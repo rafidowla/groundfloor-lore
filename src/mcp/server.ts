@@ -27,6 +27,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { LocalGraph, type LoreNode } from '../engines/localGraph.js';
 import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
+import { SurrealAdapter } from '../engines/surrealAdapter.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -125,7 +126,47 @@ const detectedScope = resolveProjectScope();
 const graphBasePath = resolveGraphPath();
 const graph = new LocalGraph(graphBasePath);
 const loreDir = path.join(graphBasePath, '.lore');
-const syncEngine = new SyncEngine(graph, loreDir, null);
+
+/**
+ * resolveSyncAdapter — Auto-detect SurrealDB and create an adapter.
+ *
+ * Priority:
+ *   1. SURREAL_URL + SURREAL_PASS env vars (explicit config)
+ *   2. Fallback to localhost:8000 with password from infra/surrealdb/.env
+ *   3. Returns null if no credentials found (offline mode)
+ *
+ * Side Effects: Reads env vars and optionally infra/.env file.
+ * Determinism: Deterministic for a given environment.
+ */
+function resolveSyncAdapter(): SurrealAdapter | null {
+    const url = process.env['SURREAL_URL'] ?? 'ws://127.0.0.1:8000/rpc';
+    const username = process.env['SURREAL_USER'] ?? 'root';
+    const orgId = process.env['SURREAL_ORG_ID'] ?? 'default';
+    const namespace = process.env['SURREAL_NAMESPACE'] ?? 'groundfloor';
+    const database = process.env['SURREAL_DATABASE'] ?? 'lore';
+
+    // Check env var first, then try local infra/.env
+    let password = process.env['SURREAL_PASS'];
+    if (!password) {
+        try {
+            const envPath = path.join(graphBasePath, 'infra', 'surrealdb', '.env');
+            const envContent = fs.readFileSync(envPath, 'utf-8');
+            const match = envContent.match(/SURREAL_ROOT_PASS=(.+)/);
+            if (match) {
+                password = match[1].trim();
+            }
+        } catch {
+            // No local .env — stay offline
+        }
+    }
+
+    if (!password) return null;
+
+    return new SurrealAdapter({ url, namespace, database, username, password, orgId });
+}
+
+const adapter = resolveSyncAdapter();
+const syncEngine = new SyncEngine(graph, loreDir, adapter);
 const wal = syncEngine.getWal();
 
 const server = new McpServer({
@@ -621,6 +662,18 @@ server.tool(
  */
 async function main(): Promise<void> {
     await graph.initialize();
+
+    // Attempt SurrealDB connection if adapter is configured
+    if (adapter) {
+        try {
+            await adapter.connect();
+            console.error(`[Lore MCP] Sync: ONLINE — connected to SurrealDB`);
+        } catch (syncConnError) {
+            console.error(`[Lore MCP] Sync: OFFLINE — SurrealDB unreachable (${(syncConnError as Error).message})`);
+        }
+    } else {
+        console.error(`[Lore MCP] Sync: OFFLINE — no SurrealDB credentials configured`);
+    }
 
     const transport = new StdioServerTransport();
     await server.connect(transport);
