@@ -1,0 +1,29 @@
+{
+    "name": "@groundfloor/lore",
+    "version": "0.1.0",
+    "description": "Unified code intelligence + institutional knowledge MCP server. Local-first Kùzu graph with SurrealDB team sync.",
+    "type": "module",
+    "main": "dist/mcp/server.js",
+    "bin": {
+        "lore": "dist/cli/index.js"
+    },
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/mcp/server.js",
+        "dev": "tsx src/mcp/server.ts",
+        "cli": "tsx src/cli/index.ts"
+    },
+    "dependencies": {
+        "@kineviz/kuzu-lite": "^0.11.3",
+        "@modelcontextprotocol/sdk": "^1.12.1",
+        "surrealdb": "^1.0.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.11.0",
+        "tsx": "^4.7.0",
+        "typescript": "^5.3.3"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    }
+}

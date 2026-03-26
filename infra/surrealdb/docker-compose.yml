@@ -1,0 +1,31 @@
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v2.2
+    container_name: surrealdb
+    restart: unless-stopped
+    user: "root"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - surreal-data:/data
+    command: >
+      start
+      --user root --pass ${SURREAL_ROOT_PASS}
+      --bind 0.0.0.0:8000
+      --log info
+      file:/data/surreal.db
+    environment:
+      - SURREAL_ROOT_PASS=${SURREAL_ROOT_PASS}
+    healthcheck:
+      test: ["CMD-SHELL", "true"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+volumes:
+  surreal-data:
+    driver: local
