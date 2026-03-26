@@ -63,4 +63,4 @@ This project builds on the work of several open-source projects:
 
 ## License
 
-Proprietary — Groundfloor / CodeMeTeam
+MIT — see [LICENSE](LICENSE)
