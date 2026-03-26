@@ -9,7 +9,13 @@ dist/
 
 # Environment / secrets
 .env
-infra/surrealdb/.env
+
+# Self-hosted infrastructure (Docker, Cloudflare Tunnel, SurrealDB configs)
+# Keep these local-only — never push to remote
+infra/
+
+# Internal-only docs (platform integration details)
+docs/baas-integration.md
 
 # OS
 .DS_Store

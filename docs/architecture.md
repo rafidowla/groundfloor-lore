@@ -2,7 +2,7 @@
 
 > **Persistent Knowledge Graph + Code Intelligence — Unified MCP for AI-Assisted Development**
 >
-> `@groundfloor/lore` · [github.com/codementeam/groundfloor-lore](https://github.com/codementeam/groundfloor-lore)
+> `@groundfloor/lore`
 
 ## Executive Summary
 
@@ -21,13 +21,13 @@ The system operates as a **single unified MCP server** (`@groundfloor/lore`) tha
 | Unified Kùzu (code + knowledge) | 🔲 Planned | Replace SQLite + Kùzu with single Kùzu graph |
 | SurrealDB Hosted (team sync) | 🔲 Planned | Docker + Cloudflare Tunnel |
 | Offline-first sync engine (WAL) | 🔲 Planned | Local-first with async push/pull |
-| macOS LaunchAgents (auto-start) | 🔲 Planned | MCP server + Docker + Tunnel start on login |
+| Auto-start service management | 🔲 Planned | MCP server starts on login |
 
 ---
 
 ## Architecture: Unified MCP with Local-First Sync
 
-> **Design Decision (2026-03-26):** Unify code graph and knowledge graph into a single MCP server and single Kùzu database locally. Use SurrealDB (Docker + Cloudflare Tunnel) for team-shared knowledge. Local-first: developer is never blocked on the network.
+> **Design Decision (2026-03-26):** Unify code graph and knowledge graph into a single MCP server and single Kùzu database locally. Use a pluggable sync adapter for team-shared knowledge. Local-first: developer is never blocked on the network.
 
 ```mermaid
 graph TB
@@ -51,16 +51,12 @@ graph TB
         SN --> WAL
     end
 
-    subgraph "Host Machine (Docker)"
-        subgraph "SurrealDB"
-            SDB["NS groundfloor DB lore<br/>Team knowledge + canonical code graph"]
-        end
-        CF["Cloudflare Tunnel<br/>sdb.yourdomain.co"]
-        SDB --- CF
+    subgraph "Remote (Optional)"
+        SDB["Team Sync Backend<br/>(pluggable adapter)"]
     end
 
-    WAL -->|"async sync (HTTPS)"| CF
-    WW -->|"query"| CF
+    WAL -->|"async sync"| SDB
+    WW -->|"query"| SDB
 
     AG["Antigravity"] -->|MCP| QR
     AG -->|MCP| SN
@@ -77,7 +73,7 @@ graph TB
 | Cross-pillar queries | AI agent synthesizes across two servers | **Single graph traversal** — "find decisions about this code" in one query |
 | Deployment | Two npm packages, two ports, two configs | **One package, one port, one config** |
 | Local database | Kùzu + SQLite (two engines) | **One Kùzu graph** — one query language (Cypher) |
-| Team sync | None | SurrealDB with offline-first WAL |
+| Team sync | None | Pluggable sync adapter with offline-first WAL |
 | Install experience | Multiple steps | `npm i -g @groundfloor/lore && lore init` |
 
 ---
@@ -201,15 +197,14 @@ recall(topic)                    → Search + traverse combined
 who_is_working(symbol?)          → Who else is touching this code?
 ```
 
-### Why Kùzu Locally, SurrealDB Hosted
+### Why Kùzu Locally
 
-> **Design Decision (2026-03-26):** Use Kùzu for local graph (code + knowledge unified). Use SurrealDB (Docker + Cloudflare Tunnel) for team-shared sync. SQLite replaced.
+> **Design Decision (2026-03-26):** Use Kùzu for local graph (code + knowledge unified). Use a pluggable sync adapter for team-shared sync. SQLite replaced.
 
 | Component | Database | Rationale |
 |---|---|---|
 | **Local graph** | Kùzu (embedded) | Native Cypher, zero-process, same engine for code + knowledge |
-| **Hosted sync** | SurrealDB (Docker) | Native graph relations, multi-project namespaces, Docker one-liner |
-| **Exposure** | Cloudflare Tunnel | HTTPS, IP-independent, free tier, no port forwarding |
+| **Team sync** | Pluggable adapter | Swap backend without changing code (SyncAdapter interface) |
 | **Offline buffer** | WAL file (JSONL) | Local writes never blocked on network |
 
 ---
@@ -222,13 +217,13 @@ Indexes **every symbol, call chain, import, class hierarchy, and execution flow*
 
 ### Implementation: Use GitNexus Directly
 
-> **Design Decision (2026-03-25):** Use [GitNexus](https://github.com/abhigyanpatwari/GitNexus) as-is (MIT license, multi-repo, already MCP-compatible). Do not rebuild.
+> **Design Decision (2026-03-25):** Use [GitNexus](https://github.com/abhigyanpatwari/GitNexus) by Abhigyan Patwari (MIT license, multi-repo, already MCP-compatible). Do not rebuild.
 
 ### MCP Tool Surface
 
 ```
 query("auth middleware")
-→ Finds across ALL repos — shell, tenant-coi, cloud, dataplane-oss
+→ Finds across ALL indexed repos
 
 impact("AppDataAdapter", upstream)
 → "47 functions across 8 repos depend on AppDataAdapter"
@@ -239,24 +234,12 @@ context("BaaSClient")
 
 detect_changes()
 → Pre-commit blast radius analysis
-→ "12 symbols changed. 3 callers in tenant-coi still use old signature."
+→ "12 symbols changed. 3 callers in another repo still use old signature."
 ```
 
-### Repos to Index
+### Multi-Repo Indexing
 
-| Repository | Language | What It Contains |
-|---|---|---|
-| `groundfloor-v2.5` | TypeScript/React | Shell + packages + admin pages + starter-kit |
-| `groundfloor-cloud` | TypeScript | Control plane |
-| `groundfloor-dataplane-oss` | Rust | Data engine (SQLite, Postgres, SurrealDB connectors) |
-| `groundfloor-control-plane` | TypeScript | Orchestration layer |
-| `groundfloor-ts-sdk` | TypeScript | Client SDK |
-| `groundfloor-python-sdk` | Python | Python client SDK |
-| `digital-employee-framework` | Python | AI agent framework |
-| `def-rust` | Rust | Rust agent framework |
-| `groundfloor-cloud-glm` | Mixed | Cloud GLM |
-| `Groundfloor-cloud-portal` | TypeScript | Portal UI |
-| `tenant-coi-extracted` | TypeScript/React | First-party MF remote app |
+Lore supports indexing multiple repositories simultaneously. Use `lore init` in each repo to add it to the local graph. The code graph automatically resolves cross-repo call chains and dependency relationships.
 
 ---
 
@@ -313,7 +296,7 @@ detect_changes() runs before every push:
 "12 symbols changed across 4 files
  RISK: HIGH
  - Modified: BaaSClient.query() signature
- - Affected: 47 admin pages, 3 callers in tenant-coi
+ - Affected: 47 admin pages, 3 callers in downstream repos
  - Knowledge Graph WARNING: 'BaaSClient.query() is a stable API contract (2026-03-11)'"
 
 → Agent flags breaking change BEFORE it ships
@@ -380,42 +363,14 @@ listMemoriesByTag(agentId: string, tag: string, orgId: string): Promise<MemoryEn
 
 ## Key Codebase Files
 
-### Data Layer
+### Lore Package Structure
 
-| File | Path | Purpose |
-|---|---|---|
-| **memoryService.ts** | `packages/common/memory/memoryService.ts` | Platform agent memory (graph upgrade planned) |
-| **BaaSClient.ts** | `packages/common/api/BaaSClient.ts` | HTTP transport — all data goes through here |
-| **AppDataAdapter.ts** | `packages/common/engine/AppDataAdapter.ts` | Manifest-aware data layer for App Engine |
-
-### Auth & Tenant Isolation
-
-| File | Path | Purpose |
-|---|---|---|
-| **AuthContext.tsx** | `packages/common/auth/AuthContext.tsx` | Provides `user.organizationId` for tenant scoping |
-| **permissions.ts** | `packages/common/auth/permissions.ts` | ReBAC system — AccessTuples, roles, permissions |
-| **usePermissions.ts** | `packages/common/auth/usePermissions.ts` | React hook for permission checks |
-
-### Module Federation Boundary (Critical for Code Graph)
-
-| File | Path | Purpose |
-|---|---|---|
-| **vite.config.ts** (Shell) | `platform/shell/vite.config.ts` | Host config — defines remotes, shared deps |
-| **vite.config.ts** (Starter Kit) | `starter-kit/vite.config.ts` | Remote template — what new apps extend |
-| **federation.d.ts** | `platform/shell/src/federation.d.ts` | Type declarations for remote modules |
-
-### Shared Platform Contract
-
-Full barrel export: [`packages/common/index.ts`](packages/common/index.ts) (200 lines, ~40 named exports)
-
-| Key Exports | What They Provide |
+| Directory | Purpose |
 |---|---|
-| `useAuth()`, `AuthProvider` | Auth state + methods |
-| `baasClient`, `AppDataAdapter` | Data access |
-| `Modal, StatusBadge, EmptyState, SearchFilterBar` | UI primitives |
-| `getAppRoles, createAccessTuple` | ReBAC role management |
-| `encryptSecret, storeSecret` | Credential management |
-| `triggerApprovalLoop, registerSchedule` | Workflow orchestration |
+| `src/engines/` | Local Kùzu graph engine (`localGraph.ts`) |
+| `src/mcp/` | MCP server implementation (`server.ts`) |
+| `src/types/` | Shared TypeScript types |
+| `scripts/` | Migration and utility scripts |
 
 ---
 
@@ -443,7 +398,7 @@ Full barrel export: [`packages/common/index.ts`](packages/common/index.ts) (200 
 
 | Capability | Without Lore | With Lore |
 |---|---|---|
-| Pattern discovery | Reinvents existing functionality | Code graph: "This pattern already exists in tenant-coi" |
+| Pattern discovery | Reinvents existing functionality | Code graph: "This pattern already exists in another module" |
 | MF contract | Reads federation.d.ts (may drift) | Code graph maps live Module Federation boundary |
 | Breaking changes | Ships changes that break the shell | `impact()` + `detect_changes()` shows affected consumers |
 
@@ -464,60 +419,40 @@ Full barrel export: [`packages/common/index.ts`](packages/common/index.ts) (200 
 
 ## Implementation Roadmap
 
-### Phase 1: Unified Local Kùzu (3-4 days)
+### Phase 1: Unified Local Kùzu
 
 | Step | What |
 |---|---|
-| 1 | Migrate Lore knowledge nodes from SQLite → Kùzu graph |
+| 1 | Migrate knowledge nodes from SQLite → Kùzu graph |
 | 2 | Add `LoreNode`, `LoreEdge`, `LoreAppliesToCode` tables to Kùzu schema |
 | 3 | Unify code analyzer + knowledge engine into single `localGraph.ts` |
 | 4 | Implement cross-pillar Cypher queries |
 
-### Phase 2: SurrealDB Docker + Cloudflare Tunnel (2-3 days)
-
-| Step | What |
-|---|---|
-| 1 | Set up docker-compose.yml with SurrealDB v2.2 |
-| 2 | Create namespaces (groundfloor, mira, inspectai, videosnap) |
-| 3 | Install `cloudflared`, create tunnel, route DNS |
-| 4 | Set up LaunchAgents (cloudflared + Docker auto-start) |
-| 5 | Configure `pmset -c sleep 0` for host availability |
-
-### Phase 3: Sync Engine (3-4 days)
+### Phase 2: Sync Engine
 
 | Step | What |
 |---|---|
 | 1 | Build WAL (write-ahead log) for offline buffering |
-| 2 | Implement sync push (local → SurrealDB) with idempotent `syncId` |
-| 3 | Implement sync pull (SurrealDB → local) with delta since `.last-sync` |
+| 2 | Implement sync push (local → remote) with idempotent `syncId` |
+| 3 | Implement sync pull (remote → local) with delta since `.last-sync` |
 | 4 | Conflict resolution (last-writer-wins by `updatedAt`) |
 | 5 | Background sync timer (30s) with health check |
 
-### Phase 4: `@groundfloor/lore` npm Package (2-3 days)
+### Phase 3: CLI + npm Package
 
 | Step | What |
 |---|---|
 | 1 | CLI: `lore init`, `lore serve`, `lore analyze`, `lore sync`, `lore status`, `lore doctor` |
 | 2 | Unified MCP server (code tools + knowledge tools + activity tools) |
 | 3 | Auto-configure MCP config on `lore init` |
-| 4 | LaunchAgent generation for MCP auto-start |
 
-### Phase 5: Team Awareness (1-2 days)
+### Phase 4: Team Awareness
 
 | Step | What |
 |---|---|
 | 1 | `dev_activity` heartbeat (push modified symbols/files every 5 min) |
 | 2 | `who_is_working()` MCP tool + `lore team` CLI command |
 | 3 | Conflict risk detection (two devs touching same symbol) |
-
-### Phase 6: BaaS 2.5 Migration (When Ready)
-
-| Step | What |
-|---|---|
-| 1 | Swap `surrealAdapter.ts` → `baasAdapter.ts` |
-| 2 | Use BaaS AppDocuments (ArangoDB native graph) as hosted backend |
-
-**Total: ~2-3 weeks**
 
 ---
 
@@ -532,24 +467,13 @@ Full barrel export: [`packages/common/index.ts`](packages/common/index.ts) (200 
     "mcpServers": {
         "groundfloor-lore": {
             "command": "lore",
-            "args": ["serve"],
-            "env": {
-                "LORE_HOSTED_URL": "wss://sdb.yourdomain.co/rpc",
-                "LORE_ORG_ID": "codementeam"
-            }
+            "args": ["serve"]
         }
     }
 }
 ```
 
-### macOS LaunchAgents (Auto-Start on Login)
-
-| Service | Plist | Auto-Restarts |
-|---|---|---|
-| Docker Desktop | Built-in (Docker settings) | ✅ |
-| SurrealDB container | `restart: unless-stopped` | ✅ |
-| Cloudflare Tunnel | `com.cloudflare.cloudflared.plist` | ✅ |
-| Lore MCP Server | `co.groundfloor.lore.plist` | ✅ |
+Optional environment variables for team sync are documented in the setup guide (not tracked in git).
 
 ---
 
@@ -559,10 +483,8 @@ Full barrel export: [`packages/common/index.ts`](packages/common/index.ts) (200 
 |---|---|---|
 | 2026-03-26 | Unified MCP server (merge GitNexus + Lore) | Single package, cross-pillar queries, simpler deployment |
 | 2026-03-26 | Kùzu for both code + knowledge locally | One graph, one query language (Cypher), cross-pillar traversal |
-| 2026-03-26 | SurrealDB for hosted team sync | Native graph relations, multi-project namespaces, Docker |
-| 2026-03-26 | Cloudflare Tunnel (free tier) for exposure | IP-independent, HTTPS automatic, no port forwarding |
 | 2026-03-26 | Local-first / offline-resilient design | WAL buffers writes, local Kùzu serves all reads, network never blocks |
-| 2026-03-26 | Multi-project SurrealDB namespaces | One Docker for Lore + MIRA + InspectAI + VideoSnap |
+| 2026-03-26 | Pluggable sync adapter pattern | Swap team sync backend without code changes |
 | 2026-03-25 | Auto-capture with visibility | AI stores knowledge during work; user sees summary at end of session |
 | 2026-03-25 | Use GitNexus analyzer for code parsing | MIT license, tree-sitter-based, proven symbol extraction |
 | 2026-03-19 | Build memory natively on BaaS (not fork Ogham) | Inherits ReBAC + multi-tenancy; no upstream drift |
