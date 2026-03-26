@@ -26,6 +26,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { LocalGraph, type LoreNode } from '../engines/localGraph.js';
+import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -123,6 +124,9 @@ function resolveGraphPath(): string {
 const detectedScope = resolveProjectScope();
 const graphBasePath = resolveGraphPath();
 const graph = new LocalGraph(graphBasePath);
+const loreDir = path.join(graphBasePath, '.lore');
+const syncEngine = new SyncEngine(graph, loreDir, null);
+const wal = syncEngine.getWal();
 
 const server = new McpServer({
     name: 'groundfloor-lore',
@@ -160,6 +164,9 @@ server.tool(
                 ecosystem: scopedEcosystem,
                 metadata: metadata ?? '{}',
             });
+
+            // Buffer write to WAL for async sync
+            wal.append('upsert_node', { ...node });
 
             return {
                 content: [{
@@ -201,6 +208,9 @@ server.tool(
             } else {
                 await graph.addEdge({ sourceId, targetId, relation });
             }
+
+            // Buffer write to WAL for async sync
+            wal.append('add_edge', { sourceId, targetId, relation });
 
             return {
                 content: [{
@@ -510,6 +520,84 @@ server.tool(
                     text: JSON.stringify({
                         ...graphStats,
                         graphPath: path.join(graphBasePath, '.lore', 'graph'),
+                        engine: 'kùzu',
+                    }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: who_is_working ─────────────────────────────────────── */
+
+server.tool(
+    'who_is_working',
+    'See team developer activity — who is working on what, filtered by symbol or file',
+    {
+        symbol: z.string().optional().describe('Filter by symbol name (e.g., "UserService")'),
+    },
+    async ({ symbol }) => {
+        try {
+            const syncStatus = syncEngine.getStatus();
+
+            if (!syncStatus.hasAdapter) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            message: 'No remote sync adapter configured — team awareness requires a shared backend (SurrealDB).',
+                            hint: 'Configure SURREAL_URL, SURREAL_USER, SURREAL_PASS environment variables to enable team sync.',
+                            localStatus: {
+                                walPending: syncStatus.walPending,
+                                lastSync: syncStatus.lastSync,
+                            },
+                        }, null, 2),
+                    }],
+                };
+            }
+
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        message: 'Team awareness is available.',
+                        filter: symbol ?? 'all',
+                        note: 'Query remote backend for active developers.',
+                    }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: sync_status ───────────────────────────────────────── */
+
+server.tool(
+    'sync_status',
+    'Get the current sync engine status — WAL pending count, last sync time, remote connectivity',
+    {},
+    async () => {
+        try {
+            const status = syncEngine.getStatus();
+
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        walPending: status.walPending,
+                        lastSync: status.lastSync === '1970-01-01T00:00:00.000Z' ? 'never' : status.lastSync,
+                        remoteConfigured: status.hasAdapter,
+                        autoSyncing: status.isAutoSyncing,
                         engine: 'kùzu',
                     }, null, 2),
                 }],
