@@ -3,20 +3,20 @@
  * server.ts — Unified Groundfloor Lore MCP Server.
  *
  * Purpose:
- *   Exposes the unified Kùzu knowledge graph as an MCP server over stdio.
+ *   Exposes the unified Kùzu knowledge graph as an MCP server.
  *   Combines institutional knowledge (decisions, conventions, bugs) and
  *   code intelligence into a single MCP tool surface.
  *
  * Architecture:
- *   Uses @modelcontextprotocol/sdk for stdio transport.
+ *   Uses @modelcontextprotocol/sdk for transport (stdio or HTTP).
  *   Delegates storage to LocalGraph (Kùzu embedded graph).
  *   Each tool maps to one or more graph operations.
  *
- * MCP Tools:
- *   Knowledge: store_node, store_edge, traverse, search, recall,
- *              delete_node, list_nodes, stats, register_project
+ * Transport:
+ *   Default: stdio (stdin/stdout) — one IDE spawns one process.
+ *   --http:  Streamable HTTP daemon on port 3847 — multiple IDEs share one process.
+ *   The HTTP mode solves Kùzu's single-writer file lock constraint.
  *
- * Transport: stdio (stdin/stdout)
  * Error Behavior: Returns MCP error responses; does not crash the server.
  * Side Effects: Reads/writes .lore/graph/ via LocalGraph.
  * Determinism: Non-deterministic (depends on database state).
@@ -24,6 +24,8 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { z } from 'zod';
 import { LocalGraph, type LoreNode } from '../engines/localGraph.js';
 import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
@@ -1197,11 +1199,25 @@ server.resource(
 
 /* ─── Server Start ────────────────────────────────────────────── */
 
+/** Default port for HTTP daemon mode. Override with LORE_PORT env var. */
+const LORE_HTTP_PORT = parseInt(process.env['LORE_PORT'] ?? '3847', 10);
+
 /**
- * main — Initialize graph and start MCP server on stdio.
+ * main — Initialize graph and start MCP server.
  *
- * Side Effects: Opens Kùzu database, starts stdio listener.
+ * Purpose:
+ *   Supports two transport modes:
+ *   - stdio (default): each IDE spawns its own process.
+ *   - HTTP (--http flag): single daemon, multiple IDEs connect via HTTP.
+ *
+ * Inputs:
+ *   - process.argv: checks for '--http' flag.
+ *   - LORE_PORT env var: HTTP port (default 3847).
+ *
+ * Side Effects: Opens Kùzu database, starts listener (stdio or HTTP).
  * Error Behavior: Exits process with code 1 on fatal startup error.
+ * Concurrency: HTTP mode allows multiple concurrent IDE connections
+ *   sharing a single Kùzu write lock.
  */
 async function main(): Promise<void> {
     await graph.initialize();
@@ -1218,13 +1234,66 @@ async function main(): Promise<void> {
         console.error(`[Lore MCP] Sync: OFFLINE — no SurrealDB credentials configured`);
     }
 
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
+    const useHttp = process.argv.includes('--http');
 
-    console.error(`[Lore MCP] Server v1.0.0 started on stdio.`);
-    console.error(`[Lore MCP] Graph: ${path.join(graphBasePath, '.lore', 'graph')}`);
-    console.error(`[Lore MCP] Scope: project=${detectedScope.project}, ecosystem=${detectedScope.ecosystem}`);
-    console.error(`[Lore MCP] Engine: Kùzu (unified graph)`);
+    if (useHttp) {
+        // HTTP daemon mode — multiple IDEs share one process
+        const httpTransport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: undefined, // stateless — no session tracking needed
+        });
+
+        await server.connect(httpTransport);
+
+        const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+            const url = req.url ?? '';
+
+            // Health check endpoint for monitoring
+            if (url === '/health' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ status: 'ok', version: '1.0.0' }));
+                return;
+            }
+
+            // MCP endpoint — delegate to StreamableHTTPServerTransport
+            if (url === '/mcp') {
+                await httpTransport.handleRequest(req, res);
+                return;
+            }
+
+            // Unknown path
+            res.writeHead(404, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Not found. Use /mcp for MCP or /health for status.' }));
+        });
+
+        httpServer.listen(LORE_HTTP_PORT, '127.0.0.1', () => {
+            console.error(`[Lore MCP] Server v1.0.0 started on HTTP :${LORE_HTTP_PORT}`);
+            console.error(`[Lore MCP] Endpoint: http://127.0.0.1:${LORE_HTTP_PORT}/mcp`);
+            console.error(`[Lore MCP] Health:   http://127.0.0.1:${LORE_HTTP_PORT}/health`);
+            console.error(`[Lore MCP] Graph: ${path.join(graphBasePath, '.lore', 'graph')}`);
+            console.error(`[Lore MCP] Scope: project=${detectedScope.project}, ecosystem=${detectedScope.ecosystem}`);
+            console.error(`[Lore MCP] Engine: Kùzu (unified graph)`);
+        });
+
+        // Graceful shutdown
+        process.on('SIGINT', () => {
+            console.error('[Lore MCP] Shutting down...');
+            httpServer.close();
+            process.exit(0);
+        });
+        process.on('SIGTERM', () => {
+            httpServer.close();
+            process.exit(0);
+        });
+    } else {
+        // stdio mode — backward compatible, one IDE per process
+        const transport = new StdioServerTransport();
+        await server.connect(transport);
+
+        console.error(`[Lore MCP] Server v1.0.0 started on stdio.`);
+        console.error(`[Lore MCP] Graph: ${path.join(graphBasePath, '.lore', 'graph')}`);
+        console.error(`[Lore MCP] Scope: project=${detectedScope.project}, ecosystem=${detectedScope.ecosystem}`);
+        console.error(`[Lore MCP] Engine: Kùzu (unified graph)`);
+    }
 }
 
 main().catch((startupError) => {

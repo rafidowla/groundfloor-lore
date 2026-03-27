@@ -180,17 +180,24 @@ async function configureMcp(tool: string, basePath: string): Promise<void> {
 /* ─── Command: serve ──────────────────────────────────────────── */
 
 /**
- * serveCommand — Start the MCP server on stdio.
+ * serveCommand — Start the MCP server.
  *
- * Purpose: Equivalent to running the MCP server directly. Imports and
- *   executes the server module which handles stdio transport setup.
+ * Purpose: Starts the MCP server in either stdio (default) or HTTP daemon mode.
+ *   Pass --http to start as a shared HTTP daemon on port 3847.
  *
- * @param _args - CLI arguments (unused).
+ * @param args - CLI arguments. Supports '--http' for daemon mode.
  *
  * Side Effects: Starts MCP server, opens Kùzu database.
  * Error Behavior: Server module handles its own errors.
  */
-export async function serveCommand(_args: string[]): Promise<void> {
+export async function serveCommand(args: string[]): Promise<void> {
+    const useHttp = args.includes('--http');
+
+    if (useHttp) {
+        // Pass --http to the server module via process.argv
+        process.argv.push('--http');
+    }
+
     // Import the server module — it starts itself on import
     await import('../mcp/server.js');
 }

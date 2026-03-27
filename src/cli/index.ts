@@ -34,7 +34,7 @@ Usage: lore <command> [options]
 
 Commands:
   init      Initialize .lore/ graph in the current repo
-  serve     Start the MCP server on stdio
+  serve     Start the MCP server (default: stdio, --http for daemon)
   index     Import code symbols from GitNexus into unified graph
   sync      Push pending changes and pull from remote
   status    Show graph statistics and sync status
