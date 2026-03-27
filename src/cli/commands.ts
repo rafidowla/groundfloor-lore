@@ -15,6 +15,7 @@ import path from 'path';
 import os from 'os';
 import { LocalGraph } from '../engines/localGraph.js';
 import { SyncEngine } from '../engines/syncEngine.js';
+import { listGitNexusRepos, getGitNexusRepo, importFromGitNexus, isGitNexusAvailable } from '../engines/codeIndexer.js';
 
 /* ─── Shared Helpers ──────────────────────────────────────────── */
 
@@ -198,6 +199,109 @@ export async function serveCommand(_args: string[]): Promise<void> {
     await import('../mcp/server.js');
 }
 
+/* ─── Command: index ─────────────────────────────────────── */
+
+/**
+ * indexCommand — Import code symbols from GitNexus into the unified Lore graph.
+ *
+ * Purpose:
+ *   Reads GitNexus .gitnexus/ Kùzu databases and imports all code symbols
+ *   and relationships into Lore's unified graph. Enables cross-pillar queries
+ *   between knowledge nodes and code symbols.
+ *
+ * @param args - Optional repo name. If omitted, imports all indexed repos.
+ *
+ * Side Effects:
+ *   - Opens GitNexus DB read-only for each repo.
+ *   - Clears existing code symbols before re-import (idempotent).
+ *   - Writes CodeSymbol + CodeRelation to Lore Kùzu graph.
+ *
+ * Error Behavior: Prints per-repo results. Non-fatal errors are collected.
+ */
+export async function indexCommand(args: string[]): Promise<void> {
+    const basePath = resolveGraphBasePath();
+    const loreDir = path.join(basePath, '.lore');
+
+    if (!fs.existsSync(loreDir)) {
+        console.error('❌ No .lore/ directory found. Run "lore init" first.');
+        process.exit(1);
+    }
+
+    const graph = new LocalGraph(basePath);
+    await graph.initialize();
+
+    const specificRepo = args[0];
+
+    if (specificRepo) {
+        // Index a specific repo
+        const repoEntry = getGitNexusRepo(specificRepo);
+        if (!repoEntry) {
+            console.error(`❌ Repository '${specificRepo}' not found in GitNexus registry.`);
+            console.error('  Available repos:');
+            const allRepos = listGitNexusRepos();
+            for (const repo of allRepos) {
+                console.error(`    - ${repo.name} (${repo.stats.nodes} symbols)`);
+            }
+            await graph.close();
+            process.exit(1);
+        }
+
+        console.log(`→ Indexing '${specificRepo}' from GitNexus...`);
+        const result = await importFromGitNexus(repoEntry, graph);
+        printIndexResult(result);
+    } else {
+        // Index all repos
+        const repos = listGitNexusRepos();
+        if (repos.length === 0) {
+            console.error('❌ No GitNexus-indexed repos found.');
+            console.error('  Run "gitnexus analyze <path>" to index a repo first.');
+            await graph.close();
+            process.exit(1);
+        }
+
+        console.log(`→ Indexing ${repos.length} repo(s) from GitNexus...`);
+        console.log('');
+
+        for (const repo of repos) {
+            console.log(`  ─── ${repo.name} (${repo.stats.nodes} GitNexus symbols) ───`);
+            const result = await importFromGitNexus(repo, graph);
+            printIndexResult(result);
+            console.log('');
+        }
+    }
+
+    // Show updated stats
+    const stats = await graph.getStats();
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('  Unified Graph Stats:');
+    console.log(`    Knowledge: ${stats.nodeCount} nodes, ${stats.edgeCount} edges`);
+    console.log(`    Code:      ${stats.codeSymbolCount} symbols, ${stats.codeRelationCount} relations`);
+    console.log('═══════════════════════════════════════════════════════════');
+
+    await graph.close();
+}
+
+/**
+ * printIndexResult — Display the result of a code index operation.
+ */
+function printIndexResult(result: import('../engines/codeIndexer.js').IndexResult): void {
+    console.log(`  ✓ ${result.symbolsImported} symbols imported`);
+    console.log(`  ✓ ${result.relationsImported} relations imported`);
+    if (result.symbolsCleared > 0) {
+        console.log(`  ✓ ${result.symbolsCleared} old symbols cleared`);
+    }
+    console.log(`  ✓ Duration: ${result.durationMs}ms`);
+    if (result.errors.length > 0) {
+        console.log(`  ⚠ ${result.errors.length} non-fatal errors`);
+        for (const error of result.errors.slice(0, 5)) {
+            console.log(`    - ${error}`);
+        }
+        if (result.errors.length > 5) {
+            console.log(`    ... and ${result.errors.length - 5} more`);
+        }
+    }
+}
+
 /* ─── Command: sync ───────────────────────────────────────────── */
 
 /**
@@ -301,6 +405,13 @@ export async function statusCommand(_args: string[]): Promise<void> {
         for (const [typeName, count] of Object.entries(stats.typeBreakdown)) {
             console.log(`      ${typeName}: ${count}`);
         }
+    }
+    console.log('');
+    console.log('  Code Graph');
+    console.log(`    Symbols:   ${stats.codeSymbolCount}`);
+    console.log(`    Relations: ${stats.codeRelationCount}`);
+    if (stats.codeSymbolCount === 0) {
+        console.log('    (run "lore index" to import from GitNexus)');
     }
     console.log('');
     console.log('  Sync');
@@ -423,6 +534,15 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         console.log(`  ✓ Node.js version: v${nodeVersion}`);
     } else {
         console.log(`  ✗ Node.js version: v${nodeVersion} (requires ≥20)`);
+        issues++;
+    }
+
+    // Check 8: GitNexus CLI
+    if (isGitNexusAvailable()) {
+        const repos = listGitNexusRepos();
+        console.log(`  ✓ GitNexus CLI available: ${repos.length} repo(s) indexed`);
+    } else {
+        console.log('  ✗ GitNexus CLI not found — install with: npm install -g gitnexus');
         issues++;
     }
 

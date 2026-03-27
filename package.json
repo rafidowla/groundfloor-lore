@@ -16,6 +16,7 @@
     "dependencies": {
         "@kineviz/kuzu-lite": "^0.11.3",
         "@modelcontextprotocol/sdk": "^1.12.1",
+        "gitnexus": "*",
         "surrealdb": "^1.0.0"
     },
     "devDependencies": {

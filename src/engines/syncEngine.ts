@@ -29,14 +29,14 @@
 
 import fs from 'fs';
 import path from 'path';
-import type { LoreNode, LoreEdge, LocalGraph } from './localGraph.js';
+import type { LoreNode, LoreEdge, CodeSymbol, CodeRelationEdge, LocalGraph } from './localGraph.js';
 
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
  * WalOperation — The type of operation recorded in the WAL.
  */
-export type WalOperation = 'upsert_node' | 'add_edge' | 'delete_node';
+export type WalOperation = 'upsert_node' | 'add_edge' | 'delete_node' | 'upsert_code_symbol' | 'add_code_relation' | 'link_knowledge_to_code';
 
 /**
  * WalEntry — A single write operation buffered in the WAL.
@@ -156,6 +156,18 @@ export interface SyncAdapter {
      * Side Effects: Network health check.
      */
     isConnected(): Promise<boolean>;
+
+    /**
+     * pushCodeData — Push code symbols and relations to remote.
+     *
+     * @param symbols - CodeSymbol records to upsert.
+     * @param relations - CodeRelationEdge records to create.
+     * @returns Push result summary.
+     *
+     * Side Effects: Writes to remote code_symbol/code_relation tables.
+     * Idempotency: Yes — upsert by UID.
+     */
+    pushCodeData(symbols: CodeSymbol[], relations: CodeRelationEdge[]): Promise<SyncResult>;
 
     /**
      * connect — Establish connection to the remote backend.
@@ -367,6 +379,8 @@ export class SyncEngine {
         const nodes: LoreNode[] = [];
         const edges: LoreEdge[] = [];
         const deletedIds: string[] = [];
+        const codeSymbols: CodeSymbol[] = [];
+        const codeRelations: CodeRelationEdge[] = [];
 
         for (const entry of entries) {
             switch (entry.op) {
@@ -378,6 +392,15 @@ export class SyncEngine {
                     break;
                 case 'delete_node':
                     deletedIds.push(entry.data['id'] as string);
+                    break;
+                case 'upsert_code_symbol':
+                    codeSymbols.push(entry.data as unknown as CodeSymbol);
+                    break;
+                case 'add_code_relation':
+                    codeRelations.push(entry.data as unknown as CodeRelationEdge);
+                    break;
+                case 'link_knowledge_to_code':
+                    // Cross-pillar links are captured in code_symbol push
                     break;
             }
         }
@@ -392,11 +415,26 @@ export class SyncEngine {
                         // Non-fatal — node may have been deleted locally
                     });
                 }
+            }
+
+            // Push code data if present
+            let codeResult: SyncResult = { nodesPushed: 0, edgesPushed: 0, failures: 0, errors: [] };
+            if (codeSymbols.length > 0 || codeRelations.length > 0) {
+                codeResult = await this.adapter!.pushCodeData(codeSymbols, codeRelations);
+            }
+
+            // Only truncate WAL if ALL pushes succeeded
+            if (result.failures === 0 && codeResult.failures === 0) {
                 this.wal.truncate();
                 this.writeLastSync(new Date().toISOString());
             }
 
-            return result;
+            return {
+                nodesPushed: result.nodesPushed + codeResult.nodesPushed,
+                edgesPushed: result.edgesPushed + codeResult.edgesPushed,
+                failures: result.failures + codeResult.failures,
+                errors: [...result.errors, ...codeResult.errors],
+            };
         } catch (pushError) {
             return {
                 nodesPushed: 0,

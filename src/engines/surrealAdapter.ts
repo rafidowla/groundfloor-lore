@@ -19,7 +19,7 @@
  * Idempotency: Push is idempotent (upsert via record ID).
  */
 
-import type { LoreNode, LoreEdge } from './localGraph.js';
+import type { LoreNode, LoreEdge, CodeSymbol, CodeRelationEdge } from './localGraph.js';
 import type { SyncAdapter, SyncResult, DevActivity } from './syncEngine.js';
 
 /* ─── Configuration ───────────────────────────────────────────── */
@@ -307,6 +307,81 @@ export class SurrealAdapter implements SyncAdapter {
                 queryError,
             );
         }
+    }
+
+    /* ─── Code Graph Sync ─────────────────────────────────────────── */
+
+    /**
+     * pushCodeData — Push code symbols and relations to SurrealDB.
+     *
+     * @param symbols - CodeSymbol records to upsert.
+     * @param relations - CodeRelationEdge records to create.
+     * @returns Push result summary.
+     *
+     * Side Effects: Writes to remote code_symbol and code_relation tables.
+     * Idempotency: Yes — upsert by UID.
+     */
+    async pushCodeData(symbols: CodeSymbol[], relations: CodeRelationEdge[]): Promise<SyncResult> {
+        this.ensureConnected();
+        const surreal = this.db as { query(sql: string, bindings?: Record<string, unknown>): Promise<unknown[]> };
+
+        let nodesPushed = 0;
+        let edgesPushed = 0;
+        const errors: string[] = [];
+
+        // Push code symbols
+        for (const symbol of symbols) {
+            try {
+                await surreal.query(
+                    `UPSERT code_symbol:⟨${symbol.uid}⟩ SET
+                        name = $name, kind = $kind, filePath = $filePath,
+                        startLine = $startLine, endLine = $endLine,
+                        signature = $signature, returnType = $returnType,
+                        parameterCount = $parameterCount, repo = $repo,
+                        org_id = $orgId, updated_at = time::now()`,
+                    {
+                        name: symbol.name,
+                        kind: symbol.kind,
+                        filePath: symbol.filePath,
+                        startLine: symbol.startLine,
+                        endLine: symbol.endLine,
+                        signature: symbol.signature,
+                        returnType: symbol.returnType,
+                        parameterCount: symbol.parameterCount,
+                        repo: symbol.repo,
+                        orgId: this.config.orgId,
+                    },
+                );
+                nodesPushed++;
+            } catch (symbolError) {
+                errors.push(`CodeSymbol '${symbol.uid}': ${(symbolError as Error).message}`);
+            }
+        }
+
+        // Push code relations
+        for (const relation of relations) {
+            try {
+                await surreal.query(
+                    `UPSERT code_relation:⟨${relation.sourceUid}-${relation.type}-${relation.targetUid}⟩ SET
+                        sourceUid = $sourceUid, targetUid = $targetUid,
+                        type = $type, confidence = $confidence, reason = $reason,
+                        org_id = $orgId, updated_at = time::now()`,
+                    {
+                        sourceUid: relation.sourceUid,
+                        targetUid: relation.targetUid,
+                        type: relation.type,
+                        confidence: relation.confidence,
+                        reason: relation.reason,
+                        orgId: this.config.orgId,
+                    },
+                );
+                edgesPushed++;
+            } catch (relationError) {
+                errors.push(`CodeRelation '${relation.sourceUid}→${relation.targetUid}': ${(relationError as Error).message}`);
+            }
+        }
+
+        return { nodesPushed, edgesPushed, failures: errors.length, errors };
     }
 
     /* ─── Private Helpers ─────────────────────────────────────────── */

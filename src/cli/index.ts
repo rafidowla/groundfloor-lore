@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand } from './commands.js';
 
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -35,6 +35,7 @@ Usage: lore <command> [options]
 Commands:
   init      Initialize .lore/ graph in the current repo
   serve     Start the MCP server on stdio
+  index     Import code symbols from GitNexus into unified graph
   sync      Push pending changes and pull from remote
   status    Show graph statistics and sync status
   doctor    Diagnose configuration and connectivity
@@ -45,6 +46,8 @@ Options:
 Examples:
   lore init                    # Initialize in current repo
   lore init --mcp antigravity  # Initialize and configure MCP for Antigravity
+  lore index                   # Import all GitNexus repos into code graph
+  lore index groundfloor-v2.5  # Import a specific repo
   lore status                  # Show current graph stats
   lore sync                    # Trigger manual sync
   lore doctor                  # Check health of all components
@@ -82,10 +85,20 @@ async function main(): Promise<void> {
         case 'doctor':
             await doctorCommand(commandArgs);
             break;
+        case 'index':
+            await indexCommand(commandArgs);
+            break;
         default:
             console.error(`Unknown command: '${command}'`);
             console.error(`Run 'lore --help' for available commands.`);
             process.exit(1);
+    }
+
+    // Explicit exit prevents segfault from @kineviz/kuzu-lite native addon
+    // cleanup during Node.js garbage collection. The native addon occasionally
+    // accesses freed memory during shutdown. Data is fully committed by this point.
+    if (command !== 'serve') {
+        process.exit(0);
     }
 }
 
