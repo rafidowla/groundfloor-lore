@@ -302,6 +302,22 @@ export class LocalGraph {
                 )
             `);
 
+            // ─── Schema Migrations ─────────────────────────────────────────
+            // Add columns that may be missing from older databases.
+            // Kùzu doesn't support ALTER TABLE IF NOT EXISTS, so we catch
+            // and ignore errors for columns that already exist.
+            const migrations = [
+                `ALTER TABLE LoreNode ADD project STRING DEFAULT '*'`,
+                `ALTER TABLE LoreNode ADD ecosystem STRING DEFAULT '*'`,
+            ];
+            for (const migration of migrations) {
+                try {
+                    await this.connection.query(migration);
+                } catch {
+                    // Column already exists — expected, ignore
+                }
+            }
+
             this.initialized = true;
         } catch (error) {
             throw new LoreGraphError(
