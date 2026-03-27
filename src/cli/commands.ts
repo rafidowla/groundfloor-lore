@@ -38,13 +38,9 @@ function findRepoRoot(): string {
 /**
  * resolveGraphBasePath — Determines the base path for the .lore/ directory.
  *
- * Priority: 1) Git repo root, 2) ~/.groundfloor/
+ * Always uses ~/.groundfloor for consistency across CLI, MCP, and IDEs.
  */
 function resolveGraphBasePath(): string {
-    const repoRoot = findRepoRoot();
-    if (fs.existsSync(path.join(repoRoot, '.git'))) {
-        return repoRoot;
-    }
     return path.join(os.homedir(), '.groundfloor');
 }
 

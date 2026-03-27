@@ -132,7 +132,7 @@ const loreDir = path.join(graphBasePath, '.lore');
  * Determinism: Deterministic for a given environment.
  */
 function resolveSyncAdapter(): SurrealAdapter | null {
-    const url = process.env['SURREAL_URL'] ?? 'ws://127.0.0.1:8000/rpc';
+    let url = process.env['SURREAL_URL'];
     const username = process.env['SURREAL_USER'] ?? 'root';
     const orgId = process.env['SURREAL_ORG_ID'] ?? 'default';
     const namespace = process.env['SURREAL_NAMESPACE'] ?? 'groundfloor';
@@ -144,9 +144,17 @@ function resolveSyncAdapter(): SurrealAdapter | null {
         try {
             const envPath = path.join(graphBasePath, 'infra', 'surrealdb', '.env');
             const envContent = fs.readFileSync(envPath, 'utf-8');
-            const match = envContent.match(/SURREAL_ROOT_PASS=(.+)/);
-            if (match) {
-                password = match[1].trim();
+
+            // Parse all key=value pairs from .env
+            const passMatch = envContent.match(/SURREAL_ROOT_PASS=(.+)/);
+            if (passMatch) {
+                password = passMatch[1].trim();
+            }
+            if (!url) {
+                const urlMatch = envContent.match(/SURREAL_URL=(.+)/);
+                if (urlMatch) {
+                    url = urlMatch[1].trim();
+                }
             }
         } catch {
             // No local .env — stay offline
@@ -154,6 +162,7 @@ function resolveSyncAdapter(): SurrealAdapter | null {
     }
 
     if (!password) return null;
+    if (!url) url = 'ws://127.0.0.1:8001/rpc';
 
     return new SurrealAdapter({ url, namespace, database, username, password, orgId });
 }
