@@ -722,6 +722,148 @@ export async function setupCommand(args: string[]): Promise<void> {
     }
     steps++;
 
+    // ─── Step 6: Install Lore Protocol rules per IDE ────────────
+    const protocolSource = path.resolve(
+        path.dirname(new URL(import.meta.url).pathname), '..', '..', 'docs', 'LORE_PROTOCOL.md'
+    );
+    let protocolContent = '';
+    try {
+        protocolContent = fs.readFileSync(protocolSource, 'utf-8');
+    } catch {
+        // Fallback: try from package root
+        try {
+            const altPath = path.resolve(
+                path.dirname(new URL(import.meta.url).pathname), '..', '..', '..', 'docs', 'LORE_PROTOCOL.md'
+            );
+            protocolContent = fs.readFileSync(altPath, 'utf-8');
+        } catch {
+            console.log('  ⚠ LORE_PROTOCOL.md not found — skipping rules installation');
+        }
+    }
+
+    if (protocolContent) {
+        let rulesInstalled = 0;
+
+        // Cursor — .mdc format with yaml frontmatter
+        const cursorRulesDir = path.join(os.homedir(), '.cursor', 'rules');
+        if (fs.existsSync(path.join(os.homedir(), '.cursor'))) {
+            try {
+                fs.mkdirSync(cursorRulesDir, { recursive: true });
+                const cursorRule = `---
+description: Lore Intelligence Protocol — auto-consult knowledge graph and auto-store learnings
+globs:
+alwaysApply: true
+---
+
+${protocolContent}`;
+                const cursorRulePath = path.join(cursorRulesDir, 'lore-protocol.mdc');
+                fs.writeFileSync(cursorRulePath, cursorRule, 'utf-8');
+                console.log('  ✓ Cursor rules installed — ~/.cursor/rules/lore-protocol.mdc');
+                rulesInstalled++;
+            } catch (cursorRuleError) {
+                console.error(`  ✗ Cursor rules failed: ${(cursorRuleError as Error).message}`);
+                issues++;
+            }
+        }
+
+        // Antigravity — append section to GEMINI.md
+        const geminiMdPath = path.join(os.homedir(), '.gemini', 'GEMINI.md');
+        if (fs.existsSync(path.join(os.homedir(), '.gemini'))) {
+            try {
+                const sectionHeader = '14. LORE INTELLIGENCE PROTOCOL (MANDATORY)';
+                let existingGemini = '';
+                try { existingGemini = fs.readFileSync(geminiMdPath, 'utf-8'); } catch { /* new file */ }
+
+                if (existingGemini.includes(sectionHeader)) {
+                    console.log('  ✓ Antigravity rules already in GEMINI.md');
+                } else {
+                    const geminiSection = `
+────────────────────────────────────────
+${sectionHeader}
+────────────────────────────────────────
+Applies when the \`groundfloor-lore\` MCP server is available.
+
+${protocolContent}
+────────────────────────────────────────
+`;
+                    // Insert before END OF GLOBAL RULE, or append
+                    if (existingGemini.includes('END OF GLOBAL RULE')) {
+                        const updated = existingGemini.replace('END OF GLOBAL RULE', geminiSection + '\nEND OF GLOBAL RULE');
+                        fs.writeFileSync(geminiMdPath, updated, 'utf-8');
+                    } else {
+                        fs.appendFileSync(geminiMdPath, geminiSection, 'utf-8');
+                    }
+                    console.log('  ✓ Antigravity rules appended to ~/.gemini/GEMINI.md');
+                }
+                rulesInstalled++;
+            } catch (agRuleError) {
+                console.error(`  ✗ Antigravity rules failed: ${(agRuleError as Error).message}`);
+                issues++;
+            }
+        }
+
+        // Claude Code — append to CLAUDE.md
+        const claudeMdPath = path.join(os.homedir(), '.claude', 'CLAUDE.md');
+        if (fs.existsSync(path.join(os.homedir(), '.claude'))) {
+            try {
+                const claudeHeader = 'LORE INTELLIGENCE PROTOCOL';
+                let existingClaude = '';
+                try { existingClaude = fs.readFileSync(claudeMdPath, 'utf-8'); } catch { /* new file */ }
+
+                if (existingClaude.includes(claudeHeader)) {
+                    console.log('  ✓ Claude Code rules already in CLAUDE.md');
+                } else {
+                    fs.appendFileSync(claudeMdPath, `\n\n# ${claudeHeader}\n\n${protocolContent}`, 'utf-8');
+                    console.log('  ✓ Claude Code rules appended to ~/.claude/CLAUDE.md');
+                }
+                rulesInstalled++;
+            } catch (claudeError) {
+                console.error(`  ✗ Claude Code rules failed: ${(claudeError as Error).message}`);
+                issues++;
+            }
+        }
+
+        if (rulesInstalled === 0) {
+            console.log('  · No supported IDEs detected for rules — add manually:');
+            console.log(`    See: ${protocolSource}`);
+        }
+    }
+    steps++;
+
+    // ─── Step 7: Global git hooks (auto-reindex on commit) ──────
+    const globalHooksDir = path.join(basePath, 'hooks');
+    const hookSource = path.resolve(
+        path.dirname(new URL(import.meta.url).pathname), '..', '..', 'scripts', 'hooks', 'post-commit'
+    );
+
+    try {
+        fs.mkdirSync(globalHooksDir, { recursive: true });
+
+        // Copy hook to global hooks dir
+        if (fs.existsSync(hookSource)) {
+            fs.copyFileSync(hookSource, path.join(globalHooksDir, 'post-commit'));
+            fs.chmodSync(path.join(globalHooksDir, 'post-commit'), 0o755);
+
+            // Set global git hooks path
+            const currentHooksPath = (() => {
+                try { return execSync('git config --global core.hooksPath', { encoding: 'utf-8' }).trim(); } catch { return ''; }
+            })();
+
+            if (currentHooksPath === globalHooksDir || currentHooksPath === `~/.groundfloor/hooks` || currentHooksPath.endsWith('.groundfloor/hooks')) {
+                console.log('  ✓ Global git hooks already configured');
+            } else {
+                execSync(`git config --global core.hooksPath "${globalHooksDir}"`, { stdio: 'ignore' });
+                console.log('  ✓ Global git hooks installed — auto-reindex on commit');
+            }
+        } else {
+            console.log('  ⚠ Hook script not found — skipping git hooks');
+        }
+    } catch (hookError) {
+        console.error(`  ✗ Git hooks failed: ${(hookError as Error).message}`);
+        issues++;
+    }
+    steps++;
+
     // ─── Summary ────────────────────────────────────────────────
     console.log('');
     console.log('  ═══════════════════════════════════════');
