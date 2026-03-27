@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand } from './commands.js';
 
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -33,6 +33,8 @@ const HELP_TEXT = `
 Usage: lore <command> [options]
 
 Commands:
+  setup     One-time setup (graph, daemon, IDE config)
+  join      Connect to a team's shared database
   init      Initialize .lore/ graph in the current repo
   serve     Start the MCP server (default: stdio, --http for daemon)
   index     Import code symbols from GitNexus into unified graph
@@ -44,13 +46,12 @@ Options:
   --help    Show this help message
 
 Examples:
-  lore init                    # Initialize in current repo
-  lore init --mcp antigravity  # Initialize and configure MCP for Antigravity
-  lore index                   # Import all GitNexus repos into code graph
-  lore index groundfloor-v2.5  # Import a specific repo
-  lore status                  # Show current graph stats
-  lore sync                    # Trigger manual sync
-  lore doctor                  # Check health of all components
+  lore setup                             # Full onboarding (solo)
+  lore join gf://host:8001/ns?token=...  # Join a team
+  lore index                             # Import all GitNexus repos
+  lore index groundfloor-v2.5            # Import a specific repo
+  lore status                            # Show current graph stats
+  lore doctor                            # Check health
 `;
 
 /* ─── Command Routing ─────────────────────────────────────────── */
@@ -70,6 +71,12 @@ async function main(): Promise<void> {
     const commandArgs = args.slice(1);
 
     switch (command) {
+        case 'setup':
+            await setupCommand(commandArgs);
+            break;
+        case 'join':
+            await joinCommand(commandArgs);
+            break;
         case 'init':
             await initCommand(commandArgs);
             break;

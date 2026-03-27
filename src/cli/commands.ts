@@ -2,17 +2,19 @@
  * commands.ts — CLI Command Handlers.
  *
  * Purpose:
- *   Implements the five CLI commands: init, serve, sync, status, doctor.
+ *   Implements CLI commands: init, serve, sync, status, doctor, setup, join.
  *   Each command creates its own LocalGraph and SyncEngine instances
  *   as needed — the CLI is a thin orchestration layer.
  *
- * Side Effects: Filesystem writes (init), stdio (serve), network (sync).
+ * Side Effects: Filesystem writes (init, setup, join), stdio (serve), network (sync, join).
  * Error Behavior: Each command catches errors and exits with code 1.
  */
 
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execSync } from 'child_process';
+import http from 'http';
 import { LocalGraph } from '../engines/localGraph.js';
 import { SyncEngine } from '../engines/syncEngine.js';
 import { listGitNexusRepos, getGitNexusRepo, importFromGitNexus, isGitNexusAvailable } from '../engines/codeIndexer.js';
@@ -557,4 +559,383 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         console.log(`  ${issues} issue${issues > 1 ? 's' : ''} found.`);
     }
     console.log('');
+}
+
+/* ─── Command: setup ─────────────────────────────────────────── */
+
+/**
+ * setupCommand — One-command onboarding for Groundfloor Lore.
+ *
+ * Purpose:
+ *   Automates the full setup process: graph initialization, daemon installation,
+ *   and IDE configuration. Transforms a 10-step manual process into one command.
+ *
+ * @param args - CLI arguments. Supports '--team' for team lead setup (future).
+ *
+ * Side Effects:
+ *   - Creates ~/.groundfloor/.lore/graph/ (Kùzu database)
+ *   - Installs LaunchAgent at ~/Library/LaunchAgents/com.groundfloor.lore.plist
+ *   - Starts the Lore HTTP daemon on port 3847
+ *   - Writes MCP config to detected IDEs (Cursor, Antigravity)
+ *
+ * Error Behavior: Prints per-step results. Non-fatal errors are collected.
+ * Idempotent: Safe to run multiple times — skips already-completed steps.
+ */
+export async function setupCommand(args: string[]): Promise<void> {
+    console.log('');
+    console.log('  @groundfloor/lore — Setup');
+    console.log('  ═══════════════════════════════════════');
+    console.log('');
+
+    const basePath = resolveGraphBasePath();
+    const loreDir = path.join(basePath, '.lore');
+    const logsDir = path.join(basePath, 'logs');
+    let steps = 0;
+    let issues = 0;
+
+    // ─── Step 1: Initialize graph ───────────────────────────────
+    if (fs.existsSync(path.join(loreDir, 'graph'))) {
+        console.log('  ✓ Graph already exists at ~/.groundfloor/.lore/graph/');
+    } else {
+        try {
+            fs.mkdirSync(loreDir, { recursive: true });
+            const graph = new LocalGraph(basePath);
+            await graph.initialize();
+            await graph.close();
+            console.log('  ✓ Kùzu graph initialized at ~/.groundfloor/.lore/graph/');
+        } catch (graphError) {
+            console.error(`  ✗ Failed to initialize graph: ${(graphError as Error).message}`);
+            issues++;
+        }
+    }
+    steps++;
+
+    // ─── Step 2: Create logs directory ──────────────────────────
+    fs.mkdirSync(logsDir, { recursive: true });
+    steps++;
+
+    // ─── Step 3: Install LaunchAgent (macOS only) ───────────────
+    if (process.platform === 'darwin') {
+        const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.groundfloor.lore.plist');
+        const nodePath = process.execPath;
+        const serverPath = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', 'mcp', 'server.js');
+
+        const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.groundfloor.lore</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${nodePath}</string>
+        <string>${serverPath}</string>
+        <string>--http</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardErrorPath</key>
+    <string>${logsDir}/lore-mcp.log</string>
+    <key>StandardOutPath</key>
+    <string>${logsDir}/lore-mcp.out</string>
+    <key>WorkingDirectory</key>
+    <string>${basePath}</string>
+</dict>
+</plist>
+`;
+
+        if (fs.existsSync(plistPath)) {
+            console.log('  ✓ LaunchAgent already installed');
+        } else {
+            try {
+                fs.writeFileSync(plistPath, plistContent, 'utf-8');
+                console.log('  ✓ LaunchAgent installed at ~/Library/LaunchAgents/');
+            } catch (plistError) {
+                console.error(`  ✗ Failed to install LaunchAgent: ${(plistError as Error).message}`);
+                issues++;
+            }
+        }
+        steps++;
+
+        // ─── Step 4: Start daemon ───────────────────────────────────
+        try {
+            const isRunning = isDaemonRunning();
+            if (isRunning) {
+                console.log('  ✓ Daemon already running on port 3847');
+            } else {
+                execSync(`launchctl load "${plistPath}"`, { stdio: 'ignore' });
+                // Wait for daemon to start
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                if (isDaemonRunning()) {
+                    console.log('  ✓ Daemon started on port 3847');
+                } else {
+                    console.log('  ⚠ Daemon loaded but may need a moment — check: curl http://127.0.0.1:3847/health');
+                }
+            }
+        } catch (daemonError) {
+            console.error(`  ✗ Failed to start daemon: ${(daemonError as Error).message}`);
+            issues++;
+        }
+        steps++;
+    } else {
+        console.log('  ⚠ LaunchAgent is macOS-only. Start the daemon manually:');
+        console.log('    node dist/mcp/server.js --http');
+        steps += 2;
+    }
+
+    // ─── Step 5: Detect and configure IDEs ──────────────────────
+    const mcpEntry = {
+        type: 'http' as const,
+        url: 'http://127.0.0.1:3847/mcp',
+    };
+
+    // Cursor
+    const cursorDir = path.join(os.homedir(), '.cursor');
+    if (fs.existsSync(cursorDir)) {
+        try {
+            const cursorConfig = path.join(cursorDir, 'mcp.json');
+            writeMcpConfig(cursorConfig, 'groundfloor-lore', mcpEntry);
+            console.log('  ✓ Cursor configured — ~/.cursor/mcp.json');
+        } catch (cursorError) {
+            console.error(`  ✗ Cursor config failed: ${(cursorError as Error).message}`);
+            issues++;
+        }
+    } else {
+        console.log('  · Cursor not detected — skipping');
+    }
+
+    // Antigravity
+    const antigravityDir = path.join(os.homedir(), '.gemini', 'antigravity');
+    if (fs.existsSync(antigravityDir)) {
+        try {
+            const agConfig = path.join(antigravityDir, 'mcp_config.json');
+            writeMcpConfig(agConfig, 'groundfloor-lore', mcpEntry);
+            console.log('  ✓ Antigravity configured — ~/.gemini/antigravity/mcp_config.json');
+        } catch (agError) {
+            console.error(`  ✗ Antigravity config failed: ${(agError as Error).message}`);
+            issues++;
+        }
+    } else {
+        console.log('  · Antigravity not detected — skipping');
+    }
+    steps++;
+
+    // ─── Summary ────────────────────────────────────────────────
+    console.log('');
+    console.log('  ═══════════════════════════════════════');
+    if (issues === 0) {
+        console.log('  ✅ Setup complete!');
+        console.log('');
+        console.log('  Next steps:');
+        console.log('    cd ~/your-project && gitnexus analyze .   # Index a project');
+        console.log('    lore index                                # Import into Lore');
+        console.log('    lore join gf://host:port/ns?token=...     # Join a team (optional)');
+    } else {
+        console.log(`  ⚠ Setup completed with ${issues} issue(s). Run 'lore doctor' for details.`);
+    }
+    console.log('');
+}
+
+/* ─── Command: join ──────────────────────────────────────────── */
+
+/**
+ * joinCommand — Connect to a team's SurrealDB for shared knowledge sync.
+ *
+ * Purpose:
+ *   Parses a join URL, extracts connection parameters, saves credentials,
+ *   and tests the connection. One command to enable team sync.
+ *
+ * @param args - CLI arguments. First arg must be a gf:// URL.
+ *
+ * Join URL Format:
+ *   gf://hostname:port/namespace?token=BASE64_PASSWORD
+ *   Example: gf://192.168.1.50:8001/groundfloor?token=cm9vdDEyMw==
+ *
+ * Side Effects:
+ *   - Creates ~/.groundfloor/infra/surrealdb/.env with connection credentials.
+ *
+ * Error Behavior: Validates URL format and tests connection before saving.
+ * Idempotent: Overwrites existing .env if run again.
+ */
+export async function joinCommand(args: string[]): Promise<void> {
+    const joinUrl = args[0];
+
+    if (!joinUrl) {
+        console.error('❌ Usage: lore join gf://hostname:port/namespace?token=BASE64_PASSWORD');
+        console.error('');
+        console.error('  Example:');
+        console.error('    lore join gf://192.168.1.50:8001/groundfloor?token=cm9vdDEyMw==');
+        process.exit(1);
+    }
+
+    // ─── Parse join URL ─────────────────────────────────────────
+    const parsed = parseJoinUrl(joinUrl);
+    if (!parsed) {
+        console.error('❌ Invalid join URL format.');
+        console.error('  Expected: gf://hostname:port/namespace?token=BASE64_PASSWORD');
+        process.exit(1);
+    }
+
+    const { host, port, namespace, password } = parsed;
+
+    console.log('');
+    console.log('  @groundfloor/lore — Team Join');
+    console.log('  ═══════════════════════════════════════');
+    console.log(`  Host:      ${host}:${port}`);
+    console.log(`  Namespace: ${namespace}`);
+    console.log('');
+
+    // ─── Test connection ────────────────────────────────────────
+    const surrealUrl = `ws://${host}:${port}/rpc`;
+    const healthUrl = `http://${host}:${port}/health`;
+
+    process.stdout.write('  Testing connection... ');
+    const healthy = await testHttpHealth(healthUrl);
+    if (!healthy) {
+        console.log('❌');
+        console.error(`  Could not reach SurrealDB at ${host}:${port}`);
+        console.error('  Check that the team database is running and accessible.');
+        process.exit(1);
+    }
+    console.log('✓');
+
+    // ─── Save credentials ───────────────────────────────────────
+    const basePath = resolveGraphBasePath();
+    const envDir = path.join(basePath, 'infra', 'surrealdb');
+    const envPath = path.join(envDir, '.env');
+
+    fs.mkdirSync(envDir, { recursive: true });
+    const envContent = `SURREAL_ROOT_PASS=${password}\nSURREAL_URL=${surrealUrl}\nSURREAL_NAMESPACE=${namespace}\n`;
+    fs.writeFileSync(envPath, envContent, 'utf-8');
+    console.log('  ✓ Credentials saved to ~/.groundfloor/infra/surrealdb/.env');
+
+    // ─── Restart daemon to pick up new credentials ──────────────
+    if (process.platform === 'darwin') {
+        const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.groundfloor.lore.plist');
+        if (fs.existsSync(plistPath)) {
+            try {
+                execSync(`launchctl unload "${plistPath}"`, { stdio: 'ignore' });
+                execSync(`launchctl load "${plistPath}"`, { stdio: 'ignore' });
+                await new Promise(resolve => setTimeout(resolve, 3000));
+                console.log('  ✓ Daemon restarted with team sync enabled');
+            } catch {
+                console.log('  ⚠ Could not restart daemon — restart manually: launchctl unload/load');
+            }
+        }
+    }
+
+    console.log('');
+    console.log('  ═══════════════════════════════════════');
+    console.log('  ✅ Joined team!');
+    console.log('  Knowledge will sync automatically on next daemon restart.');
+    console.log('  Run "lore status" to verify sync status.');
+    console.log('');
+}
+
+/* ─── Shared Utilities ───────────────────────────────────────── */
+
+/**
+ * isDaemonRunning — Check if the Lore HTTP daemon is responding on port 3847.
+ *
+ * @returns true if daemon responds to /health, false otherwise.
+ *
+ * Error Behavior: Returns false on any network error.
+ * Determinism: Non-deterministic (depends on network state).
+ */
+function isDaemonRunning(): boolean {
+    try {
+        execSync('curl -s --max-time 2 http://127.0.0.1:3847/health', { stdio: 'ignore' });
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/**
+ * writeMcpConfig — Merge a Lore MCP server entry into an IDE's config file.
+ *
+ * Purpose:
+ *   Reads existing config (if any), adds/updates the groundfloor-lore entry,
+ *   and writes back. Does not overwrite other MCP server entries.
+ *
+ * @param configPath - Absolute path to the IDE's MCP config JSON file.
+ * @param serverName - MCP server name key (e.g., "groundfloor-lore").
+ * @param entry - The MCP server config object to set.
+ *
+ * Side Effects: Writes to filesystem.
+ * Idempotent: Safe to call multiple times.
+ */
+function writeMcpConfig(
+    configPath: string,
+    serverName: string,
+    entry: { type: string; url: string },
+): void {
+    let config: Record<string, unknown> = { mcpServers: {} };
+
+    if (fs.existsSync(configPath)) {
+        try {
+            config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        } catch {
+            // Corrupted config — start fresh
+        }
+    }
+
+    if (!config['mcpServers'] || typeof config['mcpServers'] !== 'object') {
+        config['mcpServers'] = {};
+    }
+
+    (config['mcpServers'] as Record<string, unknown>)[serverName] = entry;
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 4) + '\n', 'utf-8');
+}
+
+/**
+ * parseJoinUrl — Parse a gf:// join URL into connection parameters.
+ *
+ * @param url - Join URL in the format gf://host:port/namespace?token=BASE64_PASS
+ * @returns Parsed parameters or null if invalid.
+ *
+ * Determinism: Deterministic.
+ */
+function parseJoinUrl(url: string): { host: string; port: string; namespace: string; password: string } | null {
+    try {
+        // Replace gf:// with http:// for URL parsing
+        const parsed = new URL(url.replace(/^gf:\/\//, 'http://'));
+        const host = parsed.hostname;
+        const port = parsed.port || '8001';
+        const namespace = parsed.pathname.replace(/^\//, '') || 'groundfloor';
+        const tokenBase64 = parsed.searchParams.get('token');
+
+        if (!host || !tokenBase64) return null;
+
+        const password = Buffer.from(tokenBase64, 'base64').toString('utf-8');
+        if (!password) return null;
+
+        return { host, port, namespace, password };
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * testHttpHealth — Test if a URL returns a successful HTTP response.
+ *
+ * @param url - HTTP URL to test.
+ * @returns Promise resolving to true if reachable, false otherwise.
+ *
+ * Error Behavior: Returns false on timeout, connection refused, etc.
+ * Determinism: Non-deterministic.
+ */
+function testHttpHealth(url: string): Promise<boolean> {
+    return new Promise((resolve) => {
+        const request = http.get(url, { timeout: 5000 }, (response) => {
+            resolve(response.statusCode === 200);
+        });
+        request.on('error', () => resolve(false));
+        request.on('timeout', () => {
+            request.destroy();
+            resolve(false);
+        });
+    });
 }
