@@ -174,14 +174,28 @@ const adapter = resolveSyncAdapter();
 const syncEngine = new SyncEngine(graph, loreDir, adapter);
 const wal = syncEngine.getWal();
 
-const server = new McpServer({
-    name: 'groundfloor-lore',
-    version: '1.0.0',
-});
+/**
+ * createMcpServer — Factory function to create and configure an McpServer instance.
+ *
+ * Purpose:
+ *   Creates a new McpServer with all tools and resources registered.
+ *   In stdio mode, called once. In HTTP mode, called per client session
+ *   since McpServer binds to a single transport and cannot be reused.
+ *
+ * @returns Fully configured McpServer instance.
+ *
+ * Side Effects: None (tools operate on shared graph/syncEngine singletons).
+ * Determinism: Deterministic.
+ */
+function createMcpServer(): McpServer {
+    const mcpServer = new McpServer({
+        name: 'groundfloor-lore',
+        version: '1.0.0',
+    });
 
 /* ─── Tool: store_node ────────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'store_node',
     'Create or update a knowledge node (decision, convention, bug pattern, etc.)',
     {
@@ -235,7 +249,7 @@ server.tool(
 
 /* ─── Tool: store_edge ────────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'store_edge',
     'Create a relationship between two knowledge nodes',
     {
@@ -279,7 +293,7 @@ server.tool(
 
 /* ─── Tool: traverse ──────────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'traverse',
     'Follow graph edges from a starting node to find all connected knowledge',
     {
@@ -327,7 +341,7 @@ server.tool(
 
 /* ─── Tool: search ────────────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'search',
     'Full-text search across all knowledge nodes',
     {
@@ -363,7 +377,7 @@ server.tool(
 
 /* ─── Tool: recall ────────────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'recall',
     'High-level knowledge recall: searches for a topic and traverses related nodes',
     {
@@ -439,7 +453,7 @@ server.tool(
 
 /* ─── Tool: delete_node ───────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'delete_node',
     'Remove a knowledge node and all its relationships',
     {
@@ -469,7 +483,7 @@ server.tool(
 
 /* ─── Tool: list_nodes ────────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'list_nodes',
     'List all knowledge nodes, optionally filtered by type or tag',
     {
@@ -505,7 +519,7 @@ server.tool(
 
 /* ─── Tool: register_project ──────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'register_project',
     'Register a new project in the Lore project registry.',
     {
@@ -553,7 +567,7 @@ server.tool(
 
 /* ─── Tool: stats ─────────────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'stats',
     'Get knowledge graph statistics (node count, edge count, type breakdown)',
     {},
@@ -581,7 +595,7 @@ server.tool(
 
 /* ─── Tool: who_is_working ─────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'who_is_working',
     'See team developer activity — who is working on what, filtered by symbol or file',
     {
@@ -628,7 +642,7 @@ server.tool(
 
 /* ─── Tool: sync_status ───────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'sync_status',
     'Get the current sync engine status — WAL pending count, last sync time, remote connectivity',
     {},
@@ -659,7 +673,7 @@ server.tool(
 
 /* ─── Tool: code_query ────────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'code_query',
     'Search code symbols by name or file path. Returns functions, classes, methods, and interfaces from the unified graph.',
     {
@@ -707,7 +721,7 @@ server.tool(
 
 /* ─── Tool: code_context ──────────────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'code_context',
     '360° view of a code symbol — shows callers, callees, and connected knowledge nodes (decisions, conventions, bugs)',
     {
@@ -767,7 +781,7 @@ server.tool(
 
 /* ─── Tool: link_knowledge_to_code ────────────────────────────── */
 
-server.tool(
+mcpServer.tool(
     'link_knowledge_to_code',
     'Create a cross-pillar edge linking a knowledge node (decision, convention, bug) to a code symbol. Enables queries like "what decisions affect this function?"',
     {
@@ -806,7 +820,7 @@ server.tool(
  * Proxies GitNexus's hybrid BM25 + vector search.
  * Returns processes (call chains) ranked by relevance.
  */
-server.tool(
+mcpServer.tool(
     'gitnexus_query',
     'Search code execution flows using GitNexus (BM25 + semantic vector search)',
     {
@@ -828,7 +842,7 @@ server.tool(
  *
  * Shows callers, callees, processes, and file location.
  */
-server.tool(
+mcpServer.tool(
     'gitnexus_context',
     '360° view of a code symbol: callers, callees, processes, imports (via GitNexus)',
     {
@@ -850,7 +864,7 @@ server.tool(
  * Returns what would break if you change a symbol.
  * Affected symbols grouped by depth (d=1 WILL BREAK, d=2 LIKELY AFFECTED, d=3 MAY NEED TESTING).
  */
-server.tool(
+mcpServer.tool(
     'gitnexus_impact',
     'Blast radius analysis: what breaks if you change a symbol (via GitNexus)',
     {
@@ -872,7 +886,7 @@ server.tool(
  *
  * Full Cypher query access for advanced structural queries.
  */
-server.tool(
+mcpServer.tool(
     'gitnexus_cypher',
     'Execute raw Cypher query against the GitNexus code knowledge graph',
     {
@@ -893,7 +907,7 @@ server.tool(
 /**
  * list_repos — List all repositories indexed by GitNexus.
  */
-server.tool(
+mcpServer.tool(
     'list_repos',
     'List all repositories indexed by GitNexus',
     {},
@@ -914,7 +928,7 @@ server.tool(
 /**
  * detect_changes — Analyze uncommitted changes and find affected code symbols.
  */
-server.tool(
+mcpServer.tool(
     'detect_changes',
     'Analyze uncommitted git changes and find affected code symbols in the knowledge graph',
     {
@@ -964,7 +978,7 @@ server.tool(
 /**
  * rename — Multi-file coordinated rename using graph + text search.
  */
-server.tool(
+mcpServer.tool(
     'rename',
     'Multi-file coordinated rename using knowledge graph + text search. Preview by default (dry_run=true).',
     {
@@ -1013,7 +1027,7 @@ server.tool(
 /**
  * repos — List all indexed repositories.
  */
-server.resource(
+mcpServer.resource(
     'repos',
     'lore://repos',
     { description: 'All indexed repositories' },
@@ -1032,7 +1046,7 @@ server.resource(
 /**
  * setup — Setup and configuration guide.
  */
-server.resource(
+mcpServer.resource(
     'setup',
     'lore://setup',
     { description: 'Lore setup and configuration guide' },
@@ -1073,7 +1087,7 @@ server.resource(
 /**
  * repo context — Overview of a specific repo's code graph.
  */
-server.resource(
+mcpServer.resource(
     'repo_context',
     'lore://repo/{name}/context',
     { description: 'Repository overview: symbol count, file count, staleness' },
@@ -1107,7 +1121,7 @@ server.resource(
 /**
  * repo clusters — Functional areas (by top-level directory).
  */
-server.resource(
+mcpServer.resource(
     'repo_clusters',
     'lore://repo/{name}/clusters',
     { description: 'Functional areas grouped by directory structure' },
@@ -1140,7 +1154,7 @@ server.resource(
 /**
  * repo processes — Execution flows (approximated from CALLS chains).
  */
-server.resource(
+mcpServer.resource(
     'repo_processes',
     'lore://repo/{name}/processes',
     { description: 'Execution flows based on call chains' },
@@ -1164,7 +1178,7 @@ server.resource(
 /**
  * repo schema — Graph schema for Cypher queries.
  */
-server.resource(
+mcpServer.resource(
     'repo_schema',
     'lore://repo/{name}/schema',
     { description: 'Graph schema: node types, edge types, properties' },
@@ -1198,10 +1212,16 @@ server.resource(
     },
 );
 
+    return mcpServer;
+}
+
 /* ─── Server Start ────────────────────────────────────────────── */
 
 /** Default port for HTTP daemon mode. Override with LORE_PORT env var. */
 const LORE_HTTP_PORT = parseInt(process.env['LORE_PORT'] ?? '3847', 10);
+
+/** Active HTTP sessions — maps session ID to transport instance. */
+const activeSessions = new Map<string, StreamableHTTPServerTransport>();
 
 /**
  * main — Initialize graph and start MCP server.
@@ -1217,8 +1237,8 @@ const LORE_HTTP_PORT = parseInt(process.env['LORE_PORT'] ?? '3847', 10);
  *
  * Side Effects: Opens Kùzu database, starts listener (stdio or HTTP).
  * Error Behavior: Exits process with code 1 on fatal startup error.
- * Concurrency: HTTP mode allows multiple concurrent IDE connections
- *   sharing a single Kùzu write lock.
+ * Concurrency: HTTP mode creates per-session McpServer+transport pairs,
+ *   all sharing a single Kùzu graph instance.
  */
 async function main(): Promise<void> {
     await graph.initialize();
@@ -1238,26 +1258,52 @@ async function main(): Promise<void> {
     const useHttp = process.argv.includes('--http');
 
     if (useHttp) {
-        // HTTP daemon mode — multiple IDEs share one process
-        const httpTransport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: () => randomUUID(), // stateful — each IDE gets its own session
-        });
-
-        await server.connect(httpTransport);
-
+        // HTTP daemon mode — per-session McpServer+transport pairs
         const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
             const url = req.url ?? '';
 
             // Health check endpoint for monitoring
             if (url === '/health' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ status: 'ok', version: '1.0.0' }));
+                res.end(JSON.stringify({ status: 'ok', version: '1.0.0', sessions: activeSessions.size }));
                 return;
             }
 
-            // MCP endpoint — delegate to StreamableHTTPServerTransport
+            // MCP endpoint
             if (url === '/mcp') {
-                await httpTransport.handleRequest(req, res);
+                const sessionId = req.headers['mcp-session-id'] as string | undefined;
+
+                // Route to existing session if header present
+                if (sessionId && activeSessions.has(sessionId)) {
+                    const existingTransport = activeSessions.get(sessionId)!;
+                    await existingTransport.handleRequest(req, res);
+                    return;
+                }
+
+                // New session — create fresh McpServer + transport
+                const sessionTransport = new StreamableHTTPServerTransport({
+                    sessionIdGenerator: () => randomUUID(),
+                });
+
+                sessionTransport.onclose = () => {
+                    const sid = sessionTransport.sessionId;
+                    if (sid) {
+                        activeSessions.delete(sid);
+                        console.error(`[Lore MCP] Session ${sid.slice(0, 8)}... closed (${activeSessions.size} active)`);
+                    }
+                };
+
+                const sessionServer = createMcpServer();
+                await sessionServer.connect(sessionTransport);
+
+                // Store session after connection (sessionId is set during handleRequest)
+                await sessionTransport.handleRequest(req, res);
+
+                const newSessionId = sessionTransport.sessionId;
+                if (newSessionId) {
+                    activeSessions.set(newSessionId, sessionTransport);
+                    console.error(`[Lore MCP] New session ${newSessionId.slice(0, 8)}... (${activeSessions.size} active)`);
+                }
                 return;
             }
 
@@ -1287,6 +1333,7 @@ async function main(): Promise<void> {
         });
     } else {
         // stdio mode — backward compatible, one IDE per process
+        const server = createMcpServer();
         const transport = new StdioServerTransport();
         await server.connect(transport);
 
@@ -1301,3 +1348,4 @@ main().catch((startupError) => {
     console.error('[Lore MCP] Failed to start:', startupError);
     process.exit(1);
 });
+
