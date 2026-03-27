@@ -26,6 +26,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { LocalGraph, type LoreNode } from '../engines/localGraph.js';
 import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
@@ -1239,7 +1240,7 @@ async function main(): Promise<void> {
     if (useHttp) {
         // HTTP daemon mode — multiple IDEs share one process
         const httpTransport = new StreamableHTTPServerTransport({
-            sessionIdGenerator: undefined, // stateless — no session tracking needed
+            sessionIdGenerator: () => randomUUID(), // stateful — each IDE gets its own session
         });
 
         await server.connect(httpTransport);
