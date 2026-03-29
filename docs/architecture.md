@@ -458,20 +458,34 @@ listMemoriesByTag(agentId: string, tag: string, orgId: string): Promise<MemoryEn
 
 ## Configuration
 
-### MCP Config (After `lore init`)
+### MCP Config (After `lore setup`)
 
-**File:** `~/.gemini/antigravity/mcp_config.json`
+Each IDE uses a different MCP config schema. `lore setup` auto-detects and writes the correct format.
 
+**Cursor** (`~/.cursor/mcp.json`):
 ```json
 {
     "mcpServers": {
         "groundfloor-lore": {
-            "command": "lore",
-            "args": ["serve"]
+            "type": "http",
+            "url": "http://127.0.0.1:3847/mcp"
         }
     }
 }
 ```
+
+**Antigravity** (`~/.gemini/antigravity/mcp_config.json`):
+```json
+{
+    "mcpServers": {
+        "groundfloor-lore": {
+            "serverUrl": "http://127.0.0.1:3847/mcp"
+        }
+    }
+}
+```
+
+> **Key difference:** Cursor uses `type` + `url`; Antigravity uses `serverUrl` (no `type` field).
 
 Optional environment variables for team sync are documented in the setup guide (not tracked in git).
 

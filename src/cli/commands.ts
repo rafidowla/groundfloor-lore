@@ -497,18 +497,22 @@ export async function doctorCommand(_args: string[]): Promise<void> {
     }
 
     // Check 5: MCP config (Antigravity)
+    // Antigravity uses { serverUrl: "..." } format (no type field).
     const antigravityConfigPath = path.join(os.homedir(), '.gemini', 'antigravity', 'mcp_config.json');
     if (fs.existsSync(antigravityConfigPath)) {
         try {
             const mcpConfig = JSON.parse(fs.readFileSync(antigravityConfigPath, 'utf-8'));
             if (mcpConfig.mcpServers?.['groundfloor-lore']) {
-                const serverArgs = mcpConfig.mcpServers['groundfloor-lore'].args ?? [];
-                const serverPath = serverArgs[0] ?? 'unknown';
-                const serverExists = fs.existsSync(serverPath);
-                if (serverExists) {
-                    console.log(`  ✓ Antigravity MCP config: groundfloor-lore → ${path.basename(serverPath)}`);
+                const loreEntry = mcpConfig.mcpServers['groundfloor-lore'];
+                const configuredUrl = loreEntry.serverUrl ?? loreEntry.url ?? null;
+                if (configuredUrl) {
+                    console.log(`  ✓ Antigravity MCP config: groundfloor-lore → ${configuredUrl}`);
+                    if (loreEntry.url && !loreEntry.serverUrl) {
+                        console.log('  ⚠ Antigravity uses "serverUrl" (not "url") — run "lore setup" to fix');
+                        issues++;
+                    }
                 } else {
-                    console.log(`  ✗ Antigravity MCP config: server.js not found at ${serverPath}`);
+                    console.log('  ✗ Antigravity MCP config: no serverUrl or command configured');
                     issues++;
                 }
             } else {
@@ -686,17 +690,18 @@ export async function setupCommand(args: string[]): Promise<void> {
     }
 
     // ─── Step 5: Detect and configure IDEs ──────────────────────
-    const mcpEntry = {
-        type: 'http' as const,
-        url: 'http://127.0.0.1:3847/mcp',
-    };
+    // NOTE: Cursor and Antigravity use different MCP config schemas.
+    //   Cursor:      { type: "http", url: "..." }
+    //   Antigravity:  { serverUrl: "..." }  (no type field)
+    const LORE_MCP_URL = 'http://127.0.0.1:3847/mcp';
 
     // Cursor
     const cursorDir = path.join(os.homedir(), '.cursor');
     if (fs.existsSync(cursorDir)) {
         try {
             const cursorConfig = path.join(cursorDir, 'mcp.json');
-            writeMcpConfig(cursorConfig, 'groundfloor-lore', mcpEntry);
+            const cursorMcpEntry = { type: 'http', url: LORE_MCP_URL };
+            writeMcpConfig(cursorConfig, 'groundfloor-lore', cursorMcpEntry);
             console.log('  ✓ Cursor configured — ~/.cursor/mcp.json');
         } catch (cursorError) {
             console.error(`  ✗ Cursor config failed: ${(cursorError as Error).message}`);
@@ -711,7 +716,8 @@ export async function setupCommand(args: string[]): Promise<void> {
     if (fs.existsSync(antigravityDir)) {
         try {
             const agConfig = path.join(antigravityDir, 'mcp_config.json');
-            writeMcpConfig(agConfig, 'groundfloor-lore', mcpEntry);
+            const antigravityMcpEntry = { serverUrl: LORE_MCP_URL };
+            writeMcpConfig(agConfig, 'groundfloor-lore', antigravityMcpEntry);
             console.log('  ✓ Antigravity configured — ~/.gemini/antigravity/mcp_config.json');
         } catch (agError) {
             console.error(`  ✗ Antigravity config failed: ${(agError as Error).message}`);
@@ -1012,7 +1018,7 @@ function isDaemonRunning(): boolean {
 function writeMcpConfig(
     configPath: string,
     serverName: string,
-    entry: { type: string; url: string },
+    entry: Record<string, string>,
 ): void {
     let config: Record<string, unknown> = { mcpServers: {} };
 

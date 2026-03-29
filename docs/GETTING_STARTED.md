@@ -116,7 +116,9 @@ launchctl load ~/Library/LaunchAgents/com.groundfloor.lore.plist
 ```
 
 ### IDE not connecting
-Check your MCP config points to the daemon:
+Check your MCP config points to the daemon. Each IDE uses a different schema:
+
+**Cursor** (`~/.cursor/mcp.json`):
 ```json
 {
   "groundfloor-lore": {
@@ -125,6 +127,18 @@ Check your MCP config points to the daemon:
   }
 }
 ```
+
+**Antigravity** (`~/.gemini/antigravity/mcp_config.json`):
+```json
+{
+  "groundfloor-lore": {
+    "serverUrl": "http://127.0.0.1:3847/mcp"
+  }
+}
+```
+
+> **Note:** Cursor uses `url` + `type`; Antigravity uses `serverUrl` (no `type` field).
+> Run `lore setup` to auto-configure both.
 
 ### Graph locked / schema error
 Stop all Lore processes, then restart the daemon:
