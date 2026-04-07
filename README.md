@@ -21,6 +21,12 @@ lore init
 
 # Start the MCP server
 lore serve
+
+# Check engine status
+lore status
+
+# Open the Graph Visualizer UI in your browser
+lore explore
 ```
 
 ## Architecture

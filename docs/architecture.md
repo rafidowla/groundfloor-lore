@@ -192,10 +192,19 @@ store_edge(source_id, target_id, relation)
 traverse(node_id, depth=2)
 search(query, type?)
 recall(topic)                    → Search + traverse combined
+get_hot_context()                → Retrieve recently accessed session memory
 
 -- Team awareness tools (NEW)
 who_is_working(symbol?)          → Who else is touching this code?
 ```
+
+### Graph Visualizer Dashboard (NEW)
+
+Lore includes a built-in interactive web dashboard to visualize both the codebase hierarchy and the interconnected knowledge nodes.
+
+- **URL:** `http://127.0.0.1:3847/explore` (when `lore serve --http` is running)
+- **CLI:** `lore explore`
+- **Purpose:** Interactive graphical exploration of relationships, node physics modeling, and topology extraction without needing to write Cypher queries.
 
 ### Why Kùzu Locally
 
@@ -442,7 +451,7 @@ listMemoriesByTag(agentId: string, tag: string, orgId: string): Promise<MemoryEn
 
 | Step | What |
 |---|---|
-| 1 | CLI: `lore init`, `lore serve`, `lore analyze`, `lore sync`, `lore status`, `lore doctor` |
+| 1 | CLI: `lore init`, `lore serve`, `lore analyze`, `lore sync`, `lore status`, `lore explore`, `lore doctor` |
 | 2 | Unified MCP server (code tools + knowledge tools + activity tools) |
 | 3 | Auto-configure MCP config on `lore init` |
 
