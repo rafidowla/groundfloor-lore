@@ -174,6 +174,51 @@ export class LoreGraphError extends Error {
 
 /* ─── Local Graph ─────────────────────────────────────────────── */
 
+export class SessionCacheManager {
+    private cachePath: string;
+    private maxItems = 10;
+
+    constructor(basePath: string) {
+        this.cachePath = path.join(basePath, '.lore', 'hot_session.json');
+    }
+
+    pushNode(nodeId: string): void {
+        const cache = this.readCache();
+        // Remove if exists
+        cache.recent_nodes = cache.recent_nodes.filter((id) => id !== nodeId);
+        // Push to front
+        cache.recent_nodes.unshift(nodeId);
+        // Truncate
+        if (cache.recent_nodes.length > this.maxItems) {
+            cache.recent_nodes = cache.recent_nodes.slice(0, this.maxItems);
+        }
+        this.writeCache(cache);
+    }
+
+    getHotContext(): { recent_nodes: string[] } {
+        return this.readCache();
+    }
+
+    private readCache(): { recent_nodes: string[] } {
+        try {
+            if (fs.existsSync(this.cachePath)) {
+                return JSON.parse(fs.readFileSync(this.cachePath, 'utf-8'));
+            }
+        } catch {
+            // IGNORE
+        }
+        return { recent_nodes: [] };
+    }
+
+    private writeCache(cache: { recent_nodes: string[] }): void {
+        try {
+            fs.writeFileSync(this.cachePath, JSON.stringify(cache, null, 2), 'utf-8');
+        } catch {
+            // IGNORE
+        }
+    }
+}
+
 /**
  * LocalGraph — Kùzu-backed unified graph for code + knowledge.
  *
@@ -198,6 +243,7 @@ export class LocalGraph {
     private connection: Connection;
     private graphPath: string;
     private initialized: boolean = false;
+    public sessionCache: SessionCacheManager;
 
     /**
      * Creates a new LocalGraph instance.
@@ -212,6 +258,7 @@ export class LocalGraph {
 
         this.database = new Database(this.graphPath);
         this.connection = new Connection(this.database);
+        this.sessionCache = new SessionCacheManager(basePath);
     }
 
     /**
@@ -374,6 +421,8 @@ export class LocalGraph {
                     syncedAt: '',
                 });
 
+                this.sessionCache.pushNode(nodeData.id);
+
                 return {
                     ...nodeData,
                     createdAt: existingNode.createdAt,
@@ -409,6 +458,8 @@ export class LocalGraph {
                     updatedAt: now,
                     syncedAt: '',
                 });
+
+                this.sessionCache.pushNode(nodeData.id);
 
                 return {
                     ...nodeData,
@@ -614,6 +665,56 @@ export class LocalGraph {
      * @param ecosystem - Optional ecosystem filter ('*' for all).
      * @returns Array of matching nodes.
      */
+    async getTopology(limit: number = 300): Promise<{ nodes: any[]; edges: any[] }> {
+        await this.initialize();
+        
+        try {
+            // Fetch Nodes
+            const nodesCypher = `MATCH (n:LoreNode) RETURN n LIMIT ${limit}`;
+            const nodesResult = await this.connection.query(nodesCypher) as any;
+            const nodesData = await nodesResult.getAll();
+            
+            const nodes = nodesData.map((row: any) => {
+                const n: any = row['n'];
+                return {
+                    id: n.id,
+                    label: n.label,
+                    type: n.type,
+                    project: n.project,
+                    group: n.type // Useful for vis.js node styling
+                };
+            });
+
+            // Fetch Edges
+            const edgesCypher = `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode) RETURN n.id AS source, e.relation AS relation, m.id AS target LIMIT ${limit}`;
+            const edgesResult = await this.connection.query(edgesCypher) as any;
+            const edgesData = await edgesResult.getAll();
+            
+            const edges = edgesData.map((row: any) => ({
+                from: row['source'],
+                to: row['target'],
+                label: row['relation']
+            }));
+
+            return { nodes, edges };
+        } catch (error) {
+            throw new LoreGraphError(
+                'Failed to extract graph topology',
+                'getTopology',
+                error,
+            );
+        }
+    }
+
+    /**
+     * listNodes — List all nodes with optional type/tag/scope filters.
+     *
+     * @param type - Optional node type filter.
+     * @param tag - Optional tag filter (substring match).
+     * @param project - Optional project filter ('*' for all).
+     * @param ecosystem - Optional ecosystem filter ('*' for all).
+     * @returns Array of matching nodes.
+     */
     async listNodes(
         type?: string,
         tag?: string,
@@ -747,6 +848,44 @@ export class LocalGraph {
                 'getStats',
                 error,
             );
+        }
+    }
+
+    /**
+     * lintGraph — Perform health checks manually on the graph.
+     *
+     * Purpose: Identifies orphaned knowledge nodes and code links to missing symbols.
+     *
+     * @returns Array of warning strings.
+     */
+    async lintGraph(): Promise<string[]> {
+        await this.initialize();
+        const warnings: string[] = [];
+
+        try {
+            // Rule 1: Orphaned nodes (no edges, excluding simple notes)
+            const orphanQuery = `MATCH (n:LoreNode) WHERE NOT (n)-[]-() AND n.type <> 'note' RETURN n.id AS id, n.type AS type`;
+            const orphanResult = await this.connection.query(orphanQuery) as QueryResult;
+            for (const row of await orphanResult.getAll()) {
+                const record = row as Record<string, unknown>;
+                warnings.push(`Orphan: ${record['type']} node '${record['id']}' has no relationships.`);
+            }
+
+            // Rule 2: Bug patterns missing code links
+            try {
+                const bugQuery = `MATCH (n:LoreNode) WHERE n.type = 'bug_pattern' AND NOT (n)-[:LoreAppliesToCode]->(:CodeSymbol) RETURN n.id AS id`;
+                const bugResult = await this.connection.query(bugQuery) as QueryResult;
+                for (const row of await bugResult.getAll()) {
+                    const record = row as Record<string, unknown>;
+                    warnings.push(`Missing Link: bug_pattern '${record['id']}' is not linked to any CodeSymbol.`);
+                }
+            } catch {
+                // Ignore if Code tables aren't indexed yet
+            }
+
+            return warnings;
+        } catch (error) {
+            throw new LoreGraphError('Failed to lint graph', 'lintGraph', error);
         }
     }
 

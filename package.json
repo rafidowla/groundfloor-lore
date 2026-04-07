@@ -11,7 +11,8 @@
         "build": "tsc",
         "start": "node dist/mcp/server.js",
         "dev": "tsx src/mcp/server.ts",
-        "cli": "tsx src/cli/index.ts"
+        "cli": "tsx src/cli/index.ts",
+        "test:http": "tsx test/http-test.ts"
     },
     "dependencies": {
         "@kineviz/kuzu-lite": "^0.11.3",

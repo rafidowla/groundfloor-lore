@@ -35,6 +35,15 @@ Use `store_node()` with:
 
 Create `store_edge()` relationships to connect related nodes.
 
+## Raw Document Ingestion (via MCP)
+
+When asked to "ingest" a document, text file, or requirements spec:
+1. Use the `read_document_for_ingestion(filePath)` MCP tool to read the raw text.
+2. Read the systemic instructions returned along with the file content.
+3. Automatically analyze and chunk the document into logical concepts (architecture decisions, conventions, entities).
+4. For each chunk/concept, call `store_node()` with the appropriate type and tags.
+5. If the extracted concepts relate to each other, use `store_edge()` to connect them in the graph.
+
 ## Knowledge Capture Triggers
 
 You MUST store knowledge when:

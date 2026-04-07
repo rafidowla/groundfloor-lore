@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Knowledge Explorer</title>
+    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <style>
+        :root {
+            --bg-dark: #0f1115;
+            --bg-sidebar: #16181d;
+            --bg-item: #1f2229;
+            --bg-item-hover: #2d313a;
+            --border-color: #2d313a;
+            --text-main: #e2e8f0;
+            --text-muted: #94a3b8;
+            --accent: #3182CE;
+        }
+
+        body { 
+            margin: 0; padding: 0; background-color: var(--bg-dark); color: var(--text-main); 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            overflow: hidden; display: flex; height: 100vh;
+        }
+
+        /* Sidebar Styling */
+        #sidebar {
+            width: 300px;
+            background-color: var(--bg-sidebar);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            z-index: 10;
+        }
+        
+        #sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        #sidebar-header h1 { margin: 0; font-size: 1.2rem; font-weight: 600; color: #fff; }
+        #sidebar-header p { margin: 4px 0 0 0; font-size: 0.8rem; color: var(--text-muted); }
+
+        #search-container {
+            padding: 15px 20px;
+            border-bottom: 1px solid var(--border-color);
+        }
+        #search-input {
+            width: 100%;
+            padding: 8px 12px;
+            background-color: var(--bg-item);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: #fff;
+            box-sizing: border-box;
+            outline: none;
+        }
+        #search-input:focus { border-color: var(--accent); }
+
+        #sidebar-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 10px 0;
+        }
+
+        .category {
+            padding: 10px 20px;
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .nav-list {
+            list-style: none;
+            padding: 0;
+            margin: 0 0 15px 0;
+        }
+        .nav-item {
+            padding: 8px 20px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-left: 2px solid transparent;
+        }
+        .nav-item:hover { background-color: var(--bg-item-hover); }
+        .nav-item.active { background-color: var(--bg-item); border-left-color: var(--accent); color: #fff; }
+        .nav-item .badge {
+            background-color: var(--border-color);
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            padding: 2px 6px;
+            border-radius: 10px;
+            min-width: 18px;
+            text-align: center;
+        }
+
+        .orphan-item { color: #E53E3E; }
+
+        /* Canvas Styling */
+        #canvas-container {
+            flex: 1;
+            position: relative;
+            height: 100%;
+            overflow: hidden;
+        }
+        #network { position: absolute; top: 0; left: 0; width: 100%; height: 100%; outline: none; }
+        
+        #loading { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+            font-size: 1rem; color: var(--text-muted); 
+            background: rgba(0,0,0,0.8); padding: 10px 20px; border-radius: 20px;
+            z-index: 100;
+        }
+
+        #legend {
+            position: absolute; bottom: 20px; left: 20px; z-index: 10;
+            background: rgba(22, 24, 29, 0.85); padding: 15px; border-radius: 8px;
+            border: 1px solid var(--border-color); font-size: 0.8rem;
+        }
+        #legend h4 { margin: 0 0 10px 0; color: #fff; font-size: 0.85rem; }
+        .legend-item { display: flex; align-items: center; margin-bottom: 6px; color: var(--text-muted); }
+        .legend-color { width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; border: 1px solid #2D3748; }
+
+        #toast {
+            display: none; position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
+            background: #3182CE; color: #fff; padding: 12px 24px; border-radius: 8px; z-index: 1000;
+            font-size: 0.9rem; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            pointer-events: none;
+        }
+
+        /* Top controls */
+        #top-controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 10;
+        }
+        .btn {
+            background-color: var(--bg-item);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.85rem;
+        }
+        .btn:hover { background-color: var(--bg-item-hover); }
+    </style>
+</head>
+<body>
+    
+    <!-- LEFT SIDEBAR -->
+    <div id="sidebar">
+        <div id="sidebar-header">
+            <h1>Knowledge Explorer</h1>
+            <p>Lore Graph Visualization</p>
+        </div>
+        
+        <div id="search-container">
+            <input type="text" id="search-input" placeholder="Search nodes or projects...">
+        </div>
+
+        <div id="sidebar-content">
+            <div class="category">Projects</div>
+            <ul class="nav-list" id="list-projects"></ul>
+
+            <div class="category">Node Types</div>
+            <ul class="nav-list" id="list-types"></ul>
+
+            <div class="category" id="orphans-title" style="display: none;">Orphaned Nodes</div>
+            <ul class="nav-list" id="list-orphans"></ul>
+        </div>
+    </div>
+
+    <!-- MAIN CANVAS -->
+    <div id="canvas-container">
+        <div id="top-controls">
+            <button class="btn" id="btn-relayout">Re-Layout clusters</button>
+            <button class="btn" id="btn-reset">Show Full Graph</button>
+        </div>
+        
+        <!-- Legend -->
+        <div id="legend">
+            <h4>Node Types</h4>
+            <div class="legend-item"><span class="legend-color" style="background:#3182CE"></span> Architecture</div>
+            <div class="legend-item"><span class="legend-color" style="background:#38A169"></span> Convention</div>
+            <div class="legend-item"><span class="legend-color" style="background:#805AD5"></span> Decision</div>
+            <div class="legend-item"><span class="legend-color" style="background:#E53E3E"></span> Bug Pattern</div>
+            <div class="legend-item"><span class="legend-color" style="background:#DD6B20"></span> Troubleshooting</div>
+            <div class="legend-item"><span class="legend-color" style="background:#4A5568"></span> Other</div>
+        </div>
+
+        <div id="loading">Connecting to Knowledge Engine...</div>
+        <div id="network"></div>
+        <div id="toast"></div>
+    </div>
+
+    <!-- APPLICATION LOGIC -->
+    <script>
+        let network = null;
+        let originalNodesDataSet = null;
+        let originalEdgesDataSet = null;
+        
+        let allNodes = [];
+        let allEdges = [];
+
+        // Constants
+        const COLORS = {
+            'architecture': '#3182CE',
+            'convention': '#38A169',
+            'decision': '#805AD5',
+            'bug_pattern': '#E53E3E',
+            'troubleshooting': '#DD6B20',
+            'default': '#4A5568'
+        };
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            toast.style.display = 'block';
+            setTimeout(() => { toast.style.display = 'none'; }, 3000);
+        }
+
+        async function init() {
+            try {
+                console.log('Fetching topology...');
+                const response = await fetch('/api/topology');
+                const data = await response.json();
+                document.getElementById('loading').style.display = 'none';
+
+                allNodes = data.nodes || [];
+                allEdges = data.edges || [];
+                console.log(`Loaded ${allNodes.length} nodes and ${allEdges.length} edges.`);
+
+                computeSidebar(allNodes, allEdges);
+                renderGraph(allNodes, allEdges);
+                setupEvents();
+
+            } catch (err) {
+                console.error('Initialization error:', err);
+                document.getElementById('loading').innerText = 'Failed to load graph: ' + err.message;
+            }
+        }
+
+        function computeSidebar(nodes, edges) {
+            // 1. Compute Projects
+            const projectMap = {};
+            const typeMap = {};
+            const orphans = [];
+
+            // Detect edges for orphans
+            const connectedIds = new Set();
+            edges.forEach(e => {
+                connectedIds.add(e.from);
+                connectedIds.add(e.to);
+            });
+
+            nodes.forEach(n => {
+                // Tally Projects
+                const proj = n.project || 'Global';
+                projectMap[proj] = (projectMap[proj] || 0) + 1;
+
+                // Tally Types
+                const type = n.type || 'Unknown';
+                typeMap[type] = (typeMap[type] || 0) + 1;
+
+                // Detect Orphans
+                if (n.id && !connectedIds.has(n.id)) {
+                    orphans.push(n);
+                }
+            });
+
+            // Render Projects
+            const ulProjects = document.getElementById('list-projects');
+            ulProjects.innerHTML = '';
+            Object.keys(projectMap).sort().forEach(proj => {
+                ulProjects.appendChild(createNavItem(proj, projectMap[proj], () => filterByProject(proj)));
+            });
+
+            // Render Types
+            const ulTypes = document.getElementById('list-types');
+            ulTypes.innerHTML = '';
+            Object.keys(typeMap).sort().forEach(type => {
+                ulTypes.appendChild(createNavItem(type, typeMap[type], () => filterByType(type)));
+            });
+
+            // Render Orphans
+            const ulOrphans = document.getElementById('list-orphans');
+            ulOrphans.innerHTML = '';
+            if (orphans.length > 0) {
+                document.getElementById('orphans-title').style.display = 'block';
+                orphans.forEach(o => {
+                    const li = createNavItem(o.label || o.id, '', () => focusOnNode(o.id));
+                    li.classList.add('orphan-item');
+                    li.title = `ID: ${o.id}`;
+                    ulOrphans.appendChild(li);
+                });
+            } else {
+                document.getElementById('orphans-title').style.display = 'none';
+            }
+        }
+
+        function createNavItem(label, count, onClick) {
+            const li = document.createElement('li');
+            li.className = 'nav-item';
+            
+            const spanText = document.createElement('span');
+            spanText.textContent = label;
+            spanText.style.overflow = 'hidden';
+            spanText.style.textOverflow = 'ellipsis';
+            spanText.style.whiteSpace = 'nowrap';
+            li.appendChild(spanText);
+
+            if (count !== '') {
+                const spanBadge = document.createElement('span');
+                spanBadge.className = 'badge';
+                spanBadge.textContent = count;
+                li.appendChild(spanBadge);
+            }
+
+            li.addEventListener('click', () => {
+                document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+                li.classList.add('active');
+                onClick();
+            });
+            return li;
+        }
+
+        function renderGraph(filteredNodes, filteredEdges) {
+            try {
+                const container = document.getElementById('network');
+                
+                // Format Vis Nodes
+                const visNodes = filteredNodes.map(n => ({
+                    id: n.id,
+                    label: n.label || n.id,
+                    color: { 
+                        background: COLORS[n.type] || COLORS['default'], 
+                        border: '#2D3748',
+                        highlight: { background: COLORS[n.type] || COLORS['default'], border: '#ffffff' }
+                    },
+                    font: { 
+                        color: '#ffffff', 
+                        face: 'Inter, -apple-system, system-ui', 
+                        size: 14, 
+                        strokeWidth: 5, 
+                        strokeColor: '#0f1115',     // Match background to make text cut beautifully through edges
+                        multi: true
+                    },
+                    shape: 'dot',
+                    size: 18,
+                    title: 'Type: ' + n.type + '\nID: ' + n.id + '\nProject: ' + (n.project || 'Global')
+                }));
+
+                // Format Vis Edges
+                const visEdges = filteredEdges.map(e => ({
+                    from: e.from,
+                    to: e.to,
+                    label: e.label,
+                    font: { 
+                        color: '#cbd5e1', 
+                        size: 11, 
+                        face: 'Inter, -apple-system, system-ui', 
+                        align: 'middle', 
+                        background: '#16181d',     // Gives edge labels a dark pill background
+                        strokeWidth: 0 
+                    },
+                    color: { color: '#4A5568', opacity: 0.6, highlight: '#718096' },
+                    arrows: 'to',
+                    length: 250
+                }));
+
+                // --- Clustering Magic ---
+                // We create invisible "Project Anchors" to group all isolated nodes belonging to the same project.
+                // We create a "Global Hub" to perfectly center and orbit all project clusters so they never wander.
+                const uniqueProjects = new Set(filteredNodes.map(n => n.project || 'Global'));
+                const projectAnchors = [];
+                const anchorEdges = [];
+                
+                if (uniqueProjects.size > 1) {
+                    
+                    // 1. The Global Sun (Invisible dead-center magnet)
+                    projectAnchors.push({
+                        id: 'GLOBAL_HUB',
+                        shape: 'dot', size: 0,
+                        color: { background: 'transparent', border: 'transparent' },
+                        x: 0, y: 0, fixed: true, mass: 1 
+                    });
+
+                    // 2. The Planets (Project names)
+                    Array.from(uniqueProjects).forEach(proj => {
+                        projectAnchors.push({
+                            id: `PROJECT_ANCHOR_${proj}`,
+                            label: proj.toUpperCase(),
+                            font: { color: '#334155', size: 36, face: 'Inter', strokeWidth: 0, bold: true },
+                            shape: 'text', fixed: false, mass: 2 // Reduced mass so it doesn't repel other planets too far 
+                        });
+                        
+                        // Link planet to sun
+                        anchorEdges.push({
+                            from: `PROJECT_ANCHOR_${proj}`, to: 'GLOBAL_HUB',
+                            color: { opacity: 0 }, length: 550, physics: true
+                        });
+                    });
+
+                    // 3. The Moons (Actual Data Nodes)
+                    filteredNodes.forEach(n => {
+                        anchorEdges.push({
+                            from: n.id,
+                            to: `PROJECT_ANCHOR_${n.project || 'Global'}`,
+                            color: { opacity: 0 }, // Invisible spring 
+                            length: 50, 
+                            physics: true
+                        });
+                    });
+                }
+
+                originalNodesDataSet = new vis.DataSet([...visNodes, ...projectAnchors]);
+                originalEdgesDataSet = new vis.DataSet([...visEdges, ...anchorEdges]);
+
+                const options = {
+                    physics: {
+                        solver: 'barnesHut',
+                        barnesHut: { 
+                            gravitationalConstant: -1500, // Balanced repulsive force
+                            centralGravity: 0.0, // Don't suck everything to the center
+                            springLength: 100, 
+                            springConstant: 0.05, 
+                            damping: 0.09,
+                            avoidOverlap: 0.2 // Solid overlap resistance but not explosive 
+                        },
+                        stabilization: { iterations: 150 }
+                    },
+                    nodes: { shadow: { enabled: true, color: 'rgba(0,0,0,0.5)', size: 10 } },
+                    edges: { smooth: { type: 'continuous' } },
+                    interaction: { hover: true, tooltipDelay: 200 }
+                };
+
+                if (network) {
+                    network.destroy();
+                }
+                network = new vis.Network(container, { nodes: originalNodesDataSet, edges: originalEdgesDataSet }, options);
+
+                // --- Freeze Physics Post-Load ---
+                // Wait for the clusters to initially organize and stabilize.
+                // Once it finishes, we completely turn OFF physics. 
+                // This lets users drag nodes exactly where they want without rubber-banding springs.
+                network.on("stabilizationIterationsDone", function () {
+                    network.setOptions({ physics: { enabled: false } });
+                });
+                
+                // --- IDE Clipboard Bridge ---
+                network.on("selectNode", function (params) {
+                    if (params.nodes.length > 0) {
+                        const nodeId = params.nodes[0];
+                        if (nodeId.startsWith('PROJECT_ANCHOR_') || nodeId === 'GLOBAL_HUB') return;
+                        
+                        const query = `[Lore Request]: Tell me about the node '${nodeId}' and how it relates to this project.`;
+                        navigator.clipboard.writeText(query).then(() => {
+                            showToast(`Copied to clipboard. Switch to IDE!`);
+                        }).catch(err => {
+                            console.error('Clipboard failed', err);
+                        });
+                    }
+                });
+            } catch (err) {
+                console.error('Error rendering graph:', err);
+            }
+        }
+
+        /* --- Filtering & Drilldown Logic --- */
+
+        function resetGraph() {
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            document.getElementById('search-input').value = '';
+            renderGraph(allNodes, allEdges);
+        }
+
+        function filterByProject(projectName) {
+            const filteredNodes = allNodes.filter(n => (n.project || 'Global') === projectName);
+            const validSet = new Set(filteredNodes.map(n => n.id));
+            const filteredEdges = allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to));
+            renderGraph(filteredNodes, filteredEdges);
+        }
+
+        function filterByType(typeName) {
+            const filteredNodes = allNodes.filter(n => n.type === typeName);
+            const validSet = new Set(filteredNodes.map(n => n.id));
+            const filteredEdges = allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to));
+            renderGraph(filteredNodes, filteredEdges);
+        }
+
+        function focusOnNode(nodeId) {
+            // Show all so we can focus inside it
+            renderGraph(allNodes, allEdges);
+            network.selectNodes([nodeId]);
+            network.focus(nodeId, {
+                scale: 1.2,
+                animation: { duration: 500, easingFunction: 'easeInOutQuad' }
+            });
+        }
+
+        function handleSearch(e) {
+            const query = e.target.value.toLowerCase();
+            if (!query) {
+                resetGraph();
+                // Show all sidebar items
+                document.querySelectorAll('.nav-item').forEach(el => el.style.display = 'flex');
+                return;
+            }
+
+            const matchedNodes = allNodes.filter(n => 
+                (n.id && n.id.toLowerCase().includes(query)) || 
+                (n.label && n.label.toLowerCase().includes(query)) ||
+                (n.project && n.project.toLowerCase().includes(query))
+            );
+            
+            const validSet = new Set(matchedNodes.map(n => n.id));
+            
+            // Also include edges connected to those nodes
+            const matchedEdges = allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to));
+
+            // Hide/show sidebar items based on query
+            document.querySelectorAll('.nav-item').forEach(el => {
+                const text = el.querySelector('span:first-child').textContent.toLowerCase();
+                if (text.includes(query)) {
+                    el.style.display = 'flex';
+                } else {
+                    el.style.display = 'none';
+                }
+            });
+
+            renderGraph(matchedNodes, matchedEdges);
+        }
+
+        function setupEvents() {
+            document.getElementById('btn-reset').addEventListener('click', resetGraph);
+            document.getElementById('btn-relayout').addEventListener('click', () => {
+                if (network) {
+                    network.setOptions({ physics: { enabled: true } });
+                    network.stabilize();
+                }
+            });
+            document.getElementById('search-input').addEventListener('input', handleSearch);
+        }
+
+        // Start
+        window.onload = init;
+    </script>
+</body>
+</html>

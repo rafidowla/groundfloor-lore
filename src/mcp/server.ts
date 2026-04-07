@@ -34,6 +34,7 @@ import { SurrealAdapter } from '../engines/surrealAdapter.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 import { proxyQuery, proxyContext, proxyImpact, proxyCypher } from './gitnexusProxy.js';
 import { detectChanges, rename, listRepos, formatReposMarkdown } from './nativeTools.js';
 
@@ -425,6 +426,11 @@ mcpServer.tool(
             const recalledNodes = Array.from(allNodes.values())
                 .sort((nodeA, nodeB) => nodeA.depth - nodeB.depth);
 
+            // Update Hot Cache
+            for (const item of recalledNodes) {
+                graph.sessionCache.pushNode(item.node.id);
+            }
+
             return {
                 content: [{
                     type: 'text' as const,
@@ -659,6 +665,66 @@ mcpServer.tool(
                         remoteConfigured: status.hasAdapter,
                         autoSyncing: status.isAutoSyncing,
                         engine: 'kùzu',
+                    }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: get_hot_context ───────────────────────────────────── */
+
+mcpServer.tool(
+    'get_hot_context',
+    'Retrieve the Hot Cache: the most recently stored or accessed knowledge nodes. Use this to maintain immediate context.',
+    {},
+    async () => {
+        try {
+            const context = graph.sessionCache.getHotContext();
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify(context, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: read_document_for_ingestion ───────────────────────── */
+
+mcpServer.tool(
+    'read_document_for_ingestion',
+    'Read a raw text or markdown document from the filesystem so that the AI can chunk it and ingest it into the knowledge graph.',
+    {
+        filePath: z.string().describe('Absolute path to the document'),
+    },
+    async ({ filePath }) => {
+        try {
+            if (!fs.existsSync(filePath)) {
+                return {
+                    content: [{ type: 'text' as const, text: `File not found: ${filePath}` }],
+                    isError: true,
+                };
+            }
+            const content = fs.readFileSync(filePath, 'utf-8');
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        filePath,
+                        content,
+                        instructions: 'Please parse this content into LoreNode objects. For each distinct item you find, use the store_node tool to insert it into the graph.'
                     }, null, 2),
                 }],
             };
@@ -1303,6 +1369,37 @@ async function main(): Promise<void> {
                 if (newSessionId) {
                     activeSessions.set(newSessionId, sessionTransport);
                     console.error(`[Lore MCP] New session ${newSessionId.slice(0, 8)}... (${activeSessions.size} active)`);
+                }
+                return;
+            }
+
+            // UI Visualizer Data API Endpoint
+            if (url === '/api/topology' && req.method === 'GET') {
+                try {
+                    const topology = await graph.getTopology(500);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(topology));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // Visualizer Frontend Endpoint
+            if (url === '/explore' && req.method === 'GET') {
+                try {
+                    const __dirnameLocal = path.dirname(fileURLToPath(import.meta.url));
+                    // When running from dist/mcp, root is ../../
+                    // When running from src/mcp, root is ../../ 
+                    // Wait, from src/mcp, package root is ../../ as well. 
+                    const htmlPath = path.resolve(__dirnameLocal, '../../src/public/explore.html');
+                    const html = fs.readFileSync(htmlPath, 'utf8');
+                    res.writeHead(200, { 'Content-Type': 'text/html' });
+                    res.end(html);
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'text/plain' });
+                    res.end('Failed to load explore HTML dashboard: ' + (err as Error).message);
                 }
                 return;
             }

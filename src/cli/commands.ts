@@ -1087,3 +1087,43 @@ function testHttpHealth(url: string): Promise<boolean> {
         });
     });
 }
+
+/* ─── Command: lint ───────────────────────────────────────────── */
+
+/**
+ * lintCommand — Perform health checks manually on the graph.
+ *
+ * @param _args - CLI arguments.
+ *
+ * Side Effects: Reads from Kùzu database. Prints to stdout/stderr.
+ */
+export async function lintCommand(_args: string[]): Promise<void> {
+    const basePath = resolveGraphBasePath();
+    const loreDir = path.join(basePath, '.lore');
+
+    if (!fs.existsSync(loreDir)) {
+        console.error('❌ No .lore/ directory found. Run "lore init" first.');
+        process.exit(1);
+    }
+
+    const graph = new LocalGraph(basePath);
+    await graph.initialize();
+
+    console.log(`→ Linting graph at ${loreDir}...`);
+    const warnings = await graph.lintGraph();
+    
+    await graph.close();
+
+    if (warnings.length > 0) {
+        console.error('');
+        console.error('  ⚠️ LINT WARNINGS FOUND:');
+        for (const warning of warnings) {
+            console.error(`    - ${warning}`);
+        }
+        console.error('');
+        process.exit(1);
+    } else {
+        console.log('  ✓ No lint warnings found. Graph is healthy!');
+        process.exit(0);
+    }
+}

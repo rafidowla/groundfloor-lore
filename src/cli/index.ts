@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand } from './commands.js';
 
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -41,6 +41,7 @@ Commands:
   sync      Push pending changes and pull from remote
   status    Show graph statistics and sync status
   doctor    Diagnose configuration and connectivity
+  lint      Check graph health and relationships
 
 Options:
   --help    Show this help message
@@ -94,6 +95,9 @@ async function main(): Promise<void> {
             break;
         case 'index':
             await indexCommand(commandArgs);
+            break;
+        case 'lint':
+            await lintCommand(commandArgs);
             break;
         default:
             console.error(`Unknown command: '${command}'`);
