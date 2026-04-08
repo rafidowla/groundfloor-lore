@@ -1127,3 +1127,92 @@ export async function lintCommand(_args: string[]): Promise<void> {
         process.exit(0);
     }
 }
+
+/* ─── Command: audit ──────────────────────────────────────────── */
+
+/**
+ * auditCommand — Detects MDM Schema Drift.
+ *
+ * Purpose:
+ *   Validates the current codebase against Lore Master Data Models.
+ *   Fails if strict JSON metadata fields are missing from TS code.
+ */
+export async function auditCommand(_args: string[]): Promise<void> {
+    const basePath = resolveGraphBasePath();
+    const graph = new LocalGraph(basePath);
+    await graph.initialize();
+    
+    console.log(`→ Auditing codebase against Master Data Models...`);
+    const allNodes = await graph.listNodes();
+    const schemas = allNodes.filter(n => n.type === 'schema');
+
+    if (schemas.length === 0) {
+        console.log('  No specific MDM schemas found to audit. Pass.');
+        await graph.close();
+        process.exit(0);
+    }
+
+    const repoRoot = findRepoRoot();
+    const tsFiles = findTsFiles(repoRoot);
+    let driftDetected = false;
+
+    for (const schema of schemas) {
+        if (!schema.metadata) continue;
+        let meta;
+        try { meta = JSON.parse(schema.metadata); } catch { continue; }
+        if (!meta.fields || !Array.isArray(meta.fields)) continue;
+
+        let schemaSymbolFound = false;
+        let missingFields = [];
+        const targetLabel = schema.label;
+        
+        for (const file of tsFiles) {
+            const content = fs.readFileSync(file, 'utf-8');
+            const declarationRegex = new RegExp(`(?:interface|class|type)\\s+${targetLabel}\\b`, 'g');
+            if (declarationRegex.test(content)) {
+                schemaSymbolFound = true;
+                for (const field of meta.fields) {
+                    const fieldRegex = new RegExp(`\\b${field.name}\\b`, 'g');
+                    if (!fieldRegex.test(content)) {
+                        missingFields.push(field.name);
+                    }
+                }
+                break;
+            }
+        }
+        
+        if (schemaSymbolFound && missingFields.length > 0) {
+            console.error(`  ❌ DRIFT DETECTED: [${targetLabel}] is missing official MDM fields: ${missingFields.join(', ')}`);
+            driftDetected = true;
+        } else if (schemaSymbolFound) {
+            console.log(`  ✓ SCHEMA ALIGNED: [${targetLabel}] perfectly matches ecosystem MDM.`);
+        }
+    }
+
+    await graph.close();
+
+    if (driftDetected) {
+        console.error('');
+        console.error('  ⚠️ SCHEMA DRIFT VIOLATION. Please correct your data models to align with the Lore Master Data Model.');
+        process.exit(1);
+    } else {
+        console.log('  ✓ Codebase models are strictly aligned with MDM. Good to push!');
+        process.exit(0);
+    }
+}
+
+function findTsFiles(dir: string, fileList: string[] = []): string[] {
+    const files = fs.readdirSync(dir);
+    for (const file of files) {
+        const filePath = path.join(dir, file);
+        if (fs.statSync(filePath).isDirectory()) {
+            if (file === 'node_modules' || file === '.git' || file === 'dist') continue;
+            findTsFiles(filePath, fileList);
+        } else {
+            if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) {
+                fileList.push(filePath);
+            }
+        }
+    }
+    return fileList;
+}

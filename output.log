@@ -1,0 +1,21 @@
+Initialized Graph.
+Stored node: schema-appdocument
+Stored node: schema-property
+Stored node: schema-building
+Stored node: schema-floor
+Stored node: schema-suite
+Stored node: schema-verticaltenant
+Stored node: schema-verticallease
+Added edge: schema-appdocument -> schema-property
+Added edge: schema-appdocument -> schema-building
+Added edge: schema-appdocument -> schema-floor
+Added edge: schema-appdocument -> schema-suite
+Added edge: schema-appdocument -> schema-verticaltenant
+Added edge: schema-appdocument -> schema-verticallease
+Added edge: schema-property -> schema-building
+Added edge: schema-building -> schema-floor
+Added edge: schema-floor -> schema-suite
+Added edge: schema-verticaltenant -> schema-suite
+Added edge: schema-verticaltenant -> schema-verticallease
+Added edge: schema-verticallease -> schema-suite
+DONE SEEDING
