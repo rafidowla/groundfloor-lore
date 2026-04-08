@@ -43,7 +43,7 @@ export interface LoreNode {
     /** Unique identifier, e.g. "baas-body-stream-fix" */
     id: string;
     /** Node category */
-    type: 'decision' | 'convention' | 'bug_pattern' | 'file_ref' | 'architecture' | 'troubleshooting' | 'note';
+    type: 'decision' | 'convention' | 'bug_pattern' | 'file_ref' | 'architecture' | 'troubleshooting' | 'note' | 'schema';
     /** Human-readable title */
     label: string;
     /** Full text content */

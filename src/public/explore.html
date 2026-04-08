@@ -181,6 +181,7 @@
         <div id="top-controls">
             <button class="btn" id="btn-relayout">Re-Layout clusters</button>
             <button class="btn" id="btn-reset">Show Full Graph</button>
+            <button class="btn" id="btn-erd" style="margin-left: 10px; background-color: #319795; color: white; border-color: transparent;">View Data Lake (ERD)</button>
         </div>
         
         <!-- Legend -->
@@ -191,6 +192,7 @@
             <div class="legend-item"><span class="legend-color" style="background:#805AD5"></span> Decision</div>
             <div class="legend-item"><span class="legend-color" style="background:#E53E3E"></span> Bug Pattern</div>
             <div class="legend-item"><span class="legend-color" style="background:#DD6B20"></span> Troubleshooting</div>
+            <div class="legend-item"><span class="legend-color" style="background:#319795; border-radius: 2px;"></span> Schema (ERD)</div>
             <div class="legend-item"><span class="legend-color" style="background:#4A5568"></span> Other</div>
         </div>
 
@@ -215,6 +217,7 @@
             'decision': '#805AD5',
             'bug_pattern': '#E53E3E',
             'troubleshooting': '#DD6B20',
+            'schema': '#319795',
             'default': '#4A5568'
         };
 
@@ -330,14 +333,14 @@
             return li;
         }
 
-        function renderGraph(filteredNodes, filteredEdges) {
+        function renderGraph(filteredNodes, filteredEdges, isHierarchical = false) {
             try {
                 const container = document.getElementById('network');
                 
                 // Format Vis Nodes
                 const visNodes = filteredNodes.map(n => ({
                     id: n.id,
-                    label: n.label || n.id,
+                    label: n.type === 'schema' ? (n.label || n.id).toUpperCase() : n.label || n.id,
                     color: { 
                         background: COLORS[n.type] || COLORS['default'], 
                         border: '#2D3748',
@@ -347,12 +350,13 @@
                         color: '#ffffff', 
                         face: 'Inter, -apple-system, system-ui', 
                         size: 14, 
-                        strokeWidth: 5, 
+                        strokeWidth: n.type === 'schema' ? 0 : 5, 
                         strokeColor: '#0f1115',     // Match background to make text cut beautifully through edges
                         multi: true
                     },
-                    shape: 'dot',
-                    size: 18,
+                    shape: n.type === 'schema' ? 'box' : 'dot',
+                    size: n.type === 'schema' ? undefined : 18,
+                    borderRadius: n.type === 'schema' ? 4 : undefined,
                     title: 'Type: ' + n.type + '\nID: ' + n.id + '\nProject: ' + (n.project || 'Global')
                 }));
 
@@ -381,7 +385,7 @@
                 const projectAnchors = [];
                 const anchorEdges = [];
                 
-                if (uniqueProjects.size > 1) {
+                if (!isHierarchical && uniqueProjects.size > 1) {
                     
                     // 1. The Global Sun (Invisible dead-center magnet)
                     projectAnchors.push({
@@ -422,7 +426,7 @@
                 originalNodesDataSet = new vis.DataSet([...visNodes, ...projectAnchors]);
                 originalEdgesDataSet = new vis.DataSet([...visEdges, ...anchorEdges]);
 
-                const options = {
+                let options = {
                     physics: {
                         solver: 'barnesHut',
                         barnesHut: { 
@@ -439,6 +443,24 @@
                     edges: { smooth: { type: 'continuous' } },
                     interaction: { hover: true, tooltipDelay: 200 }
                 };
+
+                if (isHierarchical) {
+                    options = {
+                        layout: {
+                            hierarchical: {
+                                enabled: true,
+                                direction: 'UD',
+                                sortMethod: 'directed',
+                                levelSeparation: 150,
+                                nodeSpacing: 250
+                            }
+                        },
+                        physics: { enabled: false },
+                        nodes: { shadow: { enabled: true, color: 'rgba(0,0,0,0.5)', size: 10 } },
+                        edges: { smooth: { type: 'cubicBezier', forceDirection: 'vertical', roundness: 0.4 } },
+                        interaction: { hover: true, tooltipDelay: 200 }
+                    };
+                }
 
                 if (network) {
                     network.destroy();
@@ -537,8 +559,18 @@
             renderGraph(matchedNodes, matchedEdges);
         }
 
+        function viewDataLake() {
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            const filteredNodes = allNodes.filter(n => n.type === 'schema');
+            const validSet = new Set(filteredNodes.map(n => n.id));
+            const filteredEdges = allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to));
+            renderGraph(filteredNodes, filteredEdges, true);
+            showToast("Master Data Model ERD Active");
+        }
+
         function setupEvents() {
             document.getElementById('btn-reset').addEventListener('click', resetGraph);
+            document.getElementById('btn-erd').addEventListener('click', viewDataLake);
             document.getElementById('btn-relayout').addEventListener('click', () => {
                 if (network) {
                     network.setOptions({ physics: { enabled: true } });

@@ -16,6 +16,14 @@ At the START of every conversation, before doing any work:
 If groundfloor-lore is unavailable (connection refused, timeout),
 note it to the user and proceed without Lore.
 
+## Master Data Model Protocol (MANDATORY)
+
+When working on tasks involving setting up or modifying database tables, ORM entities, data collections, or business models:
+1. You MUST check the existing ecosystem schemas via `recall({topic: "schemas"})` or `list_nodes({type: "schema"})`.
+2. Do NOT arbitrarily spin up isolated generic tables (like `UserProfile` or `Organization`) in a silo unless absolutely required. 
+3. Proactively ask the user: *"I see there is an existing schema context for X in this ecosystem. Do you want to map this current feature to the Master Data Model to ensure schema reusability, or does this require strict client-specific structuring?"*
+4. Any new baseline schemas agreed upon MUST be captured immediately using `store_node(..., type="schema")`.
+
 ## Auto-Store After Significant Work (MANDATORY)
 
 After completing ANY of the following, store a knowledge node:

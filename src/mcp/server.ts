@@ -201,7 +201,7 @@ mcpServer.tool(
     'Create or update a knowledge node (decision, convention, bug pattern, etc.)',
     {
         id: z.string().describe('Unique identifier (e.g., "baas-body-stream-fix")'),
-        type: z.enum(['decision', 'convention', 'bug_pattern', 'file_ref', 'architecture', 'troubleshooting', 'note'])
+        type: z.enum(['decision', 'convention', 'bug_pattern', 'file_ref', 'architecture', 'troubleshooting', 'note', 'schema'])
             .describe('Node type'),
         label: z.string().describe('Human-readable title'),
         content: z.string().optional().describe('Full text content'),
@@ -493,7 +493,7 @@ mcpServer.tool(
     'list_nodes',
     'List all knowledge nodes, optionally filtered by type or tag',
     {
-        type: z.enum(['decision', 'convention', 'bug_pattern', 'file_ref', 'architecture', 'troubleshooting', 'note'])
+        type: z.enum(['decision', 'convention', 'bug_pattern', 'file_ref', 'architecture', 'troubleshooting', 'note', 'schema'])
             .optional().describe('Filter by node type'),
         tag: z.string().optional().describe('Filter by tag'),
     },
