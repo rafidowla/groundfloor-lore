@@ -1373,6 +1373,44 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // Save / create a node from the UI dashboard
+            if (url === '/api/node' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const nodeData = JSON.parse(body);
+                        if (!nodeData.id || !nodeData.type || !nodeData.label) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'id, type, and label are required' }));
+                            return;
+                        }
+                        await graph.upsertNode(nodeData);
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: true, id: nodeData.id }));
+                    } catch (saveErr) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (saveErr as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            // Full-text content search from the UI dashboard
+            if (url.startsWith('/api/search') && req.method === 'GET') {
+                try {
+                    const searchParams = new URL(url, 'http://localhost').searchParams;
+                    const query = searchParams.get('q') ?? '';
+                    const results = await graph.search(query, 50);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(results));
+                } catch (searchErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (searchErr as Error).message }));
+                }
+                return;
+            }
+
             // UI Visualizer Data API Endpoint
             if (url === '/api/topology' && req.method === 'GET') {
                 try {

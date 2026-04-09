@@ -3,9 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Knowledge Explorer</title>
+    <title>Knowledge Explorer — Lore</title>
     <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <!-- marked.js for Markdown rendering -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
         :root {
             --bg-dark: #0f1115;
             --bg-sidebar: #16181d;
@@ -15,17 +19,22 @@
             --text-main: #e2e8f0;
             --text-muted: #94a3b8;
             --accent: #3182CE;
+            --accent-green: #38A169;
+            --accent-teal: #319795;
+            --drawer-width: 400px;
         }
+
+        * { box-sizing: border-box; }
 
         body { 
             margin: 0; padding: 0; background-color: var(--bg-dark); color: var(--text-main); 
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; 
             overflow: hidden; display: flex; height: 100vh;
         }
 
-        /* Sidebar Styling */
+        /* ── LEFT SIDEBAR ── */
         #sidebar {
-            width: 300px;
+            width: 280px;
             background-color: var(--bg-sidebar);
             border-right: 1px solid var(--border-color);
             display: flex;
@@ -35,16 +44,14 @@
         }
         
         #sidebar-header {
-            padding: 20px;
+            padding: 18px 20px 14px;
             border-bottom: 1px solid var(--border-color);
         }
-        #sidebar-header h1 { margin: 0; font-size: 1.2rem; font-weight: 600; color: #fff; }
-        #sidebar-header p { margin: 4px 0 0 0; font-size: 0.8rem; color: var(--text-muted); }
+        #sidebar-header h1 { margin: 0; font-size: 1.05rem; font-weight: 600; color: #fff; }
+        #sidebar-header p { margin: 3px 0 0 0; font-size: 0.75rem; color: var(--text-muted); }
 
-        #search-container {
-            padding: 15px 20px;
-            border-bottom: 1px solid var(--border-color);
-        }
+        #search-container { padding: 12px 16px; border-bottom: 1px solid var(--border-color); }
+
         #search-input {
             width: 100%;
             padding: 8px 12px;
@@ -52,55 +59,85 @@
             border: 1px solid var(--border-color);
             border-radius: 6px;
             color: #fff;
-            box-sizing: border-box;
+            font-size: 0.85rem;
             outline: none;
+            font-family: inherit;
         }
         #search-input:focus { border-color: var(--accent); }
+        #search-input::placeholder { color: var(--text-muted); }
+
+        #search-mode-toggle {
+            margin-top: 6px;
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            cursor: pointer;
+            user-select: none;
+        }
+        #search-mode-toggle input { cursor: pointer; accent-color: var(--accent); }
+        #search-mode-toggle label { cursor: pointer; }
 
         #sidebar-content {
             flex: 1;
             overflow-y: auto;
-            padding: 10px 0;
+            padding: 8px 0;
         }
 
         .category {
-            padding: 10px 20px;
-            font-size: 0.75rem;
+            padding: 10px 16px 5px;
+            font-size: 0.7rem;
             text-transform: uppercase;
-            letter-spacing: 0.05em;
+            letter-spacing: 0.08em;
             color: var(--text-muted);
             font-weight: 600;
         }
 
-        .nav-list {
-            list-style: none;
-            padding: 0;
-            margin: 0 0 15px 0;
-        }
+        .nav-list { list-style: none; padding: 0; margin: 0 0 12px 0; }
         .nav-item {
-            padding: 8px 20px;
+            padding: 7px 16px;
             cursor: pointer;
-            font-size: 0.9rem;
+            font-size: 0.85rem;
             display: flex;
             justify-content: space-between;
             align-items: center;
             border-left: 2px solid transparent;
+            transition: background 0.12s;
         }
         .nav-item:hover { background-color: var(--bg-item-hover); }
         .nav-item.active { background-color: var(--bg-item); border-left-color: var(--accent); color: #fff; }
         .nav-item .badge {
             background-color: var(--border-color);
             color: var(--text-muted);
-            font-size: 0.75rem;
+            font-size: 0.72rem;
             padding: 2px 6px;
             border-radius: 10px;
             min-width: 18px;
             text-align: center;
         }
-
         .orphan-item { color: #E53E3E; }
 
-        /* Canvas Styling */
+        #sidebar-footer {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border-color);
+        }
+        #btn-new-node {
+            width: 100%;
+            padding: 8px;
+            background-color: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            font-family: inherit;
+            transition: background 0.15s;
+        }
+        #btn-new-node:hover { background-color: #2b6cb0; }
+
+        /* ── CANVAS ── */
         #canvas-container {
             flex: 1;
             position: relative;
@@ -111,33 +148,34 @@
         
         #loading { 
             position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
-            font-size: 1rem; color: var(--text-muted); 
+            font-size: 0.95rem; color: var(--text-muted); 
             background: rgba(0,0,0,0.8); padding: 10px 20px; border-radius: 20px;
             z-index: 100;
         }
 
         #legend {
             position: absolute; bottom: 20px; left: 20px; z-index: 10;
-            background: rgba(22, 24, 29, 0.85); padding: 15px; border-radius: 8px;
-            border: 1px solid var(--border-color); font-size: 0.8rem;
+            background: rgba(22, 24, 29, 0.9); padding: 12px 14px; border-radius: 8px;
+            border: 1px solid var(--border-color); font-size: 0.78rem;
         }
-        #legend h4 { margin: 0 0 10px 0; color: #fff; font-size: 0.85rem; }
-        .legend-item { display: flex; align-items: center; margin-bottom: 6px; color: var(--text-muted); }
-        .legend-color { width: 12px; height: 12px; border-radius: 50%; margin-right: 8px; border: 1px solid #2D3748; }
+        #legend h4 { margin: 0 0 8px 0; color: #fff; font-size: 0.8rem; }
+        .legend-item { display: flex; align-items: center; margin-bottom: 5px; color: var(--text-muted); }
+        .legend-color { width: 10px; height: 10px; border-radius: 50%; margin-right: 7px; border: 1px solid #2D3748; }
 
         #toast {
             display: none; position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%);
-            background: #3182CE; color: #fff; padding: 12px 24px; border-radius: 8px; z-index: 1000;
-            font-size: 0.9rem; font-weight: bold; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            background: #3182CE; color: #fff; padding: 10px 20px; border-radius: 8px; z-index: 9999;
+            font-size: 0.85rem; font-weight: 500; box-shadow: 0 4px 12px rgba(0,0,0,0.5);
             pointer-events: none;
         }
 
-        /* Top controls */
         #top-controls {
             position: absolute;
-            top: 20px;
-            right: 20px;
+            top: 16px;
+            right: 16px;
             z-index: 10;
+            display: flex;
+            gap: 8px;
         }
         .btn {
             background-color: var(--bg-item);
@@ -146,9 +184,216 @@
             padding: 6px 12px;
             border-radius: 6px;
             cursor: pointer;
-            font-size: 0.85rem;
+            font-size: 0.82rem;
+            font-family: inherit;
+            transition: background 0.12s;
         }
         .btn:hover { background-color: var(--bg-item-hover); }
+        .btn-teal { background-color: var(--accent-teal); color: white; border-color: transparent; }
+        .btn-teal:hover { background-color: #2c7a7b; }
+
+        /* ── RIGHT DETAIL DRAWER ── */
+        #detail-drawer {
+            width: var(--drawer-width);
+            background-color: var(--bg-sidebar);
+            border-left: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            transform: translateX(var(--drawer-width));
+            transition: transform 0.25s ease;
+            position: relative;
+            z-index: 20;
+        }
+        #detail-drawer.open { transform: translateX(0); }
+
+        #drawer-header {
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        #drawer-title {
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: #fff;
+            flex: 1;
+            word-break: break-word;
+        }
+        #drawer-type-badge {
+            font-size: 0.7rem;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-weight: 500;
+            flex-shrink: 0;
+            margin-top: 2px;
+        }
+        #drawer-close {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-size: 1.2rem;
+            padding: 0;
+            line-height: 1;
+            flex-shrink: 0;
+        }
+        #drawer-close:hover { color: #fff; }
+
+        #drawer-meta {
+            padding: 8px 16px;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        #drawer-meta span { display: flex; align-items: center; gap: 4px; }
+
+        #drawer-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 16px;
+        }
+
+        /* Markdown content rendering */
+        #content-view {
+            font-size: 0.875rem;
+            line-height: 1.7;
+            color: var(--text-main);
+        }
+        #content-view h1,#content-view h2,#content-view h3 { color: #fff; margin: 1em 0 0.4em; }
+        #content-view h1 { font-size: 1.1rem; }
+        #content-view h2 { font-size: 1rem; }
+        #content-view h3 { font-size: 0.95rem; }
+        #content-view p { margin: 0.5em 0; }
+        #content-view code {
+            background: var(--bg-item);
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            padding: 1px 5px;
+            font-size: 0.82em;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+        }
+        #content-view pre {
+            background: var(--bg-item);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            padding: 12px;
+            overflow-x: auto;
+        }
+        #content-view pre code { background: none; border: none; padding: 0; }
+        #content-view ul, #content-view ol { padding-left: 1.4em; margin: 0.5em 0; }
+        #content-view li { margin: 0.2em 0; }
+        #content-view strong { color: #fff; }
+        #content-view blockquote {
+            border-left: 3px solid var(--accent);
+            margin: 0.8em 0;
+            padding: 4px 12px;
+            color: var(--text-muted);
+        }
+
+        /* Edit mode textarea */
+        #content-edit {
+            display: none;
+            width: 100%;
+            min-height: 280px;
+            background: var(--bg-item);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            color: var(--text-main);
+            padding: 12px;
+            font-size: 0.85rem;
+            font-family: 'SFMono-Regular', Consolas, monospace;
+            resize: vertical;
+            outline: none;
+            line-height: 1.6;
+        }
+        #content-edit:focus { border-color: var(--accent); }
+
+        /* JSON metadata display */
+        #drawer-metadata {
+            margin-top: 16px;
+            padding-top: 12px;
+            border-top: 1px solid var(--border-color);
+        }
+        #drawer-metadata h4 { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; margin: 0 0 8px; }
+        .field-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--bg-item);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 3px 8px;
+            font-size: 0.75rem;
+            margin: 3px 3px 3px 0;
+        }
+        .field-chip .field-name { color: #63b3ed; font-family: monospace; }
+        .field-chip .field-type { color: var(--text-muted); }
+        .field-chip .field-req { color: var(--accent-green); font-size: 0.65rem; }
+
+        #drawer-actions {
+            padding: 12px 16px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 8px;
+        }
+        .drawer-btn {
+            padding: 7px 14px;
+            border-radius: 6px;
+            font-size: 0.82rem;
+            font-weight: 500;
+            cursor: pointer;
+            font-family: inherit;
+            border: 1px solid var(--border-color);
+            transition: background 0.12s;
+        }
+        #btn-edit-node { background: var(--bg-item); color: var(--text-main); }
+        #btn-edit-node:hover { background: var(--bg-item-hover); }
+        #btn-save-node { display: none; background: var(--accent-green); color: white; border-color: transparent; }
+        #btn-save-node:hover { background: #2f855a; }
+        #btn-cancel-edit { display: none; background: var(--bg-item); color: var(--text-muted); }
+        #btn-cancel-edit:hover { background: var(--bg-item-hover); }
+        #btn-copy-ide { background: var(--bg-item); color: var(--text-muted); margin-left: auto; }
+        #btn-copy-ide:hover { background: var(--bg-item-hover); color: var(--text-main); }
+
+        /* Search results list */
+        #search-results {
+            display: none;
+            position: absolute;
+            top: 56px;
+            left: 0;
+            right: 0;
+            background: var(--bg-sidebar);
+            border-bottom: 1px solid var(--border-color);
+            max-height: 280px;
+            overflow-y: auto;
+            z-index: 50;
+        }
+        .search-result-item {
+            padding: 10px 16px;
+            cursor: pointer;
+            border-bottom: 1px solid var(--border-color);
+            transition: background 0.1s;
+        }
+        .search-result-item:hover { background: var(--bg-item-hover); }
+        .search-result-item .res-label { font-size: 0.87rem; color: #fff; font-weight: 500; }
+        .search-result-item .res-meta { font-size: 0.73rem; color: var(--text-muted); margin-top: 2px; }
+        .search-result-item .res-snippet {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 4px;
+            overflow: hidden;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
+        .search-result-item .res-snippet em { color: #90cdf4; font-style: normal; font-weight: 500; }
+
     </style>
 </head>
 <body>
@@ -156,12 +401,17 @@
     <!-- LEFT SIDEBAR -->
     <div id="sidebar">
         <div id="sidebar-header">
-            <h1>Knowledge Explorer</h1>
+            <h1>⬡ Knowledge Explorer</h1>
             <p>Lore Graph Visualization</p>
         </div>
         
-        <div id="search-container">
-            <input type="text" id="search-input" placeholder="Search nodes or projects...">
+        <div id="search-container" style="position:relative;">
+            <input type="text" id="search-input" placeholder="Search nodes…" autocomplete="off">
+            <div id="search-mode-toggle">
+                <input type="checkbox" id="deep-search-toggle">
+                <label for="deep-search-toggle">Deep search (content + tags)</label>
+            </div>
+            <div id="search-results"></div>
         </div>
 
         <div id="sidebar-content">
@@ -174,17 +424,20 @@
             <div class="category" id="orphans-title" style="display: none;">Orphaned Nodes</div>
             <ul class="nav-list" id="list-orphans"></ul>
         </div>
+        
+        <div id="sidebar-footer">
+            <button id="btn-new-node">+ New Node</button>
+        </div>
     </div>
 
     <!-- MAIN CANVAS -->
     <div id="canvas-container">
         <div id="top-controls">
-            <button class="btn" id="btn-relayout">Re-Layout clusters</button>
-            <button class="btn" id="btn-reset">Show Full Graph</button>
-            <button class="btn" id="btn-erd" style="margin-left: 10px; background-color: #319795; color: white; border-color: transparent;">View Data Lake (ERD)</button>
+            <button class="btn" id="btn-relayout">Re-Layout</button>
+            <button class="btn" id="btn-reset">Full Graph</button>
+            <button class="btn btn-teal" id="btn-erd">View Data Lake (ERD)</button>
         </div>
         
-        <!-- Legend -->
         <div id="legend">
             <h4>Node Types</h4>
             <div class="legend-item"><span class="legend-color" style="background:#3182CE"></span> Architecture</div>
@@ -196,9 +449,37 @@
             <div class="legend-item"><span class="legend-color" style="background:#4A5568"></span> Other</div>
         </div>
 
-        <div id="loading">Connecting to Knowledge Engine...</div>
+        <div id="loading">Connecting to Knowledge Engine…</div>
         <div id="network"></div>
         <div id="toast"></div>
+    </div>
+
+    <!-- RIGHT DETAIL DRAWER -->
+    <div id="detail-drawer">
+        <div id="drawer-header">
+            <div style="flex:1; min-width:0;">
+                <div id="drawer-title">Node Title</div>
+                <div style="margin-top:4px;">
+                    <span id="drawer-type-badge"></span>
+                </div>
+            </div>
+            <button id="drawer-close">✕</button>
+        </div>
+        <div id="drawer-meta">
+            <span id="meta-project">📁 —</span>
+            <span id="meta-updated">🕐 —</span>
+        </div>
+        <div id="drawer-body">
+            <div id="content-view"></div>
+            <textarea id="content-edit" placeholder="Write node content in Markdown…"></textarea>
+            <div id="drawer-metadata"></div>
+        </div>
+        <div id="drawer-actions">
+            <button class="drawer-btn" id="btn-edit-node">✏️ Edit</button>
+            <button class="drawer-btn" id="btn-save-node">💾 Save</button>
+            <button class="drawer-btn" id="btn-cancel-edit">Cancel</button>
+            <button class="drawer-btn" id="btn-copy-ide">⧉ Copy to IDE</button>
+        </div>
     </div>
 
     <!-- APPLICATION LOGIC -->
@@ -206,11 +487,12 @@
         let network = null;
         let originalNodesDataSet = null;
         let originalEdgesDataSet = null;
-        
         let allNodes = [];
         let allEdges = [];
+        let currentNode = null; // The node shown in the detail drawer
+        let isEditMode = false;
+        let searchDebounceTimer = null;
 
-        // Constants
         const COLORS = {
             'architecture': '#3182CE',
             'convention': '#38A169',
@@ -218,80 +500,65 @@
             'bug_pattern': '#E53E3E',
             'troubleshooting': '#DD6B20',
             'schema': '#319795',
+            'note': '#718096',
+            'file_ref': '#B7791F',
             'default': '#4A5568'
         };
 
-        function showToast(msg) {
+        // ── Toast ──────────────────────────────────────────────────
+        function showToast(msg, color = '#3182CE') {
             const toast = document.getElementById('toast');
             toast.textContent = msg;
+            toast.style.background = color;
             toast.style.display = 'block';
             setTimeout(() => { toast.style.display = 'none'; }, 3000);
         }
 
+        // ── Init ───────────────────────────────────────────────────
         async function init() {
             try {
-                console.log('Fetching topology...');
                 const response = await fetch('/api/topology');
                 const data = await response.json();
                 document.getElementById('loading').style.display = 'none';
 
                 allNodes = data.nodes || [];
                 allEdges = data.edges || [];
-                console.log(`Loaded ${allNodes.length} nodes and ${allEdges.length} edges.`);
 
                 computeSidebar(allNodes, allEdges);
                 renderGraph(allNodes, allEdges);
                 setupEvents();
-
             } catch (err) {
-                console.error('Initialization error:', err);
                 document.getElementById('loading').innerText = 'Failed to load graph: ' + err.message;
             }
         }
 
+        // ── Sidebar ────────────────────────────────────────────────
         function computeSidebar(nodes, edges) {
-            // 1. Compute Projects
-            const projectMap = {};
-            const typeMap = {};
+            const projectMap = {}, typeMap = {};
             const orphans = [];
-
-            // Detect edges for orphans
             const connectedIds = new Set();
-            edges.forEach(e => {
-                connectedIds.add(e.from);
-                connectedIds.add(e.to);
-            });
+            edges.forEach(e => { connectedIds.add(e.from); connectedIds.add(e.to); });
 
             nodes.forEach(n => {
-                // Tally Projects
                 const proj = n.project || 'Global';
                 projectMap[proj] = (projectMap[proj] || 0) + 1;
-
-                // Tally Types
                 const type = n.type || 'Unknown';
                 typeMap[type] = (typeMap[type] || 0) + 1;
-
-                // Detect Orphans
-                if (n.id && !connectedIds.has(n.id)) {
-                    orphans.push(n);
-                }
+                if (n.id && !connectedIds.has(n.id)) orphans.push(n);
             });
 
-            // Render Projects
             const ulProjects = document.getElementById('list-projects');
             ulProjects.innerHTML = '';
             Object.keys(projectMap).sort().forEach(proj => {
                 ulProjects.appendChild(createNavItem(proj, projectMap[proj], () => filterByProject(proj)));
             });
 
-            // Render Types
             const ulTypes = document.getElementById('list-types');
             ulTypes.innerHTML = '';
             Object.keys(typeMap).sort().forEach(type => {
                 ulTypes.appendChild(createNavItem(type, typeMap[type], () => filterByType(type)));
             });
 
-            // Render Orphans
             const ulOrphans = document.getElementById('list-orphans');
             ulOrphans.innerHTML = '';
             if (orphans.length > 0) {
@@ -310,21 +577,16 @@
         function createNavItem(label, count, onClick) {
             const li = document.createElement('li');
             li.className = 'nav-item';
-            
             const spanText = document.createElement('span');
             spanText.textContent = label;
-            spanText.style.overflow = 'hidden';
-            spanText.style.textOverflow = 'ellipsis';
-            spanText.style.whiteSpace = 'nowrap';
+            spanText.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
             li.appendChild(spanText);
-
             if (count !== '') {
                 const spanBadge = document.createElement('span');
                 spanBadge.className = 'badge';
                 spanBadge.textContent = count;
                 li.appendChild(spanBadge);
             }
-
             li.addEventListener('click', () => {
                 document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
                 li.classList.add('active');
@@ -333,93 +595,43 @@
             return li;
         }
 
+        // ── Graph Rendering ────────────────────────────────────────
         function renderGraph(filteredNodes, filteredEdges, isHierarchical = false) {
             try {
                 const container = document.getElementById('network');
-                
-                // Format Vis Nodes
+
                 const visNodes = filteredNodes.map(n => ({
                     id: n.id,
                     label: n.type === 'schema' ? (n.label || n.id).toUpperCase() : n.label || n.id,
-                    color: { 
-                        background: COLORS[n.type] || COLORS['default'], 
+                    color: {
+                        background: COLORS[n.type] || COLORS['default'],
                         border: '#2D3748',
                         highlight: { background: COLORS[n.type] || COLORS['default'], border: '#ffffff' }
                     },
-                    font: { 
-                        color: '#ffffff', 
-                        face: 'Inter, -apple-system, system-ui', 
-                        size: 14, 
-                        strokeWidth: n.type === 'schema' ? 0 : 5, 
-                        strokeColor: '#0f1115',     // Match background to make text cut beautifully through edges
-                        multi: true
-                    },
+                    font: { color: '#ffffff', face: 'Inter, -apple-system, system-ui', size: 14, strokeWidth: n.type === 'schema' ? 0 : 5, strokeColor: '#0f1115', multi: true },
                     shape: n.type === 'schema' ? 'box' : 'dot',
                     size: n.type === 'schema' ? undefined : 18,
-                    borderRadius: n.type === 'schema' ? 4 : undefined,
                     title: 'Type: ' + n.type + '\nID: ' + n.id + '\nProject: ' + (n.project || 'Global')
                 }));
 
-                // Format Vis Edges
                 const visEdges = filteredEdges.map(e => ({
-                    from: e.from,
-                    to: e.to,
-                    label: e.label,
-                    font: { 
-                        color: '#cbd5e1', 
-                        size: 11, 
-                        face: 'Inter, -apple-system, system-ui', 
-                        align: 'middle', 
-                        background: '#16181d',     // Gives edge labels a dark pill background
-                        strokeWidth: 0 
-                    },
+                    from: e.from, to: e.to, label: e.label,
+                    font: { color: '#cbd5e1', size: 11, face: 'Inter', align: 'middle', background: '#16181d', strokeWidth: 0 },
                     color: { color: '#4A5568', opacity: 0.6, highlight: '#718096' },
-                    arrows: 'to',
-                    length: 250
+                    arrows: 'to', length: 250
                 }));
 
-                // --- Clustering Magic ---
-                // We create invisible "Project Anchors" to group all isolated nodes belonging to the same project.
-                // We create a "Global Hub" to perfectly center and orbit all project clusters so they never wander.
                 const uniqueProjects = new Set(filteredNodes.map(n => n.project || 'Global'));
-                const projectAnchors = [];
-                const anchorEdges = [];
-                
+                const projectAnchors = [], anchorEdges = [];
+
                 if (!isHierarchical && uniqueProjects.size > 1) {
-                    
-                    // 1. The Global Sun (Invisible dead-center magnet)
-                    projectAnchors.push({
-                        id: 'GLOBAL_HUB',
-                        shape: 'dot', size: 0,
-                        color: { background: 'transparent', border: 'transparent' },
-                        x: 0, y: 0, fixed: true, mass: 1 
-                    });
-
-                    // 2. The Planets (Project names)
+                    projectAnchors.push({ id: 'GLOBAL_HUB', shape: 'dot', size: 0, color: { background: 'transparent', border: 'transparent' }, x: 0, y: 0, fixed: true, mass: 1 });
                     Array.from(uniqueProjects).forEach(proj => {
-                        projectAnchors.push({
-                            id: `PROJECT_ANCHOR_${proj}`,
-                            label: proj.toUpperCase(),
-                            font: { color: '#334155', size: 36, face: 'Inter', strokeWidth: 0, bold: true },
-                            shape: 'text', fixed: false, mass: 2 // Reduced mass so it doesn't repel other planets too far 
-                        });
-                        
-                        // Link planet to sun
-                        anchorEdges.push({
-                            from: `PROJECT_ANCHOR_${proj}`, to: 'GLOBAL_HUB',
-                            color: { opacity: 0 }, length: 550, physics: true
-                        });
+                        projectAnchors.push({ id: `PROJECT_ANCHOR_${proj}`, label: proj.toUpperCase(), font: { color: '#334155', size: 36, face: 'Inter', strokeWidth: 0, bold: true }, shape: 'text', fixed: false, mass: 2 });
+                        anchorEdges.push({ from: `PROJECT_ANCHOR_${proj}`, to: 'GLOBAL_HUB', color: { opacity: 0 }, length: 550, physics: true });
                     });
-
-                    // 3. The Moons (Actual Data Nodes)
                     filteredNodes.forEach(n => {
-                        anchorEdges.push({
-                            from: n.id,
-                            to: `PROJECT_ANCHOR_${n.project || 'Global'}`,
-                            color: { opacity: 0 }, // Invisible spring 
-                            length: 50, 
-                            physics: true
-                        });
+                        anchorEdges.push({ from: n.id, to: `PROJECT_ANCHOR_${n.project || 'Global'}`, color: { opacity: 0 }, length: 50, physics: true });
                     });
                 }
 
@@ -427,18 +639,7 @@
                 originalEdgesDataSet = new vis.DataSet([...visEdges, ...anchorEdges]);
 
                 let options = {
-                    physics: {
-                        solver: 'barnesHut',
-                        barnesHut: { 
-                            gravitationalConstant: -1500, // Balanced repulsive force
-                            centralGravity: 0.0, // Don't suck everything to the center
-                            springLength: 100, 
-                            springConstant: 0.05, 
-                            damping: 0.09,
-                            avoidOverlap: 0.2 // Solid overlap resistance but not explosive 
-                        },
-                        stabilization: { iterations: 150 }
-                    },
+                    physics: { solver: 'barnesHut', barnesHut: { gravitationalConstant: -1500, centralGravity: 0.0, springLength: 100, springConstant: 0.05, damping: 0.09, avoidOverlap: 0.2 }, stabilization: { iterations: 150 } },
                     nodes: { shadow: { enabled: true, color: 'rgba(0,0,0,0.5)', size: 10 } },
                     edges: { smooth: { type: 'continuous' } },
                     interaction: { hover: true, tooltipDelay: 200 }
@@ -446,15 +647,7 @@
 
                 if (isHierarchical) {
                     options = {
-                        layout: {
-                            hierarchical: {
-                                enabled: true,
-                                direction: 'UD',
-                                sortMethod: 'directed',
-                                levelSeparation: 150,
-                                nodeSpacing: 250
-                            }
-                        },
+                        layout: { hierarchical: { enabled: true, direction: 'UD', sortMethod: 'directed', levelSeparation: 150, nodeSpacing: 250 } },
                         physics: { enabled: false },
                         nodes: { shadow: { enabled: true, color: 'rgba(0,0,0,0.5)', size: 10 } },
                         edges: { smooth: { type: 'cubicBezier', forceDirection: 'vertical', roundness: 0.4 } },
@@ -462,125 +655,329 @@
                     };
                 }
 
-                if (network) {
-                    network.destroy();
-                }
+                if (network) network.destroy();
                 network = new vis.Network(container, { nodes: originalNodesDataSet, edges: originalEdgesDataSet }, options);
 
-                // --- Freeze Physics Post-Load ---
-                // Wait for the clusters to initially organize and stabilize.
-                // Once it finishes, we completely turn OFF physics. 
-                // This lets users drag nodes exactly where they want without rubber-banding springs.
-                network.on("stabilizationIterationsDone", function () {
+                network.on("stabilizationIterationsDone", () => {
                     network.setOptions({ physics: { enabled: false } });
                 });
-                
-                // --- IDE Clipboard Bridge ---
-                network.on("selectNode", function (params) {
+
+                network.on("selectNode", params => {
                     if (params.nodes.length > 0) {
                         const nodeId = params.nodes[0];
                         if (nodeId.startsWith('PROJECT_ANCHOR_') || nodeId === 'GLOBAL_HUB') return;
-                        
-                        const query = `[Lore Request]: Tell me about the node '${nodeId}' and how it relates to this project.`;
-                        navigator.clipboard.writeText(query).then(() => {
-                            showToast(`Copied to clipboard. Switch to IDE!`);
-                        }).catch(err => {
-                            console.error('Clipboard failed', err);
-                        });
+                        openDetailDrawer(nodeId);
                     }
                 });
+
+                network.on("deselectNode", () => {
+                    // Don't close drawer on deselect — let user explicitly close it
+                });
+
             } catch (err) {
                 console.error('Error rendering graph:', err);
             }
         }
 
-        /* --- Filtering & Drilldown Logic --- */
+        // ── Detail Drawer ──────────────────────────────────────────
+        async function openDetailDrawer(nodeIdOrData) {
+            let node = typeof nodeIdOrData === 'string'
+                ? allNodes.find(n => n.id === nodeIdOrData)
+                : nodeIdOrData;
 
+            if (!node) {
+                // Try fetching the full node from the server to get content
+                try {
+                    const res = await fetch(`/api/search?q=${encodeURIComponent(nodeIdOrData)}`);
+                    const results = await res.json();
+                    node = results.find(n => n.id === nodeIdOrData);
+                } catch { return; }
+            }
+
+            if (!node) return;
+            currentNode = node;
+            exitEditMode();
+
+            // Populate header
+            document.getElementById('drawer-title').textContent = node.label || node.id;
+
+            const badge = document.getElementById('drawer-type-badge');
+            badge.textContent = (node.type || 'note').replace('_', ' ');
+            const badgeColor = COLORS[node.type] || COLORS['default'];
+            badge.style.cssText = `background:${badgeColor}22; color:${badgeColor}; border:1px solid ${badgeColor}44; border-radius:12px; padding:2px 8px; font-size:0.7rem; font-weight:500;`;
+
+            // Populate meta
+            document.getElementById('meta-project').textContent = '📁 ' + (node.project || 'Global');
+            document.getElementById('meta-updated').textContent = '🕐 ' + (node.updatedAt ? new Date(node.updatedAt).toLocaleDateString() : '—');
+
+            // Render markdown content
+            const contentView = document.getElementById('content-view');
+            const rawContent = node.content || '_No content stored for this node._';
+            contentView.innerHTML = typeof marked !== 'undefined' ? marked.parse(rawContent) : rawContent.replace(/\n/g, '<br>');
+
+            // Render JSON metadata fields (for schema nodes)
+            renderMetadata(node);
+
+            // Open the drawer
+            document.getElementById('detail-drawer').classList.add('open');
+        }
+
+        function renderMetadata(node) {
+            const container = document.getElementById('drawer-metadata');
+            container.innerHTML = '';
+            if (!node.metadata) return;
+
+            let meta;
+            try { meta = JSON.parse(node.metadata); } catch { return; }
+            if (!meta || !meta.fields || !Array.isArray(meta.fields) || meta.fields.length === 0) return;
+
+            const h4 = document.createElement('h4');
+            h4.textContent = 'Schema Fields';
+            container.appendChild(h4);
+
+            meta.fields.forEach(field => {
+                const chip = document.createElement('div');
+                chip.className = 'field-chip';
+                chip.innerHTML = `<span class="field-name">${field.name}</span><span class="field-type">${field.type}</span>${field.required ? '<span class="field-req">required</span>' : ''}`;
+                container.appendChild(chip);
+            });
+        }
+
+        function closeDetailDrawer() {
+            document.getElementById('detail-drawer').classList.remove('open');
+            currentNode = null;
+            exitEditMode();
+        }
+
+        function enterEditMode() {
+            if (!currentNode) return;
+            isEditMode = true;
+            document.getElementById('content-view').style.display = 'none';
+            const textarea = document.getElementById('content-edit');
+            textarea.style.display = 'block';
+            textarea.value = currentNode.content || '';
+            textarea.focus();
+            document.getElementById('btn-edit-node').style.display = 'none';
+            document.getElementById('btn-save-node').style.display = 'inline-flex';
+            document.getElementById('btn-cancel-edit').style.display = 'inline-flex';
+        }
+
+        function exitEditMode() {
+            isEditMode = false;
+            document.getElementById('content-view').style.display = 'block';
+            document.getElementById('content-edit').style.display = 'none';
+            document.getElementById('btn-edit-node').style.display = 'inline-flex';
+            document.getElementById('btn-save-node').style.display = 'none';
+            document.getElementById('btn-cancel-edit').style.display = 'none';
+        }
+
+        async function saveNode() {
+            if (!currentNode) return;
+            const newContent = document.getElementById('content-edit').value;
+            const updatedNode = { ...currentNode, content: newContent };
+
+            try {
+                const res = await fetch('/api/node', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(updatedNode)
+                });
+                const result = await res.json();
+                if (!res.ok) throw new Error(result.error || 'Save failed');
+
+                // Update local cache
+                currentNode.content = newContent;
+                const idx = allNodes.findIndex(n => n.id === currentNode.id);
+                if (idx !== -1) allNodes[idx].content = newContent;
+
+                // Re-render content view
+                const contentView = document.getElementById('content-view');
+                contentView.innerHTML = typeof marked !== 'undefined' ? marked.parse(newContent) : newContent.replace(/\n/g, '<br>');
+
+                exitEditMode();
+                showToast('Node saved ✓', '#38A169');
+            } catch (err) {
+                showToast('Save failed: ' + err.message, '#E53E3E');
+            }
+        }
+
+        function openNewNodeDrawer() {
+            currentNode = {
+                id: 'new-node-' + Date.now(),
+                type: 'note',
+                label: 'New Node',
+                content: '',
+                project: '*',
+                ecosystem: '*',
+                tags: '',
+                metadata: '{}'
+            };
+            document.getElementById('drawer-title').textContent = 'New Node';
+            const badge = document.getElementById('drawer-type-badge');
+            badge.textContent = 'note';
+            badge.style.cssText = 'background:#4A556822; color:#718096; border:1px solid #4A556844; border-radius:12px; padding:2px 8px; font-size:0.7rem;';
+            document.getElementById('meta-project').textContent = '📁 *';
+            document.getElementById('meta-updated').textContent = '🕐 Now';
+            document.getElementById('drawer-metadata').innerHTML = '';
+            document.getElementById('content-view').innerHTML = '';
+            document.getElementById('detail-drawer').classList.add('open');
+            enterEditMode();
+        }
+
+        // ── Search ─────────────────────────────────────────────────
+        function handleSearch(e) {
+            const query = e.target.value.trim();
+            clearTimeout(searchDebounceTimer);
+
+            const deepSearch = document.getElementById('deep-search-toggle').checked;
+
+            if (!query) {
+                closeSearchResults();
+                resetGraph();
+                return;
+            }
+
+            if (deepSearch) {
+                // Debounced API deep search (searches content too)
+                searchDebounceTimer = setTimeout(() => doDeepSearch(query), 300);
+            } else {
+                // Instant local label/id/project search
+                doLocalSearch(query);
+            }
+        }
+
+        function doLocalSearch(query) {
+            const q = query.toLowerCase();
+            const matchedNodes = allNodes.filter(n =>
+                (n.id && n.id.toLowerCase().includes(q)) ||
+                (n.label && n.label.toLowerCase().includes(q)) ||
+                (n.project && n.project.toLowerCase().includes(q))
+            );
+            const validSet = new Set(matchedNodes.map(n => n.id));
+            const matchedEdges = allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to));
+            closeSearchResults();
+            renderGraph(matchedNodes, matchedEdges);
+        }
+
+        async function doDeepSearch(query) {
+            try {
+                const res = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+                const results = await res.json();
+                if (!Array.isArray(results) || results.length === 0) {
+                    showSearchResults([]);
+                    return;
+                }
+                showSearchResults(results, query);
+            } catch { /* silent */ }
+        }
+
+        function showSearchResults(results, query = '') {
+            const container = document.getElementById('search-results');
+            container.innerHTML = '';
+
+            if (results.length === 0) {
+                container.style.display = 'block';
+                container.innerHTML = '<div style="padding:12px 16px;font-size:0.82rem;color:var(--text-muted);">No results found.</div>';
+                return;
+            }
+
+            results.slice(0, 10).forEach(node => {
+                const item = document.createElement('div');
+                item.className = 'search-result-item';
+
+                let snippet = (node.content || '').slice(0, 120);
+                if (query) {
+                    const qLow = query.toLowerCase();
+                    const idx = snippet.toLowerCase().indexOf(qLow);
+                    if (idx !== -1) {
+                        const before = snippet.slice(0, idx);
+                        const match = snippet.slice(idx, idx + qLow.length);
+                        const after = snippet.slice(idx + qLow.length);
+                        snippet = `${before}<em>${match}</em>${after}`;
+                    }
+                }
+
+                const color = COLORS[node.type] || COLORS['default'];
+                item.innerHTML = `
+                    <div class="res-label">${node.label || node.id}</div>
+                    <div class="res-meta"><span style="color:${color};font-size:0.7rem;">■</span> ${(node.type || 'note').replace('_',' ')} · ${node.project || 'Global'}</div>
+                    ${snippet ? `<div class="res-snippet">${snippet}…</div>` : ''}
+                `;
+                item.addEventListener('click', () => {
+                    closeSearchResults();
+                    focusOnNode(node.id);
+                    openDetailDrawer(node);
+                });
+                container.appendChild(item);
+            });
+
+            container.style.display = 'block';
+        }
+
+        function closeSearchResults() {
+            document.getElementById('search-results').style.display = 'none';
+        }
+
+        // ── Filter ─────────────────────────────────────────────────
         function resetGraph() {
             document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
             document.getElementById('search-input').value = '';
+            closeSearchResults();
             renderGraph(allNodes, allEdges);
         }
 
         function filterByProject(projectName) {
             const filteredNodes = allNodes.filter(n => (n.project || 'Global') === projectName);
             const validSet = new Set(filteredNodes.map(n => n.id));
-            const filteredEdges = allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to));
-            renderGraph(filteredNodes, filteredEdges);
+            renderGraph(filteredNodes, allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to)));
         }
 
         function filterByType(typeName) {
             const filteredNodes = allNodes.filter(n => n.type === typeName);
             const validSet = new Set(filteredNodes.map(n => n.id));
-            const filteredEdges = allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to));
-            renderGraph(filteredNodes, filteredEdges);
+            renderGraph(filteredNodes, allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to)));
         }
 
         function focusOnNode(nodeId) {
-            // Show all so we can focus inside it
-            renderGraph(allNodes, allEdges);
+            if (!network) return;
             network.selectNodes([nodeId]);
-            network.focus(nodeId, {
-                scale: 1.2,
-                animation: { duration: 500, easingFunction: 'easeInOutQuad' }
-            });
-        }
-
-        function handleSearch(e) {
-            const query = e.target.value.toLowerCase();
-            if (!query) {
-                resetGraph();
-                // Show all sidebar items
-                document.querySelectorAll('.nav-item').forEach(el => el.style.display = 'flex');
-                return;
-            }
-
-            const matchedNodes = allNodes.filter(n => 
-                (n.id && n.id.toLowerCase().includes(query)) || 
-                (n.label && n.label.toLowerCase().includes(query)) ||
-                (n.project && n.project.toLowerCase().includes(query))
-            );
-            
-            const validSet = new Set(matchedNodes.map(n => n.id));
-            
-            // Also include edges connected to those nodes
-            const matchedEdges = allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to));
-
-            // Hide/show sidebar items based on query
-            document.querySelectorAll('.nav-item').forEach(el => {
-                const text = el.querySelector('span:first-child').textContent.toLowerCase();
-                if (text.includes(query)) {
-                    el.style.display = 'flex';
-                } else {
-                    el.style.display = 'none';
-                }
-            });
-
-            renderGraph(matchedNodes, matchedEdges);
+            network.focus(nodeId, { scale: 1.2, animation: { duration: 500, easingFunction: 'easeInOutQuad' } });
         }
 
         function viewDataLake() {
             document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
             const filteredNodes = allNodes.filter(n => n.type === 'schema');
             const validSet = new Set(filteredNodes.map(n => n.id));
-            const filteredEdges = allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to));
-            renderGraph(filteredNodes, filteredEdges, true);
-            showToast("Master Data Model ERD Active");
+            renderGraph(filteredNodes, allEdges.filter(e => validSet.has(e.from) && validSet.has(e.to)), true);
+            showToast('Master Data Model ERD Active');
         }
 
+        // ── Events ─────────────────────────────────────────────────
         function setupEvents() {
             document.getElementById('btn-reset').addEventListener('click', resetGraph);
             document.getElementById('btn-erd').addEventListener('click', viewDataLake);
             document.getElementById('btn-relayout').addEventListener('click', () => {
-                if (network) {
-                    network.setOptions({ physics: { enabled: true } });
-                    network.stabilize();
-                }
+                if (network) { network.setOptions({ physics: { enabled: true } }); network.stabilize(); }
             });
             document.getElementById('search-input').addEventListener('input', handleSearch);
+            document.getElementById('search-input').addEventListener('blur', () => {
+                setTimeout(closeSearchResults, 200);
+            });
+            document.getElementById('drawer-close').addEventListener('click', closeDetailDrawer);
+            document.getElementById('btn-edit-node').addEventListener('click', enterEditMode);
+            document.getElementById('btn-save-node').addEventListener('click', saveNode);
+            document.getElementById('btn-cancel-edit').addEventListener('click', () => { exitEditMode(); openDetailDrawer(currentNode); });
+            document.getElementById('btn-copy-ide').addEventListener('click', () => {
+                if (!currentNode) return;
+                const query = `[Lore Request]: Tell me about the node '${currentNode.id}' and how it relates to this project.`;
+                navigator.clipboard.writeText(query).then(() => showToast('Copied to IDE clipboard!')).catch(() => {});
+            });
+            document.getElementById('btn-new-node').addEventListener('click', openNewNodeDrawer);
+
+            // Close search results when clicking graph
+            document.getElementById('network').addEventListener('click', closeSearchResults);
         }
 
-        // Start
         window.onload = init;
     </script>
 </body>
