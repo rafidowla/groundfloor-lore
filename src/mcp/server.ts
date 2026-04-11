@@ -29,6 +29,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { LocalGraph, type LoreNode } from '../engines/localGraph.js';
+import { VerbatimStore, buildVerbatimText } from '../engines/verbatimStore.js';
 import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
 import { SurrealAdapter } from '../engines/surrealAdapter.js';
 import fs from 'fs';
@@ -122,6 +123,7 @@ function resolveGraphPath(): string {
 const detectedScope = resolveProjectScope();
 const graphBasePath = resolveGraphPath();
 const graph = new LocalGraph(graphBasePath);
+const verbatimStore = new VerbatimStore(graphBasePath);
 const loreDir = path.join(graphBasePath, '.lore');
 
 /**
@@ -228,6 +230,12 @@ mcpServer.tool(
 
             // Buffer write to WAL for async sync
             wal.append('upsert_node', { ...node });
+
+            verbatimStore.store({
+                id,
+                text: buildVerbatimText(label, content ?? '', tags ?? ''),
+                metadata: { type, label, tags: tags ?? '', project: scopedProject, ecosystem: scopedEcosystem, updatedAt: node.updatedAt }
+            }).catch((err) => console.error(`[Lore MCP] VerbatimStore write failed for '${id}':`, err));
 
             return {
                 content: [{
@@ -387,7 +395,24 @@ mcpServer.tool(
     },
     async ({ topic, depth }) => {
         try {
-            const searchResults = await graph.search(topic, 10, detectedScope.project, detectedScope.ecosystem);
+            const verbatimCount = await verbatimStore.count();
+            let seedNodeIds: string[] = [];
+            
+            if (verbatimCount > 0) {
+                const results = await verbatimStore.search(topic, 10);
+                seedNodeIds = results.map(r => r.id);
+            }
+            
+            let searchResults: LoreNode[] = [];
+            
+            if (verbatimCount === 0 || seedNodeIds.length === 0) {
+                searchResults = await graph.search(topic, 10, detectedScope.project, detectedScope.ecosystem);
+            } else {
+                for (const id of seedNodeIds) {
+                    const node = await graph.getNode(id);
+                    if (node) searchResults.push(node);
+                }
+            }
 
             if (searchResults.length === 0) {
                 return {
@@ -436,6 +461,7 @@ mcpServer.tool(
                     type: 'text' as const,
                     text: JSON.stringify({
                         topic,
+                        searchMode: verbatimCount > 0 ? 'semantic' : 'keyword',
                         scope: { project: detectedScope.project, ecosystem: detectedScope.ecosystem },
                         totalRecalled: recalledNodes.length,
                         directMatches: searchResults.length,
@@ -468,6 +494,7 @@ mcpServer.tool(
     async ({ id }) => {
         try {
             const deleted = await graph.deleteNode(id);
+            if (deleted) verbatimStore.delete(id).catch((err) => console.error(`[Lore MCP] VerbatimStore delete failed for '${id}':`, err));
             return {
                 content: [{
                     type: 'text' as const,
@@ -585,8 +612,9 @@ mcpServer.tool(
                     type: 'text' as const,
                     text: JSON.stringify({
                         ...graphStats,
+                        verbatimDocuments: await verbatimStore.count(),
                         graphPath: path.join(graphBasePath, '.lore', 'graph'),
-                        engine: 'kùzu',
+                        engine: 'kùzu + lancedb',
                     }, null, 2),
                 }],
             };
@@ -1308,6 +1336,7 @@ const activeSessions = new Map<string, StreamableHTTPServerTransport>();
  */
 async function main(): Promise<void> {
     await graph.initialize();
+    await verbatimStore.initialize();
 
     // Attempt SurrealDB connection if adapter is configured
     if (adapter) {
