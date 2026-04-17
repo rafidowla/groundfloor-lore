@@ -12,8 +12,10 @@ const MODE_FILTER_PRESETS: Record<string, string[] | null> = {
   developer: ['decision', 'convention', 'bug_pattern', 'code_symbol', 'architecture', 'troubleshooting'],
 };
 
-// Backend daemon base URL. The MCP server listens on 127.0.0.1:3847 in --http mode.
-const API_BASE = (import.meta as unknown as { env?: { VITE_LORE_API?: string } }).env?.VITE_LORE_API ?? 'http://127.0.0.1:3847';
+// Backend daemon base URL. Default is empty string so requests are
+// same-origin — the Vite dev proxy in ui/vite.config.ts forwards /api/*
+// to http://127.0.0.1:3847. Override with VITE_LORE_API for production.
+const API_BASE = (import.meta as unknown as { env?: { VITE_LORE_API?: string } }).env?.VITE_LORE_API ?? '';
 
 type LlmProvider = 'anthropic' | 'openai' | 'ollama';
 

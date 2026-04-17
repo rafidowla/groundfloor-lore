@@ -608,6 +608,10 @@ export default function SigmaCanvas({
                     zIndex: true,
                     defaultDrawNodeLabel: drawLabel as any,
                     defaultDrawNodeHover: drawHover as any,
+                    // Allow zero-dim containers during initial mount (common in
+                    // flex layouts + Puppeteer-based previews). Sigma re-renders
+                    // once the ResizeObserver fires.
+                    allowInvalidContainer: true,
                 }}
             >
                 <GraphLoader onStatsReady={handleStatsReady} onTopologyReady={onTopologyReady} />
