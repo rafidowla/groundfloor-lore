@@ -39,6 +39,9 @@ import { fileURLToPath } from 'url';
 import { proxyQuery, proxyContext, proxyImpact, proxyCypher } from './gitnexusProxy.js';
 import { detectChanges, rename, listRepos, formatReposMarkdown } from './nativeTools.js';
 import { SchemaLoader } from '../schemas/loader.js';
+import { ConfigManager } from '../config/configManager.js';
+import { setApiKey, getApiKey, hasApiKey, deleteApiKey } from '../config/keychain.js';
+import { stream as llmStream, getCapability } from '../providers/llmDispatch.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -131,6 +134,7 @@ const edgeRelationsEnum = z.enum(domainSchema.edgeRelations as [string, ...strin
 const graph = new LocalGraph(graphBasePath);
 const verbatimStore = new VerbatimStore(graphBasePath);
 const loreDir = path.join(graphBasePath, '.lore');
+const configManager = new ConfigManager(loreDir);
 
 /**
  * resolveSyncAdapter — Auto-detect Dataplane API keys and create a TS-SDK adapter.
@@ -1427,6 +1431,129 @@ async function main(): Promise<void> {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (err as Error).message }));
                 }
+                return;
+            }
+
+            // UI health check: status + active config snapshot + sync adapter status
+            if (url === '/api/health' && req.method === 'GET') {
+                try {
+                    const cfg = configManager.read();
+                    const syncAdapter = resolveSyncAdapter();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        status: 'ok',
+                        version: '2.0.0-phase0',
+                        activePlugins: cfg.plugins,
+                        defaultMode: cfg.defaultMode,
+                        llmProvider: cfg.llmProvider,
+                        workspaceAccount: cfg.workspaceAccount,
+                        dataplane: syncAdapter ? 'bound' : 'offline',
+                        sessions: activeSessions.size,
+                    }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ status: 'degraded', error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // UI config read: returns the live config (without API keys)
+            if (url === '/api/config' && req.method === 'GET') {
+                try {
+                    const cfg = configManager.read();
+                    const hasKey = await hasApiKey(cfg.llmProvider);
+                    const capability = getCapability(cfg.llmProvider);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ...cfg, hasApiKey: hasKey, capability }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // UI config write: PATCH partial updates. `apiKey` goes to keychain,
+            // all other fields merge into .lore/config.json.
+            if (url === '/api/config' && req.method === 'PATCH') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const update = JSON.parse(body || '{}') as Record<string, unknown>;
+                        const { apiKey, ...configFields } = update;
+                        const next = configManager.patch(configFields);
+                        if (typeof apiKey === 'string' && apiKey.length > 0) {
+                            const ok = await setApiKey(next.llmProvider, apiKey);
+                            if (!ok) {
+                                res.writeHead(500, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'keychain write failed' }));
+                                return;
+                            }
+                        } else if (apiKey === null) {
+                            await deleteApiKey(next.llmProvider);
+                        }
+                        const hasKey = await hasApiKey(next.llmProvider);
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ...next, hasApiKey: hasKey, capability: getCapability(next.llmProvider) }));
+                    } catch (err) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            // Chat SSE stream — routes every message to the local/BYOK LLM.
+            // Never falls back to any cloud pathway silently.
+            if (url === '/api/chat' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    let message = '';
+                    try {
+                        const parsed = JSON.parse(body || '{}') as { message?: string };
+                        message = (parsed.message ?? '').trim();
+                    } catch {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'invalid JSON body' }));
+                        return;
+                    }
+                    if (!message) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'message required' }));
+                        return;
+                    }
+
+                    res.writeHead(200, {
+                        'Content-Type': 'text/event-stream',
+                        'Cache-Control': 'no-cache',
+                        Connection: 'keep-alive',
+                        'X-Accel-Buffering': 'no',
+                    });
+
+                    const write = (evt: Record<string, unknown>): void => {
+                        res.write(`data: ${JSON.stringify(evt)}\n\n`);
+                    };
+
+                    try {
+                        const cfg = configManager.read();
+                        const key = await getApiKey(cfg.llmProvider);
+                        write({ type: 'start', provider: cfg.llmProvider });
+                        for await (const chunk of llmStream(cfg.llmProvider, message, key)) {
+                            if (chunk.kind === 'token' && chunk.content) {
+                                write({ type: 'token', content: chunk.content });
+                            } else if (chunk.kind === 'error') {
+                                write({ type: 'error', message: chunk.message });
+                            } else if (chunk.kind === 'done') {
+                                write({ type: 'done' });
+                            }
+                        }
+                    } catch (err) {
+                        write({ type: 'error', message: `chat pipeline: ${(err as Error).message}` });
+                    } finally {
+                        res.end();
+                    }
+                });
                 return;
             }
 
