@@ -42,6 +42,7 @@ import { SchemaLoader } from '../schemas/loader.js';
 import { ConfigManager } from '../config/configManager.js';
 import { setApiKey, getApiKey, hasApiKey, deleteApiKey } from '../config/keychain.js';
 import { stream as llmStream, getCapability } from '../providers/llmDispatch.js';
+import { PluginRegistry } from '../plugins/registry.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -135,6 +136,13 @@ const graph = new LocalGraph(graphBasePath);
 const verbatimStore = new VerbatimStore(graphBasePath);
 const loreDir = path.join(graphBasePath, '.lore');
 const configManager = new ConfigManager(loreDir);
+const pluginRegistry = new PluginRegistry(configManager);
+pluginRegistry.boot();
+console.error(`[Lore MCP] Plugins active: ${configManager.read().plugins.join(', ') || '(none)'}`);
+const orphanStateAtBoot = pluginRegistry.getOrphanState();
+if (orphanStateAtBoot.blocking) {
+    console.error(`[Lore MCP] ⚠ Orphan plugins detected: ${orphanStateAtBoot.orphans.join(', ')}. /api/* is blocked until resolved via POST /api/orphan.`);
+}
 
 /**
  * resolveSyncAdapter — Auto-detect Dataplane API keys and create a TS-SDK adapter.
@@ -746,6 +754,13 @@ mcpServer.tool(
     },
 );
 
+// ═══════════════════════════════════════════════════════════════════
+// Developer plugin tools — gated by .lore/config.json plugins[] list.
+// When 'developer' is not active, these tools are never registered with
+// the MCP server. See src/plugins/developer/index.ts for the manifest.
+// ═══════════════════════════════════════════════════════════════════
+if (pluginRegistry.isActive('developer')) {
+
 /* ─── Tool: code_query ────────────────────────────────────────── */
 
 mcpServer.tool(
@@ -1097,6 +1112,8 @@ mcpServer.tool(
     },
 );
 
+} // end: developer plugin tools gate
+
 /* ─── MCP Resources ──────────────────────────────────────────── */
 
 /**
@@ -1338,6 +1355,23 @@ async function main(): Promise<void> {
         const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
             const url = req.url ?? '';
 
+            // Orphan-decision gate: when a plugin has been deactivated but the
+            // user hasn't chosen Keep/Drop/Re-enable, block every /api/* path
+            // except /api/health (so UI can render the modal) and /api/orphan
+            // (so the user can resolve it). Matches Option C in V2_implementation_plan.md.
+            if (url.startsWith('/api/') && url !== '/api/health' && url !== '/api/orphan') {
+                const orphanState = pluginRegistry.getOrphanState();
+                if (orphanState.blocking) {
+                    res.writeHead(503, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        code: 'orphan_decision_required',
+                        orphans: orphanState.orphans,
+                        resolve: 'POST /api/orphan {plugin, decision: keep|drop|reenable, confirm?: "DROP"}',
+                    }));
+                    return;
+                }
+            }
+
             // Health check endpoint for monitoring
             if (url === '/health' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1439,21 +1473,68 @@ async function main(): Promise<void> {
                 try {
                     const cfg = configManager.read();
                     const syncAdapter = resolveSyncAdapter();
+                    const orphanState = pluginRegistry.getOrphanState();
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({
-                        status: 'ok',
-                        version: '2.0.0-phase0',
+                        status: orphanState.blocking ? 'orphan_decision_required' : 'ok',
+                        version: '2.0.0-phase1',
                         activePlugins: cfg.plugins,
                         defaultMode: cfg.defaultMode,
                         llmProvider: cfg.llmProvider,
                         workspaceAccount: cfg.workspaceAccount,
                         dataplane: syncAdapter ? 'bound' : 'offline',
                         sessions: activeSessions.size,
+                        orphans: orphanState.orphans,
                     }));
                 } catch (err) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ status: 'degraded', error: (err as Error).message }));
                 }
+                return;
+            }
+
+            // Orphan plugin resolution endpoint. GET returns state; POST applies
+            // the user's decision (keep/drop/reenable). 'drop' requires the
+            // literal string "DROP" in confirm to match the CLI/UI prompt.
+            if (url === '/api/orphan' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(pluginRegistry.getOrphanState()));
+                return;
+            }
+
+            if (url === '/api/orphan' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', () => {
+                    try {
+                        const { plugin, decision, confirm } = JSON.parse(body || '{}') as {
+                            plugin?: string;
+                            decision?: 'keep' | 'drop' | 'reenable';
+                            confirm?: string;
+                        };
+                        if (!plugin || !decision) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'plugin and decision required' }));
+                            return;
+                        }
+                        if (decision === 'drop' && confirm !== 'DROP') {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'drop requires confirm="DROP"' }));
+                            return;
+                        }
+                        const next = pluginRegistry.resolveOrphan(plugin, decision);
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            resolved: plugin,
+                            decision,
+                            orphanState: pluginRegistry.getOrphanState(),
+                            config: next,
+                        }));
+                    } catch (err) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
                 return;
             }
 

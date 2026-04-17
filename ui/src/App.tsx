@@ -17,7 +17,10 @@ interface HealthResponse {
   llmProvider: LlmProvider;
   workspaceAccount: string;
   dataplane: 'bound' | 'offline';
+  orphans?: string[];
 }
+
+type OrphanDecision = 'keep' | 'drop' | 'reenable';
 
 interface ConfigResponse {
   plugins: string[];
@@ -56,6 +59,11 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const patchTimer = useRef<number | null>(null);
 
+  // Phase 1: Mode pill-group state. "all" shows every plugin's nodes;
+  // otherwise the value matches one entry in health.activePlugins.
+  const [activeMode, setActiveMode] = useState<string>('all');
+  const [workspaceToast, setWorkspaceToast] = useState<string | null>(null);
+
   // ── Initial load: fetch /api/health + /api/config ────────────────
   useEffect(() => {
     void (async () => {
@@ -68,6 +76,7 @@ function App() {
         setLlmProvider(c.llmProvider);
         setWorkspaceAccount(c.workspaceAccount);
         setHasApiKey(c.hasApiKey);
+        setActiveMode(c.defaultMode || 'all');
       } catch (err) {
         setHealthError((err as Error).message);
       }
@@ -77,6 +86,23 @@ function App() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Cmd/Ctrl+1..9 cycles through Mode pills (All, then active plugins in order).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      const n = parseInt(e.key, 10);
+      if (Number.isNaN(n) || n < 1 || n > 9) return;
+      const order = ['all', ...(health?.activePlugins ?? [])];
+      const pick = order[n - 1];
+      if (pick) {
+        setActiveMode(pick);
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [health]);
 
   const toggleTheme = () => {
     const newTheme = theme === 'corporate' ? 'midnight' : 'corporate';
@@ -113,6 +139,34 @@ function App() {
   const handleWorkspaceChange = (account: string): void => {
     setWorkspaceAccount(account);
     void patchConfig({ workspaceAccount: account });
+    // Workspace switches are a restart-required operation (each workspace
+    // maps to a separate .lore/ directory). Surface a toast so the user
+    // knows the daemon still serves the prior workspace until reboot.
+    setWorkspaceToast(`Workspace switched to "${account}" — restart the Lore daemon to apply.`);
+    window.setTimeout(() => setWorkspaceToast(null), 6000);
+  };
+
+  const resolveOrphan = async (plugin: string, decision: OrphanDecision): Promise<void> => {
+    let confirmValue: string | undefined;
+    if (decision === 'drop') {
+      // eslint-disable-next-line no-alert
+      const typed = window.prompt(`Type DROP to permanently remove tables for "${plugin}":`);
+      if (typed !== 'DROP') return;
+      confirmValue = 'DROP';
+    }
+    try {
+      const resp = await fetch(`${API_BASE}/api/orphan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plugin, decision, confirm: confirmValue }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      // Refresh health to clear the blocking modal.
+      const h = (await fetch(`${API_BASE}/api/health`).then((r) => r.json())) as HealthResponse;
+      setHealth(h);
+    } catch (err) {
+      setHealthError(`Orphan resolve failed: ${(err as Error).message}`);
+    }
   };
 
   // Debounce API key PATCH to avoid keychain write on every keystroke.
@@ -249,6 +303,64 @@ function App() {
 
       {/* Graph Visualization Canvas Area */}
       <main className="canvas-area" style={{ position: 'relative' }}>
+        {/* Phase 1: Mode pill-group. Renders one pill per active plugin + "All".
+            Click or Cmd+1..9 to switch. Phase 3 wires filter preset, system
+            prompt swap, and camera focus off this state. */}
+        {health && health.activePlugins.length > 0 ? (
+          <div className="mode-pills" role="tablist" aria-label="Mode">
+            {(['all', ...health.activePlugins]).map((mode, idx) => (
+              <button
+                key={mode}
+                role="tab"
+                aria-selected={activeMode === mode}
+                className={`mode-pill${activeMode === mode ? ' active' : ''}`}
+                onClick={() => setActiveMode(mode)}
+                title={`${mode === 'all' ? 'All modes' : mode} (⌘${idx + 1})`}
+              >
+                {mode === 'all' ? 'All' : mode.charAt(0).toUpperCase() + mode.slice(1)}
+              </button>
+            ))}
+          </div>
+        ) : null}
+
+        {/* Workspace-switched toast */}
+        {workspaceToast ? (
+          <div className="workspace-toast glass-panel" role="status">
+            {workspaceToast}
+          </div>
+        ) : null}
+
+        {/* Orphan-decision modal. Server returns HTTP 503 on /api/* until
+            resolved, and /api/health carries the orphans list. */}
+        {health?.status === 'orphan_decision_required' && (health.orphans?.length ?? 0) > 0 ? (
+          <div className="orphan-backdrop">
+            <div className="orphan-modal glass-panel" role="dialog" aria-modal="true">
+              <h3>Plugin decision required</h3>
+              <p>
+                The following plugin(s) were previously active but are no longer listed in
+                <code> .lore/config.json</code>. Choose how to handle their on-disk data:
+              </p>
+              <ul className="orphan-list">
+                {(health.orphans ?? []).map((p) => (
+                  <li key={p}>
+                    <strong>{p}</strong>
+                    <div className="orphan-actions">
+                      <button onClick={() => void resolveOrphan(p, 'keep')}>Keep on disk</button>
+                      <button onClick={() => void resolveOrphan(p, 'reenable')}>Re-enable plugin</button>
+                      <button className="danger" onClick={() => void resolveOrphan(p, 'drop')}>
+                        Drop permanently
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+              <p className="help-text" style={{ fontSize: '0.75rem' }}>
+                All <code>/api/*</code> calls are blocked until this is resolved.
+              </p>
+            </div>
+          </div>
+        ) : null}
+
         {useSigmaEngine ? <SigmaCanvas /> : <GraphCanvas />}
 
         {/* Dynamic Settings Sidebar (Slide-over) */}

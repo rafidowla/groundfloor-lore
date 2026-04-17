@@ -38,6 +38,12 @@ export interface LoreConfig {
     llmProvider: string;
     workspaceAccount: string;
     plugin_history?: PluginHistoryEntry[];
+    /**
+     * Snapshot of `plugins` from the PREVIOUS successful boot. Used by
+     * the orphan detector to find plugins the user removed since last run.
+     * Written at the end of each successful boot.
+     */
+    plugins_last_boot?: string[];
 }
 
 export const DEFAULT_CONFIG: LoreConfig = {
@@ -93,6 +99,7 @@ export class ConfigManager {
             'plugins',
             'pluginConfig',
             'plugin_history',
+            'plugins_last_boot',
         ];
         const next: LoreConfig = { ...current };
         for (const key of allowed) {

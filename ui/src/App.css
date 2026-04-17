@@ -204,3 +204,162 @@
   align-items: center;
   gap: 0.5rem;
 }
+
+/* ─── Phase 1: Mode pill-group (top-center above canvas) ───────── */
+.mode-pills {
+  position: absolute;
+  top: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  background: rgba(255, 255, 255, 0.08);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  z-index: 5;
+}
+
+.mode-pill {
+  padding: 0.35rem 0.9rem;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 120ms, color 120ms;
+}
+
+.mode-pill:hover {
+  color: var(--color-text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.mode-pill.active {
+  color: var(--color-bg);
+  background: var(--color-accent, #14b8a6);
+}
+
+/* ─── Phase 1: Workspace-switched toast ────────────────────────── */
+.workspace-toast {
+  position: absolute;
+  top: 4rem;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 0.6rem 1rem;
+  font-size: 0.8rem;
+  color: var(--color-text);
+  border-radius: 8px;
+  z-index: 6;
+  animation: fadeIn 200ms ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translate(-50%, -8px); }
+  to   { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ─── Phase 1: Orphan-decision modal ───────────────────────────── */
+.orphan-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+}
+
+.orphan-modal {
+  max-width: 520px;
+  width: 90%;
+  padding: 1.5rem;
+  border-radius: 12px;
+}
+
+.orphan-modal h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+}
+
+.orphan-modal p {
+  font-size: 0.85rem;
+  color: var(--color-text-muted);
+  margin: 0 0 0.75rem;
+}
+
+.orphan-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1rem;
+}
+
+.orphan-list li {
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.orphan-list li:last-child {
+  border-bottom: none;
+}
+
+.orphan-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.orphan-actions button {
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8rem;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  color: var(--color-text);
+  cursor: pointer;
+  transition: background-color 120ms;
+}
+
+.orphan-actions button:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.orphan-actions button.danger {
+  color: #fca5a5;
+  border-color: #7f1d1d;
+}
+
+.orphan-actions button.danger:hover {
+  background: rgba(127, 29, 29, 0.3);
+}
+
+/* Pill-ok badge used for "API key stored" indicator */
+.pill-ok {
+  margin-left: 0.5rem;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.65rem;
+  font-weight: 500;
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.15);
+  border-radius: 999px;
+}
+
+.cursor-blink {
+  display: inline-block;
+  animation: blink 1s steps(1) infinite;
+  margin-left: 2px;
+  opacity: 0.6;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.chat-error {
+  border-color: #ef4444 !important;
+  background: rgba(239, 68, 68, 0.08) !important;
+}
