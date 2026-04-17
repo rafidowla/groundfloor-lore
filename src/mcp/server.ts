@@ -1655,6 +1655,32 @@ async function main(): Promise<void> {
                         const cfg = configManager.read();
                         const key = await getApiKey(cfg.llmProvider);
                         write({ type: 'start', provider: cfg.llmProvider });
+
+                        // Phase 3 "focus" fallback: before streaming, regex-match
+                        // message tokens against existing node labels. Any hit
+                        // gets emitted as a focus event so the UI can pan the
+                        // camera while the LLM is still generating.
+                        try {
+                            const topology = await graph.getTopology(500);
+                            const tokens = message
+                                .toLowerCase()
+                                .split(/[^a-z0-9_\-:]+/i)
+                                .filter((t) => t.length >= 4);
+                            const matches: string[] = [];
+                            for (const node of topology.nodes) {
+                                const label = (node.label ?? node.id).toLowerCase();
+                                if (tokens.some((tok) => label.includes(tok))) {
+                                    matches.push(node.id);
+                                    if (matches.length >= 3) break; // cap
+                                }
+                            }
+                            if (matches.length > 0) {
+                                write({ type: 'focus', nodeId: matches[0], matches });
+                            }
+                        } catch {
+                            // Focus fallback is best-effort; failure must not kill the chat.
+                        }
+
                         for await (const chunk of llmStream(cfg.llmProvider, message, key)) {
                             if (chunk.kind === 'token' && chunk.content) {
                                 write({ type: 'token', content: chunk.content });

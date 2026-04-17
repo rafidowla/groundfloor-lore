@@ -170,9 +170,10 @@ function drawHover(
 
 interface GraphLoaderProps {
     onStatsReady: (stats: { nodes: number; edges: number }) => void;
+    onTopologyReady?: (topology: { nodes: Array<{ id: string; type: string; project?: string; label?: string }> }) => void;
 }
 
-const GraphLoader = ({ onStatsReady }: GraphLoaderProps) => {
+const GraphLoader = ({ onStatsReady, onTopologyReady }: GraphLoaderProps) => {
     const loadGraph = useLoadGraph();
     const sigma = useSigma();
 
@@ -184,6 +185,7 @@ const GraphLoader = ({ onStatsReady }: GraphLoaderProps) => {
                 const response = await fetch('/api/topology');
                 const data = await response.json();
                 if (!active) return;
+                if (onTopologyReady) onTopologyReady({ nodes: data.nodes ?? [] });
 
                 const graph = new Graph();
 
@@ -234,17 +236,24 @@ const GraphLoader = ({ onStatsReady }: GraphLoaderProps) => {
                     graph.setNodeAttribute(nodeId, 'size', nodeSize);
                 });
 
-                // ── ForceAtlas2 layout ──
+                // ── ForceAtlas2 layout — capped at 2000 iterations OR 3s ──
+                // Phase 3 performance ceiling (docs/V2_implementation_plan.md).
+                // forceAtlas2.assign() is synchronous; we approximate the
+                // 3s wall-clock cap by chunking into slices of 100 iterations
+                // and breaking early when the clock runs out.
                 const fa2Settings = forceAtlas2.inferSettings(graph);
-                forceAtlas2.assign(graph, {
-                    iterations: 200,
-                    settings: {
-                        ...fa2Settings,
-                        gravity: 0.05,
-                        scalingRatio: 8,
-                        barnesHutOptimize: true,
-                    },
-                });
+                const settings = {
+                    ...fa2Settings,
+                    gravity: 0.05,
+                    scalingRatio: 8,
+                    barnesHutOptimize: true,
+                } as const;
+                const deadline = Date.now() + 3000;
+                let iterationsDone = 0;
+                while (iterationsDone < 2000 && Date.now() < deadline) {
+                    forceAtlas2.assign(graph, { iterations: 100, settings });
+                    iterationsDone += 100;
+                }
 
                 loadGraph(graph);
 
@@ -494,9 +503,89 @@ function Legend() {
     );
 }
 
+/* ─── Phase 3: Filter + Camera effect components ──────────────── */
+
+interface FilterEffectProps {
+    activeTypes: Set<string> | null;
+    activeProjects: Set<string> | null;
+}
+
+/**
+ * FilterEffect — Applies the right-panel filter state via Sigma's
+ * nodeReducer. An empty set for any filter dimension means "nothing
+ * selected", which visually dims all non-matching nodes to ~15% alpha.
+ * `null` means "filter not configured; show everything".
+ */
+const FilterEffect = ({ activeTypes, activeProjects }: FilterEffectProps) => {
+    const sigma = useSigma();
+
+    useEffect(() => {
+        sigma.setSetting('nodeReducer', (_nodeId: string, data: Record<string, any>) => {
+            const t = data.tag as string;
+            const c = data.clusterLabel as string;
+            const dimType = activeTypes !== null && !activeTypes.has(t);
+            const dimProj = activeProjects !== null && !activeProjects.has(c);
+            if (dimType || dimProj) {
+                return { ...data, color: '#cbd5e188', label: '', zIndex: 0 };
+            }
+            return data;
+        });
+        sigma.refresh();
+    }, [sigma, activeTypes, activeProjects]);
+
+    return null;
+};
+
+interface CameraEffectProps {
+    focusNodeId: string | null;
+}
+
+/**
+ * CameraEffect — Smoothly animates the camera to a target node whenever
+ * the incoming focusNodeId changes. Gracefully no-ops on unknown IDs
+ * (per Phase 3 fallback "NodeId not in current graph → silently ignored").
+ * Pauses user-initiated pans for 3s before restoring auto-focus behavior.
+ */
+const CameraEffect = ({ focusNodeId }: CameraEffectProps) => {
+    const sigma = useSigma();
+    const pauseUntilRef = useRef<number>(0);
+    const registerEvents = useRegisterEvents();
+
+    // Detect user pans; pause auto-follow for 3s.
+    useEffect(() => {
+        registerEvents({
+            mousedown: () => { pauseUntilRef.current = Date.now() + 3000; },
+            wheel: () => { pauseUntilRef.current = Date.now() + 3000; },
+        });
+    }, [registerEvents]);
+
+    useEffect(() => {
+        if (!focusNodeId) return;
+        if (Date.now() < pauseUntilRef.current) return;
+        const graph = sigma.getGraph();
+        if (!graph.hasNode(focusNodeId)) return;
+        const { x, y } = graph.getNodeAttributes(focusNodeId) as { x: number; y: number };
+        sigma.getCamera().animate({ x, y, ratio: 0.35 }, { duration: 600 });
+    }, [sigma, focusNodeId]);
+
+    return null;
+};
+
 /* ─── Main export ──────────────────────────────────────────────── */
 
-export default function SigmaCanvas() {
+interface SigmaCanvasProps {
+    activeTypes?: Set<string> | null;
+    activeProjects?: Set<string> | null;
+    focusNodeId?: string | null;
+    onTopologyReady?: (topology: { nodes: Array<{ id: string; type: string; project?: string; label?: string }> }) => void;
+}
+
+export default function SigmaCanvas({
+    activeTypes = null,
+    activeProjects = null,
+    focusNodeId = null,
+    onTopologyReady,
+}: SigmaCanvasProps) {
     const [stats, setStats] = useState<{ nodes: number; edges: number } | null>(null);
 
     const handleStatsReady = useCallback((newStats: { nodes: number; edges: number }) => {
@@ -521,9 +610,11 @@ export default function SigmaCanvas() {
                     defaultDrawNodeHover: drawHover as any,
                 }}
             >
-                <GraphLoader onStatsReady={handleStatsReady} />
+                <GraphLoader onStatsReady={handleStatsReady} onTopologyReady={onTopologyReady} />
                 <DragEvents />
                 <HoverHighlight />
+                <FilterEffect activeTypes={activeTypes} activeProjects={activeProjects} />
+                <CameraEffect focusNodeId={focusNodeId} />
                 <CustomZoomControls />
             </SigmaContainer>
 

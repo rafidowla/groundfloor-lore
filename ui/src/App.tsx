@@ -2,7 +2,15 @@ import { useEffect, useRef, useState } from 'react';
 import { Settings, MessageSquare, Network, Moon, Sun } from 'lucide-react';
 import GraphCanvas from './components/GraphCanvas';
 import SigmaCanvas from './components/SigmaCanvas';
+import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import './App.css';
+
+// Mode → default filter preset. Matches the plugin's uiHints.defaultFilterTypes
+// on the backend (src/plugins/developer/index.ts). "all" = pass-through.
+const MODE_FILTER_PRESETS: Record<string, string[] | null> = {
+  all: null,
+  developer: ['decision', 'convention', 'bug_pattern', 'code_symbol', 'architecture', 'troubleshooting'],
+};
 
 // Backend daemon base URL. The MCP server listens on 127.0.0.1:3847 in --http mode.
 const API_BASE = (import.meta as unknown as { env?: { VITE_LORE_API?: string } }).env?.VITE_LORE_API ?? 'http://127.0.0.1:3847';
@@ -107,6 +115,14 @@ function App() {
   const [lastExtract, setLastExtract] = useState<ExtractResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Phase 3: filter state for the right panel, topology for populating
+  // the filter buckets, focusNodeId driven by SSE `focus` events.
+  const [topology, setTopology] = useState<TopologyLike | null>(null);
+  const [activeTypes, setActiveTypes] = useState<Set<string> | null>(null);
+  const [activeProjects, setActiveProjects] = useState<Set<string> | null>(null);
+  const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
+  const focusCoalesceRef = useRef<number | null>(null);
+
   // ── Initial load: fetch /api/health + /api/config ────────────────
   useEffect(() => {
     void (async () => {
@@ -132,6 +148,38 @@ function App() {
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Phase 3: when the mode pill changes, apply that plugin's default
+  // filter preset. Users can still toggle individual types after.
+  useEffect(() => {
+    const preset = MODE_FILTER_PRESETS[activeMode] ?? null;
+    if (preset) {
+      setActiveTypes(new Set(preset));
+    } else if (topology) {
+      // "all" mode: everything checked.
+      const all = new Set(topology.nodes.map((n) => n.type).filter(Boolean));
+      setActiveTypes(all);
+    } else {
+      setActiveTypes(null);
+    }
+  }, [activeMode, topology]);
+
+  // Keep project filter aligned with topology: default = all checked.
+  useEffect(() => {
+    if (topology && activeProjects === null) {
+      const all = new Set(topology.nodes.map((n) => n.project ?? 'Global'));
+      setActiveProjects(all);
+    }
+  }, [topology, activeProjects]);
+
+  // Coalesce rapid focus requests (<200ms) to the last one only.
+  const requestFocus = (nodeId: string): void => {
+    if (focusCoalesceRef.current) window.clearTimeout(focusCoalesceRef.current);
+    focusCoalesceRef.current = window.setTimeout(() => {
+      setFocusNodeId(nodeId);
+      focusCoalesceRef.current = null;
+    }, 200);
+  };
 
   // Cmd/Ctrl+1..9 cycles through Mode pills (All, then active plugins in order).
   useEffect(() => {
@@ -291,9 +339,15 @@ function App() {
           for (const line of frame.split('\n')) {
             if (!line.startsWith('data: ')) continue;
             try {
-              const evt = JSON.parse(line.slice(6)) as { type: string; content?: string; message?: string };
-              if (evt.type === 'token' && evt.content) {
+              const evt = JSON.parse(line.slice(6)) as { type: string; content?: string; message?: string; nodeId?: string };
+              if (evt.type === 'focus' && evt.nodeId) {
+                requestFocus(evt.nodeId);
+              } else if (evt.type === 'token' && evt.content) {
                 setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: msg.text + evt.content } : msg)));
+                // Phase 3: parse bracketed [node:ID] markers in the stream
+                // so an LLM that emits them directly still triggers a pan.
+                const nodeMatch = /\[node:([\w\-.:]+)\]/i.exec(evt.content ?? '');
+                if (nodeMatch) requestFocus(nodeMatch[1]);
               } else if (evt.type === 'error') {
                 gotError = true;
                 setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: evt.message ?? 'error', error: true, streaming: false } : msg)));
@@ -441,7 +495,16 @@ function App() {
           </div>
         ) : null}
 
-        {useSigmaEngine ? <SigmaCanvas /> : <GraphCanvas />}
+        {useSigmaEngine ? (
+          <SigmaCanvas
+            activeTypes={activeTypes}
+            activeProjects={activeProjects}
+            focusNodeId={focusNodeId}
+            onTopologyReady={(t) => setTopology(t)}
+          />
+        ) : (
+          <GraphCanvas />
+        )}
 
         {/* Dynamic Settings Sidebar (Slide-over) */}
         {showSettings && (
@@ -619,6 +682,15 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* Phase 3: Right panel — filters driven by /api/topology */}
+      <FiltersPanel
+        topology={topology}
+        activeTypes={activeTypes ?? new Set()}
+        setActiveTypes={(next) => setActiveTypes(next)}
+        activeProjects={activeProjects ?? new Set()}
+        setActiveProjects={(next) => setActiveProjects(next)}
+      />
     </div>
   );
 }
