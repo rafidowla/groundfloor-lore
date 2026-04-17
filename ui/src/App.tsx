@@ -28,7 +28,25 @@ interface ConfigResponse {
   llmProvider: LlmProvider;
   workspaceAccount: string;
   hasApiKey: boolean;
-  capability: { provider: string; model: string; acceptsText: boolean; acceptsImages: boolean };
+  extractionPath?: 'local-byok' | 'def-cloud';
+  telemetryOptOut?: boolean;
+  capability: {
+    provider: string;
+    model: string;
+    acceptsText: boolean;
+    acceptsImages: boolean;
+    acceptedMimeTypes: string[];
+  };
+}
+
+interface ExtractResult {
+  accepted: boolean;
+  status?: number;
+  filename: string;
+  mimeType: string;
+  reason?: string;
+  plan?: { kind: string; chunks?: number; preview?: string };
+  acceptedMimeTypes?: string[];
 }
 
 interface ChatMessage {
@@ -37,6 +55,23 @@ interface ChatMessage {
   text: string;
   streaming?: boolean;
   error?: boolean;
+}
+
+/** Read a File object as base64 without the data: URL prefix. */
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== 'string') {
+        reject(new Error('Expected base64 string'));
+        return;
+      }
+      resolve(result.split(',')[1] ?? '');
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('FileReader error'));
+    reader.readAsDataURL(file);
+  });
 }
 
 function App() {
@@ -64,6 +99,14 @@ function App() {
   const [activeMode, setActiveMode] = useState<string>('all');
   const [workspaceToast, setWorkspaceToast] = useState<string | null>(null);
 
+  // Phase 2: Dual-path extraction settings + last upload result (rendered
+  // beneath the file input so the user sees what the server decided).
+  const [extractionPath, setExtractionPath] = useState<'local-byok' | 'def-cloud'>('local-byok');
+  const [telemetryOptOut, setTelemetryOptOut] = useState(false);
+  const [capability, setCapability] = useState<ConfigResponse['capability'] | null>(null);
+  const [lastExtract, setLastExtract] = useState<ExtractResult | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   // ── Initial load: fetch /api/health + /api/config ────────────────
   useEffect(() => {
     void (async () => {
@@ -77,6 +120,9 @@ function App() {
         setWorkspaceAccount(c.workspaceAccount);
         setHasApiKey(c.hasApiKey);
         setActiveMode(c.defaultMode || 'all');
+        setExtractionPath(c.extractionPath ?? 'local-byok');
+        setTelemetryOptOut(Boolean(c.telemetryOptOut));
+        setCapability(c.capability);
       } catch (err) {
         setHealthError((err as Error).message);
       }
@@ -125,6 +171,7 @@ function App() {
       if (resp.ok) {
         const next = (await resp.json()) as ConfigResponse;
         setHasApiKey(next.hasApiKey);
+        setCapability(next.capability);
       }
     } catch (err) {
       console.error('config patch failed:', err);
@@ -144,6 +191,39 @@ function App() {
     // knows the daemon still serves the prior workspace until reboot.
     setWorkspaceToast(`Workspace switched to "${account}" — restart the Lore daemon to apply.`);
     window.setTimeout(() => setWorkspaceToast(null), 6000);
+  };
+
+  // ── Phase 2: file ingestion via /api/extract ────────────────────
+  const triggerFilePicker = (): void => {
+    fileInputRef.current?.click();
+  };
+
+  const onFileSelected = async (file: File): Promise<void> => {
+    const isText = file.type.startsWith('text/') || /\.(md|txt)$/i.test(file.name);
+    const content = isText ? await file.text() : await readFileAsBase64(file);
+    const mimeType = file.type || (isText ? 'text/plain' : 'application/octet-stream');
+
+    try {
+      const resp = await fetch(`${API_BASE}/api/extract`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: file.name,
+          mimeType,
+          content,
+          encoding: isText ? 'utf8' : 'base64',
+        }),
+      });
+      const body = (await resp.json()) as ExtractResult;
+      setLastExtract({ ...body, status: resp.status });
+    } catch (err) {
+      setLastExtract({
+        accepted: false,
+        filename: file.name,
+        mimeType,
+        reason: `Upload failed: ${(err as Error).message}`,
+      });
+    }
   };
 
   const resolveOrphan = async (plugin: string, decision: OrphanDecision): Promise<void> => {
@@ -431,6 +511,106 @@ function App() {
                   Keep your lore local, or log in to sync with an enterprise Dataplane.
                 </p>
               </div>
+            </div>
+
+            {/* Phase 2: Extraction Path (BYOK / greyed DEF Cloud) */}
+            <div className="setting-group">
+              <label>Extraction Path</label>
+              <div className="radio-group">
+                <label className="radio-option">
+                  <input
+                    type="radio"
+                    name="extractionPath"
+                    value="local-byok"
+                    checked={extractionPath === 'local-byok'}
+                    onChange={() => {
+                      setExtractionPath('local-byok');
+                      void patchConfig({ extractionPath: 'local-byok' });
+                    }}
+                  />
+                  <span>
+                    <strong>Local BYOK</strong>
+                    <small>Your LLM handles everything. Graph stays on disk.</small>
+                  </span>
+                </label>
+                <label className="radio-option disabled" title="Requires Groundfloor Cloud sign-in (coming soon)">
+                  <input type="radio" name="extractionPath" value="def-cloud" disabled />
+                  <span>
+                    <strong>Groundfloor DEF (Cloud)</strong>
+                    <small>Requires Groundfloor Cloud sign-in (coming soon)</small>
+                  </span>
+                </label>
+              </div>
+            </div>
+
+            {/* Phase 2: Active Plugins read-out */}
+            <div className="setting-group">
+              <label>Active Plugins</label>
+              <div className="plugins-list">
+                {(health?.activePlugins ?? []).map((p) => (
+                  <span key={p} className="plugin-badge">{p}</span>
+                ))}
+                {(health?.activePlugins.length ?? 0) === 0 ? (
+                  <span className="help-text">No plugins active — edit .lore/config.json</span>
+                ) : null}
+              </div>
+              <p className="help-text">
+                Change by editing <code>.lore/config.json</code> and restarting the daemon.
+              </p>
+            </div>
+
+            {/* Phase 2: Ingest File (BYOK) */}
+            <div className="setting-group">
+              <label>Ingest File (BYOK)</label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void onFileSelected(f);
+                  if (fileInputRef.current) fileInputRef.current.value = '';
+                }}
+              />
+              <button className="theme-toggle" onClick={triggerFilePicker}>
+                <span>Choose a file…</span>
+              </button>
+              {capability ? (
+                <p className="help-text">
+                  Accepted by <code>{capability.model}</code>: {capability.acceptedMimeTypes.join(', ')}
+                </p>
+              ) : null}
+              {lastExtract ? (
+                <div className={`extract-result${lastExtract.accepted ? ' ok' : ' err'}`}>
+                  <strong>{lastExtract.accepted ? '✓ Accepted' : '✗ Rejected'}</strong> {lastExtract.filename}
+                  {lastExtract.reason ? <div className="help-text">{lastExtract.reason}</div> : null}
+                  {lastExtract.plan?.preview ? (
+                    <div className="help-text" style={{ marginTop: '0.25rem' }}>
+                      {lastExtract.plan.chunks ? `${lastExtract.plan.chunks} chunk(s) — ` : ''}
+                      {lastExtract.plan.preview}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            {/* Phase 2: Telemetry opt-out (stub, Phase 4 consumes it) */}
+            <div className="setting-group">
+              <label>Telemetry</label>
+              <label className="toggle-switch">
+                <input
+                  type="checkbox"
+                  checked={telemetryOptOut}
+                  onChange={(e) => {
+                    setTelemetryOptOut(e.target.checked);
+                    void patchConfig({ telemetryOptOut: e.target.checked });
+                  }}
+                />
+                <span>Opt out of Dataplane health-ping</span>
+              </label>
+              <p className="help-text">
+                Persisted today; Phase 4 will honor this at boot.
+              </p>
             </div>
 
             <button className="icon-button close-settings" onClick={() => setShowSettings(false)}>

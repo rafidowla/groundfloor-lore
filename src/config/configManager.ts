@@ -44,6 +44,20 @@ export interface LoreConfig {
      * Written at the end of each successful boot.
      */
     plugins_last_boot?: string[];
+
+    /**
+     * Phase 2: Dual-path extraction routing. "local-byok" is the only
+     * wired path; "def-cloud" is reserved and surfaced in Settings as
+     * a greyed-out radio until the Groundfloor sign-in workflow ships.
+     */
+    extractionPath?: 'local-byok' | 'def-cloud';
+
+    /**
+     * Phase 2 / Phase 4: When true, Lore suppresses the Dataplane
+     * telemetry health-ping. Stub today — the ping is not yet wired —
+     * but persisted so Phase 4 can honor it on first implementation.
+     */
+    telemetryOptOut?: boolean;
 }
 
 export const DEFAULT_CONFIG: LoreConfig = {
@@ -52,6 +66,8 @@ export const DEFAULT_CONFIG: LoreConfig = {
     defaultMode: 'developer',
     llmProvider: 'anthropic',
     workspaceAccount: 'local',
+    extractionPath: 'local-byok',
+    telemetryOptOut: false,
 };
 
 export class ConfigManager {
@@ -100,6 +116,8 @@ export class ConfigManager {
             'pluginConfig',
             'plugin_history',
             'plugins_last_boot',
+            'extractionPath',
+            'telemetryOptOut',
         ];
         const next: LoreConfig = { ...current };
         for (const key of allowed) {

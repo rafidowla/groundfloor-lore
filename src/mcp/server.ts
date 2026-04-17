@@ -42,6 +42,7 @@ import { SchemaLoader } from '../schemas/loader.js';
 import { ConfigManager } from '../config/configManager.js';
 import { setApiKey, getApiKey, hasApiKey, deleteApiKey } from '../config/keychain.js';
 import { stream as llmStream, getCapability } from '../providers/llmDispatch.js';
+import { decide as decideExtraction, type ExtractPayload } from '../providers/extractRouter.js';
 import { PluginRegistry } from '../plugins/registry.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
@@ -1576,6 +1577,40 @@ async function main(): Promise<void> {
                         const hasKey = await hasApiKey(next.llmProvider);
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ ...next, hasApiKey: hasKey, capability: getCapability(next.llmProvider) }));
+                    } catch (err) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            // File extraction gate (Phase 2). The server reads the LIVE
+            // capability manifest of the configured LLM and either accepts
+            // + returns a chunking/caption plan (202), or rejects with the
+            // accepted-types list (415). BYOK only — DEF Cloud path is
+            // greyed out in UI until the Groundfloor sign-in workflow ships.
+            if (url === '/api/extract' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', () => {
+                    try {
+                        const payload = JSON.parse(body || '{}') as Partial<ExtractPayload>;
+                        if (!payload.filename || !payload.mimeType || payload.content === undefined) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'filename, mimeType, content required' }));
+                            return;
+                        }
+                        const cfg = configManager.read();
+                        const cap = getCapability(cfg.llmProvider);
+                        const decision = decideExtraction(payload as ExtractPayload, cap);
+                        res.writeHead(decision.status, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            accepted: decision.accepted,
+                            provider: cfg.llmProvider,
+                            capability: cap,
+                            ...decision.body,
+                        }));
                     } catch (err) {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: (err as Error).message }));

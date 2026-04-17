@@ -363,3 +363,79 @@
   border-color: #ef4444 !important;
   background: rgba(239, 68, 68, 0.08) !important;
 }
+
+/* ─── Phase 2: Extraction Path radios + plugin badges ──────────── */
+.radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.radio-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  padding: 0.6rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background-color 120ms;
+}
+
+.radio-option:hover:not(.disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.radio-option.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.radio-option input[type="radio"] {
+  margin-top: 0.2rem;
+}
+
+.radio-option span {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.85rem;
+}
+
+.radio-option small {
+  color: var(--color-text-muted);
+  font-size: 0.7rem;
+  margin-top: 0.15rem;
+}
+
+.plugins-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.plugin-badge {
+  padding: 0.2rem 0.6rem;
+  font-size: 0.75rem;
+  color: var(--color-bg);
+  background: var(--color-accent, #14b8a6);
+  border-radius: 999px;
+}
+
+.extract-result {
+  margin-top: 0.6rem;
+  padding: 0.6rem;
+  font-size: 0.8rem;
+  border-radius: 6px;
+  border: 1px solid var(--color-border);
+}
+
+.extract-result.ok {
+  border-color: #10b981;
+  background: rgba(16, 185, 129, 0.08);
+}
+
+.extract-result.err {
+  border-color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+}
