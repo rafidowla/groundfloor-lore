@@ -31,14 +31,14 @@ import { z } from 'zod';
 import { LocalGraph, type LoreNode } from '../engines/localGraph.js';
 import { VerbatimStore, buildVerbatimText } from '../engines/verbatimStore.js';
 import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
-import { SurrealAdapter } from '../engines/surrealAdapter.js';
+import { TsSdkAdapter } from '../engines/tsSdkAdapter.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { proxyQuery, proxyContext, proxyImpact, proxyCypher } from './gitnexusProxy.js';
 import { detectChanges, rename, listRepos, formatReposMarkdown } from './nativeTools.js';
-
+import { SchemaLoader } from '../schemas/loader.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -122,55 +122,35 @@ function resolveGraphPath(): string {
 
 const detectedScope = resolveProjectScope();
 const graphBasePath = resolveGraphPath();
+
+const schemaLoader = new SchemaLoader(graphBasePath);
+const domainSchema = schemaLoader.get();
+const nodeTypesEnum = z.enum(domainSchema.nodeTypes as [string, ...string[]]);
+const edgeRelationsEnum = z.enum(domainSchema.edgeRelations as [string, ...string[]]);
+
 const graph = new LocalGraph(graphBasePath);
 const verbatimStore = new VerbatimStore(graphBasePath);
 const loreDir = path.join(graphBasePath, '.lore');
 
 /**
- * resolveSyncAdapter — Auto-detect SurrealDB and create an adapter.
+ * resolveSyncAdapter — Auto-detect Dataplane API keys and create a TS-SDK adapter.
  *
  * Priority:
- *   1. SURREAL_URL + SURREAL_PASS env vars (explicit config)
- *   2. Fallback to localhost:8000 with password from infra/surrealdb/.env
- *   3. Returns null if no credentials found (offline mode)
+ *   1. DATAPLANE_URL + DATAPLANE_API_KEY env vars
+ *   2. Returns null if no credentials found (offline mode)
  *
- * Side Effects: Reads env vars and optionally infra/.env file.
+ * Side Effects: Reads env vars.
  * Determinism: Deterministic for a given environment.
  */
-function resolveSyncAdapter(): SurrealAdapter | null {
-    let url = process.env['SURREAL_URL'];
-    const username = process.env['SURREAL_USER'] ?? 'root';
-    const orgId = process.env['SURREAL_ORG_ID'] ?? 'default';
-    const namespace = process.env['SURREAL_NAMESPACE'] ?? 'groundfloor';
-    const database = process.env['SURREAL_DATABASE'] ?? 'lore';
+function resolveSyncAdapter(): TsSdkAdapter | null {
+    let baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
+    const apiKey = process.env['DATAPLANE_API_KEY'];
+    const tenantId = process.env['DATAPLANE_TENANT_ID'] ?? 'groundfloor_lore';
+    const orgId = process.env['DATAPLANE_ORG_ID'] ?? 'default';
 
-    // Check env var first, then try local infra/.env
-    let password = process.env['SURREAL_PASS'];
-    if (!password) {
-        try {
-            const envPath = path.join(graphBasePath, 'infra', 'surrealdb', '.env');
-            const envContent = fs.readFileSync(envPath, 'utf-8');
+    if (!apiKey) return null;
 
-            // Parse all key=value pairs from .env
-            const passMatch = envContent.match(/SURREAL_ROOT_PASS=(.+)/);
-            if (passMatch) {
-                password = passMatch[1].trim();
-            }
-            if (!url) {
-                const urlMatch = envContent.match(/SURREAL_URL=(.+)/);
-                if (urlMatch) {
-                    url = urlMatch[1].trim();
-                }
-            }
-        } catch {
-            // No local .env — stay offline
-        }
-    }
-
-    if (!password) return null;
-    if (!url) url = 'ws://127.0.0.1:8001/rpc';
-
-    return new SurrealAdapter({ url, namespace, database, username, password, orgId });
+    return new TsSdkAdapter({ baseUrl, apiKey, tenantId, orgId });
 }
 
 const adapter = resolveSyncAdapter();
@@ -200,11 +180,10 @@ function createMcpServer(): McpServer {
 
 mcpServer.tool(
     'store_node',
-    'Create or update a knowledge node (decision, convention, bug pattern, etc.)',
+    `Create or update a knowledge node within the ${domainSchema.domain} domain`,
     {
         id: z.string().describe('Unique identifier (e.g., "baas-body-stream-fix")'),
-        type: z.enum(['decision', 'convention', 'bug_pattern', 'file_ref', 'architecture', 'troubleshooting', 'note', 'schema'])
-            .describe('Node type'),
+        type: nodeTypesEnum.describe(`Node type (options: ${domainSchema.nodeTypes.join(', ')})`),
         label: z.string().describe('Human-readable title'),
         content: z.string().optional().describe('Full text content'),
         tags: z.string().optional().describe('Comma-separated tags (e.g., "platform,baasclient,error-handling")'),
@@ -264,8 +243,7 @@ mcpServer.tool(
     {
         sourceId: z.string().describe('Source node ID'),
         targetId: z.string().describe('Target node ID'),
-        relation: z.enum(['decided_for', 'caused_by', 'applies_to', 'fixed_by', 'supersedes', 'related_to', 'depends_on'])
-            .describe('Relationship type'),
+        relation: edgeRelationsEnum.describe(`Relationship type (options: ${domainSchema.edgeRelations.join(', ')})`),
         bidirectional: z.boolean().optional().describe('Create edge in both directions (default: true)'),
     },
     async ({ sourceId, targetId, relation, bidirectional }) => {
@@ -520,8 +498,7 @@ mcpServer.tool(
     'list_nodes',
     'List all knowledge nodes, optionally filtered by type or tag',
     {
-        type: z.enum(['decision', 'convention', 'bug_pattern', 'file_ref', 'architecture', 'troubleshooting', 'note', 'schema'])
-            .optional().describe('Filter by node type'),
+        type: nodeTypesEnum.optional().describe('Filter by node type'),
         tag: z.string().optional().describe('Filter by tag'),
     },
     async ({ type, tag }) => {
@@ -644,8 +621,8 @@ mcpServer.tool(
                     content: [{
                         type: 'text' as const,
                         text: JSON.stringify({
-                            message: 'No remote sync adapter configured — team awareness requires a shared backend (SurrealDB).',
-                            hint: 'Configure SURREAL_URL, SURREAL_USER, SURREAL_PASS environment variables to enable team sync.',
+                            message: 'No remote sync adapter configured — team awareness requires a shared backend (Groundfloor Dataplane).',
+                            hint: 'Configure DATAPLANE_URL, DATAPLANE_API_KEY, DATAPLANE_TENANT_ID environment variables to enable team sync.',
                             localStatus: {
                                 walPending: syncStatus.walPending,
                                 lastSync: syncStatus.lastSync,

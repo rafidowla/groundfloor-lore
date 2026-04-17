@@ -1,0 +1,11 @@
+{
+    "nodes": [
+        {"id": "sys_main", "type": "architecture", "label": "Main System", "project": "core"},
+        {"id": "feat_auth", "type": "convention", "label": "Authentication", "project": "core"},
+        {"id": "doc_api", "type": "schema", "label": "API Spec", "project": "docs"}
+    ],
+    "edges": [
+        {"from": "feat_auth", "to": "sys_main", "label": "depends_on"},
+        {"from": "doc_api", "to": "sys_main", "label": "documents"}
+    ]
+}

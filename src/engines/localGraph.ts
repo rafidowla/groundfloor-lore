@@ -31,47 +31,12 @@ import { Database, Connection, type QueryResult } from '@kineviz/kuzu-lite';
 import path from 'path';
 import fs from 'fs';
 
+import type { GraphProvider, LoreNode, LoreEdge, TraversalResult, GraphStats } from '../providers/types.js';
+export type { LoreNode, LoreEdge, TraversalResult, GraphStats };
+
 /* ─── Types ───────────────────────────────────────────────────── */
 
-/**
- * LoreNode — A knowledge node in the graph.
- *
- * Represents a discrete piece of institutional knowledge: a decision,
- * convention, bug pattern, architecture note, or file reference.
- */
-export interface LoreNode {
-    /** Unique identifier, e.g. "baas-body-stream-fix" */
-    id: string;
-    /** Node category */
-    type: 'decision' | 'convention' | 'bug_pattern' | 'file_ref' | 'architecture' | 'troubleshooting' | 'note' | 'schema';
-    /** Human-readable title */
-    label: string;
-    /** Full text content */
-    content: string;
-    /** Comma-separated tags */
-    tags: string;
-    /** Project scope (e.g., "groundfloor-v2.5") */
-    project: string;
-    /** Ecosystem scope (e.g., "groundfloor") */
-    ecosystem: string;
-    /** JSON metadata string */
-    metadata: string;
-    /** ISO 8601 timestamp */
-    createdAt: string;
-    /** ISO 8601 timestamp */
-    updatedAt: string;
-    /** ISO 8601 timestamp — NULL if not yet synced to hosted */
-    syncedAt: string | null;
-}
 
-/**
- * LoreEdge — A relationship between two knowledge nodes.
- */
-export interface LoreEdge {
-    sourceId: string;
-    targetId: string;
-    relation: string;
-}
 
 /**
  * CodeSymbol — A code element imported from GitNexus.
@@ -136,25 +101,7 @@ export interface DevActivity {
     tool: string;
 }
 
-/**
- * TraversalResult — A node discovered during graph traversal.
- */
-export interface TraversalResult {
-    node: LoreNode;
-    depth: number;
-    relation: string;
-}
 
-/**
- * GraphStats — Summary statistics for the local graph.
- */
-export interface GraphStats {
-    nodeCount: number;
-    edgeCount: number;
-    typeBreakdown: Record<string, number>;
-    codeSymbolCount: number;
-    codeRelationCount: number;
-}
 
 /**
  * LoreGraphError — Custom error for graph operations.
@@ -238,7 +185,7 @@ export class SessionCacheManager {
  * Concurrency: Single-writer. Multiple readers are safe.
  * Performance: All operations are local (<1ms for typical queries).
  */
-export class LocalGraph {
+export class LocalGraph implements GraphProvider {
     private database: Database;
     private connection: Connection;
     private graphPath: string;
@@ -289,6 +236,7 @@ export class LocalGraph {
                     createdAt STRING,
                     updatedAt STRING,
                     syncedAt STRING,
+                    security_scopes STRING[],
                     PRIMARY KEY (id)
                 )
             `);
@@ -356,6 +304,7 @@ export class LocalGraph {
             const migrations = [
                 `ALTER TABLE LoreNode ADD project STRING DEFAULT '*'`,
                 `ALTER TABLE LoreNode ADD ecosystem STRING DEFAULT '*'`,
+                `ALTER TABLE LoreNode ADD security_scopes STRING[] DEFAULT []`,
             ];
             for (const migration of migrations) {
                 try {
@@ -396,7 +345,7 @@ export class LocalGraph {
 
         try {
             if (existingNode) {
-                const stmt = await this.connection.prepare(
+                 const stmt = await this.connection.prepare(
                     `MATCH (n:LoreNode {id: $id})
                      SET n.type = $type,
                          n.label = $label,
@@ -406,7 +355,8 @@ export class LocalGraph {
                          n.ecosystem = $ecosystem,
                          n.metadata = $metadata,
                          n.updatedAt = $updatedAt,
-                         n.syncedAt = $syncedAt`,
+                         n.syncedAt = $syncedAt,
+                         n.security_scopes = $security_scopes`,
                 );
                 await this.connection.execute(stmt, {
                     id: nodeData.id,
@@ -419,6 +369,7 @@ export class LocalGraph {
                     metadata: nodeData.metadata,
                     updatedAt: now,
                     syncedAt: '',
+                    security_scopes: nodeData.security_scopes || [],
                 });
 
                 this.sessionCache.pushNode(nodeData.id);
@@ -430,7 +381,7 @@ export class LocalGraph {
                     syncedAt: null,
                 };
             } else {
-                const stmt = await this.connection.prepare(
+                 const stmt = await this.connection.prepare(
                     `CREATE (n:LoreNode {
                         id: $id,
                         type: $type,
@@ -442,7 +393,8 @@ export class LocalGraph {
                         metadata: $metadata,
                         createdAt: $createdAt,
                         updatedAt: $updatedAt,
-                        syncedAt: $syncedAt
+                        syncedAt: $syncedAt,
+                        security_scopes: $security_scopes
                     })`,
                 );
                 await this.connection.execute(stmt, {
@@ -457,6 +409,7 @@ export class LocalGraph {
                     createdAt: now,
                     updatedAt: now,
                     syncedAt: '',
+                    security_scopes: nodeData.security_scopes || [],
                 });
 
                 this.sessionCache.pushNode(nodeData.id);
@@ -990,6 +943,7 @@ export class LocalGraph {
             createdAt: (getValue('createdAt') as string) ?? '',
             updatedAt: (getValue('updatedAt') as string) ?? '',
             syncedAt: (getValue('syncedAt') as string) || null,
+            security_scopes: (getValue('security_scopes') as string[]) ?? [],
         };
     }
 
