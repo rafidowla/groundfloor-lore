@@ -171,6 +171,50 @@ const syncEngine = new SyncEngine(graph, loreDir, adapter);
 const wal = syncEngine.getWal();
 
 /**
+ * Phase 4: Lightweight Dataplane health-ping.
+ *
+ * Invariants:
+ *   - Fires exactly once at boot.
+ *   - Sends NO graph contents, NO node counts, NO user data. Just
+ *     "is the tenant reachable". Matches Non-Goal #4.
+ *   - Honors config.telemetryOptOut. When true, we skip the ping entirely
+ *     and treat dataplane as 'offline'.
+ *   - Failure is non-fatal. Airplane-mode boot must succeed even when
+ *     /etc/hosts points Dataplane at a black hole.
+ */
+type DataplaneState = 'unknown' | 'offline' | 'opted-out' | 'bound' | 'error';
+let dataplaneState: DataplaneState = 'unknown';
+
+async function fireBootHealthPing(): Promise<void> {
+    try {
+        const cfg = configManager.read();
+        if (cfg.telemetryOptOut) {
+            dataplaneState = 'opted-out';
+            console.error('[Lore MCP] Dataplane ping: opted-out (config.telemetryOptOut=true)');
+            return;
+        }
+        if (!adapter) {
+            dataplaneState = 'offline';
+            console.error('[Lore MCP] Dataplane ping: offline (no DATAPLANE_API_KEY env var)');
+            return;
+        }
+        await adapter.connect();
+        dataplaneState = 'bound';
+        console.error('[Lore MCP] Dataplane ping: bound');
+    } catch (err) {
+        dataplaneState = 'error';
+        console.error(`[Lore MCP] Dataplane ping: failed (${(err as Error).message}) — continuing offline`);
+    }
+}
+
+function getDataplaneState(): DataplaneState {
+    return dataplaneState;
+}
+
+// Fire the ping non-blockingly; server boot must not wait on it.
+void fireBootHealthPing();
+
+/**
  * createMcpServer — Factory function to create and configure an McpServer instance.
  *
  * Purpose:
@@ -1473,17 +1517,17 @@ async function main(): Promise<void> {
             if (url === '/api/health' && req.method === 'GET') {
                 try {
                     const cfg = configManager.read();
-                    const syncAdapter = resolveSyncAdapter();
                     const orphanState = pluginRegistry.getOrphanState();
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({
                         status: orphanState.blocking ? 'orphan_decision_required' : 'ok',
-                        version: '2.0.0-phase1',
+                        version: '2.0.0',
                         activePlugins: cfg.plugins,
                         defaultMode: cfg.defaultMode,
                         llmProvider: cfg.llmProvider,
                         workspaceAccount: cfg.workspaceAccount,
-                        dataplane: syncAdapter ? 'bound' : 'offline',
+                        dataplane: getDataplaneState(),
+                        telemetryOptOut: Boolean(cfg.telemetryOptOut),
                         sessions: activeSessions.size,
                         orphans: orphanState.orphans,
                     }));
