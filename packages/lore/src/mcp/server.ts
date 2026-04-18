@@ -1167,15 +1167,17 @@ async function main(): Promise<void> {
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
                     try {
-                        const { k, threshold, apply } = JSON.parse(body || '{}') as {
+                        const { k, threshold, apply, force } = JSON.parse(body || '{}') as {
                             k?: number;
                             threshold?: number;
                             apply?: boolean;
+                            force?: boolean;
                         };
                         const result = await reconnectGraph(graph, verbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
                             dryRun: !apply,
+                            force,
                         });
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify(result));
@@ -1197,15 +1199,17 @@ async function main(): Promise<void> {
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
                     try {
-                        const { k, threshold } = JSON.parse(body || '{}') as {
+                        const { k, threshold, force } = JSON.parse(body || '{}') as {
                             k?: number;
                             threshold?: number;
+                            force?: boolean;
                         };
                         const result = await reconnectGraph(graph, verbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
                             dryRun: false,
                             pruneInferred: true,
+                            force,
                         });
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify(result));

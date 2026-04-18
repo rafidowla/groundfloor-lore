@@ -49,6 +49,9 @@ const LORE_VERBATIM_SCHEMA = new Schema([
     new Field('ecosystem', new Utf8(), true),
     new Field('updatedAt', new Utf8(), true),
     new Field('security_scopes', new List(new Field('item', new Utf8(), true)), true),
+    // V2.1: content hash lets reconnect skip nodes whose text hasn't
+    // changed since the last embed. Cheap sha1-16 over the embed text.
+    new Field('contentHash', new Utf8(), true),
 ]);
 
 export class VerbatimStore implements VectorProvider {
@@ -100,7 +103,8 @@ export class VerbatimStore implements VectorProvider {
                 project: doc.metadata?.project || '',
                 ecosystem: doc.metadata?.ecosystem || '',
                 updatedAt: doc.metadata?.updatedAt || '',
-                security_scopes: doc.metadata?.security_scopes || []
+                security_scopes: doc.metadata?.security_scopes || [],
+                contentHash: (doc.metadata as { contentHash?: string })?.contentHash || '',
             };
 
             if (!this.table) {
@@ -155,6 +159,30 @@ export class VerbatimStore implements VectorProvider {
             }));
         } catch (error: any) {
             throw new VerbatimStoreError('search', error.message);
+        }
+    }
+
+    /**
+     * V2.1: getById — Return the stored metadata (without re-running the
+     * embedder) for a single id. Used by reconnectGraph's --only-changed
+     * path to skip nodes whose contentHash hasn't changed.
+     *
+     * Returns null if the row doesn't exist or the table hasn't been
+     * created yet.
+     */
+    async getById(id: string): Promise<{ contentHash?: string; text?: string } | null> {
+        try {
+            if (!this.initialized || !this.table) return null;
+            const rows = await this.table
+                .query()
+                .where(`id = '${id.replace(/'/g, "''")}'`)
+                .limit(1)
+                .toArray();
+            if (rows.length === 0) return null;
+            const r = rows[0] as { contentHash?: string; text?: string };
+            return { contentHash: r.contentHash ?? '', text: r.text ?? '' };
+        } catch {
+            return null;
         }
     }
 

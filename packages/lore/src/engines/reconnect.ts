@@ -19,6 +19,7 @@
  *      inferred edges, then we insert the fresh batch.
  */
 
+import { createHash } from 'node:crypto';
 import type { LocalGraph, LoreNode } from './localGraph.js';
 import type { VerbatimStore } from './verbatimStore.js';
 import { buildVerbatimText } from './verbatimStore.js';
@@ -28,11 +29,23 @@ import type { EmbeddableNode, PluginGraphContext } from '../plugins/types.js';
 const SEMANTIC_PREFIX = 'semantic_neighbor';
 const PREFIX_LORE = 'lore:';
 
+/** Cheap, short content hash used by the --only-changed skip path. */
+function contentHash(text: string): string {
+    return createHash('sha1').update(text).digest('hex').slice(0, 16);
+}
+
 export interface ReconnectOptions {
     k?: number;
     minSim?: number;
     dryRun?: boolean;
     pruneInferred?: boolean;
+    /**
+     * V2.1: force re-embedding every node even when its contentHash
+     * matches what's already stored. Default `false` — reconsume skips
+     * unchanged nodes. Pass `true` to nuke + rebuild the vector space
+     * (e.g. after upgrading the embedder or changing the prefix scheme).
+     */
+    force?: boolean;
 }
 
 export interface ReconnectProposal {
@@ -44,6 +57,8 @@ export interface ReconnectProposal {
 export interface ReconnectResult {
     candidatesScanned: number;
     embeddingsAdded: number;
+    /** How many nodes were skipped because their contentHash matched. */
+    embeddingsSkipped: number;
     proposedEdges: ReconnectProposal[];
     applied: boolean;
     /** Edges the core inserted into LoreEdge. */
@@ -85,12 +100,24 @@ export async function reconnectGraph(
     const pluginCtx: PluginGraphContext = graph.createPluginGraphContext();
 
     // 1. Embed every LoreNode with the canonical lore: prefix.
+    //    V2.1 --only-changed: skip nodes whose contentHash matches the
+    //    already-stored embedding. force=true rebuilds unconditionally.
     const loreNodes: LoreNode[] = await graph.listNodes();
     let embeddingsAdded = 0;
+    let embeddingsSkipped = 0;
+    const force = opts.force ?? false;
     for (const n of loreNodes) {
         const text = buildVerbatimText(n.label ?? '', n.content ?? '', n.tags ?? '');
         if (!text.trim()) continue;
         const prefixedId = PREFIX_LORE + n.id;
+        const hash = contentHash(text);
+        if (!force) {
+            const existing = await verbatim.getById(prefixedId);
+            if (existing && existing.contentHash === hash) {
+                embeddingsSkipped++;
+                continue;
+            }
+        }
         try { await verbatim.delete(prefixedId); } catch { /* ignore */ }
         await verbatim.store({
             id: prefixedId,
@@ -103,12 +130,16 @@ export async function reconnectGraph(
                 ecosystem: n.ecosystem ?? '',
                 updatedAt: n.updatedAt ?? '',
                 security_scopes: n.security_scopes ?? [],
-            },
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                contentHash: hash,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any,
         });
         embeddingsAdded++;
     }
 
     // 2. Ask each active plugin for its embeddable contributions.
+    //    Same contentHash skip applies to plugin-contributed nodes.
     let pluginNodes: EmbeddableNode[] = [];
     for (const plugin of pluginRegistry.active()) {
         if (typeof plugin.contributeReconnectNodes !== 'function') continue;
@@ -120,8 +151,21 @@ export async function reconnectGraph(
         }
     }
     for (const ebn of pluginNodes) {
+        const hash = contentHash(ebn.text);
+        if (!force) {
+            const existing = await verbatim.getById(ebn.id);
+            if (existing && existing.contentHash === hash) {
+                embeddingsSkipped++;
+                continue;
+            }
+        }
         try { await verbatim.delete(ebn.id); } catch { /* ignore */ }
-        await verbatim.store({ id: ebn.id, text: ebn.text, metadata: ebn.metadata });
+        await verbatim.store({
+            id: ebn.id,
+            text: ebn.text,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            metadata: { ...ebn.metadata, contentHash: hash } as any,
+        });
         embeddingsAdded++;
     }
 
@@ -169,6 +213,7 @@ export async function reconnectGraph(
         return {
             candidatesScanned: totalNodes,
             embeddingsAdded,
+            embeddingsSkipped,
             proposedEdges,
             applied: false,
             coreEdgesInserted: 0,
@@ -241,6 +286,7 @@ export async function reconnectGraph(
     return {
         candidatesScanned: totalNodes,
         embeddingsAdded,
+        embeddingsSkipped,
         proposedEdges,
         applied: true,
         coreEdgesInserted,

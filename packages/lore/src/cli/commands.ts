@@ -1324,6 +1324,7 @@ export async function reconnectCommand(args: string[]): Promise<void> {
     const { PluginRegistry } = await import('../plugins/registry.js');
 
     const apply = args.includes('--apply');
+    const force = args.includes('--force');
     const kIndex = args.indexOf('--k');
     const tIndex = args.indexOf('--threshold');
     const k = kIndex >= 0 ? parseInt(args[kIndex + 1], 10) : 5;
@@ -1339,10 +1340,10 @@ export async function reconnectCommand(args: string[]): Promise<void> {
     await registry.registerSchemas(graph.createPluginGraphContext());
 
     console.log('');
-    console.log(`  Reconnect pass — k=${k}, threshold=${threshold}, mode=${apply ? 'APPLY' : 'dry-run'}`);
-    const result = await reconnectGraph(graph, verbatim, registry, { k, minSim: threshold, dryRun: !apply });
+    console.log(`  Reconnect pass — k=${k}, threshold=${threshold}, mode=${apply ? 'APPLY' : 'dry-run'}${force ? ', force=true' : ''}`);
+    const result = await reconnectGraph(graph, verbatim, registry, { k, minSim: threshold, dryRun: !apply, force });
 
-    console.log(`  ✓ Scanned ${result.candidatesScanned} node(s); embeddings added: ${result.embeddingsAdded}`);
+    console.log(`  ✓ Scanned ${result.candidatesScanned} node(s); embeddings added: ${result.embeddingsAdded}, skipped (hash match): ${result.embeddingsSkipped}`);
     const buckets = Object.entries(result.distribution).sort((a, b) => Number(b[0]) - Number(a[0]));
     if (buckets.length) {
         console.log('  Similarity distribution (all neighbors, before threshold):');
