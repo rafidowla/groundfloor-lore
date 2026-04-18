@@ -64,7 +64,10 @@ export const DEFAULT_CONFIG: LoreConfig = {
     plugins: ['developer'],
     pluginConfig: {},
     defaultMode: 'developer',
-    llmProvider: 'anthropic',
+    // Default to the embedded Qwen 0.5B so a fresh install chats out of
+    // the box with no API keys or Ollama required. Users upgrade to
+    // Anthropic/OpenAI/Ollama from Settings once they have them.
+    llmProvider: 'embedded',
     workspaceAccount: 'local',
     extractionPath: 'local-byok',
     telemetryOptOut: false,

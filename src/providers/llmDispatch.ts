@@ -22,7 +22,7 @@
  * Determinism: Non-deterministic (LLM output).
  */
 
-export type LlmProvider = 'anthropic' | 'openai' | 'ollama' | string;
+export type LlmProvider = 'embedded' | 'anthropic' | 'openai' | 'ollama' | string;
 
 export interface LlmChunk {
     kind: 'token' | 'done' | 'error';
@@ -39,10 +39,19 @@ export interface LlmCapability {
 }
 
 const DEFAULT_MODELS: Record<string, string> = {
+    embedded: 'Xenova/Qwen1.5-0.5B-Chat',
     anthropic: 'claude-3-5-sonnet-latest',
     openai: 'gpt-4o-mini',
     ollama: 'llama3.2',
 };
+
+/**
+ * isEmbeddedCapable — True when the provider is "embedded" (built-in Qwen).
+ * Used by the UI to decide whether to show the upgrade nudge banner.
+ */
+export function isEmbeddedCapable(provider: LlmProvider): boolean {
+    return provider === 'embedded';
+}
 
 /**
  * getCapability — Returns the capability manifest for a provider/model.
@@ -54,6 +63,17 @@ const DEFAULT_MODELS: Record<string, string> = {
 export function getCapability(provider: LlmProvider, model?: string): LlmCapability {
     const resolvedModel = model ?? DEFAULT_MODELS[provider] ?? 'unknown';
     const lower = resolvedModel.toLowerCase();
+
+    // Embedded Qwen 0.5B is text-only; no image/audio capability.
+    if (provider === 'embedded') {
+        return {
+            provider,
+            model: resolvedModel,
+            acceptsText: true,
+            acceptsImages: false,
+            acceptedMimeTypes: ['text/plain', 'text/markdown'],
+        };
+    }
 
     // Multimodal families
     const multimodal =
@@ -88,6 +108,11 @@ export async function* stream(
     const resolvedModel = model ?? DEFAULT_MODELS[provider] ?? '';
 
     try {
+        if (provider === 'embedded') {
+            yield* streamEmbedded(message, resolvedModel);
+            return;
+        }
+
         if (provider === 'ollama') {
             yield* streamOllama(message, resolvedModel);
             return;
@@ -112,6 +137,97 @@ export async function* stream(
     } catch (err) {
         yield { kind: 'error', message: `LLM unreachable: ${(err as Error).message}` };
     }
+}
+
+/**
+ * streamEmbedded — Runs a built-in Qwen 0.5B through Transformers.js.
+ *
+ * First-run downloads ~500MB of ONNX weights to ~/.groundfloor/models/ (via
+ * env.cacheDir). Subsequent runs are cache hits. No network calls once
+ * cached — honors the offline-first ethos.
+ *
+ * Streaming: wraps Transformers.js's TextStreamer (which uses a callback
+ * per token) in a Promise-queue so we can yield AsyncGenerator frames.
+ *
+ * Quality note: Qwen-0.5B is usable for simple Q&A but won't hold a candle
+ * to Claude/GPT-4 class models. The UI surfaces a nudge banner whenever
+ * this provider is active so the user knows why answers feel thin.
+ */
+async function* streamEmbedded(message: string, model: string): AsyncGenerator<LlmChunk> {
+    // Queue-based async iterator over the streamer's sync callback.
+    const queue: string[] = [];
+    let streamingDone = false;
+    let streamingError: { message: string } | null = null;
+    let resolveNext: (() => void) | null = null;
+    const notify = (): void => {
+        const r = resolveNext;
+        resolveNext = null;
+        if (r) r();
+    };
+
+    const genPromise = (async () => {
+        try {
+            const transformers = await import('@xenova/transformers');
+            const { pipeline, env, TextStreamer } = transformers as unknown as {
+                pipeline: (task: string, model: string, opts?: Record<string, unknown>) => Promise<unknown>;
+                env: { cacheDir?: string; allowRemoteModels?: boolean };
+                TextStreamer: new (tokenizer: unknown, opts: Record<string, unknown>) => unknown;
+            };
+            const os = await import('node:os');
+            const path = await import('node:path');
+            env.cacheDir = path.join(os.homedir(), '.groundfloor', 'models');
+            env.allowRemoteModels = true;
+
+            console.error(`[llmDispatch] Loading embedded model ${model} (first run downloads to ${env.cacheDir})...`);
+            const generator = await pipeline('text-generation', model, { quantized: true }) as {
+                tokenizer: unknown;
+                (input: unknown, opts: Record<string, unknown>): Promise<unknown>;
+            };
+
+            const streamer = new TextStreamer(generator.tokenizer, {
+                skip_prompt: true,
+                skip_special_tokens: true,
+                callback_function: (text: string) => {
+                    if (text) {
+                        queue.push(text);
+                        notify();
+                    }
+                },
+            });
+
+            const prompt = [
+                { role: 'system', content: 'You are a concise assistant. Keep answers short.' },
+                { role: 'user', content: message },
+            ];
+            await generator(prompt, {
+                max_new_tokens: 256,
+                do_sample: false,
+                streamer,
+            });
+        } catch (err) {
+            streamingError = { message: (err as Error).message };
+        } finally {
+            streamingDone = true;
+            notify();
+        }
+    })();
+
+    while (!streamingDone || queue.length > 0) {
+        if (queue.length === 0 && !streamingDone) {
+            await new Promise<void>((r) => { resolveNext = r; });
+        }
+        while (queue.length > 0) {
+            yield { kind: 'token', content: queue.shift()! };
+        }
+    }
+    await genPromise;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const capturedError: any = streamingError;
+    if (capturedError && typeof capturedError.message === 'string') {
+        yield { kind: 'error', message: `Embedded model failed: ${capturedError.message}` };
+        return;
+    }
+    yield { kind: 'done' };
 }
 
 async function* streamOllama(message: string, model: string): AsyncGenerator<LlmChunk> {

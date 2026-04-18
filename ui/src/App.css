@@ -364,6 +364,16 @@
   background: rgba(239, 68, 68, 0.08) !important;
 }
 
+/* Embedded-Qwen nudge banner — informational, not error */
+.nudge-banner {
+  border-color: #f59e0b !important;
+  background: rgba(245, 158, 11, 0.08) !important;
+}
+
+.nudge-banner strong {
+  color: #f59e0b;
+}
+
 /* ─── Phase 2: Extraction Path radios + plugin badges ──────────── */
 .radio-group {
   display: flex;

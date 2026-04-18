@@ -17,7 +17,7 @@ const MODE_FILTER_PRESETS: Record<string, string[] | null> = {
 // to http://127.0.0.1:3847. Override with VITE_LORE_API for production.
 const API_BASE = (import.meta as unknown as { env?: { VITE_LORE_API?: string } }).env?.VITE_LORE_API ?? '';
 
-type LlmProvider = 'anthropic' | 'openai' | 'ollama';
+type LlmProvider = 'embedded' | 'anthropic' | 'openai' | 'ollama';
 
 interface HealthResponse {
   status: string;
@@ -90,7 +90,7 @@ function App() {
   const [useSigmaEngine, setUseSigmaEngine] = useState(true);
 
   // Config state (Phase 0 wiring)
-  const [llmProvider, setLlmProvider] = useState<LlmProvider>('anthropic');
+  const [llmProvider, setLlmProvider] = useState<LlmProvider>('embedded');
   const [apiKey, setApiKey] = useState('');
   const [workspaceAccount, setWorkspaceAccount] = useState('local');
   const [hasApiKey, setHasApiKey] = useState(false);
@@ -405,6 +405,15 @@ function App() {
             <div className={`chat-message ai-message glass-panel${healthError ? ' chat-error' : ''}`}>
               <p>{bannerText}</p>
             </div>
+            {llmProvider === 'embedded' ? (
+              <div className="chat-message ai-message glass-panel nudge-banner">
+                <p>
+                  ⚠ Using the built-in <strong>Qwen 0.5B</strong> — usable, but small. For better
+                  answers, add an API key (Anthropic / OpenAI) or switch to Ollama with a stronger
+                  local model in <em>Settings</em>.
+                </p>
+              </div>
+            ) : null}
             {messages.map((m) => (
               <div
                 key={m.id}
@@ -536,6 +545,7 @@ function App() {
                 value={llmProvider}
                 onChange={(e) => handleProviderChange(e.target.value as LlmProvider)}
               >
+                <option value="embedded">Built-in Qwen 0.5B (no setup)</option>
                 <option value="anthropic">Anthropic API (BYOK)</option>
                 <option value="openai">OpenAI API (BYOK)</option>
                 <option value="ollama">Local Ollama (localhost:11434)</option>
@@ -546,11 +556,17 @@ function App() {
               <label>API Key {hasApiKey ? <span className="pill-ok">stored</span> : null}</label>
               <input
                 type="password"
-                placeholder={llmProvider === 'ollama' ? 'Not required for Ollama' : 'sk-…'}
+                placeholder={
+                  llmProvider === 'ollama'
+                    ? 'Not required for Ollama'
+                    : llmProvider === 'embedded'
+                      ? 'Not required for built-in Qwen'
+                      : 'sk-…'
+                }
                 className="ui-input"
                 value={apiKey}
                 onChange={(e) => handleApiKeyChange(e.target.value)}
-                disabled={llmProvider === 'ollama'}
+                disabled={llmProvider === 'ollama' || llmProvider === 'embedded'}
                 autoComplete="off"
               />
               <p className="help-text" style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '0.25rem' }}>
