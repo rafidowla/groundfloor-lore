@@ -31,47 +31,15 @@ import { Database, Connection, type QueryResult } from '@kineviz/kuzu-lite';
 import path from 'path';
 import fs from 'fs';
 
+// inferLanguage moved to src/plugins/developer/operations.ts alongside
+// the CodeFile operations it supports.
+
+import type { GraphProvider, LoreNode, LoreEdge, TraversalResult, GraphStats } from '../providers/types.js';
+export type { LoreNode, LoreEdge, TraversalResult, GraphStats };
+
 /* ─── Types ───────────────────────────────────────────────────── */
 
-/**
- * LoreNode — A knowledge node in the graph.
- *
- * Represents a discrete piece of institutional knowledge: a decision,
- * convention, bug pattern, architecture note, or file reference.
- */
-export interface LoreNode {
-    /** Unique identifier, e.g. "baas-body-stream-fix" */
-    id: string;
-    /** Node category */
-    type: 'decision' | 'convention' | 'bug_pattern' | 'file_ref' | 'architecture' | 'troubleshooting' | 'note' | 'schema';
-    /** Human-readable title */
-    label: string;
-    /** Full text content */
-    content: string;
-    /** Comma-separated tags */
-    tags: string;
-    /** Project scope (e.g., "groundfloor-v2.5") */
-    project: string;
-    /** Ecosystem scope (e.g., "groundfloor") */
-    ecosystem: string;
-    /** JSON metadata string */
-    metadata: string;
-    /** ISO 8601 timestamp */
-    createdAt: string;
-    /** ISO 8601 timestamp */
-    updatedAt: string;
-    /** ISO 8601 timestamp — NULL if not yet synced to hosted */
-    syncedAt: string | null;
-}
 
-/**
- * LoreEdge — A relationship between two knowledge nodes.
- */
-export interface LoreEdge {
-    sourceId: string;
-    targetId: string;
-    relation: string;
-}
 
 /**
  * CodeSymbol — A code element imported from GitNexus.
@@ -136,25 +104,7 @@ export interface DevActivity {
     tool: string;
 }
 
-/**
- * TraversalResult — A node discovered during graph traversal.
- */
-export interface TraversalResult {
-    node: LoreNode;
-    depth: number;
-    relation: string;
-}
 
-/**
- * GraphStats — Summary statistics for the local graph.
- */
-export interface GraphStats {
-    nodeCount: number;
-    edgeCount: number;
-    typeBreakdown: Record<string, number>;
-    codeSymbolCount: number;
-    codeRelationCount: number;
-}
 
 /**
  * LoreGraphError — Custom error for graph operations.
@@ -238,7 +188,7 @@ export class SessionCacheManager {
  * Concurrency: Single-writer. Multiple readers are safe.
  * Performance: All operations are local (<1ms for typical queries).
  */
-export class LocalGraph {
+export class LocalGraph implements GraphProvider {
     private database: Database;
     private connection: Connection;
     private graphPath: string;
@@ -289,6 +239,7 @@ export class LocalGraph {
                     createdAt STRING,
                     updatedAt STRING,
                     syncedAt STRING,
+                    security_scopes STRING[],
                     PRIMARY KEY (id)
                 )
             `);
@@ -301,53 +252,11 @@ export class LocalGraph {
                 )
             `);
 
-            // ─── Code Intelligence Tables ────────────────────────────────
-            await this.connection.query(`
-                CREATE NODE TABLE IF NOT EXISTS CodeSymbol (
-                    uid STRING,
-                    name STRING,
-                    kind STRING,
-                    filePath STRING,
-                    startLine INT32,
-                    endLine INT32,
-                    content STRING,
-                    signature STRING,
-                    returnType STRING,
-                    parameterCount INT32,
-                    repo STRING,
-                    PRIMARY KEY (uid)
-                )
-            `);
-
-            await this.connection.query(`
-                CREATE REL TABLE IF NOT EXISTS CodeRelation (
-                    FROM CodeSymbol TO CodeSymbol,
-                    type STRING,
-                    confidence DOUBLE,
-                    reason STRING
-                )
-            `);
-
-            // ─── Cross-Pillar Edges (Knowledge ↔ Code) ──────────────────
-            await this.connection.query(`
-                CREATE REL TABLE IF NOT EXISTS LoreAppliesToCode (
-                    FROM LoreNode TO CodeSymbol,
-                    relation STRING
-                )
-            `);
-
-            // ─── DevActivity (Team Awareness) ────────────────────────────
-            await this.connection.query(`
-                CREATE NODE TABLE IF NOT EXISTS DevActivity (
-                    id STRING PRIMARY KEY,
-                    dev STRING,
-                    project STRING,
-                    action STRING,
-                    filePath STRING,
-                    timestamp STRING,
-                    tool STRING
-                )
-            `);
+            // V2.1 / Option C: plugin-owned tables (CodeSymbol, CodeFile,
+            // CodeRelation, FileContains, LoreAppliesToCode, LoreTouchesFile,
+            // DevActivity) are created by their respective plugin's
+            // `registerSchema` hook, invoked by PluginRegistry after the
+            // core tables above are in place. Core Lore is plugin-agnostic.
 
             // ─── Schema Migrations ─────────────────────────────────────────
             // Add columns that may be missing from older databases.
@@ -356,6 +265,7 @@ export class LocalGraph {
             const migrations = [
                 `ALTER TABLE LoreNode ADD project STRING DEFAULT '*'`,
                 `ALTER TABLE LoreNode ADD ecosystem STRING DEFAULT '*'`,
+                `ALTER TABLE LoreNode ADD security_scopes STRING[] DEFAULT []`,
             ];
             for (const migration of migrations) {
                 try {
@@ -396,7 +306,7 @@ export class LocalGraph {
 
         try {
             if (existingNode) {
-                const stmt = await this.connection.prepare(
+                 const stmt = await this.connection.prepare(
                     `MATCH (n:LoreNode {id: $id})
                      SET n.type = $type,
                          n.label = $label,
@@ -406,7 +316,8 @@ export class LocalGraph {
                          n.ecosystem = $ecosystem,
                          n.metadata = $metadata,
                          n.updatedAt = $updatedAt,
-                         n.syncedAt = $syncedAt`,
+                         n.syncedAt = $syncedAt,
+                         n.security_scopes = $security_scopes`,
                 );
                 await this.connection.execute(stmt, {
                     id: nodeData.id,
@@ -419,6 +330,7 @@ export class LocalGraph {
                     metadata: nodeData.metadata,
                     updatedAt: now,
                     syncedAt: '',
+                    security_scopes: nodeData.security_scopes || [],
                 });
 
                 this.sessionCache.pushNode(nodeData.id);
@@ -430,7 +342,7 @@ export class LocalGraph {
                     syncedAt: null,
                 };
             } else {
-                const stmt = await this.connection.prepare(
+                 const stmt = await this.connection.prepare(
                     `CREATE (n:LoreNode {
                         id: $id,
                         type: $type,
@@ -442,7 +354,8 @@ export class LocalGraph {
                         metadata: $metadata,
                         createdAt: $createdAt,
                         updatedAt: $updatedAt,
-                        syncedAt: $syncedAt
+                        syncedAt: $syncedAt,
+                        security_scopes: $security_scopes
                     })`,
                 );
                 await this.connection.execute(stmt, {
@@ -457,6 +370,7 @@ export class LocalGraph {
                     createdAt: now,
                     updatedAt: now,
                     syncedAt: '',
+                    security_scopes: nodeData.security_scopes || [],
                 });
 
                 this.sessionCache.pushNode(nodeData.id);
@@ -552,6 +466,46 @@ export class LocalGraph {
             relation: edge.relation,
         });
     }
+
+    /**
+     * V2.1: pruneInferredLoreEdges — Delete every LoreEdge whose relation
+     * field starts with the given prefix (e.g. "semantic_neighbor").
+     * Used by reconnectGraph before re-inserting a fresh batch.
+     *
+     * Only touches inferred edges; human-asserted relations like
+     * "supersedes"/"refers_to" are left alone.
+     *
+     * @returns the number of edges deleted.
+     */
+    async pruneInferredLoreEdges(relationPrefix: string): Promise<number> {
+        await this.initialize();
+        try {
+            const countStmt = await this.connection.prepare(
+                `MATCH ()-[e:LoreEdge]->() WHERE e.relation STARTS WITH $p RETURN count(e) AS cnt`,
+            );
+            const countResult = await this.connection.execute(countStmt, { p: relationPrefix }) as QueryResult;
+            const rows = await countResult.getAll();
+            const count = Number(rows[0]?.cnt ?? 0);
+
+            const delStmt = await this.connection.prepare(
+                `MATCH ()-[e:LoreEdge]->() WHERE e.relation STARTS WITH $p DELETE e`,
+            );
+            await this.connection.execute(delStmt, { p: relationPrefix });
+            return count;
+        } catch (error) {
+            throw new LoreGraphError(
+                `Failed to prune inferred edges with prefix '${relationPrefix}'`,
+                'pruneInferredLoreEdges',
+                error,
+            );
+        }
+    }
+
+    // V2.1 / Option C: cross-pillar operations (pruneInferredCrossEdges,
+    // listCodeFiles*, listCodeSymbols) moved to src/plugins/developer/
+    // operations.ts. Callers now reach them via
+    // pluginRegistry.get('developer')?.api.*. Keeping the core engine
+    // ignorant of whether any specific plugin is active.
 
     /**
      * traverse — Walk the graph from a starting node.
@@ -667,34 +621,26 @@ export class LocalGraph {
      */
     async getTopology(limit: number = 300): Promise<{ nodes: any[]; edges: any[] }> {
         await this.initialize();
-        
-        try {
-            // Fetch Nodes
-            const nodesCypher = `MATCH (n:LoreNode) RETURN n LIMIT ${limit}`;
-            const nodesResult = await this.connection.query(nodesCypher) as any;
-            const nodesData = await nodesResult.getAll();
-            
-            const nodes = nodesData.map((row: any) => {
-                const n: any = row['n'];
-                return {
-                    id: n.id,
-                    label: n.label,
-                    type: n.type,
-                    project: n.project,
-                    group: n.type // Useful for vis.js node styling
-                };
-            });
 
-            // Fetch Edges
-            const edgesCypher = `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode) RETURN n.id AS source, e.relation AS relation, m.id AS target LIMIT ${limit}`;
-            const edgesResult = await this.connection.query(edgesCypher) as any;
-            const edgesData = await edgesResult.getAll();
-            
-            const edges = edgesData.map((row: any) => ({
-                from: row['source'],
-                to: row['target'],
-                label: row['relation']
-            }));
+        try {
+            const nodes: any[] = [];
+            const edges: any[] = [];
+
+            // LoreNode (knowledge) — core memory primitive. Plugins contribute
+            // their own topology slices via ILorePlugin.contributeTopology
+            // (invoked by callers that have access to the plugin registry;
+            // LocalGraph stays plugin-agnostic).
+            const loreNodesResult = await this.connection.query(`MATCH (n:LoreNode) RETURN n LIMIT ${limit}`) as any;
+            for (const row of await loreNodesResult.getAll()) {
+                const n: any = row['n'];
+                nodes.push({ id: n.id, label: n.label, type: n.type, project: n.project, group: n.type });
+            }
+            const loreEdgesResult = await this.connection.query(
+                `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode) RETURN n.id AS source, e.relation AS relation, m.id AS target LIMIT ${limit}`,
+            ) as any;
+            for (const row of await loreEdgesResult.getAll()) {
+                edges.push({ from: row['source'], to: row['target'], label: row['relation'] });
+            }
 
             return { nodes, edges };
         } catch (error) {
@@ -943,6 +889,45 @@ export class LocalGraph {
      *
      * Side Effects: Closes Kùzu connection and database handles.
      */
+    /**
+     * V2.1 / Option C — returns a narrow query surface plugins can use
+     * to register their own schema + read/write their own nodes without
+     * importing this class directly. See src/plugins/types.ts
+     * (PluginGraphContext) for the contract.
+     *
+     * This method intentionally returns an opaque shape rather than the
+     * raw Connection so plugins can't reach into LocalGraph internals.
+     */
+    createPluginGraphContext(): {
+        executeQuery(cypher: string, params?: Record<string, unknown>): Promise<unknown>;
+        queryRows(cypher: string, params?: Record<string, unknown>): Promise<Array<Record<string, unknown>>>;
+    } {
+        return {
+            executeQuery: async (cypher: string, params?: Record<string, unknown>) => {
+                await this.initialize();
+                if (!params || Object.keys(params).length === 0) {
+                    return await this.connection.query(cypher);
+                }
+                const stmt = await this.connection.prepare(cypher);
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                return await this.connection.execute(stmt, params as any);
+            },
+            queryRows: async (cypher: string, params?: Record<string, unknown>) => {
+                await this.initialize();
+                let result: QueryResult;
+                if (!params || Object.keys(params).length === 0) {
+                    result = await this.connection.query(cypher) as QueryResult;
+                } else {
+                    const stmt = await this.connection.prepare(cypher);
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    result = await this.connection.execute(stmt, params as any) as QueryResult;
+                }
+                const rows = await result.getAll();
+                return rows as Array<Record<string, unknown>>;
+            },
+        };
+    }
+
     async close(): Promise<void> {
         try {
             await this.connection.close();
@@ -990,506 +975,11 @@ export class LocalGraph {
             createdAt: (getValue('createdAt') as string) ?? '',
             updatedAt: (getValue('updatedAt') as string) ?? '',
             syncedAt: (getValue('syncedAt') as string) || null,
+            security_scopes: (getValue('security_scopes') as string[]) ?? [],
         };
     }
 
-    /* ─── Code Intelligence Methods ───────────────────────────────── */
-
-    /**
-     * upsertCodeSymbol — Create or update a code symbol.
-     *
-     * @param symbol - The code symbol to upsert.
-     *
-     * Side Effects: Writes to Kùzu CodeSymbol table.
-     * Idempotency: Yes — upsert by uid.
-     */
-    async upsertCodeSymbol(symbol: CodeSymbol): Promise<void> {
-        await this.initialize();
-
-        try {
-            const stmt = await this.connection.prepare(
-                `MERGE (s:CodeSymbol {uid: $uid})
-                 SET s.name = $name, s.kind = $kind, s.filePath = $filePath,
-                     s.startLine = $startLine, s.endLine = $endLine,
-                     s.content = $content, s.signature = $signature,
-                     s.returnType = $returnType, s.parameterCount = $parameterCount,
-                     s.repo = $repo`,
-            );
-            await this.connection.execute(stmt, {
-                uid: symbol.uid,
-                name: symbol.name,
-                kind: symbol.kind,
-                filePath: symbol.filePath,
-                startLine: symbol.startLine,
-                endLine: symbol.endLine,
-                content: symbol.content,
-                signature: symbol.signature,
-                returnType: symbol.returnType,
-                parameterCount: symbol.parameterCount,
-                repo: symbol.repo,
-            });
-        } catch (error) {
-            throw new LoreGraphError(
-                `Failed to upsert code symbol '${symbol.uid}'`,
-                'upsertCodeSymbol',
-                error,
-            );
-        }
-    }
-
-    /**
-     * addCodeRelation — Create a relationship between two code symbols.
-     *
-     * @param edge - Source uid, target uid, type, confidence, reason.
-     *
-     * Side Effects: Writes to Kùzu CodeRelation table.
-     */
-    async addCodeRelation(edge: CodeRelationEdge): Promise<void> {
-        await this.initialize();
-
-        try {
-            const stmt = await this.connection.prepare(
-                `MATCH (a:CodeSymbol {uid: $sourceUid}), (b:CodeSymbol {uid: $targetUid})
-                 CREATE (a)-[:CodeRelation {type: $type, confidence: $confidence, reason: $reason}]->(b)`,
-            );
-            await this.connection.execute(stmt, {
-                sourceUid: edge.sourceUid,
-                targetUid: edge.targetUid,
-                type: edge.type,
-                confidence: edge.confidence,
-                reason: edge.reason,
-            });
-        } catch (error) {
-            throw new LoreGraphError(
-                `Failed to add code relation ${edge.sourceUid} → ${edge.targetUid}`,
-                'addCodeRelation',
-                error,
-            );
-        }
-    }
-
-    /**
-     * linkKnowledgeToCode — Create a cross-pillar edge.
-     *
-     * Purpose: Links a knowledge node (decision, convention, bug) to a code
-     *   symbol. This is the "killer feature" — cross-pillar traversal.
-     *
-     * @param nodeId - LoreNode ID.
-     * @param symbolUid - CodeSymbol UID.
-     * @param relation - Relationship type (e.g., "applies_to", "documents").
-     *
-     * Side Effects: Writes to Kùzu LoreAppliesToCode table.
-     */
-    async linkKnowledgeToCode(nodeId: string, symbolUid: string, relation: string): Promise<void> {
-        await this.initialize();
-
-        try {
-            const stmt = await this.connection.prepare(
-                `MATCH (n:LoreNode {id: $nodeId}), (s:CodeSymbol {uid: $symbolUid})
-                 CREATE (n)-[:LoreAppliesToCode {relation: $relation}]->(s)`,
-            );
-            await this.connection.execute(stmt, { nodeId, symbolUid, relation });
-        } catch (error) {
-            throw new LoreGraphError(
-                `Failed to link '${nodeId}' → '${symbolUid}'`,
-                'linkKnowledgeToCode',
-                error,
-            );
-        }
-    }
-
-    /**
-     * queryCodeSymbols — Search code symbols by name or file path.
-     *
-     * @param query - Search string (matched against name and filePath).
-     * @param repo - Optional repository filter.
-     * @param limit - Maximum results (default: 20).
-     * @returns Matching code symbols.
-     */
-    async queryCodeSymbols(query: string, repo?: string, limit: number = 20): Promise<CodeSymbol[]> {
-        await this.initialize();
-
-        try {
-            const escapedQuery = this.escapeString(query.toLowerCase());
-            let cypher = `MATCH (s:CodeSymbol)
-                          WHERE lower(s.name) CONTAINS '${escapedQuery}'
-                             OR lower(s.filePath) CONTAINS '${escapedQuery}'`;
-            if (repo) {
-                cypher += ` AND s.repo = '${this.escapeString(repo)}'`;
-            }
-            cypher += ` RETURN s.* LIMIT ${limit}`;
-
-            const result = await this.connection.query(cypher) as QueryResult;
-            const rows = await result.getAll();
-            return rows.map((row) => this.rowToCodeSymbol(row as Record<string, unknown>));
-        } catch (error) {
-            throw new LoreGraphError(
-                `Failed to query code symbols '${query}'`,
-                'queryCodeSymbols',
-                error,
-            );
-        }
-    }
-
-    /**
-     * getCodeSymbolContext — Get a symbol and all its relationships.
-     *
-     * @param uid - CodeSymbol UID.
-     * @returns The symbol with its callers, callees, and connected knowledge.
-     */
-    async getCodeSymbolContext(uid: string): Promise<{
-        symbol: CodeSymbol | null;
-        callers: CodeSymbol[];
-        callees: CodeSymbol[];
-        knowledge: LoreNode[];
-    }> {
-        await this.initialize();
-
-        try {
-            // Get the symbol
-            const symResult = await this.connection.query(
-                `MATCH (s:CodeSymbol {uid: '${this.escapeString(uid)}'}) RETURN s.*`,
-            ) as QueryResult;
-            const symRows = await symResult.getAll();
-            const symbol = symRows.length > 0
-                ? this.rowToCodeSymbol(symRows[0] as Record<string, unknown>)
-                : null;
-
-            // Get callers (who calls this symbol)
-            const callersResult = await this.connection.query(
-                `MATCH (caller:CodeSymbol)-[:CodeRelation {type: 'CALLS'}]->(s:CodeSymbol {uid: '${this.escapeString(uid)}'})
-                 RETURN caller.*`,
-            ) as QueryResult;
-            const callerRows = await callersResult.getAll();
-            const callers = callerRows.map((row) => this.rowToCodeSymbol(row as Record<string, unknown>, 'caller'));
-
-            // Get callees (what this symbol calls)
-            const calleesResult = await this.connection.query(
-                `MATCH (s:CodeSymbol {uid: '${this.escapeString(uid)}'})-[:CodeRelation {type: 'CALLS'}]->(callee:CodeSymbol)
-                 RETURN callee.*`,
-            ) as QueryResult;
-            const calleeRows = await calleesResult.getAll();
-            const callees = calleeRows.map((row) => this.rowToCodeSymbol(row as Record<string, unknown>, 'callee'));
-
-            // Get connected knowledge
-            const knowledgeResult = await this.connection.query(
-                `MATCH (n:LoreNode)-[:LoreAppliesToCode]->(s:CodeSymbol {uid: '${this.escapeString(uid)}'})
-                 RETURN n.*`,
-            ) as QueryResult;
-            const knowledgeRows = await knowledgeResult.getAll();
-            const knowledge = knowledgeRows.map((row) => this.rowToLoreNode(row as Record<string, unknown>));
-
-            return { symbol, callers, callees, knowledge };
-        } catch (error) {
-            throw new LoreGraphError(
-                `Failed to get context for '${uid}'`,
-                'getCodeSymbolContext',
-                error,
-            );
-        }
-    }
-
-    /**
-     * getCrossPillarEdges — Get all knowledge↔code edges for a repo.
-     *
-     * Purpose: Called before clearCodeSymbols to save cross-pillar edges
-     *   so they can be restored after re-indexing. Prevents knowledge links
-     *   from being orphaned when code symbols are refreshed.
-     *
-     * @param repo - Repository name to filter by.
-     * @returns Array of cross-pillar edge data (nodeId, symbolUid, relation).
-     *
-     * Side Effects: Reads from Kùzu database.
-     */
-    async getCrossPillarEdges(repo: string): Promise<{ nodeId: string; symbolUid: string; relation: string }[]> {
-        await this.initialize();
-
-        try {
-            const result = await this.connection.query(
-                `MATCH (n:LoreNode)-[r:LoreAppliesToCode]->(s:CodeSymbol {repo: '${this.escapeString(repo)}'})
-                 RETURN n.id AS nodeId, s.uid AS symbolUid, r.relation AS relation`,
-            ) as QueryResult;
-            const rows = await result.getAll();
-
-            return rows.map((row) => {
-                const record = row as Record<string, unknown>;
-                return {
-                    nodeId: (record['nodeId'] as string) ?? '',
-                    symbolUid: (record['symbolUid'] as string) ?? '',
-                    relation: (record['relation'] as string) ?? 'applies_to',
-                };
-            });
-        } catch {
-            // Table may not exist yet — return empty
-            return [];
-        }
-    }
-
-    /**
-     * clearCodeSymbols — Remove all code symbols for a repo (before re-index).
-     *
-     * @param repo - Repository name to clear.
-     * @returns Number of symbols removed.
-     */
-    async clearCodeSymbols(repo: string): Promise<number> {
-        await this.initialize();
-
-        try {
-            // Count first
-            const countResult = await this.connection.query(
-                `MATCH (s:CodeSymbol {repo: '${this.escapeString(repo)}'}) RETURN count(s) AS cnt`,
-            ) as QueryResult;
-            const countRows = await countResult.getAll();
-            const count = (countRows[0] as Record<string, unknown>)?.['cnt'] as number ?? 0;
-
-            // Delete edges first, then nodes
-            await this.connection.query(
-                `MATCH (s:CodeSymbol {repo: '${this.escapeString(repo)}'})-[r:CodeRelation]->() DELETE r`,
-            );
-            await this.connection.query(
-                `MATCH ()-[r:CodeRelation]->(s:CodeSymbol {repo: '${this.escapeString(repo)}'}) DELETE r`,
-            );
-            await this.connection.query(
-                `MATCH ()-[r:LoreAppliesToCode]->(s:CodeSymbol {repo: '${this.escapeString(repo)}'}) DELETE r`,
-            );
-            await this.connection.query(
-                `MATCH (s:CodeSymbol {repo: '${this.escapeString(repo)}'}) DELETE s`,
-            );
-
-            return count;
-        } catch (error) {
-            throw new LoreGraphError(
-                `Failed to clear code symbols for '${repo}'`,
-                'clearCodeSymbols',
-                error,
-            );
-        }
-    }
-
-    /**
-     * rowToCodeSymbol — Convert a Kùzu result row to a CodeSymbol.
-     */
-    private rowToCodeSymbol(row: Record<string, unknown>, prefix: string = 's'): CodeSymbol {
-        const getValue = (key: string): unknown => {
-            return row[key] ?? row[`${prefix}.${key}`] ?? undefined;
-        };
-
-        return {
-            uid: (getValue('uid') as string) ?? '',
-            name: (getValue('name') as string) ?? '',
-            kind: (getValue('kind') as string) ?? '',
-            filePath: (getValue('filePath') as string) ?? '',
-            startLine: (getValue('startLine') as number) ?? 0,
-            endLine: (getValue('endLine') as number) ?? 0,
-            content: (getValue('content') as string) ?? '',
-            signature: (getValue('signature') as string) ?? '',
-            returnType: (getValue('returnType') as string) ?? '',
-            parameterCount: (getValue('parameterCount') as number) ?? 0,
-            repo: (getValue('repo') as string) ?? '',
-        };
-    }
-
-    /* ─── Code Graph Helpers (for native tools) ────────────────── */
-
-    /**
-     * queryCodeSymbolsByName — Find code symbols by exact name match.
-     *
-     * @param name - Exact symbol name to match.
-     * @returns Matching CodeSymbol records.
-     *
-     * Side Effects: Reads from Kùzu database.
-     */
-    async queryCodeSymbolsByName(name: string): Promise<CodeSymbol[]> {
-        await this.initialize();
-        try {
-            const result = await this.connection.query(
-                `MATCH (s:CodeSymbol) WHERE s.name = '${this.escapeString(name)}' RETURN s.*`,
-            ) as QueryResult;
-            const rows = await result.getAll();
-            return rows.map((row) => this.rowToCodeSymbol(row as Record<string, unknown>));
-        } catch {
-            return [];
-        }
-    }
-
-    /**
-     * getCodeSymbolByUid — Get a single code symbol by its UID.
-     *
-     * @param uid - CodeSymbol UID.
-     * @returns The symbol, or null if not found.
-     *
-     * Side Effects: Reads from Kùzu database.
-     */
-    async getCodeSymbolByUid(uid: string): Promise<CodeSymbol | null> {
-        await this.initialize();
-        try {
-            const result = await this.connection.query(
-                `MATCH (s:CodeSymbol {uid: '${this.escapeString(uid)}'}) RETURN s.*`,
-            ) as QueryResult;
-            const rows = await result.getAll();
-            return rows.length > 0 ? this.rowToCodeSymbol(rows[0] as Record<string, unknown>) : null;
-        } catch {
-            return null;
-        }
-    }
-
-    /**
-     * getCodeRelationsTo — Get all incoming code relations to a symbol.
-     *
-     * Purpose: Finds all symbols that reference the target (callers, importers,
-     *   extenders). Used by the native rename tool to find all references.
-     *
-     * @param targetUid - UID of the target symbol.
-     * @returns Array of CodeRelationEdge records pointing to the target.
-     *
-     * Side Effects: Reads from Kùzu database.
-     */
-    async getCodeRelationsTo(targetUid: string): Promise<CodeRelationEdge[]> {
-        await this.initialize();
-        try {
-            const result = await this.connection.query(
-                `MATCH (source:CodeSymbol)-[r:CodeRelation]->(target:CodeSymbol {uid: '${this.escapeString(targetUid)}'})
-                 RETURN source.uid AS sourceUid, target.uid AS targetUid,
-                        r.type AS type, r.confidence AS confidence, r.reason AS reason`,
-            ) as QueryResult;
-            const rows = await result.getAll();
-            return rows.map((row) => {
-                const record = row as Record<string, unknown>;
-                return {
-                    sourceUid: (record['sourceUid'] as string) ?? '',
-                    targetUid: (record['targetUid'] as string) ?? '',
-                    type: (record['type'] as string) ?? '',
-                    confidence: (record['confidence'] as number) ?? 1.0,
-                    reason: (record['reason'] as string) ?? '',
-                };
-            });
-        } catch {
-            return [];
-        }
-    }
-
-    /* ─── DevActivity (Team Awareness) ────────────────────────── */
-
-    /**
-     * recordDevActivity — Upsert a developer activity heartbeat.
-     *
-     * Purpose: Records what a developer is currently working on.
-     *   Each developer gets one activity record per project, updated
-     *   in-place on each heartbeat (MERGE on id).
-     *
-     * @param activity - DevActivity event to record.
-     *
-     * Side Effects: Writes to Kùzu DevActivity table.
-     * Idempotency: Yes — MERGE upserts.
-     * Determinism: Deterministic.
-     */
-    async recordDevActivity(activity: DevActivity): Promise<void> {
-        await this.initialize();
-
-        const activityId = `${activity.dev}::${activity.project}`;
-        try {
-            const stmt = await this.connection.prepare(
-                `MERGE (a:DevActivity {id: $id})
-                 SET a.dev = $dev, a.project = $project, a.action = $action,
-                     a.filePath = $filePath, a.timestamp = $timestamp, a.tool = $tool`,
-            );
-            await this.connection.execute(stmt, {
-                id: activityId,
-                dev: activity.dev,
-                project: activity.project,
-                action: activity.action,
-                filePath: activity.filePath,
-                timestamp: activity.timestamp,
-                tool: activity.tool,
-            });
-        } catch (error) {
-            throw new LoreGraphError(
-                `Failed to record activity for '${activity.dev}'`,
-                'recordDevActivity',
-                error,
-            );
-        }
-    }
-
-    /**
-     * getActiveDevs — Query currently active developers.
-     *
-     * Purpose: Returns DevActivity records updated within the last N minutes.
-     *   Used by the who_is_working MCP tool for team awareness.
-     *
-     * @param project - Optional project filter.
-     * @param activeWindowMinutes - How many minutes back counts as "active" (default: 30).
-     * @returns Array of active DevActivity records.
-     *
-     * Side Effects: Reads from Kùzu database.
-     * Determinism: Non-deterministic (time-dependent).
-     */
-    async getActiveDevs(project?: string, activeWindowMinutes: number = 30): Promise<DevActivity[]> {
-        await this.initialize();
-
-        try {
-            let cypher = `MATCH (a:DevActivity) RETURN a`;
-            if (project) {
-                cypher = `MATCH (a:DevActivity) WHERE a.project = '${this.escapeString(project)}' RETURN a`;
-            }
-
-            const result = await this.connection.query(cypher) as QueryResult;
-            const rows = await result.getAll();
-
-            const cutoff = new Date(Date.now() - activeWindowMinutes * 60 * 1000).toISOString();
-
-            return rows
-                .map((row) => {
-                    const record = row as Record<string, unknown>;
-                    const getField = (key: string): unknown => record[key] ?? record[`a.${key}`] ?? undefined;
-                    return {
-                        dev: (getField('dev') as string) ?? '',
-                        project: (getField('project') as string) ?? '',
-                        action: (getField('action') as string) ?? '',
-                        filePath: (getField('filePath') as string) ?? '',
-                        timestamp: (getField('timestamp') as string) ?? '',
-                        tool: (getField('tool') as string) ?? '',
-                    };
-                })
-                .filter((activity) => activity.timestamp >= cutoff);
-        } catch {
-            // Table may not exist yet
-            return [];
-        }
-    }
-
-    /**
-     * clearStaleActivity — Remove activity records older than a threshold.
-     *
-     * Purpose: Garbage collection for stale heartbeats. Called periodically
-     *   or on sync to prevent unbounded growth.
-     *
-     * @param olderThanMinutes - Remove records older than this (default: 60).
-     * @returns Number of records removed.
-     *
-     * Side Effects: Deletes from Kùzu DevActivity table.
-     */
-    async clearStaleActivity(olderThanMinutes: number = 60): Promise<number> {
-        await this.initialize();
-
-        try {
-            const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000).toISOString();
-            const countResult = await this.connection.query(
-                `MATCH (a:DevActivity) WHERE a.timestamp < '${cutoff}' RETURN count(a) AS cnt`,
-            ) as QueryResult;
-            const countRows = await countResult.getAll();
-            const count = (countRows[0] as Record<string, unknown>)?.['cnt'] as number ?? 0;
-
-            if (count > 0) {
-                await this.connection.query(
-                    `MATCH (a:DevActivity) WHERE a.timestamp < '${cutoff}' DELETE a`,
-                );
-            }
-
-            return count;
-        } catch {
-            return 0;
-        }
-    }
+    // V2.1 / Option C: all developer-specific graph operations moved to
+    // src/plugins/developer/operations.ts. Core callers reach them via
+    // pluginRegistry.get('developer')?.api (see DeveloperApi contract).
 }
-

@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run build)",
+      "Bash(npm run test:arch)",
+      "Bash(npm test)",
+      "Bash(npx gitnexus impact *)",
+      "mcp__Claude_Preview__preview_screenshot",
+      "mcp__Claude_Preview__preview_console_logs",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "mcp__groundfloor-lore__search",
+      "mcp__groundfloor-lore__recall",
+      "mcp__groundfloor-lore__list_nodes",
+      "mcp__groundfloor-lore__stats",
+      "mcp__groundfloor-lore__get_hot_context"
+    ]
+  }
+}

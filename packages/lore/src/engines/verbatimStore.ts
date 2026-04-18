@@ -1,27 +1,11 @@
 import { pipeline } from '@xenova/transformers';
 import * as lancedb from '@lancedb/lancedb';
+import { Schema, Field, Float32, Utf8, List, FixedSizeList } from 'apache-arrow';
 import * as fs from 'fs';
 import * as path from 'path';
 
-export interface VerbatimDocument {
-    id: string;
-    text: string;
-    metadata: {
-        type?: string;
-        label?: string;
-        tags?: string;
-        project?: string;
-        ecosystem?: string;
-        updatedAt?: string;
-    };
-}
-
-export interface VerbatimSearchResult {
-    id: string;
-    score: number;
-    metadata: VerbatimDocument['metadata'];
-    text: string;
-}
+import type { VectorProvider, VerbatimDocument, VerbatimSearchResult } from '../providers/types.js';
+export type { VerbatimDocument, VerbatimSearchResult };
 
 export class VerbatimStoreError extends Error {
     public operation: string;
@@ -48,7 +32,29 @@ async function getEmbeddingPipeline() {
     return pipelineInstance;
 }
 
-export class VerbatimStore {
+/**
+ * Explicit Apache Arrow schema for the lore_verbatim table.
+ * Prevents LanceDB type-inference failures when fields like
+ * security_scopes contain empty arrays on first record insertion.
+ * Embedding dimension: 384 (Xenova/all-MiniLM-L6-v2).
+ */
+const LORE_VERBATIM_SCHEMA = new Schema([
+    new Field('vector', new FixedSizeList(384, new Field('item', new Float32(), true)), false),
+    new Field('id', new Utf8(), false),
+    new Field('text', new Utf8(), false),
+    new Field('type', new Utf8(), true),
+    new Field('label', new Utf8(), true),
+    new Field('tags', new Utf8(), true),
+    new Field('project', new Utf8(), true),
+    new Field('ecosystem', new Utf8(), true),
+    new Field('updatedAt', new Utf8(), true),
+    new Field('security_scopes', new List(new Field('item', new Utf8(), true)), true),
+    // V2.1: content hash lets reconnect skip nodes whose text hasn't
+    // changed since the last embed. Cheap sha1-16 over the embed text.
+    new Field('contentHash', new Utf8(), true),
+]);
+
+export class VerbatimStore implements VectorProvider {
     private initialized: boolean = false;
     private db: lancedb.Connection | null = null;
     private table: lancedb.Table | null = null;
@@ -96,12 +102,15 @@ export class VerbatimStore {
                 tags: doc.metadata?.tags || '',
                 project: doc.metadata?.project || '',
                 ecosystem: doc.metadata?.ecosystem || '',
-                updatedAt: doc.metadata?.updatedAt || ''
+                updatedAt: doc.metadata?.updatedAt || '',
+                security_scopes: doc.metadata?.security_scopes || [],
+                contentHash: (doc.metadata as { contentHash?: string })?.contentHash || '',
             };
 
             if (!this.table) {
-                console.log('[VerbatimStore] Creating new table with first record...');
-                this.table = await this.db.createTable('lore_verbatim', [row]);
+                console.log('[VerbatimStore] Creating new table with explicit schema...');
+                this.table = await this.db.createEmptyTable('lore_verbatim', LORE_VERBATIM_SCHEMA);
+                await this.table.add([row]);
             } else {
                 await this.table.add([row]);
             }
@@ -144,11 +153,36 @@ export class VerbatimStore {
                     tags: r.tags,
                     project: r.project,
                     ecosystem: r.ecosystem,
-                    updatedAt: r.updatedAt
+                    updatedAt: r.updatedAt,
+                    security_scopes: r.security_scopes || []
                 }
             }));
         } catch (error: any) {
             throw new VerbatimStoreError('search', error.message);
+        }
+    }
+
+    /**
+     * V2.1: getById — Return the stored metadata (without re-running the
+     * embedder) for a single id. Used by reconnectGraph's --only-changed
+     * path to skip nodes whose contentHash hasn't changed.
+     *
+     * Returns null if the row doesn't exist or the table hasn't been
+     * created yet.
+     */
+    async getById(id: string): Promise<{ contentHash?: string; text?: string } | null> {
+        try {
+            if (!this.initialized || !this.table) return null;
+            const rows = await this.table
+                .query()
+                .where(`id = '${id.replace(/'/g, "''")}'`)
+                .limit(1)
+                .toArray();
+            if (rows.length === 0) return null;
+            const r = rows[0] as { contentHash?: string; text?: string };
+            return { contentHash: r.contentHash ?? '', text: r.text ?? '' };
+        } catch {
+            return null;
         }
     }
 

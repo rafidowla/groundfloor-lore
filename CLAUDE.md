@@ -1,3 +1,64 @@
+# Plugin Boundary (MANDATORY — read before editing anything under `src/`)
+
+Lore's core engine is plugin-agnostic. `src/plugins/<name>/` is plugin-local
+code — only meaningful when that plugin is active in a workspace's
+`.lore/config.json`. Code outside `src/plugins/` is the shared core and
+must work when zero plugins are loaded.
+
+## The rule
+
+**Core code must never import from `src/plugins/**` except:**
+- `src/plugins/types.ts` (the `ILorePlugin` contract itself)
+- `src/plugins/registry.ts` (the dispatcher)
+
+**Core code must never reference plugin-owned vocabulary:**
+`CodeSymbol`, `CodeFile`, `LoreAppliesToCode`, `LoreTouchesFile`,
+`FileContains`, `CodeRelation`, `DevActivity`, `gitnexus`, `GitNexus`.
+These are Developer-plugin concerns. Future plugins bring their own
+vocabulary — add it to the lint list when they land.
+
+Plugins contribute via hooks on `ILorePlugin`:
+`registerTools` · `registerSchema` · `contributeReconnectNodes` ·
+`routeReconnectEdge` · `pruneInferredEdges` · `getTelemetryPayload` · `api`.
+Core iterates plugins via `PluginRegistry.active()` and calls each hook.
+
+## When adding or changing a feature, ask
+
+> **"Would this also make sense for a `family` or `finance` workspace?"**
+
+- **Yes** → it belongs in `src/engines/`, `src/mcp/` (except tool
+  registration), `src/cli/` (except plugin-specific commands), or
+  `src/providers/`.
+- **No** → it belongs in `src/plugins/<plugin>/`.
+
+## Red flags that you're about to leak
+
+- You're writing `graph.upsertCodeSymbol(...)` or `graph.listCodeFiles(...)`
+  from outside `src/plugins/developer/` → stop. Go through
+  `pluginRegistry.active().find(p => p.name === 'developer')?.api`.
+- You're about to add `if (pluginRegistry.isActive('developer')) { … big
+  block of code … }` → move the block *into* `src/plugins/developer/`
+  and register it through a hook. The `if` check is a sign the block
+  doesn't belong where it sits.
+- You're importing from `../plugins/developer/…` in `src/engines/` or
+  `src/cli/` → stop. Use an `ILorePlugin` hook or the opaque `plugin.api`.
+
+## Enforcement — three layers
+
+1. **`npm run test:arch`** — fails CI on any new plugin-boundary
+   violation. Known legacy is tracked in `.arch-baseline.json`; net-new
+   violations require fixing or an entry + justification in that file.
+2. **ESLint `no-restricted-imports`** — warns in-editor on imports
+   that cross the boundary.
+3. **This `CLAUDE.md` section** — read by every AI session before it
+   touches code.
+
+Past failure mode: V2.1's initial pass put disk-read file content,
+gitnexus CLI parsing, `CodeFile` schema, and `ingest-files` HTTP/CLI
+surfaces into `src/engines/` and `src/mcp/` because it shipped fast.
+The Option C refactor moved them into `src/plugins/developer/`. The
+guardrails above prevent this from happening again.
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 

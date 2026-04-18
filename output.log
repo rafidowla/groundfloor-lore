@@ -1,21 +1,7 @@
-Initialized Graph.
-Stored node: schema-appdocument
-Stored node: schema-property
-Stored node: schema-building
-Stored node: schema-floor
-Stored node: schema-suite
-Stored node: schema-verticaltenant
-Stored node: schema-verticallease
-Added edge: schema-appdocument -> schema-property
-Added edge: schema-appdocument -> schema-building
-Added edge: schema-appdocument -> schema-floor
-Added edge: schema-appdocument -> schema-suite
-Added edge: schema-appdocument -> schema-verticaltenant
-Added edge: schema-appdocument -> schema-verticallease
-Added edge: schema-property -> schema-building
-Added edge: schema-building -> schema-floor
-Added edge: schema-floor -> schema-suite
-Added edge: schema-verticaltenant -> schema-suite
-Added edge: schema-verticaltenant -> schema-verticallease
-Added edge: schema-verticallease -> schema-suite
-DONE SEEDING
+[Lore MCP] Failed to start: LoreGraphError: [LoreGraph:initialize] Failed to initialize graph schema
+    at LocalGraph.initialize (file:///Users/rdowla/Downloads/AiDev/BitBucket/groundfloor-lore/dist/engines/localGraph.js:229:19)
+    at async main (file:///Users/rdowla/Downloads/AiDev/BitBucket/groundfloor-lore/dist/mcp/server.js:1083:5) {
+  operation: 'initialize',
+  cause: [Error: IO exception: Could not set lock on file : /Users/rdowla/.groundfloor/.lore/graph
+  See the docs: https://docs.kuzudb.com/concurrency for more information.]
+}

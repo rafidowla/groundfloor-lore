@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(claude mcp:*)",
+      "Read(//Users/rdowla/.claude/**)",
+      "Read(//usr/local/bin/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('top keys:', list\\(d.keys\\(\\)\\)\\); print\\('mcpServers:', list\\(d.get\\('mcpServers',{}\\).keys\\(\\)\\)\\); print\\('projects with mcpServers:'\\); [print\\(' ', p, '->', list\\(d['projects'][p].get\\('mcpServers',{}\\).keys\\(\\)\\)\\) for p in d.get\\('projects',{}\\) if d['projects'][p].get\\('mcpServers'\\)]\")",
+      "Bash(python3 -c ':*)",
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(rm -f .lore/config.json)",
+      "Bash(npx tsx *)",
+      "Bash(tee /tmp/lore-server.log)",
+      "Bash(curl -sS http://127.0.0.1:3847/api/health)",
+      "Bash(curl -sS http://127.0.0.1:3847/api/config)",
+      "Bash(pwd -P)",
+      "Bash(kill 64255)",
+      "Bash(echo \"started PID $!\")",
+      "Bash(launchctl list *)",
+      "Bash(rm -f ~/.groundfloor/.lore/config.json)",
+      "Bash(rm -rf /Users/rdowla/.groundfloor/.lore/graph.*lock)",
+      "Bash(curl -sS -X PATCH http://127.0.0.1:3847/api/config -H \"Content-Type: application/json\" -d '{\"llmProvider\":\"ollama\"}')",
+      "Bash(curl -sS -X PATCH http://127.0.0.1:3847/api/config -H \"Content-Type: application/json\" -d '{\"llmProvider\":\"anthropic\",\"apiKey\":\"sk-test-dummy-12345\"}')",
+      "Bash(security find-generic-password *)",
+      "Bash(curl -sS -N -X POST http://127.0.0.1:3847/api/chat -H \"Content-Type: application/json\" -d '{\"message\":\"hello\"}' --max-time 8)",
+      "Bash(curl -sS -X POST http://127.0.0.1:3847/api/chat -H \"Content-Type: application/json\" -d '{\"message\":\"\"}')"
+    ]
+  }
+}
