@@ -2,8 +2,22 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@react-sigma/core';
 import '@react-sigma/core/lib/style.css';
 import Graph from 'graphology';
+import type { Attributes } from 'graphology-types';
 import forceAtlas2 from 'graphology-layout-forceatlas2';
 import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
+import type { NodeDisplayData } from 'sigma/types';
+import type { NodeLabelDrawingFunction, NodeHoverDrawingFunction } from 'sigma/rendering';
+
+/**
+ * Extends Sigma's NodeDisplayData with the two custom attributes we stash
+ * on every node in GraphLoader (`tag` = node type, `clusterLabel` =
+ * project). Typed once here so drawHover and the reducers can read them
+ * without `any`.
+ */
+type LoreNodeAttrs = NodeDisplayData & {
+    tag?: string;
+    clusterLabel?: string;
+};
 
 /* ─── Data contract from /api/topology ─────────────────────────── */
 
@@ -56,11 +70,7 @@ const LABEL_RENDERED_SIZE_THRESHOLD = 12;
  * Draws a label with a semi-transparent background pill, matching the
  * Sigma.js demo style (canvas-utils.ts from the official repo).
  */
-function drawLabel(
-    context: CanvasRenderingContext2D,
-    data: { x: number; y: number; size: number; label: string; color: string },
-    settings: { labelSize: number; labelFont: string; labelWeight: string },
-): void {
+const drawLabel: NodeLabelDrawingFunction<LoreNodeAttrs> = (context, data, settings) => {
     if (!data.label) return;
 
     const size = settings.labelSize;
@@ -87,17 +97,13 @@ function drawLabel(
  * Draws a rich hover card: rounded rectangle with label,
  * type sub-label, and project cluster label.
  */
-function drawHover(
-    context: CanvasRenderingContext2D,
-    data: Record<string, any>,
-    settings: Record<string, any>,
-): void {
-    const size = settings.labelSize as number;
-    const font = settings.labelFont as string;
-    const weight = settings.labelWeight as string;
+const drawHover: NodeHoverDrawingFunction<LoreNodeAttrs> = (context, data, settings) => {
+    const size = settings.labelSize;
+    const font = settings.labelFont;
+    const weight = settings.labelWeight;
     const subLabelSize = size - 2;
 
-    const label: string = data.label || data.id || '';
+    const label: string = data.label || '';
     const subLabel: string = data.tag || '';
     const clusterLabel: string = data.clusterLabel || '';
 
@@ -268,15 +274,14 @@ const GraphLoader = ({ onStatsReady, onTopologyReady }: GraphLoaderProps) => {
                 sigma.setSetting('labelFont', 'Inter, -apple-system, system-ui, sans-serif');
                 sigma.setSetting('labelSize', 13);
                 sigma.setSetting('labelWeight', '500');
-                sigma.setSetting('defaultDrawNodeLabel', drawLabel as any);
-                sigma.setSetting('defaultDrawNodeHover', drawHover as any);
+                sigma.setSetting('defaultDrawNodeLabel', drawLabel);
+                sigma.setSetting('defaultDrawNodeHover', drawHover);
                 sigma.setSetting('defaultEdgeType', 'arrow');
                 sigma.setSetting('edgeLabelSize', 10);
                 sigma.setSetting('renderEdgeLabels', false);
-                // Node border on hover
-                sigma.setSetting('nodeReducer', (_node: string, data: Record<string, any>) => {
-                    return { ...data };
-                });
+                // nodeReducer / edgeReducer are owned by <ViewStateEffect>;
+                // do NOT install a passthrough here — it would race and
+                // overwrite the filter/hover composition on first load.
 
             } catch (err) {
                 console.error('Failed to load Sigma topology', err);
@@ -286,7 +291,7 @@ const GraphLoader = ({ onStatsReady, onTopologyReady }: GraphLoaderProps) => {
         fetchGraph();
 
         return () => { active = false; };
-    }, [loadGraph, sigma, onStatsReady]);
+    }, [loadGraph, sigma, onStatsReady, onTopologyReady]);
 
     return null;
 };
@@ -322,51 +327,6 @@ const DragEvents = () => {
             mousedown: () => {
                 if (!sigma.getCustomBBox()) sigma.setCustomBBox(sigma.getBBox());
             },
-        });
-    }, [registerEvents, sigma]);
-
-    return null;
-};
-
-/* ─── Hover neighbour highlighting ─────────────────────────────── */
-
-const HoverHighlight = () => {
-    const registerEvents = useRegisterEvents();
-    const sigma = useSigma();
-    const hoveredNodeRef = useRef<string | null>(null);
-
-    useEffect(() => {
-        registerEvents({
-            enterNode: ({ node }) => {
-                hoveredNodeRef.current = node;
-                const graph = sigma.getGraph();
-
-                // Dim all nodes and edges, highlight the hovered node + its neighbours
-                const neighbours = new Set(graph.neighbors(node));
-                neighbours.add(node);
-
-                sigma.setSetting('nodeReducer', (_nodeId: string, data: Record<string, any>) => {
-                    if (neighbours.has(_nodeId)) {
-                        return { ...data, zIndex: 1 };
-                    }
-                    return { ...data, color: '#e0e0e0', label: '', zIndex: 0 };
-                });
-
-                sigma.setSetting('edgeReducer', (_edgeId: string, data: Record<string, any>) => {
-                    const source = graph.source(_edgeId);
-                    const target = graph.target(_edgeId);
-                    if (neighbours.has(source) && neighbours.has(target)) {
-                        return { ...data, color: '#333', size: 2 };
-                    }
-                    return { ...data, hidden: true };
-                });
-            },
-            leaveNode: () => {
-                hoveredNodeRef.current = null;
-                // Reset reducers
-                sigma.setSetting('nodeReducer', null);
-                sigma.setSetting('edgeReducer', null);
-            }
         });
     }, [registerEvents, sigma]);
 
@@ -503,33 +463,91 @@ function Legend() {
     );
 }
 
-/* ─── Phase 3: Filter + Camera effect components ──────────────── */
+/* ─── Phase 3: Filter + Hover + Camera effect components ────── */
 
-interface FilterEffectProps {
+interface ViewStateEffectProps {
     activeTypes: Set<string> | null;
     activeProjects: Set<string> | null;
 }
 
 /**
- * FilterEffect — Applies the right-panel filter state via Sigma's
- * nodeReducer. An empty set for any filter dimension means "nothing
- * selected", which visually dims all non-matching nodes to ~15% alpha.
- * `null` means "filter not configured; show everything".
+ * ViewStateEffect — owns the sole nodeReducer + edgeReducer on the
+ * Sigma instance. Previously filter-dimming and hover-highlighting
+ * lived in separate components that each called sigma.setSetting
+ * independently, which meant hovering a node overwrote the filter's
+ * reducer and leaveNode cleared it — filtered-out nodes came back
+ * visible and stayed visible until a filter checkbox changed.
+ *
+ * Option 1 fix: single source of truth. Hover state lives in refs;
+ * enterNode/leaveNode just mutate the refs and call sigma.refresh(),
+ * which re-invokes the same composed reducer. The reducer layers
+ * filter dim under hover dim so both states stay consistent.
  */
-const FilterEffect = ({ activeTypes, activeProjects }: FilterEffectProps) => {
+const ViewStateEffect = ({ activeTypes, activeProjects }: ViewStateEffectProps) => {
     const sigma = useSigma();
+    const registerEvents = useRegisterEvents();
+    const hoverNeighborsRef = useRef<Set<string> | null>(null);
 
+    // Hover events flip the ref + refresh; the reducer below re-runs
+    // with the new ref value. No setSetting calls here.
     useEffect(() => {
-        sigma.setSetting('nodeReducer', (_nodeId: string, data: Record<string, any>) => {
+        registerEvents({
+            enterNode: ({ node }) => {
+                const graph = sigma.getGraph();
+                const neighbours = new Set(graph.neighbors(node));
+                neighbours.add(node);
+                hoverNeighborsRef.current = neighbours;
+                sigma.refresh();
+            },
+            leaveNode: () => {
+                hoverNeighborsRef.current = null;
+                sigma.refresh();
+            },
+        });
+    }, [registerEvents, sigma]);
+
+    // Reducers — re-installed when the filter props change. The
+    // closures read the current filter state (props) and the live
+    // hover state (ref), so hovering doesn't need a reinstall.
+    useEffect(() => {
+        sigma.setSetting('nodeReducer', (nodeId: string, data: Attributes) => {
             const t = data.tag as string;
             const c = data.clusterLabel as string;
             const dimType = activeTypes !== null && !activeTypes.has(t);
             const dimProj = activeProjects !== null && !activeProjects.has(c);
-            if (dimType || dimProj) {
+            const filteredOut = dimType || dimProj;
+
+            const neighbours = hoverNeighborsRef.current;
+            if (neighbours) {
+                if (!neighbours.has(nodeId)) {
+                    // Not in hover neighborhood: aggressive hover dim.
+                    return { ...data, color: '#e0e0e0', label: '', zIndex: 0 };
+                }
+                // In neighborhood — still respect the filter dim.
+                if (filteredOut) {
+                    return { ...data, color: '#cbd5e188', label: '', zIndex: 0 };
+                }
+                return { ...data, zIndex: 1 };
+            }
+
+            if (filteredOut) {
                 return { ...data, color: '#cbd5e188', label: '', zIndex: 0 };
             }
             return data;
         });
+
+        sigma.setSetting('edgeReducer', (edgeId: string, data: Attributes) => {
+            const neighbours = hoverNeighborsRef.current;
+            if (!neighbours) return data;
+            const graph = sigma.getGraph();
+            const source = graph.source(edgeId);
+            const target = graph.target(edgeId);
+            if (neighbours.has(source) && neighbours.has(target)) {
+                return { ...data, color: '#333', size: 2 };
+            }
+            return { ...data, hidden: true };
+        });
+
         sigma.refresh();
     }, [sigma, activeTypes, activeProjects]);
 
@@ -625,8 +643,8 @@ export default function SigmaCanvas({
                     defaultEdgeType: 'arrow',
                     renderEdgeLabels: false,
                     zIndex: true,
-                    defaultDrawNodeLabel: drawLabel as any,
-                    defaultDrawNodeHover: drawHover as any,
+                    defaultDrawNodeLabel: drawLabel,
+                    defaultDrawNodeHover: drawHover,
                     // Allow zero-dim containers during initial mount (common in
                     // flex layouts + Puppeteer-based previews). Sigma re-renders
                     // once the ResizeObserver fires.
@@ -635,9 +653,8 @@ export default function SigmaCanvas({
             >
                 <GraphLoader onStatsReady={handleStatsReady} onTopologyReady={onTopologyReady} />
                 <DragEvents />
-                <HoverHighlight />
                 <ClickEvents onNodeClick={onNodeClick} />
-                <FilterEffect activeTypes={activeTypes} activeProjects={activeProjects} />
+                <ViewStateEffect activeTypes={activeTypes} activeProjects={activeProjects} />
                 <CameraEffect focusNodeId={focusNodeId} />
                 <CustomZoomControls />
             </SigmaContainer>

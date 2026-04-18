@@ -1,16 +1,14 @@
-import { useEffect, useRef, useState, lazy, Suspense } from 'react';
-import { Settings, MessageSquare, Network, Moon, Sun, PanelLeft, PanelRight } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react';
+import { Settings, MessageSquare, Moon, Sun, PanelLeft, PanelRight } from 'lucide-react';
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import WorkspacePicker from './components/WorkspacePicker';
 import NodeDetailDrawer from './components/NodeDetailDrawer';
 import './App.css';
 
-// V2.1: code-split the two heavy graph renderers. Sigma.js + graphology
-// and vis-network together add ~550 KB to the initial bundle; lazy-loading
-// means users only download the renderer they actually use. The Suspense
+// V2.1: code-split the graph renderer. Sigma.js + graphology adds ~180 KB
+// gzipped; lazy-loading keeps the initial app bundle small. The Suspense
 // fallback shows a brief "Loading canvas…" while the chunk arrives.
 const SigmaCanvas = lazy(() => import('./components/SigmaCanvas'));
-const GraphCanvas = lazy(() => import('./components/GraphCanvas'));
 
 function CanvasLoadingFallback() {
   return (
@@ -107,7 +105,6 @@ function readFileAsBase64(file: File): Promise<string> {
 function App() {
   const [theme, setTheme] = useState<'corporate' | 'midnight'>('corporate');
   const [showSettings, setShowSettings] = useState(false);
-  const [useSigmaEngine, setUseSigmaEngine] = useState(true);
 
   // Config state (Phase 0 wiring)
   const [llmProvider, setLlmProvider] = useState<LlmProvider>('embedded');
@@ -233,6 +230,17 @@ function App() {
       focusCoalesceRef.current = null;
     }, 200);
   };
+
+  // Stable handler identities for SigmaCanvas. Inline arrows change
+  // every render, which would (a) refetch /api/topology on every App
+  // render once onTopologyReady is in GraphLoader's deps, and
+  // (b) cause ClickEvents to re-register listeners every render.
+  const handleTopologyReady = useCallback((t: TopologyLike) => {
+    setTopology(t);
+  }, []);
+  const handleNodeClick = useCallback((nodeId: string) => {
+    setSelectedNodeId(nodeId);
+  }, []);
 
   // V2.1: Cmd/Ctrl+1..9 mode cycling removed with the mode pill-group.
   // Future keyboard shortcuts (focus chat, toggle filters) can live here.
@@ -388,7 +396,6 @@ function App() {
   const resolveOrphan = async (plugin: string, decision: OrphanDecision): Promise<void> => {
     let confirmValue: string | undefined;
     if (decision === 'drop') {
-      // eslint-disable-next-line no-alert
       const typed = window.prompt(`Type DROP to permanently remove tables for "${plugin}":`);
       if (typed !== 'DROP') return;
       confirmValue = 'DROP';
@@ -439,7 +446,6 @@ function App() {
       const decoder = new TextDecoder();
       let buffer = '';
       let gotError = false;
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -698,21 +704,20 @@ function App() {
         ) : null}
 
         <Suspense fallback={<CanvasLoadingFallback />}>
-          {useSigmaEngine ? (
-            <SigmaCanvas
-              activeTypes={activeTypes}
-              activeProjects={activeProjects}
-              focusNodeId={focusNodeId}
-              onTopologyReady={(t) => setTopology(t)}
-              onNodeClick={(nodeId) => setSelectedNodeId(nodeId)}
-            />
-          ) : (
-            <GraphCanvas />
-          )}
+          <SigmaCanvas
+            activeTypes={activeTypes}
+            activeProjects={activeProjects}
+            focusNodeId={focusNodeId}
+            onTopologyReady={handleTopologyReady}
+            onNodeClick={handleNodeClick}
+          />
         </Suspense>
 
-        {/* V2.1: node-click detail drawer */}
+        {/* V2.1: node-click detail drawer. `key` forces a fresh instance
+            per selected node so stale fetch results never render under a
+            newer id — cleaner than tracking "detail-for-id" in state. */}
         <NodeDetailDrawer
+          key={selectedNodeId ?? 'closed'}
           apiBase={API_BASE}
           selectedNodeId={selectedNodeId}
           onClose={() => setSelectedNodeId(null)}
@@ -732,14 +737,6 @@ function App() {
               <button className="theme-toggle" onClick={toggleTheme}>
                 {theme === 'corporate' ? <Moon size={16} /> : <Sun size={16} />}
                 <span>{theme === 'corporate' ? 'Switch to Midnight' : 'Switch to Corporate'}</span>
-              </button>
-            </div>
-
-            <div className="setting-group">
-              <label>Renderer Engine (Beta)</label>
-              <button className="theme-toggle" onClick={() => setUseSigmaEngine(!useSigmaEngine)}>
-                <Network size={16} />
-                <span>{useSigmaEngine ? 'Revert to Vis-Network' : 'Try Sigma WebGL Engine'}</span>
               </button>
             </div>
 

@@ -73,7 +73,6 @@ export default function WorkspacePicker({ apiBase, onSwitchStarted }: WorkspaceP
     };
 
     const handleCreate = async (): Promise<void> => {
-        // eslint-disable-next-line no-alert
         const raw = window.prompt('Name the new workspace (letters, digits, dashes; 1–40 chars):');
         if (!raw) return;
         try {
@@ -84,31 +83,26 @@ export default function WorkspacePicker({ apiBase, onSwitchStarted }: WorkspaceP
             });
             if (!resp.ok) {
                 const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-                // eslint-disable-next-line no-alert
                 window.alert(`Create failed: ${err.error ?? 'unknown'}`);
                 return;
             }
             await refresh();
         } catch (err) {
-            // eslint-disable-next-line no-alert
             window.alert(`Create failed: ${(err as Error).message}`);
         }
     };
 
     const handleDelete = async (name: string): Promise<void> => {
-        // eslint-disable-next-line no-alert
         if (!window.confirm(`Remove workspace "${name}" from the registry? On-disk data is NOT deleted.`)) return;
         try {
             const resp = await fetch(`${apiBase}/api/workspaces/${encodeURIComponent(name)}`, { method: 'DELETE' });
             if (!resp.ok) {
                 const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
-                // eslint-disable-next-line no-alert
                 window.alert(`Delete failed: ${err.error ?? 'unknown'}`);
                 return;
             }
             await refresh();
         } catch (err) {
-            // eslint-disable-next-line no-alert
             window.alert(`Delete failed: ${(err as Error).message}`);
         }
     };
