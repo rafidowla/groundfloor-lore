@@ -485,6 +485,98 @@
   background: var(--color-border);
 }
 
+/* ─── V2.1: Collapsible panels ─────────────────────────────────── */
+.filters-panel-wrapper {
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.filters-panel-toolbar {
+  display: flex;
+  justify-content: flex-start;
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.filters-panel-wrapper .filters-panel {
+  border-left: none;
+  flex: 1;
+}
+
+.panel-reopen {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 48px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  backdrop-filter: blur(6px);
+  z-index: 7;
+}
+
+.panel-reopen.left {
+  left: 0;
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+}
+
+.panel-reopen.right {
+  right: 0;
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+}
+
+.panel-reopen:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--color-text);
+}
+
+/* ─── V2.1: Drag-drop overlay ─────────────────────────────────── */
+.canvas-area.drag-over {
+  outline: 2px dashed var(--color-accent, #14b8a6);
+  outline-offset: -12px;
+}
+
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 25;
+}
+
+.drop-overlay-card {
+  padding: 1.25rem 2rem;
+  text-align: center;
+  border-radius: 12px;
+  background: rgba(20, 184, 166, 0.12) !important;
+  border-color: var(--color-accent, #14b8a6) !important;
+}
+
+.drop-overlay-card p {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+.drop-overlay-card small {
+  display: block;
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+}
+
 /* ─── Phase 2: Extraction Path radios + plugin badges ──────────── */
 .radio-group {
   display: flex;

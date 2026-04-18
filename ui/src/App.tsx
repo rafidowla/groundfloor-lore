@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Settings, MessageSquare, Network, Moon, Sun } from 'lucide-react';
+import { Settings, MessageSquare, Network, Moon, Sun, PanelLeft, PanelRight } from 'lucide-react';
 import GraphCanvas from './components/GraphCanvas';
 import SigmaCanvas from './components/SigmaCanvas';
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
@@ -115,6 +115,23 @@ function App() {
   const [capability, setCapability] = useState<ConfigResponse['capability'] | null>(null);
   const [lastExtract, setLastExtract] = useState<ExtractResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // V2.1: collapsible panels (persisted in localStorage)
+  const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem('lore.sidebarOpen') !== 'false'; } catch { return true; }
+  });
+  const [filtersOpen, setFiltersOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem('lore.filtersOpen') !== 'false'; } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('lore.sidebarOpen', sidebarOpen ? 'true' : 'false'); } catch { /* ignore */ }
+  }, [sidebarOpen]);
+  useEffect(() => {
+    try { localStorage.setItem('lore.filtersOpen', filtersOpen ? 'true' : 'false'); } catch { /* ignore */ }
+  }, [filtersOpen]);
+
+  // V2.1: drag-drop visual cue
+  const [dragOver, setDragOver] = useState(false);
 
   // V2.1: reconnect panel state
   const [reconnectBusy, setReconnectBusy] = useState(false);
@@ -435,6 +452,43 @@ function App() {
     }
   };
 
+  // V2.1: drag-drop handlers — one file at a time through /api/extract.
+  // Handles both chat and canvas drop zones; rejects surface as an
+  // error-styled chat bubble so the user sees the capability mismatch.
+  const onDrop = async (e: React.DragEvent<HTMLElement>): Promise<void> => {
+    e.preventDefault();
+    setDragOver(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (!file) return;
+    const sysId = `s-${Date.now()}`;
+    setMessages((m) => [...m, { id: sysId, role: 'system', text: `Uploading ${file.name}…` }]);
+    await onFileSelected(file);
+    // `lastExtract` just got set inside onFileSelected; mirror it into chat.
+    window.setTimeout(() => {
+      setLastExtract((le) => {
+        if (!le) return le;
+        const bubble: ChatMessage = {
+          id: `s-${Date.now()}`,
+          role: 'assistant',
+          text: le.accepted
+            ? `✓ Ingested ${le.filename}${le.plan?.chunks ? ` — ${le.plan.chunks} chunk(s)` : ''}`
+            : `✗ ${le.filename} rejected: ${le.reason ?? 'unknown reason'}`,
+          error: !le.accepted,
+        };
+        setMessages((m) => m.filter((x) => x.id !== sysId).concat(bubble));
+        return le;
+      });
+    }, 50);
+  };
+
+  const onDragOver = (e: React.DragEvent<HTMLElement>): void => {
+    if (!e.dataTransfer?.types?.includes('Files')) return;
+    e.preventDefault();
+    setDragOver(true);
+  };
+
+  const onDragLeave = (): void => setDragOver(false);
+
   // Banner text = real health result, not hardcoded.
   const bannerText = healthError
     ? `Lore daemon unreachable: ${healthError}`
@@ -445,12 +499,23 @@ function App() {
   return (
     <div className="app-container">
       {/* Left Panel: Navigation & Chat */}
-      <aside className="sidebar">
+      {sidebarOpen ? (
+      <aside
+        className="sidebar"
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={(e) => void onDrop(e)}
+      >
         <header className="sidebar-header">
           <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
-          <button className="icon-button" onClick={() => setShowSettings(!showSettings)} title="Settings">
-            <Settings size={20} />
-          </button>
+          <div style={{ display: 'flex', gap: '0.25rem' }}>
+            <button className="icon-button" onClick={() => setShowSettings(!showSettings)} title="Settings">
+              <Settings size={20} />
+            </button>
+            <button className="icon-button" onClick={() => setSidebarOpen(false)} title="Hide chat panel">
+              <PanelLeft size={18} />
+            </button>
+          </div>
         </header>
 
         <div className="chat-container">
@@ -498,9 +563,16 @@ function App() {
           </div>
         </div>
       </aside>
+      ) : null}
 
       {/* Graph Visualization Canvas Area */}
-      <main className="canvas-area" style={{ position: 'relative' }}>
+      <main
+        className={`canvas-area${dragOver ? ' drag-over' : ''}`}
+        style={{ position: 'relative' }}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={(e) => void onDrop(e)}
+      >
         {/* Phase 1: Mode pill-group. Renders one pill per active plugin + "All".
             Click or Cmd+1..9 to switch. Phase 3 wires filter preset, system
             prompt swap, and camera focus off this state. */}
@@ -804,16 +876,63 @@ function App() {
             </button>
           </div>
         )}
+        {/* V2.1: Floating panel-toggle chevrons. Visible when a side
+            panel is collapsed so the user can reopen it. */}
+        {!sidebarOpen ? (
+          <button
+            className="panel-reopen left"
+            onClick={() => setSidebarOpen(true)}
+            title="Show chat panel"
+          >
+            <PanelLeft size={16} />
+          </button>
+        ) : null}
+        {!filtersOpen ? (
+          <button
+            className="panel-reopen right"
+            onClick={() => setFiltersOpen(true)}
+            title="Show filters panel"
+          >
+            <PanelRight size={16} />
+          </button>
+        ) : null}
+
+        {/* Drag overlay */}
+        {dragOver ? (
+          <div className="drop-overlay">
+            <div className="drop-overlay-card glass-panel">
+              <p>Drop to ingest</p>
+              {capability ? (
+                <small>
+                  {capability.model} accepts: {capability.acceptedMimeTypes.join(', ')}
+                </small>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
       </main>
 
       {/* Phase 3: Right panel — filters driven by /api/topology */}
-      <FiltersPanel
-        topology={topology}
-        activeTypes={activeTypes ?? new Set()}
-        setActiveTypes={(next) => setActiveTypes(next)}
-        activeProjects={activeProjects ?? new Set()}
-        setActiveProjects={(next) => setActiveProjects(next)}
-      />
+      {filtersOpen ? (
+        <aside className="filters-panel-wrapper">
+          <div className="filters-panel-toolbar">
+            <button
+              className="icon-button"
+              onClick={() => setFiltersOpen(false)}
+              title="Hide filters panel"
+            >
+              <PanelRight size={16} />
+            </button>
+          </div>
+          <FiltersPanel
+            topology={topology}
+            activeTypes={activeTypes ?? new Set()}
+            setActiveTypes={(next) => setActiveTypes(next)}
+            activeProjects={activeProjects ?? new Set()}
+            setActiveProjects={(next) => setActiveProjects(next)}
+          />
+        </aside>
+      ) : null}
     </div>
   );
 }
