@@ -159,6 +159,78 @@ function strip(prefixedId: string): string {
     return i < 0 ? prefixedId : prefixedId.slice(i + 1);
 }
 
+/**
+ * contributeDeveloperTopology — Plugin-side /api/topology contribution.
+ * Emits CodeFile + CodeSymbol as nodes with prefixed ids + the three
+ * cross-pillar edge kinds the developer plugin owns. Core LocalGraph
+ * emits only LoreNode / LoreEdge; this function fills in the code layer.
+ */
+export async function contributeDeveloperTopology(
+    ctx: PluginGraphContext,
+    limit: number = 300,
+): Promise<{
+    nodes: Array<{ id: string; label: string; type: string; project?: string; group?: string }>;
+    edges: Array<{ from: string; to: string; label: string }>;
+}> {
+    const nodes: Array<{ id: string; label: string; type: string; project?: string; group?: string }> = [];
+    const edges: Array<{ from: string; to: string; label: string }> = [];
+
+    try {
+        const fileRows = await ctx.queryRows(`MATCH (f:CodeFile) RETURN f LIMIT ${limit}`);
+        for (const row of fileRows) {
+            const f = row.f as Record<string, unknown>;
+            const pathStr = (f?.path as string) ?? '';
+            nodes.push({
+                id: `file:${pathStr}`,
+                label: pathStr.split('/').slice(-2).join('/'),
+                type: 'code_file',
+                project: f?.repo as string | undefined,
+                group: 'code_file',
+            });
+        }
+        const fcRows = await ctx.queryRows(
+            `MATCH (f:CodeFile)-[:FileContains]->(s:CodeSymbol) RETURN f.path AS fpath, s.uid AS suid LIMIT ${limit * 4}`,
+        );
+        for (const row of fcRows) {
+            edges.push({ from: `file:${row.fpath}`, to: `symbol:${row.suid}`, label: 'contains' });
+        }
+        const ltRows = await ctx.queryRows(
+            `MATCH (n:LoreNode)-[r:LoreTouchesFile]->(f:CodeFile) RETURN n.id AS nid, f.path AS fpath, r.relation AS rel LIMIT ${limit}`,
+        );
+        for (const row of ltRows) {
+            edges.push({ from: row.nid as string, to: `file:${row.fpath}`, label: (row.rel as string) ?? 'touches' });
+        }
+    } catch { /* tables may be missing on older graphs */ }
+
+    try {
+        const symRows = await ctx.queryRows(`MATCH (s:CodeSymbol) RETURN s LIMIT ${limit * 4}`);
+        for (const row of symRows) {
+            const s = row.s as Record<string, unknown>;
+            nodes.push({
+                id: `symbol:${s?.uid}`,
+                label: (s?.name as string) ?? '',
+                type: 'code_symbol',
+                project: s?.repo as string | undefined,
+                group: 'code_symbol',
+            });
+        }
+        const crRows = await ctx.queryRows(
+            `MATCH (a:CodeSymbol)-[e:CodeRelation]->(b:CodeSymbol) RETURN a.uid AS src, e.type AS rel, b.uid AS dst LIMIT ${limit * 4}`,
+        );
+        for (const row of crRows) {
+            edges.push({ from: `symbol:${row.src}`, to: `symbol:${row.dst}`, label: row.rel as string });
+        }
+        const laRows = await ctx.queryRows(
+            `MATCH (n:LoreNode)-[e:LoreAppliesToCode]->(s:CodeSymbol) RETURN n.id AS nid, s.uid AS suid, e.relation AS rel LIMIT ${limit}`,
+        );
+        for (const row of laRows) {
+            edges.push({ from: row.nid as string, to: `symbol:${row.suid}`, label: (row.rel as string) ?? 'applies_to' });
+        }
+    } catch { /* ignore */ }
+
+    return { nodes, edges };
+}
+
 export async function routeDeveloperReconnectEdge(
     proposal: ReconnectEdgeProposal,
     ctx: PluginGraphContext,

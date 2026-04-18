@@ -28,7 +28,8 @@
  */
 
 import { execSync } from 'child_process';
-import type { LocalGraph, CodeSymbol, CodeRelationEdge } from './localGraph.js';
+import type { CodeSymbol, CodeRelationEdge } from './types.js';
+import type { DeveloperApi } from './api.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
@@ -348,7 +349,7 @@ const GITNEXUS_EDGE_TYPES = [
  *   relationships, and writes them into Lore's unified Kùzu graph.
  *
  * @param repoEntry - The GitNexus repo entry with storage path.
- * @param loreGraph - The target Lore graph to write into.
+ * @param api - DeveloperApi for the workspace's plugin-owned Kùzu tables.
  * @returns Import result summary.
  *
  * Side Effects:
@@ -361,7 +362,7 @@ const GITNEXUS_EDGE_TYPES = [
  */
 export async function importFromGitNexus(
     repoEntry: GitNexusRepoEntry,
-    loreGraph: LocalGraph,
+    api: DeveloperApi,
 ): Promise<IndexResult> {
     const startTime = Date.now();
     const errors: string[] = [];
@@ -381,10 +382,10 @@ export async function importFromGitNexus(
     }
 
     // Preserve cross-pillar edges before clearing
-    const crossPillarEdges = await loreGraph.getCrossPillarEdges(repoEntry.name);
+    const crossPillarEdges = await api.getCrossPillarEdges(repoEntry.name);
 
     // Clear existing code symbols (and their CodeRelation edges)
-    const symbolsCleared = await loreGraph.clearCodeSymbols(repoEntry.name);
+    const symbolsCleared = await api.clearCodeSymbols(repoEntry.name);
 
     // Import symbols from each node type
     for (const nodeType of GITNEXUS_NODE_TYPES) {
@@ -401,7 +402,7 @@ export async function importFromGitNexus(
             const uid = generateSymbolUid(repoEntry.name, symbolFilePath, symbolName, nodeType);
 
             try {
-                await loreGraph.upsertCodeSymbol({
+                await api.upsertCodeSymbol({
                     uid,
                     name: symbolName,
                     kind: nodeType,
@@ -438,7 +439,7 @@ export async function importFromGitNexus(
         const targetUid = generateSymbolUid(repoEntry.name, dstPath, dstName, dstKind);
 
         try {
-            await loreGraph.addCodeRelation({
+            await api.addCodeRelation({
                 sourceUid,
                 targetUid,
                 type: row['relType'] ?? 'CALLS',
@@ -455,7 +456,7 @@ export async function importFromGitNexus(
     let crossPillarRestored = 0;
     for (const edge of crossPillarEdges) {
         try {
-            await loreGraph.linkKnowledgeToCode(edge.nodeId, edge.symbolUid, edge.relation);
+            await api.linkKnowledgeToCode(edge.nodeId, edge.symbolUid, edge.relation);
             crossPillarRestored++;
         } catch {
             // Symbol may have been renamed/removed — edge is orphaned
@@ -478,10 +479,10 @@ export async function importFromGitNexus(
 /**
  * indexAllRepos — Import all GitNexus-indexed repos into Lore.
  *
- * @param loreGraph - The target Lore graph.
+ * @param api - DeveloperApi for the workspace's plugin-owned Kùzu tables.
  * @returns Array of results, one per repo.
  */
-export async function indexAllRepos(loreGraph: LocalGraph): Promise<IndexResult[]> {
+export async function indexAllRepos(api: DeveloperApi): Promise<IndexResult[]> {
     const repos = listGitNexusRepos();
 
     if (repos.length === 0) {
@@ -497,7 +498,7 @@ export async function indexAllRepos(loreGraph: LocalGraph): Promise<IndexResult[
 
     const results: IndexResult[] = [];
     for (const repo of repos) {
-        const result = await importFromGitNexus(repo, loreGraph);
+        const result = await importFromGitNexus(repo, api);
         results.push(result);
     }
 

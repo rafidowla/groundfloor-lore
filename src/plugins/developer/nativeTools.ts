@@ -21,7 +21,8 @@ import { execSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import type { LocalGraph, CodeSymbol } from '../engines/localGraph.js';
+import type { CodeSymbol } from './types.js';
+import type { DeveloperApi } from './api.js';
 
 /* ─── Types ───────────────────────────────────────────────────── */
 
@@ -104,7 +105,7 @@ export interface RepoInfo {
  *   by their current uncommitted work. Replaces GitNexus's MCP-only
  *   detect_changes tool using Lore's Kùzu CodeSymbol table.
  *
- * @param graph - LocalGraph instance for Kùzu queries.
+ * @param api - DeveloperApi for plugin-owned Kùzu queries.
  * @param repoPath - Path to the git repository.
  * @param scope - 'unstaged' (default), 'staged', or 'all'.
  * @returns DetectChangesResult with affected symbols and unmapped files.
@@ -114,7 +115,7 @@ export interface RepoInfo {
  * Idempotency: Yes — read-only operation.
  */
 export async function detectChanges(
-    graph: LocalGraph,
+    api: DeveloperApi,
     repoPath: string,
     scope: 'unstaged' | 'staged' | 'all' = 'unstaged',
 ): Promise<DetectChangesResult> {
@@ -130,7 +131,7 @@ export async function detectChanges(
 
     for (const change of changedFiles) {
         // Query Kùzu for symbols in this file
-        const symbols = await graph.queryCodeSymbols(change.filePath);
+        const symbols = await api.queryCodeSymbols(change.filePath);
 
         if (symbols.length > 0) {
             for (const symbol of symbols) {
@@ -218,7 +219,7 @@ function getGitChangedFiles(
  *   and regex text search (lower confidence). Preview by default (dry_run=true).
  *   Replaces GitNexus's MCP-only rename tool.
  *
- * @param graph - LocalGraph instance for Kùzu queries.
+ * @param api - DeveloperApi for plugin-owned Kùzu queries.
  * @param symbolName - Current name of the symbol to rename.
  * @param newName - New name for the symbol.
  * @param repoPath - Path to the repository root.
@@ -230,7 +231,7 @@ function getGitChangedFiles(
  * Idempotency: Dry run is idempotent. Apply is NOT idempotent.
  */
 export async function rename(
-    graph: LocalGraph,
+    api: DeveloperApi,
     symbolName: string,
     newName: string,
     repoPath: string,
@@ -239,7 +240,7 @@ export async function rename(
     const edits: RenameEdit[] = [];
 
     // Phase 1: Graph-based references (high confidence)
-    const graphEdits = await findGraphReferences(graph, symbolName, repoPath);
+    const graphEdits = await findGraphReferences(api, symbolName, repoPath);
     edits.push(...graphEdits);
 
     // Phase 2: Text search fallback (lower confidence)
@@ -263,14 +264,14 @@ export async function rename(
  * that reference the target symbol. These are high-confidence results.
  */
 async function findGraphReferences(
-    graph: LocalGraph,
+    api: DeveloperApi,
     symbolName: string,
     repoPath: string,
 ): Promise<RenameEdit[]> {
     const edits: RenameEdit[] = [];
 
     // Find the symbol itself
-    const symbols = await graph.queryCodeSymbolsByName(symbolName);
+    const symbols = await api.queryCodeSymbolsByName(symbolName);
 
     for (const symbol of symbols) {
         // Add the declaration itself
@@ -286,10 +287,10 @@ async function findGraphReferences(
         }
 
         // Find all incoming references (callers, importers, etc.)
-        const relations = await graph.getCodeRelationsTo(symbol.uid);
+        const relations = await api.getCodeRelationsTo(symbol.uid);
         for (const relation of relations) {
             // Get the source symbol's file
-            const sourceSymbol = await graph.getCodeSymbolByUid(relation.sourceUid);
+            const sourceSymbol = await api.getCodeSymbolByUid(relation.sourceUid);
             if (sourceSymbol) {
                 const sourceAbsPath = path.join(repoPath, sourceSymbol.filePath);
                 if (fs.existsSync(sourceAbsPath)) {

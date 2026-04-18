@@ -209,4 +209,16 @@ export interface ILorePlugin {
      * Returns the number of edges deleted (for stats/logging).
      */
     pruneInferredEdges?(relationPrefix: string, ctx: PluginGraphContext): Promise<number>;
+
+    /**
+     * V2.1 — contribute additional nodes + edges to the /api/topology
+     * response so the dashboard's graph view shows plugin-owned data
+     * alongside core LoreNodes. Core emits LoreNode + LoreEdge by
+     * default; plugins add their own with prefixed ids (e.g. file:,
+     * symbol:) and any cross-pillar edges they track.
+     */
+    contributeTopology?(ctx: PluginGraphContext, limit: number): Promise<{
+        nodes: Array<{ id: string; label: string; type: string; project?: string; group?: string }>;
+        edges: Array<{ from: string; to: string; label: string }>;
+    }>;
 }

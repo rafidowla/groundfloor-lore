@@ -30,8 +30,9 @@ import type {
 } from '../types.js';
 import { registerDeveloperSchema } from './schema.js';
 import { pruneInferredDeveloperEdges } from './operations.js';
-import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge } from './reconnect.js';
-import { buildDeveloperApi, type DeveloperApi } from './api.js';
+import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology } from './reconnect.js';
+import { buildDeveloperApi, bindApiSelfReference, type DeveloperApi } from './api.js';
+import { registerDeveloperTools } from './tools.js';
 
 const TOOL_NAMES = [
     'code_query',
@@ -72,13 +73,16 @@ export const developerPlugin: ILorePlugin = {
     },
 
     /**
-     * Phase 1: the registrar is a no-op here because tools are still
-     * defined in server.ts and gated by `pluginRegistry.isActive('developer')`.
-     * Phase-follow-up: move the 10 tool closures into ./tools.ts and
-     * invoke them here.
+     * V2.1 cleanup: register the 10 developer MCP tools through the
+     * plugin's own module. server.ts has no knowledge of these tools.
      */
-    registerTools(_server: McpServer, _ctx: PluginContext): void {
-        // intentional no-op until physical extraction lands
+    registerTools(server: McpServer, ctx: PluginContext): void {
+        const api = (developerPlugin as ILorePlugin & { api?: DeveloperApi }).api;
+        if (!api) {
+            console.error('[developer plugin] registerTools called before registerSchema attached the api — skipping.');
+            return;
+        }
+        registerDeveloperTools(server, api, ctx);
     },
 
     /**
@@ -92,7 +96,9 @@ export const developerPlugin: ILorePlugin = {
         // Attach the typed api so outside callers can reach developer ops
         // without importing plugin internals. See src/plugins/developer/api.ts
         // for the DeveloperApi contract.
-        (developerPlugin as ILorePlugin & { api?: DeveloperApi }).api = buildDeveloperApi(ctx);
+        const api = buildDeveloperApi(ctx);
+        bindApiSelfReference(api);
+        (developerPlugin as ILorePlugin & { api?: DeveloperApi }).api = api;
     },
 
     /**
@@ -121,6 +127,10 @@ export const developerPlugin: ILorePlugin = {
     async pruneInferredEdges(relationPrefix: string, ctx: PluginGraphContext): Promise<number> {
         const stats = await pruneInferredDeveloperEdges(ctx, relationPrefix);
         return stats.touchesFile + stats.appliesToCode;
+    },
+
+    async contributeTopology(ctx: PluginGraphContext, limit: number) {
+        return await contributeDeveloperTopology(ctx, limit);
     },
 
     async getTelemetryPayload(ctx: PluginContext): Promise<PluginTelemetryPayload | null> {

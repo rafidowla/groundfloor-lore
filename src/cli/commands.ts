@@ -17,7 +17,10 @@ import { execSync } from 'child_process';
 import http from 'http';
 import { LocalGraph } from '../engines/localGraph.js';
 import { SyncEngine } from '../engines/syncEngine.js';
-import { listGitNexusRepos, getGitNexusRepo, importFromGitNexus, isGitNexusAvailable } from '../engines/codeIndexer.js';
+// `lore index` + `lore doctor` reach the GitNexus-backed code indexer
+// through the developer plugin's opaque api. See src/plugins/developer/
+// codeIndexer.ts for the implementation.
+import type { DeveloperApi, IndexResult } from '../plugins/developer/api.js';
 
 /* ─── Shared Helpers ──────────────────────────────────────────── */
 
@@ -232,19 +235,30 @@ export async function indexCommand(args: string[]): Promise<void> {
         process.exit(1);
     }
 
+    const { ConfigManager } = await import('../config/configManager.js');
+    const { PluginRegistry } = await import('../plugins/registry.js');
     const graph = new LocalGraph(basePath);
+    const registry = new PluginRegistry(new ConfigManager(loreDir));
+    registry.boot();
     await graph.initialize();
+    await registry.registerSchemas(graph.createPluginGraphContext());
+
+    const devPlugin = registry.active().find((p) => p.name === 'developer');
+    const devApi = devPlugin?.api as DeveloperApi | undefined;
+    if (!devApi) {
+        console.error('❌ `lore index` requires the "developer" plugin. Add "developer" to .lore/config.json plugins[].');
+        await graph.close();
+        process.exit(1);
+    }
 
     const specificRepo = args[0];
 
     if (specificRepo) {
-        // Index a specific repo
-        const repoEntry = getGitNexusRepo(specificRepo);
+        const repoEntry = devApi.getGitNexusRepo(specificRepo);
         if (!repoEntry) {
             console.error(`❌ Repository '${specificRepo}' not found in GitNexus registry.`);
             console.error('  Available repos:');
-            const allRepos = listGitNexusRepos();
-            for (const repo of allRepos) {
+            for (const repo of devApi.listGitNexusRepos()) {
                 console.error(`    - ${repo.name} (${repo.stats.nodes} symbols)`);
             }
             await graph.close();
@@ -252,11 +266,10 @@ export async function indexCommand(args: string[]): Promise<void> {
         }
 
         console.log(`→ Indexing '${specificRepo}' from GitNexus...`);
-        const result = await importFromGitNexus(repoEntry, graph);
+        const result = await devApi.importFromGitNexus(repoEntry);
         printIndexResult(result);
     } else {
-        // Index all repos
-        const repos = listGitNexusRepos();
+        const repos = devApi.listGitNexusRepos();
         if (repos.length === 0) {
             console.error('❌ No GitNexus-indexed repos found.');
             console.error('  Run "gitnexus analyze <path>" to index a repo first.');
@@ -269,7 +282,7 @@ export async function indexCommand(args: string[]): Promise<void> {
 
         for (const repo of repos) {
             console.log(`  ─── ${repo.name} (${repo.stats.nodes} GitNexus symbols) ───`);
-            const result = await importFromGitNexus(repo, graph);
+            const result = await devApi.importFromGitNexus(repo);
             printIndexResult(result);
             console.log('');
         }
@@ -289,7 +302,7 @@ export async function indexCommand(args: string[]): Promise<void> {
 /**
  * printIndexResult — Display the result of a code index operation.
  */
-function printIndexResult(result: import('../engines/codeIndexer.js').IndexResult): void {
+function printIndexResult(result: IndexResult): void {
     console.log(`  ✓ ${result.symbolsImported} symbols imported`);
     console.log(`  ✓ ${result.relationsImported} relations imported`);
     if (result.symbolsCleared > 0) {
@@ -546,13 +559,33 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         issues++;
     }
 
-    // Check 8: GitNexus CLI
-    if (isGitNexusAvailable()) {
-        const repos = listGitNexusRepos();
-        console.log(`  ✓ GitNexus CLI available: ${repos.length} repo(s) indexed`);
-    } else {
-        console.log('  ✗ GitNexus CLI not found — install with: npm install -g gitnexus');
-        issues++;
+    // Check 8: Active plugins + per-plugin health (developer plugin owns
+    // the GitNexus-availability check it used to drive in core).
+    try {
+        const { ConfigManager } = await import('../config/configManager.js');
+        const { PluginRegistry } = await import('../plugins/registry.js');
+        const registry = new PluginRegistry(new ConfigManager(loreDir));
+        registry.boot();
+        const graph = new LocalGraph(basePath);
+        await graph.initialize();
+        await registry.registerSchemas(graph.createPluginGraphContext());
+        const active = registry.active().map((p) => p.name);
+        console.log(`  ✓ Active plugins: ${active.join(', ') || '(none)'}`);
+
+        const devPlugin = registry.active().find((p) => p.name === 'developer');
+        const devApi = devPlugin?.api as DeveloperApi | undefined;
+        if (devApi) {
+            if (devApi.isGitNexusAvailable()) {
+                const repos = devApi.listGitNexusRepos();
+                console.log(`  ✓ GitNexus CLI available: ${repos.length} repo(s) indexed`);
+            } else {
+                console.log('  ✗ GitNexus CLI not found — install with: npm install -g gitnexus');
+                issues++;
+            }
+        }
+        await graph.close();
+    } catch (pluginErr) {
+        console.log(`  ⚠ Plugin health check failed: ${(pluginErr as Error).message}`);
     }
 
     // Summary

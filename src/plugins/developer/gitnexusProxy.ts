@@ -30,7 +30,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { isGitNexusAvailable } from '../engines/codeIndexer.js';
+import { isGitNexusAvailable } from './codeIndexer.js';
 
 /* ─── Types ───────────────────────────────────────────────────── */
 

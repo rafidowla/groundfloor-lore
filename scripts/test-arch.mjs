@@ -103,8 +103,16 @@ function scanAll() {
         let m;
         while ((m = importFromPluginsRe.exec(content)) !== null) {
             const importedPath = m[1];
+            // Sanctioned cross-boundary imports:
+            //   - plugins/types.js        — ILorePlugin contract
+            //   - plugins/registry.js     — dispatcher
+            //   - plugins/<name>/api.js   — plugin's public contract. The
+            //     api module is the ONE place a plugin declares its
+            //     outward-facing surface; importing the type is how core
+            //     callers (e.g. CLI orchestration) stay loosely coupled.
             if (importedPath.endsWith('plugins/types.js') || importedPath.endsWith('plugins/types')) continue;
             if (importedPath.endsWith('plugins/registry.js') || importedPath.endsWith('plugins/registry')) continue;
+            if (/plugins\/[^/]+\/api(\.js)?$/.test(importedPath)) continue;
             violations.push({ rule: 'no-plugin-import', file: relPath, token: importedPath });
         }
 
