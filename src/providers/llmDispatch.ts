@@ -25,9 +25,15 @@
 export type LlmProvider = 'embedded' | 'anthropic' | 'openai' | 'ollama' | string;
 
 export interface LlmChunk {
-    kind: 'token' | 'done' | 'error';
+    kind: 'token' | 'done' | 'error' | 'model_loading';
     content?: string;
     message?: string;
+    /** Download/progress fraction in [0, 1] for 'model_loading' frames. */
+    progress?: number;
+    /** File being downloaded, e.g. "onnx/decoder_model_merged_quantized.onnx". */
+    file?: string;
+    /** Human-readable status tag: "download" | "ready". */
+    status?: string;
 }
 
 export interface LlmCapability {
@@ -154,8 +160,9 @@ export async function* stream(
  * this provider is active so the user knows why answers feel thin.
  */
 async function* streamEmbedded(message: string, model: string): AsyncGenerator<LlmChunk> {
-    // Queue-based async iterator over the streamer's sync callback.
-    const queue: string[] = [];
+    // Queue holds LlmChunks so it can interleave model-loading progress
+    // frames with token frames. Both flow through the same notify() gate.
+    const queue: LlmChunk[] = [];
     let streamingDone = false;
     let streamingError: { message: string } | null = null;
     let resolveNext: (() => void) | null = null;
@@ -179,7 +186,35 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
             env.allowRemoteModels = true;
 
             console.error(`[llmDispatch] Loading embedded model ${model} (first run downloads to ${env.cacheDir})...`);
-            const generator = await pipeline('text-generation', model, { quantized: true }) as {
+
+            // V2.1: surface download progress to the UI. Transformers.js
+            // fires progress_callback with {status, file, loaded, total,
+            // progress} as each weight shard is fetched. We translate that
+            // into LlmChunk frames the chat can render as a progress bar.
+            const progress_callback = (p: {
+                status?: string;
+                file?: string;
+                loaded?: number;
+                total?: number;
+                progress?: number;
+            }): void => {
+                if (!p) return;
+                const frac = typeof p.progress === 'number'
+                    ? Math.max(0, Math.min(1, p.progress / 100))
+                    : p.total && p.loaded ? p.loaded / p.total : 0;
+                queue.push({
+                    kind: 'model_loading',
+                    status: p.status,
+                    file: p.file,
+                    progress: frac,
+                });
+                notify();
+            };
+
+            const generator = await pipeline('text-generation', model, {
+                quantized: true,
+                progress_callback,
+            }) as {
                 tokenizer: unknown;
                 (input: unknown, opts: Record<string, unknown>): Promise<unknown>;
             };
@@ -189,7 +224,7 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
                 skip_special_tokens: true,
                 callback_function: (text: string) => {
                     if (text) {
-                        queue.push(text);
+                        queue.push({ kind: 'token', content: text });
                         notify();
                     }
                 },
@@ -217,7 +252,7 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
             await new Promise<void>((r) => { resolveNext = r; });
         }
         while (queue.length > 0) {
-            yield { kind: 'token', content: queue.shift()! };
+            yield queue.shift()!;
         }
     }
     await genPromise;

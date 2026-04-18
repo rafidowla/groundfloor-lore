@@ -1280,8 +1280,10 @@ export async function reconnectCommand(args: string[]): Promise<void> {
     console.log(`  ✓ Proposed edges at threshold ${threshold}: ${result.proposedEdges.length}`);
 
     if (apply) {
-        console.log(`  ✓ Pruned ${result.inferredPruned} prior inferred edge(s)`);
-        console.log(`  ✓ Inserted ${result.edgesInserted} new semantic_neighbor edge(s)`);
+        const p = result.prunedByTable;
+        const i = result.edgesInsertedByTable;
+        console.log(`  ✓ Pruned — LoreEdge:${p.loreEdge}  TouchesFile:${p.touchesFile}  AppliesToCode:${p.appliesToCode}`);
+        console.log(`  ✓ Inserted — LoreEdge:${i.loreEdge}  TouchesFile:${i.touchesFile}  AppliesToCode:${i.appliesToCode}  (total ${i.loreEdge + i.touchesFile + i.appliesToCode})`);
     } else {
         console.log('');
         console.log('  (dry run — nothing was written. Re-run with --apply to commit.)');

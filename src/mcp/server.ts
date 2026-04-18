@@ -1890,6 +1890,14 @@ async function main(): Promise<void> {
                         for await (const chunk of llmStream(cfg.llmProvider, message, key)) {
                             if (chunk.kind === 'token' && chunk.content) {
                                 write({ type: 'token', content: chunk.content });
+                            } else if (chunk.kind === 'model_loading') {
+                                // V2.1: first-run Qwen download progress.
+                                write({
+                                    type: 'model_loading',
+                                    status: chunk.status,
+                                    file: chunk.file,
+                                    progress: chunk.progress,
+                                });
                             } else if (chunk.kind === 'error') {
                                 write({ type: 'error', message: chunk.message });
                             } else if (chunk.kind === 'done') {

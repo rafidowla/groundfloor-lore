@@ -593,6 +593,90 @@ export class LocalGraph implements GraphProvider {
     }
 
     /**
+     * V2.1 cross-pillar: prune inferred cross-pillar rel-table edges by prefix.
+     * Used by reconnectGraph to reset the semantic layer before re-inserting.
+     */
+    async pruneInferredCrossEdges(relationPrefix: string): Promise<{ touchesFile: number; appliesToCode: number }> {
+        await this.initialize();
+        let touchesFile = 0;
+        let appliesToCode = 0;
+        try {
+            const tfCount = await this.connection.execute(
+                await this.connection.prepare(
+                    `MATCH ()-[e:LoreTouchesFile]->() WHERE e.relation STARTS WITH $p RETURN count(e) AS cnt`,
+                ),
+                { p: relationPrefix },
+            ) as QueryResult;
+            touchesFile = Number((await tfCount.getAll())[0]?.cnt ?? 0);
+            await this.connection.execute(
+                await this.connection.prepare(
+                    `MATCH ()-[e:LoreTouchesFile]->() WHERE e.relation STARTS WITH $p DELETE e`,
+                ),
+                { p: relationPrefix },
+            );
+        } catch { /* table may not exist on very old graphs */ }
+        try {
+            const acCount = await this.connection.execute(
+                await this.connection.prepare(
+                    `MATCH ()-[e:LoreAppliesToCode]->() WHERE e.relation STARTS WITH $p RETURN count(e) AS cnt`,
+                ),
+                { p: relationPrefix },
+            ) as QueryResult;
+            appliesToCode = Number((await acCount.getAll())[0]?.cnt ?? 0);
+            await this.connection.execute(
+                await this.connection.prepare(
+                    `MATCH ()-[e:LoreAppliesToCode]->() WHERE e.relation STARTS WITH $p DELETE e`,
+                ),
+                { p: relationPrefix },
+            );
+        } catch { /* ignore */ }
+        return { touchesFile, appliesToCode };
+    }
+
+    /**
+     * V2.1: Walk CodeFiles + CodeSymbols and return flat records the
+     * reconnect pass can embed into VerbatimStore. Kept here so
+     * reconnect.ts doesn't need to know Cypher.
+     */
+    async listCodeFiles(): Promise<Array<{ path: string; language: string; repo: string }>> {
+        await this.initialize();
+        try {
+            const result = await this.connection.query(
+                `MATCH (f:CodeFile) RETURN f.path AS path, f.language AS language, f.repo AS repo`,
+            ) as QueryResult;
+            const rows = await result.getAll();
+            return rows.map((r) => ({
+                path: (r.path ?? '') as string,
+                language: (r.language ?? '') as string,
+                repo: (r.repo ?? '') as string,
+            }));
+        } catch {
+            return [];
+        }
+    }
+
+    async listCodeSymbols(limit: number = 2000): Promise<Array<{ uid: string; name: string; kind: string; filePath: string; signature: string; content: string; repo: string }>> {
+        await this.initialize();
+        try {
+            const result = await this.connection.query(
+                `MATCH (s:CodeSymbol) RETURN s.uid AS uid, s.name AS name, s.kind AS kind, s.filePath AS filePath, s.signature AS signature, s.content AS content, s.repo AS repo LIMIT ${limit}`,
+            ) as QueryResult;
+            const rows = await result.getAll();
+            return rows.map((r) => ({
+                uid: (r.uid ?? '') as string,
+                name: (r.name ?? '') as string,
+                kind: (r.kind ?? '') as string,
+                filePath: (r.filePath ?? '') as string,
+                signature: (r.signature ?? '') as string,
+                content: (r.content ?? '') as string,
+                repo: (r.repo ?? '') as string,
+            }));
+        } catch {
+            return [];
+        }
+    }
+
+    /**
      * traverse — Walk the graph from a starting node.
      *
      * Purpose: Follows edges up to a specified depth, returning all

@@ -1,10 +1,31 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, lazy, Suspense } from 'react';
 import { Settings, MessageSquare, Network, Moon, Sun, PanelLeft, PanelRight } from 'lucide-react';
-import GraphCanvas from './components/GraphCanvas';
-import SigmaCanvas from './components/SigmaCanvas';
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import WorkspacePicker from './components/WorkspacePicker';
 import './App.css';
+
+// V2.1: code-split the two heavy graph renderers. Sigma.js + graphology
+// and vis-network together add ~550 KB to the initial bundle; lazy-loading
+// means users only download the renderer they actually use. The Suspense
+// fallback shows a brief "Loading canvas…" while the chunk arrives.
+const SigmaCanvas = lazy(() => import('./components/SigmaCanvas'));
+const GraphCanvas = lazy(() => import('./components/GraphCanvas'));
+
+function CanvasLoadingFallback() {
+  return (
+    <div style={{
+      position: 'absolute',
+      inset: 0,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      color: 'var(--color-text-muted)',
+      fontSize: '0.9rem',
+    }}>
+      Loading canvas…
+    </div>
+  );
+}
 
 // Mode → default filter preset. Matches the plugin's uiHints.defaultFilterTypes
 // on the backend (src/plugins/developer/index.ts). "all" = pass-through.
@@ -65,6 +86,11 @@ interface ChatMessage {
   text: string;
   streaming?: boolean;
   error?: boolean;
+  /** V2.1: first-run Qwen download progress overlay. */
+  loading?: {
+    file?: string;
+    progress: number; // 0..1
+  };
 }
 
 /** Read a File object as base64 without the data: URL prefix. */
@@ -414,11 +440,40 @@ function App() {
           for (const line of frame.split('\n')) {
             if (!line.startsWith('data: ')) continue;
             try {
-              const evt = JSON.parse(line.slice(6)) as { type: string; content?: string; message?: string; nodeId?: string };
+              const evt = JSON.parse(line.slice(6)) as {
+                type: string;
+                content?: string;
+                message?: string;
+                nodeId?: string;
+                file?: string;
+                progress?: number;
+                status?: string;
+              };
               if (evt.type === 'focus' && evt.nodeId) {
                 requestFocus(evt.nodeId);
+              } else if (evt.type === 'model_loading') {
+                // V2.1: Qwen first-run download progress.
+                setMessages((m) =>
+                  m.map((msg) =>
+                    msg.id === assistantId
+                      ? {
+                          ...msg,
+                          loading: {
+                            file: evt.file,
+                            progress: typeof evt.progress === 'number' ? evt.progress : 0,
+                          },
+                        }
+                      : msg,
+                  ),
+                );
               } else if (evt.type === 'token' && evt.content) {
-                setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: msg.text + evt.content } : msg)));
+                setMessages((m) =>
+                  m.map((msg) =>
+                    msg.id === assistantId
+                      ? { ...msg, text: msg.text + evt.content, loading: undefined }
+                      : msg,
+                  ),
+                );
                 // Phase 3: parse bracketed [node:ID] markers in the stream
                 // so an LLM that emits them directly still triggers a pan.
                 const nodeMatch = /\[node:([\w\-.:]+)\]/i.exec(evt.content ?? '');
@@ -537,10 +592,25 @@ function App() {
                 key={m.id}
                 className={`chat-message glass-panel ${m.role === 'user' ? 'user-message' : 'ai-message'}${m.error ? ' chat-error' : ''}`}
               >
-                <p>
-                  {m.text}
-                  {m.streaming ? <span className="cursor-blink">▌</span> : null}
-                </p>
+                {m.loading ? (
+                  <div className="model-loading">
+                    <p style={{ margin: 0, fontSize: '0.85rem' }}>
+                      Downloading model… {m.loading.file ? <code>{m.loading.file}</code> : null}
+                    </p>
+                    <div className="progress-bar">
+                      <div
+                        className="progress-bar-fill"
+                        style={{ width: `${Math.round(m.loading.progress * 100)}%` }}
+                      />
+                    </div>
+                    <small>{Math.round(m.loading.progress * 100)}% — runs fully offline after download</small>
+                  </div>
+                ) : (
+                  <p>
+                    {m.text}
+                    {m.streaming ? <span className="cursor-blink">▌</span> : null}
+                  </p>
+                )}
               </div>
             ))}
             <div ref={chatEndRef} />
@@ -632,16 +702,18 @@ function App() {
           </div>
         ) : null}
 
-        {useSigmaEngine ? (
-          <SigmaCanvas
-            activeTypes={activeTypes}
-            activeProjects={activeProjects}
-            focusNodeId={focusNodeId}
-            onTopologyReady={(t) => setTopology(t)}
-          />
-        ) : (
-          <GraphCanvas />
-        )}
+        <Suspense fallback={<CanvasLoadingFallback />}>
+          {useSigmaEngine ? (
+            <SigmaCanvas
+              activeTypes={activeTypes}
+              activeProjects={activeProjects}
+              focusNodeId={focusNodeId}
+              onTopologyReady={(t) => setTopology(t)}
+            />
+          ) : (
+            <GraphCanvas />
+          )}
+        </Suspense>
 
         {/* Dynamic Settings Sidebar (Slide-over) */}
         {showSettings && (
