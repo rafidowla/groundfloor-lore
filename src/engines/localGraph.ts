@@ -1175,6 +1175,45 @@ export class LocalGraph implements GraphProvider {
      *
      * Side Effects: Closes Kùzu connection and database handles.
      */
+    /**
+     * V2.1 / Option C — returns a narrow query surface plugins can use
+     * to register their own schema + read/write their own nodes without
+     * importing this class directly. See src/plugins/types.ts
+     * (PluginGraphContext) for the contract.
+     *
+     * This method intentionally returns an opaque shape rather than the
+     * raw Connection so plugins can't reach into LocalGraph internals.
+     */
+    createPluginGraphContext(): {
+        executeQuery(cypher: string, params?: Record<string, unknown>): Promise<unknown>;
+        queryRows(cypher: string, params?: Record<string, unknown>): Promise<Array<Record<string, unknown>>>;
+    } {
+        return {
+            executeQuery: async (cypher: string, params?: Record<string, unknown>) => {
+                await this.initialize();
+                if (!params || Object.keys(params).length === 0) {
+                    return await this.connection.query(cypher);
+                }
+                const stmt = await this.connection.prepare(cypher);
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                return await this.connection.execute(stmt, params as any);
+            },
+            queryRows: async (cypher: string, params?: Record<string, unknown>) => {
+                await this.initialize();
+                let result: QueryResult;
+                if (!params || Object.keys(params).length === 0) {
+                    result = await this.connection.query(cypher) as QueryResult;
+                } else {
+                    const stmt = await this.connection.prepare(cypher);
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    result = await this.connection.execute(stmt, params as any) as QueryResult;
+                }
+                const rows = await result.getAll();
+                return rows as Array<Record<string, unknown>>;
+            },
+        };
+    }
+
     async close(): Promise<void> {
         try {
             await this.connection.close();
