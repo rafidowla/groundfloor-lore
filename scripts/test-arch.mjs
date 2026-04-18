@@ -31,7 +31,9 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..');
-const srcRoot = path.join(repoRoot, 'src');
+// V2.1 workspace split: source lives under packages/*. "Core" is
+// packages/lore/, "plugins" are packages/lore-plugin-*/.
+const srcRoot = path.join(repoRoot, 'packages');
 const baselinePath = path.join(repoRoot, '.arch-baseline.json');
 
 const PLUGIN_SCOPED_TOKENS = [
@@ -56,12 +58,14 @@ const PLUGIN_SCOPED_TOKENS = [
 const ALLOWED_IN_CORE = [
     'scripts/test-arch.mjs',
     // Registry's BUILTIN_PLUGINS map is the one place core knows plugin
-    // names. It still imports from src/plugins/developer/index for the
-    // instance, which is structurally legal (registry is the bridge).
-    'src/plugins/registry.ts',
+    // names by reference. Structurally legal (registry is the bridge).
+    'packages/lore/src/plugins/registry.ts',
 ];
 
-const PLUGIN_ROOTS = ['src/plugins'];
+// Anything under packages/lore-plugin-* is plugin-local and allowed to
+// use its own vocabulary. packages/lore/** is the core engine and
+// must stay plugin-agnostic.
+const PLUGIN_ROOTS = ['packages/lore-plugin-'];
 
 function walk(dir, out = []) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -77,7 +81,7 @@ function walk(dir, out = []) {
 }
 
 function isPluginFile(relPath) {
-    return PLUGIN_ROOTS.some((root) => relPath.startsWith(root + '/'));
+    return PLUGIN_ROOTS.some((root) => relPath.startsWith(root));
 }
 
 function isAllowlisted(relPath) {
@@ -113,6 +117,12 @@ function scanAll() {
             if (importedPath.endsWith('plugins/types.js') || importedPath.endsWith('plugins/types')) continue;
             if (importedPath.endsWith('plugins/registry.js') || importedPath.endsWith('plugins/registry')) continue;
             if (/plugins\/[^/]+\/api(\.js)?$/.test(importedPath)) continue;
+            // Path-alias imports (V2.1 workspace split): @lore-plugin-<name>/api.js
+            // is the sanctioned way to reach a plugin's public surface.
+            if (/@lore-plugin-[^/]+\/api(\.js)?$/.test(importedPath)) continue;
+            // Developer plugin's api import is a special case: CLI + server
+            // reach the DeveloperApi via the alias.
+            if (/@lore-plugin-[^/]+\/index(\.js)?$/.test(importedPath)) continue;
             violations.push({ rule: 'no-plugin-import', file: relPath, token: importedPath });
         }
 

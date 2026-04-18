@@ -3,15 +3,15 @@
     "version": "0.1.0",
     "description": "Unified code intelligence + institutional knowledge MCP server. Local-first Kùzu graph with SurrealDB team sync.",
     "type": "module",
-    "main": "dist/mcp/server.js",
+    "main": "dist/lore/src/mcp/server.js",
     "bin": {
-        "lore": "dist/cli/index.js"
+        "lore": "dist/lore/src/cli/index.js"
     },
     "scripts": {
-        "build": "tsc",
-        "start": "node dist/mcp/server.js",
-        "dev": "tsx src/mcp/server.ts",
-        "cli": "tsx src/cli/index.ts",
+        "build": "tsc && tsc-alias",
+        "start": "node dist/lore/src/mcp/server.js",
+        "dev": "tsx packages/lore/src/mcp/server.ts",
+        "cli": "tsx packages/lore/src/cli/index.ts",
         "test:http": "tsx test/http-test.ts",
         "test:arch": "node scripts/test-arch.mjs",
         "test": "npm run test:arch && tsc --noEmit"
@@ -27,6 +27,7 @@
     },
     "devDependencies": {
         "@types/node": "^20.11.0",
+        "tsc-alias": "^1.8.16",
         "tsx": "^4.7.0",
         "typescript": "^5.3.3"
     },

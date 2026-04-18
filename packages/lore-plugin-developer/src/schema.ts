@@ -20,7 +20,7 @@
  * and safe on graphs that already have the tables from prior boots.
  */
 
-import type { PluginGraphContext } from '../types.js';
+import type { PluginGraphContext } from '@lore-core/plugins/types.js';
 
 export async function registerDeveloperSchema(ctx: PluginGraphContext): Promise<void> {
     await ctx.executeQuery(`

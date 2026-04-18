@@ -20,7 +20,7 @@ import { SyncEngine } from '../engines/syncEngine.js';
 // `lore index` + `lore doctor` reach the GitNexus-backed code indexer
 // through the developer plugin's opaque api. See src/plugins/developer/
 // codeIndexer.ts for the implementation.
-import type { DeveloperApi, IndexResult } from '../plugins/developer/api.js';
+import type { DeveloperApi, IndexResult } from '@lore-plugin-developer/api.js';
 
 /* ─── Shared Helpers ──────────────────────────────────────────── */
 

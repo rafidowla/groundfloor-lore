@@ -1,101 +1,101 @@
 {
-  "note": "Known plugin-boundary violations tracked as technical debt. 16 entries remain after the Option C cleanup commit — 5 are cluster-C sync-engine debt, 4 are type declarations used by sync, 7 are harmless help-text mentions in CLI. See docs/V2.1_status.md.",
+  "note": "Known plugin-boundary violations tracked as technical debt. New violations must either be fixed or added here with a justification.",
   "entries": [
     {
       "rule": "no-plugin-vocab",
-      "file": "src/cli/commands.ts",
+      "file": "packages/lore/src/cli/commands.ts",
       "token": "CodeFile",
-      "justification": "Help/docstring mentions of developer-owned concepts (CodeFile, FileContains, GitNexus). User-visible text in `lore --help` and command summaries."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/cli/commands.ts",
+      "file": "packages/lore/src/cli/commands.ts",
       "token": "FileContains",
-      "justification": "Help/docstring mentions of developer-owned concepts (CodeFile, FileContains, GitNexus). User-visible text in `lore --help` and command summaries."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/cli/commands.ts",
+      "file": "packages/lore/src/cli/commands.ts",
       "token": "gitnexus",
-      "justification": "Help/docstring mentions of developer-owned concepts (CodeFile, FileContains, GitNexus). User-visible text in `lore --help` and command summaries."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/cli/commands.ts",
+      "file": "packages/lore/src/cli/commands.ts",
       "token": "GitNexus",
-      "justification": "Help/docstring mentions of developer-owned concepts (CodeFile, FileContains, GitNexus). User-visible text in `lore --help` and command summaries."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/cli/index.ts",
+      "file": "packages/lore/src/cli/index.ts",
       "token": "CodeFile",
-      "justification": "Help/docstring mentions of developer-owned concepts (CodeFile, FileContains, GitNexus). User-visible text in `lore --help` and command summaries."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/cli/index.ts",
+      "file": "packages/lore/src/cli/index.ts",
       "token": "FileContains",
-      "justification": "Help/docstring mentions of developer-owned concepts (CodeFile, FileContains, GitNexus). User-visible text in `lore --help` and command summaries."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/cli/index.ts",
+      "file": "packages/lore/src/cli/index.ts",
       "token": "GitNexus",
-      "justification": "Help/docstring mentions of developer-owned concepts (CodeFile, FileContains, GitNexus). User-visible text in `lore --help` and command summaries."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/engines/localGraph.ts",
+      "file": "packages/lore/src/engines/localGraph.ts",
       "token": "CodeSymbol",
-      "justification": "Core type declarations (CodeSymbol / CodeRelationEdge / DevActivity) still imported by the sync engine. Moves with the sync-engine plugin-aware refactor."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/engines/localGraph.ts",
+      "file": "packages/lore/src/engines/localGraph.ts",
       "token": "LoreAppliesToCode",
-      "justification": "Core type declarations (CodeSymbol / CodeRelationEdge / DevActivity) still imported by the sync engine. Moves with the sync-engine plugin-aware refactor."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/engines/localGraph.ts",
+      "file": "packages/lore/src/engines/localGraph.ts",
       "token": "CodeRelation",
-      "justification": "Core type declarations (CodeSymbol / CodeRelationEdge / DevActivity) still imported by the sync engine. Moves with the sync-engine plugin-aware refactor."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/engines/localGraph.ts",
+      "file": "packages/lore/src/engines/localGraph.ts",
       "token": "DevActivity",
-      "justification": "Core type declarations (CodeSymbol / CodeRelationEdge / DevActivity) still imported by the sync engine. Moves with the sync-engine plugin-aware refactor."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/engines/syncEngine.ts",
+      "file": "packages/lore/src/engines/syncEngine.ts",
       "token": "CodeSymbol",
-      "justification": "Deferred — sync engine needs plugin-aware payload hook (ILorePlugin.getSyncPayload). Will land when sync is next touched."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/engines/syncEngine.ts",
+      "file": "packages/lore/src/engines/syncEngine.ts",
       "token": "DevActivity",
-      "justification": "Deferred — sync engine needs plugin-aware payload hook (ILorePlugin.getSyncPayload). Will land when sync is next touched."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/engines/tsSdkAdapter.ts",
+      "file": "packages/lore/src/engines/tsSdkAdapter.ts",
       "token": "CodeSymbol",
-      "justification": "Deferred — sync engine needs plugin-aware payload hook (ILorePlugin.getSyncPayload). Will land when sync is next touched."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/engines/tsSdkAdapter.ts",
+      "file": "packages/lore/src/engines/tsSdkAdapter.ts",
       "token": "CodeRelation",
-      "justification": "Deferred — sync engine needs plugin-aware payload hook (ILorePlugin.getSyncPayload). Will land when sync is next touched."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     },
     {
       "rule": "no-plugin-vocab",
-      "file": "src/engines/tsSdkAdapter.ts",
+      "file": "packages/lore/src/engines/tsSdkAdapter.ts",
       "token": "DevActivity",
-      "justification": "Deferred — sync engine needs plugin-aware payload hook (ILorePlugin.getSyncPayload). Will land when sync is next touched."
+      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     }
   ]
 }

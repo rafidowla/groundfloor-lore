@@ -16,7 +16,7 @@
  */
 
 import path from 'path';
-import type { PluginGraphContext } from '../types.js';
+import type { PluginGraphContext } from '@lore-core/plugins/types.js';
 import type { CodeSymbol, CodeRelationEdge, DevActivity } from './types.js';
 
 function escapeString(s: string): string {

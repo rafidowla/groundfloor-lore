@@ -6,7 +6,7 @@
  * registerSchema so it closes over the live PluginGraphContext.
  */
 
-import type { PluginGraphContext } from '../types.js';
+import type { PluginGraphContext } from '@lore-core/plugins/types.js';
 import type { CodeSymbol, CodeRelationEdge, DevActivity } from './types.js';
 import * as ops from './operations.js';
 import * as indexer from './codeIndexer.js';

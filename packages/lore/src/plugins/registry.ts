@@ -18,7 +18,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ILorePlugin, PluginContext, PluginGraphContext } from './types.js';
 import type { ConfigManager, LoreConfig } from '../config/configManager.js';
 import type { PluginHistoryEntry } from '../config/configManager.js';
-import { developerPlugin } from './developer/index.js';
+import { developerPlugin } from '@lore-plugin-developer/index.js';
 
 /** Hard-coded plugin catalog. Extend here to add a new plugin. */
 const BUILTIN_PLUGINS: Record<string, ILorePlugin> = {

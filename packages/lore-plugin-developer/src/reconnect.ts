@@ -23,9 +23,9 @@
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { PluginGraphContext, EmbeddableNode, ReconnectEdgeProposal } from '../types.js';
+import type { PluginGraphContext, EmbeddableNode, ReconnectEdgeProposal } from '@lore-core/plugins/types.js';
 import { listCodeSymbols, listCodeFilesWithPreview, addLoreTouchesFile, linkKnowledgeToCode } from './operations.js';
-import { buildVerbatimText } from '../../engines/verbatimStore.js';
+import { buildVerbatimText } from '@lore-core/engines/verbatimStore.js';
 
 const PREFIX_LORE = 'lore:';
 const PREFIX_FILE = 'file:';

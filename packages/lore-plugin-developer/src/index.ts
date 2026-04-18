@@ -27,7 +27,7 @@ import type {
     PluginTelemetryPayload,
     EmbeddableNode,
     ReconnectEdgeProposal,
-} from '../types.js';
+} from '@lore-core/plugins/types.js';
 import { registerDeveloperSchema } from './schema.js';
 import { pruneInferredDeveloperEdges } from './operations.js';
 import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology } from './reconnect.js';

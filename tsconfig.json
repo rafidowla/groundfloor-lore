@@ -4,15 +4,20 @@
         "module": "Node16",
         "moduleResolution": "Node16",
         "outDir": "dist",
-        "rootDir": "src",
+        "rootDir": "packages",
         "strict": true,
         "esModuleInterop": true,
         "skipLibCheck": true,
         "declaration": true,
         "resolveJsonModule": true,
         "sourceMap": true,
-        "forceConsistentCasingInFileNames": true
+        "forceConsistentCasingInFileNames": true,
+        "baseUrl": ".",
+        "paths": {
+            "@lore-core/*": ["packages/lore/src/*"],
+            "@lore-plugin-developer/*": ["packages/lore-plugin-developer/src/*"]
+        }
     },
-    "include": ["src/**/*"],
-    "exclude": ["node_modules", "dist"]
+    "include": ["packages/lore/src/**/*", "packages/lore-plugin-developer/src/**/*"],
+    "exclude": ["node_modules", "dist", "ui"]
 }

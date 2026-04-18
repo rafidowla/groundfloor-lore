@@ -13,7 +13,7 @@
 
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { PluginContext } from '../types.js';
+import type { PluginContext } from '@lore-core/plugins/types.js';
 import type { DeveloperApi } from './api.js';
 import { proxyQuery, proxyContext, proxyImpact, proxyCypher } from './gitnexusProxy.js';
 import { detectChanges, rename, listRepos, formatReposMarkdown } from './nativeTools.js';
