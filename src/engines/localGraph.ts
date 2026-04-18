@@ -655,6 +655,68 @@ export class LocalGraph implements GraphProvider {
         }
     }
 
+    /**
+     * V2.1: Content-enriched listing — for each CodeFile, concatenates a
+     * preview of its child symbols' names + signatures + first few lines
+     * of content so reconnect's embeddings carry real semantic weight.
+     * Capped at ~2 KB per file to keep embedding cost bounded.
+     *
+     * Returns one record per CodeFile with a `preview` field:
+     *   "<path>\n\n<symbolName>: <signature>\n<content head>\n\n..."
+     */
+    async listCodeFilesWithPreview(maxBytes: number = 2048): Promise<Array<{ path: string; language: string; repo: string; preview: string }>> {
+        await this.initialize();
+        // kuzu-lite's collect() behavior varies between builds; the N+1
+        // per-file query is a bit more I/O but reliably returns the full
+        // symbol list. For 15-200 files the cost is negligible (<100ms).
+        return await this.listCodeFilesWithPreviewFallback(maxBytes);
+    }
+
+    private async listCodeFilesWithPreviewFallback(maxBytes: number): Promise<Array<{ path: string; language: string; repo: string; preview: string }>> {
+        const files = await this.listCodeFiles();
+        const out: Array<{ path: string; language: string; repo: string; preview: string }> = [];
+        for (const f of files) {
+            try {
+                const stmt = await this.connection.prepare(
+                    `MATCH (s:CodeSymbol {filePath: $path})
+                     RETURN s.name AS name, s.kind AS kind, s.signature AS signature, s.content AS content`,
+                );
+                const res = await this.connection.execute(stmt, { path: f.path }) as QueryResult;
+                const rows = await res.getAll();
+                const symbols = rows.map((r) => ({
+                    name: (r.name ?? '') as string,
+                    kind: (r.kind ?? '') as string,
+                    signature: (r.signature ?? '') as string,
+                    content: (r.content ?? '') as string,
+                }));
+                out.push({ ...f, preview: this.buildFilePreview(symbols, maxBytes) });
+            } catch {
+                out.push({ ...f, preview: '' });
+            }
+        }
+        return out;
+    }
+
+    private buildFilePreview(
+        symbols: Array<{ name: string; kind: string; signature: string; content: string }>,
+        maxBytes: number,
+    ): string {
+        // Prefer the signature (short, high-signal) then a head of the content.
+        // Capped at maxBytes total so embeddings have bounded cost.
+        const parts: string[] = [];
+        let bytes = 0;
+        for (const s of symbols) {
+            const line = `${s.kind} ${s.name}: ${s.signature || ''}`.trim();
+            const head = (s.content || '').split('\n').slice(0, 4).join('\n').slice(0, 300);
+            const chunk = `${line}\n${head}`.trim();
+            if (!chunk) continue;
+            if (bytes + chunk.length > maxBytes) break;
+            parts.push(chunk);
+            bytes += chunk.length + 2;
+        }
+        return parts.join('\n\n');
+    }
+
     async listCodeSymbols(limit: number = 2000): Promise<Array<{ uid: string; name: string; kind: string; filePath: string; signature: string; content: string; repo: string }>> {
         await this.initialize();
         try {

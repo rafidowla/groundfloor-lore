@@ -1242,6 +1242,21 @@ export async function ingestFilesCommand(_args: string[]): Promise<void> {
 }
 
 /**
+ * reconsumeCommand — One-call "refresh everything" pipeline.
+ *
+ * Equivalent to `lore reconnect --apply`, but named to make the intent
+ * obvious ("reconsume the content, update the graph"). Always applies;
+ * uses enriched file + symbol embeddings so cross-pillar links actually
+ * land at the default threshold.
+ *
+ *   lore reconsume                          # default k=5, threshold=0.65
+ *   lore reconsume --k 8 --threshold 0.55   # experiment
+ */
+export async function reconsumeCommand(args: string[]): Promise<void> {
+    await reconnectCommand([...args, '--apply']);
+}
+
+/**
  * reconnectCommand — Run the V2.1 semantic reconnection pass.
  *
  *   lore reconnect                          # dry-run (default)

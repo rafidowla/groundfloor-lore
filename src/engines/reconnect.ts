@@ -42,6 +42,75 @@
 import type { LocalGraph, LoreNode } from './localGraph.js';
 import type { VerbatimStore } from './verbatimStore.js';
 import { buildVerbatimText } from './verbatimStore.js';
+import { execSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+
+/**
+ * repoRootCache — disk-location lookup for each indexed repo. Populated
+ * once per reconnect pass by parsing `gitnexus list` output. Using the
+ * CLI output is uglier than a programmatic API but avoids a hard
+ * dependency on gitnexus internals and works offline.
+ *
+ * Map: repoName → absolute filesystem path.
+ */
+let repoRootCache: Map<string, string> | null = null;
+
+function loadRepoRoots(): Map<string, string> {
+    if (repoRootCache) return repoRootCache;
+    const out = new Map<string, string>();
+    try {
+        const stdout = execSync('gitnexus list', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+        const lines = stdout.split('\n');
+        let currentName: string | null = null;
+        for (const raw of lines) {
+            const line = raw.trimEnd();
+            // Top-level repo name is indented with 2 spaces, no further nesting.
+            const nameMatch = /^ {2}(\S.*\S)$/.exec(line);
+            if (nameMatch && !line.trim().startsWith('Path:') && !line.includes('Indexed Repositories')) {
+                currentName = nameMatch[1];
+                continue;
+            }
+            const pathMatch = /^\s{4}Path:\s+(.+)$/.exec(line);
+            if (pathMatch && currentName) {
+                out.set(currentName, pathMatch[1].trim());
+                currentName = null;
+            }
+        }
+    } catch {
+        // gitnexus CLI missing or failed; fall back to empty map so callers
+        // know there's no disk path available.
+    }
+    repoRootCache = out;
+    return out;
+}
+
+/**
+ * readFileHead — Best-effort read of the first N bytes of a source file.
+ * Uses the gitnexus repo registry to translate relative paths; if the
+ * repo root can't be resolved or the read fails, returns an empty string.
+ */
+function readFileHead(repo: string, relPath: string, maxBytes: number): string {
+    if (!repo || !relPath) return '';
+    const roots = loadRepoRoots();
+    const root = roots.get(repo);
+    if (!root) return '';
+    const abs = path.join(root, relPath);
+    try {
+        const stat = fs.statSync(abs);
+        if (!stat.isFile()) return '';
+        const fd = fs.openSync(abs, 'r');
+        try {
+            const buf = Buffer.alloc(Math.min(maxBytes, stat.size));
+            fs.readSync(fd, buf, 0, buf.length, 0);
+            return buf.toString('utf8');
+        } finally {
+            fs.closeSync(fd);
+        }
+    } catch {
+        return '';
+    }
+}
 
 const SEMANTIC_PREFIX = 'semantic_neighbor';
 const PREFIX_LORE = 'lore:';
@@ -98,8 +167,11 @@ export async function reconnectGraph(
     await verbatim.initialize();
 
     // 1. Pull every node we care about from the graph.
+    //    V2.1 enrichment: CodeFile embeddings carry a ~2 KB preview of
+    //    their child symbols' name+signature+content-head so they embed
+    //    to real semantic content, not just the filename.
     const loreNodes: LoreNode[] = await graph.listNodes();
-    const codeFiles = await graph.listCodeFiles();
+    const codeFiles = await graph.listCodeFilesWithPreview(2048);
     const codeSymbols = await graph.listCodeSymbols(2000);
     const totalNodes = loreNodes.length + codeFiles.length + codeSymbols.length;
 
@@ -129,9 +201,21 @@ export async function reconnectGraph(
         embeddingsAdded++;
     }
 
+    // V2.1 reconsume: if gitnexus knows the repo's on-disk location,
+    // read the first 2 KB of each file directly. This is the highest-
+    // quality content signal available — actual code, not just names.
+    // Falls back to the graph-built preview if disk read is impossible.
+    const fileReadBudget = 2048;
     for (const f of codeFiles) {
         const slug = f.path.split('/').slice(-2).join('/');
-        const text = buildVerbatimText(slug, f.path, `${f.language} ${f.repo}`);
+        const diskHead = readFileHead(f.repo, f.path, fileReadBudget);
+        const bodyText = diskHead.trim().length > 0
+            ? diskHead
+            : `${f.path}\n\n${f.preview}`;
+        // Embedding text = slug + language + repo + (disk content OR
+        // symbol preview). Disk content produces genuine cross-pillar
+        // matches; symbol preview is the fallback when paths can't resolve.
+        const text = buildVerbatimText(slug, bodyText, `${f.language} ${f.repo}`);
         const prefixedId = PREFIX_FILE + f.path;
         try { await verbatim.delete(prefixedId); } catch { /* ignore */ }
         await verbatim.store({
@@ -150,10 +234,34 @@ export async function reconnectGraph(
         embeddingsAdded++;
     }
 
+    // Pre-load repo roots once so per-symbol disk reads don't reparse
+    // gitnexus list every iteration.
+    loadRepoRoots();
     for (const s of codeSymbols) {
+        // V2.1 reconsume: prefer an actual slice of the source file between
+        // startLine and endLine when we can resolve the path; GitNexus
+        // often stores empty signature/content so the graph alone is thin.
+        let bodyText = [s.signature ?? '', (s.content ?? '').slice(0, 1024)]
+            .filter((p) => p.trim())
+            .join('\n\n');
+        if (!bodyText.trim()) {
+            const diskFull = readFileHead(s.repo, s.filePath, 16 * 1024);
+            if (diskFull) {
+                // Slice by 1-indexed line numbers.
+                const start = (s as unknown as { startLine?: number }).startLine ?? 0;
+                const end = (s as unknown as { endLine?: number }).endLine ?? 0;
+                if (start > 0 && end >= start) {
+                    const lines = diskFull.split('\n');
+                    bodyText = lines.slice(Math.max(0, start - 1), end).join('\n').slice(0, 1024);
+                } else {
+                    bodyText = diskFull.slice(0, 1024);
+                }
+            }
+        }
+
         const text = buildVerbatimText(
             s.name,
-            (s.signature || s.content || '').slice(0, 512),
+            bodyText,
             `${s.kind} ${s.filePath}`,
         );
         if (!text.trim()) continue;

@@ -341,32 +341,41 @@ function App() {
     }
   };
 
-  // V2.1: Graph reconnect — POST /api/graph/reconnect. Dry-run first
-  // gives a proposed-edge count; the user re-clicks "Apply" to commit.
-  const runReconnect = async (apply: boolean): Promise<void> => {
+  // V2.1: Graph reconnect / reconsume.
+  // - `reconnect`: dry-run by default; Apply prunes+inserts semantic edges.
+  // - `reconsume`: always applies, with enriched file+symbol embeddings
+  //   (re-reads node content into the vector store before edge routing).
+  const runReconnect = async (mode: 'dry' | 'apply' | 'reconsume'): Promise<void> => {
     setReconnectBusy(true);
-    setReconnectMsg('Embedding + scoring…');
+    setReconnectMsg(mode === 'reconsume' ? 'Re-embedding every node + reconnecting…' : 'Embedding + scoring…');
     try {
-      const resp = await fetch(`${API_BASE}/api/graph/reconnect`, {
+      const endpoint = mode === 'reconsume' ? '/api/graph/reconsume' : '/api/graph/reconnect';
+      const resp = await fetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ k: reconnectK, threshold: reconnectThreshold, apply }),
+        body: JSON.stringify({
+          k: reconnectK,
+          threshold: reconnectThreshold,
+          ...(mode === 'apply' ? { apply: true } : {}),
+        }),
       });
       const body = (await resp.json()) as {
         proposedEdges: Array<unknown>;
-        edgesInserted?: number;
-        inferredPruned?: number;
         applied?: boolean;
+        prunedByTable?: { loreEdge: number; touchesFile: number; appliesToCode: number };
+        edgesInsertedByTable?: { loreEdge: number; touchesFile: number; appliesToCode: number };
       };
-      if (apply) {
+      if (mode === 'dry') {
         setReconnectMsg(
-          `✓ Pruned ${body.inferredPruned ?? 0}, inserted ${body.edgesInserted ?? 0} semantic_neighbor edges. Refreshing graph…`,
+          `${body.proposedEdges.length} edges proposed at threshold ${reconnectThreshold.toFixed(2)}. Click "Apply" to commit.`,
         );
-        window.setTimeout(() => window.location.reload(), 1200);
       } else {
+        const ins = body.edgesInsertedByTable ?? { loreEdge: 0, touchesFile: 0, appliesToCode: 0 };
+        const total = ins.loreEdge + ins.touchesFile + ins.appliesToCode;
         setReconnectMsg(
-          `${body.proposedEdges.length} edges proposed at threshold ${reconnectThreshold}. Click "Apply" to commit.`,
+          `✓ Inserted ${total}: ${ins.loreEdge} lore↔lore · ${ins.touchesFile} lore→file · ${ins.appliesToCode} lore→symbol. Refreshing…`,
         );
+        window.setTimeout(() => window.location.reload(), 1400);
       }
     } catch (err) {
       setReconnectMsg(`Failed: ${(err as Error).message}`);
@@ -866,21 +875,30 @@ function App() {
                 store. Dry-run shows a count; Apply prunes prior inferred
                 edges and inserts the fresh batch.
               </p>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
                 <button
                   className="theme-toggle"
-                  onClick={() => void runReconnect(false)}
+                  onClick={() => void runReconnect('dry')}
                   disabled={reconnectBusy}
                 >
                   <span>{reconnectBusy ? 'Working…' : 'Dry run'}</span>
                 </button>
                 <button
                   className="theme-toggle"
-                  onClick={() => void runReconnect(true)}
+                  onClick={() => void runReconnect('apply')}
                   disabled={reconnectBusy}
                   style={{ background: 'rgba(20, 184, 166, 0.12)' }}
                 >
                   <span>Apply</span>
+                </button>
+                <button
+                  className="theme-toggle"
+                  onClick={() => void runReconnect('reconsume')}
+                  disabled={reconnectBusy}
+                  style={{ background: 'rgba(245, 158, 11, 0.12)' }}
+                  title="Re-read every node's content, re-embed, and rebuild the semantic layer"
+                >
+                  <span>Reconsume</span>
                 </button>
               </div>
               {reconnectMsg ? (

@@ -1686,6 +1686,36 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // V2.1: Reconsume — the "refresh everything" button. Does the
+            // full re-embed + reconnect pipeline in one call: pulls every
+            // LoreNode + CodeFile (with child-symbol preview) + CodeSymbol,
+            // re-embeds against the latest content, prunes old inferred
+            // edges, and lays a fresh cross-pillar edge set. Always applies.
+            if (url === '/api/graph/reconsume' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const { k, threshold } = JSON.parse(body || '{}') as {
+                            k?: number;
+                            threshold?: number;
+                        };
+                        const result = await reconnectGraph(graph, verbatimStore, {
+                            k,
+                            minSim: threshold,
+                            dryRun: false,
+                            pruneInferred: true,
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(result));
+                    } catch (err) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
             // V2.1: Graph ingest — synthesize CodeFile nodes from existing
             // CodeSymbols' filePaths and wire FileContains edges. Idempotent.
             if (url === '/api/graph/ingest-files' && req.method === 'POST') {
