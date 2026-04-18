@@ -1637,6 +1637,20 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // V2.1: Graph ingest — synthesize CodeFile nodes from existing
+            // CodeSymbols' filePaths and wire FileContains edges. Idempotent.
+            if (url === '/api/graph/ingest-files' && req.method === 'POST') {
+                try {
+                    const stats = await graph.ingestFilesFromSymbols();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, ...stats }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
             // Orphan plugin resolution endpoint. GET returns state; POST applies
             // the user's decision (keep/drop/reenable). 'drop' requires the
             // literal string "DROP" in confirm to match the CLI/UI prompt.

@@ -1216,3 +1216,27 @@ function findTsFiles(dir: string, fileList: string[] = []): string[] {
     }
     return fileList;
 }
+
+/**
+ * ingestFilesCommand — Materialize CodeFile nodes from existing CodeSymbols.
+ *
+ * V2.1: the developer lore has CodeSymbols but zero CodeFile nodes, so
+ * queries like "which files does this decision touch?" are impossible
+ * until we model files. This walks every CodeSymbol, groups by filePath,
+ * and creates one CodeFile per distinct path plus a FileContains edge
+ * from the file to each of its symbols.
+ *
+ * Idempotent — safe to re-run after pulling more symbols via `lore index`.
+ */
+export async function ingestFilesCommand(_args: string[]): Promise<void> {
+    const graph = new LocalGraph(path.join(os.homedir(), '.groundfloor'));
+    await graph.initialize();
+    console.log('');
+    console.log('  Ingesting files from existing CodeSymbols…');
+    const stats = await graph.ingestFilesFromSymbols();
+    console.log(`  ✓ ${stats.filesCreated} CodeFile node(s) synthesized`);
+    console.log(`  ✓ ${stats.edgesCreated} FileContains edge(s) created`);
+    await graph.close();
+    console.log('');
+    console.log('  Next: `lore reconnect` to link LoreNode knowledge to these files via semantic similarity.');
+}

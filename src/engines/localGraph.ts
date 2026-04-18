@@ -31,6 +31,28 @@ import { Database, Connection, type QueryResult } from '@kineviz/kuzu-lite';
 import path from 'path';
 import fs from 'fs';
 
+/**
+ * inferLanguage — Best-effort language tag from a file extension.
+ * Used by upsertCodeFile so the UI legend / filters can group by language.
+ */
+function inferLanguage(filePath: string): string {
+    const ext = path.extname(filePath).toLowerCase();
+    const map: Record<string, string> = {
+        '.ts': 'TypeScript', '.tsx': 'TypeScript',
+        '.js': 'JavaScript', '.jsx': 'JavaScript', '.mjs': 'JavaScript',
+        '.py': 'Python', '.rs': 'Rust', '.go': 'Go',
+        '.java': 'Java', '.kt': 'Kotlin',
+        '.rb': 'Ruby', '.php': 'PHP',
+        '.c': 'C', '.cpp': 'C++', '.h': 'C', '.hpp': 'C++',
+        '.cs': 'C#',
+        '.swift': 'Swift',
+        '.sh': 'Shell', '.bash': 'Shell', '.zsh': 'Shell',
+        '.md': 'Markdown', '.json': 'JSON', '.yaml': 'YAML', '.yml': 'YAML',
+        '.toml': 'TOML', '.sql': 'SQL',
+    };
+    return map[ext] ?? 'Unknown';
+}
+
 import type { GraphProvider, LoreNode, LoreEdge, TraversalResult, GraphStats } from '../providers/types.js';
 export type { LoreNode, LoreEdge, TraversalResult, GraphStats };
 
@@ -280,6 +302,36 @@ export class LocalGraph implements GraphProvider {
             await this.connection.query(`
                 CREATE REL TABLE IF NOT EXISTS LoreAppliesToCode (
                     FROM LoreNode TO CodeSymbol,
+                    relation STRING
+                )
+            `);
+
+            // ─── V2.1: File-level connective tissue ─────────────────────
+            // CodeFile nodes model the files themselves (GitNexus gives
+            // us symbols; we synthesize files from their filePath). That
+            // lets the graph answer "which decisions touch src/auth.ts?"
+            await this.connection.query(`
+                CREATE NODE TABLE IF NOT EXISTS CodeFile (
+                    path STRING,
+                    language STRING,
+                    loc INT32,
+                    repo STRING,
+                    lastModified STRING,
+                    PRIMARY KEY (path)
+                )
+            `);
+            // File → its symbols (CodeSymbol already has filePath; this
+            // makes the containment explicit so traversals are cheaper).
+            await this.connection.query(`
+                CREATE REL TABLE IF NOT EXISTS FileContains (
+                    FROM CodeFile TO CodeSymbol
+                )
+            `);
+            // Knowledge node → file (any decision/bug_pattern/architecture
+            // note that applies to a whole file, not a specific symbol).
+            await this.connection.query(`
+                CREATE REL TABLE IF NOT EXISTS LoreTouchesFile (
+                    FROM LoreNode TO CodeFile,
                     relation STRING
                 )
             `);
@@ -620,34 +672,81 @@ export class LocalGraph implements GraphProvider {
      */
     async getTopology(limit: number = 300): Promise<{ nodes: any[]; edges: any[] }> {
         await this.initialize();
-        
-        try {
-            // Fetch Nodes
-            const nodesCypher = `MATCH (n:LoreNode) RETURN n LIMIT ${limit}`;
-            const nodesResult = await this.connection.query(nodesCypher) as any;
-            const nodesData = await nodesResult.getAll();
-            
-            const nodes = nodesData.map((row: any) => {
-                const n: any = row['n'];
-                return {
-                    id: n.id,
-                    label: n.label,
-                    type: n.type,
-                    project: n.project,
-                    group: n.type // Useful for vis.js node styling
-                };
-            });
 
-            // Fetch Edges
-            const edgesCypher = `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode) RETURN n.id AS source, e.relation AS relation, m.id AS target LIMIT ${limit}`;
-            const edgesResult = await this.connection.query(edgesCypher) as any;
-            const edgesData = await edgesResult.getAll();
-            
-            const edges = edgesData.map((row: any) => ({
-                from: row['source'],
-                to: row['target'],
-                label: row['relation']
-            }));
+        try {
+            const nodes: any[] = [];
+            const edges: any[] = [];
+
+            // LoreNode (knowledge) — decisions, conventions, bug patterns, etc.
+            const loreNodesResult = await this.connection.query(`MATCH (n:LoreNode) RETURN n LIMIT ${limit}`) as any;
+            for (const row of await loreNodesResult.getAll()) {
+                const n: any = row['n'];
+                nodes.push({ id: n.id, label: n.label, type: n.type, project: n.project, group: n.type });
+            }
+            const loreEdgesResult = await this.connection.query(
+                `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode) RETURN n.id AS source, e.relation AS relation, m.id AS target LIMIT ${limit}`,
+            ) as any;
+            for (const row of await loreEdgesResult.getAll()) {
+                edges.push({ from: row['source'], to: row['target'], label: row['relation'] });
+            }
+
+            // V2.1: CodeFile nodes + FileContains edges + LoreTouchesFile edges.
+            try {
+                const fileNodesResult = await this.connection.query(`MATCH (f:CodeFile) RETURN f LIMIT ${limit}`) as any;
+                for (const row of await fileNodesResult.getAll()) {
+                    const f: any = row['f'];
+                    nodes.push({
+                        id: `file:${f.path}`,
+                        label: (f.path as string).split('/').slice(-2).join('/'),
+                        type: 'code_file',
+                        project: f.repo,
+                        group: 'code_file',
+                    });
+                }
+                const fcResult = await this.connection.query(
+                    `MATCH (f:CodeFile)-[:FileContains]->(s:CodeSymbol) RETURN f.path AS fpath, s.uid AS suid LIMIT ${limit * 4}`,
+                ) as any;
+                for (const row of await fcResult.getAll()) {
+                    edges.push({ from: `file:${row['fpath']}`, to: `symbol:${row['suid']}`, label: 'contains' });
+                }
+                const ltResult = await this.connection.query(
+                    `MATCH (n:LoreNode)-[r:LoreTouchesFile]->(f:CodeFile) RETURN n.id AS nid, f.path AS fpath, r.relation AS rel LIMIT ${limit}`,
+                ) as any;
+                for (const row of await ltResult.getAll()) {
+                    edges.push({ from: row['nid'], to: `file:${row['fpath']}`, label: row['rel'] ?? 'touches' });
+                }
+            } catch {
+                // CodeFile tables missing on older graphs; ignore
+            }
+
+            // CodeSymbol nodes + CodeRelation edges + LoreAppliesToCode edges.
+            try {
+                const symNodesResult = await this.connection.query(`MATCH (s:CodeSymbol) RETURN s LIMIT ${limit * 4}`) as any;
+                for (const row of await symNodesResult.getAll()) {
+                    const s: any = row['s'];
+                    nodes.push({
+                        id: `symbol:${s.uid}`,
+                        label: s.name,
+                        type: 'code_symbol',
+                        project: s.repo,
+                        group: 'code_symbol',
+                    });
+                }
+                const crResult = await this.connection.query(
+                    `MATCH (a:CodeSymbol)-[e:CodeRelation]->(b:CodeSymbol) RETURN a.uid AS src, e.type AS rel, b.uid AS dst LIMIT ${limit * 4}`,
+                ) as any;
+                for (const row of await crResult.getAll()) {
+                    edges.push({ from: `symbol:${row['src']}`, to: `symbol:${row['dst']}`, label: row['rel'] });
+                }
+                const laResult = await this.connection.query(
+                    `MATCH (n:LoreNode)-[e:LoreAppliesToCode]->(s:CodeSymbol) RETURN n.id AS nid, s.uid AS suid, e.relation AS rel LIMIT ${limit}`,
+                ) as any;
+                for (const row of await laResult.getAll()) {
+                    edges.push({ from: row['nid'], to: `symbol:${row['suid']}`, label: row['rel'] ?? 'applies_to' });
+                }
+            } catch {
+                // CodeSymbol tables missing on older graphs; ignore
+            }
 
             return { nodes, edges };
         } catch (error) {
@@ -957,6 +1056,134 @@ export class LocalGraph implements GraphProvider {
      * Side Effects: Writes to Kùzu CodeSymbol table.
      * Idempotency: Yes — upsert by uid.
      */
+    /**
+     * V2.1: File-level modeling — upsert a CodeFile node.
+     *
+     * Side Effects: Writes to Kùzu CodeFile table.
+     * Idempotency: Yes — primary key is `path`.
+     */
+    async upsertCodeFile(file: {
+        path: string;
+        language?: string;
+        loc?: number;
+        repo?: string;
+        lastModified?: string;
+    }): Promise<void> {
+        await this.initialize();
+        try {
+            const stmt = await this.connection.prepare(
+                `MERGE (f:CodeFile {path: $path})
+                 SET f.language = $language, f.loc = $loc,
+                     f.repo = $repo, f.lastModified = $lastModified`,
+            );
+            await this.connection.execute(stmt, {
+                path: file.path,
+                language: file.language ?? '',
+                loc: file.loc ?? 0,
+                repo: file.repo ?? '',
+                lastModified: file.lastModified ?? new Date().toISOString(),
+            });
+        } catch (error) {
+            throw new LoreGraphError(
+                `Failed to upsert code file '${file.path}'`,
+                'upsertCodeFile',
+                error,
+            );
+        }
+    }
+
+    /**
+     * addFileContains — CodeFile —[CONTAINS]→ CodeSymbol.
+     * Called by the file-ingest pass to wire each file to its symbols.
+     */
+    async addFileContains(filePath: string, symbolUid: string): Promise<void> {
+        await this.initialize();
+        try {
+            const stmt = await this.connection.prepare(
+                `MATCH (f:CodeFile {path: $path}), (s:CodeSymbol {uid: $uid})
+                 MERGE (f)-[:FileContains]->(s)`,
+            );
+            await this.connection.execute(stmt, { path: filePath, uid: symbolUid });
+        } catch (error) {
+            throw new LoreGraphError(
+                `Failed to link file '${filePath}' → symbol '${symbolUid}'`,
+                'addFileContains',
+                error,
+            );
+        }
+    }
+
+    /**
+     * addLoreTouchesFile — LoreNode —[TOUCHES]→ CodeFile.
+     * Called by the reconnect pass for file-level knowledge attachment,
+     * or manually via the `link_knowledge_to_file` MCP tool.
+     */
+    async addLoreTouchesFile(loreNodeId: string, filePath: string, relation: string = 'touches'): Promise<void> {
+        await this.initialize();
+        try {
+            const stmt = await this.connection.prepare(
+                `MATCH (n:LoreNode {id: $id}), (f:CodeFile {path: $path})
+                 MERGE (n)-[r:LoreTouchesFile]->(f)
+                 SET r.relation = $relation`,
+            );
+            await this.connection.execute(stmt, { id: loreNodeId, path: filePath, relation });
+        } catch (error) {
+            throw new LoreGraphError(
+                `Failed to link knowledge '${loreNodeId}' → file '${filePath}'`,
+                'addLoreTouchesFile',
+                error,
+            );
+        }
+    }
+
+    /**
+     * ingestFilesFromSymbols — For every distinct filePath carried by
+     * existing CodeSymbols, synthesize a CodeFile node and wire the
+     * FileContains edge. Safe to re-run — idempotent via MERGE.
+     *
+     * Returns stats so callers can report "+ 23 files, + 412 edges".
+     */
+    async ingestFilesFromSymbols(): Promise<{ filesCreated: number; edgesCreated: number }> {
+        await this.initialize();
+        try {
+            const stmt = await this.connection.prepare(
+                `MATCH (s:CodeSymbol) RETURN DISTINCT s.filePath AS filePath, s.repo AS repo`,
+            );
+            const result = await this.connection.execute(stmt, {}) as QueryResult;
+            const rows = await result.getAll();
+            let filesCreated = 0;
+            let edgesCreated = 0;
+            for (const row of rows) {
+                const filePath = row.filePath as string;
+                const repo = (row.repo ?? '') as string;
+                if (!filePath) continue;
+                await this.upsertCodeFile({
+                    path: filePath,
+                    language: inferLanguage(filePath),
+                    repo,
+                });
+                filesCreated++;
+                // Link all symbols in this file
+                const linkStmt = await this.connection.prepare(
+                    `MATCH (s:CodeSymbol {filePath: $path}) RETURN s.uid AS uid`,
+                );
+                const linkResult = await this.connection.execute(linkStmt, { path: filePath }) as QueryResult;
+                const symRows = await linkResult.getAll();
+                for (const sr of symRows) {
+                    await this.addFileContains(filePath, sr.uid as string);
+                    edgesCreated++;
+                }
+            }
+            return { filesCreated, edgesCreated };
+        } catch (error) {
+            throw new LoreGraphError(
+                'Failed to ingest files from symbols',
+                'ingestFilesFromSymbols',
+                error,
+            );
+        }
+    }
+
     async upsertCodeSymbol(symbol: CodeSymbol): Promise<void> {
         await this.initialize();
 
