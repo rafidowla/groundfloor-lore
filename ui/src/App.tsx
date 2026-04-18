@@ -3,6 +3,7 @@ import { Settings, MessageSquare, Network, Moon, Sun } from 'lucide-react';
 import GraphCanvas from './components/GraphCanvas';
 import SigmaCanvas from './components/SigmaCanvas';
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
+import WorkspacePicker from './components/WorkspacePicker';
 import './App.css';
 
 // Mode → default filter preset. Matches the plugin's uiHints.defaultFilterTypes
@@ -25,7 +26,7 @@ interface HealthResponse {
   activePlugins: string[];
   defaultMode: string;
   llmProvider: LlmProvider;
-  workspaceAccount: string;
+  workspace: string;
   dataplane: 'bound' | 'offline';
   orphans?: string[];
 }
@@ -36,7 +37,6 @@ interface ConfigResponse {
   plugins: string[];
   defaultMode: string;
   llmProvider: LlmProvider;
-  workspaceAccount: string;
   hasApiKey: boolean;
   extractionPath?: 'local-byok' | 'def-cloud';
   telemetryOptOut?: boolean;
@@ -92,10 +92,10 @@ function App() {
   // Config state (Phase 0 wiring)
   const [llmProvider, setLlmProvider] = useState<LlmProvider>('embedded');
   const [apiKey, setApiKey] = useState('');
-  const [workspaceAccount, setWorkspaceAccount] = useState('local');
   const [hasApiKey, setHasApiKey] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [workspaceSwitching, setWorkspaceSwitching] = useState<string | null>(null);
 
   // Chat state
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -107,7 +107,6 @@ function App() {
   // Phase 1: Mode pill-group state. "all" shows every plugin's nodes;
   // otherwise the value matches one entry in health.activePlugins.
   const [activeMode, setActiveMode] = useState<string>('all');
-  const [workspaceToast, setWorkspaceToast] = useState<string | null>(null);
 
   // Phase 2: Dual-path extraction settings + last upload result (rendered
   // beneath the file input so the user sees what the server decided).
@@ -135,7 +134,6 @@ function App() {
         ]);
         setHealth(h);
         setLlmProvider(c.llmProvider);
-        setWorkspaceAccount(c.workspaceAccount);
         setHasApiKey(c.hasApiKey);
         setActiveMode(c.defaultMode || 'all');
         setExtractionPath(c.extractionPath ?? 'local-byok');
@@ -233,14 +231,31 @@ function App() {
     void patchConfig({ llmProvider: provider });
   };
 
-  const handleWorkspaceChange = (account: string): void => {
-    setWorkspaceAccount(account);
-    void patchConfig({ workspaceAccount: account });
-    // Workspace switches are a restart-required operation (each workspace
-    // maps to a separate .lore/ directory). Surface a toast so the user
-    // knows the daemon still serves the prior workspace until reboot.
-    setWorkspaceToast(`Workspace switched to "${account}" — restart the Lore daemon to apply.`);
-    window.setTimeout(() => setWorkspaceToast(null), 6000);
+  // Phase V2.1: Workspace switch UX. Daemon exits after writing the new
+  // "active" field; launchd KeepAlive brings it back bound to the new
+  // graph. We poll /api/health every 500ms until the new workspace name
+  // is reported, then reload the page so Sigma + filters re-fetch fresh.
+  const onWorkspaceSwitchStarted = (next: string): void => {
+    setWorkspaceSwitching(next);
+    const start = Date.now();
+    const tick = async (): Promise<void> => {
+      if (Date.now() - start > 20_000) {
+        setWorkspaceSwitching(null);
+        setHealthError('Workspace switch timed out after 20s');
+        return;
+      }
+      try {
+        const h = (await fetch(`${API_BASE}/api/health`).then((r) => r.json())) as HealthResponse;
+        if (h.workspace === next) {
+          window.location.reload();
+          return;
+        }
+      } catch {
+        // daemon mid-restart, keep polling
+      }
+      window.setTimeout(() => void tick(), 500);
+    };
+    window.setTimeout(() => void tick(), 800);
   };
 
   // ── Phase 2: file ingestion via /api/extract ────────────────────
@@ -391,10 +406,7 @@ function App() {
       {/* Left Panel: Navigation & Chat */}
       <aside className="sidebar">
         <header className="sidebar-header">
-          <div className="logo-area">
-            <Network className="logo-icon" size={24} />
-            <span className="logo-text">Lore Explorer</span>
-          </div>
+          <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
           <button className="icon-button" onClick={() => setShowSettings(!showSettings)} title="Settings">
             <Settings size={20} />
           </button>
@@ -468,10 +480,11 @@ function App() {
           </div>
         ) : null}
 
-        {/* Workspace-switched toast */}
-        {workspaceToast ? (
+        {/* V2.1: Workspace-switch overlay — polls /api/health until the
+            daemon comes back on the new workspace, then reloads. */}
+        {workspaceSwitching ? (
           <div className="workspace-toast glass-panel" role="status">
-            {workspaceToast}
+            Switching to workspace “{workspaceSwitching}” — daemon restarting…
           </div>
         ) : null}
 
@@ -574,25 +587,10 @@ function App() {
               </p>
             </div>
 
-            <div className="setting-group">
-              <label>Workspace Account</label>
-              <div className="account-switcher">
-                <select
-                  className="ui-select"
-                  value={workspaceAccount}
-                  onChange={(e) => handleWorkspaceChange(e.target.value)}
-                >
-                  <option value="local">Personal Local Account</option>
-                  <option value="div" disabled>
-                    ─── Cloud Workspaces ───
-                  </option>
-                  <option value="login">+ Connect Groundfloor Cloud</option>
-                </select>
-                <p className="help-text" style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)', marginTop: '0.25rem' }}>
-                  Keep your lore local, or log in to sync with an enterprise Dataplane.
-                </p>
-              </div>
-            </div>
+            {/* V2.1: Workspace switching moved to the top-left chip
+                (WorkspacePicker). See the sidebar header above — the old
+                "Workspace Account" dropdown was misleading for a data-
+                space switch and has been removed. */}
 
             {/* Phase 2: Extraction Path (BYOK / greyed DEF Cloud) */}
             <div className="setting-group">

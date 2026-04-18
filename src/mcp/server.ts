@@ -41,6 +41,14 @@ import { detectChanges, rename, listRepos, formatReposMarkdown } from './nativeT
 import { SchemaLoader } from '../schemas/loader.js';
 import { ConfigManager } from '../config/configManager.js';
 import { setApiKey, getApiKey, hasApiKey, deleteApiKey } from '../config/keychain.js';
+import {
+    loadWorkspaces,
+    getActiveWorkspacePath,
+    getActiveWorkspaceName,
+    createWorkspace,
+    switchWorkspace,
+    deleteWorkspace,
+} from '../config/workspaces.js';
 import { stream as llmStream, getCapability } from '../providers/llmDispatch.js';
 import { decide as decideExtraction, type ExtractPayload } from '../providers/extractRouter.js';
 import { PluginRegistry } from '../plugins/registry.js';
@@ -117,10 +125,16 @@ function resolveProjectScope(): ResolvedScope {
  * Priority: 1) Git repo root, 2) CWD, 3) ~/.groundfloor/
  */
 function resolveGraphPath(): string {
-    // Always use the global ~/.groundfloor path.
-    // This ensures the same graph is accessible regardless of which
-    // IDE/tool starts the MCP server (Cursor, Antigravity, CLI, etc.)
-    return path.join(os.homedir(), '.groundfloor');
+    // V2.1: the graph lives under the currently-active workspace.
+    // On first boot, loadWorkspaces() auto-writes a "default" entry that
+    // points at ~/.groundfloor — preserving V2.0 data without migration.
+    // Subsequent workspaces are created under ~/.groundfloor/workspaces/{name}/.
+    try {
+        return getActiveWorkspacePath();
+    } catch (err) {
+        console.error(`[Lore MCP] Workspace resolve failed (${(err as Error).message}); falling back to ~/.groundfloor`);
+        return path.join(os.homedir(), '.groundfloor');
+    }
 }
 
 /* ─── Server Setup ────────────────────────────────────────────── */
@@ -1402,9 +1416,15 @@ async function main(): Promise<void> {
 
             // Orphan-decision gate: when a plugin has been deactivated but the
             // user hasn't chosen Keep/Drop/Re-enable, block every /api/* path
-            // except /api/health (so UI can render the modal) and /api/orphan
-            // (so the user can resolve it). Matches Option C in V2_implementation_plan.md.
-            if (url.startsWith('/api/') && url !== '/api/health' && url !== '/api/orphan') {
+            // except /api/health (so UI can render the modal), /api/orphan
+            // (so the user can resolve it), and /api/workspaces/* (so the user
+            // can escape by switching workspaces). Matches Option C in
+            // docs/V2_implementation_plan.md.
+            const orphanExempt =
+                url === '/api/health' ||
+                url === '/api/orphan' ||
+                url.startsWith('/api/workspaces');
+            if (url.startsWith('/api/') && !orphanExempt) {
                 const orphanState = pluginRegistry.getOrphanState();
                 if (orphanState.blocking) {
                     res.writeHead(503, { 'Content-Type': 'application/json' });
@@ -1521,11 +1541,11 @@ async function main(): Promise<void> {
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({
                         status: orphanState.blocking ? 'orphan_decision_required' : 'ok',
-                        version: '2.0.0',
+                        version: '2.1.0',
                         activePlugins: cfg.plugins,
                         defaultMode: cfg.defaultMode,
                         llmProvider: cfg.llmProvider,
-                        workspaceAccount: cfg.workspaceAccount,
+                        workspace: getActiveWorkspaceName(),
                         dataplane: getDataplaneState(),
                         telemetryOptOut: Boolean(cfg.telemetryOptOut),
                         sessions: activeSessions.size,
@@ -1534,6 +1554,85 @@ async function main(): Promise<void> {
                 } catch (err) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ status: 'degraded', error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // V2.1: Workspace registry — Slack-style hard switching between
+            // independent graphs. Each workspace = its own .lore/ directory,
+            // never cross-visible. Switching requires a daemon restart so the
+            // Kùzu graph + VerbatimStore can re-initialize against the new path.
+            if (url === '/api/workspaces' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(loadWorkspaces()));
+                return;
+            }
+
+            if (url === '/api/workspaces' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', () => {
+                    try {
+                        const { name } = JSON.parse(body || '{}') as { name?: string };
+                        if (!name) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'name required' }));
+                            return;
+                        }
+                        const entry = createWorkspace(name);
+                        res.writeHead(201, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ created: entry, workspaces: loadWorkspaces() }));
+                    } catch (err) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            if (url === '/api/workspaces/switch' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', () => {
+                    try {
+                        const { name } = JSON.parse(body || '{}') as { name?: string };
+                        if (!name) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'name required' }));
+                            return;
+                        }
+                        if (name === getActiveWorkspaceName()) {
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ active: name, restarting: false }));
+                            return;
+                        }
+                        switchWorkspace(name);
+                        res.writeHead(202, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ active: name, restarting: true }));
+                        // Defer exit so the response flushes cleanly; launchd
+                        // KeepAlive=true will relaunch immediately and the daemon
+                        // will bind to the new workspace on the next boot.
+                        setTimeout(() => {
+                            console.error(`[Lore MCP] Workspace switched to "${name}" — exiting for restart.`);
+                            process.exit(0);
+                        }, 150);
+                    } catch (err) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            if (url.startsWith('/api/workspaces/') && req.method === 'DELETE') {
+                const name = decodeURIComponent(url.slice('/api/workspaces/'.length));
+                try {
+                    const next = deleteWorkspace(name);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(next));
+                } catch (err) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
                 }
                 return;
             }
