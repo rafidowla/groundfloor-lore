@@ -155,6 +155,10 @@ const configManager = new ConfigManager(loreDir);
 const pluginRegistry = new PluginRegistry(configManager);
 pluginRegistry.boot();
 console.error(`[Lore MCP] Plugins active: ${configManager.read().plugins.join(', ') || '(none)'}`);
+
+// Plugin schema registration runs inside main() after graph.initialize()
+// — see line ~1432 in main(). Doing it there avoids racing the Kùzu
+// connection open with the main() init path.
 const orphanStateAtBoot = pluginRegistry.getOrphanState();
 if (orphanStateAtBoot.blocking) {
     console.error(`[Lore MCP] ⚠ Orphan plugins detected: ${orphanStateAtBoot.orphans.join(', ')}. /api/* is blocked until resolved via POST /api/orphan.`);
@@ -295,7 +299,7 @@ mcpServer.tool(
             const cfgForHook = configManager.read();
             const devCfg = (cfgForHook.pluginConfig?.developer ?? {}) as { autoLinkOnIngest?: boolean };
             if (devCfg.autoLinkOnIngest !== false) {
-                void reconnectOneNode(graph, verbatimStore, {
+                void reconnectOneNode(graph, verbatimStore, pluginRegistry, {
                     id,
                     label,
                     content: content ?? '',
@@ -1412,6 +1416,19 @@ const activeSessions = new Map<string, StreamableHTTPServerTransport>();
  */
 async function main(): Promise<void> {
     await graph.initialize();
+
+    // V2.1 / Option C: each active plugin registers its own Kùzu schema
+    // (e.g. developer plugin's CodeFile/CodeSymbol tables) and attaches
+    // its typed api surface. Core never touches plugin-specific tables.
+    try {
+        await pluginRegistry.registerSchemas(graph.createPluginGraphContext());
+        for (const plugin of pluginRegistry.active()) {
+            console.error(`[Lore MCP] Plugin schema ready: ${plugin.name}`);
+        }
+    } catch (schemaErr) {
+        console.error(`[Lore MCP] Plugin schema registration failed: ${(schemaErr as Error).message}`);
+    }
+
     await verbatimStore.initialize();
 
     // Attempt SurrealDB connection if adapter is configured
@@ -1671,7 +1688,7 @@ async function main(): Promise<void> {
                             threshold?: number;
                             apply?: boolean;
                         };
-                        const result = await reconnectGraph(graph, verbatimStore, {
+                        const result = await reconnectGraph(graph, verbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
                             dryRun: !apply,
@@ -1700,7 +1717,7 @@ async function main(): Promise<void> {
                             k?: number;
                             threshold?: number;
                         };
-                        const result = await reconnectGraph(graph, verbatimStore, {
+                        const result = await reconnectGraph(graph, verbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
                             dryRun: false,
@@ -1716,11 +1733,21 @@ async function main(): Promise<void> {
                 return;
             }
 
-            // V2.1: Graph ingest — synthesize CodeFile nodes from existing
-            // CodeSymbols' filePaths and wire FileContains edges. Idempotent.
+            // V2.1 / Option C: ingest-files is developer-plugin-owned.
+            // Core reaches it through the plugin's opaque api surface;
+            // returns 501 if the developer plugin isn't active here.
             if (url === '/api/graph/ingest-files' && req.method === 'POST') {
                 try {
-                    const stats = await graph.ingestFilesFromSymbols();
+                    const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                    const devApi = devPlugin?.api as
+                        | { ingestFilesFromSymbols: () => Promise<{ filesCreated: number; edgesCreated: number }> }
+                        | undefined;
+                    if (!devApi) {
+                        res.writeHead(501, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'ingest-files requires the "developer" plugin (not active in this workspace)' }));
+                        return;
+                    }
+                    const stats = await devApi.ingestFilesFromSymbols();
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ok: true, ...stats }));
                 } catch (err) {

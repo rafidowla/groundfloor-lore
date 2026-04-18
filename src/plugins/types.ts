@@ -151,6 +151,18 @@ export interface ILorePlugin {
     uiHints: PluginUiHints;
 
     /**
+     * Plugin-specific typed API. Opaque to core — core callers that
+     * know they want a specific plugin do:
+     *
+     *   const devPlugin = registry.get('developer');
+     *   (devPlugin?.api as DeveloperApi | undefined)?.ingestFilesFromSymbols();
+     *
+     * Populated by the plugin during `registerSchema` so it can close
+     * over the PluginGraphContext. Core never reads this field's shape.
+     */
+    api?: unknown;
+
+    /**
      * Register all MCP tools this plugin contributes. Called by the
      * registry only if the plugin is active.
      */

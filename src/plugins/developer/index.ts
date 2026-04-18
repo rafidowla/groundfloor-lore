@@ -20,7 +20,18 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { ILorePlugin, PluginContext, PluginTelemetryPayload } from '../types.js';
+import type {
+    ILorePlugin,
+    PluginContext,
+    PluginGraphContext,
+    PluginTelemetryPayload,
+    EmbeddableNode,
+    ReconnectEdgeProposal,
+} from '../types.js';
+import { registerDeveloperSchema } from './schema.js';
+import { pruneInferredDeveloperEdges } from './operations.js';
+import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge } from './reconnect.js';
+import { buildDeveloperApi, type DeveloperApi } from './api.js';
 
 const TOOL_NAMES = [
     'code_query',
@@ -68,6 +79,48 @@ export const developerPlugin: ILorePlugin = {
      */
     registerTools(_server: McpServer, _ctx: PluginContext): void {
         // intentional no-op until physical extraction lands
+    },
+
+    /**
+     * V2.1 / Option C: own the developer-specific Kùzu schema. Called
+     * by the registry once at boot after the core graph is initialized.
+     * Also the natural place to build the plugin's typed API since we
+     * have the PluginGraphContext in hand.
+     */
+    async registerSchema(ctx: PluginGraphContext): Promise<void> {
+        await registerDeveloperSchema(ctx);
+        // Attach the typed api so outside callers can reach developer ops
+        // without importing plugin internals. See src/plugins/developer/api.ts
+        // for the DeveloperApi contract.
+        (developerPlugin as ILorePlugin & { api?: DeveloperApi }).api = buildDeveloperApi(ctx);
+    },
+
+    /**
+     * V2.1 / Option C: hand the core reconnect pass all the CodeFile
+     * and CodeSymbol nodes as embeddable items, with disk-read content
+     * enrichment via `gitnexus list`.
+     */
+    async contributeReconnectNodes(ctx: PluginGraphContext): Promise<EmbeddableNode[]> {
+        return await contributeDeveloperReconnectNodes(ctx);
+    },
+
+    /**
+     * V2.1 / Option C: route cross-pillar semantic edges into the
+     * developer-owned rel tables (LoreTouchesFile, LoreAppliesToCode).
+     * Returns true if we routed it; false so core or another plugin
+     * can try.
+     */
+    async routeReconnectEdge(proposal: ReconnectEdgeProposal, ctx: PluginGraphContext): Promise<boolean> {
+        return await routeDeveloperReconnectEdge(proposal, ctx);
+    },
+
+    /**
+     * V2.1 / Option C: clear our own inferred edges before a reconnect
+     * apply so re-runs don't duplicate.
+     */
+    async pruneInferredEdges(relationPrefix: string, ctx: PluginGraphContext): Promise<number> {
+        const stats = await pruneInferredDeveloperEdges(ctx, relationPrefix);
+        return stats.touchesFile + stats.appliesToCode;
     },
 
     async getTelemetryPayload(ctx: PluginContext): Promise<PluginTelemetryPayload | null> {

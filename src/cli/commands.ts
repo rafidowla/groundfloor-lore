@@ -1229,11 +1229,31 @@ function findTsFiles(dir: string, fileList: string[] = []): string[] {
  * Idempotent — safe to re-run after pulling more symbols via `lore index`.
  */
 export async function ingestFilesCommand(_args: string[]): Promise<void> {
-    const graph = new LocalGraph(path.join(os.homedir(), '.groundfloor'));
+    // V2.1 / Option C: this command is developer-plugin-specific but lives
+    // in core CLI for discoverability. We reach the plugin by booting the
+    // registry + its schemas, then calling through the opaque api field.
+    const { ConfigManager } = await import('../config/configManager.js');
+    const { PluginRegistry } = await import('../plugins/registry.js');
+    const basePath = path.join(os.homedir(), '.groundfloor');
+    const loreDir = path.join(basePath, '.lore');
+    const graph = new LocalGraph(basePath);
+    const registry = new PluginRegistry(new ConfigManager(loreDir));
+    registry.boot();
     await graph.initialize();
+    await registry.registerSchemas(graph.createPluginGraphContext());
+
+    const devPlugin = registry.active().find((p) => p.name === 'developer');
+    const devApi = devPlugin?.api as
+        | { ingestFilesFromSymbols: () => Promise<{ filesCreated: number; edgesCreated: number }> }
+        | undefined;
+    if (!devApi) {
+        console.error('  ✗ ingest-files requires the "developer" plugin. Add "developer" to .lore/config.json plugins[].');
+        await graph.close();
+        return;
+    }
     console.log('');
     console.log('  Ingesting files from existing CodeSymbols…');
-    const stats = await graph.ingestFilesFromSymbols();
+    const stats = await devApi.ingestFilesFromSymbols();
     console.log(`  ✓ ${stats.filesCreated} CodeFile node(s) synthesized`);
     console.log(`  ✓ ${stats.edgesCreated} FileContains edge(s) created`);
     await graph.close();
@@ -1267,6 +1287,8 @@ export async function reconnectCommand(args: string[]): Promise<void> {
     const { LocalGraph } = await import('../engines/localGraph.js');
     const { VerbatimStore } = await import('../engines/verbatimStore.js');
     const { reconnectGraph } = await import('../engines/reconnect.js');
+    const { ConfigManager } = await import('../config/configManager.js');
+    const { PluginRegistry } = await import('../plugins/registry.js');
 
     const apply = args.includes('--apply');
     const kIndex = args.indexOf('--k');
@@ -1275,13 +1297,17 @@ export async function reconnectCommand(args: string[]): Promise<void> {
     const threshold = tIndex >= 0 ? parseFloat(args[tIndex + 1]) : 0.65;
 
     const basePath = path.join(os.homedir(), '.groundfloor');
+    const loreDir = path.join(basePath, '.lore');
     const graph = new LocalGraph(basePath);
     const verbatim = new VerbatimStore(basePath);
+    const registry = new PluginRegistry(new ConfigManager(loreDir));
+    registry.boot();
     await graph.initialize();
+    await registry.registerSchemas(graph.createPluginGraphContext());
 
     console.log('');
     console.log(`  Reconnect pass — k=${k}, threshold=${threshold}, mode=${apply ? 'APPLY' : 'dry-run'}`);
-    const result = await reconnectGraph(graph, verbatim, { k, minSim: threshold, dryRun: !apply });
+    const result = await reconnectGraph(graph, verbatim, registry, { k, minSim: threshold, dryRun: !apply });
 
     console.log(`  ✓ Scanned ${result.candidatesScanned} node(s); embeddings added: ${result.embeddingsAdded}`);
     const buckets = Object.entries(result.distribution).sort((a, b) => Number(b[0]) - Number(a[0]));
@@ -1295,10 +1321,11 @@ export async function reconnectCommand(args: string[]): Promise<void> {
     console.log(`  ✓ Proposed edges at threshold ${threshold}: ${result.proposedEdges.length}`);
 
     if (apply) {
-        const p = result.prunedByTable;
-        const i = result.edgesInsertedByTable;
-        console.log(`  ✓ Pruned — LoreEdge:${p.loreEdge}  TouchesFile:${p.touchesFile}  AppliesToCode:${p.appliesToCode}`);
-        console.log(`  ✓ Inserted — LoreEdge:${i.loreEdge}  TouchesFile:${i.touchesFile}  AppliesToCode:${i.appliesToCode}  (total ${i.loreEdge + i.touchesFile + i.appliesToCode})`);
+        const pruned = Object.entries(result.prunedByOwner)
+            .map(([owner, n]) => `${owner}:${n}`)
+            .join('  ');
+        console.log(`  ✓ Pruned — ${pruned || '(nothing)'}`);
+        console.log(`  ✓ Inserted — core:${result.coreEdgesInserted}  plugin-routed:${result.pluginEdgesRouted}  (unrouted:${result.unroutedEdges})`);
     } else {
         console.log('');
         console.log('  (dry run — nothing was written. Re-run with --apply to commit.)');

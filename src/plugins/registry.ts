@@ -15,7 +15,7 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { ILorePlugin, PluginContext } from './types.js';
+import type { ILorePlugin, PluginContext, PluginGraphContext } from './types.js';
 import type { ConfigManager, LoreConfig } from '../config/configManager.js';
 import type { PluginHistoryEntry } from '../config/configManager.js';
 import { developerPlugin } from './developer/index.js';
@@ -112,8 +112,27 @@ export class PluginRegistry {
         }
     }
 
+    /**
+     * V2.1 / Option C — Run each active plugin's `registerSchema` hook.
+     * Called once at boot after the core graph finishes its own
+     * initialize(). Plugins issue CREATE TABLE IF NOT EXISTS for their
+     * own node/rel tables. Throws on any failure (bad schema = fatal).
+     */
+    async registerSchemas(ctx: PluginGraphContext): Promise<void> {
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.registerSchema === 'function') {
+                await plugin.registerSchema(ctx);
+            }
+        }
+    }
+
     isActive(pluginName: string): boolean {
         return this.loaded.has(pluginName);
+    }
+
+    /** Iterate active plugins in activation order. */
+    active(): ILorePlugin[] {
+        return Array.from(this.loaded.values());
     }
 
     /** Combined node type enum across active plugins + the base schema. */
