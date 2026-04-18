@@ -3,17 +3,65 @@
   height: 100vh;
   width: 100vw;
   overflow: hidden;
+  position: relative;
 }
 
 /* Sidebar (Left Nav/Chat) */
 .sidebar {
   width: 380px;
-  min-width: 380px;
+  min-width: 320px;
   background-color: var(--color-surface);
   border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   z-index: 10;
+  flex-shrink: 0;
+}
+
+/* ── V2.1 Responsive ──────────────────────────────────────────
+   Sub-1200px: right filters panel becomes an overlay drawer.
+   Sub-900px:  left sidebar also becomes an overlay drawer.
+   Sub-640px:  both overlays cover full width (mobile tabs-ish). */
+
+@media (max-width: 1200px) {
+  .filters-panel-wrapper {
+    position: absolute;
+    top: 0;
+    right: 0;
+    height: 100%;
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
+    z-index: 15;
+  }
+}
+
+@media (max-width: 900px) {
+  .sidebar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.18);
+    z-index: 15;
+  }
+  .filters-panel-wrapper {
+    width: 280px;
+    min-width: 280px;
+  }
+}
+
+@media (max-width: 640px) {
+  .sidebar {
+    width: 100vw;
+    min-width: 0;
+  }
+  .filters-panel-wrapper {
+    width: 100vw;
+    min-width: 0;
+  }
+  .settings-panel {
+    width: 100vw !important;
+    max-width: 100vw !important;
+  }
 }
 
 .sidebar-header {
@@ -205,42 +253,177 @@
   gap: 0.5rem;
 }
 
-/* ─── Phase 1: Mode pill-group (top-center above canvas) ───────── */
-.mode-pills {
+/* V2.1: mode-pill group removed. See App.tsx for the rationale. */
+
+/* ─── V2.1: Node-click detail drawer ───────────────────────────── */
+.node-drawer {
   position: absolute;
   top: 1rem;
-  left: 50%;
-  transform: translateX(-50%);
+  right: 1rem;
+  width: 360px;
+  max-width: calc(100vw - 2rem);
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+  border-radius: 10px;
+  z-index: 16;
+  box-shadow: -8px 12px 40px rgba(0, 0, 0, 0.28);
+}
+
+.node-drawer-header {
   display: flex;
-  gap: 0.25rem;
-  padding: 0.25rem;
-  background: rgba(255, 255, 255, 0.08);
-  backdrop-filter: blur(16px);
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  z-index: 5;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
 }
 
-.mode-pill {
-  padding: 0.35rem 0.9rem;
-  font-size: 0.8rem;
+.node-drawer-title {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.node-drawer-title h3 {
+  margin: 0;
+  font-size: 1rem;
+  word-wrap: break-word;
+}
+
+.node-type-badge {
+  display: inline-block;
+  padding: 0.12rem 0.5rem;
+  font-size: 0.65rem;
   font-weight: 500;
-  color: var(--color-text-muted);
-  background: transparent;
-  border: none;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
   border-radius: 999px;
-  cursor: pointer;
-  transition: background-color 120ms, color 120ms;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--color-text-muted);
+  width: fit-content;
 }
 
-.mode-pill:hover {
+.node-type-badge.type-decision     { background: rgba(128, 90, 213, 0.18); color: #c4b5fd; }
+.node-type-badge.type-architecture { background: rgba(49, 130, 206, 0.18); color: #93c5fd; }
+.node-type-badge.type-bug_pattern  { background: rgba(229, 62, 62, 0.18); color: #fca5a5; }
+.node-type-badge.type-convention   { background: rgba(56, 161, 105, 0.18); color: #6ee7b7; }
+.node-type-badge.type-note         { background: rgba(113, 128, 150, 0.18); color: #cbd5e1; }
+.node-type-badge.type-code_file    { background: rgba(20, 184, 166, 0.14); color: #5eead4; }
+.node-type-badge.type-code_symbol  { background: rgba(99, 102, 241, 0.14); color: #c7d2fe; }
+
+.node-drawer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.8rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.7rem;
+  color: var(--color-text-muted);
+}
+
+.node-drawer-meta code {
+  padding: 0.05rem 0.4rem;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+}
+
+.node-drawer-body section {
+  margin-bottom: 0.9rem;
+}
+
+.node-drawer-body h4 {
+  margin: 0 0 0.35rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+}
+
+.node-drawer-content {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.node-drawer-neighbors {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.node-drawer-neighbors li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  padding: 0.3rem 0;
+  font-size: 0.78rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.node-drawer-neighbors li:last-child {
+  border-bottom: none;
+}
+
+.node-drawer-neighbors .rel-label {
+  padding: 0.05rem 0.4rem;
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.node-drawer-neighbors .neighbor-type {
+  font-size: 0.65rem;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.node-drawer-neighbors .neighbor-label {
+  word-wrap: break-word;
   color: var(--color-text);
-  background: rgba(255, 255, 255, 0.06);
+  flex: 1;
+  min-width: 0;
 }
 
-.mode-pill.active {
+.node-drawer-error {
+  padding: 0.6rem;
+  font-size: 0.8rem;
+  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: 6px;
+}
+
+.node-drawer-ask {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+  padding: 0.45rem 0.8rem;
+  font-size: 0.8rem;
   color: var(--color-bg);
   background: var(--color-accent, #14b8a6);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: opacity 120ms;
+}
+
+.node-drawer-ask:hover {
+  opacity: 0.9;
+}
+
+@media (max-width: 640px) {
+  .node-drawer {
+    width: calc(100vw - 2rem);
+    top: auto;
+    bottom: 1rem;
+    max-height: 60vh;
+  }
 }
 
 /* ─── Phase 1: Workspace-switched toast ────────────────────────── */

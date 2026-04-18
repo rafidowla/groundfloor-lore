@@ -578,13 +578,32 @@ interface SigmaCanvasProps {
     activeProjects?: Set<string> | null;
     focusNodeId?: string | null;
     onTopologyReady?: (topology: { nodes: Array<{ id: string; type: string; project?: string; label?: string }> }) => void;
+    /** V2.1: emit when the user clicks a graph node. */
+    onNodeClick?: (nodeId: string) => void;
 }
+
+/**
+ * ClickEvent — translates Sigma's clickNode into a prop callback.
+ * Registered alongside the existing Drag + Hover event listeners.
+ */
+const ClickEvents = ({ onNodeClick }: { onNodeClick?: (nodeId: string) => void }) => {
+    const registerEvents = useRegisterEvents();
+    useEffect(() => {
+        registerEvents({
+            clickNode: ({ node }) => {
+                if (onNodeClick) onNodeClick(node);
+            },
+        });
+    }, [registerEvents, onNodeClick]);
+    return null;
+};
 
 export default function SigmaCanvas({
     activeTypes = null,
     activeProjects = null,
     focusNodeId = null,
     onTopologyReady,
+    onNodeClick,
 }: SigmaCanvasProps) {
     const [stats, setStats] = useState<{ nodes: number; edges: number } | null>(null);
 
@@ -617,6 +636,7 @@ export default function SigmaCanvas({
                 <GraphLoader onStatsReady={handleStatsReady} onTopologyReady={onTopologyReady} />
                 <DragEvents />
                 <HoverHighlight />
+                <ClickEvents onNodeClick={onNodeClick} />
                 <FilterEffect activeTypes={activeTypes} activeProjects={activeProjects} />
                 <CameraEffect focusNodeId={focusNodeId} />
                 <CustomZoomControls />

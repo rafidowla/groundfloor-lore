@@ -988,6 +988,67 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // V2.1: Node detail for the UI drawer. Returns the node itself,
+            // plus its immediate neighbors and the edges connecting them.
+            // Consumed by the node-click drawer + "Ask about this" chat flow.
+            if (url.startsWith('/api/node') && req.method === 'GET') {
+                try {
+                    const id = new URL(url, 'http://localhost').searchParams.get('id') ?? '';
+                    if (!id) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'id query param required' }));
+                        return;
+                    }
+                    // Core only knows about LoreNodes. Plugin-contributed
+                    // nodes (file:, symbol:) are in topology but not
+                    // individually addressable here — V1 limitation, can
+                    // add a pluginRegistry hook later.
+                    const stripped = id.startsWith('lore:') ? id.slice(5) : id;
+                    const node = await graph.getNode(stripped);
+                    if (!node) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: `Node "${id}" not found` }));
+                        return;
+                    }
+                    // Pull immediate neighbors in both directions via a direct
+                    // 1-hop Cypher match (simpler than traverse, which uses
+                    // a recursive pattern that some kuzu-lite builds choke on).
+                    const pluginCtxForNode = graph.createPluginGraphContext();
+                    const outRows = await pluginCtxForNode.queryRows(
+                        `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->(m:LoreNode)
+                         RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
+                        { id: stripped },
+                    ).catch(() => []);
+                    const inRows = await pluginCtxForNode.queryRows(
+                        `MATCH (m:LoreNode)-[e:LoreEdge]->(n:LoreNode {id: $id})
+                         RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
+                        { id: stripped },
+                    ).catch(() => []);
+                    const neighbors = [
+                        ...outRows.map((r) => ({
+                            id: r.id as string,
+                            label: r.label as string,
+                            type: r.type as string,
+                            relation: (r.rel as string) || 'related_to',
+                            depth: 1,
+                        })),
+                        ...inRows.map((r) => ({
+                            id: r.id as string,
+                            label: r.label as string,
+                            type: r.type as string,
+                            relation: `← ${(r.rel as string) || 'related_to'}`,
+                            depth: 1,
+                        })),
+                    ];
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ node, neighbors }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
             // Save / create a node from the UI dashboard
             if (url === '/api/node' && req.method === 'POST') {
                 let body = '';
@@ -1407,32 +1468,81 @@ async function main(): Promise<void> {
                         const key = await getApiKey(cfg.llmProvider);
                         write({ type: 'start', provider: cfg.llmProvider });
 
-                        // Phase 3 "focus" fallback: before streaming, regex-match
-                        // message tokens against existing node labels. Any hit
-                        // gets emitted as a focus event so the UI can pan the
-                        // camera while the LLM is still generating.
-                        try {
-                            const topology = await graph.getTopology(500);
-                            const tokens = message
-                                .toLowerCase()
-                                .split(/[^a-z0-9_\-:]+/i)
-                                .filter((t) => t.length >= 4);
-                            const matches: string[] = [];
-                            for (const node of topology.nodes) {
-                                const label = (node.label ?? node.id).toLowerCase();
-                                if (tokens.some((tok) => label.includes(tok))) {
-                                    matches.push(node.id);
-                                    if (matches.length >= 3) break; // cap
+                        // V2.1: if the message references `[node:id]` markers
+                        // (added by the "Ask about this" button on the node
+                        // detail drawer), load those nodes + their immediate
+                        // neighbors and prepend as a system-prompt addendum so
+                        // the LLM answers in scope. Focus event still fires
+                        // so the canvas pans to the primary reference.
+                        let enrichedMessage = message;
+                        const markerRe = /\[node:([\w\-.:]+)\]/gi;
+                        const referencedIds: string[] = [];
+                        let m;
+                        while ((m = markerRe.exec(message)) !== null) {
+                            referencedIds.push(m[1]);
+                        }
+                        if (referencedIds.length > 0) {
+                            const contextBlocks: string[] = [];
+                            const chatCtx = graph.createPluginGraphContext();
+                            for (const rawId of referencedIds) {
+                                const id = rawId.startsWith('lore:') ? rawId.slice(5) : rawId;
+                                try {
+                                    const refNode = await graph.getNode(id);
+                                    if (!refNode) continue;
+                                    // Use a plain 1-hop Cypher — traverse uses a
+                                    // recursive pattern that some kuzu-lite builds
+                                    // refuse.
+                                    const outRows = await chatCtx.queryRows(
+                                        `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->(m:LoreNode)
+                                         RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
+                                        { id },
+                                    ).catch(() => []);
+                                    const inRows = await chatCtx.queryRows(
+                                        `MATCH (m:LoreNode)-[e:LoreEdge]->(n:LoreNode {id: $id})
+                                         RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
+                                        { id },
+                                    ).catch(() => []);
+                                    const neighborLines = [...outRows, ...inRows]
+                                        .slice(0, 10)
+                                        .map((r) => `  - ${r.rel ?? 'related_to'} → ${r.type}: ${r.label} (${r.id})`)
+                                        .join('\n');
+                                    contextBlocks.push(
+                                        `## Referenced node: ${refNode.label} (id=${refNode.id}, type=${refNode.type})\n\n${refNode.content || '(no content)'}\n\n### Connected to:\n${neighborLines || '  (no edges yet)'}`,
+                                    );
+                                } catch (refErr) {
+                                    console.error(`[/api/chat] failed to load ref node "${rawId}":`, (refErr as Error).message);
                                 }
                             }
-                            if (matches.length > 0) {
-                                write({ type: 'focus', nodeId: matches[0], matches });
+                            if (contextBlocks.length > 0) {
+                                enrichedMessage = `You are answering about specific knowledge node(s) the user has referenced. Use the context below as the primary source; cite by id when you reply.\n\n${contextBlocks.join('\n\n---\n\n')}\n\n## User question\n${message}`;
+                                write({ type: 'focus', nodeId: referencedIds[0], matches: referencedIds });
                             }
-                        } catch {
-                            // Focus fallback is best-effort; failure must not kill the chat.
+                        } else {
+                            // Fallback: regex-match tokens against node labels
+                            // for camera pan (Phase 3 focus fallback).
+                            try {
+                                const topology = await graph.getTopology(500);
+                                const tokens = message
+                                    .toLowerCase()
+                                    .split(/[^a-z0-9_\-:]+/i)
+                                    .filter((t) => t.length >= 4);
+                                const matches: string[] = [];
+                                for (const node of topology.nodes) {
+                                    const label = (node.label ?? node.id).toLowerCase();
+                                    if (tokens.some((tok) => label.includes(tok))) {
+                                        matches.push(node.id);
+                                        if (matches.length >= 3) break;
+                                    }
+                                }
+                                if (matches.length > 0) {
+                                    write({ type: 'focus', nodeId: matches[0], matches });
+                                }
+                            } catch {
+                                // Focus fallback is best-effort.
+                            }
                         }
 
-                        for await (const chunk of llmStream(cfg.llmProvider, message, key)) {
+                        for await (const chunk of llmStream(cfg.llmProvider, enrichedMessage, key)) {
                             if (chunk.kind === 'token' && chunk.content) {
                                 write({ type: 'token', content: chunk.content });
                             } else if (chunk.kind === 'model_loading') {

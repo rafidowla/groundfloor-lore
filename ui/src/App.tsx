@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, lazy, Suspense } from 'react';
 import { Settings, MessageSquare, Network, Moon, Sun, PanelLeft, PanelRight } from 'lucide-react';
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import WorkspacePicker from './components/WorkspacePicker';
+import NodeDetailDrawer from './components/NodeDetailDrawer';
 import './App.css';
 
 // V2.1: code-split the two heavy graph renderers. Sigma.js + graphology
@@ -26,13 +27,6 @@ function CanvasLoadingFallback() {
     </div>
   );
 }
-
-// Mode → default filter preset. Matches the plugin's uiHints.defaultFilterTypes
-// on the backend (src/plugins/developer/index.ts). "all" = pass-through.
-const MODE_FILTER_PRESETS: Record<string, string[] | null> = {
-  all: null,
-  developer: ['decision', 'convention', 'bug_pattern', 'code_symbol', 'architecture', 'troubleshooting'],
-};
 
 // Backend daemon base URL. Default is empty string so requests are
 // same-origin — the Vite dev proxy in ui/vite.config.ts forwards /api/*
@@ -130,9 +124,9 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const patchTimer = useRef<number | null>(null);
 
-  // Phase 1: Mode pill-group state. "all" shows every plugin's nodes;
-  // otherwise the value matches one entry in health.activePlugins.
-  const [activeMode, setActiveMode] = useState<string>('all');
+  // V2.1 note: Mode pills removed. Workspace chip (WorkspacePicker) is
+  // the only context switcher. Intra-workspace scoping happens through
+  // the Projects filter in the right panel.
 
   // Phase 2: Dual-path extraction settings + last upload result (rendered
   // beneath the file input so the user sees what the server decided).
@@ -174,6 +168,21 @@ function App() {
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const focusCoalesceRef = useRef<number | null>(null);
 
+  // V2.1: node-click detail drawer state.
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const chatInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Debug hatch: dev-tools / headless test can call
+  // window.__lore_selectNode(id) to open the drawer without a Sigma click.
+  // Shipped intentionally because the cost is one typed global and it's
+  // genuinely useful for QA scripts.
+  useEffect(() => {
+    (window as unknown as { __lore_selectNode?: (id: string) => void }).__lore_selectNode = setSelectedNodeId;
+    return () => {
+      delete (window as unknown as { __lore_selectNode?: (id: string) => void }).__lore_selectNode;
+    };
+  }, []);
+
   // ── Initial load: fetch /api/health + /api/config ────────────────
   useEffect(() => {
     void (async () => {
@@ -185,7 +194,6 @@ function App() {
         setHealth(h);
         setLlmProvider(c.llmProvider);
         setHasApiKey(c.hasApiKey);
-        setActiveMode(c.defaultMode || 'all');
         setExtractionPath(c.extractionPath ?? 'local-byok');
         setTelemetryOptOut(Boolean(c.telemetryOptOut));
         setCapability(c.capability);
@@ -199,20 +207,15 @@ function App() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Phase 3: when the mode pill changes, apply that plugin's default
-  // filter preset. Users can still toggle individual types after.
+  // V2.1: initialize type filter to all-checked once topology loads.
+  // User can uncheck individual types in the right panel to scope the
+  // view; no mode preset logic anymore.
   useEffect(() => {
-    const preset = MODE_FILTER_PRESETS[activeMode] ?? null;
-    if (preset) {
-      setActiveTypes(new Set(preset));
-    } else if (topology) {
-      // "all" mode: everything checked.
+    if (topology && activeTypes === null) {
       const all = new Set(topology.nodes.map((n) => n.type).filter(Boolean));
       setActiveTypes(all);
-    } else {
-      setActiveTypes(null);
     }
-  }, [activeMode, topology]);
+  }, [topology, activeTypes]);
 
   // Keep project filter aligned with topology: default = all checked.
   useEffect(() => {
@@ -231,22 +234,8 @@ function App() {
     }, 200);
   };
 
-  // Cmd/Ctrl+1..9 cycles through Mode pills (All, then active plugins in order).
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (!(e.metaKey || e.ctrlKey)) return;
-      const n = parseInt(e.key, 10);
-      if (Number.isNaN(n) || n < 1 || n > 9) return;
-      const order = ['all', ...(health?.activePlugins ?? [])];
-      const pick = order[n - 1];
-      if (pick) {
-        setActiveMode(pick);
-        e.preventDefault();
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [health]);
+  // V2.1: Cmd/Ctrl+1..9 mode cycling removed with the mode pill-group.
+  // Future keyboard shortcuts (focus chat, toggle filters) can live here.
 
   const toggleTheme = () => {
     const newTheme = theme === 'corporate' ? 'midnight' : 'corporate';
@@ -306,6 +295,18 @@ function App() {
       window.setTimeout(() => void tick(), 500);
     };
     window.setTimeout(() => void tick(), 800);
+  };
+
+  // V2.1: "Ask about this" — pre-fill the chat with a [node:id] marker
+  // and focus the input. Server /api/chat expands the marker into
+  // system-prompt context (node content + immediate neighbors).
+  const askAboutNode = (nodeId: string): void => {
+    // Plugin-owned nodes use their prefix as the marker kind.
+    // Core nodes get the `lore:` prefix to disambiguate.
+    const marker = nodeId.includes(':') ? nodeId : `lore:${nodeId}`;
+    const prefill = `[node:${marker}] `;
+    setInput((curr) => (curr.startsWith(prefill) ? curr : prefill + curr));
+    window.setTimeout(() => chatInputRef.current?.focus(), 50);
   };
 
   // ── Phase 2: file ingestion via /api/extract ────────────────────
@@ -628,6 +629,7 @@ function App() {
           <div className="chat-input-area">
             <div className="input-wrapper glass-panel">
               <input
+                ref={chatInputRef}
                 type="text"
                 placeholder={streaming ? 'Streaming…' : 'Query the knowledge graph…'}
                 value={input}
@@ -652,25 +654,9 @@ function App() {
         onDragLeave={onDragLeave}
         onDrop={(e) => void onDrop(e)}
       >
-        {/* Phase 1: Mode pill-group. Renders one pill per active plugin + "All".
-            Click or Cmd+1..9 to switch. Phase 3 wires filter preset, system
-            prompt swap, and camera focus off this state. */}
-        {health && health.activePlugins.length > 0 ? (
-          <div className="mode-pills" role="tablist" aria-label="Mode">
-            {(['all', ...health.activePlugins]).map((mode, idx) => (
-              <button
-                key={mode}
-                role="tab"
-                aria-selected={activeMode === mode}
-                className={`mode-pill${activeMode === mode ? ' active' : ''}`}
-                onClick={() => setActiveMode(mode)}
-                title={`${mode === 'all' ? 'All modes' : mode} (⌘${idx + 1})`}
-              >
-                {mode === 'all' ? 'All' : mode.charAt(0).toUpperCase() + mode.slice(1)}
-              </button>
-            ))}
-          </div>
-        ) : null}
+        {/* V2.1: mode pill-group removed. Workspace chip (WorkspacePicker
+            in the sidebar) is the only context switcher; per-project
+            scoping is the Projects filter in the right panel. */}
 
         {/* V2.1: Workspace-switch overlay — polls /api/health until the
             daemon comes back on the new workspace, then reloads. */}
@@ -718,11 +704,23 @@ function App() {
               activeProjects={activeProjects}
               focusNodeId={focusNodeId}
               onTopologyReady={(t) => setTopology(t)}
+              onNodeClick={(nodeId) => setSelectedNodeId(nodeId)}
             />
           ) : (
             <GraphCanvas />
           )}
         </Suspense>
+
+        {/* V2.1: node-click detail drawer */}
+        <NodeDetailDrawer
+          apiBase={API_BASE}
+          selectedNodeId={selectedNodeId}
+          onClose={() => setSelectedNodeId(null)}
+          onAskAbout={(id) => {
+            askAboutNode(id);
+            setSelectedNodeId(null);
+          }}
+        />
 
         {/* Dynamic Settings Sidebar (Slide-over) */}
         {showSettings && (
