@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand, reconnectCommand } from './commands.js';
 
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -44,6 +44,7 @@ Commands:
   lint      Check graph health and relationships
   audit     Verify local codebase against Master Data Models
   ingest-files   Synthesize CodeFile nodes + FileContains edges from existing CodeSymbols
+  reconnect      Compute semantic_neighbor edges between LoreNodes (dry-run unless --apply)
 
 Options:
   --help    Show this help message
@@ -106,6 +107,9 @@ async function main(): Promise<void> {
             break;
         case 'ingest-files':
             await ingestFilesCommand(commandArgs);
+            break;
+        case 'reconnect':
+            await reconnectCommand(commandArgs);
             break;
         default:
             console.error(`Unknown command: '${command}'`);

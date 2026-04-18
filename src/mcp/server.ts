@@ -51,6 +51,7 @@ import {
 } from '../config/workspaces.js';
 import { stream as llmStream, getCapability } from '../providers/llmDispatch.js';
 import { decide as decideExtraction, type ExtractPayload } from '../providers/extractRouter.js';
+import { reconnectGraph, reconnectOneNode } from '../engines/reconnect.js';
 import { PluginRegistry } from '../plugins/registry.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
@@ -286,6 +287,24 @@ mcpServer.tool(
                 text: buildVerbatimText(label, content ?? '', tags ?? ''),
                 metadata: { type, label, tags: tags ?? '', project: scopedProject, ecosystem: scopedEcosystem, updatedAt: node.updatedAt }
             }).catch((err) => console.error(`[Lore MCP] VerbatimStore write failed for '${id}':`, err));
+
+            // V2.1 ingest hook (Option A): immediately draw semantic
+            // neighbor edges to this node's top-K similar neighbors. Keeps
+            // the graph connected as new knowledge arrives.
+            // Opt out via config.pluginConfig.developer.autoLinkOnIngest=false.
+            const cfgForHook = configManager.read();
+            const devCfg = (cfgForHook.pluginConfig?.developer ?? {}) as { autoLinkOnIngest?: boolean };
+            if (devCfg.autoLinkOnIngest !== false) {
+                void reconnectOneNode(graph, verbatimStore, {
+                    id,
+                    label,
+                    content: content ?? '',
+                    tags: tags ?? '',
+                    type,
+                    project: scopedProject,
+                    ecosystem: scopedEcosystem,
+                }).catch((err) => console.error(`[Lore MCP] ingest-hook reconnect failed for '${id}':`, err));
+            }
 
             return {
                 content: [{
@@ -1634,6 +1653,36 @@ async function main(): Promise<void> {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (err as Error).message }));
                 }
+                return;
+            }
+
+            // V2.1: Reconnect the knowledge graph via semantic neighbors.
+            // POST body: {k?, threshold?, apply?}. Dry-run by default — returns
+            // proposed edges + similarity histogram so the UI can calibrate
+            // the threshold before committing. apply=true prunes prior
+            // inferred edges and inserts the new set.
+            if (url === '/api/graph/reconnect' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const { k, threshold, apply } = JSON.parse(body || '{}') as {
+                            k?: number;
+                            threshold?: number;
+                            apply?: boolean;
+                        };
+                        const result = await reconnectGraph(graph, verbatimStore, {
+                            k,
+                            minSim: threshold,
+                            dryRun: !apply,
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(result));
+                    } catch (err) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
                 return;
             }
 

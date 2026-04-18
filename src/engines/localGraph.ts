@@ -559,6 +559,40 @@ export class LocalGraph implements GraphProvider {
     }
 
     /**
+     * V2.1: pruneInferredLoreEdges — Delete every LoreEdge whose relation
+     * field starts with the given prefix (e.g. "semantic_neighbor").
+     * Used by reconnectGraph before re-inserting a fresh batch.
+     *
+     * Only touches inferred edges; human-asserted relations like
+     * "supersedes"/"refers_to" are left alone.
+     *
+     * @returns the number of edges deleted.
+     */
+    async pruneInferredLoreEdges(relationPrefix: string): Promise<number> {
+        await this.initialize();
+        try {
+            const countStmt = await this.connection.prepare(
+                `MATCH ()-[e:LoreEdge]->() WHERE e.relation STARTS WITH $p RETURN count(e) AS cnt`,
+            );
+            const countResult = await this.connection.execute(countStmt, { p: relationPrefix }) as QueryResult;
+            const rows = await countResult.getAll();
+            const count = Number(rows[0]?.cnt ?? 0);
+
+            const delStmt = await this.connection.prepare(
+                `MATCH ()-[e:LoreEdge]->() WHERE e.relation STARTS WITH $p DELETE e`,
+            );
+            await this.connection.execute(delStmt, { p: relationPrefix });
+            return count;
+        } catch (error) {
+            throw new LoreGraphError(
+                `Failed to prune inferred edges with prefix '${relationPrefix}'`,
+                'pruneInferredLoreEdges',
+                error,
+            );
+        }
+    }
+
+    /**
      * traverse — Walk the graph from a starting node.
      *
      * Purpose: Follows edges up to a specified depth, returning all

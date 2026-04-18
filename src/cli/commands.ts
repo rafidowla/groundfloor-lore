@@ -1240,3 +1240,51 @@ export async function ingestFilesCommand(_args: string[]): Promise<void> {
     console.log('');
     console.log('  Next: `lore reconnect` to link LoreNode knowledge to these files via semantic similarity.');
 }
+
+/**
+ * reconnectCommand — Run the V2.1 semantic reconnection pass.
+ *
+ *   lore reconnect                          # dry-run (default)
+ *   lore reconnect --apply                  # prune + insert
+ *   lore reconnect --k 8 --threshold 0.55   # experiment with params
+ */
+export async function reconnectCommand(args: string[]): Promise<void> {
+    const { LocalGraph } = await import('../engines/localGraph.js');
+    const { VerbatimStore } = await import('../engines/verbatimStore.js');
+    const { reconnectGraph } = await import('../engines/reconnect.js');
+
+    const apply = args.includes('--apply');
+    const kIndex = args.indexOf('--k');
+    const tIndex = args.indexOf('--threshold');
+    const k = kIndex >= 0 ? parseInt(args[kIndex + 1], 10) : 5;
+    const threshold = tIndex >= 0 ? parseFloat(args[tIndex + 1]) : 0.65;
+
+    const basePath = path.join(os.homedir(), '.groundfloor');
+    const graph = new LocalGraph(basePath);
+    const verbatim = new VerbatimStore(basePath);
+    await graph.initialize();
+
+    console.log('');
+    console.log(`  Reconnect pass — k=${k}, threshold=${threshold}, mode=${apply ? 'APPLY' : 'dry-run'}`);
+    const result = await reconnectGraph(graph, verbatim, { k, minSim: threshold, dryRun: !apply });
+
+    console.log(`  ✓ Scanned ${result.candidatesScanned} node(s); embeddings added: ${result.embeddingsAdded}`);
+    const buckets = Object.entries(result.distribution).sort((a, b) => Number(b[0]) - Number(a[0]));
+    if (buckets.length) {
+        console.log('  Similarity distribution (all neighbors, before threshold):');
+        for (const [bucket, count] of buckets.slice(0, 10)) {
+            const bar = '█'.repeat(Math.min(40, Math.round(count / 2)));
+            console.log(`    ≥ ${bucket.padStart(4)}  ${bar}  (${count})`);
+        }
+    }
+    console.log(`  ✓ Proposed edges at threshold ${threshold}: ${result.proposedEdges.length}`);
+
+    if (apply) {
+        console.log(`  ✓ Pruned ${result.inferredPruned} prior inferred edge(s)`);
+        console.log(`  ✓ Inserted ${result.edgesInserted} new semantic_neighbor edge(s)`);
+    } else {
+        console.log('');
+        console.log('  (dry run — nothing was written. Re-run with --apply to commit.)');
+    }
+    await graph.close();
+}

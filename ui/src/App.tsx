@@ -116,6 +116,13 @@ function App() {
   const [lastExtract, setLastExtract] = useState<ExtractResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  // V2.1: reconnect panel state
+  const [reconnectBusy, setReconnectBusy] = useState(false);
+  const [reconnectMsg, setReconnectMsg] = useState<string | null>(null);
+  const [reconnectAdvanced, setReconnectAdvanced] = useState(false);
+  const [reconnectK, setReconnectK] = useState(5);
+  const [reconnectThreshold, setReconnectThreshold] = useState(0.65);
+
   // Phase 3: filter state for the right panel, topology for populating
   // the filter buckets, focusNodeId driven by SSE `focus` events.
   const [topology, setTopology] = useState<TopologyLike | null>(null);
@@ -288,6 +295,40 @@ function App() {
         mimeType,
         reason: `Upload failed: ${(err as Error).message}`,
       });
+    }
+  };
+
+  // V2.1: Graph reconnect — POST /api/graph/reconnect. Dry-run first
+  // gives a proposed-edge count; the user re-clicks "Apply" to commit.
+  const runReconnect = async (apply: boolean): Promise<void> => {
+    setReconnectBusy(true);
+    setReconnectMsg('Embedding + scoring…');
+    try {
+      const resp = await fetch(`${API_BASE}/api/graph/reconnect`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ k: reconnectK, threshold: reconnectThreshold, apply }),
+      });
+      const body = (await resp.json()) as {
+        proposedEdges: Array<unknown>;
+        edgesInserted?: number;
+        inferredPruned?: number;
+        applied?: boolean;
+      };
+      if (apply) {
+        setReconnectMsg(
+          `✓ Pruned ${body.inferredPruned ?? 0}, inserted ${body.edgesInserted ?? 0} semantic_neighbor edges. Refreshing graph…`,
+        );
+        window.setTimeout(() => window.location.reload(), 1200);
+      } else {
+        setReconnectMsg(
+          `${body.proposedEdges.length} edges proposed at threshold ${reconnectThreshold}. Click "Apply" to commit.`,
+        );
+      }
+    } catch (err) {
+      setReconnectMsg(`Failed: ${(err as Error).message}`);
+    } finally {
+      setReconnectBusy(false);
     }
   };
 
@@ -669,6 +710,72 @@ function App() {
                       {lastExtract.plan.preview}
                     </div>
                   ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            {/* V2.1: Graph reconnect — compute semantic_neighbor edges */}
+            <div className="setting-group">
+              <label>Graph Connections</label>
+              <p className="help-text">
+                Connects LoreNodes by semantic similarity via the verbatim
+                store. Dry-run shows a count; Apply prunes prior inferred
+                edges and inserts the fresh batch.
+              </p>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <button
+                  className="theme-toggle"
+                  onClick={() => void runReconnect(false)}
+                  disabled={reconnectBusy}
+                >
+                  <span>{reconnectBusy ? 'Working…' : 'Dry run'}</span>
+                </button>
+                <button
+                  className="theme-toggle"
+                  onClick={() => void runReconnect(true)}
+                  disabled={reconnectBusy}
+                  style={{ background: 'rgba(20, 184, 166, 0.12)' }}
+                >
+                  <span>Apply</span>
+                </button>
+              </div>
+              {reconnectMsg ? (
+                <p className="help-text" style={{ marginTop: '0.4rem' }}>{reconnectMsg}</p>
+              ) : null}
+
+              <button
+                className="filter-show-more"
+                onClick={() => setReconnectAdvanced((v) => !v)}
+                style={{ marginTop: '0.5rem' }}
+              >
+                {reconnectAdvanced ? 'Hide advanced' : 'Advanced…'}
+              </button>
+              {reconnectAdvanced ? (
+                <div style={{ marginTop: '0.4rem' }}>
+                  <label className="help-text" style={{ display: 'block' }}>
+                    K (nearest neighbors per node): {reconnectK}
+                  </label>
+                  <input
+                    type="range"
+                    min={2}
+                    max={10}
+                    step={1}
+                    value={reconnectK}
+                    onChange={(e) => setReconnectK(Number(e.target.value))}
+                    style={{ width: '100%' }}
+                  />
+                  <label className="help-text" style={{ display: 'block', marginTop: '0.3rem' }}>
+                    Threshold: {reconnectThreshold.toFixed(2)}
+                  </label>
+                  <input
+                    type="range"
+                    min={0.4}
+                    max={0.9}
+                    step={0.01}
+                    value={reconnectThreshold}
+                    onChange={(e) => setReconnectThreshold(Number(e.target.value))}
+                    style={{ width: '100%' }}
+                  />
                 </div>
               ) : null}
             </div>
