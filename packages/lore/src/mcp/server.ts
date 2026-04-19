@@ -54,6 +54,11 @@ import { PluginRegistry } from '../plugins/registry.js';
 import { lockDownDataDir } from '../security/permissions.js';
 import { ensureAuthToken, getAuthTokenPath } from '../security/authToken.js';
 import { validateRequest, writeAuthFailure } from '../security/httpAuth.js';
+import {
+    assertPathAllowed,
+    loadExtraIngestionRoots,
+    PathAllowlistError,
+} from '../security/pathAllowlist.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -810,19 +815,37 @@ mcpServer.tool(
         filePath: z.string().describe('Absolute path to the document'),
     },
     async ({ filePath }) => {
+        // S4 — enforce the ingestion allowlist before any disk read.
+        // Rejects ~/.ssh/id_rsa, ~/.aws/credentials, ~/.groundfloor/auth.
+        // token, macOS keychain files, and anything not under an explicitly
+        // allowed root. See packages/lore/src/security/pathAllowlist.ts
+        // for the full policy.
+        let resolvedPath: string;
         try {
-            if (!fs.existsSync(filePath)) {
+            resolvedPath = assertPathAllowed(filePath, {
+                workspaceRoot: graphBasePath,
+                extraRoots: loadExtraIngestionRoots(path.join(os.homedir(), '.groundfloor')),
+            });
+        } catch (err) {
+            if (err instanceof PathAllowlistError) {
                 return {
-                    content: [{ type: 'text' as const, text: `File not found: ${filePath}` }],
+                    content: [{
+                        type: 'text' as const,
+                        text: `Ingestion denied (${err.code}): ${err.message}`,
+                    }],
                     isError: true,
                 };
             }
-            const content = fs.readFileSync(filePath, 'utf-8');
+            throw err;
+        }
+
+        try {
+            const content = fs.readFileSync(resolvedPath, 'utf-8');
             return {
                 content: [{
                     type: 'text' as const,
                     text: JSON.stringify({
-                        filePath,
+                        filePath: resolvedPath,
                         content,
                         instructions: 'Please parse this content into LoreNode objects. For each distinct item you find, use the store_node tool to insert it into the graph.'
                     }, null, 2),
