@@ -3,6 +3,7 @@ import { Settings, MessageSquare, Moon, Sun, PanelLeft, PanelRight } from 'lucid
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import WorkspacePicker from './components/WorkspacePicker';
 import NodeDetailDrawer from './components/NodeDetailDrawer';
+import { authFetch } from './lib/authFetch';
 import './App.css';
 
 // V2.1: code-split the graph renderer. Sigma.js + graphology adds ~180 KB
@@ -185,8 +186,8 @@ function App() {
     void (async () => {
       try {
         const [h, c] = await Promise.all([
-          fetch(`${API_BASE}/api/health`).then((r) => r.json() as Promise<HealthResponse>),
-          fetch(`${API_BASE}/api/config`).then((r) => r.json() as Promise<ConfigResponse>),
+          authFetch(`${API_BASE}/api/health`).then((r) => r.json() as Promise<HealthResponse>),
+          authFetch(`${API_BASE}/api/config`).then((r) => r.json() as Promise<ConfigResponse>),
         ]);
         setHealth(h);
         setLlmProvider(c.llmProvider);
@@ -258,7 +259,7 @@ function App() {
   // ── PATCH /api/config helpers ────────────────────────────────────
   const patchConfig = async (patch: Record<string, unknown>): Promise<void> => {
     try {
-      const resp = await fetch(`${API_BASE}/api/config`, {
+      const resp = await authFetch(`${API_BASE}/api/config`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
@@ -292,7 +293,7 @@ function App() {
         return;
       }
       try {
-        const h = (await fetch(`${API_BASE}/api/health`).then((r) => r.json())) as HealthResponse;
+        const h = (await authFetch(`${API_BASE}/api/health`).then((r) => r.json())) as HealthResponse;
         if (h.workspace === next) {
           window.location.reload();
           return;
@@ -328,7 +329,7 @@ function App() {
     const mimeType = file.type || (isText ? 'text/plain' : 'application/octet-stream');
 
     try {
-      const resp = await fetch(`${API_BASE}/api/extract`, {
+      const resp = await authFetch(`${API_BASE}/api/extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -359,7 +360,7 @@ function App() {
     setReconnectMsg(mode === 'reconsume' ? 'Re-embedding every node + reconnecting…' : 'Embedding + scoring…');
     try {
       const endpoint = mode === 'reconsume' ? '/api/graph/reconsume' : '/api/graph/reconnect';
-      const resp = await fetch(`${API_BASE}${endpoint}`, {
+      const resp = await authFetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -401,14 +402,14 @@ function App() {
       confirmValue = 'DROP';
     }
     try {
-      const resp = await fetch(`${API_BASE}/api/orphan`, {
+      const resp = await authFetch(`${API_BASE}/api/orphan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plugin, decision, confirm: confirmValue }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       // Refresh health to clear the blocking modal.
-      const h = (await fetch(`${API_BASE}/api/health`).then((r) => r.json())) as HealthResponse;
+      const h = (await authFetch(`${API_BASE}/api/health`).then((r) => r.json())) as HealthResponse;
       setHealth(h);
     } catch (err) {
       setHealthError(`Orphan resolve failed: ${(err as Error).message}`);
@@ -435,7 +436,7 @@ function App() {
     setStreaming(true);
 
     try {
-      const resp = await fetch(`${API_BASE}/api/chat`, {
+      const resp = await authFetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: text }),

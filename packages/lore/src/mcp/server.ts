@@ -52,6 +52,8 @@ import { decide as decideExtraction, type ExtractPayload } from '../providers/ex
 import { reconnectGraph, reconnectOneNode } from '../engines/reconnect.js';
 import { PluginRegistry } from '../plugins/registry.js';
 import { lockDownDataDir } from '../security/permissions.js';
+import { ensureAuthToken, getAuthTokenPath } from '../security/authToken.js';
+import { validateRequest, writeAuthFailure } from '../security/httpAuth.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -865,6 +867,16 @@ pluginRegistry.registerTools(mcpServer, {
 /** Default port for HTTP daemon mode. Override with LORE_PORT env var. */
 const LORE_HTTP_PORT = parseInt(process.env['LORE_PORT'] ?? '3847', 10);
 
+/**
+ * S3 — localhost auth token. Populated at the top of main() from
+ * ~/.groundfloor/auth.token (generated if missing). Consumed by the
+ * HTTP request validator on every /api/* request.
+ *
+ * Module-level mutable: set once at boot, read on every request. Never
+ * reassigned after boot; the daemon is restarted to rotate.
+ */
+let authToken = '';
+
 /** Active HTTP sessions — maps session ID to transport instance. */
 const activeSessions = new Map<string, StreamableHTTPServerTransport>();
 
@@ -908,6 +920,14 @@ async function main(): Promise<void> {
         console.error(`[Lore MCP] Perm lockdown failed (non-fatal): ${(lockErr as Error).message}`);
     }
 
+    // S3 — ensure the localhost auth token exists. Written with 0600.
+    // After this line, every /api/* handler (except the public allowlist)
+    // requires Authorization: Bearer <token>. UI bootstraps via
+    // /api/auth/bootstrap (Host+Origin gated).
+    const dataHome = path.join(os.homedir(), '.groundfloor');
+    authToken = ensureAuthToken(dataHome);
+    console.error(`[Lore MCP] Auth token at ${getAuthTokenPath(dataHome)} (0600)`);
+
     await graph.initialize();
 
     // V2.1 / Option C: each active plugin registers its own Kùzu schema
@@ -942,6 +962,31 @@ async function main(): Promise<void> {
         // HTTP daemon mode — per-session McpServer+transport pairs
         const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
             const url = req.url ?? '';
+
+            // ── S3: first gate — Host + Origin + Bearer token validation ──
+            // Rejects DNS-rebinding attempts (bad Host), cross-origin browser
+            // attacks (bad Origin), and unauthorized callers (missing/bad
+            // Bearer). Public paths (/health, /api/health, /api/auth/
+            // bootstrap) skip the bearer check but still must pass Host and
+            // Origin. See packages/lore/src/security/httpAuth.ts.
+            const authCheck = validateRequest(req, { port: LORE_HTTP_PORT, token: authToken });
+            if (!authCheck.ok) {
+                writeAuthFailure(res, authCheck);
+                return;
+            }
+
+            // Bootstrap endpoint — the UI calls this once on load to fetch
+            // the auth token, then attaches it as Authorization: Bearer on
+            // every subsequent /api/* request. Safe because: (a) validate
+            // Request already enforced Host + Origin must be localhost, so
+            // a hostile cross-origin tab can't reach here; (b) UI is always
+            // same-origin on the daemon's port in production, or served
+            // from localhost:5173 in dev (also allowed Origin).
+            if (url === '/api/auth/bootstrap' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ token: authToken }));
+                return;
+            }
 
             // Orphan-decision gate: when a plugin has been deactivated but the
             // user hasn't chosen Keep/Drop/Re-enable, block every /api/* path

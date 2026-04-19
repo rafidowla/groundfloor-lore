@@ -7,6 +7,7 @@
 
 import { useEffect, useState } from 'react';
 import { X, MessageSquare } from 'lucide-react';
+import { authFetch } from '../lib/authFetch';
 
 interface NodeDetail {
     node: {
@@ -58,7 +59,7 @@ export default function NodeDetailDrawer({
     useEffect(() => {
         if (!selectedNodeId || !isCore) return;
         let cancelled = false;
-        void fetch(`${apiBase}/api/node?id=${encodeURIComponent(selectedNodeId)}`)
+        void authFetch(`${apiBase}/api/node?id=${encodeURIComponent(selectedNodeId)}`)
             .then(async (r) => {
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 return r.json() as Promise<NodeDetail>;

@@ -7,6 +7,7 @@ import forceAtlas2 from 'graphology-layout-forceatlas2';
 import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import type { NodeDisplayData } from 'sigma/types';
 import type { NodeLabelDrawingFunction, NodeHoverDrawingFunction } from 'sigma/rendering';
+import { authFetch } from '../lib/authFetch';
 
 /**
  * Extends Sigma's NodeDisplayData with the two custom attributes we stash
@@ -188,7 +189,7 @@ const GraphLoader = ({ onStatsReady, onTopologyReady }: GraphLoaderProps) => {
 
         const fetchGraph = async () => {
             try {
-                const response = await fetch('/api/topology');
+                const response = await authFetch('/api/topology');
                 const data = await response.json();
                 if (!active) return;
                 if (onTopologyReady) onTopologyReady({ nodes: data.nodes ?? [] });
