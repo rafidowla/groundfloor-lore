@@ -480,17 +480,37 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         issues++;
     }
 
-    // Check 3: Graph is readable and has data
+    // Check 3: Graph is readable. If the daemon is up it holds Kùzu's
+    // single-writer lock, so we can't open it directly — defer to the
+    // daemon's HTTP surface for node/edge counts via /api/storage (which
+    // also gives us disk-usage free). If the daemon is down, open the
+    // DB directly as before.
     if (fs.existsSync(loreDir)) {
-        try {
-            const graph = new LocalGraph(basePath);
-            await graph.initialize();
-            const stats = await graph.getStats();
-            console.log(`  ✓ Graph readable: ${stats.nodeCount} nodes, ${stats.edgeCount} edges`);
-            await graph.close();
-        } catch (graphError) {
-            console.log(`  ✗ Graph error: ${(graphError as Error).message}`);
-            issues++;
+        const tokenPath = path.join(os.homedir(), '.groundfloor', 'auth.token');
+        const daemonUp = (await probeHttp('/api/health', null)) === 200;
+        if (daemonUp && fs.existsSync(tokenPath)) {
+            try {
+                const token = fs.readFileSync(tokenPath, 'utf-8').trim();
+                const topology = await probeJson('/api/topology', token);
+                if (topology && Array.isArray(topology.nodes) && Array.isArray(topology.edges)) {
+                    console.log(`  ✓ Graph (via daemon): ${topology.nodes.length} nodes, ${topology.edges.length} edges`);
+                } else {
+                    console.log('  ⚠ Daemon up but /api/topology returned unexpected shape');
+                }
+            } catch (err) {
+                console.log(`  ⚠ Graph check via daemon failed: ${(err as Error).message}`);
+            }
+        } else {
+            try {
+                const graph = new LocalGraph(basePath);
+                await graph.initialize();
+                const stats = await graph.getStats();
+                console.log(`  ✓ Graph readable: ${stats.nodeCount} nodes, ${stats.edgeCount} edges`);
+                await graph.close();
+            } catch (graphError) {
+                console.log(`  ✗ Graph error: ${(graphError as Error).message}`);
+                issues++;
+            }
         }
     }
 
@@ -588,6 +608,108 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         console.log(`  ⚠ Plugin health check failed: ${(pluginErr as Error).message}`);
     }
 
+    // ─── S10: Security posture ─────────────────────────────────
+    console.log('');
+    console.log('  Security posture');
+    console.log('  ─────────────────────────────────────');
+    const dataHome = path.join(os.homedir(), '.groundfloor');
+
+    // S1 — filesystem permissions
+    try {
+        const dhStat = fs.statSync(dataHome);
+        const dhMode = dhStat.mode & 0o777;
+        if (dhMode === 0o700) {
+            console.log('  ✓ Data home permissions (~/.groundfloor) = 0700');
+        } else {
+            console.log(`  ✗ Data home permissions = 0${dhMode.toString(8)} (expected 0700). Daemon restart will self-heal.`);
+            issues++;
+        }
+    } catch {
+        console.log('  ⚠ Data home ~/.groundfloor not found');
+    }
+    try {
+        const tokenPath = path.join(dataHome, 'auth.token');
+        if (fs.existsSync(tokenPath)) {
+            const tokMode = fs.statSync(tokenPath).mode & 0o777;
+            if (tokMode === 0o600) {
+                console.log('  ✓ Auth token file (0600)');
+            } else {
+                console.log(`  ✗ Auth token mode = 0${tokMode.toString(8)} (expected 0600)`);
+                issues++;
+            }
+        } else {
+            console.log('  ⚠ Auth token not yet generated (daemon not booted)');
+        }
+    } catch { /* ignore */ }
+
+    // S3 — daemon reachable + correctly gating unauthenticated requests
+    try {
+        const tokenPath = path.join(dataHome, 'auth.token');
+        if (fs.existsSync(tokenPath)) {
+            const token = fs.readFileSync(tokenPath, 'utf-8').trim();
+            const healthStatus = await probeHttp('/api/health', null);
+            if (healthStatus === 200) {
+                console.log('  ✓ Daemon /api/health reachable (no auth)');
+            } else {
+                console.log(`  ⚠ /api/health status=${healthStatus ?? 'unreachable'} — daemon may not be running`);
+            }
+            const configUnauth = await probeHttp('/api/config', null);
+            if (configUnauth === 401) {
+                console.log('  ✓ /api/config rejects unauthenticated requests (401)');
+            } else if (configUnauth == null) {
+                console.log('  ⚠ Daemon unreachable — skipping auth-enforcement check');
+            } else {
+                console.log(`  ✗ /api/config without auth returned ${configUnauth} (expected 401) — SECURITY GAP`);
+                issues++;
+            }
+            const configAuth = await probeHttp('/api/config', token);
+            if (configAuth === 200) {
+                console.log('  ✓ /api/config accepts valid bearer (200)');
+            } else if (configAuth != null) {
+                console.log(`  ✗ /api/config with valid bearer returned ${configAuth} (expected 200)`);
+                issues++;
+            }
+        }
+    } catch (authErr) {
+        console.log(`  ⚠ Auth posture check failed: ${(authErr as Error).message}`);
+    }
+
+    // S6 — encryption keyring per workspace (key presence = opt-in ready)
+    try {
+        const { hasWorkspaceKey } = await import('../security/keyring.js');
+        const wsRegistryPath = path.join(dataHome, 'workspaces.json');
+        if (fs.existsSync(wsRegistryPath)) {
+            const reg = JSON.parse(fs.readFileSync(wsRegistryPath, 'utf-8')) as { workspaces: Array<{ name: string }> };
+            let ready = 0;
+            for (const ws of reg.workspaces) {
+                const has = await hasWorkspaceKey(ws.name);
+                if (has) ready++;
+            }
+            console.log(`  ⓘ Encryption keyring: ${ready}/${reg.workspaces.length} workspace(s) have keys provisioned (S6 primitives; opt-in wiring pending)`);
+        }
+    } catch (keyErr) {
+        console.log(`  ⚠ Keyring check failed: ${(keyErr as Error).message}`);
+    }
+
+    // S8 — npm audit summary
+    try {
+        const { execSync } = await import('child_process');
+        const auditRaw = execSync('npm audit --json', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+        const audit = JSON.parse(auditRaw) as { metadata?: { vulnerabilities?: Record<string, number> } };
+        const v = audit.metadata?.vulnerabilities ?? {};
+        const criticalCount = v.critical ?? 0;
+        const highCount = v.high ?? 0;
+        const moderateCount = v.moderate ?? 0;
+        if (criticalCount === 0 && highCount === 0 && moderateCount === 0) {
+            console.log('  ✓ npm audit clean (0 vulnerabilities)');
+        } else {
+            console.log(`  ⚠ npm audit: ${criticalCount} critical, ${highCount} high, ${moderateCount} moderate`);
+            if (criticalCount > 0 || highCount > 0) issues++;
+        }
+    } catch {
+        console.log('  ⚠ npm audit not runnable');
+    }
+
     // Summary
     console.log('');
     if (issues === 0) {
@@ -596,6 +718,57 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         console.log(`  ${issues} issue${issues > 1 ? 's' : ''} found.`);
     }
     console.log('');
+}
+
+/**
+ * probeHttp — small helper for doctor to probe the daemon via HTTP.
+ * Returns status code or null on unreachable.
+ */
+async function probeHttp(pathname: string, token: string | null): Promise<number | null> {
+    return await new Promise((resolve) => {
+        const req = http.request({
+            host: '127.0.0.1',
+            port: 3847,
+            method: 'GET',
+            path: pathname,
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            timeout: 2000,
+        }, (res) => {
+            res.resume();
+            resolve(res.statusCode ?? null);
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.end();
+    });
+}
+
+/**
+ * probeJson — like probeHttp but parses the response body. Returns
+ * null on any error (unreachable, non-200, non-JSON).
+ */
+async function probeJson(pathname: string, token: string | null): Promise<any | null> {
+    return await new Promise((resolve) => {
+        const req = http.request({
+            host: '127.0.0.1',
+            port: 3847,
+            method: 'GET',
+            path: pathname,
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            timeout: 3000,
+        }, (res) => {
+            if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+            let body = '';
+            res.setEncoding('utf-8');
+            res.on('data', (c) => { body += c; });
+            res.on('end', () => {
+                try { resolve(JSON.parse(body)); } catch { resolve(null); }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.end();
+    });
 }
 
 /* ─── Command: setup ─────────────────────────────────────────── */

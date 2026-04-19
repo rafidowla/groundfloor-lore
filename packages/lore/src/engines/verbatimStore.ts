@@ -1,4 +1,4 @@
-import { pipeline } from '@xenova/transformers';
+import { pipeline } from '@huggingface/transformers';
 import * as lancedb from '@lancedb/lancedb';
 import { Schema, Field, Float32, Utf8, List, FixedSizeList } from 'apache-arrow';
 import * as fs from 'fs';

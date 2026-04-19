@@ -174,7 +174,7 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
 
     const genPromise = (async () => {
         try {
-            const transformers = await import('@xenova/transformers');
+            const transformers = await import('@huggingface/transformers');
             const { pipeline, env, TextStreamer } = transformers as unknown as {
                 pipeline: (task: string, model: string, opts?: Record<string, unknown>) => Promise<unknown>;
                 env: { cacheDir?: string; allowRemoteModels?: boolean };

@@ -46,6 +46,7 @@ import {
     createWorkspace,
     switchWorkspace,
     deleteWorkspace,
+    kebabCase,
 } from '../config/workspaces.js';
 import { stream as llmStream, getCapability } from '../providers/llmDispatch.js';
 import { decide as decideExtraction, type ExtractPayload } from '../providers/extractRouter.js';
@@ -65,6 +66,13 @@ import { inspectAllWorkspaces, inspectDataHome, formatBytes } from '../engines/s
 import { writeGraphReport } from '../engines/graphReport.js';
 import { buildDefaultConnectors } from '../engines/connectors/index.js';
 import { decideQuota } from '../engines/quotaManager.js';
+import { redactId, redactError } from '../security/logRedact.js';
+import { scrubEnv } from '../security/envScrub.js';
+import {
+    wrapUntrustedContent,
+    hardenedSystemPrefix,
+    buildInjectionWarning,
+} from '../security/promptGuard.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -179,15 +187,19 @@ if (orphanStateAtBoot.blocking) {
 /**
  * resolveSyncAdapter — Auto-detect Dataplane API keys and create a TS-SDK adapter.
  *
- * Priority:
- *   1. DATAPLANE_URL + DATAPLANE_API_KEY env vars
- *   2. Returns null if no credentials found (offline mode)
+ * Priority (S9 — keychain preferred over env):
+ *   1. OS keychain entry under account='dataplane' (checked in main())
+ *   2. DATAPLANE_API_KEY env var (backward-compat; useful in CI)
+ *   3. Returns null if neither present (offline mode)
+ *
+ * This function handles the env path. Keychain override happens in main()
+ * via maybeUpgradeAdapterFromKeychain() which may rebuild adapter+syncEngine.
  *
  * Side Effects: Reads env vars.
  * Determinism: Deterministic for a given environment.
  */
-function resolveSyncAdapter(): TsSdkAdapter | null {
-    let baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
+function resolveSyncAdapterFromEnv(): TsSdkAdapter | null {
+    const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
     const apiKey = process.env['DATAPLANE_API_KEY'];
     const tenantId = process.env['DATAPLANE_TENANT_ID'] ?? 'groundfloor_lore';
     const orgId = process.env['DATAPLANE_ORG_ID'] ?? 'default';
@@ -197,9 +209,37 @@ function resolveSyncAdapter(): TsSdkAdapter | null {
     return new TsSdkAdapter({ baseUrl, apiKey, tenantId, orgId });
 }
 
-const adapter = resolveSyncAdapter();
-const syncEngine = new SyncEngine(graph, loreDir, adapter);
-const wal = syncEngine.getWal();
+// Module-level bindings. Start from env (backward compat). main() may
+// replace adapter (and rebuild syncEngine) if the OS keychain has a
+// dataplane credential — preferred because it's not visible to any
+// process that inherits this daemon's env.
+let adapter: TsSdkAdapter | null = resolveSyncAdapterFromEnv();
+let syncEngine: SyncEngine = new SyncEngine(graph, loreDir, adapter);
+let wal = syncEngine.getWal();
+
+/**
+ * maybeUpgradeAdapterFromKeychain — S9 keychain preference.
+ *
+ * Called exactly once at main() startup. If the keychain has a
+ * 'dataplane' account, its password overrides any env-sourced key, and
+ * we rebuild adapter + syncEngine + wal with the fresh credential.
+ *
+ * Keychain fetch is best-effort — failures (keytar unavailable, empty
+ * entry) leave the env-sourced adapter in place.
+ */
+async function maybeUpgradeAdapterFromKeychain(): Promise<'keychain' | 'env' | 'none'> {
+    const keychainKey = await getApiKey('dataplane');
+    if (!keychainKey) {
+        return adapter ? 'env' : 'none';
+    }
+    const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
+    const tenantId = process.env['DATAPLANE_TENANT_ID'] ?? 'groundfloor_lore';
+    const orgId = process.env['DATAPLANE_ORG_ID'] ?? 'default';
+    adapter = new TsSdkAdapter({ baseUrl, apiKey: keychainKey, tenantId, orgId });
+    syncEngine = new SyncEngine(graph, loreDir, adapter);
+    wal = syncEngine.getWal();
+    return 'keychain';
+}
 
 /**
  * Phase 4: Lightweight Dataplane health-ping.
@@ -302,7 +342,7 @@ mcpServer.tool(
                 id,
                 text: buildVerbatimText(label, content ?? '', tags ?? ''),
                 metadata: { type, label, tags: tags ?? '', project: scopedProject, ecosystem: scopedEcosystem, updatedAt: node.updatedAt }
-            }).catch((err) => console.error(`[Lore MCP] VerbatimStore write failed for '${id}':`, err));
+            }).catch((err) => console.error(`[Lore MCP] VerbatimStore write failed for ${redactId(id)}: ${redactError(err)}`));
 
             // V2.1 ingest hook (Option A): immediately draw semantic
             // neighbor edges to this node's top-K similar neighbors. Keeps
@@ -319,7 +359,7 @@ mcpServer.tool(
                     type,
                     project: scopedProject,
                     ecosystem: scopedEcosystem,
-                }).catch((err) => console.error(`[Lore MCP] ingest-hook reconnect failed for '${id}':`, err));
+                }).catch((err) => console.error(`[Lore MCP] ingest-hook reconnect failed for ${redactId(id)}: ${redactError(err)}`));
             }
 
             return {
@@ -593,7 +633,7 @@ mcpServer.tool(
     async ({ id }) => {
         try {
             const deleted = await graph.deleteNode(id);
-            if (deleted) verbatimStore.delete(id).catch((err) => console.error(`[Lore MCP] VerbatimStore delete failed for '${id}':`, err));
+            if (deleted) verbatimStore.delete(id).catch((err) => console.error(`[Lore MCP] VerbatimStore delete failed for ${redactId(id)}: ${redactError(err)}`));
             return {
                 content: [{
                     type: 'text' as const,
@@ -1014,6 +1054,20 @@ const activeSessions = new Map<string, StreamableHTTPServerTransport>();
  *   all sharing a single Kùzu graph instance.
  */
 async function main(): Promise<void> {
+    // S9 — Parent environment scrub. Module-level env reads (DATAPLANE_*,
+    // LORE_PORT) already captured whatever they needed from the inherited
+    // env during import. After this call, process.env contains only the
+    // allowlist — any subsequent env read inside Lore (or a plugin) can't
+    // surface an AWS/GitHub/etc. token the IDE happened to have set.
+    try {
+        const scrub = scrubEnv();
+        if (scrub.droppedCount > 0) {
+            console.error(`[Lore MCP] Env scrub: dropped ${scrub.droppedCount} var(s); kept ${scrub.kept.length}. Sample dropped (non-secret names): ${scrub.droppedSamples.join(', ') || '(all names contained secret-like tokens; none safe to log)'}`);
+        }
+    } catch (scrubErr) {
+        console.error(`[Lore MCP] Env scrub failed (non-fatal): ${(scrubErr as Error).message}`);
+    }
+
     // S1 — File permission lockdown (Phase 0 security hardening).
     // Tighten ~/.groundfloor (data home) AND the active workspace root if
     // it differs (custom workspace paths can live anywhere). Must run
@@ -1034,6 +1088,20 @@ async function main(): Promise<void> {
         }
     } catch (lockErr) {
         console.error(`[Lore MCP] Perm lockdown failed (non-fatal): ${(lockErr as Error).message}`);
+    }
+
+    // S9 — upgrade Dataplane adapter from keychain if available. Env
+    // remains the backward-compat fallback. Rebuilds syncEngine + wal
+    // on upgrade so all downstream code sees the fresh adapter.
+    try {
+        const source = await maybeUpgradeAdapterFromKeychain();
+        if (source === 'keychain') {
+            console.error('[Lore MCP] Dataplane credential: keychain');
+        } else if (source === 'env') {
+            console.error('[Lore MCP] Dataplane credential: env (consider moving to keychain)');
+        }
+    } catch (kcErr) {
+        console.error(`[Lore MCP] Keychain upgrade failed (non-fatal): ${(kcErr as Error).message}`);
     }
 
     // S3 — ensure the localhost auth token exists. Written with 0600.
@@ -1418,8 +1486,13 @@ async function main(): Promise<void> {
             }
 
             if (url.startsWith('/api/workspaces/') && req.method === 'DELETE') {
-                const name = decodeURIComponent(url.slice('/api/workspaces/'.length));
+                const raw = decodeURIComponent(url.slice('/api/workspaces/'.length));
                 try {
+                    // S9 — re-validate via kebabCase before hitting the
+                    // registry. This catches any encoded slashes or dots
+                    // that slipped past URL parsing. kebabCase throws on
+                    // anything outside [a-z0-9-] 1..40.
+                    const name = kebabCase(raw);
                     const next = deleteWorkspace(name);
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify(next));
@@ -1712,16 +1785,20 @@ async function main(): Promise<void> {
                             referencedIds.push(m[1]);
                         }
                         if (referencedIds.length > 0) {
-                            const contextBlocks: string[] = [];
+                            // S7 — build wrapped <data> blocks for each
+                            // referenced node and track any that scan as
+                            // suspicious. The LLM is told upfront (via the
+                            // hardened prefix) that <data> blocks carry
+                            // untrusted content — instructions inside are
+                            // to be refused.
+                            const wrappedBlocks: string[] = [];
+                            const suspicious: Array<{ source: string; patterns: string[] }> = [];
                             const chatCtx = graph.createPluginGraphContext();
                             for (const rawId of referencedIds) {
                                 const id = rawId.startsWith('lore:') ? rawId.slice(5) : rawId;
                                 try {
                                     const refNode = await graph.getNode(id);
                                     if (!refNode) continue;
-                                    // Use a plain 1-hop Cypher — traverse uses a
-                                    // recursive pattern that some kuzu-lite builds
-                                    // refuse.
                                     const outRows = await chatCtx.queryRows(
                                         `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->(m:LoreNode)
                                          RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
@@ -1736,16 +1813,37 @@ async function main(): Promise<void> {
                                         .slice(0, 10)
                                         .map((r) => `  - ${r.rel ?? 'related_to'} → ${r.type}: ${r.label} (${r.id})`)
                                         .join('\n');
-                                    contextBlocks.push(
-                                        `## Referenced node: ${refNode.label} (id=${refNode.id}, type=${refNode.type})\n\n${refNode.content || '(no content)'}\n\n### Connected to:\n${neighborLines || '  (no edges yet)'}`,
-                                    );
+                                    const rawBlock =
+                                        `Label: ${refNode.label}\nType: ${refNode.type}\n\n` +
+                                        `Content:\n${refNode.content || '(no content)'}\n\n` +
+                                        `Connected to:\n${neighborLines || '  (no edges yet)'}`;
+                                    const wrapped = wrapUntrustedContent(rawBlock, `lore:${refNode.id}`);
+                                    wrappedBlocks.push(wrapped.wrapped);
+                                    if (wrapped.scan.suspicious) {
+                                        suspicious.push({
+                                            source: `lore:${refNode.id}`,
+                                            patterns: wrapped.scan.patternsMatched,
+                                        });
+                                    }
                                 } catch (refErr) {
-                                    console.error(`[/api/chat] failed to load ref node "${rawId}":`, (refErr as Error).message);
+                                    console.error(`[/api/chat] failed to load ref node ${redactId(rawId)}: ${redactError(refErr)}`);
                                 }
                             }
-                            if (contextBlocks.length > 0) {
-                                enrichedMessage = `You are answering about specific knowledge node(s) the user has referenced. Use the context below as the primary source; cite by id when you reply.\n\n${contextBlocks.join('\n\n---\n\n')}\n\n## User question\n${message}`;
+                            if (wrappedBlocks.length > 0) {
+                                const warning = buildInjectionWarning(suspicious);
+                                const pieces = [
+                                    hardenedSystemPrefix(),
+                                    warning, // null-safe; filtered below
+                                    'You are answering a question about knowledge nodes the user referenced. The retrieved context is enclosed in <data> blocks.',
+                                    wrappedBlocks.join('\n\n'),
+                                    '## User question',
+                                    message,
+                                ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+                                enrichedMessage = pieces.join('\n\n');
                                 write({ type: 'focus', nodeId: referencedIds[0], matches: referencedIds });
+                                if (suspicious.length > 0) {
+                                    console.error(`[/api/chat] injection-scan flagged ${suspicious.length} retrieved block(s): ${suspicious.map((s) => s.patterns.join('+')).join(', ')}`);
+                                }
                             }
                         } else {
                             // Fallback: regex-match tokens against node labels
