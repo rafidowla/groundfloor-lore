@@ -1656,6 +1656,128 @@ export async function reportCommand(args: string[]): Promise<void> {
     }
 }
 
+/* ─── Phase 7a: V1 SQLite migration command ──────────────────── */
+
+import { migrateV1Sqlite } from '../engines/v1Migration.js';
+
+/**
+ * migrateCommand — one-off tools for moving data between eras.
+ *
+ *   lore migrate v1-sqlite [<path>]           # dry-run (default)
+ *   lore migrate v1-sqlite [<path>] --apply   # actually import
+ *   lore migrate v1-sqlite --apply --archive  # import + move file to archive
+ */
+export async function migrateCommand(args: string[]): Promise<void> {
+    const target = args[0];
+    if (target !== 'v1-sqlite') {
+        console.error('usage: lore migrate v1-sqlite [<path>] [--apply] [--archive]');
+        console.error('       Default path: ~/.groundfloor/knowledge.db');
+        console.error('       Default is dry-run. Use --apply to write to the Kùzu graph.');
+        process.exit(1);
+    }
+
+    // Parse optional positional path (anything that doesn't start with --)
+    const rest = args.slice(1);
+    const pathArg = rest.find((a) => !a.startsWith('--'));
+    const apply = rest.includes('--apply');
+    const archive = rest.includes('--archive');
+
+    const sqlitePath = pathArg ?? path.join(os.homedir(), '.groundfloor', 'knowledge.db');
+
+    if (!fs.existsSync(sqlitePath)) {
+        console.error(`No SQLite database at ${sqlitePath}`);
+        process.exit(1);
+    }
+
+    const basePath = path.join(os.homedir(), '.groundfloor');
+    const loreDir = path.join(basePath, '.lore');
+    const graph = new LocalGraph(basePath);
+
+    // We need the verbatim store + plugin registry to fire the ingest
+    // hook for each imported node (so LanceDB + semantic-reconnect run).
+    const { VerbatimStore } = await import('../engines/verbatimStore.js');
+    const verbatim = new VerbatimStore(basePath);
+    const { ConfigManager } = await import('../config/configManager.js');
+    const { PluginRegistry } = await import('../plugins/registry.js');
+    const registry = new PluginRegistry(new ConfigManager(loreDir));
+    registry.boot();
+
+    await graph.initialize();
+    await registry.registerSchemas(graph.createPluginGraphContext());
+
+    console.log('');
+    console.log(`Migration: V1 SQLite → V2 Kùzu`);
+    console.log(`  Source:   ${sqlitePath}`);
+    console.log(`  Mode:     ${apply ? 'APPLY' : 'DRY-RUN (use --apply to write)'}`);
+    if (archive && !apply) {
+        console.log(`  Archive:  (--archive is ignored without --apply)`);
+    } else if (archive) {
+        console.log(`  Archive:  YES — source file will be moved to ~/.groundfloor/archive/`);
+    }
+    console.log('');
+
+    const report = await migrateV1Sqlite(graph, {
+        sqlitePath,
+        apply,
+        archive,
+        verbatimStore: apply ? verbatim : undefined,
+        pluginRegistry: apply ? registry : undefined,
+    });
+
+    console.log('─── Summary ─────────────────────────────────');
+    console.log(`  V1 nodes read:              ${report.v1NodesRead}`);
+    console.log(`  V1 edges read:              ${report.v1EdgesRead}`);
+    console.log('');
+    console.log(`  Nodes imported:             ${report.nodesImported}${apply ? '' : ' (would be)'}`);
+    console.log(`  Nodes skipped (id match):   ${report.nodesSkippedIdConflict.length}`);
+    console.log(`  Nodes flagged (content dup): ${report.nodesFlaggedContentDup.length}`);
+    console.log('');
+    console.log(`  Edges imported:             ${report.edgesImported}${apply ? '' : ' (would be)'}`);
+    console.log(`  Edges skipped (duplicate):  ${report.edgesSkippedAlreadyExists}`);
+    console.log(`  Edges skipped (dangling):   ${report.edgesSkippedMissingEndpoint.length}`);
+    console.log('');
+    console.log(`  Duration:                   ${report.durationMs}ms`);
+    if (report.archivedTo) {
+        console.log(`  Archived to:                ${report.archivedTo}`);
+    }
+
+    // Show ID-skip details if any
+    if (report.nodesSkippedIdConflict.length > 0) {
+        console.log('');
+        console.log('ID conflicts (V1 id matched an existing Kùzu node — V1 skipped):');
+        for (const id of report.nodesSkippedIdConflict.slice(0, 10)) console.log(`  - ${id}`);
+        if (report.nodesSkippedIdConflict.length > 10) {
+            console.log(`  ... and ${report.nodesSkippedIdConflict.length - 10} more`);
+        }
+    }
+
+    // Show content-dup flags
+    if (report.nodesFlaggedContentDup.length > 0) {
+        console.log('');
+        console.log('Content-duplicates (V1 id imported alongside an existing node with identical content):');
+        console.log('  Review and `lore delete_node <v1-id>` to collapse if desired.');
+        for (const pair of report.nodesFlaggedContentDup.slice(0, 10)) {
+            console.log(`  - V1: ${pair.v1Id}  ~=  existing: ${pair.existingId}`);
+        }
+        if (report.nodesFlaggedContentDup.length > 10) {
+            console.log(`  ... and ${report.nodesFlaggedContentDup.length - 10} more`);
+        }
+    }
+
+    if (!apply) {
+        console.log('');
+        console.log('Dry-run complete. Run again with --apply to actually import.');
+    } else {
+        console.log('');
+        console.log('Migration applied. Run `lore status` to confirm.');
+        if (!archive) {
+            console.log(`The source SQLite is still at ${sqlitePath} — delete manually or re-run with --archive.`);
+        }
+    }
+
+    await graph.close();
+}
+
 /* ─── C10: snapshot command ──────────────────────────────────── */
 
 /**
