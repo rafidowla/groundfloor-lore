@@ -796,6 +796,10 @@ export async function setupCommand(args: string[]): Promise<void> {
     console.log('  @groundfloor/lore — Setup');
     console.log('  ═══════════════════════════════════════');
     console.log('');
+    console.log('  Note: Lore is local-first. One daemon per person.');
+    console.log('  For teams / families, each person runs their own daemon');
+    console.log('  and shares via Dataplane. See docs/DEPLOYMENT_MODEL.md.');
+    console.log('');
 
     const basePath = resolveGraphBasePath();
     const loreDir = path.join(basePath, '.lore');

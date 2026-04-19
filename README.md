@@ -29,6 +29,17 @@ lore status
 lore explore
 ```
 
+## Deployment model
+
+**One daemon per human.** Lore is local-first: install on your own
+machine, use it there. For teams or families, each person runs their
+own daemon and shares knowledge via Dataplane (cloud sync). Do not
+run one Lore daemon for multiple people — it is not supported and
+will hit the single-writer lock at scale.
+
+See [docs/DEPLOYMENT_MODEL.md](docs/DEPLOYMENT_MODEL.md) for the
+design rationale.
+
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for full details.
