@@ -35,6 +35,7 @@ import fs from 'fs';
 // the CodeFile operations it supports.
 
 import type { GraphProvider, LoreNode, LoreEdge, TraversalResult, GraphStats } from '../providers/types.js';
+import { detectLanguage } from './language.js';
 export type { LoreNode, LoreEdge, TraversalResult, GraphStats };
 
 /* ─── Types ───────────────────────────────────────────────────── */
@@ -241,6 +242,7 @@ export class LocalGraph implements GraphProvider {
                     syncedAt STRING,
                     security_scopes STRING[],
                     legalHold BOOLEAN DEFAULT FALSE,
+                    language STRING DEFAULT '',
                     PRIMARY KEY (id)
                 )
             `);
@@ -282,6 +284,12 @@ export class LocalGraph implements GraphProvider {
                 // today — this is groundwork. When an enterprise plugin ships
                 // a RetentionPolicy, the delete path will consult this field.
                 `ALTER TABLE LoreNode ADD legalHold BOOLEAN DEFAULT FALSE`,
+                // Phase A (V2.2) — language tag (ISO 639-1) set by the
+                // caller at ingest. Always explicit; core never auto-
+                // detects. Empty string means "unknown" and is treated
+                // as English / default downstream. See
+                // docs/LANGUAGE_DETECTION.md.
+                `ALTER TABLE LoreNode ADD language STRING DEFAULT ''`,
             ];
             for (const migration of migrations) {
                 try {
@@ -402,7 +410,8 @@ export class LocalGraph implements GraphProvider {
                          n.metadata = $metadata,
                          n.updatedAt = $updatedAt,
                          n.syncedAt = $syncedAt,
-                         n.security_scopes = $security_scopes`,
+                         n.security_scopes = $security_scopes,
+                         n.language = $language`,
                 );
                 await this.connection.execute(stmt, {
                     id: nodeData.id,
@@ -416,6 +425,7 @@ export class LocalGraph implements GraphProvider {
                     updatedAt: now,
                     syncedAt: '',
                     security_scopes: nodeData.security_scopes || [],
+                    language: nodeData.language ?? '',
                 });
 
                 this.sessionCache.pushNode(nodeData.id);
@@ -440,7 +450,8 @@ export class LocalGraph implements GraphProvider {
                         createdAt: $createdAt,
                         updatedAt: $updatedAt,
                         syncedAt: $syncedAt,
-                        security_scopes: $security_scopes
+                        security_scopes: $security_scopes,
+                        language: $language
                     })`,
                 );
                 await this.connection.execute(stmt, {
@@ -456,6 +467,7 @@ export class LocalGraph implements GraphProvider {
                     updatedAt: now,
                     syncedAt: '',
                     security_scopes: nodeData.security_scopes || [],
+                    language: nodeData.language ?? '',
                 });
 
                 this.sessionCache.pushNode(nodeData.id);
@@ -983,10 +995,42 @@ export class LocalGraph implements GraphProvider {
             return { nodeCount, edgeCount, typeBreakdown, codeSymbolCount, codeRelationCount };
         } catch (error) {
             throw new LoreGraphError(
-                'Failed to get stats',
+                `Failed to get graph stats`,
                 'getStats',
                 error,
             );
+        }
+    }
+
+    /**
+     * getLanguageBreakdown — Count LoreNodes grouped by their `language`
+     * tag (Phase A / V2.2). Plugin-contributed nodes are not included:
+     * language tagging is per-plugin opt-in, and counting them in core
+     * would cross the plugin boundary. If/when a plugin wants its own
+     * breakdown, it contributes one via its own API.
+     *
+     * Empty-string language values collapse under the key `null` in the
+     * returned map — that's the public representation of "unknown."
+     */
+    async getLanguageBreakdown(): Promise<Record<string, number>> {
+        await this.initialize();
+        try {
+            const result = await this.connection.query(
+                'MATCH (n:LoreNode) RETURN n.language AS lang, count(n) AS cnt',
+            ) as QueryResult;
+            const rows = await result.getAll();
+            const breakdown: Record<string, number> = {};
+            for (const row of rows) {
+                const rec = row as Record<string, unknown>;
+                const raw = rec['lang'] as string | null | undefined;
+                const key = raw && raw.length > 0 ? raw : 'null';
+                const cnt = rec['cnt'] as number;
+                breakdown[key] = (breakdown[key] ?? 0) + cnt;
+            }
+            return breakdown;
+        } catch {
+            // Non-fatal — older graphs pre-Phase-A won't have the column.
+            return {};
         }
     }
 
@@ -1094,6 +1138,7 @@ export class LocalGraph implements GraphProvider {
     createPluginGraphContext(): {
         executeQuery(cypher: string, params?: Record<string, unknown>): Promise<unknown>;
         queryRows(cypher: string, params?: Record<string, unknown>): Promise<Array<Record<string, unknown>>>;
+        detectLanguage(text: string, options?: { threshold?: number; minLength?: number }): { language: string | null; confidence: number };
     } {
         return {
             executeQuery: async (cypher: string, params?: Record<string, unknown>) => {
@@ -1117,6 +1162,13 @@ export class LocalGraph implements GraphProvider {
                 }
                 const rows = await result.getAll();
                 return rows as Array<Record<string, unknown>>;
+            },
+            // Phase A (V2.2) — expose the language-detection capability
+            // to plugins. See docs/LANGUAGE_DETECTION.md for the contract:
+            // plugins call this when they want tagging; core never calls
+            // it implicitly. Pure function — no graph access, just franc.
+            detectLanguage: (text: string, options?: { threshold?: number; minLength?: number }) => {
+                return detectLanguage(text, options);
             },
         };
     }
@@ -1152,6 +1204,12 @@ export class LocalGraph implements GraphProvider {
             return row[key] ?? row[`n.${key}`] ?? row[`connected.${key}`] ?? undefined;
         };
 
+        // language: stored as '' when unknown (Kùzu STRING DEFAULT '').
+        // Surface as null to callers so the "unknown" state is obvious
+        // at the API boundary.
+        const rawLang = (getValue('language') as string) ?? '';
+        const language = rawLang.length > 0 ? rawLang : null;
+
         return {
             id: (getValue('id') as string) ?? '',
             type: (getValue('type') as LoreNode['type']) ?? 'note',
@@ -1165,6 +1223,7 @@ export class LocalGraph implements GraphProvider {
             updatedAt: (getValue('updatedAt') as string) ?? '',
             syncedAt: (getValue('syncedAt') as string) || null,
             security_scopes: (getValue('security_scopes') as string[]) ?? [],
+            language,
         };
     }
 

@@ -14,6 +14,14 @@ export interface LoreNode {
     updatedAt: string;
     syncedAt: string | null;
     security_scopes?: string[];
+    /**
+     * ISO 639-1 language code tagged by the caller at ingest, or null
+     * when unknown. See docs/LANGUAGE_DETECTION.md: core never sets this
+     * automatically — it's always an explicit tag from the ingest path
+     * that knows the content (plugins, AI agents, UI). Nodes without a
+     * tag stay null and are treated as English / default downstream.
+     */
+    language?: string | null;
 }
 
 /**

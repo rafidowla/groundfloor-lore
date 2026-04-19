@@ -111,6 +111,7 @@ function App() {
   const [hasApiKey, setHasApiKey] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [languageBreakdown, setLanguageBreakdown] = useState<Record<string, number> | null>(null);
   const [workspaceSwitching, setWorkspaceSwitching] = useState<string | null>(null);
 
   // Chat state
@@ -187,9 +188,10 @@ function App() {
   useEffect(() => {
     void (async () => {
       try {
-        const [h, c] = await Promise.all([
+        const [h, c, s] = await Promise.all([
           authFetch(`${API_BASE}/api/health`).then((r) => r.json() as Promise<HealthResponse>),
           authFetch(`${API_BASE}/api/config`).then((r) => r.json() as Promise<ConfigResponse>),
+          authFetch(`${API_BASE}/api/stats`).then((r) => r.json() as Promise<{ languageBreakdown?: Record<string, number> }>).catch(() => ({})),
         ]);
         setHealth(h);
         setLlmProvider(c.llmProvider);
@@ -197,6 +199,7 @@ function App() {
         setExtractionPath(c.extractionPath ?? 'local-byok');
         setTelemetryOptOut(Boolean(c.telemetryOptOut));
         setCapability(c.capability);
+        setLanguageBreakdown(s?.languageBreakdown ?? null);
       } catch (err) {
         setHealthError((err as Error).message);
       }
@@ -830,6 +833,37 @@ function App() {
                 Change by editing <code>.lore/config.json</code> and restarting the daemon.
               </p>
             </div>
+
+            {/* Phase A (V2.2) — corpus language breakdown. Read-only
+                display of how many LoreNodes are tagged with each
+                language, plus how many are untagged (key "null"). See
+                docs/LANGUAGE_DETECTION.md: tagging is an explicit
+                caller opt-in; untagged counts are expected when
+                plugins or AI agents don't bother to pass `language`. */}
+            {languageBreakdown && Object.keys(languageBreakdown).length > 0 ? (
+              <div className="setting-group">
+                <label>Corpus Languages</label>
+                <div className="plugins-list">
+                  {Object.entries(languageBreakdown)
+                    .sort(([, a], [, b]) => b - a)
+                    .map(([lang, count]) => (
+                      <span
+                        key={lang}
+                        className="plugin-badge"
+                        title={lang === 'null' ? 'Untagged — treated as English / default' : `Explicitly tagged as ${lang}`}
+                      >
+                        {lang === 'null' ? 'untagged' : lang.toUpperCase()}: {count}
+                      </span>
+                    ))}
+                </div>
+                <p className="help-text">
+                  Tagging is explicit — see docs/LANGUAGE_DETECTION.md.
+                  Use the <code>detect_language</code> MCP tool or
+                  <code> POST /api/language/detect</code> before ingest
+                  if you want non-default tagging.
+                </p>
+              </div>
+            ) : null}
 
             {/* Phase 2: Ingest File (BYOK) */}
             <div className="setting-group">

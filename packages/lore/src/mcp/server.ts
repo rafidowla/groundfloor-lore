@@ -326,8 +326,9 @@ mcpServer.tool(
         metadata: z.string().optional().describe('JSON metadata (e.g., {"date":"2026-03-25","author":"team"})'),
         project: z.string().optional().describe('Project scope (auto-detected from workspace if omitted)'),
         ecosystem: z.string().optional().describe('Ecosystem scope (auto-detected from workspace if omitted)'),
+        language: z.string().optional().describe('ISO 639-1 language code (e.g., "en", "es", "ja"). Optional — caller tags explicitly when known. Omit to leave unknown (treated as default / English downstream). See detect_language tool.'),
     },
-    async ({ id, type, label, content, tags, metadata, project, ecosystem }) => {
+    async ({ id, type, label, content, tags, metadata, project, ecosystem, language }) => {
         try {
             const scopedProject = project ?? detectedScope.project;
             const scopedEcosystem = ecosystem ?? detectedScope.ecosystem;
@@ -341,6 +342,7 @@ mcpServer.tool(
                 project: scopedProject,
                 ecosystem: scopedEcosystem,
                 metadata: metadata ?? '{}',
+                language: language ?? null,
             });
 
             // Buffer write to WAL for async sync
@@ -503,10 +505,12 @@ mcpServer.tool(
     {
         query: z.string().describe('Search query'),
         limit: z.number().optional().describe('Max results (default: 20)'),
+        queryLanguage: z.string().optional().describe('ISO 639-1 code for the query language (e.g., "es"). When provided and the corpus is mostly in a different language, the response includes a cross-language hint. Core does not auto-detect — callers tag explicitly if they want the hint.'),
     },
-    async ({ query, limit }) => {
+    async ({ query, limit, queryLanguage }) => {
         try {
             const results = await graph.search(query, limit ?? 20, detectedScope.project, detectedScope.ecosystem);
+            const hint = queryLanguage ? await buildLanguageHint(queryLanguage) : null;
 
             return {
                 content: [{
@@ -518,7 +522,9 @@ mcpServer.tool(
                         results: results.map((node) => ({
                             id: node.id, type: node.type, label: node.label,
                             content: node.content, tags: node.tags, project: node.project,
+                            language: node.language ?? null,
                         })),
+                        ...(hint ? { hint } : {}),
                     }, null, 2),
                 }],
             };
@@ -539,8 +545,9 @@ mcpServer.tool(
     {
         topic: z.string().describe('Topic to recall (e.g., "BaaSClient", "auth conventions")'),
         depth: z.number().optional().describe('Traversal depth from each search result (default: 1)'),
+        queryLanguage: z.string().optional().describe('ISO 639-1 code for the query language. Same semantics as `search` — optional; adds a cross-language hint to the response when the corpus is mostly in a different language.'),
     },
-    async ({ topic, depth }) => {
+    async ({ topic, depth, queryLanguage }) => {
         try {
             const verbatimCount = await verbatimStore.count();
             let seedNodeIds: string[] = [];
@@ -562,6 +569,7 @@ mcpServer.tool(
             }
 
             if (searchResults.length === 0) {
+                const earlyHint = queryLanguage ? await buildLanguageHint(queryLanguage) : null;
                 return {
                     content: [{
                         type: 'text' as const,
@@ -570,6 +578,7 @@ mcpServer.tool(
                             scope: { project: detectedScope.project, ecosystem: detectedScope.ecosystem },
                             message: `No knowledge found for topic '${topic}'.`,
                             results: [],
+                            ...(earlyHint ? { hint: earlyHint } : {}),
                         }, null, 2),
                     }],
                 };
@@ -603,6 +612,8 @@ mcpServer.tool(
                 graph.sessionCache.pushNode(item.node.id);
             }
 
+            const hint = queryLanguage ? await buildLanguageHint(queryLanguage) : null;
+
             return {
                 content: [{
                     type: 'text' as const,
@@ -617,7 +628,9 @@ mcpServer.tool(
                             id: item.node.id, type: item.node.type, label: item.node.label,
                             content: item.node.content, tags: item.node.tags,
                             project: item.node.project, source: item.source,
+                            language: item.node.language ?? null,
                         })),
+                        ...(hint ? { hint } : {}),
                     }, null, 2),
                 }],
             };
@@ -629,6 +642,59 @@ mcpServer.tool(
         }
     },
 );
+
+/**
+ * buildLanguageHint — Phase B (V2.2). Given the caller's declared
+ * `queryLanguage`, compare it against the corpus language breakdown.
+ * Return a hint object when few/no nodes match — or null when either
+ * the graph has enough matches, or the distribution is uninformative
+ * (e.g. corpus is entirely untagged).
+ *
+ * No automatic translation here. The hint tells the caller that
+ * cross-language routing might help; the chat LLM already handles
+ * translation naturally during answer generation, and explicit
+ * callers can translate themselves if they prefer.
+ */
+async function buildLanguageHint(
+    queryLanguage: string,
+): Promise<{ queryLanguage: string; corpusLanguageBreakdown: Record<string, number>; suggestion: string } | null> {
+    try {
+        const breakdown = await graph.getLanguageBreakdown();
+        const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+        if (total === 0) return null;
+
+        const untagged = breakdown['null'] ?? 0;
+        const tagged = total - untagged;
+        const matchingLang = breakdown[queryLanguage] ?? 0;
+
+        // If nothing in the corpus is tagged, we have no basis to claim
+        // a language mismatch — fire a "no language data" hint so the
+        // caller knows why translation isn't being suggested.
+        if (tagged === 0) {
+            return {
+                queryLanguage,
+                corpusLanguageBreakdown: breakdown,
+                suggestion: `No nodes in the corpus are language-tagged. Your BYOK LLM will still handle translation naturally during chat. To improve raw-search quality for "${queryLanguage}" content, tag nodes explicitly at ingest (see detect_language tool or docs/LANGUAGE_DETECTION.md).`,
+            };
+        }
+
+        // Of the tagged content, how much matches the query language?
+        const matchingFracOfTagged = matchingLang / tagged;
+        // If the query language is well-represented among tagged nodes,
+        // no hint needed.
+        if (matchingFracOfTagged >= 0.1) return null;
+
+        const suggestion = `Only ${matchingLang} of ${tagged} tagged node(s) match language="${queryLanguage}" (${untagged} untagged remain). Your BYOK LLM will translate retrieved content in its answer automatically. To improve raw-search quality for "${queryLanguage}" content, tag nodes explicitly at ingest.`;
+
+        return {
+            queryLanguage,
+            corpusLanguageBreakdown: breakdown,
+            suggestion,
+        };
+    } catch {
+        return null;
+    }
+}
 
 /* ─── Tool: delete_node ───────────────────────────────────────── */
 
@@ -764,15 +830,46 @@ mcpServer.tool(
     async () => {
         try {
             const graphStats = await graph.getStats();
+            const languageBreakdown = await graph.getLanguageBreakdown();
             return {
                 content: [{
                     type: 'text' as const,
                     text: JSON.stringify({
                         ...graphStats,
                         verbatimDocuments: await verbatimStore.count(),
+                        languageBreakdown,
                         graphPath: path.join(graphBasePath, '.lore', 'graph'),
                         engine: 'kùzu + lancedb',
                     }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: detect_language ───────────────────────────────────── */
+
+mcpServer.tool(
+    'detect_language',
+    'Detect the language of a text snippet. Returns an ISO 639-1 code (e.g., "en", "es") or null when confidence is below threshold. See docs/LANGUAGE_DETECTION.md — this is an explicit capability; core never calls it automatically.',
+    {
+        text: z.string().describe('The text to analyze.'),
+        threshold: z.number().optional().describe('Minimum confidence margin (top score minus runner-up). Default 0.03. Raise for stricter results.'),
+        minLength: z.number().optional().describe('Minimum text length to attempt detection. Default 20. Shorter inputs return null.'),
+    },
+    async ({ text, threshold, minLength }) => {
+        try {
+            const { detectLanguage } = await import('../engines/language.js');
+            const result = detectLanguage(text, { threshold, minLength });
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify(result, null, 2),
                 }],
             };
         } catch (error) {
@@ -1425,6 +1522,36 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // Phase A (V2.2) — language detection capability over HTTP.
+            // Mirror of the MCP `detect_language` tool and the plugin
+            // context's ctx.detectLanguage(). Explicit-only, see
+            // docs/LANGUAGE_DETECTION.md.
+            if (url === '/api/language/detect' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const payload = JSON.parse(body || '{}') as { text?: string; threshold?: number; minLength?: number };
+                        if (typeof payload.text !== 'string') {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: '`text` (string) is required' }));
+                            return;
+                        }
+                        const { detectLanguage } = await import('../engines/language.js');
+                        const result = detectLanguage(payload.text, {
+                            threshold: payload.threshold,
+                            minLength: payload.minLength,
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(result));
+                    } catch (detectErr) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (detectErr as Error).message }));
+                    }
+                });
+                return;
+            }
+
             // Full-text content search from the UI dashboard
             if (url.startsWith('/api/search') && req.method === 'GET') {
                 try {
@@ -1436,6 +1563,26 @@ async function main(): Promise<void> {
                 } catch (searchErr) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (searchErr as Error).message }));
+                }
+                return;
+            }
+
+            // HTTP mirror of the MCP `stats` tool — same payload shape.
+            // Used by the UI to render corpus-wide info in Settings
+            // (e.g. the Phase A language breakdown).
+            if (url === '/api/stats' && req.method === 'GET') {
+                try {
+                    const graphStats = await graph.getStats();
+                    const languageBreakdown = await graph.getLanguageBreakdown();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        ...graphStats,
+                        verbatimDocuments: await verbatimStore.count(),
+                        languageBreakdown,
+                    }));
+                } catch (statsErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (statsErr as Error).message }));
                 }
                 return;
             }

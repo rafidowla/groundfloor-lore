@@ -19,6 +19,7 @@ interface NodeDetail {
         project?: string;
         ecosystem?: string;
         updatedAt?: string;
+        language?: string | null;
     };
     neighbors: Array<{
         id: string;
@@ -114,6 +115,11 @@ export default function NodeDetailDrawer({
                         <code>{displayDetail.node.id}</code>
                         {displayDetail.node.project ? <span>project: {displayDetail.node.project}</span> : null}
                         {displayDetail.node.tags ? <span>tags: {displayDetail.node.tags}</span> : null}
+                        {displayDetail.node.language ? (
+                            <span className="language-badge" title="Language detected or tagged at ingest">
+                                {displayDetail.node.language.toUpperCase()}
+                            </span>
+                        ) : null}
                     </div>
 
                     {displayDetail.node.content ? (

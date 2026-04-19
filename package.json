@@ -15,6 +15,8 @@
         "test:http": "tsx test/http-test.ts",
         "test:arch": "node scripts/test-arch.mjs",
         "test:e2e:phase-7a": "tsx test/e2e-phase-7a.ts",
+        "test:e2e:language": "tsx test/e2e-language.ts",
+        "test:e2e:all": "tsx test/run-all-e2e.ts",
         "test": "npm run test:arch && tsc --noEmit"
     },
     "dependencies": {
@@ -23,6 +25,7 @@
         "@kineviz/kuzu-lite": "^0.11.3",
         "@lancedb/lancedb": "^0.27.2",
         "@modelcontextprotocol/sdk": "^1.12.1",
+        "franc": "^6.2.0",
         "gitnexus": "1.4.10",
         "groundfloor-ts-sdk": "file:../v3/groundfloor-ts-sdk",
         "hono": "^4.12.14",

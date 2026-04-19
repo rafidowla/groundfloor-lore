@@ -313,6 +313,22 @@
 .node-type-badge.type-code_file    { background: rgba(20, 184, 166, 0.14); color: #5eead4; }
 .node-type-badge.type-code_symbol  { background: rgba(99, 102, 241, 0.14); color: #c7d2fe; }
 
+/* Phase A (V2.2) — language tag badge in the node drawer. Monospace
+   two-letter ISO 639-1 code, neutral color so it doesn't steal
+   attention from the type badge. Only rendered when tagged. */
+.language-badge {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.12);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
 .node-drawer-meta {
   display: flex;
   flex-wrap: wrap;
