@@ -20,11 +20,13 @@ import type { ConfigManager, LoreConfig } from '../config/configManager.js';
 import type { PluginHistoryEntry } from '../config/configManager.js';
 import { developerPlugin } from '@lore-plugin-developer/index.js';
 import { personalPlugin } from '@lore-plugin-personal/index.js';
+import { legalPlugin } from '@lore-plugin-legal/index.js';
 
 /** Hard-coded plugin catalog. Extend here to add a new plugin. */
 const BUILTIN_PLUGINS: Record<string, ILorePlugin> = {
     developer: developerPlugin,
     personal: personalPlugin,
+    legal: legalPlugin,
 };
 
 /**

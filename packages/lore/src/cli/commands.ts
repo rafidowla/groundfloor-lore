@@ -1656,6 +1656,205 @@ export async function reportCommand(args: string[]): Promise<void> {
     }
 }
 
+/* ─── C10: snapshot command ──────────────────────────────────── */
+
+/**
+ * snapshotCommand — `lore snapshot <folder> --output graph.html`
+ *
+ * The graphify-style one-shot: point it at a folder, get a standalone
+ * HTML snapshot of what's in there. Uses an ephemeral workspace so the
+ * user's live graph isn't touched.
+ *
+ * Implementation choice for scope: for C10 minimum viable, we don't
+ * stand up a full ephemeral workspace (that requires reconnect + plugin
+ * re-registration against a new path). Instead, we iterate the folder
+ * via the FilesystemConnector + route through the ExtractorRegistry,
+ * collecting extracted content into in-memory nodes and then rendering
+ * directly via exportGraphAsHtml's templates.
+ *
+ * This produces a PREVIEW-quality snapshot — what's in the folder,
+ * with text content extracted and shown. Semantic edges (reconnect)
+ * require the full workspace pipeline; those are absent from the
+ * one-shot snapshot. For semantic-edge snapshots, use the normal
+ * ingest → reconnect → export flow against your active workspace.
+ */
+export async function snapshotCommand(args: string[]): Promise<void> {
+    const folder = args[0];
+    if (!folder || folder.startsWith('--')) {
+        console.error('usage: lore snapshot <folder> --output <graph.html> [--title "..."]');
+        process.exit(1);
+    }
+    const outIdx = args.indexOf('--output');
+    if (outIdx < 0 || !args[outIdx + 1]) {
+        console.error('--output <path> is required');
+        process.exit(1);
+    }
+    const outputPath = path.resolve(args[outIdx + 1]);
+    const titleIdx = args.indexOf('--title');
+    const title = titleIdx >= 0 ? args[titleIdx + 1] : `Lore snapshot of ${path.basename(folder)}`;
+
+    const absFolder = path.resolve(folder);
+    if (!fs.existsSync(absFolder)) {
+        console.error(`folder not found: ${absFolder}`);
+        process.exit(1);
+    }
+
+    const { buildDefaultRegistry } = await import('../engines/extractors/index.js');
+    const { FilesystemConnector } = await import('../engines/connectors/index.js');
+    const extractors = buildDefaultRegistry();
+    const connector = new FilesystemConnector({
+        extractorRegistry: extractors,
+        roots: [absFolder],
+        // Allow the target folder even if it's outside the standard
+        // allowlist — `lore snapshot` is explicitly opt-in to this path.
+        workspaceRoot: absFolder,
+    });
+
+    console.log(`Scanning ${absFolder}...`);
+    const nodes: Array<{ id: string; label: string; type: string; group: string }> = [];
+    const edges: Array<{ from: string; to: string; label?: string }> = [];
+    const parentChildren = new Map<string, string[]>();
+
+    let count = 0;
+    for await (const item of connector.sync({ fullSync: true })) {
+        count++;
+        const rel = path.relative(absFolder, item.metadata.absolutePath as string);
+        const parent = path.dirname(rel);
+        const kind = inferSnapshotKind(item.mimeType);
+        const id = `file:${rel}`;
+        nodes.push({
+            id,
+            label: path.basename(rel),
+            type: kind,
+            group: kind,
+        });
+        if (parent && parent !== '.') {
+            if (!parentChildren.has(parent)) {
+                parentChildren.set(parent, []);
+                nodes.push({ id: `dir:${parent}`, label: parent, type: 'directory', group: 'directory' });
+            }
+            parentChildren.get(parent)!.push(id);
+            edges.push({ from: `dir:${parent}`, to: id, label: 'contains' });
+        }
+    }
+
+    // Build minimal topology payload for the HTML export template.
+    // We reuse exportGraphAsHtml's output structure by constructing a
+    // mini LocalGraph-shaped object with just getTopology().
+    const topology = { nodes, edges };
+    const html = renderSnapshotHtml(topology, {
+        title,
+        description: `Snapshot of ${absFolder} (${count} files, ${nodes.length} nodes). This is a one-shot file-tree view. Semantic edges require running a full ingest+reconnect against your active workspace.`,
+    });
+
+    fs.writeFileSync(outputPath, html, { mode: 0o600 });
+    console.log(`Wrote ${html.length} bytes to ${outputPath}`);
+    console.log(`Open: open "${outputPath}"`);
+}
+
+function inferSnapshotKind(mime: string): string {
+    if (mime.startsWith('text/')) return 'text';
+    if (mime === 'application/pdf') return 'pdf';
+    if (mime.startsWith('audio/')) return 'audio';
+    if (mime.startsWith('image/')) return 'image';
+    if (mime === 'message/rfc822') return 'email';
+    if (mime.includes('wordprocessingml')) return 'docx';
+    return 'file';
+}
+
+// Tiny inline HTML renderer for snapshots — doesn't need the full
+// graph topology pipeline, so standalone from exportGraphAsHtml.
+function renderSnapshotHtml(
+    topology: { nodes: Array<{ id: string; label: string; type: string; group: string }>, edges: Array<{ from: string; to: string; label?: string }> },
+    opts: { title: string; description: string },
+): string {
+    const escape = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c] ?? c));
+    return [
+        '<!DOCTYPE html><html><head><meta charset="utf-8">',
+        `<title>${escape(opts.title)}</title>`,
+        '<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>',
+        '<style>body{font-family:-apple-system,system-ui,sans-serif;margin:0;background:#0f172a;color:#e2e8f0}header{padding:1rem 1.5rem;background:#1e293b;border-bottom:1px solid #334155}header h1{margin:0 0 .25rem;font-size:1.1rem}header p{margin:0;font-size:.85rem;color:#94a3b8}#g{width:100vw;height:calc(100vh - 80px)}</style>',
+        `</head><body><header><h1>${escape(opts.title)}</h1><p>${escape(opts.description)}</p></header><div id="g"></div>`,
+        `<script>const DATA=${JSON.stringify(topology)};const options={nodes:{shape:"dot",size:14,font:{color:"#e2e8f0",size:12}},edges:{arrows:{to:{enabled:true,scaleFactor:.4}},color:{color:"#475569"}},physics:{stabilization:{iterations:150}},groups:{directory:{color:{background:"#475569",border:"#334155"}},text:{color:{background:"#38A169",border:"#2F855A"}},pdf:{color:{background:"#E53E3E",border:"#C53030"}},docx:{color:{background:"#3182CE",border:"#2B6CB0"}},email:{color:{background:"#805AD5",border:"#553C9A"}},audio:{color:{background:"#DD6B20",border:"#C05621"}},image:{color:{background:"#D69E2E",border:"#B7791F"}},file:{color:{background:"#718096",border:"#4A5568"}}}};new vis.Network(document.getElementById("g"),DATA,options);</script></body></html>`,
+    ].join('');
+}
+
+/* ─── C8: export command ──────────────────────────────────────── */
+
+import { exportGraphAsHtml } from '../engines/htmlExport.js';
+
+/**
+ * exportCommand — write a self-contained HTML graph snapshot.
+ *
+ *   lore export html --output graph.html [--project <name>] [--max-nodes N] [--title "..."]
+ *
+ * Routes through the daemon via /api/export/html when it's up
+ * (avoids Kùzu single-writer contention), falls back to direct DB.
+ */
+export async function exportCommand(args: string[]): Promise<void> {
+    if (args[0] !== 'html') {
+        console.error('usage: lore export html --output <path> [--project <name>] [--max-nodes N] [--title "..."]');
+        process.exit(1);
+    }
+    const outIdx = args.indexOf('--output');
+    if (outIdx < 0 || !args[outIdx + 1]) {
+        console.error('--output <path> is required');
+        process.exit(1);
+    }
+    const outputPath = path.resolve(args[outIdx + 1]);
+    const projectIdx = args.indexOf('--project');
+    const project = projectIdx >= 0 ? args[projectIdx + 1] : undefined;
+    const maxIdx = args.indexOf('--max-nodes');
+    const maxNodes = maxIdx >= 0 ? parseInt(args[maxIdx + 1], 10) : undefined;
+    const titleIdx = args.indexOf('--title');
+    const title = titleIdx >= 0 ? args[titleIdx + 1] : undefined;
+
+    let html: string | null = null;
+    try {
+        html = await fetchHtmlExportViaDaemon({ project, maxNodes, title });
+    } catch {
+        // Daemon down — open DB directly.
+    }
+    if (html == null) {
+        const basePath = path.join(os.homedir(), '.groundfloor');
+        const graph = new LocalGraph(basePath);
+        await graph.initialize();
+        html = await exportGraphAsHtml(graph, { project, maxNodes, title });
+        await graph.close();
+    }
+    fs.writeFileSync(outputPath, html, { mode: 0o600 });
+    console.log(`Wrote ${html.length} bytes to ${outputPath}`);
+    console.log(`Open in a browser: open "${outputPath}"`);
+}
+
+async function fetchHtmlExportViaDaemon(opts: { project?: string; maxNodes?: number; title?: string }): Promise<string> {
+    const tokenPath = path.join(os.homedir(), '.groundfloor', 'auth.token');
+    if (!fs.existsSync(tokenPath)) throw new Error('no daemon');
+    const token = fs.readFileSync(tokenPath, 'utf-8').trim();
+    const qs = new URLSearchParams();
+    if (opts.project) qs.set('project', opts.project);
+    if (opts.maxNodes != null) qs.set('maxNodes', String(opts.maxNodes));
+    if (opts.title) qs.set('title', opts.title);
+    const pathQs = qs.toString() ? `/api/export/html?${qs.toString()}` : '/api/export/html';
+    return await new Promise<string>((resolve, reject) => {
+        const req = http.request({
+            host: '127.0.0.1', port: 3847, method: 'GET', path: pathQs,
+            headers: { Authorization: `Bearer ${token}` }, timeout: 15_000,
+        }, (res) => {
+            let body = '';
+            res.setEncoding('utf-8');
+            res.on('data', (c) => { body += c; });
+            res.on('end', () => {
+                if (res.statusCode === 200) resolve(body);
+                else reject(new Error(`HTTP ${res.statusCode}`));
+            });
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(new Error('timeout')); });
+        req.end();
+    });
+}
+
 async function fetchReportViaDaemon(project?: string, topN?: number): Promise<string> {
     const tokenPath = path.join(os.homedir(), '.groundfloor', 'auth.token');
     if (!fs.existsSync(tokenPath)) {

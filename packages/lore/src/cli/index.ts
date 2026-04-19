@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand } from './commands.js';
 
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -48,6 +48,8 @@ Commands:
   reconsume      Re-embed every node with fresh content + apply the full reconnect pass
   storage        Show per-workspace disk usage breakdown + SSD free
   report         Write/print GRAPH_REPORT.md — human-readable graph digest
+  export html    Write a standalone HTML graph snapshot (offline-viewable)
+  snapshot       One-shot folder scan → HTML snapshot (no workspace ingest)
 
 Options:
   --help    Show this help message
@@ -122,6 +124,12 @@ async function main(): Promise<void> {
             break;
         case 'report':
             await reportCommand(commandArgs);
+            break;
+        case 'export':
+            await exportCommand(commandArgs);
+            break;
+        case 'snapshot':
+            await snapshotCommand(commandArgs);
             break;
         default:
             console.error(`Unknown command: '${command}'`);

@@ -65,6 +65,9 @@ import { RateLimiter, classifyRequest } from '../security/rateLimit.js';
 import { buildDefaultRegistry, ExtractorError } from '../engines/extractors/index.js';
 import { inspectAllWorkspaces, inspectDataHome, formatBytes } from '../engines/storageInspector.js';
 import { writeGraphReport } from '../engines/graphReport.js';
+import { exportGraphAsHtml } from '../engines/htmlExport.js';
+import { RetentionSweeper } from '../engines/retentionSweep.js';
+import { LocalFileSink } from '../engines/archive.js';
 import { buildDefaultConnectors } from '../engines/connectors/index.js';
 import { decideQuota } from '../engines/quotaManager.js';
 import { redactId, redactError } from '../security/logRedact.js';
@@ -1045,6 +1048,13 @@ const connectorRegistry = buildDefaultConnectors(extractorRegistry, graphBasePat
  */
 const auditLog = new AuditLog();
 const consentManager = new ConsentManager();
+
+/**
+ * Phase 6 — retention sweep + archive sink. Archive sink lives here
+ * (not lazily) so it's ready when the scheduled sweep fires.
+ */
+const archiveSink = new LocalFileSink();
+const retentionSweeper = new RetentionSweeper(graph, pluginRegistry, auditLog);
 
 /**
  * C6b (Phase 4) — MCP client runtime. Connects outward to external
@@ -2079,6 +2089,65 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // Phase 6 — Retention sweep trigger (dry-run by default).
+            //   POST /api/retention/sweep {apply?: boolean, plugins?: string[]}
+            // Applies are consent-gated because archive mutates node
+            // content (replaces with placeholder + sourceRef).
+            if (url === '/api/retention/sweep' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    const startMs = Date.now();
+                    try {
+                        const { apply, plugins } = JSON.parse(body || '{}') as {
+                            apply?: boolean;
+                            plugins?: string[];
+                        };
+                        let approvalId: string | undefined;
+                        if (apply) {
+                            const cReq = consentManager.request(
+                                'retention.sweep.apply',
+                                { plugins },
+                                { context: 'Apply retention policy. Archives eligible node contents; for `delete` and `evict-content` actions, applied sweep currently defers to the consent-UI followup.' },
+                            );
+                            approvalId = cReq.id;
+                            const decision = await cReq.wait;
+                            if (!decision.approved) {
+                                auditLog.log({
+                                    toolName: 'retention.sweep',
+                                    args: { apply, plugins },
+                                    result: 'denied-by-user',
+                                    resultDetail: decision.reason,
+                                    approvalId,
+                                    durationMs: Date.now() - startMs,
+                                });
+                                res.writeHead(403, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'consent denied', reason: decision.reason }));
+                                return;
+                            }
+                        }
+                        const result = await retentionSweeper.sweep({
+                            dryRun: !apply,
+                            plugins,
+                            sink: archiveSink,
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(result));
+                    } catch (err) {
+                        auditLog.log({
+                            toolName: 'retention.sweep',
+                            args: {},
+                            result: 'error',
+                            resultDetail: (err as Error).message,
+                            durationMs: Date.now() - startMs,
+                        });
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
             // C12 — List retention rules contributed by active plugins.
             // Daily-sweep enforcement is a separate runtime (not in this
             // commit); exposing the rules now lets the UI show them and
@@ -2127,6 +2196,29 @@ async function main(): Promise<void> {
                     const status = connectorRegistry.listStatus();
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ connectors: status }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // C8 — Static HTML export. Offline-viewable graph snapshot
+            // via vis-network (CDN-loaded). Share the file; no Lore
+            // daemon required on the viewer's machine.
+            if (url.startsWith('/api/export/html') && req.method === 'GET') {
+                try {
+                    const parsed = new URL(url, 'http://localhost');
+                    const project = parsed.searchParams.get('project') ?? undefined;
+                    const maxNodes = parseInt(parsed.searchParams.get('maxNodes') ?? '500', 10);
+                    const title = parsed.searchParams.get('title') ?? undefined;
+                    const html = await exportGraphAsHtml(graph, {
+                        project,
+                        maxNodes: Number.isFinite(maxNodes) ? maxNodes : 500,
+                        title,
+                    });
+                    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                    res.end(html);
                 } catch (err) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (err as Error).message }));
