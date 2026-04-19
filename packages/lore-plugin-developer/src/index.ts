@@ -145,6 +145,29 @@ export const developerPlugin: ILorePlugin = {
      * the new hook so it takes effect on every chat, and extend it with
      * the C1 confidence-aware guidance.
      */
+    /**
+     * Phase 5 / C12 — retention policy. Developer plugin keeps:
+     *   - decisions/conventions/architecture/bug_patterns FOREVER (they
+     *     age like wine — older decisions are more valuable as context)
+     *   - notes archived after 1 year (they're typically ephemeral
+     *     session handoffs / working-state checkpoints)
+     *   - troubleshooting kept forever (recurring issues benefit from
+     *     full history)
+     *
+     * `archive` action is handled by C11 when the daily-sweep runtime
+     * lands; until then this is declarative metadata the UI can show.
+     */
+    contributeRetentionPolicy() {
+        return [
+            { nodeType: 'decision',        condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
+            { nodeType: 'convention',      condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
+            { nodeType: 'architecture',    condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
+            { nodeType: 'bug_pattern',     condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
+            { nodeType: 'troubleshooting', condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
+            { nodeType: 'note',            condition: 'age' as const, ageThresholdDays: 365,    action: 'archive' as const },
+        ];
+    },
+
     contributeSystemPrompt(_ctx: PluginContext): string | null {
         return [
             developerPlugin.uiHints.systemPrompt,

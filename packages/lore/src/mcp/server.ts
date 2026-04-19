@@ -2079,6 +2079,16 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // C12 — List retention rules contributed by active plugins.
+            // Daily-sweep enforcement is a separate runtime (not in this
+            // commit); exposing the rules now lets the UI show them and
+            // catches plugin misconfigurations early.
+            if (url === '/api/retention' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ rules: pluginRegistry.collectRetentionPolicies() }));
+                return;
+            }
+
             // C6b — External MCP client status.
             if (url === '/api/mcp-clients' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });

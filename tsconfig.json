@@ -15,9 +15,14 @@
         "baseUrl": ".",
         "paths": {
             "@lore-core/*": ["packages/lore/src/*"],
-            "@lore-plugin-developer/*": ["packages/lore-plugin-developer/src/*"]
+            "@lore-plugin-developer/*": ["packages/lore-plugin-developer/src/*"],
+            "@lore-plugin-personal/*": ["packages/lore-plugin-personal/src/*"]
         }
     },
-    "include": ["packages/lore/src/**/*", "packages/lore-plugin-developer/src/**/*"],
+    "include": [
+        "packages/lore/src/**/*",
+        "packages/lore-plugin-developer/src/**/*",
+        "packages/lore-plugin-personal/src/**/*"
+    ],
     "exclude": ["node_modules", "dist", "ui"]
 }
