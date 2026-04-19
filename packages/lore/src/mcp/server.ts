@@ -59,6 +59,7 @@ import {
     loadExtraIngestionRoots,
     PathAllowlistError,
 } from '../security/pathAllowlist.js';
+import { RateLimiter, classifyRequest } from '../security/rateLimit.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -900,6 +901,12 @@ const LORE_HTTP_PORT = parseInt(process.env['LORE_PORT'] ?? '3847', 10);
  */
 let authToken = '';
 
+/**
+ * S5 — rate limiter shared across all /api/* handlers. Per-endpoint-class
+ * token buckets; see src/security/rateLimit.ts for the defaults.
+ */
+const rateLimiter = new RateLimiter();
+
 /** Active HTTP sessions — maps session ID to transport instance. */
 const activeSessions = new Map<string, StreamableHTTPServerTransport>();
 
@@ -996,6 +1003,28 @@ async function main(): Promise<void> {
             if (!authCheck.ok) {
                 writeAuthFailure(res, authCheck);
                 return;
+            }
+
+            // ── S5: rate limiting ──
+            // After auth, debit a token from the matching bucket. Liveness
+            // paths (health, bootstrap) are exempt. Exhausted bucket → 429
+            // with a Retry-After hint. See src/security/rateLimit.ts for
+            // the per-class limits.
+            const bucket = classifyRequest(url, req.method ?? 'GET');
+            if (bucket) {
+                const r = rateLimiter.tryConsume(bucket);
+                if (!r.allowed) {
+                    res.writeHead(429, {
+                        'Content-Type': 'application/json',
+                        'Retry-After': String(r.retryAfterSec),
+                    });
+                    res.end(JSON.stringify({
+                        error: 'rate limited',
+                        bucket,
+                        retryAfterSec: r.retryAfterSec,
+                    }));
+                    return;
+                }
             }
 
             // Bootstrap endpoint — the UI calls this once on load to fetch
