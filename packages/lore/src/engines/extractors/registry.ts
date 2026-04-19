@@ -89,6 +89,20 @@ const EXT_TO_MIME: Record<string, string> = {
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     '.eml': 'message/rfc822',
     '.mbox': 'application/mbox',
+    // C7 audio (Whisper)
+    '.wav': 'audio/wav',
+    '.mp3': 'audio/mpeg',
+    '.m4a': 'audio/mp4',
+    '.mp4a': 'audio/mp4',
+    '.webm': 'audio/webm',
+    '.ogg': 'audio/ogg',
+    '.oga': 'audio/ogg',
+    '.flac': 'audio/flac',
+    // C9 images (OCR) — extractor lands in same phase
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.webp': 'image/webp',
     // xlsx intentionally omitted until Phase 3 picks a safe library
     // (the SheetJS npm has unpatched CVEs).
 };

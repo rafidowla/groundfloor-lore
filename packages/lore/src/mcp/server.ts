@@ -51,6 +51,7 @@ import {
 import { stream as llmStream, getCapability } from '../providers/llmDispatch.js';
 import { decide as decideExtraction, type ExtractPayload } from '../providers/extractRouter.js';
 import { reconnectGraph, reconnectOneNode } from '../engines/reconnect.js';
+import { readCursor, writeCursor } from '../engines/reconnectCursor.js';
 import { PluginRegistry } from '../plugins/registry.js';
 import { lockDownDataDir } from '../security/permissions.js';
 import { ensureAuthToken, getAuthTokenPath } from '../security/authToken.js';
@@ -68,6 +69,9 @@ import { buildDefaultConnectors } from '../engines/connectors/index.js';
 import { decideQuota } from '../engines/quotaManager.js';
 import { redactId, redactError } from '../security/logRedact.js';
 import { scrubEnv } from '../security/envScrub.js';
+import { AuditLog } from '../security/audit.js';
+import { ConsentManager } from '../security/consent.js';
+import { McpClientRuntime } from '../engines/mcpClient/runtime.js';
 import {
     wrapUntrustedContent,
     hardenedSystemPrefix,
@@ -1033,6 +1037,22 @@ const extractorRegistry = buildDefaultRegistry();
  */
 const connectorRegistry = buildDefaultConnectors(extractorRegistry, graphBasePath);
 
+/**
+ * C6 (Phase 4) — audit log + consent manager. Every tool call flagged
+ * requiresApproval pauses here; all destructive tool calls append an
+ * audit entry regardless of approval path. See src/security/audit.ts
+ * and src/security/consent.ts.
+ */
+const auditLog = new AuditLog();
+const consentManager = new ConsentManager();
+
+/**
+ * C6b (Phase 4) — MCP client runtime. Connects outward to external
+ * MCP servers configured in ~/.groundfloor/mcp-servers.json. Empty
+ * config = no-op; first-run has nothing configured, which is expected.
+ */
+const mcpClientRuntime = new McpClientRuntime();
+
 /** Active HTTP sessions — maps session ID to transport instance. */
 const activeSessions = new Map<string, StreamableHTTPServerTransport>();
 
@@ -1089,6 +1109,16 @@ async function main(): Promise<void> {
     } catch (lockErr) {
         console.error(`[Lore MCP] Perm lockdown failed (non-fatal): ${(lockErr as Error).message}`);
     }
+
+    // C6b — connect to configured external MCP servers. Fire-and-forget
+    // so a slow stdio spawn doesn't block daemon boot.
+    void mcpClientRuntime.connectAll().then((summary) => {
+        if (summary.attempted > 0) {
+            console.error(`[Lore MCP] External MCP clients: ${summary.connected}/${summary.attempted} connected (${summary.errored} errored)`);
+        }
+    }).catch((err) => {
+        console.error(`[Lore MCP] MCP client runtime init failed: ${(err as Error).message}`);
+    });
 
     // S9 — upgrade Dataplane adapter from keychain if available. Env
     // remains the backward-compat fallback. Rebuilds syncEngine + wal
@@ -1487,16 +1517,28 @@ async function main(): Promise<void> {
 
             if (url.startsWith('/api/workspaces/') && req.method === 'DELETE') {
                 const raw = decodeURIComponent(url.slice('/api/workspaces/'.length));
+                // C6 — workspace deletion is destructive: audit every
+                // attempt regardless of outcome.
+                const startMs = Date.now();
                 try {
-                    // S9 — re-validate via kebabCase before hitting the
-                    // registry. This catches any encoded slashes or dots
-                    // that slipped past URL parsing. kebabCase throws on
-                    // anything outside [a-z0-9-] 1..40.
                     const name = kebabCase(raw);
                     const next = deleteWorkspace(name);
+                    auditLog.log({
+                        toolName: 'workspaces.delete',
+                        args: { name },
+                        result: 'success',
+                        durationMs: Date.now() - startMs,
+                    });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify(next));
                 } catch (err) {
+                    auditLog.log({
+                        toolName: 'workspaces.delete',
+                        args: { name: raw },
+                        result: 'error',
+                        resultDetail: (err as Error).message,
+                        durationMs: Date.now() - startMs,
+                    });
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (err as Error).message }));
                 }
@@ -1512,22 +1554,86 @@ async function main(): Promise<void> {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
+                    const startMs = Date.now();
                     try {
-                        const { k, threshold, apply, force } = JSON.parse(body || '{}') as {
+                        const { k, threshold, apply, force, incremental } = JSON.parse(body || '{}') as {
                             k?: number;
                             threshold?: number;
                             apply?: boolean;
                             force?: boolean;
+                            /** C6.5 — when true, filter to nodes updated after the cursor. */
+                            incremental?: boolean;
                         };
+                        // Resolve the since-cursor when incremental requested.
+                        let since: string | undefined;
+                        if (incremental) {
+                            const cursor = readCursor(graphBasePath);
+                            since = cursor?.lastReconnectAt;
+                        }
+                        // C6 — reconnect WITH apply=true mutates the graph;
+                        // dry-run does not. Only consent-gate apply mode to
+                        // avoid blocking simple calibration runs.
+                        let approvalId: string | undefined;
+                        if (apply) {
+                            const req = consentManager.request(
+                                'graph.reconnect',
+                                { k, threshold, apply, force },
+                                { context: 'Rebuild semantic edges across the graph. Existing inferred edges will be pruned and recreated. May take seconds to minutes on large graphs.' },
+                            );
+                            approvalId = req.id;
+                            const decision = await req.wait;
+                            if (!decision.approved) {
+                                auditLog.log({
+                                    toolName: 'graph.reconnect',
+                                    args: { k, threshold, apply, force },
+                                    result: 'denied-by-user',
+                                    resultDetail: decision.reason,
+                                    approvalId,
+                                    durationMs: Date.now() - startMs,
+                                });
+                                res.writeHead(403, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'consent denied', reason: decision.reason }));
+                                return;
+                            }
+                        }
                         const result = await reconnectGraph(graph, verbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
                             dryRun: !apply,
                             force,
+                            since,
+                        });
+                        // C6.5 — on successful apply, persist the cursor so
+                        // the next incremental run picks up from here.
+                        if (apply) {
+                            try {
+                                writeCursor(graphBasePath, incremental ? 'incremental' : 'full', {
+                                    candidatesScanned: result.candidatesScanned,
+                                    embeddingsAdded: result.embeddingsAdded,
+                                    embeddingsSkipped: result.embeddingsSkipped,
+                                    coreEdgesInserted: result.coreEdgesInserted,
+                                });
+                            } catch (cursorErr) {
+                                console.error(`[reconnect] cursor write failed: ${(cursorErr as Error).message}`);
+                            }
+                        }
+                        auditLog.log({
+                            toolName: 'graph.reconnect',
+                            args: { k, threshold, apply, force, incremental },
+                            result: 'success',
+                            approvalId,
+                            durationMs: Date.now() - startMs,
                         });
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify(result));
                     } catch (err) {
+                        auditLog.log({
+                            toolName: 'graph.reconnect',
+                            args: {},
+                            result: 'error',
+                            resultDetail: (err as Error).message,
+                            durationMs: Date.now() - startMs,
+                        });
                         res.writeHead(500, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: (err as Error).message }));
                     }
@@ -1544,12 +1650,33 @@ async function main(): Promise<void> {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
+                    const startMs = Date.now();
                     try {
                         const { k, threshold, force } = JSON.parse(body || '{}') as {
                             k?: number;
                             threshold?: number;
                             force?: boolean;
                         };
+                        // C6 — reconsume always applies + always prunes; gate it.
+                        const cReq = consentManager.request(
+                            'graph.reconsume',
+                            { k, threshold, force },
+                            { context: 'Re-embed every node and rebuild the entire inferred-edge set. Runs the full reconnect pipeline from scratch. Minutes of CPU on large graphs.' },
+                        );
+                        const decision = await cReq.wait;
+                        if (!decision.approved) {
+                            auditLog.log({
+                                toolName: 'graph.reconsume',
+                                args: { k, threshold, force },
+                                result: 'denied-by-user',
+                                resultDetail: decision.reason,
+                                approvalId: cReq.id,
+                                durationMs: Date.now() - startMs,
+                            });
+                            res.writeHead(403, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'consent denied', reason: decision.reason }));
+                            return;
+                        }
                         const result = await reconnectGraph(graph, verbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
@@ -1557,9 +1684,23 @@ async function main(): Promise<void> {
                             pruneInferred: true,
                             force,
                         });
+                        auditLog.log({
+                            toolName: 'graph.reconsume',
+                            args: { k, threshold, force },
+                            result: 'success',
+                            approvalId: cReq.id,
+                            durationMs: Date.now() - startMs,
+                        });
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify(result));
                     } catch (err) {
+                        auditLog.log({
+                            toolName: 'graph.reconsume',
+                            args: {},
+                            result: 'error',
+                            resultDetail: (err as Error).message,
+                            durationMs: Date.now() - startMs,
+                        });
                         res.writeHead(500, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: (err as Error).message }));
                     }
@@ -1903,6 +2044,69 @@ async function main(): Promise<void> {
                         res.end();
                     }
                 });
+                return;
+            }
+
+            // C6 — List pending approvals. UI "Pending actions" panel
+            // polls or long-polls this. Entries live ~60s then auto-deny.
+            if (url === '/api/approvals' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ pending: consentManager.list() }));
+                return;
+            }
+
+            // C6 — Resolve a pending approval. POST body: {approved: boolean, reason?}
+            if (url.startsWith('/api/approval/') && req.method === 'POST') {
+                const id = url.slice('/api/approval/'.length);
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', () => {
+                    try {
+                        const payload = JSON.parse(body || '{}') as { approved?: boolean; reason?: string };
+                        if (typeof payload.approved !== 'boolean') {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'approved must be boolean' }));
+                            return;
+                        }
+                        const ok = consentManager.resolve(id, payload.approved, payload.reason);
+                        res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok, id }));
+                    } catch (err) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            // C6b — External MCP client status.
+            if (url === '/api/mcp-clients' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ clients: mcpClientRuntime.list() }));
+                return;
+            }
+
+            // C6 — Audit log read surface.
+            //   GET /api/audit?tail=N       last N entries (default 100)
+            //   GET /api/audit?since=ISO    entries after timestamp
+            if (url.startsWith('/api/audit') && req.method === 'GET') {
+                try {
+                    const parsed = new URL(url, 'http://localhost');
+                    const since = parsed.searchParams.get('since');
+                    const tailStr = parsed.searchParams.get('tail');
+                    let entries;
+                    if (since) {
+                        entries = auditLog.since(since);
+                    } else {
+                        const n = tailStr ? parseInt(tailStr, 10) : 100;
+                        entries = auditLog.tail(Number.isFinite(n) ? n : 100);
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ entries, count: entries.length }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
                 return;
             }
 

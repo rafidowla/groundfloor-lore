@@ -332,6 +332,11 @@ export class LocalGraph implements GraphProvider {
                     if (!m) continue;
                     const score = parseFloat(m[1]);
                     if (!Number.isFinite(score) || score < 0 || score > 1) continue;
+                    // C1.1 — skip no-op rescores: edges whose parsed
+                    // similarity is already the stored 1.0 default don't
+                    // need a write. Happens legitimately when two nodes
+                    // have identical content (sim == 1.0 exactly).
+                    if (Math.abs(score - 1.0) < 1e-9) continue;
                     const upd = await this.connection.prepare(
                         `MATCH (a:LoreNode {id: $src})-[e:LoreEdge]->(b:LoreNode {id: $tgt})
                          WHERE e.relation = $rel AND e.confidenceScore = 1.0

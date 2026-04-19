@@ -12,6 +12,8 @@ import { textExtractor } from './text.js';
 import { pdfExtractor } from './pdf.js';
 import { docxExtractor } from './docx.js';
 import { emlExtractor } from './eml.js';
+import { audioExtractor } from './audio.js';
+import { imageExtractor } from './image.js';
 
 export { ExtractorRegistry } from './registry.js';
 export { ExtractorError } from './types.js';
@@ -33,5 +35,10 @@ export function buildDefaultRegistry(): ExtractorRegistry {
     registry.register(emlExtractor);
     registry.register(docxExtractor);
     registry.register(pdfExtractor);
+    registry.register(audioExtractor); // C7
+    registry.register(imageExtractor); // C9 — last registered = first checked
     return registry;
 }
+
+// Expose setCloudVisionProvider for Phase 6 Lore-Cloud wiring.
+export { setCloudVisionProvider, type ICloudVisionProvider } from './image.js';
