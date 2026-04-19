@@ -522,15 +522,29 @@ export class LocalGraph implements GraphProvider {
      */
     async traverse(nodeId: string, maxDepth: number = 2): Promise<TraversalResult[]> {
         await this.initialize();
-        const clampedDepth = Math.min(Math.max(maxDepth, 1), 5);
+        // Depth is used inside a Cypher variable-length pattern bound
+        // ([e:LoreEdge* 1..N]) which Kùzu parameters don't substitute into,
+        // so it must be a literal. We inline it only after validating it's a
+        // small positive integer — never a user-controlled string.
+        const clampedDepth = Math.min(Math.max(Math.trunc(maxDepth), 1), 5);
+        if (!Number.isInteger(clampedDepth) || clampedDepth < 1 || clampedDepth > 5) {
+            throw new LoreGraphError(
+                `Invalid traversal depth ${maxDepth}`,
+                'traverse',
+                null,
+            );
+        }
 
         try {
-            // Use MATCH with recursive edge pattern
-            const result = await this.connection.query(
+            // `nodeId` goes through a bound parameter — no string interpolation
+            // of user input into the query. The depth literal above is already
+            // validated as an integer in [1,5].
+            const stmt = await this.connection.prepare(
                 `MATCH (start:LoreNode)-[e:LoreEdge* 1..${clampedDepth}]->(connected:LoreNode)
-                 WHERE start.id = '${this.escapeString(nodeId)}'
+                 WHERE start.id = $nodeId
                  RETURN connected.*, length(e) AS depth, e[length(e)-1].relation AS relation`,
-            ) as QueryResult;
+            );
+            const result = await this.connection.execute(stmt, { nodeId }) as QueryResult;
 
             const rows = await result.getAll();
             const seen = new Set<string>();
@@ -582,22 +596,35 @@ export class LocalGraph implements GraphProvider {
     ): Promise<LoreNode[]> {
         await this.initialize();
 
-        const escapedQuery = this.escapeString(query.toLowerCase());
+        // Clamp limit to a safe integer range. Kùzu parameters work for
+        // literal values including numbers, but the pattern is defense-in-
+        // depth — keep the number a number.
+        const clampedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000);
 
         try {
+            // All user input goes through bound parameters. The WHERE clause
+            // is assembled from a fixed set of known-shape fragments; no
+            // user string enters the Cypher text.
+            const params: Record<string, unknown> = {
+                q: query.toLowerCase(),
+                limit: clampedLimit,
+            };
             let cypher = `MATCH (n:LoreNode) WHERE
-                (lower(n.label) CONTAINS '${escapedQuery}' OR lower(n.content) CONTAINS '${escapedQuery}' OR lower(n.tags) CONTAINS '${escapedQuery}')`;
+                (lower(n.label) CONTAINS $q OR lower(n.content) CONTAINS $q OR lower(n.tags) CONTAINS $q)`;
 
             if (project !== '*') {
-                cypher += ` AND (n.project = '${this.escapeString(project)}' OR n.project = '*')`;
+                cypher += ` AND (n.project = $project OR n.project = '*')`;
+                params.project = project;
             }
             if (ecosystem !== '*') {
-                cypher += ` AND (n.ecosystem = '${this.escapeString(ecosystem)}' OR n.ecosystem = '*')`;
+                cypher += ` AND (n.ecosystem = $ecosystem OR n.ecosystem = '*')`;
+                params.ecosystem = ecosystem;
             }
 
-            cypher += ` RETURN n.* LIMIT ${limit}`;
+            cypher += ` RETURN n.* LIMIT $limit`;
 
-            const result = await this.connection.query(cypher) as QueryResult;
+            const stmt = await this.connection.prepare(cypher);
+            const result = await this.connection.execute(stmt, params) as QueryResult;
             const rows = await result.getAll();
 
             return rows.map((row) => this.rowToLoreNode(row as Record<string, unknown>));
@@ -670,24 +697,30 @@ export class LocalGraph implements GraphProvider {
         await this.initialize();
 
         try {
+            const params: Record<string, unknown> = {};
             let cypher = 'MATCH (n:LoreNode) WHERE true';
 
             if (type) {
-                cypher += ` AND n.type = '${this.escapeString(type)}'`;
+                cypher += ` AND n.type = $type`;
+                params.type = type;
             }
             if (tag) {
-                cypher += ` AND lower(n.tags) CONTAINS '${this.escapeString(tag.toLowerCase())}'`;
+                cypher += ` AND lower(n.tags) CONTAINS $tag`;
+                params.tag = tag.toLowerCase();
             }
             if (project !== '*') {
-                cypher += ` AND (n.project = '${this.escapeString(project)}' OR n.project = '*')`;
+                cypher += ` AND (n.project = $project OR n.project = '*')`;
+                params.project = project;
             }
             if (ecosystem !== '*') {
-                cypher += ` AND (n.ecosystem = '${this.escapeString(ecosystem)}' OR n.ecosystem = '*')`;
+                cypher += ` AND (n.ecosystem = $ecosystem OR n.ecosystem = '*')`;
+                params.ecosystem = ecosystem;
             }
 
             cypher += ' RETURN n.* ORDER BY n.updatedAt DESC';
 
-            const result = await this.connection.query(cypher) as QueryResult;
+            const stmt = await this.connection.prepare(cypher);
+            const result = await this.connection.execute(stmt, params) as QueryResult;
             const rows = await result.getAll();
 
             return rows.map((row) => this.rowToLoreNode(row as Record<string, unknown>));
@@ -714,16 +747,18 @@ export class LocalGraph implements GraphProvider {
         const existingNode = await this.getNode(id);
         if (!existingNode) return false;
 
-        const escaped = this.escapeString(id);
         try {
             // Delete all edges connected to this node (both directions)
-            await this.connection.query(
-                `MATCH (n:LoreNode {id: '${escaped}'})-[e:LoreEdge]-() DELETE e`,
+            const edgeStmt = await this.connection.prepare(
+                `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]-() DELETE e`,
             );
+            await this.connection.execute(edgeStmt, { id });
+
             // Delete the node itself
-            await this.connection.query(
-                `MATCH (n:LoreNode {id: '${escaped}'}) DELETE n`,
+            const nodeStmt = await this.connection.prepare(
+                `MATCH (n:LoreNode {id: $id}) DELETE n`,
             );
+            await this.connection.execute(nodeStmt, { id });
 
             return true;
         } catch (error) {
@@ -940,15 +975,11 @@ export class LocalGraph implements GraphProvider {
 
     /* ─── Private Helpers ─────────────────────────────────────────── */
 
-    /**
-     * escapeString — Escape single quotes for inline Cypher values.
-     *
-     * Used for queries where parameterized execution is not possible
-     * (e.g., dynamic CONTAINS). Prevents Cypher injection.
-     */
-    private escapeString(value: string): string {
-        return value.replace(/'/g, "\\'");
-    }
+    // escapeString was removed in Phase 0 / S2 — single-quote escaping
+    // is not safe against Cypher injection (comments, backticks, nested
+    // quoting all bypass it). All read paths now use prepare/execute
+    // with bound parameters. Do NOT reintroduce a string-escape helper;
+    // route every user input through parameters instead.
 
     /**
      * rowToLoreNode — Convert a Kùzu result row to a LoreNode.

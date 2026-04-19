@@ -51,6 +51,7 @@ import { stream as llmStream, getCapability } from '../providers/llmDispatch.js'
 import { decide as decideExtraction, type ExtractPayload } from '../providers/extractRouter.js';
 import { reconnectGraph, reconnectOneNode } from '../engines/reconnect.js';
 import { PluginRegistry } from '../plugins/registry.js';
+import { lockDownDataDir } from '../security/permissions.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -885,6 +886,28 @@ const activeSessions = new Map<string, StreamableHTTPServerTransport>();
  *   all sharing a single Kùzu graph instance.
  */
 async function main(): Promise<void> {
+    // S1 — File permission lockdown (Phase 0 security hardening).
+    // Tighten ~/.groundfloor (data home) AND the active workspace root if
+    // it differs (custom workspace paths can live anywhere). Must run
+    // before graph.initialize() so Kùzu files inherit the 0700 parent dir.
+    try {
+        const dataHome = path.join(os.homedir(), '.groundfloor');
+        const lockedPaths = new Set<string>([dataHome]);
+        if (graphBasePath !== dataHome) lockedPaths.add(graphBasePath);
+        for (const root of lockedPaths) {
+            const summary = lockDownDataDir(root);
+            const touched = summary.directoriesFixed + summary.filesFixed;
+            if (touched > 0 || summary.errors.length > 0) {
+                console.error(
+                    `[Lore MCP] Perm lockdown ${root}: dirs=${summary.directoriesFixed} files=${summary.filesFixed} skipped=${summary.skipped} errors=${summary.errors.length}`,
+                );
+                for (const err of summary.errors) console.error(`[Lore MCP]   ${err}`);
+            }
+        }
+    } catch (lockErr) {
+        console.error(`[Lore MCP] Perm lockdown failed (non-fatal): ${(lockErr as Error).message}`);
+    }
+
     await graph.initialize();
 
     // V2.1 / Option C: each active plugin registers its own Kùzu schema
