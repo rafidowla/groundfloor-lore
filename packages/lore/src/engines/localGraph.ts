@@ -240,15 +240,21 @@ export class LocalGraph implements GraphProvider {
                     updatedAt STRING,
                     syncedAt STRING,
                     security_scopes STRING[],
+                    legalHold BOOLEAN DEFAULT FALSE,
                     PRIMARY KEY (id)
                 )
             `);
 
             // ─── Relationship Tables ────────────────────────────────────
+            // C1 (Phase 1) — confidence tiers on every edge. Defaults mean
+            // pre-C1 callers get the conservative 'extracted' interpretation;
+            // reconnect explicitly tags its edges as 'inferred'.
             await this.connection.query(`
                 CREATE REL TABLE IF NOT EXISTS LoreEdge (
                     FROM LoreNode TO LoreNode,
-                    relation STRING
+                    relation STRING,
+                    confidence STRING DEFAULT 'extracted',
+                    confidenceScore DOUBLE DEFAULT 1.0
                 )
             `);
 
@@ -266,6 +272,16 @@ export class LocalGraph implements GraphProvider {
                 `ALTER TABLE LoreNode ADD project STRING DEFAULT '*'`,
                 `ALTER TABLE LoreNode ADD ecosystem STRING DEFAULT '*'`,
                 `ALTER TABLE LoreNode ADD security_scopes STRING[] DEFAULT []`,
+                // C1 edge-confidence migration. Existing DBs get the columns
+                // with their defaults; the backfill pass below retags legacy
+                // semantic-reconnect edges as 'inferred'.
+                `ALTER TABLE LoreEdge ADD confidence STRING DEFAULT 'extracted'`,
+                `ALTER TABLE LoreEdge ADD confidenceScore DOUBLE DEFAULT 1.0`,
+                // C-ent0 (Phase 1) inert enterprise hook. Every LoreNode gets
+                // a legalHold flag, default false. No core code enforces it
+                // today — this is groundwork. When an enterprise plugin ships
+                // a RetentionPolicy, the delete path will consult this field.
+                `ALTER TABLE LoreNode ADD legalHold BOOLEAN DEFAULT FALSE`,
             ];
             for (const migration of migrations) {
                 try {
@@ -273,6 +289,70 @@ export class LocalGraph implements GraphProvider {
                 } catch {
                     // Column already exists — expected, ignore
                 }
+            }
+
+            // ─── C1 Backfill: retag reconnect-authored semantic edges ───
+            // Pre-C1 reconnect encoded confidence in the relation string
+            // (`semantic_neighbor:0.823`). After the ALTER above they'd all
+            // sit at the default confidence='extracted' + score=1.0, which
+            // is wrong. This pass:
+            //   1. Flips confidence to 'inferred' for every semantic edge.
+            //   2. Parses the similarity score out of the relation suffix
+            //      and writes it to confidenceScore.
+            //
+            // Idempotent: only touches edges whose stored score is still
+            // the default 1.0 AND have the semantic_neighbor prefix. Once
+            // a score is properly stored, we don't re-parse it.
+            try {
+                const retagStmt = await this.connection.prepare(
+                    `MATCH ()-[e:LoreEdge]->()
+                     WHERE e.relation STARTS WITH 'semantic_neighbor:'
+                       AND e.confidence = 'extracted'
+                     SET e.confidence = 'inferred'`,
+                );
+                await this.connection.execute(retagStmt, {});
+
+                // Read back every inferred edge whose score is still the
+                // default and parse the suffix. Iterating in JS is simpler
+                // than embedding substring parsing in Cypher.
+                const toScoreStmt = await this.connection.prepare(
+                    `MATCH (a:LoreNode)-[e:LoreEdge]->(b:LoreNode)
+                     WHERE e.confidence = 'inferred'
+                       AND e.confidenceScore = 1.0
+                       AND e.relation STARTS WITH 'semantic_neighbor:'
+                     RETURN a.id AS src, b.id AS tgt, e.relation AS rel`,
+                );
+                const toScoreRes = await this.connection.execute(toScoreStmt, {}) as QueryResult;
+                const rows = await toScoreRes.getAll();
+                let rescored = 0;
+                for (const row of rows) {
+                    const r = row as Record<string, unknown>;
+                    const rel = String(r['rel'] ?? '');
+                    const m = /^semantic_neighbor:([0-9]+(\.[0-9]+)?)$/.exec(rel);
+                    if (!m) continue;
+                    const score = parseFloat(m[1]);
+                    if (!Number.isFinite(score) || score < 0 || score > 1) continue;
+                    const upd = await this.connection.prepare(
+                        `MATCH (a:LoreNode {id: $src})-[e:LoreEdge]->(b:LoreNode {id: $tgt})
+                         WHERE e.relation = $rel AND e.confidenceScore = 1.0
+                         SET e.confidenceScore = $score`,
+                    );
+                    await this.connection.execute(upd, {
+                        src: String(r['src']),
+                        tgt: String(r['tgt']),
+                        rel,
+                        score,
+                    });
+                    rescored++;
+                }
+                if (rescored > 0) {
+                    console.error(`[LocalGraph] C1 backfill: rescored ${rescored} inferred edges`);
+                }
+            } catch (backfillErr) {
+                // Non-fatal: defaults are safe, just not optimal.
+                console.error(
+                    `[LocalGraph] C1 backfill pass failed (non-fatal): ${(backfillErr as Error).message}`,
+                );
             }
 
             this.initialized = true;
@@ -432,15 +512,27 @@ export class LocalGraph implements GraphProvider {
     async addEdge(edge: LoreEdge): Promise<void> {
         await this.initialize();
 
+        // C1 — confidence tagging. Callers that omit confidence get
+        // 'extracted' (user-asserted) with score 1.0, matching the schema
+        // default. Reconnect passes 'inferred' + the cosine similarity.
+        const confidence = edge.confidence ?? 'extracted';
+        const confidenceScore = edge.confidenceScore ?? 1.0;
+
         try {
             const stmt = await this.connection.prepare(
                 `MATCH (a:LoreNode {id: $sourceId}), (b:LoreNode {id: $targetId})
-                 CREATE (a)-[:LoreEdge {relation: $relation}]->(b)`,
+                 CREATE (a)-[:LoreEdge {
+                    relation: $relation,
+                    confidence: $confidence,
+                    confidenceScore: $confidenceScore
+                 }]->(b)`,
             );
             await this.connection.execute(stmt, {
                 sourceId: edge.sourceId,
                 targetId: edge.targetId,
                 relation: edge.relation,
+                confidence,
+                confidenceScore,
             });
         } catch (error) {
             throw new LoreGraphError(
@@ -454,7 +546,7 @@ export class LocalGraph implements GraphProvider {
     /**
      * addBidirectionalEdge — Create edges in both directions.
      *
-     * @param edge - Source, target, and relation type.
+     * @param edge - Source, target, and relation type (confidence propagates).
      *
      * Side Effects: Writes two edges to Kùzu database.
      */
@@ -464,6 +556,8 @@ export class LocalGraph implements GraphProvider {
             sourceId: edge.targetId,
             targetId: edge.sourceId,
             relation: edge.relation,
+            confidence: edge.confidence,
+            confidenceScore: edge.confidenceScore,
         });
     }
 
@@ -663,10 +757,22 @@ export class LocalGraph implements GraphProvider {
                 nodes.push({ id: n.id, label: n.label, type: n.type, project: n.project, group: n.type });
             }
             const loreEdgesResult = await this.connection.query(
-                `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode) RETURN n.id AS source, e.relation AS relation, m.id AS target LIMIT ${limit}`,
+                `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode)
+                 RETURN n.id AS source,
+                        e.relation AS relation,
+                        e.confidence AS confidence,
+                        e.confidenceScore AS confidenceScore,
+                        m.id AS target
+                 LIMIT ${limit}`,
             ) as any;
             for (const row of await loreEdgesResult.getAll()) {
-                edges.push({ from: row['source'], to: row['target'], label: row['relation'] });
+                edges.push({
+                    from: row['source'],
+                    to: row['target'],
+                    label: row['relation'],
+                    confidence: row['confidence'] ?? 'extracted',
+                    confidenceScore: row['confidenceScore'] ?? 1.0,
+                });
             }
 
             return { nodes, edges };

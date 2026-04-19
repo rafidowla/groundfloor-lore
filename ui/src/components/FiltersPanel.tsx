@@ -25,6 +25,9 @@ interface FiltersPanelProps {
     setActiveTypes: (next: Set<string>) => void;
     activeProjects: Set<string>;
     setActiveProjects: (next: Set<string>) => void;
+    /** C1 — confidence filter toggle. */
+    showInferred?: boolean;
+    setShowInferred?: (next: boolean) => void;
 }
 
 interface Bucket {
@@ -124,6 +127,8 @@ export default function FiltersPanel({
     setActiveTypes,
     activeProjects,
     setActiveProjects,
+    showInferred,
+    setShowInferred,
 }: FiltersPanelProps): React.ReactElement {
     const typeBuckets = useMemo(() => buildBuckets((topology?.nodes ?? []).map((n) => n.type)), [topology]);
     const projectBuckets = useMemo(() => buildBuckets((topology?.nodes ?? []).map((n) => n.project)), [topology]);
@@ -131,6 +136,27 @@ export default function FiltersPanel({
     return (
         <aside className="filters-panel">
             <header className="filters-panel-header">Filters</header>
+            {/* C1 — confidence toggle. Sits at the top because it's a graph-
+                wide filter (affects every edge), unlike the per-bucket
+                type/project checklists below. */}
+            {typeof showInferred === 'boolean' && setShowInferred ? (
+                <div className="filter-group">
+                    <div className="filter-group-header">
+                        <span>Confidence</span>
+                    </div>
+                    <label className="filter-checkbox" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <input
+                            type="checkbox"
+                            checked={showInferred}
+                            onChange={(e) => setShowInferred(e.target.checked)}
+                        />
+                        <span>Show inferred edges</span>
+                    </label>
+                    <p className="help-text" style={{ fontSize: '0.7rem', margin: '0.3rem 0 0' }}>
+                        Off: only user-asserted relationships are shown.
+                    </p>
+                </div>
+            ) : null}
             <FilterGroup title="Types" buckets={typeBuckets} active={activeTypes} onChange={setActiveTypes} />
             <FilterGroup title="Projects" buckets={projectBuckets} active={activeProjects} onChange={setActiveProjects} />
             {!topology || (topology.nodes?.length ?? 0) === 0 ? (

@@ -221,4 +221,27 @@ export interface ILorePlugin {
         nodes: Array<{ id: string; label: string; type: string; project?: string; group?: string }>;
         edges: Array<{ from: string; to: string; label: string }>;
     }>;
+
+    /**
+     * Phase 1 / C2 — contribute domain-specific instructions to the
+     * chat system prompt. Called at the start of every /api/chat and
+     * whenever the chat system prompt is assembled. Returning null (or
+     * not implementing) is the "no contribution" opt-out.
+     *
+     * Keep contributions short (≤1 paragraph) and focused on HOW the
+     * LLM should reason about this plugin's vocabulary — not what that
+     * vocabulary is (the schema speaks for itself). Good contributions
+     * tell the model:
+     *   - What tone/tense to use (e.g. "use first names for Person nodes")
+     *   - What NOT to say (e.g. "distinguish legal info from legal advice")
+     *   - When to call which tool (e.g. "before suggesting edits, call
+     *     gitnexus_impact on the affected symbol")
+     *
+     * Core concatenates contributions in plugin registration order,
+     * separated by blank lines, after the base prompt. Plugins are
+     * responsible for not contradicting each other — collisions are
+     * not refereed; the later contribution wins if both speak to the
+     * same instruction.
+     */
+    contributeSystemPrompt?(ctx: PluginContext): string | null;
 }

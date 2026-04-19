@@ -162,6 +162,10 @@ function App() {
   // the filter buckets, focusNodeId driven by SSE `focus` events.
   const [topology, setTopology] = useState<TopologyLike | null>(null);
   const [activeTypes, setActiveTypes] = useState<Set<string> | null>(null);
+  // C1 — confidence filter. Inferred edges are the majority in a
+  // reconnect-heavy workspace; toggle them off for a "known facts only"
+  // view. Default on so first paint matches what the user had before.
+  const [showInferred, setShowInferred] = useState<boolean>(true);
   const [activeProjects, setActiveProjects] = useState<Set<string> | null>(null);
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const focusCoalesceRef = useRef<number | null>(null);
@@ -711,6 +715,7 @@ function App() {
             focusNodeId={focusNodeId}
             onTopologyReady={handleTopologyReady}
             onNodeClick={handleNodeClick}
+            showInferred={showInferred}
           />
         </Suspense>
 
@@ -1016,6 +1021,8 @@ function App() {
             setActiveTypes={(next) => setActiveTypes(next)}
             activeProjects={activeProjects ?? new Set()}
             setActiveProjects={(next) => setActiveProjects(next)}
+            showInferred={showInferred}
+            setShowInferred={setShowInferred}
           />
         </aside>
       ) : null}

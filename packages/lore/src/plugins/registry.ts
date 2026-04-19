@@ -130,6 +130,33 @@ export class PluginRegistry {
         return this.loaded.has(pluginName);
     }
 
+    /**
+     * Phase 1 / C2 — collect every active plugin's system-prompt
+     * contribution, filter out nulls/empties, and return them in
+     * registration order. Caller concatenates with blank-line separators.
+     *
+     * Plugins that don't implement the hook (or return null / empty)
+     * are silently skipped.
+     */
+    getSystemPromptContributions(ctx: PluginContext): string[] {
+        const out: string[] = [];
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.contributeSystemPrompt !== 'function') continue;
+            try {
+                const contribution = plugin.contributeSystemPrompt(ctx);
+                if (typeof contribution === 'string' && contribution.trim()) {
+                    out.push(contribution.trim());
+                }
+            } catch (err) {
+                // A plugin's prompt throwing should never break chat.
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.contributeSystemPrompt threw: ${(err as Error).message}`,
+                );
+            }
+        }
+        return out;
+    }
+
     /** Iterate active plugins in activation order. */
     active(): ILorePlugin[] {
         return Array.from(this.loaded.values());

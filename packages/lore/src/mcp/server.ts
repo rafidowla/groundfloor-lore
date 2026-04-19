@@ -346,27 +346,42 @@ mcpServer.tool(
         targetId: z.string().describe('Target node ID'),
         relation: edgeRelationsEnum.describe(`Relationship type (options: ${domainSchema.edgeRelations.join(', ')})`),
         bidirectional: z.boolean().optional().describe('Create edge in both directions (default: true)'),
+        // C1 — confidence tier. Defaults to 'extracted' (user-asserted fact).
+        confidence: z.enum(['extracted', 'inferred', 'ambiguous']).optional().describe(
+            "Confidence tier. 'extracted' = user/rule-asserted fact (default). 'inferred' = LLM or similarity-inferred. 'ambiguous' = candidate needing human review.",
+        ),
+        confidenceScore: z.number().min(0).max(1).optional().describe(
+            'Optional numeric confidence in [0,1]. Defaults to 1.0 for extracted, or the inference score for inferred/ambiguous.',
+        ),
     },
-    async ({ sourceId, targetId, relation, bidirectional }) => {
+    async ({ sourceId, targetId, relation, bidirectional, confidence, confidenceScore }) => {
         try {
             const useBidirectional = bidirectional ?? true;
+            const conf = confidence ?? 'extracted';
+            const score = confidenceScore ?? (conf === 'extracted' ? 1.0 : 0.5);
 
             if (useBidirectional) {
-                await graph.addBidirectionalEdge({ sourceId, targetId, relation });
+                await graph.addBidirectionalEdge({
+                    sourceId, targetId, relation,
+                    confidence: conf, confidenceScore: score,
+                });
             } else {
-                await graph.addEdge({ sourceId, targetId, relation });
+                await graph.addEdge({
+                    sourceId, targetId, relation,
+                    confidence: conf, confidenceScore: score,
+                });
             }
 
             // Buffer write to WAL for async sync
-            wal.append('add_edge', { sourceId, targetId, relation });
+            wal.append('add_edge', { sourceId, targetId, relation, confidence: conf, confidenceScore: score });
 
             return {
                 content: [{
                     type: 'text' as const,
                     text: JSON.stringify({
                         success: true,
-                        edge: { sourceId, targetId, relation, bidirectional: useBidirectional },
-                        message: `Edge '${sourceId}' ${useBidirectional ? '↔' : '→'} '${targetId}' (${relation}) created.`,
+                        edge: { sourceId, targetId, relation, bidirectional: useBidirectional, confidence: conf, confidenceScore: score },
+                        message: `Edge '${sourceId}' ${useBidirectional ? '↔' : '→'} '${targetId}' (${relation}, ${conf}) created.`,
                     }, null, 2),
                 }],
             };
@@ -1136,12 +1151,14 @@ async function main(): Promise<void> {
                     const pluginCtxForNode = graph.createPluginGraphContext();
                     const outRows = await pluginCtxForNode.queryRows(
                         `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->(m:LoreNode)
-                         RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
+                         RETURN m.id AS id, m.label AS label, m.type AS type,
+                                e.relation AS rel, e.confidence AS conf, e.confidenceScore AS score`,
                         { id: stripped },
                     ).catch(() => []);
                     const inRows = await pluginCtxForNode.queryRows(
                         `MATCH (m:LoreNode)-[e:LoreEdge]->(n:LoreNode {id: $id})
-                         RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
+                         RETURN m.id AS id, m.label AS label, m.type AS type,
+                                e.relation AS rel, e.confidence AS conf, e.confidenceScore AS score`,
                         { id: stripped },
                     ).catch(() => []);
                     const neighbors = [
@@ -1150,6 +1167,8 @@ async function main(): Promise<void> {
                             label: r.label as string,
                             type: r.type as string,
                             relation: (r.rel as string) || 'related_to',
+                            confidence: (r.conf as string) ?? 'extracted',
+                            confidenceScore: typeof r.score === 'number' ? r.score : 1.0,
                             depth: 1,
                         })),
                         ...inRows.map((r) => ({
@@ -1157,6 +1176,8 @@ async function main(): Promise<void> {
                             label: r.label as string,
                             type: r.type as string,
                             relation: `← ${(r.rel as string) || 'related_to'}`,
+                            confidence: (r.conf as string) ?? 'extracted',
+                            confidenceScore: typeof r.score === 'number' ? r.score : 1.0,
                             depth: 1,
                         })),
                     ];
@@ -1595,6 +1616,24 @@ async function main(): Promise<void> {
                         // the LLM answers in scope. Focus event still fires
                         // so the canvas pans to the primary reference.
                         let enrichedMessage = message;
+
+                        // Phase 1 / C2 — collect each active plugin's system-
+                        // prompt contribution and stash it to prepend below.
+                        // Plugins teach the LLM about their domain (tone,
+                        // vocabulary, when to call which tool). `llmStream`
+                        // takes a single string; we fold the contributions
+                        // into that string rather than using a separate
+                        // 'system' role (local Qwen has no system role, and
+                        // uniformity across providers is simpler).
+                        const pluginPromptParts = pluginRegistry.getSystemPromptContributions({
+                            graph,
+                            verbatimStore,
+                            syncEngine,
+                            syncAdapter: adapter,
+                            schemaLoader,
+                            scope: detectedScope,
+                            loreDir,
+                        });
                         const markerRe = /\[node:([\w\-.:]+)\]/gi;
                         const referencedIds: string[] = [];
                         let m;
@@ -1660,6 +1699,16 @@ async function main(): Promise<void> {
                             } catch {
                                 // Focus fallback is best-effort.
                             }
+                        }
+
+                        // Prepend plugin prompt contributions (C2). They go
+                        // AFTER any [node:id] context we built above, so
+                        // domain guidance frames how the LLM treats the
+                        // referenced nodes. If no plugins contributed, this
+                        // is a no-op.
+                        if (pluginPromptParts.length > 0) {
+                            const preamble = pluginPromptParts.join('\n\n');
+                            enrichedMessage = `${preamble}\n\n---\n\n${enrichedMessage}`;
                         }
 
                         for await (const chunk of llmStream(cfg.llmProvider, enrichedMessage, key)) {

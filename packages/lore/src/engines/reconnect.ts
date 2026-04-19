@@ -254,10 +254,15 @@ export async function reconnectGraph(
 
         if (fromPillar === 'lore' && toPillar === 'lore') {
             try {
+                // C1 — reconnect edges are semantic inferences, not user
+                // assertions. Tag confidence='inferred' with the cosine
+                // similarity as the numeric score.
                 await graph.addEdge({
                     sourceId: strip(edge.from < edge.to ? edge.from : edge.to),
                     targetId: strip(edge.from < edge.to ? edge.to : edge.from),
                     relation,
+                    confidence: 'inferred',
+                    confidenceScore: edge.confidence,
                 });
                 coreEdgesInserted++;
             } catch (err) {
@@ -345,7 +350,15 @@ export async function reconnectOneNode(
         if (classifyPrefix(hit.id) === 'lore') {
             const [lo, hi] = node.id < strip(hit.id) ? [node.id, strip(hit.id)] : [strip(hit.id), node.id];
             try {
-                await graph.addEdge({ sourceId: lo, targetId: hi, relation });
+                // C1 — per-node reconnect is also inferred. Score is the
+                // cosine similarity for this candidate pair.
+                await graph.addEdge({
+                    sourceId: lo,
+                    targetId: hi,
+                    relation,
+                    confidence: 'inferred',
+                    confidenceScore: sim,
+                });
                 confidences.push(sim);
                 added++;
             } catch { /* skip dead edges */ }

@@ -133,6 +133,29 @@ export const developerPlugin: ILorePlugin = {
         return await contributeDeveloperTopology(ctx, limit);
     },
 
+    /**
+     * Phase 1 / C2 — add code-intelligence guidance to the chat system
+     * prompt. Tells the LLM: (a) prefer graph-backed impact analysis
+     * before speculating about callers/dependents, (b) treat
+     * confidence='inferred' edges as hints not facts, and (c) cite
+     * symbols by UID when they're available in-scope.
+     *
+     * The older `uiHints.systemPrompt` field predates this hook and was
+     * previously used only by the removed Mode pill. We route it through
+     * the new hook so it takes effect on every chat, and extend it with
+     * the C1 confidence-aware guidance.
+     */
+    contributeSystemPrompt(_ctx: PluginContext): string | null {
+        return [
+            developerPlugin.uiHints.systemPrompt,
+            "When the graph shows an edge with confidence='inferred', treat the relationship as a hint " +
+            "derived from semantic similarity — not a user-asserted fact. Acknowledge uncertainty when " +
+            "reasoning over such edges. Extracted edges may be cited as established.",
+            'Before suggesting code edits on a symbol, call gitnexus_impact to surface blast radius. ' +
+            'Before renaming anything, use gitnexus_rename with dry_run: true and relay the preview.',
+        ].join(' ');
+    },
+
     async getTelemetryPayload(ctx: PluginContext): Promise<PluginTelemetryPayload | null> {
         // Phase 4 ships health-ping only; this payload is not yet sent on the wire.
         const graph = ctx.graph as { stats?: () => Promise<{ nodes: number; edges: number }> };

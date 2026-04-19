@@ -17,12 +17,36 @@ export interface LoreNode {
 }
 
 /**
+ * Edge confidence tier (Phase 1 / C1).
+ *
+ *  - 'extracted': the user, or a deterministic rule, asserted this edge.
+ *                 Treat as fact.
+ *  - 'inferred':  semantic / similarity-based inference (e.g. reconnect).
+ *                 Treat as a hint; LLM should acknowledge uncertainty.
+ *  - 'ambiguous': ingestion produced a candidate edge but couldn't resolve
+ *                 it cleanly (e.g. two Person nodes with the same name).
+ *                 UI surfaces for human review.
+ */
+export type EdgeConfidence = 'extracted' | 'inferred' | 'ambiguous';
+
+/**
  * Edge definition for graph relationships.
  */
 export interface LoreEdge {
     sourceId: string;
     targetId: string;
     relation: string;
+    /**
+     * Optional confidence tier. Defaults to 'extracted' when omitted (the
+     * conservative interpretation — callers that don't specify are
+     * treated as user-asserted).
+     */
+    confidence?: EdgeConfidence;
+    /**
+     * Optional numeric confidence in [0,1]. Semantic-similarity edges
+     * record the cosine similarity here; user-asserted edges default to 1.0.
+     */
+    confidenceScore?: number;
 }
 
 /**
