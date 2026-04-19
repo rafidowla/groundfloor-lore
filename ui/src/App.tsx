@@ -584,6 +584,10 @@ function App() {
         onDrop={(e) => void onDrop(e)}
       >
         <header className="sidebar-header">
+          <div className="logo-area" title="Groundfloor Lore — local-first knowledge graph">
+            <img src="/favicon.svg" alt="" width="22" height="22" className="brand-mark" />
+            <span className="brand-wordmark">Lore</span>
+          </div>
           <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
           <div style={{ display: 'flex', gap: '0.25rem' }}>
             <button className="icon-button" onClick={() => setShowSettings(!showSettings)} title="Settings">

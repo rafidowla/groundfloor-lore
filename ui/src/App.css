@@ -76,9 +76,23 @@
 .logo-area {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.45rem;
   color: var(--color-accent);
   font-weight: 600;
+}
+
+.brand-mark {
+  display: block;
+  filter: drop-shadow(0 1px 4px rgba(168, 85, 247, 0.25));
+}
+
+.brand-wordmark {
+  font-size: 0.95rem;
+  letter-spacing: 0.02em;
+  background: linear-gradient(90deg, #a855f7 0%, #3b82f6 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
 }
 
 .icon-button {
