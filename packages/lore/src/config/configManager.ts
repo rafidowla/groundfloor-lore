@@ -9,7 +9,6 @@
  *   {
  *     "plugins":        string[]            // active plugins, Phase 1
  *     "pluginConfig":   Record<string, any> // per-plugin opaque config
- *     "defaultMode":    string              // initial mode pill selection
  *     "llmProvider":    "anthropic" | "openai" | "ollama" | string
  *     "workspaceAccount": "local" | string
  *     "plugin_history": Array<{ plugin: string; removed_at: string; decision: "kept" | "dropped" | "reenabled" }>
@@ -34,7 +33,6 @@ export interface PluginHistoryEntry {
 export interface LoreConfig {
     plugins: string[];
     pluginConfig: Record<string, unknown>;
-    defaultMode: string;
     llmProvider: string;
     workspaceAccount: string;
     plugin_history?: PluginHistoryEntry[];
@@ -63,7 +61,6 @@ export interface LoreConfig {
 export const DEFAULT_CONFIG: LoreConfig = {
     plugins: ['developer'],
     pluginConfig: {},
-    defaultMode: 'developer',
     // Default to the embedded Qwen 0.5B so a fresh install chats out of
     // the box with no API keys or Ollama required. Users upgrade to
     // Anthropic/OpenAI/Ollama from Settings once they have them.
@@ -106,7 +103,7 @@ export class ConfigManager {
 
     /**
      * patch — Merge partial updates into config and persist.
-     * Allowed keys: llmProvider, workspaceAccount, defaultMode, plugins, pluginConfig.
+     * Allowed keys: llmProvider, workspaceAccount, plugins, pluginConfig.
      * Rejects unknown keys silently (safe for versioned clients).
      */
     patch(update: Partial<LoreConfig>): LoreConfig {
@@ -114,7 +111,6 @@ export class ConfigManager {
         const allowed: (keyof LoreConfig)[] = [
             'llmProvider',
             'workspaceAccount',
-            'defaultMode',
             'plugins',
             'pluginConfig',
             'plugin_history',

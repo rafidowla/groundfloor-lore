@@ -38,7 +38,6 @@ interface HealthResponse {
   status: string;
   version: string;
   activePlugins: string[];
-  defaultMode: string;
   llmProvider: LlmProvider;
   workspace: string;
   dataplane: 'bound' | 'offline';
@@ -49,7 +48,6 @@ type OrphanDecision = 'keep' | 'drop' | 'reenable';
 
 interface ConfigResponse {
   plugins: string[];
-  defaultMode: string;
   llmProvider: LlmProvider;
   hasApiKey: boolean;
   extractionPath?: 'local-byok' | 'def-cloud';

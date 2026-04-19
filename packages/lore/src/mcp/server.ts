@@ -1477,7 +1477,6 @@ async function main(): Promise<void> {
                         status: orphanState.blocking ? 'orphan_decision_required' : 'ok',
                         version: '2.1.0',
                         activePlugins: cfg.plugins,
-                        defaultMode: cfg.defaultMode,
                         llmProvider: cfg.llmProvider,
                         workspace: getActiveWorkspaceName(),
                         dataplane: getDataplaneState(),
