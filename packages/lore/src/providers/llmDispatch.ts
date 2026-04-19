@@ -159,6 +159,17 @@ export async function* stream(
  * to Claude/GPT-4 class models. The UI surfaces a nudge banner whenever
  * this provider is active so the user knows why answers feel thin.
  */
+// Module-level pipeline cache. The 500 MB ONNX file loads once per
+// daemon lifetime, not per chat request. Keyed by model name so a
+// future switch between two embedded models still works. The value is
+// a Promise so concurrent requests during the first load all await the
+// same pipeline rather than racing to re-load.
+type EmbeddedGenerator = {
+    tokenizer: unknown;
+    (input: unknown, opts: Record<string, unknown>): Promise<unknown>;
+};
+const embeddedPipelineCache = new Map<string, Promise<EmbeddedGenerator>>();
+
 async function* streamEmbedded(message: string, model: string): AsyncGenerator<LlmChunk> {
     // Queue holds LlmChunks so it can interleave model-loading progress
     // frames with token frames. Both flow through the same notify() gate.
@@ -176,7 +187,7 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
         try {
             const transformers = await import('@huggingface/transformers');
             const { pipeline, env, TextStreamer } = transformers as unknown as {
-                pipeline: (task: string, model: string, opts?: Record<string, unknown>) => Promise<unknown>;
+                pipeline: (task: string, model: string, opts?: Record<string, unknown>) => Promise<EmbeddedGenerator>;
                 env: { cacheDir?: string; allowRemoteModels?: boolean };
                 TextStreamer: new (tokenizer: unknown, opts: Record<string, unknown>) => unknown;
             };
@@ -185,39 +196,61 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
             env.cacheDir = path.join(os.homedir(), '.groundfloor', 'models');
             env.allowRemoteModels = true;
 
-            console.error(`[llmDispatch] Loading embedded model ${model} (first run downloads to ${env.cacheDir})...`);
+            // Only load-and-cache the pipeline once per daemon. Subsequent
+            // chat requests reuse the in-memory generator with no disk I/O
+            // and no transformers-js re-initialization noise.
+            let generator: EmbeddedGenerator;
+            const cached = embeddedPipelineCache.get(model);
+            if (cached) {
+                generator = await cached;
+            } else {
+                console.error(`[llmDispatch] Loading embedded model ${model} (first run downloads to ${env.cacheDir})...`);
 
-            // V2.1: surface download progress to the UI. Transformers.js
-            // fires progress_callback with {status, file, loaded, total,
-            // progress} as each weight shard is fetched. We translate that
-            // into LlmChunk frames the chat can render as a progress bar.
-            const progress_callback = (p: {
-                status?: string;
-                file?: string;
-                loaded?: number;
-                total?: number;
-                progress?: number;
-            }): void => {
-                if (!p) return;
-                const frac = typeof p.progress === 'number'
-                    ? Math.max(0, Math.min(1, p.progress / 100))
-                    : p.total && p.loaded ? p.loaded / p.total : 0;
-                queue.push({
-                    kind: 'model_loading',
-                    status: p.status,
-                    file: p.file,
-                    progress: frac,
+                // Surface ONLY true network download progress to the UI.
+                // Transformers.js fires progress_callback for cache-hit
+                // initiate/done events too; we silently drop those so the
+                // UI doesn't render a misleading "Downloading model…"
+                // panel on every chat request after the first.
+                const progress_callback = (p: {
+                    status?: string;
+                    file?: string;
+                    loaded?: number;
+                    total?: number;
+                    progress?: number;
+                }): void => {
+                    if (!p) return;
+                    // Only emit on actual network download phases. The
+                    // two observed download-phase status values are
+                    // 'download' (start) and 'progress' (in-flight bytes).
+                    // 'initiate', 'done', 'ready' all fire on cache hits
+                    // and carry no progress signal worth rendering.
+                    if (p.status !== 'download' && p.status !== 'progress') return;
+                    const frac = typeof p.progress === 'number'
+                        ? Math.max(0, Math.min(1, p.progress / 100))
+                        : p.total && p.loaded ? p.loaded / p.total : 0;
+                    queue.push({
+                        kind: 'model_loading',
+                        status: p.status,
+                        file: p.file,
+                        progress: frac,
+                    });
+                    notify();
+                };
+
+                const pipelinePromise = pipeline('text-generation', model, {
+                    quantized: true,
+                    progress_callback,
                 });
-                notify();
-            };
-
-            const generator = await pipeline('text-generation', model, {
-                quantized: true,
-                progress_callback,
-            }) as {
-                tokenizer: unknown;
-                (input: unknown, opts: Record<string, unknown>): Promise<unknown>;
-            };
+                embeddedPipelineCache.set(model, pipelinePromise);
+                try {
+                    generator = await pipelinePromise;
+                } catch (loadErr) {
+                    // If loading failed, drop the cached promise so the
+                    // next request can retry instead of failing forever.
+                    embeddedPipelineCache.delete(model);
+                    throw loadErr;
+                }
+            }
 
             const streamer = new TextStreamer(generator.tokenizer, {
                 skip_prompt: true,
