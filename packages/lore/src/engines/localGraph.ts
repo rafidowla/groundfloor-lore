@@ -748,11 +748,19 @@ export class LocalGraph implements GraphProvider {
         if (!existingNode) return false;
 
         try {
-            // Delete all edges connected to this node (both directions)
-            const edgeStmt = await this.connection.prepare(
-                `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]-() DELETE e`,
+            // kuzu-lite does NOT support deleting via an undirected relationship
+            // pattern ("Binder exception: Delete undirected rel is not supported").
+            // Issue two directed deletes — outgoing, then incoming — to clear
+            // edges in both directions before removing the node itself.
+            const outStmt = await this.connection.prepare(
+                `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->() DELETE e`,
             );
-            await this.connection.execute(edgeStmt, { id });
+            await this.connection.execute(outStmt, { id });
+
+            const inStmt = await this.connection.prepare(
+                `MATCH ()-[e:LoreEdge]->(n:LoreNode {id: $id}) DELETE e`,
+            );
+            await this.connection.execute(inStmt, { id });
 
             // Delete the node itself
             const nodeStmt = await this.connection.prepare(
