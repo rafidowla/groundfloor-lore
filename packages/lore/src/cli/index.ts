@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand, reconnectCommand, reconsumeCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand } from './commands.js';
 
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -46,6 +46,8 @@ Commands:
   ingest-files   Synthesize CodeFile nodes + FileContains edges from existing CodeSymbols
   reconnect      Compute semantic_neighbor edges between LoreNodes (dry-run unless --apply)
   reconsume      Re-embed every node with fresh content + apply the full reconnect pass
+  storage        Show per-workspace disk usage breakdown + SSD free
+  report         Write/print GRAPH_REPORT.md — human-readable graph digest
 
 Options:
   --help    Show this help message
@@ -114,6 +116,12 @@ async function main(): Promise<void> {
             break;
         case 'reconsume':
             await reconsumeCommand(commandArgs);
+            break;
+        case 'storage':
+            await storageCommand(commandArgs);
+            break;
+        case 'report':
+            await reportCommand(commandArgs);
             break;
         default:
             console.error(`Unknown command: '${command}'`);

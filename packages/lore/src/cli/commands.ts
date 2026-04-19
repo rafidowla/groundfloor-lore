@@ -1366,3 +1366,155 @@ export async function reconnectCommand(args: string[]): Promise<void> {
     }
     await graph.close();
 }
+
+/* ─── C3.5: storage command ───────────────────────────────────── */
+
+import { inspectAllWorkspaces, inspectDataHome, formatBytes } from '../engines/storageInspector.js';
+
+/**
+ * storageCommand — print per-workspace byte breakdown + disk-free.
+ *
+ * Output resembles `du`-plus: categories (graph / embeddings / logs /
+ * models / config / other) sum per workspace, with a SSD headroom line
+ * at the bottom. Human-readable by default; `--json` for machine use.
+ */
+export async function storageCommand(args: string[]): Promise<void> {
+    const json = args.includes('--json');
+    const dataHome = path.join(os.homedir(), '.groundfloor');
+
+    const homeBreakdown = inspectDataHome(dataHome);
+    const workspaces = inspectAllWorkspaces(dataHome);
+
+    if (json) {
+        console.log(JSON.stringify({
+            dataHome: { path: dataHome, breakdown: homeBreakdown },
+            workspaces: workspaces.map((w) => ({ name: w.name, path: w.path, breakdown: w.breakdown })),
+        }, null, 2));
+        return;
+    }
+
+    const line = (label: string, bytes: number, pad = 18): string =>
+        `  ${label.padEnd(pad)} ${formatBytes(bytes).padStart(10)}`;
+
+    console.log('');
+    console.log('Storage — groundfloor-lore');
+    console.log('');
+
+    for (const ws of workspaces) {
+        console.log(`Workspace: ${ws.name}  (${ws.path})`);
+        const b = ws.breakdown;
+        console.log(line('Graph (Kùzu)', b.graphBytes));
+        console.log(line('Embeddings (Lance)', b.embeddingsBytes));
+        console.log(line('Models', b.modelsBytes));
+        console.log(line('Logs', b.logsBytes));
+        console.log(line('Config', b.configBytes));
+        console.log(line('Other', b.otherBytes));
+        console.log(line('  TOTAL', b.totalBytes));
+        console.log('');
+    }
+
+    // If the default workspace is the data home (V2.0 compat), the line
+    // above already counted everything. Otherwise show the data-home
+    // residual (logs, models shared across workspaces).
+    const homeCovered = workspaces.some((w) => w.path === dataHome);
+    if (!homeCovered) {
+        console.log(`Data home residual  (${dataHome})`);
+        console.log(line('Logs', homeBreakdown.logsBytes));
+        console.log(line('Models', homeBreakdown.modelsBytes));
+        console.log(line('Config', homeBreakdown.configBytes));
+        console.log('');
+    }
+
+    if (homeBreakdown.diskTotalBytes > 0) {
+        const pctUsed = ((1 - homeBreakdown.diskFreeBytes / homeBreakdown.diskTotalBytes) * 100).toFixed(0);
+        console.log(`SSD: ${formatBytes(homeBreakdown.diskFreeBytes)} free of ${formatBytes(homeBreakdown.diskTotalBytes)} (${pctUsed}% used)`);
+    }
+}
+
+/* ─── C4: graph report command ─────────────────────────────────── */
+
+import { writeGraphReport } from '../engines/graphReport.js';
+
+/**
+ * reportCommand — write/print a human-readable GRAPH_REPORT.md.
+ *
+ * Routing:
+ *   1. If the daemon is running, fetch the report from /api/report
+ *      (the daemon holds Kùzu's single-writer lock, so the CLI
+ *      can't open the DB in parallel).
+ *   2. Otherwise, open the DB directly and generate inline.
+ *
+ * Flags:
+ *   --output <path>   write to file (default: stdout)
+ *   --project <name>  scope to a project
+ *   --topN <n>        override top-N hubs (default 20)
+ */
+export async function reportCommand(args: string[]): Promise<void> {
+    const outIdx = args.indexOf('--output');
+    const outputPath = outIdx >= 0 ? args[outIdx + 1] : null;
+    const projIdx = args.indexOf('--project');
+    const project = projIdx >= 0 ? args[projIdx + 1] : undefined;
+    const topNIdx = args.indexOf('--topN');
+    const topN = topNIdx >= 0 ? parseInt(args[topNIdx + 1], 10) : undefined;
+
+    let md: string | null = null;
+
+    // Try HTTP first — cheapest path when the daemon is up.
+    try {
+        md = await fetchReportViaDaemon(project, topN);
+    } catch {
+        // Daemon not running or unreachable — fall through to direct DB.
+    }
+
+    if (md == null) {
+        const basePath = path.join(os.homedir(), '.groundfloor');
+        const graph = new LocalGraph(basePath);
+        await graph.initialize();
+        md = await writeGraphReport(graph, { project, topN });
+        await graph.close();
+    }
+
+    if (outputPath) {
+        const resolved = path.resolve(outputPath);
+        fs.writeFileSync(resolved, md, { mode: 0o600 });
+        console.log(`Wrote ${md.length} bytes to ${resolved}`);
+    } else {
+        process.stdout.write(md);
+    }
+}
+
+async function fetchReportViaDaemon(project?: string, topN?: number): Promise<string> {
+    const tokenPath = path.join(os.homedir(), '.groundfloor', 'auth.token');
+    if (!fs.existsSync(tokenPath)) {
+        throw new Error('no auth token — daemon not initialized');
+    }
+    const token = fs.readFileSync(tokenPath, 'utf-8').trim();
+
+    const qs = new URLSearchParams();
+    if (project) qs.set('project', project);
+    if (topN != null) qs.set('topN', String(topN));
+    const path_ = qs.toString() ? `/api/report?${qs.toString()}` : '/api/report';
+
+    return await new Promise<string>((resolve, reject) => {
+        const req = http.request({
+            host: '127.0.0.1',
+            port: 3847,
+            method: 'GET',
+            path: path_,
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 10_000,
+        }, (res) => {
+            let body = '';
+            res.setEncoding('utf-8');
+            res.on('data', (c) => { body += c; });
+            res.on('end', () => {
+                if (res.statusCode === 200) resolve(body);
+                else reject(new Error(`HTTP ${res.statusCode}: ${body}`));
+            });
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(new Error('timeout')); });
+        req.end();
+    });
+}
+

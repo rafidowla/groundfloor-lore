@@ -60,6 +60,11 @@ import {
     PathAllowlistError,
 } from '../security/pathAllowlist.js';
 import { RateLimiter, classifyRequest } from '../security/rateLimit.js';
+import { buildDefaultRegistry, ExtractorError } from '../engines/extractors/index.js';
+import { inspectAllWorkspaces, inspectDataHome, formatBytes } from '../engines/storageInspector.js';
+import { writeGraphReport } from '../engines/graphReport.js';
+import { buildDefaultConnectors } from '../engines/connectors/index.js';
+import { decideQuota } from '../engines/quotaManager.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -831,6 +836,30 @@ mcpServer.tool(
         filePath: z.string().describe('Absolute path to the document'),
     },
     async ({ filePath }) => {
+        // C5.5 — enforce per-workspace quota before doing any work.
+        // Red tier means ingestion is paused; we return a user-facing
+        // error the caller (LLM or CLI) can surface. Soft tiers are
+        // advisory for now — throttling hookup lives with the larger
+        // bulk-ingestion path, not single-file reads.
+        try {
+            const ws = getActiveWorkspacePath();
+            const breakdown = inspectDataHome(ws);
+            const q = decideQuota({ breakdown });
+            if (!q.allowIngestion) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: `Ingestion paused by quota (${q.state}, ${formatBytes(q.usedBytes)}/${formatBytes(q.budgetBytes)}). ${q.message}`,
+                    }],
+                    isError: true,
+                };
+            }
+        } catch {
+            // If the inspector fails (e.g. workspace path missing), fail
+            // open — better to let the user ingest than to block on a
+            // telemetry-style failure.
+        }
+
         // S4 — enforce the ingestion allowlist before any disk read.
         // Rejects ~/.ssh/id_rsa, ~/.aws/credentials, ~/.groundfloor/auth.
         // token, macOS keychain files, and anything not under an explicitly
@@ -855,19 +884,45 @@ mcpServer.tool(
             throw err;
         }
 
+        // C3 (Phase 2) — route through the extractor registry based on
+        // the file extension. Previously this tool only handled UTF-8
+        // text; PDF/DOCX/EML now come through transparently. Binary
+        // reads are intentional: the registry expects bytes, not a
+        // decoded string (PDF would be corrupt after a utf-8 round-trip).
         try {
-            const content = fs.readFileSync(resolvedPath, 'utf-8');
+            const buf = fs.readFileSync(resolvedPath);
+            const mimeType =
+                extractorRegistry.mimeFromPath(resolvedPath) ?? 'text/plain';
+            const extracted = await extractorRegistry.extract(buf, mimeType);
             return {
                 content: [{
                     type: 'text' as const,
                     text: JSON.stringify({
                         filePath: resolvedPath,
-                        content,
-                        instructions: 'Please parse this content into LoreNode objects. For each distinct item you find, use the store_node tool to insert it into the graph.'
+                        mimeType: extracted.mimeType,
+                        sourceBytes: extracted.sourceBytes,
+                        extractorConfidence: extracted.confidence,
+                        metadata: extracted.metadata,
+                        content: extracted.text,
+                        instructions:
+                            'Parse this extracted content into LoreNode objects. For each distinct item, ' +
+                            'call store_node. When the content is an email, preserve sender/recipient in ' +
+                            'the node tags and create Person-typed neighbors where appropriate. ' +
+                            'When metadata.textBearing is false (image-only PDF), note that OCR is ' +
+                            'required to recover content.',
                     }, null, 2),
                 }],
             };
         } catch (error) {
+            if (error instanceof ExtractorError) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: `Extraction failed (${error.code}): ${error.message}`,
+                    }],
+                    isError: true,
+                };
+            }
             return {
                 content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
                 isError: true,
@@ -921,6 +976,22 @@ let authToken = '';
  * token buckets; see src/security/rateLimit.ts for the defaults.
  */
 const rateLimiter = new RateLimiter();
+
+/**
+ * C3 (Phase 2) — extractor registry. Built once at module load with the
+ * shipped defaults (text/markdown, PDF, DOCX, EML). Plugins that want
+ * to contribute additional extractors can do so before ingestion —
+ * hook not yet exposed on ILorePlugin; will land when a real third-
+ * party format shows up.
+ */
+const extractorRegistry = buildDefaultRegistry();
+
+/**
+ * C5 (Phase 2) — connector registry. Ships with FilesystemConnector.
+ * Future connectors (Gmail, Drive, Slack, ...) plug in by registering
+ * IConnector instances on this object. See src/engines/connectors/.
+ */
+const connectorRegistry = buildDefaultConnectors(extractorRegistry, graphBasePath);
 
 /** Active HTTP sessions — maps session ID to transport instance. */
 const activeSessions = new Map<string, StreamableHTTPServerTransport>();
@@ -1734,6 +1805,69 @@ async function main(): Promise<void> {
                         res.end();
                     }
                 });
+                return;
+            }
+
+            // C5 — Connector status. Lists registered connectors + last-
+            // sync state. UI "Sources" panel will poll this.
+            if (url === '/api/connectors' && req.method === 'GET') {
+                try {
+                    const status = connectorRegistry.listStatus();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ connectors: status }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // C4 — Graph report. Returns the full markdown digest so
+            // the CLI can print/save it without needing its own Kùzu
+            // connection (the daemon holds the single-writer lock).
+            if (url.startsWith('/api/report') && req.method === 'GET') {
+                try {
+                    const parsed = new URL(url, 'http://localhost');
+                    const project = parsed.searchParams.get('project') ?? undefined;
+                    const topN = parseInt(parsed.searchParams.get('topN') ?? '20', 10);
+                    const md = await writeGraphReport(graph, {
+                        project,
+                        topN: Number.isFinite(topN) ? topN : 20,
+                    });
+                    res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
+                    res.end(md);
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // C3.5 + C5.5 — Storage inspection + quota decision per
+            // workspace. UI reads both from one call so the Storage
+            // panel can show usage + budget state without a second hop.
+            if (url === '/api/storage' && req.method === 'GET') {
+                try {
+                    const dataHome = path.join(os.homedir(), '.groundfloor');
+                    const workspaces = inspectAllWorkspaces(dataHome);
+                    const home = inspectDataHome(dataHome);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        dataHome: {
+                            path: dataHome,
+                            breakdown: home,
+                        },
+                        workspaces: workspaces.map((w) => ({
+                            name: w.name,
+                            path: w.path,
+                            breakdown: w.breakdown,
+                            quota: decideQuota({ breakdown: w.breakdown }),
+                        })),
+                    }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
                 return;
             }
 
