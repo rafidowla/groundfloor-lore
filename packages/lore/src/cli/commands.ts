@@ -1656,6 +1656,91 @@ export async function reportCommand(args: string[]): Promise<void> {
     }
 }
 
+/* ─── Phase 7a / F2b: verbatim reaper ──────────────────────── */
+
+/**
+ * verbatimCommand — `lore verbatim reap [--apply] [--prefix <p>]`
+ *
+ * Finds LanceDB verbatim records whose corresponding Kùzu node no
+ * longer exists (orphans from pre-F2a deletes + test leaks). Lists
+ * them in dry-run mode; deletes them with --apply.
+ *
+ * Default prefix: 'lore:'  — the core-plugin verbatim namespace.
+ * Other prefixes (e.g. 'file:', 'symbol:') are plugin-owned; reaping
+ * those requires the plugin's side to report whether the referenced
+ * thing still exists. Out of scope for the MVP; users can pass
+ * --prefix explicitly if they know what they're doing.
+ */
+export async function verbatimCommand(args: string[]): Promise<void> {
+    const sub = args[0];
+    if (sub !== 'reap') {
+        console.error('usage: lore verbatim reap [--apply] [--prefix <prefix>]');
+        console.error('       Default prefix: lore: (reap orphaned LoreNode embeddings)');
+        process.exit(1);
+    }
+    const apply = args.includes('--apply');
+    const prefixIdx = args.indexOf('--prefix');
+    const prefix = prefixIdx >= 0 ? args[prefixIdx + 1] : 'lore:';
+
+    const basePath = path.join(os.homedir(), '.groundfloor');
+    const graph = new LocalGraph(basePath);
+    const { VerbatimStore } = await import('../engines/verbatimStore.js');
+    const verbatim = new VerbatimStore(basePath);
+
+    await graph.initialize();
+    await verbatim.initialize();
+
+    console.log('');
+    console.log(`Verbatim reaper`);
+    console.log(`  Prefix:   ${prefix}`);
+    console.log(`  Mode:     ${apply ? 'APPLY' : 'DRY-RUN (use --apply to delete)'}`);
+    console.log('');
+
+    const allIds = await verbatim.listIds(prefix);
+    console.log(`Inspecting ${allIds.length} verbatim records with prefix "${prefix}"...`);
+
+    const orphans: string[] = [];
+    let alive = 0;
+    for (const verbatimId of allIds) {
+        // Strip the prefix to get the graph node id
+        const nodeId = verbatimId.startsWith(prefix) ? verbatimId.slice(prefix.length) : verbatimId;
+        const node = await graph.getNode(nodeId);
+        if (node == null) {
+            orphans.push(verbatimId);
+        } else {
+            alive++;
+        }
+    }
+
+    console.log('');
+    console.log(`  Alive:   ${alive} verbatim records have a matching Kùzu node`);
+    console.log(`  Orphan:  ${orphans.length} verbatim records with NO matching node`);
+    console.log('');
+
+    if (orphans.length > 0) {
+        console.log('Orphan samples (first 20):');
+        for (const o of orphans.slice(0, 20)) console.log(`  - ${o}`);
+        if (orphans.length > 20) console.log(`  ... and ${orphans.length - 20} more`);
+        console.log('');
+    }
+
+    if (apply && orphans.length > 0) {
+        console.log(`Reaping ${orphans.length} orphan embedding(s)...`);
+        let reaped = 0;
+        for (const id of orphans) {
+            await verbatim.delete(id);
+            reaped++;
+        }
+        console.log(`Done. ${reaped} orphan embeddings removed.`);
+    } else if (!apply && orphans.length > 0) {
+        console.log('Dry-run complete. Re-run with --apply to actually delete.');
+    } else {
+        console.log('No action needed.');
+    }
+
+    await graph.close();
+}
+
 /* ─── Phase 7a: V1 SQLite migration command ──────────────────── */
 
 import { migrateV1Sqlite } from '../engines/v1Migration.js';

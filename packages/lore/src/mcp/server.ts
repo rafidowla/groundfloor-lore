@@ -72,6 +72,7 @@ import { buildDefaultConnectors } from '../engines/connectors/index.js';
 import { decideQuota } from '../engines/quotaManager.js';
 import { redactId, redactError } from '../security/logRedact.js';
 import { scrubEnv } from '../security/envScrub.js';
+import { rotateStandardLogs } from '../security/logRotator.js';
 import { AuditLog } from '../security/audit.js';
 import { ConsentManager } from '../security/consent.js';
 import { McpClientRuntime } from '../engines/mcpClient/runtime.js';
@@ -640,7 +641,18 @@ mcpServer.tool(
     async ({ id }) => {
         try {
             const deleted = await graph.deleteNode(id);
-            if (deleted) verbatimStore.delete(id).catch((err) => console.error(`[Lore MCP] VerbatimStore delete failed for ${redactId(id)}: ${redactError(err)}`));
+            // F2a (Phase 7a): also drop the LanceDB vector. reconnect
+            // stores LoreNode verbatim records under the 'lore:' prefix
+            // (see reconnect.ts PREFIX_LORE) — the pre-fix version of
+            // this tool passed the raw id, which silently missed every
+            // single vector. That's the root of the orphan-embedding
+            // bug noted in commit 5849140. Now cleared for any
+            // future delete call.
+            if (deleted) {
+                verbatimStore.delete(`lore:${id}`).catch((err) =>
+                    console.error(`[Lore MCP] VerbatimStore delete failed for ${redactId(id)}: ${redactError(err)}`),
+                );
+            }
             return {
                 content: [{
                     type: 'text' as const,
@@ -1142,6 +1154,27 @@ async function main(): Promise<void> {
         }
     } catch (kcErr) {
         console.error(`[Lore MCP] Keychain upgrade failed (non-fatal): ${(kcErr as Error).message}`);
+    }
+
+    // F3 (Phase 7a) — rotate standard logs if they've exceeded size
+    // or age thresholds. Runs AFTER S1 lockdown (perms are already
+    // tight) but BEFORE any daemon-initiated logging gets serious
+    // volume for this session. Non-fatal — rotation failures log to
+    // stderr and daemon proceeds.
+    try {
+        const _dataHomeForRotation = path.join(os.homedir(), '.groundfloor');
+        const results = rotateStandardLogs(_dataHomeForRotation);
+        for (const r of results) {
+            if (r.result.rotated) {
+                console.error(
+                    `[Lore MCP] Rotated ${path.basename(r.path)}: ` +
+                    `${r.result.beforeBytes} bytes → ${r.result.rotatedTo} ` +
+                    `(${r.result.reason}; retained ${r.result.retained}, deleted ${r.result.deleted})`,
+                );
+            }
+        }
+    } catch (rotErr) {
+        console.error(`[Lore MCP] Log rotation failed (non-fatal): ${(rotErr as Error).message}`);
     }
 
     // S3 — ensure the localhost auth token exists. Written with 0600.

@@ -621,10 +621,23 @@ export class LocalGraph implements GraphProvider {
      */
     async traverse(nodeId: string, maxDepth: number = 2): Promise<TraversalResult[]> {
         await this.initialize();
-        // Depth is used inside a Cypher variable-length pattern bound
-        // ([e:LoreEdge* 1..N]) which Kùzu parameters don't substitute into,
-        // so it must be a literal. We inline it only after validating it's a
-        // small positive integer — never a user-controlled string.
+
+        // F1 (Phase 7a): rewrite to iterative 1-hop BFS. Previous version
+        // used a recursive Cypher pattern with `e[length(e)-1].relation`,
+        // which Kùzu 0.11.x rejects ("mismatched input '.' expecting..."
+        // — the accessor on an indexed relationship variable isn't
+        // supported at the parser level). Issue applies to BOTH
+        // @kineviz/kuzu-lite AND upstream kuzu at 0.11.3 (verified
+        // 2026-04-19 side-by-side).
+        //
+        // The new implementation runs depth-limited BFS in JS: for each
+        // frontier node, one directed query for outgoing edges + one for
+        // incoming. That's O(maxDepth × frontier × 2) prepared-statement
+        // executions — trivially fast for realistic depth ≤ 5.
+        //
+        // Same API contract as before: returns nodes sorted by depth,
+        // with the relation that first reached each node.
+
         const clampedDepth = Math.min(Math.max(Math.trunc(maxDepth), 1), 5);
         if (!Number.isInteger(clampedDepth) || clampedDepth < 1 || clampedDepth > 5) {
             throw new LoreGraphError(
@@ -635,34 +648,60 @@ export class LocalGraph implements GraphProvider {
         }
 
         try {
-            // `nodeId` goes through a bound parameter — no string interpolation
-            // of user input into the query. The depth literal above is already
-            // validated as an integer in [1,5].
-            const stmt = await this.connection.prepare(
-                `MATCH (start:LoreNode)-[e:LoreEdge* 1..${clampedDepth}]->(connected:LoreNode)
-                 WHERE start.id = $nodeId
-                 RETURN connected.*, length(e) AS depth, e[length(e)-1].relation AS relation`,
+            // Prepare the two 1-hop statements once, reuse across frontier
+            // iterations. Explicit column aliases so rowToLoreNode's
+            // prefix-insensitive getter picks up every field; returning
+            // `m.*` surfaces keys under `m.id` etc. which the getter
+            // has historically handled, but being explicit is cheaper
+            // to debug and matches /api/node's style.
+            const outStmt = await this.connection.prepare(
+                `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->(m:LoreNode)
+                 RETURN m.id AS id, m.type AS type, m.label AS label,
+                        m.content AS content, m.tags AS tags,
+                        m.project AS project, m.ecosystem AS ecosystem,
+                        m.metadata AS metadata, m.createdAt AS createdAt,
+                        m.updatedAt AS updatedAt, m.syncedAt AS syncedAt,
+                        e.relation AS relation`,
             );
-            const result = await this.connection.execute(stmt, { nodeId }) as QueryResult;
+            const inStmt = await this.connection.prepare(
+                `MATCH (m:LoreNode)-[e:LoreEdge]->(n:LoreNode {id: $id})
+                 RETURN m.id AS id, m.type AS type, m.label AS label,
+                        m.content AS content, m.tags AS tags,
+                        m.project AS project, m.ecosystem AS ecosystem,
+                        m.metadata AS metadata, m.createdAt AS createdAt,
+                        m.updatedAt AS updatedAt, m.syncedAt AS syncedAt,
+                        e.relation AS relation`,
+            );
 
-            const rows = await result.getAll();
-            const seen = new Set<string>();
+            const visited = new Set<string>([nodeId]);
             const results: TraversalResult[] = [];
+            let frontier: string[] = [nodeId];
 
-            for (const row of rows) {
-                const record = row as Record<string, unknown>;
-                const node = this.rowToLoreNode(record);
-                if (!seen.has(node.id) && node.id !== nodeId) {
-                    seen.add(node.id);
-                    results.push({
-                        node,
-                        depth: (record['depth'] as number) ?? 1,
-                        relation: (record['relation'] as string) ?? 'related_to',
-                    });
+            for (let depth = 1; depth <= clampedDepth; depth++) {
+                const nextFrontier: string[] = [];
+                for (const currentId of frontier) {
+                    const outRes = await this.connection.execute(outStmt, { id: currentId }) as QueryResult;
+                    const inRes = await this.connection.execute(inStmt, { id: currentId }) as QueryResult;
+                    const outRows = await outRes.getAll();
+                    const inRows = await inRes.getAll();
+                    for (const row of [...outRows, ...inRows]) {
+                        const record = row as Record<string, unknown>;
+                        const node = this.rowToLoreNode(record);
+                        if (visited.has(node.id)) continue;
+                        visited.add(node.id);
+                        results.push({
+                            node,
+                            depth,
+                            relation: (record['relation'] as string) ?? 'related_to',
+                        });
+                        nextFrontier.push(node.id);
+                    }
                 }
+                if (nextFrontier.length === 0) break; // reached fixed point early
+                frontier = nextFrontier;
             }
 
-            return results.sort((nodeA, nodeB) => nodeA.depth - nodeB.depth);
+            return results.sort((a, b) => a.depth - b.depth);
         } catch (error) {
             throw new LoreGraphError(
                 `Failed to traverse from '${nodeId}'`,
