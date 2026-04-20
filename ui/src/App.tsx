@@ -177,12 +177,20 @@ function App() {
   // window.__lore_selectNode(id) to open the drawer without a Sigma click.
   // Shipped intentionally because the cost is one typed global and it's
   // genuinely useful for QA scripts.
+  // Opening the Node Detail Drawer must also close Settings — they
+  // both anchor at top-right and would otherwise visually collide.
+  // Closing the drawer (id = null) leaves Settings alone.
+  const openNodeDrawer = useCallback((nodeId: string | null) => {
+    setSelectedNodeId(nodeId);
+    if (nodeId !== null) setShowSettings(false);
+  }, []);
+
   useEffect(() => {
-    (window as unknown as { __lore_selectNode?: (id: string) => void }).__lore_selectNode = setSelectedNodeId;
+    (window as unknown as { __lore_selectNode?: (id: string) => void }).__lore_selectNode = openNodeDrawer as (id: string) => void;
     return () => {
       delete (window as unknown as { __lore_selectNode?: (id: string) => void }).__lore_selectNode;
     };
-  }, []);
+  }, [openNodeDrawer]);
 
   // ── Initial load: fetch /api/health + /api/config ────────────────
   useEffect(() => {
@@ -245,8 +253,8 @@ function App() {
     setTopology(t);
   }, []);
   const handleNodeClick = useCallback((nodeId: string) => {
-    setSelectedNodeId(nodeId);
-  }, []);
+    openNodeDrawer(nodeId);
+  }, [openNodeDrawer]);
 
   // V2.1: Cmd/Ctrl+1..9 mode cycling removed with the mode pill-group.
   // Future keyboard shortcuts (focus chat, toggle filters) can live here.
@@ -590,7 +598,18 @@ function App() {
           </div>
           <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
           <div style={{ display: 'flex', gap: '0.25rem' }}>
-            <button className="icon-button" onClick={() => setShowSettings(!showSettings)} title="Settings">
+            <button
+              className="icon-button"
+              onClick={() => {
+                // Settings + Node Detail Drawer both anchor at top-right;
+                // keep them mutually exclusive so neither obscures the
+                // other. Opening Settings closes the drawer.
+                const next = !showSettings;
+                setShowSettings(next);
+                if (next) setSelectedNodeId(null);
+              }}
+              title="Settings"
+            >
               <Settings size={20} />
             </button>
             <button className="icon-button" onClick={() => setSidebarOpen(false)} title="Hide chat panel">
