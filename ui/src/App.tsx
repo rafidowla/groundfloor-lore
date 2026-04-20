@@ -82,6 +82,9 @@ interface ChatMessage {
     file?: string;
     progress: number; // 0..1
   };
+  /** V2.2: node references attached via "Ask about this". Render as
+   *  pills above the bubble; not part of the text body itself. */
+  nodeRefs?: Array<{ marker: string; label: string | null }>;
 }
 
 /** Read a File object as base64 without the data: URL prefix. */
@@ -120,6 +123,16 @@ function App() {
   const [streaming, setStreaming] = useState(false);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const patchTimer = useRef<number | null>(null);
+
+  // V2.2: pending node references added via "Ask about this". These
+  // render as removable pills above the chat input; on send they get
+  // serialised back into [node:...] markers so the server's existing
+  // context-expansion path is unchanged.
+  const [pendingNodeRefs, setPendingNodeRefs] = useState<
+    Array<{ marker: string; label: string | null }>
+  >([]);
+  // Small in-memory label cache so re-referencing a node doesn't refetch.
+  const nodeLabelCache = useRef<Map<string, string>>(new Map());
 
   // V2.1 note: Mode pills removed. Workspace chip (WorkspacePicker) is
   // the only context switcher. Intra-workspace scoping happens through
@@ -184,6 +197,24 @@ function App() {
     setSelectedNodeId(nodeId);
     if (nodeId !== null) setShowSettings(false);
   }, []);
+
+  // V2.2: click-outside-to-close for the Settings panel. Same pattern
+  // NodeDetailDrawer uses. The gear button itself must be excluded
+  // from the outside check (otherwise opening flashes shut immediately).
+  const settingsPanelRef = useRef<HTMLDivElement | null>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!showSettings) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (settingsPanelRef.current?.contains(target)) return;
+      if (settingsButtonRef.current?.contains(target)) return;
+      setShowSettings(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showSettings]);
 
   useEffect(() => {
     (window as unknown as { __lore_selectNode?: (id: string) => void }).__lore_selectNode = openNodeDrawer as (id: string) => void;
@@ -319,17 +350,47 @@ function App() {
     window.setTimeout(() => void tick(), 800);
   };
 
-  // V2.1: "Ask about this" — pre-fill the chat with a [node:id] marker
-  // and focus the input. Server /api/chat expands the marker into
-  // system-prompt context (node content + immediate neighbors).
+  // V2.2: "Ask about this" — add the node as a removable pill above
+  // the chat input instead of stuffing a [node:id] marker into the
+  // textbox. On send (see sendMessage) the pending refs get serialised
+  // back into markers so the server's context-expansion path is
+  // unchanged. Label is fetched async; pill shows raw marker until then.
   const askAboutNode = (nodeId: string): void => {
     // Plugin-owned nodes use their prefix as the marker kind.
     // Core nodes get the `lore:` prefix to disambiguate.
     const marker = nodeId.includes(':') ? nodeId : `lore:${nodeId}`;
-    const prefill = `[node:${marker}] `;
-    setInput((curr) => (curr.startsWith(prefill) ? curr : prefill + curr));
+    setPendingNodeRefs((refs) => {
+      if (refs.some((r) => r.marker === marker)) return refs;
+      const cached = nodeLabelCache.current.get(marker) ?? null;
+      return [...refs, { marker, label: cached }];
+    });
+
+    // Fetch the label if not cached. Non-plugin (lore:) refs only —
+    // plugin-owned nodes (file:, symbol:) don't have /api/node yet.
+    if (marker.startsWith('lore:')) {
+      const rawId = marker.slice('lore:'.length);
+      if (!nodeLabelCache.current.has(marker)) {
+        void authFetch(`${API_BASE}/api/node?id=${encodeURIComponent(rawId)}`)
+          .then((r) => r.json())
+          .then((detail: { node?: { label?: string } }) => {
+            const label = detail?.node?.label ?? null;
+            if (label) {
+              nodeLabelCache.current.set(marker, label);
+              setPendingNodeRefs((refs) =>
+                refs.map((r) => (r.marker === marker ? { ...r, label } : r)),
+              );
+            }
+          })
+          .catch(() => { /* leave label null; pill still works */ });
+      }
+    }
+
     window.setTimeout(() => chatInputRef.current?.focus(), 50);
   };
+
+  const removePendingNodeRef = useCallback((marker: string): void => {
+    setPendingNodeRefs((refs) => refs.filter((r) => r.marker !== marker));
+  }, []);
 
   // ── Phase 2: file ingestion via /api/extract ────────────────────
   const triggerFilePicker = (): void => {
@@ -441,18 +502,40 @@ function App() {
   // ── Chat / SSE streaming ─────────────────────────────────────────
   const sendMessage = async (): Promise<void> => {
     const text = input.trim();
-    if (!text || streaming) return;
-    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', text };
+    // Allow send when EITHER the user typed text OR they have pending
+    // node refs — "Ask about this" with no added text is a valid query.
+    if ((!text && pendingNodeRefs.length === 0) || streaming) return;
+
+    // Serialise pending refs back into [node:...] markers so the
+    // server's existing context-expansion path works unchanged.
+    const markerPrefix = pendingNodeRefs
+      .map((r) => `[node:${r.marker}]`)
+      .join(' ');
+    const wireMessage = markerPrefix
+      ? (text ? `${markerPrefix} ${text}` : markerPrefix)
+      : text;
+
+    // Display in the user bubble: clean text (or fallback if no text)
+    // plus the pills as structured refs. Don't put markers in the
+    // visible text body — that's what caused the ugly [node:…] in the
+    // chat log before.
+    const userMsg: ChatMessage = {
+      id: `u-${Date.now()}`,
+      role: 'user',
+      text: text || (pendingNodeRefs.length > 0 ? 'Ask about this' : ''),
+      nodeRefs: pendingNodeRefs.length > 0 ? [...pendingNodeRefs] : undefined,
+    };
     const assistantId = `a-${Date.now()}`;
     setMessages((m) => [...m, userMsg, { id: assistantId, role: 'assistant', text: '', streaming: true }]);
     setInput('');
+    setPendingNodeRefs([]);
     setStreaming(true);
 
     try {
       const resp = await authFetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: wireMessage }),
       });
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
@@ -599,6 +682,7 @@ function App() {
           <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
           <div style={{ display: 'flex', gap: '0.25rem' }}>
             <button
+              ref={settingsButtonRef}
               className="icon-button"
               onClick={() => {
                 // Settings + Node Detail Drawer both anchor at top-right;
@@ -651,10 +735,21 @@ function App() {
                     <small>{Math.round(m.loading.progress * 100)}% — runs fully offline after download</small>
                   </div>
                 ) : (
-                  <p>
-                    {m.text}
-                    {m.streaming ? <span className="cursor-blink">▌</span> : null}
-                  </p>
+                  <>
+                    {m.nodeRefs && m.nodeRefs.length > 0 ? (
+                      <div className="node-ref-pills message-refs">
+                        {m.nodeRefs.map((r) => (
+                          <span key={r.marker} className="node-ref-pill" title={r.marker}>
+                            <span className="node-ref-pill-label">{r.label ?? r.marker}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    <p>
+                      {m.text}
+                      {m.streaming ? <span className="cursor-blink">▌</span> : null}
+                    </p>
+                  </>
                 )}
               </div>
             ))}
@@ -663,18 +758,47 @@ function App() {
 
           <div className="chat-input-area">
             <div className="input-wrapper glass-panel">
-              <input
-                ref={chatInputRef}
-                type="text"
-                placeholder={streaming ? 'Streaming…' : 'Query the knowledge graph…'}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={onInputKeyDown}
-                disabled={streaming}
-              />
-              <button className="send-button" onClick={() => void sendMessage()} disabled={streaming || !input.trim()}>
-                <MessageSquare size={18} />
-              </button>
+              {pendingNodeRefs.length > 0 ? (
+                <div className="node-ref-pills">
+                  {pendingNodeRefs.map((r) => (
+                    <span key={r.marker} className="node-ref-pill removable" title={r.marker}>
+                      <button
+                        type="button"
+                        className="node-ref-pill-remove"
+                        aria-label={`Remove ${r.label ?? r.marker}`}
+                        onClick={() => removePendingNodeRef(r.marker)}
+                      >
+                        ×
+                      </button>
+                      <span className="node-ref-pill-label">{r.label ?? r.marker}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              <div className="input-wrapper-row">
+                <input
+                  ref={chatInputRef}
+                  type="text"
+                  placeholder={
+                    streaming
+                      ? 'Streaming…'
+                      : pendingNodeRefs.length > 0
+                        ? 'Ask a follow-up… (or send as-is)'
+                        : 'Query the knowledge graph…'
+                  }
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={onInputKeyDown}
+                  disabled={streaming}
+                />
+                <button
+                  className="send-button"
+                  onClick={() => void sendMessage()}
+                  disabled={streaming || (!input.trim() && pendingNodeRefs.length === 0)}
+                >
+                  <MessageSquare size={18} />
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -759,7 +883,7 @@ function App() {
 
         {/* Dynamic Settings Sidebar (Slide-over) */}
         {showSettings && (
-          <div className="settings-panel glass-panel">
+          <div className="settings-panel glass-panel" ref={settingsPanelRef}>
             <h3>Configuration</h3>
 
             <div className="setting-group">

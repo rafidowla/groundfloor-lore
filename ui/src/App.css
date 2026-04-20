@@ -141,8 +141,15 @@
 
 .input-wrapper {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   padding: 0.5rem;
+  gap: 0.35rem;
+}
+
+.input-wrapper-row {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
 }
 
 .input-wrapper input {
@@ -153,6 +160,68 @@
   color: var(--color-text-primary);
   padding: 0.5rem;
   font-size: 0.95rem;
+}
+
+/* V2.2: node-reference pill chips shown above the input
+   (when user has clicked "Ask about this") and inside user
+   message bubbles (as a read-only record of what was referenced). */
+.node-ref-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  padding: 0.15rem 0.25rem;
+}
+
+.node-ref-pills.message-refs {
+  margin-bottom: 0.35rem;
+  padding: 0;
+}
+
+.node-ref-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.6rem;
+  background: rgba(168, 85, 247, 0.12);
+  color: var(--color-accent);
+  border: 1px solid rgba(168, 85, 247, 0.28);
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1.2;
+  max-width: 260px;
+}
+
+.node-ref-pill.removable {
+  padding-left: 0.2rem;
+}
+
+.node-ref-pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+.node-ref-pill-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.node-ref-pill-remove:hover {
+  background: rgba(168, 85, 247, 0.25);
 }
 
 .send-button {

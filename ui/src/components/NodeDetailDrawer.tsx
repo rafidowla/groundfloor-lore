@@ -5,7 +5,7 @@
  * the server expands into system-prompt context.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, MessageSquare } from 'lucide-react';
 import { authFetch } from '../lib/authFetch';
 
@@ -71,6 +71,26 @@ export default function NodeDetailDrawer({
         return () => { cancelled = true; };
     }, [apiBase, selectedNodeId, isCore]);
 
+    // V2.2: click-outside-to-close. Listen for mousedown on document;
+    // if it lands outside the drawer's root element, close. Skip when
+    // the click originated in the graph canvas (a node click will
+    // immediately reopen for the new node) — but the simpler design is
+    // to let the outside-click close, then the canvas handler re-opens
+    // with the new ID on the same tick. React batches the two updates.
+    const drawerRef = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        if (!selectedNodeId) return;
+        const handler = (e: MouseEvent) => {
+            const target = e.target as Node | null;
+            if (!target) return;
+            if (drawerRef.current && !drawerRef.current.contains(target)) {
+                onClose();
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [selectedNodeId, onClose]);
+
     if (!selectedNodeId) return null;
 
     // Plugin-owned placeholder is pure derivation from selectedNodeId;
@@ -88,7 +108,7 @@ export default function NodeDetailDrawer({
         };
 
     return (
-        <div className="node-drawer glass-panel">
+        <div className="node-drawer glass-panel" ref={drawerRef}>
             <header className="node-drawer-header">
                 <div className="node-drawer-title">
                     {displayDetail ? (
