@@ -36,6 +36,7 @@ import fs from 'fs';
 
 import type { GraphProvider, LoreNode, LoreEdge, TraversalResult, GraphStats } from '../providers/types.js';
 import { detectLanguage } from './language.js';
+import { ReadCache, cacheKey, type CacheStats } from './cache.js';
 export type { LoreNode, LoreEdge, TraversalResult, GraphStats };
 
 /* ─── Types ───────────────────────────────────────────────────── */
@@ -196,13 +197,27 @@ export class LocalGraph implements GraphProvider {
     private initialized: boolean = false;
     public sessionCache: SessionCacheManager;
 
+    /* Q1.3 — in-proc read-through cache. Keyed on
+     * (kind, workspace, epoch, params-sha1); every write bumps the
+     * epoch so prior entries become unreachable. Disabled via
+     * LORE_CACHE_DISABLED=1 (used by the benchmark harness to get a
+     * clean cold baseline). See src/engines/cache.ts. */
+    public readCache: ReadCache;
+    private readonly workspaceId: string;
+
     /**
      * Creates a new LocalGraph instance.
      *
      * @param basePath - Root directory for the .lore/graph/ data.
      *                   Typically the repository root or ~/.groundfloor/.
+     * @param opts - Optional cache + workspace tuning. workspaceId
+     *               scopes cache keys per-workspace (so switching
+     *               workspaces never returns cross-workspace hits).
      */
-    constructor(basePath: string) {
+    constructor(
+        basePath: string,
+        opts: { workspaceId?: string; cacheMaxSize?: number; cacheTtlMs?: number } = {},
+    ) {
         const loreDir = path.join(basePath, '.lore');
         fs.mkdirSync(loreDir, { recursive: true });
         this.graphPath = path.join(loreDir, 'graph');
@@ -210,6 +225,18 @@ export class LocalGraph implements GraphProvider {
         this.database = new Database(this.graphPath);
         this.connection = new Connection(this.database);
         this.sessionCache = new SessionCacheManager(basePath);
+
+        this.workspaceId = opts.workspaceId ?? 'default';
+        this.readCache = new ReadCache({
+            maxSize: opts.cacheMaxSize ?? 500,
+            ttlMs: opts.cacheTtlMs ?? 60_000,
+            disabled: process.env.LORE_CACHE_DISABLED === '1',
+        });
+    }
+
+    /** Cache-instrumentation for admin/benchmark callers. */
+    getCacheStats(): CacheStats {
+        return this.readCache.stats();
     }
 
     /**
@@ -429,6 +456,10 @@ export class LocalGraph implements GraphProvider {
                 });
 
                 this.sessionCache.pushNode(nodeData.id);
+                // Q1.3 — write-through invalidation. Epoch bump makes
+                // every previously-cached read unreachable in O(1); a
+                // subsequent getNode/search/listNodes sees fresh data.
+                this.readCache.bumpEpoch();
 
                 return {
                     ...nodeData,
@@ -471,6 +502,8 @@ export class LocalGraph implements GraphProvider {
                 });
 
                 this.sessionCache.pushNode(nodeData.id);
+                // Q1.3 — write-through invalidation (see branch above).
+                this.readCache.bumpEpoch();
 
                 return {
                     ...nodeData,
@@ -499,23 +532,28 @@ export class LocalGraph implements GraphProvider {
      */
     async getNode(id: string): Promise<LoreNode | null> {
         await this.initialize();
-
-        try {
-            const stmt = await this.connection.prepare(
-                `MATCH (n:LoreNode {id: $id}) RETURN n.*`,
-            );
-            const result = await this.connection.execute(stmt, { id }) as QueryResult;
-            const rows = await result.getAll();
-            if (rows.length === 0) return null;
-
-            return this.rowToLoreNode(rows[0]);
-        } catch (error) {
-            throw new LoreGraphError(
-                `Failed to get node '${id}'`,
-                'getNode',
-                error,
-            );
-        }
+        // Q1.3 — single-node reads dominate recall()'s post-search
+        // hydration loop; caching them collapses N calls to one DB
+        // round-trip when recall() is invoked repeatedly on the same
+        // topic.
+        const key = cacheKey('getNode', this.workspaceId, this.readCache.epoch, { id });
+        return this.readCache.memoize<LoreNode | null>(key, async () => {
+            try {
+                const stmt = await this.connection.prepare(
+                    `MATCH (n:LoreNode {id: $id}) RETURN n.*`,
+                );
+                const result = await this.connection.execute(stmt, { id }) as QueryResult;
+                const rows = await result.getAll();
+                if (rows.length === 0) return null;
+                return this.rowToLoreNode(rows[0]);
+            } catch (error) {
+                throw new LoreGraphError(
+                    `Failed to get node '${id}'`,
+                    'getNode',
+                    error,
+                );
+            }
+        });
     }
 
     /**
@@ -551,6 +589,9 @@ export class LocalGraph implements GraphProvider {
                 confidence,
                 confidenceScore,
             });
+            // Q1.3 — edges affect traverse() and neighbor queries;
+            // bump the epoch to invalidate cached traversals.
+            this.readCache.bumpEpoch();
         } catch (error) {
             throw new LoreGraphError(
                 `Failed to add edge ${edge.sourceId} → ${edge.targetId}`,
@@ -602,6 +643,9 @@ export class LocalGraph implements GraphProvider {
                 `MATCH ()-[e:LoreEdge]->() WHERE e.relation STARTS WITH $p DELETE e`,
             );
             await this.connection.execute(delStmt, { p: relationPrefix });
+            // Q1.3 — bulk edge prune invalidates traverse/neighbor
+            // caches; epoch bump is correct at any granularity.
+            if (count > 0) this.readCache.bumpEpoch();
             return count;
         } catch (error) {
             throw new LoreGraphError(
@@ -633,6 +677,17 @@ export class LocalGraph implements GraphProvider {
      */
     async traverse(nodeId: string, maxDepth: number = 2): Promise<TraversalResult[]> {
         await this.initialize();
+        // Q1.3 — recall() calls traverse() once per search seed; a hot
+        // topic with 10 seeds runs 10 BFS passes. Cache-keyed on
+        // (seed, depth); any write invalidates via epoch bump.
+        const memoKey = cacheKey('traverse', this.workspaceId, this.readCache.epoch, {
+            nodeId,
+            maxDepth: Math.min(Math.max(Math.trunc(maxDepth), 1), 5),
+        });
+        return this.readCache.memoize<TraversalResult[]>(memoKey, () => this._traverseUncached(nodeId, maxDepth));
+    }
+
+    private async _traverseUncached(nodeId: string, maxDepth: number): Promise<TraversalResult[]> {
 
         // F1 (Phase 7a): rewrite to iterative 1-hop BFS. Previous version
         // used a recursive Cypher pattern with `e[length(e)-1].relation`,
@@ -751,6 +806,16 @@ export class LocalGraph implements GraphProvider {
         // depth — keep the number a number.
         const clampedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000);
 
+        // Q1.3 — search is the hottest recall() path. Cache-key is
+        // the full query params (query text + clamped limit + scope);
+        // epoch is embedded so any write invalidates all prior hits.
+        const key = cacheKey('search', this.workspaceId, this.readCache.epoch, {
+            q: query.toLowerCase(),
+            limit: clampedLimit,
+            project,
+            ecosystem,
+        });
+        return this.readCache.memoize<LoreNode[]>(key, async () => {
         try {
             // All user input goes through bound parameters. The WHERE clause
             // is assembled from a fixed set of known-shape fragments; no
@@ -785,6 +850,7 @@ export class LocalGraph implements GraphProvider {
                 error,
             );
         }
+        });
     }
 
     /**
@@ -857,7 +923,15 @@ export class LocalGraph implements GraphProvider {
         ecosystem: string = '*',
     ): Promise<LoreNode[]> {
         await this.initialize();
-
+        // Q1.3 — FiltersPanel and the UI drawer hit listNodes on every
+        // open; cache-keyed on the filter tuple.
+        const key = cacheKey('listNodes', this.workspaceId, this.readCache.epoch, {
+            type: type ?? null,
+            tag: tag ?? null,
+            project,
+            ecosystem,
+        });
+        return this.readCache.memoize<LoreNode[]>(key, async () => {
         try {
             const params: Record<string, unknown> = {};
             let cypher = 'MATCH (n:LoreNode) WHERE true';
@@ -893,6 +967,7 @@ export class LocalGraph implements GraphProvider {
                 error,
             );
         }
+        });
     }
 
     /**
@@ -929,6 +1004,10 @@ export class LocalGraph implements GraphProvider {
                 `MATCH (n:LoreNode {id: $id}) DELETE n`,
             );
             await this.connection.execute(nodeStmt, { id });
+
+            // Q1.3 — invalidate every cached read; subsequent recalls
+            // must not surface a node we just dropped.
+            this.readCache.bumpEpoch();
 
             return true;
         } catch (error) {
