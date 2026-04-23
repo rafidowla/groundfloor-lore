@@ -6,7 +6,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { X, MessageSquare, FileText, RefreshCw } from 'lucide-react';
+import { X, MessageSquare, RefreshCw } from 'lucide-react';
 import { authFetch } from '../lib/authFetch';
 
 interface NodeDetail {
@@ -35,7 +35,6 @@ interface NodeDetailDrawerProps {
     selectedNodeId: string | null;
     onClose: () => void;
     onAskAbout: (nodeId: string) => void;
-    onGenerateDocs: (nodeId: string) => void;
     onReconnectNode: (nodeId: string) => void;
 }
 
@@ -44,7 +43,6 @@ export default function NodeDetailDrawer({
     selectedNodeId,
     onClose,
     onAskAbout,
-    onGenerateDocs,
     onReconnectNode,
 }: NodeDetailDrawerProps) {
     // Core nodes are the lore: prefix or unprefixed. Plugin-owned nodes
@@ -185,22 +183,21 @@ export default function NodeDetailDrawer({
                             <MessageSquare size={14} />
                             Ask about this
                         </button>
-                        <button
-                            className="node-drawer-reconnect"
-                            onClick={() => onReconnectNode(displayDetail.node.id)}
-                            title="Re-compute semantic edges for this node against the latest graph state — useful when a node looks orphaned or out of date"
-                        >
-                            <RefreshCw size={14} />
-                            Recalibrate
-                        </button>
-                        <button
-                            className="node-drawer-generate"
-                            onClick={() => onGenerateDocs(displayDetail.node.id)}
-                            title="Generate a Markdown developer-docs document for this node using the active LLM"
-                        >
-                            <FileText size={14} />
-                            Generate docs
-                        </button>
+                        {/* Recalibrate is scoped to core LoreNodes. The server path
+                            (/api/chat/action reconnect_node → reconnectOneNode) only
+                            understands the core LoreNode table; plugin-owned nodes
+                            (file:, symbol:) would 404. Hide the button for those
+                            until a per-plugin recalibrate hook exists. */}
+                        {isCore ? (
+                            <button
+                                className="node-drawer-reconnect"
+                                onClick={() => onReconnectNode(displayDetail.node.id)}
+                                title="Re-compute semantic edges for this node against the latest graph state — useful when a node looks orphaned or out of date"
+                            >
+                                <RefreshCw size={14} />
+                                Recalibrate
+                            </button>
+                        ) : null}
                     </div>
                 </div>
             ) : null}
