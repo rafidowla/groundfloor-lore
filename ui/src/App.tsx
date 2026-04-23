@@ -464,6 +464,66 @@ function App() {
     }
   }, []);
 
+  // V2.2: specialized prompt for "Generate docs for this node." Sends
+  // the node reference as a pill + a doc-request instruction that
+  // asks the LLM for a structured Markdown document. The chat bubble
+  // renders via the existing ChatMarkdown pipeline, so code blocks,
+  // tables, and Mermaid diagrams all render correctly.
+  //
+  // Quality depends entirely on the active LLM. Embedded Gemma 1B
+  // will produce a short stub; BYOK Claude / GPT-4o produces full
+  // Markdown with diagrams when the node content supports it. The
+  // UI doesn't gate on capability — the user sees what their model
+  // produces, which is the honest signal.
+  const DOCS_PROMPT = (
+    'Produce comprehensive developer-facing documentation for the node(s) attached to this conversation. Structure as Markdown with these sections:\n\n' +
+    '1. **Overview** — 1-2 paragraphs describing what this node represents.\n' +
+    '2. **Key Concepts** — bullet list of important terms and ideas.\n' +
+    '3. **Relationships** — how this connects to other systems or knowledge.\n' +
+    '4. **Code References** — if the node mentions files or line numbers, list them as a Markdown table (file | lines | purpose).\n' +
+    '5. **Diagram** — include a ```mermaid code block with a diagram if the node describes architecture, flows, or relationships. Skip this section if a diagram would not add value.\n' +
+    '6. **Usage / Context** — when and how this knowledge applies.\n\n' +
+    'Cite any claims with [node-id] markers. Do not invent details that are not in the provided context.'
+  );
+  const generateDocsFor = useCallback((nodeId: string): void => {
+    const marker = nodeId.includes(':') ? nodeId : `lore:${nodeId}`;
+    setPendingNodeRefs((refs) => {
+      if (refs.some((r) => r.marker === marker)) return refs;
+      const cached = nodeLabelCache.current.get(marker) ?? null;
+      return [...refs, { marker, label: cached }];
+    });
+    // Prefill input with the docs request. User can edit before send
+    // OR hit send as-is. Deliberately not auto-sending — one extra
+    // click is the safety belt against accidental invocations.
+    setInput((curr) => (curr ? curr : DOCS_PROMPT));
+    window.setTimeout(() => chatInputRef.current?.focus(), 50);
+  }, []);
+
+  // V2.2: Save an assistant message body as a .md file. Browser-side
+  // only — no server round-trip. Filename derives from the first
+  // non-empty heading or falls back to a timestamp. No external deps.
+  const downloadAssistantMessageAsMarkdown = useCallback((text: string): void => {
+    if (!text) return;
+    // Try to pull a filename from the first ATX heading.
+    const headingMatch = /^#{1,6}\s+(.+?)\s*$/m.exec(text);
+    const slug = (headingMatch ? headingMatch[1] : '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `${slug || 'lore-chat'}-${stamp}.md`;
+    const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, []);
+
   // V2.2: "Ask about this" — add the node as a removable pill above
   // the chat input instead of stuffing a [node:id] marker into the
   // textbox. On send (see sendMessage) the pending refs get serialised
@@ -910,6 +970,20 @@ function App() {
                             ))}
                           </div>
                         ) : null}
+                        {/* V2.2: Save as .md on every completed
+                            assistant message. Hidden during streaming;
+                            hidden on banner-role system messages;
+                            hidden on empty bodies. */}
+                        {!m.streaming && m.text && m.text.length > 10 ? (
+                          <button
+                            type="button"
+                            className="chat-save-md"
+                            onClick={() => downloadAssistantMessageAsMarkdown(m.text)}
+                            title="Download this message as a Markdown file"
+                          >
+                            Save as .md
+                          </button>
+                        ) : null}
                       </div>
                     ) : (
                       // User bubbles stay plain text — the user
@@ -1048,6 +1122,10 @@ function App() {
           onClose={() => setSelectedNodeId(null)}
           onAskAbout={(id) => {
             askAboutNode(id);
+            setSelectedNodeId(null);
+          }}
+          onGenerateDocs={(id) => {
+            generateDocsFor(id);
             setSelectedNodeId(null);
           }}
         />

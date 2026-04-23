@@ -350,6 +350,27 @@
   border-left: 3px solid rgba(20, 184, 166, 0.55);
 }
 
+/* V2.2: Save-as-.md button on assistant bubbles — minimalist,
+   appears below actions if any, above the bubble padding edge.
+   Subtle on purpose — should be findable but not noisy. */
+.chat-save-md {
+  display: inline-block;
+  margin-top: 0.5rem;
+  padding: 0.2rem 0.55rem;
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.chat-save-md:hover {
+  background: var(--color-border);
+  color: var(--color-text-primary);
+}
+
 .chat-input-area {
   margin-top: 1rem;
 }
@@ -712,22 +733,40 @@
   border-radius: 6px;
 }
 
-.node-drawer-ask {
+.node-drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+
+.node-drawer-ask,
+.node-drawer-generate {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  margin-top: 0.5rem;
   padding: 0.45rem 0.8rem;
   font-size: 0.8rem;
   color: var(--color-bg);
-  background: var(--color-accent, #14b8a6);
   border: none;
   border-radius: 6px;
   cursor: pointer;
   transition: opacity 120ms;
 }
 
-.node-drawer-ask:hover {
+.node-drawer-ask {
+  background: var(--color-accent, #14b8a6);
+}
+
+.node-drawer-generate {
+  /* V2.2: Generate docs — purple gradient to match the brand mark +
+     chat-action buttons, signals "this will produce AI output." */
+  background: linear-gradient(90deg, #a855f7 0%, #3b82f6 100%);
+  color: #ffffff;
+}
+
+.node-drawer-ask:hover,
+.node-drawer-generate:hover {
   opacity: 0.9;
 }
 

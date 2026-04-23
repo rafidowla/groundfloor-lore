@@ -6,7 +6,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { X, MessageSquare } from 'lucide-react';
+import { X, MessageSquare, FileText } from 'lucide-react';
 import { authFetch } from '../lib/authFetch';
 
 interface NodeDetail {
@@ -35,6 +35,7 @@ interface NodeDetailDrawerProps {
     selectedNodeId: string | null;
     onClose: () => void;
     onAskAbout: (nodeId: string) => void;
+    onGenerateDocs: (nodeId: string) => void;
 }
 
 export default function NodeDetailDrawer({
@@ -42,6 +43,7 @@ export default function NodeDetailDrawer({
     selectedNodeId,
     onClose,
     onAskAbout,
+    onGenerateDocs,
 }: NodeDetailDrawerProps) {
     // Core nodes are the lore: prefix or unprefixed. Plugin-owned nodes
     // (file:, symbol:) don't have a GET /api/node endpoint yet.
@@ -172,14 +174,24 @@ export default function NodeDetailDrawer({
                         </section>
                     )}
 
-                    <button
-                        className="node-drawer-ask"
-                        onClick={() => onAskAbout(displayDetail.node.id)}
-                        title="Pre-fill the chat with [node:id] so the LLM answers in context"
-                    >
-                        <MessageSquare size={14} />
-                        Ask about this in chat
-                    </button>
+                    <div className="node-drawer-actions">
+                        <button
+                            className="node-drawer-ask"
+                            onClick={() => onAskAbout(displayDetail.node.id)}
+                            title="Pre-fill the chat with [node:id] so the LLM answers in context"
+                        >
+                            <MessageSquare size={14} />
+                            Ask about this
+                        </button>
+                        <button
+                            className="node-drawer-generate"
+                            onClick={() => onGenerateDocs(displayDetail.node.id)}
+                            title="Generate a Markdown developer-docs document for this node using the active LLM"
+                        >
+                            <FileText size={14} />
+                            Generate docs
+                        </button>
+                    </div>
                 </div>
             ) : null}
         </div>
