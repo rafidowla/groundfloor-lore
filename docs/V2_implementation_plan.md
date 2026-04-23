@@ -47,13 +47,19 @@ Nothing downstream (Phase 2 Dual-Path Extractor, Phase 3 Chat) can function unti
 We must first strip out all the hardcoded Developer implementation so Lore can boot as a blank slate.
 - **Goal:** A `config.json` that dictates which plugins are active.
 - **Action:** Move all `GitNexus` and `CodeSymbol` logic out of the core server and into a modular `Developer Plugin`.
-- **Multi-plugin support:** Multiple plugins may be active simultaneously in a single workspace. Boot-time collision checks enforce non-overlapping table namespaces.
-  - **Workspace** (hard separation): each workspace = its own `.lore/` directory with its own `config.json` and Kùzu graph on disk. Switched via the Settings "Workspace Account" dropdown. Analogous to Claude app accounts.
-  - **Mode** (soft separation, same DB): a top-of-center-panel Mode pill-group, one pill per active plugin plus an "All" pill. Clicking a pill (a) swaps chat system prompt, (b) applies the plugin's default filter preset, (c) shows/hides plugin-specific UI panels, (d) centers camera on the plugin's densest cluster. Keyboard `Cmd+1/2/3` cycles modes. Analogous to Claude chat modes.
-  - Config shape: `{ "plugins": ["developer","family"], "pluginConfig": {...}, "defaultMode": "developer" }`
+- **Workspace separation model (V2.1 decision — confirmed 2026-04-23):** Each workspace is its own `.lore/` directory with its own `config.json` and Kùzu graph. A workspace typically activates a single plugin (`developer`, `personal`, `legal`, etc.) along with the connectors that plugin needs (`filesystem`, `gmail`, git repos, ...). Users switch contexts via the top-left **WorkspacePicker** chip. The Projects filter in the right panel handles any intra-workspace scoping. Mode pill-group was evaluated and rejected — Workspaces provide the separation users actually need.
+  - Boot-time collision checks still enforce non-overlapping table namespaces; multiple plugins in one workspace remain technically supported but are not the primary UX.
+  - Config shape: `{ "plugins": ["personal"], "pluginConfig": { "personal": { "connectors": ["gmail","filesystem"], ... } } }`
+  - Example layouts:
+    - `~/Documents/Personal/.lore/config.json` → `plugins: ["personal"]`, connectors `gmail` + `filesystem` rooted at `~/Documents`, `~/Desktop`
+    - `~/Code/Work/.lore/config.json` → `plugins: ["developer"]`, connector rooted at the repo paths
 - **Plugin-swap migration (Option C — Prompt on boot):** If `config.json` is changed so a previously-active plugin is no longer listed, boot detects orphaned tables and prompts: `Keep on disk` (reversible), `Drop permanently` (requires typing `DROP` to confirm), `Re-enable plugin` (adds back to config). Decision persisted under `plugin_history` in `config.json`. CLI blocks at stdin prompt; UI surfaces a modal and blocks `/api/*` calls with `orphan_decision_required` until resolved.
 - **V1→V2 migration:** First V2 boot against a pre-existing V1 `.lore/` directory auto-writes `config.json` as `{"plugins":["developer"],"pluginConfig":{}}`. One-time UI toast: *"Welcome to Lore V2 — the Developer plugin was activated automatically. Change this in Settings."*
-- **Outcome:** If someone wants to use Lore for Law or Personal Finance, they swap the active plugin without modifying the core server.
+- **Follow-up items not blocking V2:**
+  - **Gmail connector** for the `personal` plugin (only `filesystem` exists today).
+  - **Workspace creation wizard** in Settings: *"Create new workspace" → pick folder → pick plugin → configure connectors.* Workspace switching already works; creation is still manual config-on-disk.
+  - **Legacy plugin-vocab leakage cleanup:** 16 tracked entries in `.arch-baseline.json` across `localGraph.ts`, `tsSdkAdapter.ts`, `syncEngine.ts`, `cli/commands.ts`, `cli/index.ts` still reference `CodeSymbol` / `GitNexus` / `CodeFile`. Marked "Legacy V2.1 debt" — move into Developer plugin in a follow-up pass.
+- **Outcome:** If someone wants to use Lore for Law or Personal Finance, they swap the active plugin (via WorkspacePicker) without modifying the core server.
 
 ### Phase 2: Dual-Path Extraction Router & Settings UX
 We are building the UI Settings panel to let users dictate how their context is processed.
@@ -75,8 +81,12 @@ With the backend decoupled, transition the UI from a simple developer readout in
 - **Action:**
   1. **Left Panel:** Conversational AI Chat that streams SSE. On each streamed `focus` event with a `nodeId`, the client animates the Sigma camera to that node.
      - **Fallbacks:** LLM emits no structured refs → server-side regex-matches tokens against node labels. NodeId not in current graph → silently ignored. Rapid successive nodeIds (<200ms apart) → coalesce to the last. User manually pans mid-stream → pause auto-follow for 3 seconds.
-  2. **Center Panel:** Sigma.js WebGL rendering. **Performance ceilings:** 60 FPS ≤ 2k nodes; 30 FPS floor ≤ 10k nodes; hard ceiling 20k nodes (server returns a sampled subgraph above that with a banner). ForceAtlas2 layout runs max 2000 iterations OR 3 seconds. Labels render only for nodes in the top 10% by edge-degree.
-     - **Mode pill-group** sits above the canvas (see Phase 1).
+  2. **Center Panel:** Sigma.js WebGL rendering.
+     - **Performance ceilings:** 60 FPS ≤ 2k nodes; 30 FPS floor ≤ 10k nodes; **hard ceiling 20k nodes** (firm — not user-overridable). Above 20k, the server returns a sampled subgraph of the 20k most-recent/most-relevant nodes and the client shows a banner: *"Graph too large — showing 20k nodes. Use filters in the right panel to narrow the view."*
+     - **User-adjustable Graph Size Limit setting (Settings modal):** slider with steps `5k / 10k / 20k`. Default auto-detected from `navigator.hardwareConcurrency` + memory heuristics (4-core/8GB → 10k; 8-core/16GB → 20k; M-series → 20k). No "Unlimited" option. Help text above the slider: *"Higher values use more CPU and memory. Lore won't render more than 20k nodes at once — use filters for larger graphs."*
+     - **Why 20k is the firm cap:** WebGL can render more, but ForceAtlas2 layout is CPU-bound and scales non-linearly (~10-15s at 20k, ~30-60s at 50k, minutes at 100k). A firm cap prevents the browser from hanging on large graphs and forces users into the filter-driven workflow instead.
+     - **ForceAtlas2 layout runs** max 2000 iterations OR 3 seconds, whichever first. Labels render only for nodes in the top 10% by edge-degree.
+     - **Mode pill-group was evaluated and removed** — Workspaces provide the separation users need (see Phase 1).
   3. **Right Panel:** Dynamic filters — checkboxes grouped by `Types` and `Projects`. Show first 10 per category with "Show all (N)" expander. Per-category search box appears when count > 15. Hover reveals node count. "Select all" / "Select none" links per category. Unchecking dims non-matching nodes via Sigma's `nodeReducer`.
 - **Outcome:** A cohesive "Palace of Memory" interface.
 
