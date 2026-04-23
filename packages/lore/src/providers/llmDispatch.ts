@@ -36,12 +36,39 @@ export interface LlmChunk {
     status?: string;
 }
 
+/**
+ * Tool-calling capability tier for a given model.
+ *
+ * V2.2 (2026-04-20): three-tier model. Pure plumbing for now —
+ * consumed by future chat UI work to decide whether to (a) invoke
+ * native function calls, (b) emit structured `{{action:...}}`
+ * suggestion tokens the UI renders as buttons, or (c) stay in
+ * text-only mode.
+ *
+ *   'native'          — reliable function-calling. Claude 3.5+,
+ *                       GPT-4o / o-series, Gemma 3 4B+, Qwen3 1.7B+.
+ *   'suggestion_only' — emits `{{action:...}}` tokens for UI to
+ *                       render as buttons. User confirms per action.
+ *                       Gemma 3 1B (our embedded default), smaller
+ *                       local models, unknown Ollama models.
+ *   'none'            — pure text generation; no structured output
+ *                       expected. Fallback for truly limited models.
+ *
+ * Safety property: a model classified as 'suggestion_only' or 'none'
+ * MUST NOT be granted native function-calling even if future BYOK
+ * wiring makes it available. Reverse is also true — 'native' models
+ * can still emit suggestion tokens if the prompt asks; both patterns
+ * coexist per consumer choice.
+ */
+export type ToolCapability = 'native' | 'suggestion_only' | 'none';
+
 export interface LlmCapability {
     provider: LlmProvider;
     model: string;
     acceptsText: boolean;
     acceptsImages: boolean;
     acceptedMimeTypes: string[];
+    toolCalling: ToolCapability;
 }
 
 const DEFAULT_MODELS: Record<string, string> = {
@@ -77,6 +104,9 @@ export function getCapability(provider: LlmProvider, model?: string): LlmCapabil
     const lower = resolvedModel.toLowerCase();
 
     // Embedded Gemma 3 1B is text-only; no image/audio capability.
+    // Tool-calling is syntactically supported by Gemma 3 but unreliable
+    // at the 1B tier — classify as 'suggestion_only' so future UI work
+    // renders action-suggestion buttons instead of invoking tools.
     if (provider === 'embedded') {
         return {
             provider,
@@ -84,6 +114,7 @@ export function getCapability(provider: LlmProvider, model?: string): LlmCapabil
             acceptsText: true,
             acceptsImages: false,
             acceptedMimeTypes: ['text/plain', 'text/markdown'],
+            toolCalling: 'suggestion_only',
         };
     }
 
@@ -95,6 +126,24 @@ export function getCapability(provider: LlmProvider, model?: string): LlmCapabil
         lower.includes('llava') ||
         lower.includes('llama3.2-vision');
 
+    // Tool-calling tier per model family. Keep conservative: a model
+    // only earns 'native' when it's a known-reliable function-caller.
+    // Everything else (incl. unknown Ollama models) defaults to
+    // 'suggestion_only' — UI treats it as prompt-for-buttons.
+    const toolCalling: ToolCapability =
+        // Anthropic: Claude 3.5+ and Claude 4+ are native tool-callers.
+        (provider === 'anthropic' && (lower.includes('claude-3-5') || lower.includes('claude-4') || lower.includes('claude-sonnet-4') || lower.includes('claude-opus-4')))
+            ? 'native'
+        // OpenAI: GPT-4o / o-series are native tool-callers.
+        : (provider === 'openai' && (lower.includes('gpt-4o') || lower.includes('gpt-5') || lower.startsWith('o1') || lower.startsWith('o3')))
+            ? 'native'
+        // Ollama: conservative — depends heavily on loaded model. A few
+        // model families are known-reliable function-callers under Ollama;
+        // most aren't. Default suggestion_only unless explicitly on the list.
+        : (provider === 'ollama' && (lower.includes('llama3.2') || lower.includes('qwen3') || lower.includes('gemma3:4b') || lower.includes('gemma3:12b') || lower.includes('gemma3:27b') || lower.includes('mistral')))
+            ? 'native'
+        : 'suggestion_only';
+
     return {
         provider,
         model: resolvedModel,
@@ -103,6 +152,7 @@ export function getCapability(provider: LlmProvider, model?: string): LlmCapabil
         acceptedMimeTypes: multimodal
             ? ['text/plain', 'text/markdown', 'image/png', 'image/jpeg', 'image/webp', 'image/gif']
             : ['text/plain', 'text/markdown'],
+        toolCalling,
     };
 }
 

@@ -59,6 +59,11 @@ interface ConfigResponse {
     acceptsText: boolean;
     acceptsImages: boolean;
     acceptedMimeTypes: string[];
+    /** V2.2 plumbing: UI branches on this when rendering chat actions.
+     *  'native' → future native tool-calling path.
+     *  'suggestion_only' → parse {{action:...}} tokens into buttons.
+     *  'none' → pure text, no structured output expected. */
+    toolCalling: 'native' | 'suggestion_only' | 'none';
   };
 }
 
