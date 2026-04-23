@@ -350,12 +350,50 @@
   border-left: 3px solid rgba(20, 184, 166, 0.55);
 }
 
-/* V2.2: Save-as-.md button on assistant bubbles — minimalist,
-   appears below actions if any, above the bubble padding edge.
-   Subtle on purpose — should be findable but not noisy. */
+/* V2.2: Message footer — provider label + escalate + save-as-md.
+   All three controls live on one row below the bubble body. */
+.chat-msg-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+}
+
+.chat-provider-tag {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.65rem;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  background: rgba(128, 128, 128, 0.1);
+  border-radius: 999px;
+}
+
+.chat-escalate {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.65rem;
+  background: linear-gradient(90deg, rgba(168, 85, 247, 0.15) 0%, rgba(59, 130, 246, 0.15) 100%);
+  color: var(--color-accent);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.chat-escalate:hover {
+  background: linear-gradient(90deg, rgba(168, 85, 247, 0.28) 0%, rgba(59, 130, 246, 0.28) 100%);
+  border-color: rgba(168, 85, 247, 0.55);
+}
+
 .chat-save-md {
   display: inline-block;
-  margin-top: 0.5rem;
   padding: 0.2rem 0.55rem;
   background: transparent;
   color: var(--color-text-secondary);

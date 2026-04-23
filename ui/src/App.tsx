@@ -107,6 +107,10 @@ interface ChatMessage {
    *  user-confirmed action click, carry the metadata so the UI can
    *  style it as a "system confirmation" instead of normal LLM chat. */
   isActionResult?: boolean;
+  /** V2.2: which provider produced this bubble. Set from the SSE
+   *  `start` event. Used to render a provider label + decide whether
+   *  to show the "Try with BYOK" escalate button on embedded bubbles. */
+  provider?: LlmProvider;
 }
 
 /** Read a File object as base64 without the data: URL prefix. */
@@ -499,6 +503,40 @@ function App() {
     window.setTimeout(() => chatInputRef.current?.focus(), 50);
   }, []);
 
+  // V2.2: escalate an assistant bubble — re-run the user message
+  // that produced it, but through a different (typically BYOK)
+  // provider. Preserves node refs so the context is identical.
+  //
+  // Finds the most recent user message BEFORE the assistant bubble
+  // being escalated. If the bubble is from a replay/action result
+  // (no preceding user turn), escalation is a no-op — the button is
+  // hidden in that case, but belt-and-suspenders here too.
+  const escalateAssistantMessage = useCallback((assistantMsgId: string, targetProvider: LlmProvider): void => {
+    setMessages((m) => {
+      const idx = m.findIndex((msg) => msg.id === assistantMsgId);
+      if (idx <= 0) return m;
+      // Walk backward to find the preceding user message
+      for (let i = idx - 1; i >= 0; i--) {
+        const userMsg = m[i];
+        if (userMsg.role === 'user') {
+          // Kick off the replay outside the state updater so React
+          // doesn't see a sendMessage call during render. Queue with
+          // a microtask.
+          void Promise.resolve().then(() => {
+            void sendMessage({
+              forceProvider: targetProvider,
+              replayText: userMsg.text,
+              replayRefs: userMsg.nodeRefs ?? [],
+              replayLabel: `↻ ${userMsg.text}`,
+            });
+          });
+          break;
+        }
+      }
+      return m;
+    });
+  }, []);
+
   // V2.2: Save an assistant message body as a .md file. Browser-side
   // only — no server round-trip. Filename derives from the first
   // non-empty heading or falls back to a timestamp. No external deps.
@@ -674,42 +712,66 @@ function App() {
   };
 
   // ── Chat / SSE streaming ─────────────────────────────────────────
-  const sendMessage = async (): Promise<void> => {
-    const text = input.trim();
+  const sendMessage = async (
+    opts?: {
+      /** V2.2 escalate: override the active llmProvider for THIS one
+       *  call only. Doesn't change the persistent Settings choice. */
+      forceProvider?: LlmProvider;
+      /** V2.2 escalate: re-run this exact text + refs instead of
+       *  pulling from the input/pills state. Used by the "Try with
+       *  BYOK" button on an earlier assistant bubble. */
+      replayText?: string;
+      replayRefs?: Array<{ marker: string; label: string | null }>;
+      /** UI-side label for the user bubble when replaying. If unset,
+       *  falls back to the replayed text. */
+      replayLabel?: string;
+    },
+  ): Promise<void> => {
+    const text = opts?.replayText !== undefined ? opts.replayText : input.trim();
+    const refs = opts?.replayRefs !== undefined ? opts.replayRefs : pendingNodeRefs;
     // Allow send when EITHER the user typed text OR they have pending
     // node refs — "Ask about this" with no added text is a valid query.
-    if ((!text && pendingNodeRefs.length === 0) || streaming) return;
+    if ((!text && refs.length === 0) || streaming) return;
 
     // Serialise pending refs back into [node:...] markers so the
     // server's existing context-expansion path works unchanged.
-    const markerPrefix = pendingNodeRefs
+    const markerPrefix = refs
       .map((r) => `[node:${r.marker}]`)
       .join(' ');
     const wireMessage = markerPrefix
       ? (text ? `${markerPrefix} ${text}` : markerPrefix)
       : text;
 
-    // Display in the user bubble: clean text (or fallback if no text)
-    // plus the pills as structured refs. Don't put markers in the
-    // visible text body — that's what caused the ugly [node:…] in the
-    // chat log before.
-    const userMsg: ChatMessage = {
-      id: `u-${Date.now()}`,
-      role: 'user',
-      text: text || (pendingNodeRefs.length > 0 ? 'Ask about this' : ''),
-      nodeRefs: pendingNodeRefs.length > 0 ? [...pendingNodeRefs] : undefined,
-    };
+    // For replays (escalate), don't add a new user bubble — the user
+    // already asked the question once. Just insert the new assistant
+    // bubble. For normal sends, add both.
+    const isReplay = opts?.replayText !== undefined;
     const assistantId = `a-${Date.now()}`;
-    setMessages((m) => [...m, userMsg, { id: assistantId, role: 'assistant', text: '', streaming: true }]);
-    setInput('');
-    setPendingNodeRefs([]);
+    const assistantSeed: ChatMessage = { id: assistantId, role: 'assistant', text: '', streaming: true };
+
+    if (isReplay) {
+      setMessages((m) => [...m, assistantSeed]);
+    } else {
+      const userMsg: ChatMessage = {
+        id: `u-${Date.now()}`,
+        role: 'user',
+        text: opts?.replayLabel ?? (text || (refs.length > 0 ? 'Ask about this' : '')),
+        nodeRefs: refs.length > 0 ? [...refs] : undefined,
+      };
+      setMessages((m) => [...m, userMsg, assistantSeed]);
+      setInput('');
+      setPendingNodeRefs([]);
+    }
     setStreaming(true);
 
     try {
       const resp = await authFetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: wireMessage }),
+        body: JSON.stringify({
+          message: wireMessage,
+          ...(opts?.forceProvider ? { forceProvider: opts.forceProvider } : {}),
+        }),
       });
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
@@ -735,8 +797,15 @@ function App() {
                 file?: string;
                 progress?: number;
                 status?: string;
+                provider?: LlmProvider;
               };
-              if (evt.type === 'focus' && evt.nodeId) {
+              if (evt.type === 'start' && evt.provider) {
+                // V2.2 escalate support: label the bubble with the
+                // resolved provider (may differ from user default when
+                // forceProvider was passed). Later code uses this to
+                // decide whether to render the "Try with BYOK" button.
+                setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, provider: evt.provider } : msg)));
+              } else if (evt.type === 'focus' && evt.nodeId) {
                 requestFocus(evt.nodeId);
               } else if (evt.type === 'model_loading') {
                 // V2.1: Qwen first-run download progress.
@@ -970,19 +1039,36 @@ function App() {
                             ))}
                           </div>
                         ) : null}
-                        {/* V2.2: Save as .md on every completed
-                            assistant message. Hidden during streaming;
-                            hidden on banner-role system messages;
-                            hidden on empty bodies. */}
-                        {!m.streaming && m.text && m.text.length > 10 ? (
-                          <button
-                            type="button"
-                            className="chat-save-md"
-                            onClick={() => downloadAssistantMessageAsMarkdown(m.text)}
-                            title="Download this message as a Markdown file"
-                          >
-                            Save as .md
-                          </button>
+                        {/* V2.2: message footer — provider label + escalate
+                            + save-as-md. Only renders after streaming
+                            completes, on non-empty bodies, on non-action
+                            bubbles. */}
+                        {!m.streaming && m.text && m.text.length > 10 && !m.isActionResult ? (
+                          <div className="chat-msg-footer">
+                            {m.provider ? (
+                              <span className="chat-provider-tag" title={`Answered by ${m.provider}`}>
+                                {m.provider}
+                              </span>
+                            ) : null}
+                            {m.provider === 'embedded' && hasApiKey && (llmProvider === 'anthropic' || llmProvider === 'openai') ? (
+                              <button
+                                type="button"
+                                className="chat-escalate"
+                                onClick={() => escalateAssistantMessage(m.id, llmProvider)}
+                                title={`Re-run this query with ${llmProvider} for a more thorough answer`}
+                              >
+                                ↑ Try with {llmProvider === 'anthropic' ? 'Claude' : 'OpenAI'}
+                              </button>
+                            ) : null}
+                            <button
+                              type="button"
+                              className="chat-save-md"
+                              onClick={() => downloadAssistantMessageAsMarkdown(m.text)}
+                              title="Download this message as a Markdown file"
+                            >
+                              Save as .md
+                            </button>
+                          </div>
                         ) : null}
                       </div>
                     ) : (

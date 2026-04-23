@@ -48,7 +48,7 @@ import {
     deleteWorkspace,
     kebabCase,
 } from '../config/workspaces.js';
-import { stream as llmStream, getCapability, setEmbeddedModelKeepHot } from '../providers/llmDispatch.js';
+import { stream as llmStream, getCapability, setEmbeddedModelKeepHot, type LlmProvider } from '../providers/llmDispatch.js';
 import { decide as decideExtraction, type ExtractPayload } from '../providers/extractRouter.js';
 import { reconnectGraph, reconnectOneNode } from '../engines/reconnect.js';
 import { readCursor, writeCursor } from '../engines/reconnectCursor.js';
@@ -2171,9 +2171,20 @@ async function main(): Promise<void> {
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
                     let message = '';
+                    let forceProvider: string | undefined;
                     try {
-                        const parsed = JSON.parse(body || '{}') as { message?: string };
+                        const parsed = JSON.parse(body || '{}') as { message?: string; forceProvider?: string };
                         message = (parsed.message ?? '').trim();
+                        // V2.2: optional per-call override so the UI can
+                        // "escalate" a query from the embedded model to a
+                        // BYOK model without changing the user's persistent
+                        // default. Valid values match the providers in
+                        // llmDispatch's DEFAULT_MODELS; unknown values fall
+                        // back to config so a malformed client doesn't
+                        // bypass user intent.
+                        if (parsed.forceProvider && ['embedded', 'anthropic', 'openai', 'ollama'].includes(parsed.forceProvider)) {
+                            forceProvider = parsed.forceProvider;
+                        }
                     } catch {
                         res.writeHead(400, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: 'invalid JSON body' }));
@@ -2198,8 +2209,14 @@ async function main(): Promise<void> {
 
                     try {
                         const cfg = configManager.read();
-                        const key = await getApiKey(cfg.llmProvider);
-                        write({ type: 'start', provider: cfg.llmProvider });
+                        // V2.2 escalate path: if the client forced a
+                        // specific provider for THIS call, use it; else
+                        // honor the persistent config selection. Either
+                        // way, emit the resolved provider so the UI can
+                        // label the resulting bubble.
+                        const resolvedProvider = forceProvider ?? cfg.llmProvider;
+                        const key = await getApiKey(resolvedProvider);
+                        write({ type: 'start', provider: resolvedProvider });
 
                         // V2.1: if the message references `[node:id]` markers
                         // (added by the "Ask about this" button on the node
@@ -2328,7 +2345,7 @@ async function main(): Promise<void> {
                             enrichedMessage = `${preamble}\n\n---\n\n${enrichedMessage}`;
                         }
 
-                        for await (const chunk of llmStream(cfg.llmProvider, enrichedMessage, key)) {
+                        for await (const chunk of llmStream(resolvedProvider as LlmProvider, enrichedMessage, key)) {
                             if (chunk.kind === 'token' && chunk.content) {
                                 write({ type: 'token', content: chunk.content });
                             } else if (chunk.kind === 'model_loading') {
