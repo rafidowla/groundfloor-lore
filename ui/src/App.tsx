@@ -34,6 +34,43 @@ function CanvasLoadingFallback() {
 // to http://127.0.0.1:3847. Override with VITE_LORE_API for production.
 const API_BASE = (import.meta as unknown as { env?: { VITE_LORE_API?: string } }).env?.VITE_LORE_API ?? '';
 
+// Phase 3: Graph Size Limit.
+//
+// The UI slider offers 5k / 10k / 20k. The server enforces a firm 20k
+// hard cap regardless of what the client asks for (packages/lore/src/
+// mcp/server.ts — /api/topology handler). 20k is the ceiling because
+// ForceAtlas2 is CPU-bound and scales non-linearly; above ~20k the
+// browser tab hangs long enough to feel broken.
+//
+// Default is auto-detected from navigator.hardwareConcurrency.
+// Detection is deliberately coarse — we can't distinguish M1 from M4,
+// and navigator.deviceMemory is Chrome/Edge only. The goal is a sane
+// first-paint default, not a perfect benchmark; users can move the
+// slider if the default is wrong for their machine.
+const GRAPH_SIZE_OPTIONS = [5000, 10000, 20000] as const;
+type GraphSize = typeof GRAPH_SIZE_OPTIONS[number];
+const GRAPH_SIZE_STORAGE_KEY = 'lore.graphSizeLimit';
+
+function detectDefaultGraphSize(): GraphSize {
+  const cores = typeof navigator !== 'undefined' ? (navigator.hardwareConcurrency ?? 4) : 4;
+  // Apple Silicon reports as arm64 in UA platform hint; treat as the
+  // upper tier since even M1 handles 20k comfortably.
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  const isAppleSilicon = /Mac/i.test(ua) && /arm|Apple/i.test(ua);
+  if (isAppleSilicon) return 20000;
+  if (cores >= 8) return 20000;
+  if (cores >= 4) return 10000;
+  return 5000;
+}
+
+function loadGraphSizeLimit(): GraphSize {
+  if (typeof localStorage === 'undefined') return detectDefaultGraphSize();
+  const raw = localStorage.getItem(GRAPH_SIZE_STORAGE_KEY);
+  const parsed = Number(raw);
+  if (GRAPH_SIZE_OPTIONS.includes(parsed as GraphSize)) return parsed as GraphSize;
+  return detectDefaultGraphSize();
+}
+
 type LlmProvider = 'embedded' | 'anthropic' | 'openai' | 'ollama';
 
 interface HealthResponse {
@@ -226,6 +263,13 @@ function App() {
   const [activeProjects, setActiveProjects] = useState<Set<string> | null>(null);
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const focusCoalesceRef = useRef<number | null>(null);
+
+  // Phase 3: Graph Size Limit — user-adjustable ceiling passed to
+  // /api/topology as ?limit=N. Persisted to localStorage; defaults to
+  // a hardware-heuristic auto-detect on first visit. The SigmaCanvas
+  // useEffect dep array watches graphSizeLimit, so changes refetch
+  // automatically — no imperative reload needed.
+  const [graphSizeLimit, setGraphSizeLimit] = useState<GraphSize>(() => loadGraphSizeLimit());
 
   // V2.1: node-click detail drawer state.
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -1338,8 +1382,39 @@ function App() {
             onTopologyReady={handleTopologyReady}
             onNodeClick={handleNodeClick}
             showInferred={showInferred}
+            graphSizeLimit={graphSizeLimit}
           />
         </Suspense>
+
+        {/* Phase 3: truncation banner. /api/topology sets truncated:true
+            when the graph exceeds the requested limit. The banner is a
+            non-dismissable amber ribbon — dismissing would hide the fact
+            that the view is a sample. Raising the slider or filtering
+            in the right panel is the supported response. */}
+        {topology?.truncated ? (
+          <div
+            className="truncation-banner"
+            role="status"
+            style={{
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              right: 0,
+              padding: '0.5rem 1rem',
+              background: 'rgba(217, 119, 6, 0.92)', // amber-600
+              color: '#fff',
+              fontSize: '0.8rem',
+              zIndex: 5,
+              pointerEvents: 'none',
+              textAlign: 'center',
+              boxShadow: '0 1px 4px rgba(0,0,0,0.2)',
+            }}
+          >
+            Graph too large — showing {(topology.limit ?? 0).toLocaleString()} of{' '}
+            {(topology.totalCoreNodes ?? topology.nodes.length).toLocaleString()} nodes.
+            Use filters in the right panel to narrow the view, or raise the Graph Size Limit in Settings.
+          </div>
+        ) : null}
 
         {/* V2.1: node-click detail drawer. `key` forces a fresh instance
             per selected node so stale fetch results never render under a
@@ -1375,6 +1450,65 @@ function App() {
                 {theme === 'corporate' ? <Moon size={16} /> : <Sun size={16} />}
                 <span>{theme === 'corporate' ? 'Switch to Midnight' : 'Switch to Corporate'}</span>
               </button>
+            </div>
+
+            {/* Phase 3: Graph Size Limit. Hard cap at 20k — enforced by
+                server. Default is hardware-auto-detected on first visit;
+                once the user moves it, the choice is persisted. Refetch
+                is automatic via the SigmaCanvas useEffect dep array. */}
+            <div className="setting-group">
+              <label>Graph Size Limit</label>
+              <div
+                role="radiogroup"
+                aria-label="Graph Size Limit"
+                style={{ display: 'flex', gap: '0.5rem', marginTop: '0.25rem' }}
+              >
+                {GRAPH_SIZE_OPTIONS.map((size) => (
+                  <label
+                    key={size}
+                    className={`size-option ${graphSizeLimit === size ? 'active' : ''}`}
+                    style={{
+                      flex: 1,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      padding: '0.4rem 0.5rem',
+                      border: graphSizeLimit === size
+                        ? '1px solid var(--color-accent, #0969da)'
+                        : '1px solid var(--color-border, rgba(128,128,128,0.3))',
+                      borderRadius: '4px',
+                      fontSize: '0.8rem',
+                      cursor: 'pointer',
+                      background: graphSizeLimit === size
+                        ? 'rgba(9, 105, 218, 0.12)'
+                        : 'transparent',
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="graph-size"
+                      value={size}
+                      checked={graphSizeLimit === size}
+                      onChange={() => {
+                        setGraphSizeLimit(size);
+                        try {
+                          localStorage.setItem(GRAPH_SIZE_STORAGE_KEY, String(size));
+                        } catch {
+                          // localStorage may throw in private mode; ignore.
+                        }
+                      }}
+                      style={{ display: 'none' }}
+                    />
+                    {(size / 1000).toFixed(0)}k
+                  </label>
+                ))}
+              </div>
+              <p className="help-text" style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '0.4rem' }}>
+                Maximum nodes rendered in the canvas. ForceAtlas2 layout is
+                CPU-bound, so higher values cost more on slow machines.
+                20k is the firm ceiling — the server won't return more
+                even if asked. Default auto-detected from your CPU.
+              </p>
             </div>
 
             <div className="setting-group">

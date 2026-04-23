@@ -17,6 +17,15 @@ import React, { useMemo, useState } from 'react';
 
 export interface TopologyLike {
     nodes: Array<{ id: string; type: string; project?: string; label?: string }>;
+    /** Phase 3: /api/topology truncation signal — true when the graph
+     *  exceeds the requested limit. Optional to keep the shape backward
+     *  compatible with consumers that only care about `nodes`. */
+    truncated?: boolean;
+    /** Phase 3: effective limit applied by the server (after clamping). */
+    limit?: number;
+    /** Phase 3: authoritative core-node count from getStats(); lets the
+     *  banner show "N of TOTAL". */
+    totalCoreNodes?: number;
 }
 
 interface FiltersPanelProps {

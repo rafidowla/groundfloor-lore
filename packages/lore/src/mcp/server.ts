@@ -1599,22 +1599,53 @@ async function main(): Promise<void> {
             // active plugins contribute their own slice (e.g. developer
             // plugin emits CodeFile/CodeSymbol + cross-pillar edges) via
             // ILorePlugin.contributeTopology.
+            //
+            // Phase 3: hard 20k ceiling + truncation signal.
+            //   - ?limit=N query param, clamped to [TOPOLOGY_MIN, TOPOLOGY_HARD_CAP]
+            //   - default TOPOLOGY_DEFAULT when not provided
+            //   - response carries { truncated, limit, totalCoreNodes } so the
+            //     UI can render the "graph too large — use filters" banner
+            //   - getStats() gives us the authoritative core count; plugin
+            //     contributions are flagged truncated via the heuristic
+            //     "plugin returned exactly limit" since contributeTopology
+            //     does not expose a count surface
+            //   - ordering: Kùzu's natural order for now; most-recent ORDER BY
+            //     would touch getTopology internals and the other 4 call sites.
+            //     Deferred to a follow-up when a second pass on topology
+            //     sampling is warranted.
             if (url === '/api/topology' && req.method === 'GET') {
                 try {
-                    const topology = await graph.getTopology(500);
+                    const TOPOLOGY_HARD_CAP = 20000;
+                    const TOPOLOGY_MIN = 1000;
+                    const TOPOLOGY_DEFAULT = 10000;
+                    const urlObj = new URL(req.url ?? '/api/topology', 'http://local');
+                    const rawLimit = Number(urlObj.searchParams.get('limit'));
+                    const requested = Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : TOPOLOGY_DEFAULT;
+                    const limit = Math.min(Math.max(requested, TOPOLOGY_MIN), TOPOLOGY_HARD_CAP);
+
+                    const topology = await graph.getTopology(limit);
+                    const stats = await graph.getStats();
+                    let pluginTruncated = false;
                     const pluginCtx = graph.createPluginGraphContext();
                     for (const plugin of pluginRegistry.active()) {
                         if (typeof plugin.contributeTopology !== 'function') continue;
                         try {
-                            const slice = await plugin.contributeTopology(pluginCtx, 500);
+                            const slice = await plugin.contributeTopology(pluginCtx, limit);
                             topology.nodes.push(...slice.nodes);
                             topology.edges.push(...slice.edges);
+                            if (slice.nodes.length >= limit) pluginTruncated = true;
                         } catch (pluginErr) {
                             console.error(`[/api/topology] plugin "${plugin.name}" contribute failed:`, (pluginErr as Error).message);
                         }
                     }
+                    const truncated = stats.nodeCount > limit || pluginTruncated;
                     res.writeHead(200, { 'Content-Type': 'application/json' });
-                    res.end(JSON.stringify(topology));
+                    res.end(JSON.stringify({
+                        ...topology,
+                        truncated,
+                        limit,
+                        totalCoreNodes: stats.nodeCount,
+                    }));
                 } catch (err) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (err as Error).message }));

@@ -182,10 +182,19 @@ const drawHover: NodeHoverDrawingFunction<LoreNodeAttrs> = (context, data, setti
 
 interface GraphLoaderProps {
     onStatsReady: (stats: { nodes: number; edges: number }) => void;
-    onTopologyReady?: (topology: { nodes: Array<{ id: string; type: string; project?: string; label?: string }> }) => void;
+    onTopologyReady?: (topology: {
+        nodes: Array<{ id: string; type: string; project?: string; label?: string }>;
+        truncated?: boolean;
+        limit?: number;
+        totalCoreNodes?: number;
+    }) => void;
+    /** Phase 3: user-configured size limit forwarded to /api/topology.
+     *  Omit to let the server apply its default (10k). Server clamps to
+     *  [1000, 20000] regardless — UI slider enforces the same range. */
+    graphSizeLimit?: number;
 }
 
-const GraphLoader = ({ onStatsReady, onTopologyReady }: GraphLoaderProps) => {
+const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit }: GraphLoaderProps) => {
     const loadGraph = useLoadGraph();
     const sigma = useSigma();
 
@@ -194,10 +203,18 @@ const GraphLoader = ({ onStatsReady, onTopologyReady }: GraphLoaderProps) => {
 
         const fetchGraph = async () => {
             try {
-                const response = await authFetch('/api/topology');
+                const url = typeof graphSizeLimit === 'number'
+                    ? `/api/topology?limit=${graphSizeLimit}`
+                    : '/api/topology';
+                const response = await authFetch(url);
                 const data = await response.json();
                 if (!active) return;
-                if (onTopologyReady) onTopologyReady({ nodes: data.nodes ?? [] });
+                if (onTopologyReady) onTopologyReady({
+                    nodes: data.nodes ?? [],
+                    truncated: data.truncated,
+                    limit: data.limit,
+                    totalCoreNodes: data.totalCoreNodes,
+                });
 
                 const graph = new Graph();
 
@@ -315,7 +332,7 @@ const GraphLoader = ({ onStatsReady, onTopologyReady }: GraphLoaderProps) => {
         fetchGraph();
 
         return () => { active = false; };
-    }, [loadGraph, sigma, onStatsReady, onTopologyReady]);
+    }, [loadGraph, sigma, onStatsReady, onTopologyReady, graphSizeLimit]);
 
     return null;
 };
@@ -632,11 +649,19 @@ interface SigmaCanvasProps {
     activeTypes?: Set<string> | null;
     activeProjects?: Set<string> | null;
     focusNodeId?: string | null;
-    onTopologyReady?: (topology: { nodes: Array<{ id: string; type: string; project?: string; label?: string }> }) => void;
+    onTopologyReady?: (topology: {
+        nodes: Array<{ id: string; type: string; project?: string; label?: string }>;
+        truncated?: boolean;
+        limit?: number;
+        totalCoreNodes?: number;
+    }) => void;
     /** V2.1: emit when the user clicks a graph node. */
     onNodeClick?: (nodeId: string) => void;
     /** C1: when false, inferred-confidence edges are hidden. Default true. */
     showInferred?: boolean;
+    /** Phase 3: user-configured graph size limit. Forwarded to /api/topology
+     *  as ?limit=N. Server clamps to [1000, 20000]; UI slider enforces same. */
+    graphSizeLimit?: number;
 }
 
 /**
@@ -662,6 +687,7 @@ export default function SigmaCanvas({
     onTopologyReady,
     onNodeClick,
     showInferred = true,
+    graphSizeLimit,
 }: SigmaCanvasProps) {
     const [stats, setStats] = useState<{ nodes: number; edges: number } | null>(null);
 
@@ -691,7 +717,7 @@ export default function SigmaCanvas({
                     allowInvalidContainer: true,
                 }}
             >
-                <GraphLoader onStatsReady={handleStatsReady} onTopologyReady={onTopologyReady} />
+                <GraphLoader onStatsReady={handleStatsReady} onTopologyReady={onTopologyReady} graphSizeLimit={graphSizeLimit} />
                 <DragEvents />
                 <ClickEvents onNodeClick={onNodeClick} />
                 <ViewStateEffect activeTypes={activeTypes} activeProjects={activeProjects} showInferred={showInferred} />
