@@ -17,6 +17,7 @@ import { execSync } from 'child_process';
 import http from 'http';
 import { LocalGraph } from '../engines/localGraph.js';
 import { SyncEngine } from '../engines/syncEngine.js';
+import { ConfigManager } from '../config/configManager.js';
 // `lore index` + `lore doctor` reach the GitNexus-backed code indexer
 // through the developer plugin's opaque api. See src/plugins/developer/
 // codeIndexer.ts for the implementation.
@@ -1743,6 +1744,221 @@ export async function verbatimCommand(args: string[]): Promise<void> {
     }
 
     await graph.close();
+}
+
+/* ─── V2.2 / F4: lore models prune ───────────────────────────── */
+
+/**
+ * modelsCommand — `lore models prune [--apply] [--keep <pattern>]...`
+ *
+ * Walks ~/.groundfloor/models/ and reports (or deletes) ONNX model
+ * directories that aren't the currently-active embedded model. The
+ * typical use case: a user upgraded Qwen 0.5B → Gemma 3 1B and now
+ * has ~1 GB of stale Qwen weights sitting around. Also useful if
+ * the user tried multiple embedded models over time.
+ *
+ * Dry-run by default. `--keep <glob>` can pin additional models the
+ * user wants to preserve (e.g. an Ollama-on-disk variant they swap
+ * between). Active model is ALWAYS kept regardless of flags.
+ *
+ * Scope note: this only manages Transformers.js cache at
+ * ~/.groundfloor/models/. Ollama's model cache is in ~/.ollama/;
+ * not touched here. BYOK providers have nothing to prune.
+ *
+ * Directory layout inside ~/.groundfloor/models/:
+ *   <org>/<model-name>/   (e.g. Xenova/Qwen1.5-0.5B-Chat/,
+ *                              onnx-community/gemma-3-1b-it-ONNX/)
+ */
+export async function modelsCommand(args: string[]): Promise<void> {
+    const sub = args[0];
+    if (sub !== 'prune') {
+        console.error('usage: lore models prune [--apply] [--keep <pattern>]...');
+        console.error('       Removes cached ONNX model weights that are not the currently active');
+        console.error('       embedded model. Dry-run by default — use --apply to actually delete.');
+        console.error('');
+        console.error('       --keep <pattern>  Pin additional models to preserve. Can be repeated.');
+        console.error('                         Example: --keep "Xenova/*" --keep "onnx-community/Llama*"');
+        process.exit(1);
+    }
+
+    const apply = args.includes('--apply');
+    const keepGlobs: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--keep' && i + 1 < args.length) {
+            keepGlobs.push(args[i + 1]);
+            i++;
+        }
+    }
+
+    // Resolve the currently-active embedded model from config. Keep
+    // conservative: if config is missing or malformed, treat the
+    // pre-V2.2 + V2.2 defaults as always-keep. Better to leave a
+    // model on disk than to delete the one the user is about to use.
+    const basePath = path.join(os.homedir(), '.groundfloor');
+    const configManager = new ConfigManager(path.join(basePath, '.lore'));
+    let activeModel = 'onnx-community/gemma-3-1b-it-ONNX';
+    try {
+        const cfg = configManager.read();
+        if (cfg.llmProvider === 'embedded') {
+            // V2.2 default — not stored in config directly; the
+            // dispatcher's DEFAULT_MODELS constant owns it. Use the
+            // known default plus a safety fallback.
+            activeModel = 'onnx-community/gemma-3-1b-it-ONNX';
+        }
+    } catch {
+        /* use fallback */
+    }
+    // Always-keep list. This goes beyond "the active LLM" because
+    // several Transformers.js models under ~/.groundfloor/models/ are
+    // infrastructure, not user-selectable chat models:
+    //   - Xenova/all-MiniLM-L6-v2 is the sentence-transformer
+    //     embedder used by VerbatimStore + LanceDB. Removing it
+    //     breaks reconnect and semantic recall.
+    //   - onnx-community/gemma-3-1b-it-ONNX is the active LLM (V2.2).
+    //
+    // Any future model introduced as infrastructure (not a user
+    // chat pick) must be added here. A ~1 GB false positive is
+    // cheap — a broken reconnect from pruning an embedder is not.
+    const alwaysKeep = new Set([
+        activeModel,
+        'Xenova/all-MiniLM-L6-v2',             // VerbatimStore embedder
+        'onnx-community/gemma-3-1b-it-ONNX',   // V2.2 default LLM (fallback)
+    ]);
+
+    const modelsRoot = path.join(basePath, 'models');
+    if (!fs.existsSync(modelsRoot)) {
+        console.log(`No model cache found at ${modelsRoot}. Nothing to prune.`);
+        return;
+    }
+
+    console.log('');
+    console.log(`Model cache prune`);
+    console.log(`  Cache:    ${modelsRoot}`);
+    console.log(`  Active:   ${activeModel}`);
+    if (keepGlobs.length > 0) console.log(`  Keep:     ${keepGlobs.join(', ')}`);
+    console.log(`  Mode:     ${apply ? 'APPLY' : 'DRY-RUN (use --apply to delete)'}`);
+    console.log('');
+
+    // Walk <modelsRoot>/<org>/<model>/ two levels deep. Some layouts
+    // may nest deeper (huggingface may add version subdirs), but we
+    // treat <org>/<model> as the atomic unit to keep/drop.
+    const candidates: Array<{ relPath: string; fullPath: string; sizeBytes: number }> = [];
+    for (const org of fs.readdirSync(modelsRoot)) {
+        const orgPath = path.join(modelsRoot, org);
+        if (!fs.statSync(orgPath).isDirectory()) continue;
+        for (const model of fs.readdirSync(orgPath)) {
+            const modelPath = path.join(orgPath, model);
+            if (!fs.statSync(modelPath).isDirectory()) continue;
+            const relPath = `${org}/${model}`;
+            candidates.push({
+                relPath,
+                fullPath: modelPath,
+                sizeBytes: dirSizeBytes(modelPath),
+            });
+        }
+    }
+
+    if (candidates.length === 0) {
+        console.log('No cached models found.');
+        return;
+    }
+
+    const matchesKeepGlob = (relPath: string): boolean => {
+        for (const pat of keepGlobs) {
+            // Simple glob: * matches non-slash segment, everything else literal.
+            const re = new RegExp('^' + pat.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$');
+            if (re.test(relPath)) return true;
+        }
+        return false;
+    };
+
+    const keep: typeof candidates = [];
+    const drop: typeof candidates = [];
+    for (const c of candidates) {
+        if (alwaysKeep.has(c.relPath) || matchesKeepGlob(c.relPath)) {
+            keep.push(c);
+        } else {
+            drop.push(c);
+        }
+    }
+
+    const formatBytes = (n: number): string => {
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+        if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+        return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+    };
+
+    console.log(`Found ${candidates.length} cached model${candidates.length === 1 ? '' : 's'}:`);
+    for (const c of keep) {
+        console.log(`  KEEP    ${c.relPath.padEnd(50)} ${formatBytes(c.sizeBytes)}`);
+    }
+    for (const c of drop) {
+        console.log(`  PRUNE   ${c.relPath.padEnd(50)} ${formatBytes(c.sizeBytes)}`);
+    }
+    const dropTotalBytes = drop.reduce((a, b) => a + b.sizeBytes, 0);
+    console.log('');
+    console.log(`  ${keep.length} keep, ${drop.length} to prune, ${formatBytes(dropTotalBytes)} to reclaim`);
+    console.log('');
+
+    if (drop.length === 0) {
+        console.log('No models to prune.');
+        return;
+    }
+
+    if (!apply) {
+        console.log('Dry-run complete. Re-run with --apply to actually delete.');
+        return;
+    }
+
+    let pruned = 0;
+    let reclaimedBytes = 0;
+    for (const c of drop) {
+        try {
+            fs.rmSync(c.fullPath, { recursive: true, force: true });
+            pruned++;
+            reclaimedBytes += c.sizeBytes;
+            console.log(`  ✓ Removed ${c.relPath}`);
+        } catch (err) {
+            console.error(`  ✗ Failed to remove ${c.relPath}: ${(err as Error).message}`);
+        }
+    }
+
+    // Clean up now-empty <org>/ parent dirs.
+    for (const org of fs.readdirSync(modelsRoot)) {
+        const orgPath = path.join(modelsRoot, org);
+        try {
+            if (fs.statSync(orgPath).isDirectory() && fs.readdirSync(orgPath).length === 0) {
+                fs.rmdirSync(orgPath);
+            }
+        } catch { /* ignore */ }
+    }
+
+    console.log('');
+    console.log(`Done. ${pruned} model${pruned === 1 ? '' : 's'} pruned, ${formatBytes(reclaimedBytes)} reclaimed.`);
+}
+
+/** dirSizeBytes — recursive sum of file sizes under `dir`. Best-effort:
+ *  permission errors on individual files silently skip rather than
+ *  abort, so one unreadable file doesn't kill the whole scan. */
+function dirSizeBytes(dir: string): number {
+    let total = 0;
+    const walk = (p: string): void => {
+        try {
+            const st = fs.statSync(p);
+            if (st.isFile()) {
+                total += st.size;
+                return;
+            }
+            if (st.isDirectory()) {
+                for (const name of fs.readdirSync(p)) {
+                    walk(path.join(p, name));
+                }
+            }
+        } catch { /* ignore */ }
+    };
+    walk(dir);
+    return total;
 }
 
 /* ─── Phase 7a: V1 SQLite migration command ──────────────────── */

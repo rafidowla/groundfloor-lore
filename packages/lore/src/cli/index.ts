@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand, modelsCommand } from './commands.js';
 
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -52,6 +52,7 @@ Commands:
   snapshot       One-shot folder scan → HTML snapshot (no workspace ingest)
   migrate        One-off migrations (today: v1-sqlite → Kùzu)
   verbatim       LanceDB verbatim store tools (today: reap orphan embeddings)
+  models         Manage cached LLM models (today: prune unused ONNX weights)
 
 Options:
   --help    Show this help message
@@ -138,6 +139,9 @@ async function main(): Promise<void> {
             break;
         case 'verbatim':
             await verbatimCommand(commandArgs);
+            break;
+        case 'models':
+            await modelsCommand(commandArgs);
             break;
         default:
             console.error(`Unknown command: '${command}'`);
