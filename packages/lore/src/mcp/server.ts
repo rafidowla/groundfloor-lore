@@ -279,12 +279,32 @@ async function fireBootHealthPing(): Promise<void> {
         }
         if (!adapter) {
             dataplaneState = 'offline';
-            console.error('[Lore MCP] Dataplane ping: offline (no DATAPLANE_API_KEY env var)');
+            console.error('[Lore MCP] Dataplane ping: offline (no dataplane credential in keychain or DATAPLANE_API_KEY env)');
             return;
         }
+        // Q1.1 — verify the tenant is actually reachable, not just that
+        // the SDK client constructed. GroundfloorClient() is a local
+        // object instantiation; it does not hit the network. We do a
+        // lightweight GET /health (matches the Dataplane's unauth
+        // health endpoint shipped 2026-04-22). 2-second timeout so
+        // daemon boot never stalls on a slow remote.
         await adapter.connect();
-        dataplaneState = 'bound';
-        console.error('[Lore MCP] Dataplane ping: bound');
+        const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 2000);
+        try {
+            const res = await fetch(`${baseUrl.replace(/\/$/, '')}/health`, {
+                method: 'GET',
+                signal: controller.signal,
+            });
+            if (!res.ok) {
+                throw new Error(`/health returned HTTP ${res.status}`);
+            }
+            dataplaneState = 'bound';
+            console.error('[Lore MCP] Dataplane ping: bound');
+        } finally {
+            clearTimeout(timer);
+        }
     } catch (err) {
         dataplaneState = 'error';
         console.error(`[Lore MCP] Dataplane ping: failed (${(err as Error).message}) — continuing offline`);
@@ -295,8 +315,13 @@ function getDataplaneState(): DataplaneState {
     return dataplaneState;
 }
 
-// Fire the ping non-blockingly; server boot must not wait on it.
-void fireBootHealthPing();
+// Q1.1 — DO NOT fire the ping here. This module-scope call predates
+// keychain-upgrade (S9) and fires before main() replaces `adapter`
+// with the keychain-sourced instance, which hard-wires dataplaneState
+// to 'offline' even when credentials are present. The ping is now
+// fired inside main() immediately after maybeUpgradeAdapterFromKeychain
+// so it observes the final adapter binding. Kept the export shape
+// unchanged so stale imports continue to work.
 
 /**
  * createMcpServer — Factory function to create and configure an McpServer instance.
@@ -1260,6 +1285,14 @@ async function main(): Promise<void> {
     } catch (kcErr) {
         console.error(`[Lore MCP] Keychain upgrade failed (non-fatal): ${(kcErr as Error).message}`);
     }
+
+    // Q1.1 — Dataplane runtime binding. Fire the boot health-ping AFTER
+    // the adapter has been resolved (env → keychain upgrade). Fire-and-
+    // forget; daemon boot must not block on network I/O. On success:
+    // dataplaneState flips 'unknown' → 'bound' and /api/health surfaces
+    // it. Airplane-mode: ping fails silently and state stays 'offline'
+    // (no adapter) or 'error' (adapter present but connect failed).
+    void fireBootHealthPing();
 
     // F3 (Phase 7a) — rotate standard logs if they've exceeded size
     // or age thresholds. Runs AFTER S1 lockdown (perms are already
