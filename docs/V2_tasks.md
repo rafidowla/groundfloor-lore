@@ -1,26 +1,36 @@
 # Lore V2: Implementation Tasks
 
 ## Changelog
+- **2026-04-23 (audit, pass 2)** — Phase 2 closed (all four bullets implemented). Phase 3 partial — 4 of 6 items shipped, only the 20k hard cap + user-adjustable slider remain. DEF Cloud design question resolved (greyed-with-tooltip is the shipped choice). True remaining V2-ship work is Phase 3 (cap + slider) and Phase 4 (Dataplane binding + airplane-mode test).
+- **2026-04-23 (audit, pass 1)** — Phase 0 closed. Line-by-line audit confirmed all five bullets were already implemented in shipped code; doc had not been updated to reflect reality. See Phase 0 section for evidence.
 - **2026-04-23** — Reviewed for post-V2 reconciliation. Added changelog, Definition of Done, capability-manifest schema, health-ping wire format, Dataplane-down rollback, hardware-detection caveat. Q1/Q2 roadmap extracted to `docs/post_v2_plan.md`.
 - **2026-04-23** — Mode selector (intra-workspace) formally removed. Workspaces + Projects filter cover the use case.
 - **2026-04-18** — Dataplane connection deferred; code wired, runtime offline pending API key in launchd plist.
 
 ## Definition of Done (V2 ship)
 V2 is shippable when **all four** of these are true:
-1. Phase 0 closed — Settings modal actually persists changes and reflects live daemon state (no hardcoded banners).
+1. ~~Phase 0 closed~~ — **CLOSED 2026-04-23** (audit). Settings modal persists changes via PATCH `/api/config`, hydrates from `/api/health` on mount, no hardcoded banners.
 2. Airplane-mode test (Phase 4) passes all five bullets.
 3. 20k hard cap enforced server-side with UI banner (Phase 3).
 4. Dataplane health-ping green on a real workspace, with an explicit failure-mode path when it's not (Phase 4).
 
 Anything else tracked here is post-V2 and does not block ship.
 
-## Phase 0: Settings Wiring (Blocker)
-Current Settings modal ([ui/src/App.tsx](ui/src/App.tsx)) is mostly dead UI. Fix before any other Phase can ship. **Owner: unassigned — needs assignment before work resumes. Flagged pre-2026-04-23.**
-- [ ] Add `useState` + persistence for `llmProvider`, `apiKey`, `workspaceAccount`, and `activePlugin`.
-- [ ] Store `apiKey` in OS keychain via `keytar`, NOT localStorage. Keychain service name: `groundfloor-lore`; account key: `<workspace-id>:<provider>`.
-- [ ] Wire `onChange` handlers on each field; PATCH `/api/config` on change.
-- [ ] Replace hardcoded "V2 Dataplane is connected" banner with a real `GET /api/health` check on mount. Banner states: `connected` (green) / `offline` (amber, with retry button) / `error: <msg>` (red).
-- [ ] Wire chat input (`<input>` and send button) to `/api/chat` with SSE streaming.
+**Remaining work to ship V2 (as of 2026-04-23 pass-2 audit):**
+1. **Phase 3 — Hard 20k cap + truncation flag + UI banner.** Server work in `/api/topology`, client banner in `App.tsx`.
+2. **Phase 3 — Graph Size Limit slider (5k/10k/20k) with hardware auto-detect default.** Settings UI + `navigator.hardwareConcurrency` read on mount.
+3. **Phase 4 — Dataplane runtime binding.** API key into launchd plist; verify `TsSdkAdapter` binds. This is equivalent to Q1.1 in `docs/post_v2_plan.md`.
+4. **Phase 4 — Airplane-mode verification sweep.** Five-bullet test, pure verification work (not building).
+
+Phases 0, 1 (core), 2 are closed. Phase 1 follow-ups (Gmail connector, workspace-creation wizard, legacy vocab cleanup) are post-V2.
+
+## Phase 0: Settings Wiring (CLOSED — 2026-04-23 audit)
+Originally flagged as "mostly dead UI" blocker. Line-by-line audit on 2026-04-23 confirmed all five bullets were implemented across earlier V2.1/V2.2 feature commits; the doc had simply not been updated to reflect the code. No remaining Phase 0 work.
+- [x] **`useState` + persistence** for `llmProvider`, `apiKey`, and related config fields. Initial-load hydration from `/api/config` in `ui/src/App.tsx:285-303`. *(Note: `workspaceAccount` + `activePlugin` were re-scoped by the 2026-04-23 workspace model — now handled by the `WorkspacePicker` chip + per-workspace `config.json`, not Settings-modal fields. Obsolete framing, no work to do.)*
+- [x] **OS keychain via `keytar`**, no localStorage. Keychain service name: `groundfloor-lore`; account key: `<provider>`. Implementation: `packages/lore/src/config/keychain.ts`; PATCH writes via `setApiKey` at `packages/lore/src/mcp/server.ts:2009`.
+- [x] **`onChange` handlers → PATCH `/api/config`**. `handleProviderChange` (`App.tsx:378`) and debounced `handleApiKeyChange` (`App.tsx:742`); shared `patchConfig` helper (`App.tsx:361`). Server handler at `server.ts:1994-2027` — returns `{hasApiKey, capability, ...next}` for UI refresh.
+- [x] **Real `GET /api/health` on mount** (no hardcoded banner). `App.tsx:285-303` `Promise.all` fetches `/api/health` + `/api/config` + `/api/stats`. Live rendering from `health.activePlugins` + `health.dataplane` at `App.tsx:979`. The string "V2 Dataplane is connected" no longer exists in the codebase.
+- [x] **Chat input + send wired to `/api/chat` SSE**. `chatInputRef` bound to input (`App.tsx:1248`); `sendMessage` POSTs `/api/chat` (`App.tsx:804`); streams via `resp.body.getReader()` (`App.tsx:814`); send button at `App.tsx:1270`.
 
 ## Phase 1: Generalizing Lore-Local
 - [x] **Strip Developer Dependencies:** Remove hardcoded `CodeSymbol` and `GitNexus` logic from the core Lore engine. *(Mostly done — 16 legacy references tracked in `.arch-baseline.json` for follow-up cleanup.)*
@@ -36,11 +46,12 @@ Current Settings modal ([ui/src/App.tsx](ui/src/App.tsx)) is mostly dead UI. Fix
 - [ ] **Workspace creation wizard** in Settings: "Create new workspace" → pick folder → pick plugin → configure connectors. Switching works today; creation is manual file-on-disk.
 - [ ] **Legacy plugin-vocab cleanup:** move the 16 tracked entries in `.arch-baseline.json` out of `localGraph.ts`, `tsSdkAdapter.ts`, `syncEngine.ts`, `cli/commands.ts`, `cli/index.ts` into the Developer plugin.
 
-## Phase 2: Dual-Path Extraction Router & Settings
-- [ ] **Settings Modal Inventory:** Add to existing modal — Active Plugin selector, Extraction Path radio (Local BYOK / DEF Cloud — greyed), Telemetry opt-out toggle (stub). Keep existing Theme, Renderer, LLM Provider, API Key, Workspace Account.
-- [ ] **The "Coming Soon" Cloud:** Add the `Groundfloor DEF (Digital Employee Framework) Cloud` option for file extraction. **Open question (unresolved 2026-04-23):** grey-out with tooltip, hide until it exists, or show as a waitlist CTA. Decide before Phase 2 closes — current greyed-out design risks support tickets.
-- [ ] **BYOK Local Pipeline:** Server-side `/api/extract` reads the configured LLM's capability manifest and accepts only what the LLM declares. Text-only → `.md`/`.txt`. Multimodal → add `image/png|jpeg|webp|gif`. Reject others with HTTP 415 listing accepted types.
-- [ ] **Chat Routing:** Chat interactions are permanently routed to the local LLM; no cloud code path is reachable from the chat surface.
+## Phase 2: Dual-Path Extraction Router & Settings (CLOSED — 2026-04-23 audit)
+All four bullets verified implemented.
+- [x] **Settings Modal Inventory:** Extraction Path radio (`App.tsx:1480-1508`), Active Plugins read-out (`App.tsx:1509-1516`), Telemetry opt-out toggle (`App.tsx:1698-1703`). Existing Theme / Renderer / LLM Provider / API Key / Workspace still present.
+- [x] **The "Coming Soon" Cloud:** `Groundfloor DEF (Cloud)` radio option at `App.tsx:1499-1507` — `disabled` attribute, title tooltip "Requires Groundfloor Cloud sign-in (coming soon)", greyed visually. *(The 2026-04-23 open question about hide-vs-grey-vs-waitlist is resolved by shipped code: greyed-with-tooltip is the chosen design.)*
+- [x] **BYOK Local Pipeline:** `/api/extract` handler at `server.ts:2034-2060` calls `decideExtraction(payload, getCapability(cfg.llmProvider))`. Router logic in `packages/lore/src/providers/extractRouter.ts`: text-only providers accept `text/plain`+`text/markdown`; multimodal adds `image/png|jpeg|webp|gif`; others get HTTP 415 with accepted-types list.
+- [x] **Chat Routing:** No cloud code path from chat. `extractRouter.ts` non-goals comment at line 17 confirms: *"No DEF Cloud routing. Radio exists in UI but is greyed out."* Chat flows through `/api/chat` → local `llmDispatch.stream()` only.
 
 ### Phase 2 spec: LLM Capability Manifest
 Must be nailed before the BYOK pipeline can be built.
@@ -73,14 +84,15 @@ interface LLMCapabilityManifest {
 
 **Resolution order:** exact `provider+model` match → `provider` default → error. `/api/extract` translates `modalities` into an `Accept` MIME allowlist. Any rejection returns HTTP 415 with `{accepted: string[], reason: string}`.
 
-## Phase 3: The Hybrid WebGL Dashboard UX
+## Phase 3: The Hybrid WebGL Dashboard UX (PARTIAL — 2 items remain)
+2026-04-23 audit: 4 of 6 shipped; hard cap + slider are the two genuine remaining items.
 - [x] **3-Panel Layout:** Chat (Left), Sigma.js (Center), Filters (Right).
 - [ ] **~~Mode pill-group:~~ REMOVED** (V2.1 decision). Skipped in favor of Workspaces + Projects filter.
 - [x] **Dynamic WebGL Filtering:** Checkboxes grouped under Types / Projects. First 10 per category, "Show all (N)" expander. Per-category search at count > 15. Select-all / select-none links. Unchecking dims unselected nodes via Sigma's `nodeReducer`. (`FiltersPanel.tsx`)
 - [x] **Conversational Camera Pan:** Server emits SSE `focus` events (`server.ts:2402,2425`); client consumes via `focusNodeId` state and `CameraEffect` component. Fallbacks wired: nodeId missing → ignored (`SigmaCanvas.tsx:621`); rapid coalesce via `focusCoalesceRef`.
 - [x] **ForceAtlas2 cap:** 2000 iterations OR deadline (`SigmaCanvas.tsx:283`). Label threshold at rendered-size 12.
-- [ ] **Hard 20k ceiling + sampled subgraph + banner.** Firm cap, not user-overridable. Server-side truncation in `/api/topology`: if node count > limit, return the 20k most-recent/most-relevant and set a `truncated: true` flag. Client shows banner: *"Graph too large — showing 20k nodes. Use filters in the right panel to narrow the view."*
-- [ ] **Graph Size Limit setting (user-adjustable below the cap):** Settings slider with steps `5k / 10k / 20k`. Default auto-detected, approximate: `os.cpus().length >= 8 && os.totalmem() >= 16 GB` → 20k; `os.arch() === 'arm64'` → 20k; else → 10k; very-small (cpus < 4 or totalmem < 8 GB) → 5k. Detection is coarse — M-series tier-within-tier (M1 vs M4) is not distinguished. Help text: *"Higher values use more CPU and memory. Lore won't render more than 20k nodes at once — use filters for larger graphs."*
+- [ ] **Hard 20k ceiling + sampled subgraph + banner.** *(Not implemented — `/api/topology` currently calls `graph.getTopology(500)` as a preview sample, unrelated to the 20k cap. No `truncated` flag, no banner.)* Firm cap, not user-overridable. Server-side truncation in `/api/topology`: if node count > limit, return the 20k most-recent/most-relevant and set a `truncated: true` flag. Client shows banner: *"Graph too large — showing 20k nodes. Use filters in the right panel to narrow the view."*
+- [ ] **Graph Size Limit setting (user-adjustable below the cap):** *(Not implemented — no slider in Settings, no `hardwareConcurrency` wiring in UI.)* Settings slider with steps `5k / 10k / 20k`. Default auto-detected, approximate: `os.cpus().length >= 8 && os.totalmem() >= 16 GB` → 20k; `os.arch() === 'arm64'` → 20k; else → 10k; very-small (cpus < 4 or totalmem < 8 GB) → 5k. Detection is coarse — M-series tier-within-tier (M1 vs M4) is not distinguished. Help text: *"Higher values use more CPU and memory. Lore won't render more than 20k nodes at once — use filters for larger graphs."*
 
 ## Phase 4: Dataplane Sync (Stand-Alone)
 - [ ] **Validate TsSdkAdapter:** Verify the Lore V2 platform binds successfully to the `.env` Dataplane credentials.
