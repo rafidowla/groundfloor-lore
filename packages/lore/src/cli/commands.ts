@@ -17,6 +17,7 @@ import { execSync } from 'child_process';
 import http from 'http';
 import { LocalGraph } from '../engines/localGraph.js';
 import { SyncEngine } from '../engines/syncEngine.js';
+import { ConfigManager } from '../config/configManager.js';
 // `lore index` + `lore doctor` reach the GitNexus-backed code indexer
 // through the developer plugin's opaque api. See src/plugins/developer/
 // codeIndexer.ts for the implementation.
@@ -480,17 +481,37 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         issues++;
     }
 
-    // Check 3: Graph is readable and has data
+    // Check 3: Graph is readable. If the daemon is up it holds Kùzu's
+    // single-writer lock, so we can't open it directly — defer to the
+    // daemon's HTTP surface for node/edge counts via /api/storage (which
+    // also gives us disk-usage free). If the daemon is down, open the
+    // DB directly as before.
     if (fs.existsSync(loreDir)) {
-        try {
-            const graph = new LocalGraph(basePath);
-            await graph.initialize();
-            const stats = await graph.getStats();
-            console.log(`  ✓ Graph readable: ${stats.nodeCount} nodes, ${stats.edgeCount} edges`);
-            await graph.close();
-        } catch (graphError) {
-            console.log(`  ✗ Graph error: ${(graphError as Error).message}`);
-            issues++;
+        const tokenPath = path.join(os.homedir(), '.groundfloor', 'auth.token');
+        const daemonUp = (await probeHttp('/api/health', null)) === 200;
+        if (daemonUp && fs.existsSync(tokenPath)) {
+            try {
+                const token = fs.readFileSync(tokenPath, 'utf-8').trim();
+                const topology = await probeJson('/api/topology', token);
+                if (topology && Array.isArray(topology.nodes) && Array.isArray(topology.edges)) {
+                    console.log(`  ✓ Graph (via daemon): ${topology.nodes.length} nodes, ${topology.edges.length} edges`);
+                } else {
+                    console.log('  ⚠ Daemon up but /api/topology returned unexpected shape');
+                }
+            } catch (err) {
+                console.log(`  ⚠ Graph check via daemon failed: ${(err as Error).message}`);
+            }
+        } else {
+            try {
+                const graph = new LocalGraph(basePath);
+                await graph.initialize();
+                const stats = await graph.getStats();
+                console.log(`  ✓ Graph readable: ${stats.nodeCount} nodes, ${stats.edgeCount} edges`);
+                await graph.close();
+            } catch (graphError) {
+                console.log(`  ✗ Graph error: ${(graphError as Error).message}`);
+                issues++;
+            }
         }
     }
 
@@ -588,6 +609,108 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         console.log(`  ⚠ Plugin health check failed: ${(pluginErr as Error).message}`);
     }
 
+    // ─── S10: Security posture ─────────────────────────────────
+    console.log('');
+    console.log('  Security posture');
+    console.log('  ─────────────────────────────────────');
+    const dataHome = path.join(os.homedir(), '.groundfloor');
+
+    // S1 — filesystem permissions
+    try {
+        const dhStat = fs.statSync(dataHome);
+        const dhMode = dhStat.mode & 0o777;
+        if (dhMode === 0o700) {
+            console.log('  ✓ Data home permissions (~/.groundfloor) = 0700');
+        } else {
+            console.log(`  ✗ Data home permissions = 0${dhMode.toString(8)} (expected 0700). Daemon restart will self-heal.`);
+            issues++;
+        }
+    } catch {
+        console.log('  ⚠ Data home ~/.groundfloor not found');
+    }
+    try {
+        const tokenPath = path.join(dataHome, 'auth.token');
+        if (fs.existsSync(tokenPath)) {
+            const tokMode = fs.statSync(tokenPath).mode & 0o777;
+            if (tokMode === 0o600) {
+                console.log('  ✓ Auth token file (0600)');
+            } else {
+                console.log(`  ✗ Auth token mode = 0${tokMode.toString(8)} (expected 0600)`);
+                issues++;
+            }
+        } else {
+            console.log('  ⚠ Auth token not yet generated (daemon not booted)');
+        }
+    } catch { /* ignore */ }
+
+    // S3 — daemon reachable + correctly gating unauthenticated requests
+    try {
+        const tokenPath = path.join(dataHome, 'auth.token');
+        if (fs.existsSync(tokenPath)) {
+            const token = fs.readFileSync(tokenPath, 'utf-8').trim();
+            const healthStatus = await probeHttp('/api/health', null);
+            if (healthStatus === 200) {
+                console.log('  ✓ Daemon /api/health reachable (no auth)');
+            } else {
+                console.log(`  ⚠ /api/health status=${healthStatus ?? 'unreachable'} — daemon may not be running`);
+            }
+            const configUnauth = await probeHttp('/api/config', null);
+            if (configUnauth === 401) {
+                console.log('  ✓ /api/config rejects unauthenticated requests (401)');
+            } else if (configUnauth == null) {
+                console.log('  ⚠ Daemon unreachable — skipping auth-enforcement check');
+            } else {
+                console.log(`  ✗ /api/config without auth returned ${configUnauth} (expected 401) — SECURITY GAP`);
+                issues++;
+            }
+            const configAuth = await probeHttp('/api/config', token);
+            if (configAuth === 200) {
+                console.log('  ✓ /api/config accepts valid bearer (200)');
+            } else if (configAuth != null) {
+                console.log(`  ✗ /api/config with valid bearer returned ${configAuth} (expected 200)`);
+                issues++;
+            }
+        }
+    } catch (authErr) {
+        console.log(`  ⚠ Auth posture check failed: ${(authErr as Error).message}`);
+    }
+
+    // S6 — encryption keyring per workspace (key presence = opt-in ready)
+    try {
+        const { hasWorkspaceKey } = await import('../security/keyring.js');
+        const wsRegistryPath = path.join(dataHome, 'workspaces.json');
+        if (fs.existsSync(wsRegistryPath)) {
+            const reg = JSON.parse(fs.readFileSync(wsRegistryPath, 'utf-8')) as { workspaces: Array<{ name: string }> };
+            let ready = 0;
+            for (const ws of reg.workspaces) {
+                const has = await hasWorkspaceKey(ws.name);
+                if (has) ready++;
+            }
+            console.log(`  ⓘ Encryption keyring: ${ready}/${reg.workspaces.length} workspace(s) have keys provisioned (S6 primitives; opt-in wiring pending)`);
+        }
+    } catch (keyErr) {
+        console.log(`  ⚠ Keyring check failed: ${(keyErr as Error).message}`);
+    }
+
+    // S8 — npm audit summary
+    try {
+        const { execSync } = await import('child_process');
+        const auditRaw = execSync('npm audit --json', { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] });
+        const audit = JSON.parse(auditRaw) as { metadata?: { vulnerabilities?: Record<string, number> } };
+        const v = audit.metadata?.vulnerabilities ?? {};
+        const criticalCount = v.critical ?? 0;
+        const highCount = v.high ?? 0;
+        const moderateCount = v.moderate ?? 0;
+        if (criticalCount === 0 && highCount === 0 && moderateCount === 0) {
+            console.log('  ✓ npm audit clean (0 vulnerabilities)');
+        } else {
+            console.log(`  ⚠ npm audit: ${criticalCount} critical, ${highCount} high, ${moderateCount} moderate`);
+            if (criticalCount > 0 || highCount > 0) issues++;
+        }
+    } catch {
+        console.log('  ⚠ npm audit not runnable');
+    }
+
     // Summary
     console.log('');
     if (issues === 0) {
@@ -596,6 +719,57 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         console.log(`  ${issues} issue${issues > 1 ? 's' : ''} found.`);
     }
     console.log('');
+}
+
+/**
+ * probeHttp — small helper for doctor to probe the daemon via HTTP.
+ * Returns status code or null on unreachable.
+ */
+async function probeHttp(pathname: string, token: string | null): Promise<number | null> {
+    return await new Promise((resolve) => {
+        const req = http.request({
+            host: '127.0.0.1',
+            port: 3847,
+            method: 'GET',
+            path: pathname,
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            timeout: 2000,
+        }, (res) => {
+            res.resume();
+            resolve(res.statusCode ?? null);
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.end();
+    });
+}
+
+/**
+ * probeJson — like probeHttp but parses the response body. Returns
+ * null on any error (unreachable, non-200, non-JSON).
+ */
+async function probeJson(pathname: string, token: string | null): Promise<any | null> {
+    return await new Promise((resolve) => {
+        const req = http.request({
+            host: '127.0.0.1',
+            port: 3847,
+            method: 'GET',
+            path: pathname,
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            timeout: 3000,
+        }, (res) => {
+            if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+            let body = '';
+            res.setEncoding('utf-8');
+            res.on('data', (c) => { body += c; });
+            res.on('end', () => {
+                try { resolve(JSON.parse(body)); } catch { resolve(null); }
+            });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.end();
+    });
 }
 
 /* ─── Command: setup ─────────────────────────────────────────── */
@@ -622,6 +796,10 @@ export async function setupCommand(args: string[]): Promise<void> {
     console.log('');
     console.log('  @groundfloor/lore — Setup');
     console.log('  ═══════════════════════════════════════');
+    console.log('');
+    console.log('  Note: Lore is local-first. One daemon per person.');
+    console.log('  For teams / families, each person runs their own daemon');
+    console.log('  and shares via Dataplane. See docs/DEPLOYMENT_MODEL.md.');
     console.log('');
 
     const basePath = resolveGraphBasePath();
@@ -1366,3 +1544,776 @@ export async function reconnectCommand(args: string[]): Promise<void> {
     }
     await graph.close();
 }
+
+/* ─── C3.5: storage command ───────────────────────────────────── */
+
+import { inspectAllWorkspaces, inspectDataHome, formatBytes } from '../engines/storageInspector.js';
+
+/**
+ * storageCommand — print per-workspace byte breakdown + disk-free.
+ *
+ * Output resembles `du`-plus: categories (graph / embeddings / logs /
+ * models / config / other) sum per workspace, with a SSD headroom line
+ * at the bottom. Human-readable by default; `--json` for machine use.
+ */
+export async function storageCommand(args: string[]): Promise<void> {
+    const json = args.includes('--json');
+    const dataHome = path.join(os.homedir(), '.groundfloor');
+
+    const homeBreakdown = inspectDataHome(dataHome);
+    const workspaces = inspectAllWorkspaces(dataHome);
+
+    if (json) {
+        console.log(JSON.stringify({
+            dataHome: { path: dataHome, breakdown: homeBreakdown },
+            workspaces: workspaces.map((w) => ({ name: w.name, path: w.path, breakdown: w.breakdown })),
+        }, null, 2));
+        return;
+    }
+
+    const line = (label: string, bytes: number, pad = 18): string =>
+        `  ${label.padEnd(pad)} ${formatBytes(bytes).padStart(10)}`;
+
+    console.log('');
+    console.log('Storage — groundfloor-lore');
+    console.log('');
+
+    for (const ws of workspaces) {
+        console.log(`Workspace: ${ws.name}  (${ws.path})`);
+        const b = ws.breakdown;
+        console.log(line('Graph (Kùzu)', b.graphBytes));
+        console.log(line('Embeddings (Lance)', b.embeddingsBytes));
+        console.log(line('Models', b.modelsBytes));
+        console.log(line('Logs', b.logsBytes));
+        console.log(line('Config', b.configBytes));
+        console.log(line('Other', b.otherBytes));
+        console.log(line('  TOTAL', b.totalBytes));
+        console.log('');
+    }
+
+    // If the default workspace is the data home (V2.0 compat), the line
+    // above already counted everything. Otherwise show the data-home
+    // residual (logs, models shared across workspaces).
+    const homeCovered = workspaces.some((w) => w.path === dataHome);
+    if (!homeCovered) {
+        console.log(`Data home residual  (${dataHome})`);
+        console.log(line('Logs', homeBreakdown.logsBytes));
+        console.log(line('Models', homeBreakdown.modelsBytes));
+        console.log(line('Config', homeBreakdown.configBytes));
+        console.log('');
+    }
+
+    if (homeBreakdown.diskTotalBytes > 0) {
+        const pctUsed = ((1 - homeBreakdown.diskFreeBytes / homeBreakdown.diskTotalBytes) * 100).toFixed(0);
+        console.log(`SSD: ${formatBytes(homeBreakdown.diskFreeBytes)} free of ${formatBytes(homeBreakdown.diskTotalBytes)} (${pctUsed}% used)`);
+    }
+}
+
+/* ─── C4: graph report command ─────────────────────────────────── */
+
+import { writeGraphReport } from '../engines/graphReport.js';
+
+/**
+ * reportCommand — write/print a human-readable GRAPH_REPORT.md.
+ *
+ * Routing:
+ *   1. If the daemon is running, fetch the report from /api/report
+ *      (the daemon holds Kùzu's single-writer lock, so the CLI
+ *      can't open the DB in parallel).
+ *   2. Otherwise, open the DB directly and generate inline.
+ *
+ * Flags:
+ *   --output <path>   write to file (default: stdout)
+ *   --project <name>  scope to a project
+ *   --topN <n>        override top-N hubs (default 20)
+ */
+export async function reportCommand(args: string[]): Promise<void> {
+    const outIdx = args.indexOf('--output');
+    const outputPath = outIdx >= 0 ? args[outIdx + 1] : null;
+    const projIdx = args.indexOf('--project');
+    const project = projIdx >= 0 ? args[projIdx + 1] : undefined;
+    const topNIdx = args.indexOf('--topN');
+    const topN = topNIdx >= 0 ? parseInt(args[topNIdx + 1], 10) : undefined;
+
+    let md: string | null = null;
+
+    // Try HTTP first — cheapest path when the daemon is up.
+    try {
+        md = await fetchReportViaDaemon(project, topN);
+    } catch {
+        // Daemon not running or unreachable — fall through to direct DB.
+    }
+
+    if (md == null) {
+        const basePath = path.join(os.homedir(), '.groundfloor');
+        const graph = new LocalGraph(basePath);
+        await graph.initialize();
+        md = await writeGraphReport(graph, { project, topN });
+        await graph.close();
+    }
+
+    if (outputPath) {
+        const resolved = path.resolve(outputPath);
+        fs.writeFileSync(resolved, md, { mode: 0o600 });
+        console.log(`Wrote ${md.length} bytes to ${resolved}`);
+    } else {
+        process.stdout.write(md);
+    }
+}
+
+/* ─── Phase 7a / F2b: verbatim reaper ──────────────────────── */
+
+/**
+ * verbatimCommand — `lore verbatim reap [--apply] [--prefix <p>]`
+ *
+ * Finds LanceDB verbatim records whose corresponding Kùzu node no
+ * longer exists (orphans from pre-F2a deletes + test leaks). Lists
+ * them in dry-run mode; deletes them with --apply.
+ *
+ * Default prefix: 'lore:'  — the core-plugin verbatim namespace.
+ * Other prefixes (e.g. 'file:', 'symbol:') are plugin-owned; reaping
+ * those requires the plugin's side to report whether the referenced
+ * thing still exists. Out of scope for the MVP; users can pass
+ * --prefix explicitly if they know what they're doing.
+ */
+export async function verbatimCommand(args: string[]): Promise<void> {
+    const sub = args[0];
+    if (sub !== 'reap') {
+        console.error('usage: lore verbatim reap [--apply] [--prefix <prefix>]');
+        console.error('       Default prefix: lore: (reap orphaned LoreNode embeddings)');
+        process.exit(1);
+    }
+    const apply = args.includes('--apply');
+    const prefixIdx = args.indexOf('--prefix');
+    const prefix = prefixIdx >= 0 ? args[prefixIdx + 1] : 'lore:';
+
+    const basePath = path.join(os.homedir(), '.groundfloor');
+    const graph = new LocalGraph(basePath);
+    const { VerbatimStore } = await import('../engines/verbatimStore.js');
+    const verbatim = new VerbatimStore(basePath);
+
+    await graph.initialize();
+    await verbatim.initialize();
+
+    console.log('');
+    console.log(`Verbatim reaper`);
+    console.log(`  Prefix:   ${prefix}`);
+    console.log(`  Mode:     ${apply ? 'APPLY' : 'DRY-RUN (use --apply to delete)'}`);
+    console.log('');
+
+    const allIds = await verbatim.listIds(prefix);
+    console.log(`Inspecting ${allIds.length} verbatim records with prefix "${prefix}"...`);
+
+    const orphans: string[] = [];
+    let alive = 0;
+    for (const verbatimId of allIds) {
+        // Strip the prefix to get the graph node id
+        const nodeId = verbatimId.startsWith(prefix) ? verbatimId.slice(prefix.length) : verbatimId;
+        const node = await graph.getNode(nodeId);
+        if (node == null) {
+            orphans.push(verbatimId);
+        } else {
+            alive++;
+        }
+    }
+
+    console.log('');
+    console.log(`  Alive:   ${alive} verbatim records have a matching Kùzu node`);
+    console.log(`  Orphan:  ${orphans.length} verbatim records with NO matching node`);
+    console.log('');
+
+    if (orphans.length > 0) {
+        console.log('Orphan samples (first 20):');
+        for (const o of orphans.slice(0, 20)) console.log(`  - ${o}`);
+        if (orphans.length > 20) console.log(`  ... and ${orphans.length - 20} more`);
+        console.log('');
+    }
+
+    if (apply && orphans.length > 0) {
+        console.log(`Reaping ${orphans.length} orphan embedding(s)...`);
+        let reaped = 0;
+        for (const id of orphans) {
+            await verbatim.delete(id);
+            reaped++;
+        }
+        console.log(`Done. ${reaped} orphan embeddings removed.`);
+    } else if (!apply && orphans.length > 0) {
+        console.log('Dry-run complete. Re-run with --apply to actually delete.');
+    } else {
+        console.log('No action needed.');
+    }
+
+    await graph.close();
+}
+
+/* ─── V2.2 / F4: lore models prune ───────────────────────────── */
+
+/**
+ * modelsCommand — `lore models prune [--apply] [--keep <pattern>]...`
+ *
+ * Walks ~/.groundfloor/models/ and reports (or deletes) ONNX model
+ * directories that aren't the currently-active embedded model. The
+ * typical use case: a user upgraded Qwen 0.5B → Gemma 3 1B and now
+ * has ~1 GB of stale Qwen weights sitting around. Also useful if
+ * the user tried multiple embedded models over time.
+ *
+ * Dry-run by default. `--keep <glob>` can pin additional models the
+ * user wants to preserve (e.g. an Ollama-on-disk variant they swap
+ * between). Active model is ALWAYS kept regardless of flags.
+ *
+ * Scope note: this only manages Transformers.js cache at
+ * ~/.groundfloor/models/. Ollama's model cache is in ~/.ollama/;
+ * not touched here. BYOK providers have nothing to prune.
+ *
+ * Directory layout inside ~/.groundfloor/models/:
+ *   <org>/<model-name>/   (e.g. Xenova/Qwen1.5-0.5B-Chat/,
+ *                              onnx-community/gemma-3-1b-it-ONNX/)
+ */
+export async function modelsCommand(args: string[]): Promise<void> {
+    const sub = args[0];
+    if (sub !== 'prune') {
+        console.error('usage: lore models prune [--apply] [--keep <pattern>]...');
+        console.error('       Removes cached ONNX model weights that are not the currently active');
+        console.error('       embedded model. Dry-run by default — use --apply to actually delete.');
+        console.error('');
+        console.error('       --keep <pattern>  Pin additional models to preserve. Can be repeated.');
+        console.error('                         Example: --keep "Xenova/*" --keep "onnx-community/Llama*"');
+        process.exit(1);
+    }
+
+    const apply = args.includes('--apply');
+    const keepGlobs: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+        if (args[i] === '--keep' && i + 1 < args.length) {
+            keepGlobs.push(args[i + 1]);
+            i++;
+        }
+    }
+
+    // Resolve the currently-active embedded model from config. Keep
+    // conservative: if config is missing or malformed, treat the
+    // pre-V2.2 + V2.2 defaults as always-keep. Better to leave a
+    // model on disk than to delete the one the user is about to use.
+    const basePath = path.join(os.homedir(), '.groundfloor');
+    const configManager = new ConfigManager(path.join(basePath, '.lore'));
+    let activeModel = 'onnx-community/gemma-3-1b-it-ONNX';
+    try {
+        const cfg = configManager.read();
+        if (cfg.llmProvider === 'embedded') {
+            // V2.2 default — not stored in config directly; the
+            // dispatcher's DEFAULT_MODELS constant owns it. Use the
+            // known default plus a safety fallback.
+            activeModel = 'onnx-community/gemma-3-1b-it-ONNX';
+        }
+    } catch {
+        /* use fallback */
+    }
+    // Always-keep list. This goes beyond "the active LLM" because
+    // several Transformers.js models under ~/.groundfloor/models/ are
+    // infrastructure, not user-selectable chat models:
+    //   - Xenova/all-MiniLM-L6-v2 is the sentence-transformer
+    //     embedder used by VerbatimStore + LanceDB. Removing it
+    //     breaks reconnect and semantic recall.
+    //   - onnx-community/gemma-3-1b-it-ONNX is the active LLM (V2.2).
+    //
+    // Any future model introduced as infrastructure (not a user
+    // chat pick) must be added here. A ~1 GB false positive is
+    // cheap — a broken reconnect from pruning an embedder is not.
+    const alwaysKeep = new Set([
+        activeModel,
+        'Xenova/all-MiniLM-L6-v2',             // VerbatimStore embedder
+        'onnx-community/gemma-3-1b-it-ONNX',   // V2.2 default LLM (fallback)
+    ]);
+
+    const modelsRoot = path.join(basePath, 'models');
+    if (!fs.existsSync(modelsRoot)) {
+        console.log(`No model cache found at ${modelsRoot}. Nothing to prune.`);
+        return;
+    }
+
+    console.log('');
+    console.log(`Model cache prune`);
+    console.log(`  Cache:    ${modelsRoot}`);
+    console.log(`  Active:   ${activeModel}`);
+    if (keepGlobs.length > 0) console.log(`  Keep:     ${keepGlobs.join(', ')}`);
+    console.log(`  Mode:     ${apply ? 'APPLY' : 'DRY-RUN (use --apply to delete)'}`);
+    console.log('');
+
+    // Walk <modelsRoot>/<org>/<model>/ two levels deep. Some layouts
+    // may nest deeper (huggingface may add version subdirs), but we
+    // treat <org>/<model> as the atomic unit to keep/drop.
+    const candidates: Array<{ relPath: string; fullPath: string; sizeBytes: number }> = [];
+    for (const org of fs.readdirSync(modelsRoot)) {
+        const orgPath = path.join(modelsRoot, org);
+        if (!fs.statSync(orgPath).isDirectory()) continue;
+        for (const model of fs.readdirSync(orgPath)) {
+            const modelPath = path.join(orgPath, model);
+            if (!fs.statSync(modelPath).isDirectory()) continue;
+            const relPath = `${org}/${model}`;
+            candidates.push({
+                relPath,
+                fullPath: modelPath,
+                sizeBytes: dirSizeBytes(modelPath),
+            });
+        }
+    }
+
+    if (candidates.length === 0) {
+        console.log('No cached models found.');
+        return;
+    }
+
+    const matchesKeepGlob = (relPath: string): boolean => {
+        for (const pat of keepGlobs) {
+            // Simple glob: * matches non-slash segment, everything else literal.
+            const re = new RegExp('^' + pat.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*') + '$');
+            if (re.test(relPath)) return true;
+        }
+        return false;
+    };
+
+    const keep: typeof candidates = [];
+    const drop: typeof candidates = [];
+    for (const c of candidates) {
+        if (alwaysKeep.has(c.relPath) || matchesKeepGlob(c.relPath)) {
+            keep.push(c);
+        } else {
+            drop.push(c);
+        }
+    }
+
+    const formatBytes = (n: number): string => {
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+        if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+        return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+    };
+
+    console.log(`Found ${candidates.length} cached model${candidates.length === 1 ? '' : 's'}:`);
+    for (const c of keep) {
+        console.log(`  KEEP    ${c.relPath.padEnd(50)} ${formatBytes(c.sizeBytes)}`);
+    }
+    for (const c of drop) {
+        console.log(`  PRUNE   ${c.relPath.padEnd(50)} ${formatBytes(c.sizeBytes)}`);
+    }
+    const dropTotalBytes = drop.reduce((a, b) => a + b.sizeBytes, 0);
+    console.log('');
+    console.log(`  ${keep.length} keep, ${drop.length} to prune, ${formatBytes(dropTotalBytes)} to reclaim`);
+    console.log('');
+
+    if (drop.length === 0) {
+        console.log('No models to prune.');
+        return;
+    }
+
+    if (!apply) {
+        console.log('Dry-run complete. Re-run with --apply to actually delete.');
+        return;
+    }
+
+    let pruned = 0;
+    let reclaimedBytes = 0;
+    for (const c of drop) {
+        try {
+            fs.rmSync(c.fullPath, { recursive: true, force: true });
+            pruned++;
+            reclaimedBytes += c.sizeBytes;
+            console.log(`  ✓ Removed ${c.relPath}`);
+        } catch (err) {
+            console.error(`  ✗ Failed to remove ${c.relPath}: ${(err as Error).message}`);
+        }
+    }
+
+    // Clean up now-empty <org>/ parent dirs.
+    for (const org of fs.readdirSync(modelsRoot)) {
+        const orgPath = path.join(modelsRoot, org);
+        try {
+            if (fs.statSync(orgPath).isDirectory() && fs.readdirSync(orgPath).length === 0) {
+                fs.rmdirSync(orgPath);
+            }
+        } catch { /* ignore */ }
+    }
+
+    console.log('');
+    console.log(`Done. ${pruned} model${pruned === 1 ? '' : 's'} pruned, ${formatBytes(reclaimedBytes)} reclaimed.`);
+}
+
+/** dirSizeBytes — recursive sum of file sizes under `dir`. Best-effort:
+ *  permission errors on individual files silently skip rather than
+ *  abort, so one unreadable file doesn't kill the whole scan. */
+function dirSizeBytes(dir: string): number {
+    let total = 0;
+    const walk = (p: string): void => {
+        try {
+            const st = fs.statSync(p);
+            if (st.isFile()) {
+                total += st.size;
+                return;
+            }
+            if (st.isDirectory()) {
+                for (const name of fs.readdirSync(p)) {
+                    walk(path.join(p, name));
+                }
+            }
+        } catch { /* ignore */ }
+    };
+    walk(dir);
+    return total;
+}
+
+/* ─── Phase 7a: V1 SQLite migration command ──────────────────── */
+
+import { migrateV1Sqlite } from '../engines/v1Migration.js';
+
+/**
+ * migrateCommand — one-off tools for moving data between eras.
+ *
+ *   lore migrate v1-sqlite [<path>]           # dry-run (default)
+ *   lore migrate v1-sqlite [<path>] --apply   # actually import
+ *   lore migrate v1-sqlite --apply --archive  # import + move file to archive
+ */
+export async function migrateCommand(args: string[]): Promise<void> {
+    const target = args[0];
+    if (target !== 'v1-sqlite') {
+        console.error('usage: lore migrate v1-sqlite [<path>] [--apply] [--archive]');
+        console.error('       Default path: ~/.groundfloor/knowledge.db');
+        console.error('       Default is dry-run. Use --apply to write to the Kùzu graph.');
+        process.exit(1);
+    }
+
+    // Parse optional positional path (anything that doesn't start with --)
+    const rest = args.slice(1);
+    const pathArg = rest.find((a) => !a.startsWith('--'));
+    const apply = rest.includes('--apply');
+    const archive = rest.includes('--archive');
+
+    const sqlitePath = pathArg ?? path.join(os.homedir(), '.groundfloor', 'knowledge.db');
+
+    if (!fs.existsSync(sqlitePath)) {
+        console.error(`No SQLite database at ${sqlitePath}`);
+        process.exit(1);
+    }
+
+    const basePath = path.join(os.homedir(), '.groundfloor');
+    const loreDir = path.join(basePath, '.lore');
+    const graph = new LocalGraph(basePath);
+
+    // We need the verbatim store + plugin registry to fire the ingest
+    // hook for each imported node (so LanceDB + semantic-reconnect run).
+    const { VerbatimStore } = await import('../engines/verbatimStore.js');
+    const verbatim = new VerbatimStore(basePath);
+    const { ConfigManager } = await import('../config/configManager.js');
+    const { PluginRegistry } = await import('../plugins/registry.js');
+    const registry = new PluginRegistry(new ConfigManager(loreDir));
+    registry.boot();
+
+    await graph.initialize();
+    await registry.registerSchemas(graph.createPluginGraphContext());
+
+    console.log('');
+    console.log(`Migration: V1 SQLite → V2 Kùzu`);
+    console.log(`  Source:   ${sqlitePath}`);
+    console.log(`  Mode:     ${apply ? 'APPLY' : 'DRY-RUN (use --apply to write)'}`);
+    if (archive && !apply) {
+        console.log(`  Archive:  (--archive is ignored without --apply)`);
+    } else if (archive) {
+        console.log(`  Archive:  YES — source file will be moved to ~/.groundfloor/archive/`);
+    }
+    console.log('');
+
+    const report = await migrateV1Sqlite(graph, {
+        sqlitePath,
+        apply,
+        archive,
+        verbatimStore: apply ? verbatim : undefined,
+        pluginRegistry: apply ? registry : undefined,
+    });
+
+    console.log('─── Summary ─────────────────────────────────');
+    console.log(`  V1 nodes read:              ${report.v1NodesRead}`);
+    console.log(`  V1 edges read:              ${report.v1EdgesRead}`);
+    console.log('');
+    console.log(`  Nodes imported:             ${report.nodesImported}${apply ? '' : ' (would be)'}`);
+    console.log(`  Nodes skipped (id match):   ${report.nodesSkippedIdConflict.length}`);
+    console.log(`  Nodes flagged (content dup): ${report.nodesFlaggedContentDup.length}`);
+    console.log('');
+    console.log(`  Edges imported:             ${report.edgesImported}${apply ? '' : ' (would be)'}`);
+    console.log(`  Edges skipped (duplicate):  ${report.edgesSkippedAlreadyExists}`);
+    console.log(`  Edges skipped (dangling):   ${report.edgesSkippedMissingEndpoint.length}`);
+    console.log('');
+    console.log(`  Duration:                   ${report.durationMs}ms`);
+    if (report.archivedTo) {
+        console.log(`  Archived to:                ${report.archivedTo}`);
+    }
+
+    // Show ID-skip details if any
+    if (report.nodesSkippedIdConflict.length > 0) {
+        console.log('');
+        console.log('ID conflicts (V1 id matched an existing Kùzu node — V1 skipped):');
+        for (const id of report.nodesSkippedIdConflict.slice(0, 10)) console.log(`  - ${id}`);
+        if (report.nodesSkippedIdConflict.length > 10) {
+            console.log(`  ... and ${report.nodesSkippedIdConflict.length - 10} more`);
+        }
+    }
+
+    // Show content-dup flags
+    if (report.nodesFlaggedContentDup.length > 0) {
+        console.log('');
+        console.log('Content-duplicates (V1 id imported alongside an existing node with identical content):');
+        console.log('  Review and `lore delete_node <v1-id>` to collapse if desired.');
+        for (const pair of report.nodesFlaggedContentDup.slice(0, 10)) {
+            console.log(`  - V1: ${pair.v1Id}  ~=  existing: ${pair.existingId}`);
+        }
+        if (report.nodesFlaggedContentDup.length > 10) {
+            console.log(`  ... and ${report.nodesFlaggedContentDup.length - 10} more`);
+        }
+    }
+
+    if (!apply) {
+        console.log('');
+        console.log('Dry-run complete. Run again with --apply to actually import.');
+    } else {
+        console.log('');
+        console.log('Migration applied. Run `lore status` to confirm.');
+        if (!archive) {
+            console.log(`The source SQLite is still at ${sqlitePath} — delete manually or re-run with --archive.`);
+        }
+    }
+
+    await graph.close();
+}
+
+/* ─── C10: snapshot command ──────────────────────────────────── */
+
+/**
+ * snapshotCommand — `lore snapshot <folder> --output graph.html`
+ *
+ * The graphify-style one-shot: point it at a folder, get a standalone
+ * HTML snapshot of what's in there. Uses an ephemeral workspace so the
+ * user's live graph isn't touched.
+ *
+ * Implementation choice for scope: for C10 minimum viable, we don't
+ * stand up a full ephemeral workspace (that requires reconnect + plugin
+ * re-registration against a new path). Instead, we iterate the folder
+ * via the FilesystemConnector + route through the ExtractorRegistry,
+ * collecting extracted content into in-memory nodes and then rendering
+ * directly via exportGraphAsHtml's templates.
+ *
+ * This produces a PREVIEW-quality snapshot — what's in the folder,
+ * with text content extracted and shown. Semantic edges (reconnect)
+ * require the full workspace pipeline; those are absent from the
+ * one-shot snapshot. For semantic-edge snapshots, use the normal
+ * ingest → reconnect → export flow against your active workspace.
+ */
+export async function snapshotCommand(args: string[]): Promise<void> {
+    const folder = args[0];
+    if (!folder || folder.startsWith('--')) {
+        console.error('usage: lore snapshot <folder> --output <graph.html> [--title "..."]');
+        process.exit(1);
+    }
+    const outIdx = args.indexOf('--output');
+    if (outIdx < 0 || !args[outIdx + 1]) {
+        console.error('--output <path> is required');
+        process.exit(1);
+    }
+    const outputPath = path.resolve(args[outIdx + 1]);
+    const titleIdx = args.indexOf('--title');
+    const title = titleIdx >= 0 ? args[titleIdx + 1] : `Lore snapshot of ${path.basename(folder)}`;
+
+    const absFolder = path.resolve(folder);
+    if (!fs.existsSync(absFolder)) {
+        console.error(`folder not found: ${absFolder}`);
+        process.exit(1);
+    }
+
+    const { buildDefaultRegistry } = await import('../engines/extractors/index.js');
+    const { FilesystemConnector } = await import('../engines/connectors/index.js');
+    const extractors = buildDefaultRegistry();
+    const connector = new FilesystemConnector({
+        extractorRegistry: extractors,
+        roots: [absFolder],
+        // Allow the target folder even if it's outside the standard
+        // allowlist — `lore snapshot` is explicitly opt-in to this path.
+        workspaceRoot: absFolder,
+    });
+
+    console.log(`Scanning ${absFolder}...`);
+    const nodes: Array<{ id: string; label: string; type: string; group: string }> = [];
+    const edges: Array<{ from: string; to: string; label?: string }> = [];
+    const parentChildren = new Map<string, string[]>();
+
+    let count = 0;
+    for await (const item of connector.sync({ fullSync: true })) {
+        count++;
+        const rel = path.relative(absFolder, item.metadata.absolutePath as string);
+        const parent = path.dirname(rel);
+        const kind = inferSnapshotKind(item.mimeType);
+        const id = `file:${rel}`;
+        nodes.push({
+            id,
+            label: path.basename(rel),
+            type: kind,
+            group: kind,
+        });
+        if (parent && parent !== '.') {
+            if (!parentChildren.has(parent)) {
+                parentChildren.set(parent, []);
+                nodes.push({ id: `dir:${parent}`, label: parent, type: 'directory', group: 'directory' });
+            }
+            parentChildren.get(parent)!.push(id);
+            edges.push({ from: `dir:${parent}`, to: id, label: 'contains' });
+        }
+    }
+
+    // Build minimal topology payload for the HTML export template.
+    // We reuse exportGraphAsHtml's output structure by constructing a
+    // mini LocalGraph-shaped object with just getTopology().
+    const topology = { nodes, edges };
+    const html = renderSnapshotHtml(topology, {
+        title,
+        description: `Snapshot of ${absFolder} (${count} files, ${nodes.length} nodes). This is a one-shot file-tree view. Semantic edges require running a full ingest+reconnect against your active workspace.`,
+    });
+
+    fs.writeFileSync(outputPath, html, { mode: 0o600 });
+    console.log(`Wrote ${html.length} bytes to ${outputPath}`);
+    console.log(`Open: open "${outputPath}"`);
+}
+
+function inferSnapshotKind(mime: string): string {
+    if (mime.startsWith('text/')) return 'text';
+    if (mime === 'application/pdf') return 'pdf';
+    if (mime.startsWith('audio/')) return 'audio';
+    if (mime.startsWith('image/')) return 'image';
+    if (mime === 'message/rfc822') return 'email';
+    if (mime.includes('wordprocessingml')) return 'docx';
+    return 'file';
+}
+
+// Tiny inline HTML renderer for snapshots — doesn't need the full
+// graph topology pipeline, so standalone from exportGraphAsHtml.
+function renderSnapshotHtml(
+    topology: { nodes: Array<{ id: string; label: string; type: string; group: string }>, edges: Array<{ from: string; to: string; label?: string }> },
+    opts: { title: string; description: string },
+): string {
+    const escape = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c] ?? c));
+    return [
+        '<!DOCTYPE html><html><head><meta charset="utf-8">',
+        `<title>${escape(opts.title)}</title>`,
+        '<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>',
+        '<style>body{font-family:-apple-system,system-ui,sans-serif;margin:0;background:#0f172a;color:#e2e8f0}header{padding:1rem 1.5rem;background:#1e293b;border-bottom:1px solid #334155}header h1{margin:0 0 .25rem;font-size:1.1rem}header p{margin:0;font-size:.85rem;color:#94a3b8}#g{width:100vw;height:calc(100vh - 80px)}</style>',
+        `</head><body><header><h1>${escape(opts.title)}</h1><p>${escape(opts.description)}</p></header><div id="g"></div>`,
+        `<script>const DATA=${JSON.stringify(topology)};const options={nodes:{shape:"dot",size:14,font:{color:"#e2e8f0",size:12}},edges:{arrows:{to:{enabled:true,scaleFactor:.4}},color:{color:"#475569"}},physics:{stabilization:{iterations:150}},groups:{directory:{color:{background:"#475569",border:"#334155"}},text:{color:{background:"#38A169",border:"#2F855A"}},pdf:{color:{background:"#E53E3E",border:"#C53030"}},docx:{color:{background:"#3182CE",border:"#2B6CB0"}},email:{color:{background:"#805AD5",border:"#553C9A"}},audio:{color:{background:"#DD6B20",border:"#C05621"}},image:{color:{background:"#D69E2E",border:"#B7791F"}},file:{color:{background:"#718096",border:"#4A5568"}}}};new vis.Network(document.getElementById("g"),DATA,options);</script></body></html>`,
+    ].join('');
+}
+
+/* ─── C8: export command ──────────────────────────────────────── */
+
+import { exportGraphAsHtml } from '../engines/htmlExport.js';
+
+/**
+ * exportCommand — write a self-contained HTML graph snapshot.
+ *
+ *   lore export html --output graph.html [--project <name>] [--max-nodes N] [--title "..."]
+ *
+ * Routes through the daemon via /api/export/html when it's up
+ * (avoids Kùzu single-writer contention), falls back to direct DB.
+ */
+export async function exportCommand(args: string[]): Promise<void> {
+    if (args[0] !== 'html') {
+        console.error('usage: lore export html --output <path> [--project <name>] [--max-nodes N] [--title "..."]');
+        process.exit(1);
+    }
+    const outIdx = args.indexOf('--output');
+    if (outIdx < 0 || !args[outIdx + 1]) {
+        console.error('--output <path> is required');
+        process.exit(1);
+    }
+    const outputPath = path.resolve(args[outIdx + 1]);
+    const projectIdx = args.indexOf('--project');
+    const project = projectIdx >= 0 ? args[projectIdx + 1] : undefined;
+    const maxIdx = args.indexOf('--max-nodes');
+    const maxNodes = maxIdx >= 0 ? parseInt(args[maxIdx + 1], 10) : undefined;
+    const titleIdx = args.indexOf('--title');
+    const title = titleIdx >= 0 ? args[titleIdx + 1] : undefined;
+
+    let html: string | null = null;
+    try {
+        html = await fetchHtmlExportViaDaemon({ project, maxNodes, title });
+    } catch {
+        // Daemon down — open DB directly.
+    }
+    if (html == null) {
+        const basePath = path.join(os.homedir(), '.groundfloor');
+        const graph = new LocalGraph(basePath);
+        await graph.initialize();
+        html = await exportGraphAsHtml(graph, { project, maxNodes, title });
+        await graph.close();
+    }
+    fs.writeFileSync(outputPath, html, { mode: 0o600 });
+    console.log(`Wrote ${html.length} bytes to ${outputPath}`);
+    console.log(`Open in a browser: open "${outputPath}"`);
+}
+
+async function fetchHtmlExportViaDaemon(opts: { project?: string; maxNodes?: number; title?: string }): Promise<string> {
+    const tokenPath = path.join(os.homedir(), '.groundfloor', 'auth.token');
+    if (!fs.existsSync(tokenPath)) throw new Error('no daemon');
+    const token = fs.readFileSync(tokenPath, 'utf-8').trim();
+    const qs = new URLSearchParams();
+    if (opts.project) qs.set('project', opts.project);
+    if (opts.maxNodes != null) qs.set('maxNodes', String(opts.maxNodes));
+    if (opts.title) qs.set('title', opts.title);
+    const pathQs = qs.toString() ? `/api/export/html?${qs.toString()}` : '/api/export/html';
+    return await new Promise<string>((resolve, reject) => {
+        const req = http.request({
+            host: '127.0.0.1', port: 3847, method: 'GET', path: pathQs,
+            headers: { Authorization: `Bearer ${token}` }, timeout: 15_000,
+        }, (res) => {
+            let body = '';
+            res.setEncoding('utf-8');
+            res.on('data', (c) => { body += c; });
+            res.on('end', () => {
+                if (res.statusCode === 200) resolve(body);
+                else reject(new Error(`HTTP ${res.statusCode}`));
+            });
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(new Error('timeout')); });
+        req.end();
+    });
+}
+
+async function fetchReportViaDaemon(project?: string, topN?: number): Promise<string> {
+    const tokenPath = path.join(os.homedir(), '.groundfloor', 'auth.token');
+    if (!fs.existsSync(tokenPath)) {
+        throw new Error('no auth token — daemon not initialized');
+    }
+    const token = fs.readFileSync(tokenPath, 'utf-8').trim();
+
+    const qs = new URLSearchParams();
+    if (project) qs.set('project', project);
+    if (topN != null) qs.set('topN', String(topN));
+    const path_ = qs.toString() ? `/api/report?${qs.toString()}` : '/api/report';
+
+    return await new Promise<string>((resolve, reject) => {
+        const req = http.request({
+            host: '127.0.0.1',
+            port: 3847,
+            method: 'GET',
+            path: path_,
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 10_000,
+        }, (res) => {
+            let body = '';
+            res.setEncoding('utf-8');
+            res.on('data', (c) => { body += c; });
+            res.on('end', () => {
+                if (res.statusCode === 200) resolve(body);
+                else reject(new Error(`HTTP ${res.statusCode}: ${body}`));
+            });
+        });
+        req.on('error', reject);
+        req.on('timeout', () => { req.destroy(new Error('timeout')); });
+        req.end();
+    });
+}
+

@@ -35,3 +35,57 @@ Alternatives: Waiting for Dataplane sync to interpret security contexts (rejecte
 Decision: Replace SurrealAdapter with TsSdkAdapter using @groundfloor/ts-sdk.
 Reason: Decoupling physical raw-surreal interactions ensures Lore is cloud-agnostic as per the Phase 4 roadmap. The generic TS-SDK exposes document CRUD and Graph queries securely mapped to the Dataplane V3 configuration layer.
 Impact: `surrealdb` driver completely removed. The local WriteAheadLog (WAL) now syncs out to `DATAPLANE_URL` natively through `TsSdkAdapter`.
+
+## 2026-04-18 — UI: Single composed `ViewStateEffect` owns Sigma reducers
+Decision: Collapse `HoverHighlight` + `FilterEffect` into one component that owns both `nodeReducer` and `edgeReducer` on the Sigma instance. Hover state lives in a ref; filter state comes from props; one composed reducer reads both.
+Reason: The prior design had each component calling `sigma.setSetting('nodeReducer', …)` independently — hovering a node overwrote the filter dim reducer with a hover-only one, and `leaveNode` set both reducers to `null`. Net effect: filtered-out nodes became visible on hover and stayed visible until a filter checkbox was toggled. This was a user-visible correctness bug.
+Alternatives: (a) Make `HoverHighlight` read filter props directly and combine at call-time — works but splits the "what dims what" logic across two files. (b) Use a module-level shared ref — brittle. Option taken (single component, single source of truth for both reducers) is the cleanest.
+Impact: `ui/src/components/SigmaCanvas.tsx` — deleted `HoverHighlight` and `FilterEffect`, added `ViewStateEffect`. No prop surface change for `<SigmaCanvas>`. Bug pattern: **never have multiple effects write the same Sigma setting independently; pick one owner.**
+
+## 2026-04-18 — UI: Drop vis-network fallback renderer
+Decision: Delete `GraphCanvas.tsx` + `vis-network` + `vis-data` npm deps. Sigma WebGL becomes the sole graph renderer.
+Reason: The fallback was originally scaffolding for the pre-WebGL era. Assumption that it was for "large graphs" was inverted — vis-network (canvas 2D) tops out at ~1–2k nodes while Sigma (WebGL) scales to 10k–50k. Settings → Renderer Engine (Beta) toggle was never flipped in practice. Keeping it cost a 515 KB lazy chunk, 2 npm deps + 6 transitive packages, one misleading Settings toggle, and a second code path to maintain through every refactor.
+Alternatives: Keep and tighten the two `any` types (~10 min, no behavior change). Rejected — maintenance cost unjustified when the primary renderer covers all realistic graph sizes.
+Impact: `ui/src/components/GraphCanvas.tsx` deleted; `ui/package.json` lost `vis-network` + `vis-data`; `ui/src/App.tsx` lost `useSigmaEngine` state + the Suspense ternary + the `Renderer Engine (Beta)` settings group + the `Network` lucide import; `ui/vite.config.ts` dropped the `chunkSizeWarningLimit: 600` override. Bundle dropped ~515 KB. If project-anchor visual clustering from vis-network is ever wanted, port the invisible-anchor pattern into Sigma's FA2 pre-layout step (~1–2 hrs).
+
+## 2026-04-18 — MCP: User-scope config over per-project
+Decision: Wire the `groundfloor-lore` MCP server at `--scope user` (top-level `mcpServers` in `~/.claude.json`) rather than per-project. Use HTTP transport pointing at `http://127.0.0.1:3847/mcp`.
+Reason: Prior config had the Lore MCP as `type: stdio` in the project-local entry of `~/.claude.json`, spawning a new Lore daemon via `npx tsx src/mcp/server.ts` on every Claude Code launch. That spawn (a) used a stale path that hasn't existed since the workspace split, (b) fought the launchd-managed daemon for Kùzu's single-writer lock — the root cause of the "MCP server fails to start" reports. User scope + HTTP transport means every Claude Code session (IDE, CLI, Antigravity's Claude Code extension) across every project connects to the single running daemon.
+Alternatives: (a) per-project `.mcp.json` in each repo — works but requires touching N repos. Kept as an *optional* pattern for committing team-inheritable configs (e.g. `v3/groundfloor-dataplane-oss/.mcp.json` persists so teammates auto-inherit). (b) Keep stdio but fix the path — doesn't solve the Kùzu lock conflict.
+Impact: `~/.claude.json` — stdio project entry removed; HTTP user-scope entry added. `claude` CLI symlinked to `/opt/homebrew/bin/claude`. Cursor already had global config at `~/.cursor/mcp.json`. Bug pattern: **Kùzu is single-writer; never let an MCP client spawn a second Lore daemon — always HTTP transport to the launchd-managed one.**
+
+## 2026-04-18 — Dataplane runtime connection: deferred
+Decision: Park the Dataplane runtime-connection work. Code integration is complete (`fireBootHealthPing()`, `/api/health` reports `bound/offline/opted-out/error/unknown`); what's missing is a `DATAPLANE_API_KEY` in the launchd plist's environment variables.
+Reason: Obtaining / creating the API key requires investigating the `groundfloor-dataplane-oss` sibling repo (method unknown from the Lore side). V2 + V2.1 work just landed; the user chose to ship the merge rather than branch into a side-quest.
+Impact: `/api/health` will continue to show `dataplane: "offline"` until revisited. See `docs/V2.1_status.md` → Deferred section for the exact resumption steps. Memory node `project_dataplane_connection_deferred` stored so future sessions recall the state.
+
+## 2026-04-20 — Embedded LLM upgrade: Qwen 0.5B → Gemma 3 1B + strict grounding prompt + idle unload
+Decision: Replace `Xenova/Qwen1.5-0.5B-Chat` with `onnx-community/gemma-3-1b-it-ONNX` (q4 quantized) as the default embedded chat model. Replace the generic system prompt with a strict grounding prompt that forbids hallucination and redirects action requests to UI controls. Add idle-unload of the loaded pipeline after 3 minutes of no queries, with a user-visible Settings toggle ("Keep embedded model in memory when idle") to override when memory isn't a concern.
+
+Reason:
+- Qwen 0.5B hallucinated severely on grounded RAG — invented method names, procedural steps, and claimed capabilities (e.g. "I can reconnect the edges" when asked about an orphan node). Observed live on 2026-04-20 example. See Lore node for the example transcript.
+- The previous system prompt ("You are a concise assistant. Keep answers short.") didn't constrain the model to the provided context, didn't say what to do when it couldn't answer, and didn't distinguish question-from-context vs request-to-mutate.
+- Gemma 3 1B has substantially better instruction-following (IFEval ~80 vs Qwen 1.5 0.5B at ~40), stays in-context well, and has first-class Transformers.js v4 support. License is Gemma Terms of Use — commercial-OK with standard prohibited-use policy pass-through. Verified against Google's license text (not the FUD version).
+- Laptop memory is already under pressure (user running Dataplane's 7 docker services + IDE + browser on 16 GB machine with 18 GB swap). Keeping any model resident permanently adds to that. Idle-unload at 3 min reclaims the ~1.5 GB the loaded Gemma pipeline holds, while the in-session cache keeps repeat queries fast.
+
+Alternatives considered:
+- Qwen3-1.7B-ONNX — better IFEval (~83) but ~2-2.5 GB resident. Too heavy for target memory profile.
+- SmolLM3-3B — biggest quality jump but ~3-4 GB resident. Out of scope.
+- Qwen3-0.6B — marginal upgrade over Qwen 1.5 0.5B; wasted an upgrade cycle.
+- Phi-4-mini — known hallucination issues on open-domain QA; wrong fit for RAG.
+- LFM (Liquid AI) — no ONNX path, no Transformers.js support. Architecturally incompatible.
+
+Impact:
+- `packages/lore/src/providers/llmDispatch.ts` — DEFAULT_MODELS.embedded, new EMBEDDED_SYSTEM_PROMPT constant, new CachedPipeline shape with lastUsedAt tracking, new idle sweeper + setEmbeddedModelKeepHot export.
+- `packages/lore/src/config/configManager.ts` — new `keepEmbeddedModelHot` field (default false) added to LoreConfig + DEFAULT_CONFIG + patch() allowlist.
+- `packages/lore/src/mcp/server.ts` — imports setEmbeddedModelKeepHot, seeds it from config at boot, re-applies on every PATCH /api/config.
+- `ui/src/App.tsx` — ConfigResponse gains keepEmbeddedModelHot, new state + fetch wiring, new Settings toggle (only shown when `llmProvider === 'embedded'`), banner + dropdown option text updated from "Qwen 0.5B" → "Gemma 3 1B".
+
+First-run UX: existing users on embedded provider will see a ~800 MB download on their next chat query. Progress bar is already wired (Phase 7a fix). Once cached, subsequent loads are fast.
+
+Not in scope (parked for follow-up commits):
+- Markdown + Mermaid rendering in chat bubbles (unlocks doc-generation value from BYOK)
+- Action-suggestion buttons in chat (structured widgets, not tool-calling)
+- Tool-calling in chat (grant the LLM permission to call a whitelisted subset of server tools; Gemma 3 + BYOK both support function-calling natively)
+- "Generate docs for this node" structured action with BYOK
+- Stale Qwen model cleanup — `lore models prune` CLI. For now users delete `~/.groundfloor/models/Xenova/Qwen1.5-0.5B-Chat/` manually if reclaiming disk.

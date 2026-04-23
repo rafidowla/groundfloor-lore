@@ -35,6 +35,7 @@ import fs from 'fs';
 // the CodeFile operations it supports.
 
 import type { GraphProvider, LoreNode, LoreEdge, TraversalResult, GraphStats } from '../providers/types.js';
+import { detectLanguage } from './language.js';
 export type { LoreNode, LoreEdge, TraversalResult, GraphStats };
 
 /* ─── Types ───────────────────────────────────────────────────── */
@@ -240,15 +241,22 @@ export class LocalGraph implements GraphProvider {
                     updatedAt STRING,
                     syncedAt STRING,
                     security_scopes STRING[],
+                    legalHold BOOLEAN DEFAULT FALSE,
+                    language STRING DEFAULT '',
                     PRIMARY KEY (id)
                 )
             `);
 
             // ─── Relationship Tables ────────────────────────────────────
+            // C1 (Phase 1) — confidence tiers on every edge. Defaults mean
+            // pre-C1 callers get the conservative 'extracted' interpretation;
+            // reconnect explicitly tags its edges as 'inferred'.
             await this.connection.query(`
                 CREATE REL TABLE IF NOT EXISTS LoreEdge (
                     FROM LoreNode TO LoreNode,
-                    relation STRING
+                    relation STRING,
+                    confidence STRING DEFAULT 'extracted',
+                    confidenceScore DOUBLE DEFAULT 1.0
                 )
             `);
 
@@ -266,6 +274,22 @@ export class LocalGraph implements GraphProvider {
                 `ALTER TABLE LoreNode ADD project STRING DEFAULT '*'`,
                 `ALTER TABLE LoreNode ADD ecosystem STRING DEFAULT '*'`,
                 `ALTER TABLE LoreNode ADD security_scopes STRING[] DEFAULT []`,
+                // C1 edge-confidence migration. Existing DBs get the columns
+                // with their defaults; the backfill pass below retags legacy
+                // semantic-reconnect edges as 'inferred'.
+                `ALTER TABLE LoreEdge ADD confidence STRING DEFAULT 'extracted'`,
+                `ALTER TABLE LoreEdge ADD confidenceScore DOUBLE DEFAULT 1.0`,
+                // C-ent0 (Phase 1) inert enterprise hook. Every LoreNode gets
+                // a legalHold flag, default false. No core code enforces it
+                // today — this is groundwork. When an enterprise plugin ships
+                // a RetentionPolicy, the delete path will consult this field.
+                `ALTER TABLE LoreNode ADD legalHold BOOLEAN DEFAULT FALSE`,
+                // Phase A (V2.2) — language tag (ISO 639-1) set by the
+                // caller at ingest. Always explicit; core never auto-
+                // detects. Empty string means "unknown" and is treated
+                // as English / default downstream. See
+                // docs/LANGUAGE_DETECTION.md.
+                `ALTER TABLE LoreNode ADD language STRING DEFAULT ''`,
             ];
             for (const migration of migrations) {
                 try {
@@ -273,6 +297,75 @@ export class LocalGraph implements GraphProvider {
                 } catch {
                     // Column already exists — expected, ignore
                 }
+            }
+
+            // ─── C1 Backfill: retag reconnect-authored semantic edges ───
+            // Pre-C1 reconnect encoded confidence in the relation string
+            // (`semantic_neighbor:0.823`). After the ALTER above they'd all
+            // sit at the default confidence='extracted' + score=1.0, which
+            // is wrong. This pass:
+            //   1. Flips confidence to 'inferred' for every semantic edge.
+            //   2. Parses the similarity score out of the relation suffix
+            //      and writes it to confidenceScore.
+            //
+            // Idempotent: only touches edges whose stored score is still
+            // the default 1.0 AND have the semantic_neighbor prefix. Once
+            // a score is properly stored, we don't re-parse it.
+            try {
+                const retagStmt = await this.connection.prepare(
+                    `MATCH ()-[e:LoreEdge]->()
+                     WHERE e.relation STARTS WITH 'semantic_neighbor:'
+                       AND e.confidence = 'extracted'
+                     SET e.confidence = 'inferred'`,
+                );
+                await this.connection.execute(retagStmt, {});
+
+                // Read back every inferred edge whose score is still the
+                // default and parse the suffix. Iterating in JS is simpler
+                // than embedding substring parsing in Cypher.
+                const toScoreStmt = await this.connection.prepare(
+                    `MATCH (a:LoreNode)-[e:LoreEdge]->(b:LoreNode)
+                     WHERE e.confidence = 'inferred'
+                       AND e.confidenceScore = 1.0
+                       AND e.relation STARTS WITH 'semantic_neighbor:'
+                     RETURN a.id AS src, b.id AS tgt, e.relation AS rel`,
+                );
+                const toScoreRes = await this.connection.execute(toScoreStmt, {}) as QueryResult;
+                const rows = await toScoreRes.getAll();
+                let rescored = 0;
+                for (const row of rows) {
+                    const r = row as Record<string, unknown>;
+                    const rel = String(r['rel'] ?? '');
+                    const m = /^semantic_neighbor:([0-9]+(\.[0-9]+)?)$/.exec(rel);
+                    if (!m) continue;
+                    const score = parseFloat(m[1]);
+                    if (!Number.isFinite(score) || score < 0 || score > 1) continue;
+                    // C1.1 — skip no-op rescores: edges whose parsed
+                    // similarity is already the stored 1.0 default don't
+                    // need a write. Happens legitimately when two nodes
+                    // have identical content (sim == 1.0 exactly).
+                    if (Math.abs(score - 1.0) < 1e-9) continue;
+                    const upd = await this.connection.prepare(
+                        `MATCH (a:LoreNode {id: $src})-[e:LoreEdge]->(b:LoreNode {id: $tgt})
+                         WHERE e.relation = $rel AND e.confidenceScore = 1.0
+                         SET e.confidenceScore = $score`,
+                    );
+                    await this.connection.execute(upd, {
+                        src: String(r['src']),
+                        tgt: String(r['tgt']),
+                        rel,
+                        score,
+                    });
+                    rescored++;
+                }
+                if (rescored > 0) {
+                    console.error(`[LocalGraph] C1 backfill: rescored ${rescored} inferred edges`);
+                }
+            } catch (backfillErr) {
+                // Non-fatal: defaults are safe, just not optimal.
+                console.error(
+                    `[LocalGraph] C1 backfill pass failed (non-fatal): ${(backfillErr as Error).message}`,
+                );
             }
 
             this.initialized = true;
@@ -317,7 +410,8 @@ export class LocalGraph implements GraphProvider {
                          n.metadata = $metadata,
                          n.updatedAt = $updatedAt,
                          n.syncedAt = $syncedAt,
-                         n.security_scopes = $security_scopes`,
+                         n.security_scopes = $security_scopes,
+                         n.language = $language`,
                 );
                 await this.connection.execute(stmt, {
                     id: nodeData.id,
@@ -331,6 +425,7 @@ export class LocalGraph implements GraphProvider {
                     updatedAt: now,
                     syncedAt: '',
                     security_scopes: nodeData.security_scopes || [],
+                    language: nodeData.language ?? '',
                 });
 
                 this.sessionCache.pushNode(nodeData.id);
@@ -355,7 +450,8 @@ export class LocalGraph implements GraphProvider {
                         createdAt: $createdAt,
                         updatedAt: $updatedAt,
                         syncedAt: $syncedAt,
-                        security_scopes: $security_scopes
+                        security_scopes: $security_scopes,
+                        language: $language
                     })`,
                 );
                 await this.connection.execute(stmt, {
@@ -371,6 +467,7 @@ export class LocalGraph implements GraphProvider {
                     updatedAt: now,
                     syncedAt: '',
                     security_scopes: nodeData.security_scopes || [],
+                    language: nodeData.language ?? '',
                 });
 
                 this.sessionCache.pushNode(nodeData.id);
@@ -432,15 +529,27 @@ export class LocalGraph implements GraphProvider {
     async addEdge(edge: LoreEdge): Promise<void> {
         await this.initialize();
 
+        // C1 — confidence tagging. Callers that omit confidence get
+        // 'extracted' (user-asserted) with score 1.0, matching the schema
+        // default. Reconnect passes 'inferred' + the cosine similarity.
+        const confidence = edge.confidence ?? 'extracted';
+        const confidenceScore = edge.confidenceScore ?? 1.0;
+
         try {
             const stmt = await this.connection.prepare(
                 `MATCH (a:LoreNode {id: $sourceId}), (b:LoreNode {id: $targetId})
-                 CREATE (a)-[:LoreEdge {relation: $relation}]->(b)`,
+                 CREATE (a)-[:LoreEdge {
+                    relation: $relation,
+                    confidence: $confidence,
+                    confidenceScore: $confidenceScore
+                 }]->(b)`,
             );
             await this.connection.execute(stmt, {
                 sourceId: edge.sourceId,
                 targetId: edge.targetId,
                 relation: edge.relation,
+                confidence,
+                confidenceScore,
             });
         } catch (error) {
             throw new LoreGraphError(
@@ -454,7 +563,7 @@ export class LocalGraph implements GraphProvider {
     /**
      * addBidirectionalEdge — Create edges in both directions.
      *
-     * @param edge - Source, target, and relation type.
+     * @param edge - Source, target, and relation type (confidence propagates).
      *
      * Side Effects: Writes two edges to Kùzu database.
      */
@@ -464,6 +573,8 @@ export class LocalGraph implements GraphProvider {
             sourceId: edge.targetId,
             targetId: edge.sourceId,
             relation: edge.relation,
+            confidence: edge.confidence,
+            confidenceScore: edge.confidenceScore,
         });
     }
 
@@ -522,34 +633,87 @@ export class LocalGraph implements GraphProvider {
      */
     async traverse(nodeId: string, maxDepth: number = 2): Promise<TraversalResult[]> {
         await this.initialize();
-        const clampedDepth = Math.min(Math.max(maxDepth, 1), 5);
+
+        // F1 (Phase 7a): rewrite to iterative 1-hop BFS. Previous version
+        // used a recursive Cypher pattern with `e[length(e)-1].relation`,
+        // which Kùzu 0.11.x rejects ("mismatched input '.' expecting..."
+        // — the accessor on an indexed relationship variable isn't
+        // supported at the parser level). Issue applies to BOTH
+        // @kineviz/kuzu-lite AND upstream kuzu at 0.11.3 (verified
+        // 2026-04-19 side-by-side).
+        //
+        // The new implementation runs depth-limited BFS in JS: for each
+        // frontier node, one directed query for outgoing edges + one for
+        // incoming. That's O(maxDepth × frontier × 2) prepared-statement
+        // executions — trivially fast for realistic depth ≤ 5.
+        //
+        // Same API contract as before: returns nodes sorted by depth,
+        // with the relation that first reached each node.
+
+        const clampedDepth = Math.min(Math.max(Math.trunc(maxDepth), 1), 5);
+        if (!Number.isInteger(clampedDepth) || clampedDepth < 1 || clampedDepth > 5) {
+            throw new LoreGraphError(
+                `Invalid traversal depth ${maxDepth}`,
+                'traverse',
+                null,
+            );
+        }
 
         try {
-            // Use MATCH with recursive edge pattern
-            const result = await this.connection.query(
-                `MATCH (start:LoreNode)-[e:LoreEdge* 1..${clampedDepth}]->(connected:LoreNode)
-                 WHERE start.id = '${this.escapeString(nodeId)}'
-                 RETURN connected.*, length(e) AS depth, e[length(e)-1].relation AS relation`,
-            ) as QueryResult;
+            // Prepare the two 1-hop statements once, reuse across frontier
+            // iterations. Explicit column aliases so rowToLoreNode's
+            // prefix-insensitive getter picks up every field; returning
+            // `m.*` surfaces keys under `m.id` etc. which the getter
+            // has historically handled, but being explicit is cheaper
+            // to debug and matches /api/node's style.
+            const outStmt = await this.connection.prepare(
+                `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->(m:LoreNode)
+                 RETURN m.id AS id, m.type AS type, m.label AS label,
+                        m.content AS content, m.tags AS tags,
+                        m.project AS project, m.ecosystem AS ecosystem,
+                        m.metadata AS metadata, m.createdAt AS createdAt,
+                        m.updatedAt AS updatedAt, m.syncedAt AS syncedAt,
+                        e.relation AS relation`,
+            );
+            const inStmt = await this.connection.prepare(
+                `MATCH (m:LoreNode)-[e:LoreEdge]->(n:LoreNode {id: $id})
+                 RETURN m.id AS id, m.type AS type, m.label AS label,
+                        m.content AS content, m.tags AS tags,
+                        m.project AS project, m.ecosystem AS ecosystem,
+                        m.metadata AS metadata, m.createdAt AS createdAt,
+                        m.updatedAt AS updatedAt, m.syncedAt AS syncedAt,
+                        e.relation AS relation`,
+            );
 
-            const rows = await result.getAll();
-            const seen = new Set<string>();
+            const visited = new Set<string>([nodeId]);
             const results: TraversalResult[] = [];
+            let frontier: string[] = [nodeId];
 
-            for (const row of rows) {
-                const record = row as Record<string, unknown>;
-                const node = this.rowToLoreNode(record);
-                if (!seen.has(node.id) && node.id !== nodeId) {
-                    seen.add(node.id);
-                    results.push({
-                        node,
-                        depth: (record['depth'] as number) ?? 1,
-                        relation: (record['relation'] as string) ?? 'related_to',
-                    });
+            for (let depth = 1; depth <= clampedDepth; depth++) {
+                const nextFrontier: string[] = [];
+                for (const currentId of frontier) {
+                    const outRes = await this.connection.execute(outStmt, { id: currentId }) as QueryResult;
+                    const inRes = await this.connection.execute(inStmt, { id: currentId }) as QueryResult;
+                    const outRows = await outRes.getAll();
+                    const inRows = await inRes.getAll();
+                    for (const row of [...outRows, ...inRows]) {
+                        const record = row as Record<string, unknown>;
+                        const node = this.rowToLoreNode(record);
+                        if (visited.has(node.id)) continue;
+                        visited.add(node.id);
+                        results.push({
+                            node,
+                            depth,
+                            relation: (record['relation'] as string) ?? 'related_to',
+                        });
+                        nextFrontier.push(node.id);
+                    }
                 }
+                if (nextFrontier.length === 0) break; // reached fixed point early
+                frontier = nextFrontier;
             }
 
-            return results.sort((nodeA, nodeB) => nodeA.depth - nodeB.depth);
+            return results.sort((a, b) => a.depth - b.depth);
         } catch (error) {
             throw new LoreGraphError(
                 `Failed to traverse from '${nodeId}'`,
@@ -582,22 +746,35 @@ export class LocalGraph implements GraphProvider {
     ): Promise<LoreNode[]> {
         await this.initialize();
 
-        const escapedQuery = this.escapeString(query.toLowerCase());
+        // Clamp limit to a safe integer range. Kùzu parameters work for
+        // literal values including numbers, but the pattern is defense-in-
+        // depth — keep the number a number.
+        const clampedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000);
 
         try {
+            // All user input goes through bound parameters. The WHERE clause
+            // is assembled from a fixed set of known-shape fragments; no
+            // user string enters the Cypher text.
+            const params: Record<string, unknown> = {
+                q: query.toLowerCase(),
+                limit: clampedLimit,
+            };
             let cypher = `MATCH (n:LoreNode) WHERE
-                (lower(n.label) CONTAINS '${escapedQuery}' OR lower(n.content) CONTAINS '${escapedQuery}' OR lower(n.tags) CONTAINS '${escapedQuery}')`;
+                (lower(n.label) CONTAINS $q OR lower(n.content) CONTAINS $q OR lower(n.tags) CONTAINS $q)`;
 
             if (project !== '*') {
-                cypher += ` AND (n.project = '${this.escapeString(project)}' OR n.project = '*')`;
+                cypher += ` AND (n.project = $project OR n.project = '*')`;
+                params.project = project;
             }
             if (ecosystem !== '*') {
-                cypher += ` AND (n.ecosystem = '${this.escapeString(ecosystem)}' OR n.ecosystem = '*')`;
+                cypher += ` AND (n.ecosystem = $ecosystem OR n.ecosystem = '*')`;
+                params.ecosystem = ecosystem;
             }
 
-            cypher += ` RETURN n.* LIMIT ${limit}`;
+            cypher += ` RETURN n.* LIMIT $limit`;
 
-            const result = await this.connection.query(cypher) as QueryResult;
+            const stmt = await this.connection.prepare(cypher);
+            const result = await this.connection.execute(stmt, params) as QueryResult;
             const rows = await result.getAll();
 
             return rows.map((row) => this.rowToLoreNode(row as Record<string, unknown>));
@@ -636,10 +813,22 @@ export class LocalGraph implements GraphProvider {
                 nodes.push({ id: n.id, label: n.label, type: n.type, project: n.project, group: n.type });
             }
             const loreEdgesResult = await this.connection.query(
-                `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode) RETURN n.id AS source, e.relation AS relation, m.id AS target LIMIT ${limit}`,
+                `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode)
+                 RETURN n.id AS source,
+                        e.relation AS relation,
+                        e.confidence AS confidence,
+                        e.confidenceScore AS confidenceScore,
+                        m.id AS target
+                 LIMIT ${limit}`,
             ) as any;
             for (const row of await loreEdgesResult.getAll()) {
-                edges.push({ from: row['source'], to: row['target'], label: row['relation'] });
+                edges.push({
+                    from: row['source'],
+                    to: row['target'],
+                    label: row['relation'],
+                    confidence: row['confidence'] ?? 'extracted',
+                    confidenceScore: row['confidenceScore'] ?? 1.0,
+                });
             }
 
             return { nodes, edges };
@@ -670,24 +859,30 @@ export class LocalGraph implements GraphProvider {
         await this.initialize();
 
         try {
+            const params: Record<string, unknown> = {};
             let cypher = 'MATCH (n:LoreNode) WHERE true';
 
             if (type) {
-                cypher += ` AND n.type = '${this.escapeString(type)}'`;
+                cypher += ` AND n.type = $type`;
+                params.type = type;
             }
             if (tag) {
-                cypher += ` AND lower(n.tags) CONTAINS '${this.escapeString(tag.toLowerCase())}'`;
+                cypher += ` AND lower(n.tags) CONTAINS $tag`;
+                params.tag = tag.toLowerCase();
             }
             if (project !== '*') {
-                cypher += ` AND (n.project = '${this.escapeString(project)}' OR n.project = '*')`;
+                cypher += ` AND (n.project = $project OR n.project = '*')`;
+                params.project = project;
             }
             if (ecosystem !== '*') {
-                cypher += ` AND (n.ecosystem = '${this.escapeString(ecosystem)}' OR n.ecosystem = '*')`;
+                cypher += ` AND (n.ecosystem = $ecosystem OR n.ecosystem = '*')`;
+                params.ecosystem = ecosystem;
             }
 
             cypher += ' RETURN n.* ORDER BY n.updatedAt DESC';
 
-            const result = await this.connection.query(cypher) as QueryResult;
+            const stmt = await this.connection.prepare(cypher);
+            const result = await this.connection.execute(stmt, params) as QueryResult;
             const rows = await result.getAll();
 
             return rows.map((row) => this.rowToLoreNode(row as Record<string, unknown>));
@@ -714,16 +909,26 @@ export class LocalGraph implements GraphProvider {
         const existingNode = await this.getNode(id);
         if (!existingNode) return false;
 
-        const escaped = this.escapeString(id);
         try {
-            // Delete all edges connected to this node (both directions)
-            await this.connection.query(
-                `MATCH (n:LoreNode {id: '${escaped}'})-[e:LoreEdge]-() DELETE e`,
+            // kuzu-lite does NOT support deleting via an undirected relationship
+            // pattern ("Binder exception: Delete undirected rel is not supported").
+            // Issue two directed deletes — outgoing, then incoming — to clear
+            // edges in both directions before removing the node itself.
+            const outStmt = await this.connection.prepare(
+                `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->() DELETE e`,
             );
+            await this.connection.execute(outStmt, { id });
+
+            const inStmt = await this.connection.prepare(
+                `MATCH ()-[e:LoreEdge]->(n:LoreNode {id: $id}) DELETE e`,
+            );
+            await this.connection.execute(inStmt, { id });
+
             // Delete the node itself
-            await this.connection.query(
-                `MATCH (n:LoreNode {id: '${escaped}'}) DELETE n`,
+            const nodeStmt = await this.connection.prepare(
+                `MATCH (n:LoreNode {id: $id}) DELETE n`,
             );
+            await this.connection.execute(nodeStmt, { id });
 
             return true;
         } catch (error) {
@@ -790,10 +995,42 @@ export class LocalGraph implements GraphProvider {
             return { nodeCount, edgeCount, typeBreakdown, codeSymbolCount, codeRelationCount };
         } catch (error) {
             throw new LoreGraphError(
-                'Failed to get stats',
+                `Failed to get graph stats`,
                 'getStats',
                 error,
             );
+        }
+    }
+
+    /**
+     * getLanguageBreakdown — Count LoreNodes grouped by their `language`
+     * tag (Phase A / V2.2). Plugin-contributed nodes are not included:
+     * language tagging is per-plugin opt-in, and counting them in core
+     * would cross the plugin boundary. If/when a plugin wants its own
+     * breakdown, it contributes one via its own API.
+     *
+     * Empty-string language values collapse under the key `null` in the
+     * returned map — that's the public representation of "unknown."
+     */
+    async getLanguageBreakdown(): Promise<Record<string, number>> {
+        await this.initialize();
+        try {
+            const result = await this.connection.query(
+                'MATCH (n:LoreNode) RETURN n.language AS lang, count(n) AS cnt',
+            ) as QueryResult;
+            const rows = await result.getAll();
+            const breakdown: Record<string, number> = {};
+            for (const row of rows) {
+                const rec = row as Record<string, unknown>;
+                const raw = rec['lang'] as string | null | undefined;
+                const key = raw && raw.length > 0 ? raw : 'null';
+                const cnt = rec['cnt'] as number;
+                breakdown[key] = (breakdown[key] ?? 0) + cnt;
+            }
+            return breakdown;
+        } catch {
+            // Non-fatal — older graphs pre-Phase-A won't have the column.
+            return {};
         }
     }
 
@@ -901,6 +1138,7 @@ export class LocalGraph implements GraphProvider {
     createPluginGraphContext(): {
         executeQuery(cypher: string, params?: Record<string, unknown>): Promise<unknown>;
         queryRows(cypher: string, params?: Record<string, unknown>): Promise<Array<Record<string, unknown>>>;
+        detectLanguage(text: string, options?: { threshold?: number; minLength?: number }): { language: string | null; confidence: number };
     } {
         return {
             executeQuery: async (cypher: string, params?: Record<string, unknown>) => {
@@ -925,6 +1163,13 @@ export class LocalGraph implements GraphProvider {
                 const rows = await result.getAll();
                 return rows as Array<Record<string, unknown>>;
             },
+            // Phase A (V2.2) — expose the language-detection capability
+            // to plugins. See docs/LANGUAGE_DETECTION.md for the contract:
+            // plugins call this when they want tagging; core never calls
+            // it implicitly. Pure function — no graph access, just franc.
+            detectLanguage: (text: string, options?: { threshold?: number; minLength?: number }) => {
+                return detectLanguage(text, options);
+            },
         };
     }
 
@@ -940,15 +1185,11 @@ export class LocalGraph implements GraphProvider {
 
     /* ─── Private Helpers ─────────────────────────────────────────── */
 
-    /**
-     * escapeString — Escape single quotes for inline Cypher values.
-     *
-     * Used for queries where parameterized execution is not possible
-     * (e.g., dynamic CONTAINS). Prevents Cypher injection.
-     */
-    private escapeString(value: string): string {
-        return value.replace(/'/g, "\\'");
-    }
+    // escapeString was removed in Phase 0 / S2 — single-quote escaping
+    // is not safe against Cypher injection (comments, backticks, nested
+    // quoting all bypass it). All read paths now use prepare/execute
+    // with bound parameters. Do NOT reintroduce a string-escape helper;
+    // route every user input through parameters instead.
 
     /**
      * rowToLoreNode — Convert a Kùzu result row to a LoreNode.
@@ -963,6 +1204,12 @@ export class LocalGraph implements GraphProvider {
             return row[key] ?? row[`n.${key}`] ?? row[`connected.${key}`] ?? undefined;
         };
 
+        // language: stored as '' when unknown (Kùzu STRING DEFAULT '').
+        // Surface as null to callers so the "unknown" state is obvious
+        // at the API boundary.
+        const rawLang = (getValue('language') as string) ?? '';
+        const language = rawLang.length > 0 ? rawLang : null;
+
         return {
             id: (getValue('id') as string) ?? '',
             type: (getValue('type') as LoreNode['type']) ?? 'note',
@@ -976,6 +1223,7 @@ export class LocalGraph implements GraphProvider {
             updatedAt: (getValue('updatedAt') as string) ?? '',
             syncedAt: (getValue('syncedAt') as string) || null,
             security_scopes: (getValue('security_scopes') as string[]) ?? [],
+            language,
         };
     }
 

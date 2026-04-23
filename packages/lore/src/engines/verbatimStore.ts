@@ -1,4 +1,4 @@
-import { pipeline } from '@xenova/transformers';
+import { pipeline } from '@huggingface/transformers';
 import * as lancedb from '@lancedb/lancedb';
 import { Schema, Field, Float32, Utf8, List, FixedSizeList } from 'apache-arrow';
 import * as fs from 'fs';
@@ -183,6 +183,32 @@ export class VerbatimStore implements VectorProvider {
             return { contentHash: r.contentHash ?? '', text: r.text ?? '' };
         } catch {
             return null;
+        }
+    }
+
+    /**
+     * F2b (Phase 7a): list every stored id, optionally filtered by prefix.
+     * The orphan-embedding reaper uses `listIds('lore:')` to find
+     * verbatim rows whose corresponding Kùzu node no longer exists.
+     *
+     * Returns [] if the table isn't initialized (caller treats as "no
+     * records" — safe).
+     */
+    async listIds(prefix?: string): Promise<string[]> {
+        try {
+            if (!this.initialized || !this.table) return [];
+            const q = this.table.query();
+            if (prefix) {
+                // LanceDB's `where` uses SQL-ish predicates. Use a safe
+                // LIKE pattern with escaped prefix. LanceDB supports
+                // basic string operators.
+                const safe = prefix.replace(/'/g, "''");
+                q.where(`id LIKE '${safe}%'`);
+            }
+            const rows = await q.select(['id']).toArray();
+            return rows.map((r: any) => String(r.id));
+        } catch {
+            return [];
         }
     }
 

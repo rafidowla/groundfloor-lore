@@ -5,8 +5,9 @@
  * the server expands into system-prompt context.
  */
 
-import { useEffect, useState } from 'react';
-import { X, MessageSquare } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { X, MessageSquare, FileText } from 'lucide-react';
+import { authFetch } from '../lib/authFetch';
 
 interface NodeDetail {
     node: {
@@ -18,6 +19,7 @@ interface NodeDetail {
         project?: string;
         ecosystem?: string;
         updatedAt?: string;
+        language?: string | null;
     };
     neighbors: Array<{
         id: string;
@@ -33,6 +35,7 @@ interface NodeDetailDrawerProps {
     selectedNodeId: string | null;
     onClose: () => void;
     onAskAbout: (nodeId: string) => void;
+    onGenerateDocs: (nodeId: string) => void;
 }
 
 export default function NodeDetailDrawer({
@@ -40,6 +43,7 @@ export default function NodeDetailDrawer({
     selectedNodeId,
     onClose,
     onAskAbout,
+    onGenerateDocs,
 }: NodeDetailDrawerProps) {
     // Core nodes are the lore: prefix or unprefixed. Plugin-owned nodes
     // (file:, symbol:) don't have a GET /api/node endpoint yet.
@@ -58,7 +62,7 @@ export default function NodeDetailDrawer({
     useEffect(() => {
         if (!selectedNodeId || !isCore) return;
         let cancelled = false;
-        void fetch(`${apiBase}/api/node?id=${encodeURIComponent(selectedNodeId)}`)
+        void authFetch(`${apiBase}/api/node?id=${encodeURIComponent(selectedNodeId)}`)
             .then(async (r) => {
                 if (!r.ok) throw new Error(`HTTP ${r.status}`);
                 return r.json() as Promise<NodeDetail>;
@@ -68,6 +72,26 @@ export default function NodeDetailDrawer({
             .finally(() => { if (!cancelled) setLoading(false); });
         return () => { cancelled = true; };
     }, [apiBase, selectedNodeId, isCore]);
+
+    // V2.2: click-outside-to-close. Listen for mousedown on document;
+    // if it lands outside the drawer's root element, close. Skip when
+    // the click originated in the graph canvas (a node click will
+    // immediately reopen for the new node) — but the simpler design is
+    // to let the outside-click close, then the canvas handler re-opens
+    // with the new ID on the same tick. React batches the two updates.
+    const drawerRef = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        if (!selectedNodeId) return;
+        const handler = (e: MouseEvent) => {
+            const target = e.target as Node | null;
+            if (!target) return;
+            if (drawerRef.current && !drawerRef.current.contains(target)) {
+                onClose();
+            }
+        };
+        document.addEventListener('mousedown', handler);
+        return () => document.removeEventListener('mousedown', handler);
+    }, [selectedNodeId, onClose]);
 
     if (!selectedNodeId) return null;
 
@@ -86,7 +110,7 @@ export default function NodeDetailDrawer({
         };
 
     return (
-        <div className="node-drawer glass-panel">
+        <div className="node-drawer glass-panel" ref={drawerRef}>
             <header className="node-drawer-header">
                 <div className="node-drawer-title">
                     {displayDetail ? (
@@ -113,6 +137,11 @@ export default function NodeDetailDrawer({
                         <code>{displayDetail.node.id}</code>
                         {displayDetail.node.project ? <span>project: {displayDetail.node.project}</span> : null}
                         {displayDetail.node.tags ? <span>tags: {displayDetail.node.tags}</span> : null}
+                        {displayDetail.node.language ? (
+                            <span className="language-badge" title="Language detected or tagged at ingest">
+                                {displayDetail.node.language.toUpperCase()}
+                            </span>
+                        ) : null}
                     </div>
 
                     {displayDetail.node.content ? (
@@ -145,14 +174,24 @@ export default function NodeDetailDrawer({
                         </section>
                     )}
 
-                    <button
-                        className="node-drawer-ask"
-                        onClick={() => onAskAbout(displayDetail.node.id)}
-                        title="Pre-fill the chat with [node:id] so the LLM answers in context"
-                    >
-                        <MessageSquare size={14} />
-                        Ask about this in chat
-                    </button>
+                    <div className="node-drawer-actions">
+                        <button
+                            className="node-drawer-ask"
+                            onClick={() => onAskAbout(displayDetail.node.id)}
+                            title="Pre-fill the chat with [node:id] so the LLM answers in context"
+                        >
+                            <MessageSquare size={14} />
+                            Ask about this
+                        </button>
+                        <button
+                            className="node-drawer-generate"
+                            onClick={() => onGenerateDocs(displayDetail.node.id)}
+                            title="Generate a Markdown developer-docs document for this node using the active LLM"
+                        >
+                            <FileText size={14} />
+                            Generate docs
+                        </button>
+                    </div>
                 </div>
             ) : null}
         </div>

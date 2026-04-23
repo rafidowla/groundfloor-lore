@@ -9,7 +9,6 @@
  *   {
  *     "plugins":        string[]            // active plugins, Phase 1
  *     "pluginConfig":   Record<string, any> // per-plugin opaque config
- *     "defaultMode":    string              // initial mode pill selection
  *     "llmProvider":    "anthropic" | "openai" | "ollama" | string
  *     "workspaceAccount": "local" | string
  *     "plugin_history": Array<{ plugin: string; removed_at: string; decision: "kept" | "dropped" | "reenabled" }>
@@ -34,7 +33,6 @@ export interface PluginHistoryEntry {
 export interface LoreConfig {
     plugins: string[];
     pluginConfig: Record<string, unknown>;
-    defaultMode: string;
     llmProvider: string;
     workspaceAccount: string;
     plugin_history?: PluginHistoryEntry[];
@@ -58,19 +56,48 @@ export interface LoreConfig {
      * but persisted so Phase 4 can honor it on first implementation.
      */
     telemetryOptOut?: boolean;
+
+    /**
+     * V2.2 embedded-model upgrade (2026-04-20). When true, the
+     * embedded LLM pipeline stays resident in memory for the daemon
+     * lifetime (~1.2-1.5 GB RAM). When false (default), the pipeline
+     * gets idle-unloaded after 3 minutes of no queries — freeing the
+     * RAM when you're not actively chatting, at the cost of one
+     * ~5-10s reload on next use. Recommended OFF on memory-constrained
+     * laptops running Dataplane + IDE + browser alongside Lore.
+     */
+    keepEmbeddedModelHot?: boolean;
+
+    /**
+     * V2.2 chat auto-execute (2026-04-23). When true AND the active
+     * LLM has toolCalling === 'native', any action-suggestion tokens
+     * the model emits are auto-executed without the user clicking the
+     * button. Audit log still records every execution. Only surfaces
+     * in Settings when the active provider is native-tier (Anthropic
+     * Claude 3.5+/4+, OpenAI GPT-4o/o-series); embedded Gemma 1B
+     * stays on the click-to-confirm path regardless of this flag.
+     * Default false — opt-in per user; small quality-of-life for
+     * those who trust their BYOK model not to hallucinate action tokens.
+     */
+    autoExecuteChatActions?: boolean;
 }
 
 export const DEFAULT_CONFIG: LoreConfig = {
     plugins: ['developer'],
     pluginConfig: {},
-    defaultMode: 'developer',
-    // Default to the embedded Qwen 0.5B so a fresh install chats out of
-    // the box with no API keys or Ollama required. Users upgrade to
-    // Anthropic/OpenAI/Ollama from Settings once they have them.
+    // Default to the embedded Gemma 3 1B (upgraded from Qwen 0.5B in
+    // V2.2) so a fresh install chats out of the box with no API keys
+    // or Ollama required. Users upgrade to Anthropic/OpenAI/Ollama
+    // from Settings once they have them.
     llmProvider: 'embedded',
     workspaceAccount: 'local',
     extractionPath: 'local-byok',
     telemetryOptOut: false,
+    // Idle-unload enabled by default — memory-friendly for laptops.
+    keepEmbeddedModelHot: false,
+    // Auto-execute OFF by default — user must opt in per session for
+    // the BYOK-native tier. Embedded tier ignores this flag.
+    autoExecuteChatActions: false,
 };
 
 export class ConfigManager {
@@ -106,7 +133,7 @@ export class ConfigManager {
 
     /**
      * patch — Merge partial updates into config and persist.
-     * Allowed keys: llmProvider, workspaceAccount, defaultMode, plugins, pluginConfig.
+     * Allowed keys: llmProvider, workspaceAccount, plugins, pluginConfig.
      * Rejects unknown keys silently (safe for versioned clients).
      */
     patch(update: Partial<LoreConfig>): LoreConfig {
@@ -114,13 +141,14 @@ export class ConfigManager {
         const allowed: (keyof LoreConfig)[] = [
             'llmProvider',
             'workspaceAccount',
-            'defaultMode',
             'plugins',
             'pluginConfig',
             'plugin_history',
             'plugins_last_boot',
             'extractionPath',
             'telemetryOptOut',
+            'keepEmbeddedModelHot',
+            'autoExecuteChatActions',
         ];
         const next: LoreConfig = { ...current };
         for (const key of allowed) {

@@ -19,10 +19,14 @@ import type { ILorePlugin, PluginContext, PluginGraphContext } from './types.js'
 import type { ConfigManager, LoreConfig } from '../config/configManager.js';
 import type { PluginHistoryEntry } from '../config/configManager.js';
 import { developerPlugin } from '@lore-plugin-developer/index.js';
+import { personalPlugin } from '@lore-plugin-personal/index.js';
+import { legalPlugin } from '@lore-plugin-legal/index.js';
 
 /** Hard-coded plugin catalog. Extend here to add a new plugin. */
 const BUILTIN_PLUGINS: Record<string, ILorePlugin> = {
     developer: developerPlugin,
+    personal: personalPlugin,
+    legal: legalPlugin,
 };
 
 /**
@@ -128,6 +132,58 @@ export class PluginRegistry {
 
     isActive(pluginName: string): boolean {
         return this.loaded.has(pluginName);
+    }
+
+    /**
+     * Phase 5 / C12 — collect every active plugin's retention rules,
+     * tagged with the contributing plugin's name so callers (daily
+     * sweep, UI) can display "who owns this policy." Empty array if
+     * no plugin declares rules.
+     */
+    collectRetentionPolicies(): Array<{ plugin: string; rule: import('./types.js').RetentionRule }> {
+        const out: Array<{ plugin: string; rule: import('./types.js').RetentionRule }> = [];
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.contributeRetentionPolicy !== 'function') continue;
+            try {
+                const rules = plugin.contributeRetentionPolicy();
+                if (!rules || !Array.isArray(rules)) continue;
+                for (const rule of rules) {
+                    out.push({ plugin: plugin.name, rule });
+                }
+            } catch (err) {
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.contributeRetentionPolicy threw: ${(err as Error).message}`,
+                );
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Phase 1 / C2 — collect every active plugin's system-prompt
+     * contribution, filter out nulls/empties, and return them in
+     * registration order. Caller concatenates with blank-line separators.
+     *
+     * Plugins that don't implement the hook (or return null / empty)
+     * are silently skipped.
+     */
+    getSystemPromptContributions(ctx: PluginContext): string[] {
+        const out: string[] = [];
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.contributeSystemPrompt !== 'function') continue;
+            try {
+                const contribution = plugin.contributeSystemPrompt(ctx);
+                if (typeof contribution === 'string' && contribution.trim()) {
+                    out.push(contribution.trim());
+                }
+            } catch (err) {
+                // A plugin's prompt throwing should never break chat.
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.contributeSystemPrompt threw: ${(err as Error).message}`,
+                );
+            }
+        }
+        return out;
     }
 
     /** Iterate active plugins in activation order. */

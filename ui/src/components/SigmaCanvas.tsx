@@ -7,6 +7,7 @@ import forceAtlas2 from 'graphology-layout-forceatlas2';
 import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
 import type { NodeDisplayData } from 'sigma/types';
 import type { NodeLabelDrawingFunction, NodeHoverDrawingFunction } from 'sigma/rendering';
+import { authFetch } from '../lib/authFetch';
 
 /**
  * Extends Sigma's NodeDisplayData with the two custom attributes we stash
@@ -33,6 +34,11 @@ interface LoreEdge {
     from: string;
     to: string;
     label: string;
+    // C1 — confidence tier + score flow through from the daemon's
+    // /api/topology. Plugin-contributed edges (FileContains, CodeRelation,
+    // etc.) may not carry these; treat absence as 'extracted' at render.
+    confidence?: 'extracted' | 'inferred' | 'ambiguous';
+    confidenceScore?: number;
 }
 
 /* ─── Color palette per knowledge-node type ────────────────────── */
@@ -188,7 +194,7 @@ const GraphLoader = ({ onStatsReady, onTopologyReady }: GraphLoaderProps) => {
 
         const fetchGraph = async () => {
             try {
-                const response = await fetch('/api/topology');
+                const response = await authFetch('/api/topology');
                 const data = await response.json();
                 if (!active) return;
                 if (onTopologyReady) onTopologyReady({ nodes: data.nodes ?? [] });
@@ -212,14 +218,32 @@ const GraphLoader = ({ onStatsReady, onTopologyReady }: GraphLoaderProps) => {
                 });
 
                 // ── Add edges ──
+                // C1 — edge opacity encodes confidence. Extracted (user-
+                // asserted) edges render at full weight; inferred edges
+                // use reduced alpha so the graph's "known facts" pop
+                // visually above its "Lore's guesses" substrate.
+                //
+                //   extracted → 0x80 (50%)   confidence-tagged hex suffix
+                //   inferred  → 0x30 (~19%)
+                //   ambiguous → 0x20 (~12%) + slightly different hue
+                //
+                // Plugin-contributed edges with no confidence fall back
+                // to extracted rendering (historical behavior preserved).
                 (data.edges as LoreEdge[]).forEach((e) => {
                     try {
                         if (graph.hasNode(e.from) && graph.hasNode(e.to) && !graph.hasEdge(e.from, e.to)) {
+                            const conf = e.confidence ?? 'extracted';
+                            const color =
+                                conf === 'inferred'  ? '#94A3B830' :
+                                conf === 'ambiguous' ? '#F59E0B20' :
+                                                       '#94A3B880';
                             graph.addEdge(e.from, e.to, {
                                 label: e.label,
                                 type: 'arrow',
                                 size: 1,
-                                color: '#94A3B880',
+                                color,
+                                confidence: conf,
+                                confidenceScore: e.confidenceScore ?? 1.0,
                             });
                         }
                     } catch {
@@ -468,6 +492,12 @@ function Legend() {
 interface ViewStateEffectProps {
     activeTypes: Set<string> | null;
     activeProjects: Set<string> | null;
+    /**
+     * C1 — when false, edges whose `confidence === 'inferred'` are
+     * hidden via the edgeReducer. Default true so the initial
+     * render matches pre-C1 behavior.
+     */
+    showInferred: boolean;
 }
 
 /**
@@ -483,7 +513,7 @@ interface ViewStateEffectProps {
  * which re-invokes the same composed reducer. The reducer layers
  * filter dim under hover dim so both states stay consistent.
  */
-const ViewStateEffect = ({ activeTypes, activeProjects }: ViewStateEffectProps) => {
+const ViewStateEffect = ({ activeTypes, activeProjects, showInferred }: ViewStateEffectProps) => {
     const sigma = useSigma();
     const registerEvents = useRegisterEvents();
     const hoverNeighborsRef = useRef<Set<string> | null>(null);
@@ -537,6 +567,13 @@ const ViewStateEffect = ({ activeTypes, activeProjects }: ViewStateEffectProps) 
         });
 
         sigma.setSetting('edgeReducer', (edgeId: string, data: Attributes) => {
+            // C1 — hide inferred edges when the user has toggled them off.
+            // Applies regardless of hover state so the "clean up my view"
+            // intent wins over hover's neighborhood highlight.
+            if (!showInferred && data.confidence === 'inferred') {
+                return { ...data, hidden: true };
+            }
+
             const neighbours = hoverNeighborsRef.current;
             if (!neighbours) return data;
             const graph = sigma.getGraph();
@@ -549,7 +586,7 @@ const ViewStateEffect = ({ activeTypes, activeProjects }: ViewStateEffectProps) 
         });
 
         sigma.refresh();
-    }, [sigma, activeTypes, activeProjects]);
+    }, [sigma, activeTypes, activeProjects, showInferred]);
 
     return null;
 };
@@ -598,6 +635,8 @@ interface SigmaCanvasProps {
     onTopologyReady?: (topology: { nodes: Array<{ id: string; type: string; project?: string; label?: string }> }) => void;
     /** V2.1: emit when the user clicks a graph node. */
     onNodeClick?: (nodeId: string) => void;
+    /** C1: when false, inferred-confidence edges are hidden. Default true. */
+    showInferred?: boolean;
 }
 
 /**
@@ -622,6 +661,7 @@ export default function SigmaCanvas({
     focusNodeId = null,
     onTopologyReady,
     onNodeClick,
+    showInferred = true,
 }: SigmaCanvasProps) {
     const [stats, setStats] = useState<{ nodes: number; edges: number } | null>(null);
 
@@ -654,7 +694,7 @@ export default function SigmaCanvas({
                 <GraphLoader onStatsReady={handleStatsReady} onTopologyReady={onTopologyReady} />
                 <DragEvents />
                 <ClickEvents onNodeClick={onNodeClick} />
-                <ViewStateEffect activeTypes={activeTypes} activeProjects={activeProjects} />
+                <ViewStateEffect activeTypes={activeTypes} activeProjects={activeProjects} showInferred={showInferred} />
                 <CameraEffect focusNodeId={focusNodeId} />
                 <CustomZoomControls />
             </SigmaContainer>

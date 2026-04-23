@@ -126,6 +126,30 @@ export interface PluginTelemetryPayload {
 }
 
 /**
+ * RetentionRule — Phase 5 / C12. A plugin-declared policy for how
+ * long its nodes live.
+ *
+ *   nodeType: which domain node type this rule applies to
+ *             (the plugin's own node types — plugins can't regulate others').
+ *   condition: how expiry is computed
+ *     - 'age'        — nodes older than `ageThresholdDays` expire
+ *     - 'tag'        — nodes carrying `tag` expire
+ *     - 'predicate'  — plugin implements its own expiry check (future)
+ *   action: what to do when a node expires
+ *     - 'archive'       — move to cold storage via C11 archive hook
+ *     - 'evict-content' — keep the graph node, drop raw content
+ *     - 'delete'        — remove the node entirely
+ *     - 'keep-forever'  — explicit opt-out (noop)
+ */
+export interface RetentionRule {
+    nodeType: string;
+    condition: 'age' | 'tag' | 'predicate';
+    ageThresholdDays?: number;
+    tag?: string;
+    action: 'archive' | 'evict-content' | 'delete' | 'keep-forever';
+}
+
+/**
  * ILorePlugin — The contract every plugin must satisfy.
  * Must be a pure object (no module-level side effects on import) so the
  * registry can introspect without booting the plugin.
@@ -221,4 +245,47 @@ export interface ILorePlugin {
         nodes: Array<{ id: string; label: string; type: string; project?: string; group?: string }>;
         edges: Array<{ from: string; to: string; label: string }>;
     }>;
+
+    /**
+     * Phase 5 / C12 — retention policy rules owned by this plugin.
+     *
+     * A plugin declares how long its OWN node types should live and
+     * what to do when that lifetime expires. Core iterates contributions
+     * daily and applies actions (archive / delete / evict-content).
+     *
+     * Rule examples:
+     *   Personal plugin:
+     *     { nodeType: 'Memory',     action: 'keep-forever' }
+     *     { nodeType: 'Communication', condition: 'age', ageThresholdDays: 1095, action: 'archive' }
+     *   Bank plugin (future, enterprise):
+     *     { nodeType: 'Interaction', condition: 'age', ageThresholdDays: 2555, action: 'delete' }
+     *     (2555 days = 7 years, the typical regulatory retention period)
+     *
+     * Returning null or [] = no retention opinions; core never touches
+     * this plugin's nodes.
+     */
+    contributeRetentionPolicy?(): RetentionRule[] | null;
+
+    /**
+     * Phase 1 / C2 — contribute domain-specific instructions to the
+     * chat system prompt. Called at the start of every /api/chat and
+     * whenever the chat system prompt is assembled. Returning null (or
+     * not implementing) is the "no contribution" opt-out.
+     *
+     * Keep contributions short (≤1 paragraph) and focused on HOW the
+     * LLM should reason about this plugin's vocabulary — not what that
+     * vocabulary is (the schema speaks for itself). Good contributions
+     * tell the model:
+     *   - What tone/tense to use (e.g. "use first names for Person nodes")
+     *   - What NOT to say (e.g. "distinguish legal info from legal advice")
+     *   - When to call which tool (e.g. "before suggesting edits, call
+     *     gitnexus_impact on the affected symbol")
+     *
+     * Core concatenates contributions in plugin registration order,
+     * separated by blank lines, after the base prompt. Plugins are
+     * responsible for not contradicting each other — collisions are
+     * not refereed; the later contribution wins if both speak to the
+     * same instruction.
+     */
+    contributeSystemPrompt?(ctx: PluginContext): string | null;
 }

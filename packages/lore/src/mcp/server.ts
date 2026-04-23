@@ -46,11 +46,41 @@ import {
     createWorkspace,
     switchWorkspace,
     deleteWorkspace,
+    kebabCase,
 } from '../config/workspaces.js';
-import { stream as llmStream, getCapability } from '../providers/llmDispatch.js';
+import { stream as llmStream, getCapability, setEmbeddedModelKeepHot } from '../providers/llmDispatch.js';
 import { decide as decideExtraction, type ExtractPayload } from '../providers/extractRouter.js';
 import { reconnectGraph, reconnectOneNode } from '../engines/reconnect.js';
+import { readCursor, writeCursor } from '../engines/reconnectCursor.js';
 import { PluginRegistry } from '../plugins/registry.js';
+import { lockDownDataDir } from '../security/permissions.js';
+import { ensureAuthToken, getAuthTokenPath } from '../security/authToken.js';
+import { validateRequest, writeAuthFailure } from '../security/httpAuth.js';
+import {
+    assertPathAllowed,
+    loadExtraIngestionRoots,
+    PathAllowlistError,
+} from '../security/pathAllowlist.js';
+import { RateLimiter, classifyRequest } from '../security/rateLimit.js';
+import { buildDefaultRegistry, ExtractorError } from '../engines/extractors/index.js';
+import { inspectAllWorkspaces, inspectDataHome, formatBytes } from '../engines/storageInspector.js';
+import { writeGraphReport } from '../engines/graphReport.js';
+import { exportGraphAsHtml } from '../engines/htmlExport.js';
+import { RetentionSweeper } from '../engines/retentionSweep.js';
+import { LocalFileSink } from '../engines/archive.js';
+import { buildDefaultConnectors } from '../engines/connectors/index.js';
+import { decideQuota } from '../engines/quotaManager.js';
+import { redactId, redactError } from '../security/logRedact.js';
+import { scrubEnv } from '../security/envScrub.js';
+import { rotateStandardLogs } from '../security/logRotator.js';
+import { AuditLog } from '../security/audit.js';
+import { ConsentManager } from '../security/consent.js';
+import { McpClientRuntime } from '../engines/mcpClient/runtime.js';
+import {
+    wrapUntrustedContent,
+    hardenedSystemPrefix,
+    buildInjectionWarning,
+} from '../security/promptGuard.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -154,6 +184,10 @@ const pluginRegistry = new PluginRegistry(configManager);
 pluginRegistry.boot();
 console.error(`[Lore MCP] Plugins active: ${configManager.read().plugins.join(', ') || '(none)'}`);
 
+// V2.2: seed the embedded-model keep-hot flag from persisted config on
+// boot. PATCH /api/config updates it at runtime (see that handler).
+setEmbeddedModelKeepHot(Boolean(configManager.read().keepEmbeddedModelHot));
+
 // Plugin schema registration runs inside main() after graph.initialize()
 // — see line ~1432 in main(). Doing it there avoids racing the Kùzu
 // connection open with the main() init path.
@@ -165,15 +199,19 @@ if (orphanStateAtBoot.blocking) {
 /**
  * resolveSyncAdapter — Auto-detect Dataplane API keys and create a TS-SDK adapter.
  *
- * Priority:
- *   1. DATAPLANE_URL + DATAPLANE_API_KEY env vars
- *   2. Returns null if no credentials found (offline mode)
+ * Priority (S9 — keychain preferred over env):
+ *   1. OS keychain entry under account='dataplane' (checked in main())
+ *   2. DATAPLANE_API_KEY env var (backward-compat; useful in CI)
+ *   3. Returns null if neither present (offline mode)
+ *
+ * This function handles the env path. Keychain override happens in main()
+ * via maybeUpgradeAdapterFromKeychain() which may rebuild adapter+syncEngine.
  *
  * Side Effects: Reads env vars.
  * Determinism: Deterministic for a given environment.
  */
-function resolveSyncAdapter(): TsSdkAdapter | null {
-    let baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
+function resolveSyncAdapterFromEnv(): TsSdkAdapter | null {
+    const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
     const apiKey = process.env['DATAPLANE_API_KEY'];
     const tenantId = process.env['DATAPLANE_TENANT_ID'] ?? 'groundfloor_lore';
     const orgId = process.env['DATAPLANE_ORG_ID'] ?? 'default';
@@ -183,9 +221,37 @@ function resolveSyncAdapter(): TsSdkAdapter | null {
     return new TsSdkAdapter({ baseUrl, apiKey, tenantId, orgId });
 }
 
-const adapter = resolveSyncAdapter();
-const syncEngine = new SyncEngine(graph, loreDir, adapter);
-const wal = syncEngine.getWal();
+// Module-level bindings. Start from env (backward compat). main() may
+// replace adapter (and rebuild syncEngine) if the OS keychain has a
+// dataplane credential — preferred because it's not visible to any
+// process that inherits this daemon's env.
+let adapter: TsSdkAdapter | null = resolveSyncAdapterFromEnv();
+let syncEngine: SyncEngine = new SyncEngine(graph, loreDir, adapter);
+let wal = syncEngine.getWal();
+
+/**
+ * maybeUpgradeAdapterFromKeychain — S9 keychain preference.
+ *
+ * Called exactly once at main() startup. If the keychain has a
+ * 'dataplane' account, its password overrides any env-sourced key, and
+ * we rebuild adapter + syncEngine + wal with the fresh credential.
+ *
+ * Keychain fetch is best-effort — failures (keytar unavailable, empty
+ * entry) leave the env-sourced adapter in place.
+ */
+async function maybeUpgradeAdapterFromKeychain(): Promise<'keychain' | 'env' | 'none'> {
+    const keychainKey = await getApiKey('dataplane');
+    if (!keychainKey) {
+        return adapter ? 'env' : 'none';
+    }
+    const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
+    const tenantId = process.env['DATAPLANE_TENANT_ID'] ?? 'groundfloor_lore';
+    const orgId = process.env['DATAPLANE_ORG_ID'] ?? 'default';
+    adapter = new TsSdkAdapter({ baseUrl, apiKey: keychainKey, tenantId, orgId });
+    syncEngine = new SyncEngine(graph, loreDir, adapter);
+    wal = syncEngine.getWal();
+    return 'keychain';
+}
 
 /**
  * Phase 4: Lightweight Dataplane health-ping.
@@ -264,8 +330,9 @@ mcpServer.tool(
         metadata: z.string().optional().describe('JSON metadata (e.g., {"date":"2026-03-25","author":"team"})'),
         project: z.string().optional().describe('Project scope (auto-detected from workspace if omitted)'),
         ecosystem: z.string().optional().describe('Ecosystem scope (auto-detected from workspace if omitted)'),
+        language: z.string().optional().describe('ISO 639-1 language code (e.g., "en", "es", "ja"). Optional — caller tags explicitly when known. Omit to leave unknown (treated as default / English downstream). See detect_language tool.'),
     },
-    async ({ id, type, label, content, tags, metadata, project, ecosystem }) => {
+    async ({ id, type, label, content, tags, metadata, project, ecosystem, language }) => {
         try {
             const scopedProject = project ?? detectedScope.project;
             const scopedEcosystem = ecosystem ?? detectedScope.ecosystem;
@@ -279,6 +346,7 @@ mcpServer.tool(
                 project: scopedProject,
                 ecosystem: scopedEcosystem,
                 metadata: metadata ?? '{}',
+                language: language ?? null,
             });
 
             // Buffer write to WAL for async sync
@@ -288,7 +356,7 @@ mcpServer.tool(
                 id,
                 text: buildVerbatimText(label, content ?? '', tags ?? ''),
                 metadata: { type, label, tags: tags ?? '', project: scopedProject, ecosystem: scopedEcosystem, updatedAt: node.updatedAt }
-            }).catch((err) => console.error(`[Lore MCP] VerbatimStore write failed for '${id}':`, err));
+            }).catch((err) => console.error(`[Lore MCP] VerbatimStore write failed for ${redactId(id)}: ${redactError(err)}`));
 
             // V2.1 ingest hook (Option A): immediately draw semantic
             // neighbor edges to this node's top-K similar neighbors. Keeps
@@ -305,7 +373,7 @@ mcpServer.tool(
                     type,
                     project: scopedProject,
                     ecosystem: scopedEcosystem,
-                }).catch((err) => console.error(`[Lore MCP] ingest-hook reconnect failed for '${id}':`, err));
+                }).catch((err) => console.error(`[Lore MCP] ingest-hook reconnect failed for ${redactId(id)}: ${redactError(err)}`));
             }
 
             return {
@@ -337,27 +405,42 @@ mcpServer.tool(
         targetId: z.string().describe('Target node ID'),
         relation: edgeRelationsEnum.describe(`Relationship type (options: ${domainSchema.edgeRelations.join(', ')})`),
         bidirectional: z.boolean().optional().describe('Create edge in both directions (default: true)'),
+        // C1 — confidence tier. Defaults to 'extracted' (user-asserted fact).
+        confidence: z.enum(['extracted', 'inferred', 'ambiguous']).optional().describe(
+            "Confidence tier. 'extracted' = user/rule-asserted fact (default). 'inferred' = LLM or similarity-inferred. 'ambiguous' = candidate needing human review.",
+        ),
+        confidenceScore: z.number().min(0).max(1).optional().describe(
+            'Optional numeric confidence in [0,1]. Defaults to 1.0 for extracted, or the inference score for inferred/ambiguous.',
+        ),
     },
-    async ({ sourceId, targetId, relation, bidirectional }) => {
+    async ({ sourceId, targetId, relation, bidirectional, confidence, confidenceScore }) => {
         try {
             const useBidirectional = bidirectional ?? true;
+            const conf = confidence ?? 'extracted';
+            const score = confidenceScore ?? (conf === 'extracted' ? 1.0 : 0.5);
 
             if (useBidirectional) {
-                await graph.addBidirectionalEdge({ sourceId, targetId, relation });
+                await graph.addBidirectionalEdge({
+                    sourceId, targetId, relation,
+                    confidence: conf, confidenceScore: score,
+                });
             } else {
-                await graph.addEdge({ sourceId, targetId, relation });
+                await graph.addEdge({
+                    sourceId, targetId, relation,
+                    confidence: conf, confidenceScore: score,
+                });
             }
 
             // Buffer write to WAL for async sync
-            wal.append('add_edge', { sourceId, targetId, relation });
+            wal.append('add_edge', { sourceId, targetId, relation, confidence: conf, confidenceScore: score });
 
             return {
                 content: [{
                     type: 'text' as const,
                     text: JSON.stringify({
                         success: true,
-                        edge: { sourceId, targetId, relation, bidirectional: useBidirectional },
-                        message: `Edge '${sourceId}' ${useBidirectional ? '↔' : '→'} '${targetId}' (${relation}) created.`,
+                        edge: { sourceId, targetId, relation, bidirectional: useBidirectional, confidence: conf, confidenceScore: score },
+                        message: `Edge '${sourceId}' ${useBidirectional ? '↔' : '→'} '${targetId}' (${relation}, ${conf}) created.`,
                     }, null, 2),
                 }],
             };
@@ -426,10 +509,12 @@ mcpServer.tool(
     {
         query: z.string().describe('Search query'),
         limit: z.number().optional().describe('Max results (default: 20)'),
+        queryLanguage: z.string().optional().describe('ISO 639-1 code for the query language (e.g., "es"). When provided and the corpus is mostly in a different language, the response includes a cross-language hint. Core does not auto-detect — callers tag explicitly if they want the hint.'),
     },
-    async ({ query, limit }) => {
+    async ({ query, limit, queryLanguage }) => {
         try {
             const results = await graph.search(query, limit ?? 20, detectedScope.project, detectedScope.ecosystem);
+            const hint = queryLanguage ? await buildLanguageHint(queryLanguage) : null;
 
             return {
                 content: [{
@@ -441,7 +526,9 @@ mcpServer.tool(
                         results: results.map((node) => ({
                             id: node.id, type: node.type, label: node.label,
                             content: node.content, tags: node.tags, project: node.project,
+                            language: node.language ?? null,
                         })),
+                        ...(hint ? { hint } : {}),
                     }, null, 2),
                 }],
             };
@@ -462,8 +549,9 @@ mcpServer.tool(
     {
         topic: z.string().describe('Topic to recall (e.g., "BaaSClient", "auth conventions")'),
         depth: z.number().optional().describe('Traversal depth from each search result (default: 1)'),
+        queryLanguage: z.string().optional().describe('ISO 639-1 code for the query language. Same semantics as `search` — optional; adds a cross-language hint to the response when the corpus is mostly in a different language.'),
     },
-    async ({ topic, depth }) => {
+    async ({ topic, depth, queryLanguage }) => {
         try {
             const verbatimCount = await verbatimStore.count();
             let seedNodeIds: string[] = [];
@@ -485,6 +573,7 @@ mcpServer.tool(
             }
 
             if (searchResults.length === 0) {
+                const earlyHint = queryLanguage ? await buildLanguageHint(queryLanguage) : null;
                 return {
                     content: [{
                         type: 'text' as const,
@@ -493,6 +582,7 @@ mcpServer.tool(
                             scope: { project: detectedScope.project, ecosystem: detectedScope.ecosystem },
                             message: `No knowledge found for topic '${topic}'.`,
                             results: [],
+                            ...(earlyHint ? { hint: earlyHint } : {}),
                         }, null, 2),
                     }],
                 };
@@ -526,6 +616,8 @@ mcpServer.tool(
                 graph.sessionCache.pushNode(item.node.id);
             }
 
+            const hint = queryLanguage ? await buildLanguageHint(queryLanguage) : null;
+
             return {
                 content: [{
                     type: 'text' as const,
@@ -540,7 +632,9 @@ mcpServer.tool(
                             id: item.node.id, type: item.node.type, label: item.node.label,
                             content: item.node.content, tags: item.node.tags,
                             project: item.node.project, source: item.source,
+                            language: item.node.language ?? null,
                         })),
+                        ...(hint ? { hint } : {}),
                     }, null, 2),
                 }],
             };
@@ -553,6 +647,59 @@ mcpServer.tool(
     },
 );
 
+/**
+ * buildLanguageHint — Phase B (V2.2). Given the caller's declared
+ * `queryLanguage`, compare it against the corpus language breakdown.
+ * Return a hint object when few/no nodes match — or null when either
+ * the graph has enough matches, or the distribution is uninformative
+ * (e.g. corpus is entirely untagged).
+ *
+ * No automatic translation here. The hint tells the caller that
+ * cross-language routing might help; the chat LLM already handles
+ * translation naturally during answer generation, and explicit
+ * callers can translate themselves if they prefer.
+ */
+async function buildLanguageHint(
+    queryLanguage: string,
+): Promise<{ queryLanguage: string; corpusLanguageBreakdown: Record<string, number>; suggestion: string } | null> {
+    try {
+        const breakdown = await graph.getLanguageBreakdown();
+        const total = Object.values(breakdown).reduce((a, b) => a + b, 0);
+        if (total === 0) return null;
+
+        const untagged = breakdown['null'] ?? 0;
+        const tagged = total - untagged;
+        const matchingLang = breakdown[queryLanguage] ?? 0;
+
+        // If nothing in the corpus is tagged, we have no basis to claim
+        // a language mismatch — fire a "no language data" hint so the
+        // caller knows why translation isn't being suggested.
+        if (tagged === 0) {
+            return {
+                queryLanguage,
+                corpusLanguageBreakdown: breakdown,
+                suggestion: `No nodes in the corpus are language-tagged. Your BYOK LLM will still handle translation naturally during chat. To improve raw-search quality for "${queryLanguage}" content, tag nodes explicitly at ingest (see detect_language tool or docs/LANGUAGE_DETECTION.md).`,
+            };
+        }
+
+        // Of the tagged content, how much matches the query language?
+        const matchingFracOfTagged = matchingLang / tagged;
+        // If the query language is well-represented among tagged nodes,
+        // no hint needed.
+        if (matchingFracOfTagged >= 0.1) return null;
+
+        const suggestion = `Only ${matchingLang} of ${tagged} tagged node(s) match language="${queryLanguage}" (${untagged} untagged remain). Your BYOK LLM will translate retrieved content in its answer automatically. To improve raw-search quality for "${queryLanguage}" content, tag nodes explicitly at ingest.`;
+
+        return {
+            queryLanguage,
+            corpusLanguageBreakdown: breakdown,
+            suggestion,
+        };
+    } catch {
+        return null;
+    }
+}
+
 /* ─── Tool: delete_node ───────────────────────────────────────── */
 
 mcpServer.tool(
@@ -564,7 +711,18 @@ mcpServer.tool(
     async ({ id }) => {
         try {
             const deleted = await graph.deleteNode(id);
-            if (deleted) verbatimStore.delete(id).catch((err) => console.error(`[Lore MCP] VerbatimStore delete failed for '${id}':`, err));
+            // F2a (Phase 7a): also drop the LanceDB vector. reconnect
+            // stores LoreNode verbatim records under the 'lore:' prefix
+            // (see reconnect.ts PREFIX_LORE) — the pre-fix version of
+            // this tool passed the raw id, which silently missed every
+            // single vector. That's the root of the orphan-embedding
+            // bug noted in commit 5849140. Now cleared for any
+            // future delete call.
+            if (deleted) {
+                verbatimStore.delete(`lore:${id}`).catch((err) =>
+                    console.error(`[Lore MCP] VerbatimStore delete failed for ${redactId(id)}: ${redactError(err)}`),
+                );
+            }
             return {
                 content: [{
                     type: 'text' as const,
@@ -676,15 +834,46 @@ mcpServer.tool(
     async () => {
         try {
             const graphStats = await graph.getStats();
+            const languageBreakdown = await graph.getLanguageBreakdown();
             return {
                 content: [{
                     type: 'text' as const,
                     text: JSON.stringify({
                         ...graphStats,
                         verbatimDocuments: await verbatimStore.count(),
+                        languageBreakdown,
                         graphPath: path.join(graphBasePath, '.lore', 'graph'),
                         engine: 'kùzu + lancedb',
                     }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: detect_language ───────────────────────────────────── */
+
+mcpServer.tool(
+    'detect_language',
+    'Detect the language of a text snippet. Returns an ISO 639-1 code (e.g., "en", "es") or null when confidence is below threshold. See docs/LANGUAGE_DETECTION.md — this is an explicit capability; core never calls it automatically.',
+    {
+        text: z.string().describe('The text to analyze.'),
+        threshold: z.number().optional().describe('Minimum confidence margin (top score minus runner-up). Default 0.03. Raise for stricter results.'),
+        minLength: z.number().optional().describe('Minimum text length to attempt detection. Default 20. Shorter inputs return null.'),
+    },
+    async ({ text, threshold, minLength }) => {
+        try {
+            const { detectLanguage } = await import('../engines/language.js');
+            const result = detectLanguage(text, { threshold, minLength });
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify(result, null, 2),
                 }],
             };
         } catch (error) {
@@ -807,25 +996,93 @@ mcpServer.tool(
         filePath: z.string().describe('Absolute path to the document'),
     },
     async ({ filePath }) => {
+        // C5.5 — enforce per-workspace quota before doing any work.
+        // Red tier means ingestion is paused; we return a user-facing
+        // error the caller (LLM or CLI) can surface. Soft tiers are
+        // advisory for now — throttling hookup lives with the larger
+        // bulk-ingestion path, not single-file reads.
         try {
-            if (!fs.existsSync(filePath)) {
+            const ws = getActiveWorkspacePath();
+            const breakdown = inspectDataHome(ws);
+            const q = decideQuota({ breakdown });
+            if (!q.allowIngestion) {
                 return {
-                    content: [{ type: 'text' as const, text: `File not found: ${filePath}` }],
+                    content: [{
+                        type: 'text' as const,
+                        text: `Ingestion paused by quota (${q.state}, ${formatBytes(q.usedBytes)}/${formatBytes(q.budgetBytes)}). ${q.message}`,
+                    }],
                     isError: true,
                 };
             }
-            const content = fs.readFileSync(filePath, 'utf-8');
+        } catch {
+            // If the inspector fails (e.g. workspace path missing), fail
+            // open — better to let the user ingest than to block on a
+            // telemetry-style failure.
+        }
+
+        // S4 — enforce the ingestion allowlist before any disk read.
+        // Rejects ~/.ssh/id_rsa, ~/.aws/credentials, ~/.groundfloor/auth.
+        // token, macOS keychain files, and anything not under an explicitly
+        // allowed root. See packages/lore/src/security/pathAllowlist.ts
+        // for the full policy.
+        let resolvedPath: string;
+        try {
+            resolvedPath = assertPathAllowed(filePath, {
+                workspaceRoot: graphBasePath,
+                extraRoots: loadExtraIngestionRoots(path.join(os.homedir(), '.groundfloor')),
+            });
+        } catch (err) {
+            if (err instanceof PathAllowlistError) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: `Ingestion denied (${err.code}): ${err.message}`,
+                    }],
+                    isError: true,
+                };
+            }
+            throw err;
+        }
+
+        // C3 (Phase 2) — route through the extractor registry based on
+        // the file extension. Previously this tool only handled UTF-8
+        // text; PDF/DOCX/EML now come through transparently. Binary
+        // reads are intentional: the registry expects bytes, not a
+        // decoded string (PDF would be corrupt after a utf-8 round-trip).
+        try {
+            const buf = fs.readFileSync(resolvedPath);
+            const mimeType =
+                extractorRegistry.mimeFromPath(resolvedPath) ?? 'text/plain';
+            const extracted = await extractorRegistry.extract(buf, mimeType);
             return {
                 content: [{
                     type: 'text' as const,
                     text: JSON.stringify({
-                        filePath,
-                        content,
-                        instructions: 'Please parse this content into LoreNode objects. For each distinct item you find, use the store_node tool to insert it into the graph.'
+                        filePath: resolvedPath,
+                        mimeType: extracted.mimeType,
+                        sourceBytes: extracted.sourceBytes,
+                        extractorConfidence: extracted.confidence,
+                        metadata: extracted.metadata,
+                        content: extracted.text,
+                        instructions:
+                            'Parse this extracted content into LoreNode objects. For each distinct item, ' +
+                            'call store_node. When the content is an email, preserve sender/recipient in ' +
+                            'the node tags and create Person-typed neighbors where appropriate. ' +
+                            'When metadata.textBearing is false (image-only PDF), note that OCR is ' +
+                            'required to recover content.',
                     }, null, 2),
                 }],
             };
         } catch (error) {
+            if (error instanceof ExtractorError) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: `Extraction failed (${error.code}): ${error.message}`,
+                    }],
+                    isError: true,
+                };
+            }
             return {
                 content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
                 isError: true,
@@ -864,6 +1121,61 @@ pluginRegistry.registerTools(mcpServer, {
 /** Default port for HTTP daemon mode. Override with LORE_PORT env var. */
 const LORE_HTTP_PORT = parseInt(process.env['LORE_PORT'] ?? '3847', 10);
 
+/**
+ * S3 — localhost auth token. Populated at the top of main() from
+ * ~/.groundfloor/auth.token (generated if missing). Consumed by the
+ * HTTP request validator on every /api/* request.
+ *
+ * Module-level mutable: set once at boot, read on every request. Never
+ * reassigned after boot; the daemon is restarted to rotate.
+ */
+let authToken = '';
+
+/**
+ * S5 — rate limiter shared across all /api/* handlers. Per-endpoint-class
+ * token buckets; see src/security/rateLimit.ts for the defaults.
+ */
+const rateLimiter = new RateLimiter();
+
+/**
+ * C3 (Phase 2) — extractor registry. Built once at module load with the
+ * shipped defaults (text/markdown, PDF, DOCX, EML). Plugins that want
+ * to contribute additional extractors can do so before ingestion —
+ * hook not yet exposed on ILorePlugin; will land when a real third-
+ * party format shows up.
+ */
+const extractorRegistry = buildDefaultRegistry();
+
+/**
+ * C5 (Phase 2) — connector registry. Ships with FilesystemConnector.
+ * Future connectors (Gmail, Drive, Slack, ...) plug in by registering
+ * IConnector instances on this object. See src/engines/connectors/.
+ */
+const connectorRegistry = buildDefaultConnectors(extractorRegistry, graphBasePath);
+
+/**
+ * C6 (Phase 4) — audit log + consent manager. Every tool call flagged
+ * requiresApproval pauses here; all destructive tool calls append an
+ * audit entry regardless of approval path. See src/security/audit.ts
+ * and src/security/consent.ts.
+ */
+const auditLog = new AuditLog();
+const consentManager = new ConsentManager();
+
+/**
+ * Phase 6 — retention sweep + archive sink. Archive sink lives here
+ * (not lazily) so it's ready when the scheduled sweep fires.
+ */
+const archiveSink = new LocalFileSink();
+const retentionSweeper = new RetentionSweeper(graph, pluginRegistry, auditLog);
+
+/**
+ * C6b (Phase 4) — MCP client runtime. Connects outward to external
+ * MCP servers configured in ~/.groundfloor/mcp-servers.json. Empty
+ * config = no-op; first-run has nothing configured, which is expected.
+ */
+const mcpClientRuntime = new McpClientRuntime();
+
 /** Active HTTP sessions — maps session ID to transport instance. */
 const activeSessions = new Map<string, StreamableHTTPServerTransport>();
 
@@ -885,6 +1197,95 @@ const activeSessions = new Map<string, StreamableHTTPServerTransport>();
  *   all sharing a single Kùzu graph instance.
  */
 async function main(): Promise<void> {
+    // S9 — Parent environment scrub. Module-level env reads (DATAPLANE_*,
+    // LORE_PORT) already captured whatever they needed from the inherited
+    // env during import. After this call, process.env contains only the
+    // allowlist — any subsequent env read inside Lore (or a plugin) can't
+    // surface an AWS/GitHub/etc. token the IDE happened to have set.
+    try {
+        const scrub = scrubEnv();
+        if (scrub.droppedCount > 0) {
+            console.error(`[Lore MCP] Env scrub: dropped ${scrub.droppedCount} var(s); kept ${scrub.kept.length}. Sample dropped (non-secret names): ${scrub.droppedSamples.join(', ') || '(all names contained secret-like tokens; none safe to log)'}`);
+        }
+    } catch (scrubErr) {
+        console.error(`[Lore MCP] Env scrub failed (non-fatal): ${(scrubErr as Error).message}`);
+    }
+
+    // S1 — File permission lockdown (Phase 0 security hardening).
+    // Tighten ~/.groundfloor (data home) AND the active workspace root if
+    // it differs (custom workspace paths can live anywhere). Must run
+    // before graph.initialize() so Kùzu files inherit the 0700 parent dir.
+    try {
+        const dataHome = path.join(os.homedir(), '.groundfloor');
+        const lockedPaths = new Set<string>([dataHome]);
+        if (graphBasePath !== dataHome) lockedPaths.add(graphBasePath);
+        for (const root of lockedPaths) {
+            const summary = lockDownDataDir(root);
+            const touched = summary.directoriesFixed + summary.filesFixed;
+            if (touched > 0 || summary.errors.length > 0) {
+                console.error(
+                    `[Lore MCP] Perm lockdown ${root}: dirs=${summary.directoriesFixed} files=${summary.filesFixed} skipped=${summary.skipped} errors=${summary.errors.length}`,
+                );
+                for (const err of summary.errors) console.error(`[Lore MCP]   ${err}`);
+            }
+        }
+    } catch (lockErr) {
+        console.error(`[Lore MCP] Perm lockdown failed (non-fatal): ${(lockErr as Error).message}`);
+    }
+
+    // C6b — connect to configured external MCP servers. Fire-and-forget
+    // so a slow stdio spawn doesn't block daemon boot.
+    void mcpClientRuntime.connectAll().then((summary) => {
+        if (summary.attempted > 0) {
+            console.error(`[Lore MCP] External MCP clients: ${summary.connected}/${summary.attempted} connected (${summary.errored} errored)`);
+        }
+    }).catch((err) => {
+        console.error(`[Lore MCP] MCP client runtime init failed: ${(err as Error).message}`);
+    });
+
+    // S9 — upgrade Dataplane adapter from keychain if available. Env
+    // remains the backward-compat fallback. Rebuilds syncEngine + wal
+    // on upgrade so all downstream code sees the fresh adapter.
+    try {
+        const source = await maybeUpgradeAdapterFromKeychain();
+        if (source === 'keychain') {
+            console.error('[Lore MCP] Dataplane credential: keychain');
+        } else if (source === 'env') {
+            console.error('[Lore MCP] Dataplane credential: env (consider moving to keychain)');
+        }
+    } catch (kcErr) {
+        console.error(`[Lore MCP] Keychain upgrade failed (non-fatal): ${(kcErr as Error).message}`);
+    }
+
+    // F3 (Phase 7a) — rotate standard logs if they've exceeded size
+    // or age thresholds. Runs AFTER S1 lockdown (perms are already
+    // tight) but BEFORE any daemon-initiated logging gets serious
+    // volume for this session. Non-fatal — rotation failures log to
+    // stderr and daemon proceeds.
+    try {
+        const _dataHomeForRotation = path.join(os.homedir(), '.groundfloor');
+        const results = rotateStandardLogs(_dataHomeForRotation);
+        for (const r of results) {
+            if (r.result.rotated) {
+                console.error(
+                    `[Lore MCP] Rotated ${path.basename(r.path)}: ` +
+                    `${r.result.beforeBytes} bytes → ${r.result.rotatedTo} ` +
+                    `(${r.result.reason}; retained ${r.result.retained}, deleted ${r.result.deleted})`,
+                );
+            }
+        }
+    } catch (rotErr) {
+        console.error(`[Lore MCP] Log rotation failed (non-fatal): ${(rotErr as Error).message}`);
+    }
+
+    // S3 — ensure the localhost auth token exists. Written with 0600.
+    // After this line, every /api/* handler (except the public allowlist)
+    // requires Authorization: Bearer <token>. UI bootstraps via
+    // /api/auth/bootstrap (Host+Origin gated).
+    const dataHome = path.join(os.homedir(), '.groundfloor');
+    authToken = ensureAuthToken(dataHome);
+    console.error(`[Lore MCP] Auth token at ${getAuthTokenPath(dataHome)} (0600)`);
+
     await graph.initialize();
 
     // V2.1 / Option C: each active plugin registers its own Kùzu schema
@@ -919,6 +1320,53 @@ async function main(): Promise<void> {
         // HTTP daemon mode — per-session McpServer+transport pairs
         const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
             const url = req.url ?? '';
+
+            // ── S3: first gate — Host + Origin + Bearer token validation ──
+            // Rejects DNS-rebinding attempts (bad Host), cross-origin browser
+            // attacks (bad Origin), and unauthorized callers (missing/bad
+            // Bearer). Public paths (/health, /api/health, /api/auth/
+            // bootstrap) skip the bearer check but still must pass Host and
+            // Origin. See packages/lore/src/security/httpAuth.ts.
+            const authCheck = validateRequest(req, { port: LORE_HTTP_PORT, token: authToken });
+            if (!authCheck.ok) {
+                writeAuthFailure(res, authCheck);
+                return;
+            }
+
+            // ── S5: rate limiting ──
+            // After auth, debit a token from the matching bucket. Liveness
+            // paths (health, bootstrap) are exempt. Exhausted bucket → 429
+            // with a Retry-After hint. See src/security/rateLimit.ts for
+            // the per-class limits.
+            const bucket = classifyRequest(url, req.method ?? 'GET');
+            if (bucket) {
+                const r = rateLimiter.tryConsume(bucket);
+                if (!r.allowed) {
+                    res.writeHead(429, {
+                        'Content-Type': 'application/json',
+                        'Retry-After': String(r.retryAfterSec),
+                    });
+                    res.end(JSON.stringify({
+                        error: 'rate limited',
+                        bucket,
+                        retryAfterSec: r.retryAfterSec,
+                    }));
+                    return;
+                }
+            }
+
+            // Bootstrap endpoint — the UI calls this once on load to fetch
+            // the auth token, then attaches it as Authorization: Bearer on
+            // every subsequent /api/* request. Safe because: (a) validate
+            // Request already enforced Host + Origin must be localhost, so
+            // a hostile cross-origin tab can't reach here; (b) UI is always
+            // same-origin on the daemon's port in production, or served
+            // from localhost:5173 in dev (also allowed Origin).
+            if (url === '/api/auth/bootstrap' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ token: authToken }));
+                return;
+            }
 
             // Orphan-decision gate: when a plugin has been deactivated but the
             // user hasn't chosen Keep/Drop/Re-enable, block every /api/* path
@@ -1016,12 +1464,14 @@ async function main(): Promise<void> {
                     const pluginCtxForNode = graph.createPluginGraphContext();
                     const outRows = await pluginCtxForNode.queryRows(
                         `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->(m:LoreNode)
-                         RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
+                         RETURN m.id AS id, m.label AS label, m.type AS type,
+                                e.relation AS rel, e.confidence AS conf, e.confidenceScore AS score`,
                         { id: stripped },
                     ).catch(() => []);
                     const inRows = await pluginCtxForNode.queryRows(
                         `MATCH (m:LoreNode)-[e:LoreEdge]->(n:LoreNode {id: $id})
-                         RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
+                         RETURN m.id AS id, m.label AS label, m.type AS type,
+                                e.relation AS rel, e.confidence AS conf, e.confidenceScore AS score`,
                         { id: stripped },
                     ).catch(() => []);
                     const neighbors = [
@@ -1030,6 +1480,8 @@ async function main(): Promise<void> {
                             label: r.label as string,
                             type: r.type as string,
                             relation: (r.rel as string) || 'related_to',
+                            confidence: (r.conf as string) ?? 'extracted',
+                            confidenceScore: typeof r.score === 'number' ? r.score : 1.0,
                             depth: 1,
                         })),
                         ...inRows.map((r) => ({
@@ -1037,6 +1489,8 @@ async function main(): Promise<void> {
                             label: r.label as string,
                             type: r.type as string,
                             relation: `← ${(r.rel as string) || 'related_to'}`,
+                            confidence: (r.conf as string) ?? 'extracted',
+                            confidenceScore: typeof r.score === 'number' ? r.score : 1.0,
                             depth: 1,
                         })),
                     ];
@@ -1072,6 +1526,36 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // Phase A (V2.2) — language detection capability over HTTP.
+            // Mirror of the MCP `detect_language` tool and the plugin
+            // context's ctx.detectLanguage(). Explicit-only, see
+            // docs/LANGUAGE_DETECTION.md.
+            if (url === '/api/language/detect' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const payload = JSON.parse(body || '{}') as { text?: string; threshold?: number; minLength?: number };
+                        if (typeof payload.text !== 'string') {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: '`text` (string) is required' }));
+                            return;
+                        }
+                        const { detectLanguage } = await import('../engines/language.js');
+                        const result = detectLanguage(payload.text, {
+                            threshold: payload.threshold,
+                            minLength: payload.minLength,
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(result));
+                    } catch (detectErr) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (detectErr as Error).message }));
+                    }
+                });
+                return;
+            }
+
             // Full-text content search from the UI dashboard
             if (url.startsWith('/api/search') && req.method === 'GET') {
                 try {
@@ -1083,6 +1567,26 @@ async function main(): Promise<void> {
                 } catch (searchErr) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (searchErr as Error).message }));
+                }
+                return;
+            }
+
+            // HTTP mirror of the MCP `stats` tool — same payload shape.
+            // Used by the UI to render corpus-wide info in Settings
+            // (e.g. the Phase A language breakdown).
+            if (url === '/api/stats' && req.method === 'GET') {
+                try {
+                    const graphStats = await graph.getStats();
+                    const languageBreakdown = await graph.getLanguageBreakdown();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        ...graphStats,
+                        verbatimDocuments: await verbatimStore.count(),
+                        languageBreakdown,
+                    }));
+                } catch (statsErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (statsErr as Error).message }));
                 }
                 return;
             }
@@ -1124,7 +1628,6 @@ async function main(): Promise<void> {
                         status: orphanState.blocking ? 'orphan_decision_required' : 'ok',
                         version: '2.1.0',
                         activePlugins: cfg.plugins,
-                        defaultMode: cfg.defaultMode,
                         llmProvider: cfg.llmProvider,
                         workspace: getActiveWorkspaceName(),
                         dataplane: getDataplaneState(),
@@ -1206,12 +1709,29 @@ async function main(): Promise<void> {
             }
 
             if (url.startsWith('/api/workspaces/') && req.method === 'DELETE') {
-                const name = decodeURIComponent(url.slice('/api/workspaces/'.length));
+                const raw = decodeURIComponent(url.slice('/api/workspaces/'.length));
+                // C6 — workspace deletion is destructive: audit every
+                // attempt regardless of outcome.
+                const startMs = Date.now();
                 try {
+                    const name = kebabCase(raw);
                     const next = deleteWorkspace(name);
+                    auditLog.log({
+                        toolName: 'workspaces.delete',
+                        args: { name },
+                        result: 'success',
+                        durationMs: Date.now() - startMs,
+                    });
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify(next));
                 } catch (err) {
+                    auditLog.log({
+                        toolName: 'workspaces.delete',
+                        args: { name: raw },
+                        result: 'error',
+                        resultDetail: (err as Error).message,
+                        durationMs: Date.now() - startMs,
+                    });
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (err as Error).message }));
                 }
@@ -1227,22 +1747,86 @@ async function main(): Promise<void> {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
+                    const startMs = Date.now();
                     try {
-                        const { k, threshold, apply, force } = JSON.parse(body || '{}') as {
+                        const { k, threshold, apply, force, incremental } = JSON.parse(body || '{}') as {
                             k?: number;
                             threshold?: number;
                             apply?: boolean;
                             force?: boolean;
+                            /** C6.5 — when true, filter to nodes updated after the cursor. */
+                            incremental?: boolean;
                         };
+                        // Resolve the since-cursor when incremental requested.
+                        let since: string | undefined;
+                        if (incremental) {
+                            const cursor = readCursor(graphBasePath);
+                            since = cursor?.lastReconnectAt;
+                        }
+                        // C6 — reconnect WITH apply=true mutates the graph;
+                        // dry-run does not. Only consent-gate apply mode to
+                        // avoid blocking simple calibration runs.
+                        let approvalId: string | undefined;
+                        if (apply) {
+                            const req = consentManager.request(
+                                'graph.reconnect',
+                                { k, threshold, apply, force },
+                                { context: 'Rebuild semantic edges across the graph. Existing inferred edges will be pruned and recreated. May take seconds to minutes on large graphs.' },
+                            );
+                            approvalId = req.id;
+                            const decision = await req.wait;
+                            if (!decision.approved) {
+                                auditLog.log({
+                                    toolName: 'graph.reconnect',
+                                    args: { k, threshold, apply, force },
+                                    result: 'denied-by-user',
+                                    resultDetail: decision.reason,
+                                    approvalId,
+                                    durationMs: Date.now() - startMs,
+                                });
+                                res.writeHead(403, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'consent denied', reason: decision.reason }));
+                                return;
+                            }
+                        }
                         const result = await reconnectGraph(graph, verbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
                             dryRun: !apply,
                             force,
+                            since,
+                        });
+                        // C6.5 — on successful apply, persist the cursor so
+                        // the next incremental run picks up from here.
+                        if (apply) {
+                            try {
+                                writeCursor(graphBasePath, incremental ? 'incremental' : 'full', {
+                                    candidatesScanned: result.candidatesScanned,
+                                    embeddingsAdded: result.embeddingsAdded,
+                                    embeddingsSkipped: result.embeddingsSkipped,
+                                    coreEdgesInserted: result.coreEdgesInserted,
+                                });
+                            } catch (cursorErr) {
+                                console.error(`[reconnect] cursor write failed: ${(cursorErr as Error).message}`);
+                            }
+                        }
+                        auditLog.log({
+                            toolName: 'graph.reconnect',
+                            args: { k, threshold, apply, force, incremental },
+                            result: 'success',
+                            approvalId,
+                            durationMs: Date.now() - startMs,
                         });
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify(result));
                     } catch (err) {
+                        auditLog.log({
+                            toolName: 'graph.reconnect',
+                            args: {},
+                            result: 'error',
+                            resultDetail: (err as Error).message,
+                            durationMs: Date.now() - startMs,
+                        });
                         res.writeHead(500, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: (err as Error).message }));
                     }
@@ -1259,12 +1843,33 @@ async function main(): Promise<void> {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
+                    const startMs = Date.now();
                     try {
                         const { k, threshold, force } = JSON.parse(body || '{}') as {
                             k?: number;
                             threshold?: number;
                             force?: boolean;
                         };
+                        // C6 — reconsume always applies + always prunes; gate it.
+                        const cReq = consentManager.request(
+                            'graph.reconsume',
+                            { k, threshold, force },
+                            { context: 'Re-embed every node and rebuild the entire inferred-edge set. Runs the full reconnect pipeline from scratch. Minutes of CPU on large graphs.' },
+                        );
+                        const decision = await cReq.wait;
+                        if (!decision.approved) {
+                            auditLog.log({
+                                toolName: 'graph.reconsume',
+                                args: { k, threshold, force },
+                                result: 'denied-by-user',
+                                resultDetail: decision.reason,
+                                approvalId: cReq.id,
+                                durationMs: Date.now() - startMs,
+                            });
+                            res.writeHead(403, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'consent denied', reason: decision.reason }));
+                            return;
+                        }
                         const result = await reconnectGraph(graph, verbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
@@ -1272,9 +1877,23 @@ async function main(): Promise<void> {
                             pruneInferred: true,
                             force,
                         });
+                        auditLog.log({
+                            toolName: 'graph.reconsume',
+                            args: { k, threshold, force },
+                            result: 'success',
+                            approvalId: cReq.id,
+                            durationMs: Date.now() - startMs,
+                        });
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify(result));
                     } catch (err) {
+                        auditLog.log({
+                            toolName: 'graph.reconsume',
+                            args: {},
+                            result: 'error',
+                            resultDetail: (err as Error).message,
+                            durationMs: Date.now() - startMs,
+                        });
                         res.writeHead(500, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ error: (err as Error).message }));
                     }
@@ -1376,6 +1995,12 @@ async function main(): Promise<void> {
                         const update = JSON.parse(body || '{}') as Record<string, unknown>;
                         const { apiKey, ...configFields } = update;
                         const next = configManager.patch(configFields);
+                        // V2.2: mirror the keep-hot flag to the LLM dispatcher
+                        // so idle-unload behavior updates without a daemon
+                        // restart. Always push the resolved value (next.*)
+                        // rather than the incoming update to avoid partial
+                        // patches leaving stale state.
+                        setEmbeddedModelKeepHot(Boolean(next.keepEmbeddedModelHot));
                         if (typeof apiKey === 'string' && apiKey.length > 0) {
                             const ok = await setApiKey(next.llmProvider, apiKey);
                             if (!ok) {
@@ -1431,6 +2056,114 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // V2.2: chat action dispatcher. When the LLM emits an
+            // action-suggestion token like {{action:reconnect_node|...}}
+            // the UI renders it as a button. Click posts here with
+            // { action, params }. Server enforces the whitelist — only
+            // the exact action names from EMBEDDED_SYSTEM_PROMPT's
+            // action registry are honored. Every other string returns 400.
+            //
+            // Supported actions (Phase 1 — intentionally narrow):
+            //   reconnect_node { nodeId } — rebuild semantic_neighbor
+            //     edges for a single node via reconnectOneNode
+            //   open_reconnect_settings — pure UI hint, server acks OK
+            //
+            // Adding a new action requires: updating EMBEDDED_SYSTEM_PROMPT
+            // action registry, updating the whitelist here, and updating
+            // the UI action dispatcher. All three in one PR.
+            if (url === '/api/chat/action' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    const startedAt = Date.now();
+                    let auditAction = 'unknown';
+                    let auditArgs: Record<string, unknown> = {};
+                    let auditResult: 'success' | 'error' | 'denied-by-policy' = 'success';
+                    let auditResultDetail: string | undefined;
+                    let statusCode = 200;
+                    let responseBody: unknown = null;
+                    try {
+                        const payload = JSON.parse(body || '{}') as { action?: string; params?: Record<string, unknown> };
+                        const action = payload.action ?? '';
+                        const params = payload.params ?? {};
+                        auditAction = action;
+                        auditArgs = params;
+
+                        if (action === 'reconnect_node') {
+                            const rawId = typeof params['nodeId'] === 'string' ? (params['nodeId'] as string) : '';
+                            const nodeId = rawId.startsWith('lore:') ? rawId.slice('lore:'.length) : rawId;
+                            if (!nodeId) {
+                                statusCode = 400;
+                                responseBody = { error: 'nodeId required' };
+                                auditResult = 'denied-by-policy';
+                                auditResultDetail = 'missing nodeId';
+                            } else {
+                                const node = await graph.getNode(nodeId);
+                                if (!node) {
+                                    statusCode = 404;
+                                    responseBody = { error: `node '${nodeId}' not found` };
+                                    auditResult = 'denied-by-policy';
+                                    auditResultDetail = `node not found: ${nodeId}`;
+                                } else {
+                                    const result = await reconnectOneNode(graph, verbatimStore, pluginRegistry, {
+                                        id: node.id,
+                                        label: node.label,
+                                        content: node.content,
+                                        tags: node.tags,
+                                        type: node.type,
+                                        project: node.project,
+                                        ecosystem: node.ecosystem,
+                                    });
+                                    responseBody = {
+                                        ok: true,
+                                        action: 'reconnect_node',
+                                        nodeId,
+                                        label: node.label,
+                                        edgesAdded: result.added,
+                                        confidences: result.confidences,
+                                    };
+                                    auditResultDetail = `edgesAdded=${result.added}`;
+                                }
+                            }
+                        } else if (action === 'open_reconnect_settings') {
+                            responseBody = {
+                                ok: true,
+                                action: 'open_reconnect_settings',
+                                uiHint: { openPanel: 'settings', scrollTo: 'graph-connections' },
+                            };
+                        } else {
+                            statusCode = 400;
+                            responseBody = { error: `unknown action '${action}'` };
+                            auditResult = 'denied-by-policy';
+                            auditResultDetail = `unknown action: ${action}`;
+                        }
+                    } catch (actionErr) {
+                        statusCode = 500;
+                        responseBody = { error: (actionErr as Error).message };
+                        auditResult = 'error';
+                        auditResultDetail = (actionErr as Error).message;
+                    } finally {
+                        // V2.2: every chat-action dispatch (button click OR
+                        // auto-executed) gets audit-logged with action name,
+                        // args, outcome, and duration. Append in finally
+                        // so failure paths log too. Same AuditLog the rest
+                        // of the server uses.
+                        try {
+                            auditLog.log({
+                                toolName: `chat_action:${auditAction}`,
+                                args: auditArgs,
+                                result: auditResult,
+                                resultDetail: auditResultDetail,
+                                durationMs: Date.now() - startedAt,
+                            });
+                        } catch { /* never let audit-log errors break the response */ }
+                        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(responseBody));
+                    }
+                });
+                return;
+            }
+
             // Chat SSE stream — routes every message to the local/BYOK LLM.
             // Never falls back to any cloud pathway silently.
             if (url === '/api/chat' && req.method === 'POST') {
@@ -1475,6 +2208,24 @@ async function main(): Promise<void> {
                         // the LLM answers in scope. Focus event still fires
                         // so the canvas pans to the primary reference.
                         let enrichedMessage = message;
+
+                        // Phase 1 / C2 — collect each active plugin's system-
+                        // prompt contribution and stash it to prepend below.
+                        // Plugins teach the LLM about their domain (tone,
+                        // vocabulary, when to call which tool). `llmStream`
+                        // takes a single string; we fold the contributions
+                        // into that string rather than using a separate
+                        // 'system' role (local Qwen has no system role, and
+                        // uniformity across providers is simpler).
+                        const pluginPromptParts = pluginRegistry.getSystemPromptContributions({
+                            graph,
+                            verbatimStore,
+                            syncEngine,
+                            syncAdapter: adapter,
+                            schemaLoader,
+                            scope: detectedScope,
+                            loreDir,
+                        });
                         const markerRe = /\[node:([\w\-.:]+)\]/gi;
                         const referencedIds: string[] = [];
                         let m;
@@ -1482,16 +2233,20 @@ async function main(): Promise<void> {
                             referencedIds.push(m[1]);
                         }
                         if (referencedIds.length > 0) {
-                            const contextBlocks: string[] = [];
+                            // S7 — build wrapped <data> blocks for each
+                            // referenced node and track any that scan as
+                            // suspicious. The LLM is told upfront (via the
+                            // hardened prefix) that <data> blocks carry
+                            // untrusted content — instructions inside are
+                            // to be refused.
+                            const wrappedBlocks: string[] = [];
+                            const suspicious: Array<{ source: string; patterns: string[] }> = [];
                             const chatCtx = graph.createPluginGraphContext();
                             for (const rawId of referencedIds) {
                                 const id = rawId.startsWith('lore:') ? rawId.slice(5) : rawId;
                                 try {
                                     const refNode = await graph.getNode(id);
                                     if (!refNode) continue;
-                                    // Use a plain 1-hop Cypher — traverse uses a
-                                    // recursive pattern that some kuzu-lite builds
-                                    // refuse.
                                     const outRows = await chatCtx.queryRows(
                                         `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->(m:LoreNode)
                                          RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
@@ -1506,16 +2261,37 @@ async function main(): Promise<void> {
                                         .slice(0, 10)
                                         .map((r) => `  - ${r.rel ?? 'related_to'} → ${r.type}: ${r.label} (${r.id})`)
                                         .join('\n');
-                                    contextBlocks.push(
-                                        `## Referenced node: ${refNode.label} (id=${refNode.id}, type=${refNode.type})\n\n${refNode.content || '(no content)'}\n\n### Connected to:\n${neighborLines || '  (no edges yet)'}`,
-                                    );
+                                    const rawBlock =
+                                        `Label: ${refNode.label}\nType: ${refNode.type}\n\n` +
+                                        `Content:\n${refNode.content || '(no content)'}\n\n` +
+                                        `Connected to:\n${neighborLines || '  (no edges yet)'}`;
+                                    const wrapped = wrapUntrustedContent(rawBlock, `lore:${refNode.id}`);
+                                    wrappedBlocks.push(wrapped.wrapped);
+                                    if (wrapped.scan.suspicious) {
+                                        suspicious.push({
+                                            source: `lore:${refNode.id}`,
+                                            patterns: wrapped.scan.patternsMatched,
+                                        });
+                                    }
                                 } catch (refErr) {
-                                    console.error(`[/api/chat] failed to load ref node "${rawId}":`, (refErr as Error).message);
+                                    console.error(`[/api/chat] failed to load ref node ${redactId(rawId)}: ${redactError(refErr)}`);
                                 }
                             }
-                            if (contextBlocks.length > 0) {
-                                enrichedMessage = `You are answering about specific knowledge node(s) the user has referenced. Use the context below as the primary source; cite by id when you reply.\n\n${contextBlocks.join('\n\n---\n\n')}\n\n## User question\n${message}`;
+                            if (wrappedBlocks.length > 0) {
+                                const warning = buildInjectionWarning(suspicious);
+                                const pieces = [
+                                    hardenedSystemPrefix(),
+                                    warning, // null-safe; filtered below
+                                    'You are answering a question about knowledge nodes the user referenced. The retrieved context is enclosed in <data> blocks.',
+                                    wrappedBlocks.join('\n\n'),
+                                    '## User question',
+                                    message,
+                                ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+                                enrichedMessage = pieces.join('\n\n');
                                 write({ type: 'focus', nodeId: referencedIds[0], matches: referencedIds });
+                                if (suspicious.length > 0) {
+                                    console.error(`[/api/chat] injection-scan flagged ${suspicious.length} retrieved block(s): ${suspicious.map((s) => s.patterns.join('+')).join(', ')}`);
+                                }
                             }
                         } else {
                             // Fallback: regex-match tokens against node labels
@@ -1542,6 +2318,16 @@ async function main(): Promise<void> {
                             }
                         }
 
+                        // Prepend plugin prompt contributions (C2). They go
+                        // AFTER any [node:id] context we built above, so
+                        // domain guidance frames how the LLM treats the
+                        // referenced nodes. If no plugins contributed, this
+                        // is a no-op.
+                        if (pluginPromptParts.length > 0) {
+                            const preamble = pluginPromptParts.join('\n\n');
+                            enrichedMessage = `${preamble}\n\n---\n\n${enrichedMessage}`;
+                        }
+
                         for await (const chunk of llmStream(cfg.llmProvider, enrichedMessage, key)) {
                             if (chunk.kind === 'token' && chunk.content) {
                                 write({ type: 'token', content: chunk.content });
@@ -1565,6 +2351,224 @@ async function main(): Promise<void> {
                         res.end();
                     }
                 });
+                return;
+            }
+
+            // C6 — List pending approvals. UI "Pending actions" panel
+            // polls or long-polls this. Entries live ~60s then auto-deny.
+            if (url === '/api/approvals' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ pending: consentManager.list() }));
+                return;
+            }
+
+            // C6 — Resolve a pending approval. POST body: {approved: boolean, reason?}
+            if (url.startsWith('/api/approval/') && req.method === 'POST') {
+                const id = url.slice('/api/approval/'.length);
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', () => {
+                    try {
+                        const payload = JSON.parse(body || '{}') as { approved?: boolean; reason?: string };
+                        if (typeof payload.approved !== 'boolean') {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'approved must be boolean' }));
+                            return;
+                        }
+                        const ok = consentManager.resolve(id, payload.approved, payload.reason);
+                        res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok, id }));
+                    } catch (err) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            // Phase 6 — Retention sweep trigger (dry-run by default).
+            //   POST /api/retention/sweep {apply?: boolean, plugins?: string[]}
+            // Applies are consent-gated because archive mutates node
+            // content (replaces with placeholder + sourceRef).
+            if (url === '/api/retention/sweep' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    const startMs = Date.now();
+                    try {
+                        const { apply, plugins } = JSON.parse(body || '{}') as {
+                            apply?: boolean;
+                            plugins?: string[];
+                        };
+                        let approvalId: string | undefined;
+                        if (apply) {
+                            const cReq = consentManager.request(
+                                'retention.sweep.apply',
+                                { plugins },
+                                { context: 'Apply retention policy. Archives eligible node contents; for `delete` and `evict-content` actions, applied sweep currently defers to the consent-UI followup.' },
+                            );
+                            approvalId = cReq.id;
+                            const decision = await cReq.wait;
+                            if (!decision.approved) {
+                                auditLog.log({
+                                    toolName: 'retention.sweep',
+                                    args: { apply, plugins },
+                                    result: 'denied-by-user',
+                                    resultDetail: decision.reason,
+                                    approvalId,
+                                    durationMs: Date.now() - startMs,
+                                });
+                                res.writeHead(403, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'consent denied', reason: decision.reason }));
+                                return;
+                            }
+                        }
+                        const result = await retentionSweeper.sweep({
+                            dryRun: !apply,
+                            plugins,
+                            sink: archiveSink,
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(result));
+                    } catch (err) {
+                        auditLog.log({
+                            toolName: 'retention.sweep',
+                            args: {},
+                            result: 'error',
+                            resultDetail: (err as Error).message,
+                            durationMs: Date.now() - startMs,
+                        });
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            // C12 — List retention rules contributed by active plugins.
+            // Daily-sweep enforcement is a separate runtime (not in this
+            // commit); exposing the rules now lets the UI show them and
+            // catches plugin misconfigurations early.
+            if (url === '/api/retention' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ rules: pluginRegistry.collectRetentionPolicies() }));
+                return;
+            }
+
+            // C6b — External MCP client status.
+            if (url === '/api/mcp-clients' && req.method === 'GET') {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ clients: mcpClientRuntime.list() }));
+                return;
+            }
+
+            // C6 — Audit log read surface.
+            //   GET /api/audit?tail=N       last N entries (default 100)
+            //   GET /api/audit?since=ISO    entries after timestamp
+            if (url.startsWith('/api/audit') && req.method === 'GET') {
+                try {
+                    const parsed = new URL(url, 'http://localhost');
+                    const since = parsed.searchParams.get('since');
+                    const tailStr = parsed.searchParams.get('tail');
+                    let entries;
+                    if (since) {
+                        entries = auditLog.since(since);
+                    } else {
+                        const n = tailStr ? parseInt(tailStr, 10) : 100;
+                        entries = auditLog.tail(Number.isFinite(n) ? n : 100);
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ entries, count: entries.length }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // C5 — Connector status. Lists registered connectors + last-
+            // sync state. UI "Sources" panel will poll this.
+            if (url === '/api/connectors' && req.method === 'GET') {
+                try {
+                    const status = connectorRegistry.listStatus();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ connectors: status }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // C8 — Static HTML export. Offline-viewable graph snapshot
+            // via vis-network (CDN-loaded). Share the file; no Lore
+            // daemon required on the viewer's machine.
+            if (url.startsWith('/api/export/html') && req.method === 'GET') {
+                try {
+                    const parsed = new URL(url, 'http://localhost');
+                    const project = parsed.searchParams.get('project') ?? undefined;
+                    const maxNodes = parseInt(parsed.searchParams.get('maxNodes') ?? '500', 10);
+                    const title = parsed.searchParams.get('title') ?? undefined;
+                    const html = await exportGraphAsHtml(graph, {
+                        project,
+                        maxNodes: Number.isFinite(maxNodes) ? maxNodes : 500,
+                        title,
+                    });
+                    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+                    res.end(html);
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // C4 — Graph report. Returns the full markdown digest so
+            // the CLI can print/save it without needing its own Kùzu
+            // connection (the daemon holds the single-writer lock).
+            if (url.startsWith('/api/report') && req.method === 'GET') {
+                try {
+                    const parsed = new URL(url, 'http://localhost');
+                    const project = parsed.searchParams.get('project') ?? undefined;
+                    const topN = parseInt(parsed.searchParams.get('topN') ?? '20', 10);
+                    const md = await writeGraphReport(graph, {
+                        project,
+                        topN: Number.isFinite(topN) ? topN : 20,
+                    });
+                    res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
+                    res.end(md);
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // C3.5 + C5.5 — Storage inspection + quota decision per
+            // workspace. UI reads both from one call so the Storage
+            // panel can show usage + budget state without a second hop.
+            if (url === '/api/storage' && req.method === 'GET') {
+                try {
+                    const dataHome = path.join(os.homedir(), '.groundfloor');
+                    const workspaces = inspectAllWorkspaces(dataHome);
+                    const home = inspectDataHome(dataHome);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        dataHome: {
+                            path: dataHome,
+                            breakdown: home,
+                        },
+                        workspaces: workspaces.map((w) => ({
+                            name: w.name,
+                            path: w.path,
+                            breakdown: w.breakdown,
+                            quota: decideQuota({ breakdown: w.breakdown }),
+                        })),
+                    }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
                 return;
             }
 

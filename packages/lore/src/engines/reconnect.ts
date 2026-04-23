@@ -46,6 +46,18 @@ export interface ReconnectOptions {
      * (e.g. after upgrading the embedder or changing the prefix scheme).
      */
     force?: boolean;
+    /**
+     * C6.5 (Phase 4) — incremental cursor. When set to an ISO timestamp,
+     * reconnect only considers nodes whose `updatedAt` is strictly
+     * greater than `since`. Massively faster on large stable graphs:
+     * after a one-time full sweep, nightly reconnects process only
+     * what changed today.
+     *
+     * Invariant: incremental mode does NOT prune existing inferred
+     * edges (`pruneInferred: false` is forced). If you need a clean
+     * rebuild, call without `since` (full sweep).
+     */
+    since?: string;
 }
 
 export interface ReconnectProposal {
@@ -94,7 +106,10 @@ export async function reconnectGraph(
     const k = opts.k ?? 5;
     const minSim = opts.minSim ?? 0.65;
     const dryRun = opts.dryRun ?? true;
-    const pruneInferred = opts.pruneInferred ?? true;
+    // C6.5: incremental mode forces pruneInferred: false (we're only
+    // updating the delta, not rebuilding from scratch).
+    const since = opts.since;
+    const pruneInferred = since ? false : (opts.pruneInferred ?? true);
 
     await verbatim.initialize();
     const pluginCtx: PluginGraphContext = graph.createPluginGraphContext();
@@ -102,7 +117,21 @@ export async function reconnectGraph(
     // 1. Embed every LoreNode with the canonical lore: prefix.
     //    V2.1 --only-changed: skip nodes whose contentHash matches the
     //    already-stored embedding. force=true rebuilds unconditionally.
-    const loreNodes: LoreNode[] = await graph.listNodes();
+    //    C6.5 incremental: when `since` is set, filter to nodes whose
+    //    updatedAt is strictly after the cursor. Nodes that haven't
+    //    changed since the last sweep skip the embed AND the search.
+    let loreNodes: LoreNode[] = await graph.listNodes();
+    if (since) {
+        const cutoffMs = Date.parse(since);
+        if (Number.isFinite(cutoffMs)) {
+            const before = loreNodes.length;
+            loreNodes = loreNodes.filter((n) => {
+                const t = n.updatedAt ? Date.parse(n.updatedAt) : 0;
+                return t > cutoffMs;
+            });
+            console.error(`[reconnect] incremental: ${loreNodes.length}/${before} nodes changed since ${since}`);
+        }
+    }
     let embeddingsAdded = 0;
     let embeddingsSkipped = 0;
     const force = opts.force ?? false;
@@ -254,10 +283,15 @@ export async function reconnectGraph(
 
         if (fromPillar === 'lore' && toPillar === 'lore') {
             try {
+                // C1 — reconnect edges are semantic inferences, not user
+                // assertions. Tag confidence='inferred' with the cosine
+                // similarity as the numeric score.
                 await graph.addEdge({
                     sourceId: strip(edge.from < edge.to ? edge.from : edge.to),
                     targetId: strip(edge.from < edge.to ? edge.to : edge.from),
                     relation,
+                    confidence: 'inferred',
+                    confidenceScore: edge.confidence,
                 });
                 coreEdgesInserted++;
             } catch (err) {
@@ -345,7 +379,15 @@ export async function reconnectOneNode(
         if (classifyPrefix(hit.id) === 'lore') {
             const [lo, hi] = node.id < strip(hit.id) ? [node.id, strip(hit.id)] : [strip(hit.id), node.id];
             try {
-                await graph.addEdge({ sourceId: lo, targetId: hi, relation });
+                // C1 — per-node reconnect is also inferred. Score is the
+                // cosine similarity for this candidate pair.
+                await graph.addEdge({
+                    sourceId: lo,
+                    targetId: hi,
+                    relation,
+                    confidence: 'inferred',
+                    confidenceScore: sim,
+                });
                 confidences.push(sim);
                 added++;
             } catch { /* skip dead edges */ }

@@ -9,6 +9,7 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Plus, Trash2 } from 'lucide-react';
+import { authFetch } from '../lib/authFetch';
 
 interface WorkspaceEntry {
     name: string;
@@ -33,7 +34,7 @@ export default function WorkspacePicker({ apiBase, onSwitchStarted }: WorkspaceP
     const ref = useRef<HTMLDivElement | null>(null);
 
     useEffect(() => {
-        void fetch(`${apiBase}/api/workspaces`)
+        void authFetch(`${apiBase}/api/workspaces`)
             .then((r) => r.json() as Promise<WorkspacesResponse>)
             .then(setState)
             .catch(() => setState(null));
@@ -49,7 +50,7 @@ export default function WorkspacePicker({ apiBase, onSwitchStarted }: WorkspaceP
     }, []);
 
     const refresh = async (): Promise<void> => {
-        const next = (await fetch(`${apiBase}/api/workspaces`).then((r) => r.json())) as WorkspacesResponse;
+        const next = (await authFetch(`${apiBase}/api/workspaces`).then((r) => r.json())) as WorkspacesResponse;
         setState(next);
     };
 
@@ -61,7 +62,7 @@ export default function WorkspacePicker({ apiBase, onSwitchStarted }: WorkspaceP
         setBusy(true);
         onSwitchStarted(name);
         try {
-            await fetch(`${apiBase}/api/workspaces/switch`, {
+            await authFetch(`${apiBase}/api/workspaces/switch`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name }),
@@ -76,7 +77,7 @@ export default function WorkspacePicker({ apiBase, onSwitchStarted }: WorkspaceP
         const raw = window.prompt('Name the new workspace (letters, digits, dashes; 1–40 chars):');
         if (!raw) return;
         try {
-            const resp = await fetch(`${apiBase}/api/workspaces`, {
+            const resp = await authFetch(`${apiBase}/api/workspaces`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name: raw }),
@@ -95,7 +96,7 @@ export default function WorkspacePicker({ apiBase, onSwitchStarted }: WorkspaceP
     const handleDelete = async (name: string): Promise<void> => {
         if (!window.confirm(`Remove workspace "${name}" from the registry? On-disk data is NOT deleted.`)) return;
         try {
-            const resp = await fetch(`${apiBase}/api/workspaces/${encodeURIComponent(name)}`, { method: 'DELETE' });
+            const resp = await authFetch(`${apiBase}/api/workspaces/${encodeURIComponent(name)}`, { method: 'DELETE' });
             if (!resp.ok) {
                 const err = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
                 window.alert(`Delete failed: ${err.error ?? 'unknown'}`);

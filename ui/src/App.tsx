@@ -3,6 +3,9 @@ import { Settings, MessageSquare, Moon, Sun, PanelLeft, PanelRight } from 'lucid
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import WorkspacePicker from './components/WorkspacePicker';
 import NodeDetailDrawer from './components/NodeDetailDrawer';
+import { ChatMarkdown } from './components/ChatMarkdown';
+import { authFetch } from './lib/authFetch';
+import 'highlight.js/styles/github-dark.css';
 import './App.css';
 
 // V2.1: code-split the graph renderer. Sigma.js + graphology adds ~180 KB
@@ -37,7 +40,6 @@ interface HealthResponse {
   status: string;
   version: string;
   activePlugins: string[];
-  defaultMode: string;
   llmProvider: LlmProvider;
   workspace: string;
   dataplane: 'bound' | 'offline';
@@ -48,17 +50,23 @@ type OrphanDecision = 'keep' | 'drop' | 'reenable';
 
 interface ConfigResponse {
   plugins: string[];
-  defaultMode: string;
   llmProvider: LlmProvider;
   hasApiKey: boolean;
   extractionPath?: 'local-byok' | 'def-cloud';
   telemetryOptOut?: boolean;
+  keepEmbeddedModelHot?: boolean;
+  autoExecuteChatActions?: boolean;
   capability: {
     provider: string;
     model: string;
     acceptsText: boolean;
     acceptsImages: boolean;
     acceptedMimeTypes: string[];
+    /** V2.2 plumbing: UI branches on this when rendering chat actions.
+     *  'native' → future native tool-calling path.
+     *  'suggestion_only' → parse {{action:...}} tokens into buttons.
+     *  'none' → pure text, no structured output expected. */
+    toolCalling: 'native' | 'suggestion_only' | 'none';
   };
 }
 
@@ -83,6 +91,22 @@ interface ChatMessage {
     file?: string;
     progress: number; // 0..1
   };
+  /** V2.2: node references attached via "Ask about this". Render as
+   *  pills above the bubble; not part of the text body itself. */
+  nodeRefs?: Array<{ marker: string; label: string | null }>;
+  /** V2.2: action-suggestion buttons parsed from the assistant's
+   *  {{action:...}} tokens. Null when the message contains no actions
+   *  (text-only answer). Preserves insertion order so buttons appear
+   *  below the text in the order the LLM emitted them. */
+  actions?: Array<{
+    action: string;
+    params: Record<string, string>;
+    label: string;
+  }>;
+  /** V2.2: if this assistant message is itself the result of a
+   *  user-confirmed action click, carry the metadata so the UI can
+   *  style it as a "system confirmation" instead of normal LLM chat. */
+  isActionResult?: boolean;
 }
 
 /** Read a File object as base64 without the data: URL prefix. */
@@ -112,6 +136,7 @@ function App() {
   const [hasApiKey, setHasApiKey] = useState(false);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [languageBreakdown, setLanguageBreakdown] = useState<Record<string, number> | null>(null);
   const [workspaceSwitching, setWorkspaceSwitching] = useState<string | null>(null);
 
   // Chat state
@@ -121,6 +146,16 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const patchTimer = useRef<number | null>(null);
 
+  // V2.2: pending node references added via "Ask about this". These
+  // render as removable pills above the chat input; on send they get
+  // serialised back into [node:...] markers so the server's existing
+  // context-expansion path is unchanged.
+  const [pendingNodeRefs, setPendingNodeRefs] = useState<
+    Array<{ marker: string; label: string | null }>
+  >([]);
+  // Small in-memory label cache so re-referencing a node doesn't refetch.
+  const nodeLabelCache = useRef<Map<string, string>>(new Map());
+
   // V2.1 note: Mode pills removed. Workspace chip (WorkspacePicker) is
   // the only context switcher. Intra-workspace scoping happens through
   // the Projects filter in the right panel.
@@ -129,6 +164,8 @@ function App() {
   // beneath the file input so the user sees what the server decided).
   const [extractionPath, setExtractionPath] = useState<'local-byok' | 'def-cloud'>('local-byok');
   const [telemetryOptOut, setTelemetryOptOut] = useState(false);
+  const [keepEmbeddedModelHot, setKeepEmbeddedModelHot] = useState(false);
+  const [autoExecuteChatActions, setAutoExecuteChatActions] = useState(false);
   const [capability, setCapability] = useState<ConfigResponse['capability'] | null>(null);
   const [lastExtract, setLastExtract] = useState<ExtractResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -161,6 +198,10 @@ function App() {
   // the filter buckets, focusNodeId driven by SSE `focus` events.
   const [topology, setTopology] = useState<TopologyLike | null>(null);
   const [activeTypes, setActiveTypes] = useState<Set<string> | null>(null);
+  // C1 — confidence filter. Inferred edges are the majority in a
+  // reconnect-heavy workspace; toggle them off for a "known facts only"
+  // view. Default on so first paint matches what the user had before.
+  const [showInferred, setShowInferred] = useState<boolean>(true);
   const [activeProjects, setActiveProjects] = useState<Set<string> | null>(null);
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const focusCoalesceRef = useRef<number | null>(null);
@@ -173,27 +214,57 @@ function App() {
   // window.__lore_selectNode(id) to open the drawer without a Sigma click.
   // Shipped intentionally because the cost is one typed global and it's
   // genuinely useful for QA scripts.
+  // Opening the Node Detail Drawer must also close Settings — they
+  // both anchor at top-right and would otherwise visually collide.
+  // Closing the drawer (id = null) leaves Settings alone.
+  const openNodeDrawer = useCallback((nodeId: string | null) => {
+    setSelectedNodeId(nodeId);
+    if (nodeId !== null) setShowSettings(false);
+  }, []);
+
+  // V2.2: click-outside-to-close for the Settings panel. Same pattern
+  // NodeDetailDrawer uses. The gear button itself must be excluded
+  // from the outside check (otherwise opening flashes shut immediately).
+  const settingsPanelRef = useRef<HTMLDivElement | null>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
   useEffect(() => {
-    (window as unknown as { __lore_selectNode?: (id: string) => void }).__lore_selectNode = setSelectedNodeId;
+    if (!showSettings) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as Node | null;
+      if (!target) return;
+      if (settingsPanelRef.current?.contains(target)) return;
+      if (settingsButtonRef.current?.contains(target)) return;
+      setShowSettings(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [showSettings]);
+
+  useEffect(() => {
+    (window as unknown as { __lore_selectNode?: (id: string) => void }).__lore_selectNode = openNodeDrawer as (id: string) => void;
     return () => {
       delete (window as unknown as { __lore_selectNode?: (id: string) => void }).__lore_selectNode;
     };
-  }, []);
+  }, [openNodeDrawer]);
 
   // ── Initial load: fetch /api/health + /api/config ────────────────
   useEffect(() => {
     void (async () => {
       try {
-        const [h, c] = await Promise.all([
-          fetch(`${API_BASE}/api/health`).then((r) => r.json() as Promise<HealthResponse>),
-          fetch(`${API_BASE}/api/config`).then((r) => r.json() as Promise<ConfigResponse>),
+        const [h, c, s] = await Promise.all([
+          authFetch(`${API_BASE}/api/health`).then((r) => r.json() as Promise<HealthResponse>),
+          authFetch(`${API_BASE}/api/config`).then((r) => r.json() as Promise<ConfigResponse>),
+          authFetch(`${API_BASE}/api/stats`).then((r) => r.json() as Promise<{ languageBreakdown?: Record<string, number> }>).catch(() => ({})),
         ]);
         setHealth(h);
         setLlmProvider(c.llmProvider);
         setHasApiKey(c.hasApiKey);
         setExtractionPath(c.extractionPath ?? 'local-byok');
         setTelemetryOptOut(Boolean(c.telemetryOptOut));
+        setKeepEmbeddedModelHot(Boolean(c.keepEmbeddedModelHot));
+        setAutoExecuteChatActions(Boolean(c.autoExecuteChatActions));
         setCapability(c.capability);
+        setLanguageBreakdown(s?.languageBreakdown ?? null);
       } catch (err) {
         setHealthError((err as Error).message);
       }
@@ -239,8 +310,8 @@ function App() {
     setTopology(t);
   }, []);
   const handleNodeClick = useCallback((nodeId: string) => {
-    setSelectedNodeId(nodeId);
-  }, []);
+    openNodeDrawer(nodeId);
+  }, [openNodeDrawer]);
 
   // V2.1: Cmd/Ctrl+1..9 mode cycling removed with the mode pill-group.
   // Future keyboard shortcuts (focus chat, toggle filters) can live here.
@@ -258,7 +329,7 @@ function App() {
   // ── PATCH /api/config helpers ────────────────────────────────────
   const patchConfig = async (patch: Record<string, unknown>): Promise<void> => {
     try {
-      const resp = await fetch(`${API_BASE}/api/config`, {
+      const resp = await authFetch(`${API_BASE}/api/config`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(patch),
@@ -292,7 +363,7 @@ function App() {
         return;
       }
       try {
-        const h = (await fetch(`${API_BASE}/api/health`).then((r) => r.json())) as HealthResponse;
+        const h = (await authFetch(`${API_BASE}/api/health`).then((r) => r.json())) as HealthResponse;
         if (h.workspace === next) {
           window.location.reload();
           return;
@@ -305,17 +376,195 @@ function App() {
     window.setTimeout(() => void tick(), 800);
   };
 
-  // V2.1: "Ask about this" — pre-fill the chat with a [node:id] marker
-  // and focus the input. Server /api/chat expands the marker into
-  // system-prompt context (node content + immediate neighbors).
+  // V2.2: parse {{action:name|key=value|...}} tokens out of an LLM
+  // response. Returns the cleaned text (tokens removed) plus the
+  // extracted actions array in emit order.
+  //
+  // Defensive: unknown action names are dropped silently (never
+  // rendered as a button) — prevents a hallucinated action from
+  // producing a clickable dead-end. Server-side whitelist is the
+  // authoritative check; this is a client-side pre-filter.
+  const KNOWN_ACTIONS = new Set(['reconnect_node', 'open_reconnect_settings']);
+  const ACTION_TOKEN_RE = /\{\{action:([^}]+)\}\}/g;
+  const extractActions = (rawText: string): {
+    cleaned: string;
+    actions: Array<{ action: string; params: Record<string, string>; label: string }>;
+  } => {
+    const actions: Array<{ action: string; params: Record<string, string>; label: string }> = [];
+    const cleaned = rawText.replace(ACTION_TOKEN_RE, (_full, inner: string) => {
+      // inner shape: "name|key=value|key=value"
+      const parts = inner.split('|').map((s) => s.trim()).filter(Boolean);
+      if (parts.length === 0) return '';
+      const action = parts[0];
+      if (!KNOWN_ACTIONS.has(action)) return ''; // drop unknown action
+      const params: Record<string, string> = {};
+      for (let i = 1; i < parts.length; i++) {
+        const eq = parts[i].indexOf('=');
+        if (eq < 0) continue;
+        const key = parts[i].slice(0, eq).trim();
+        const value = parts[i].slice(eq + 1).trim();
+        if (key) params[key] = value;
+      }
+      const label = params['label'] || 'Run action';
+      actions.push({ action, params, label });
+      return '';
+    });
+    return { cleaned: cleaned.replace(/\n\n+/g, '\n\n').trim(), actions };
+  };
+
+  // V2.2: execute an action button. POSTs to /api/chat/action, shows
+  // the result as a new assistant message styled as an action-result
+  // confirmation. Errors surface the same way (error styling).
+  const runChatAction = useCallback(async (action: string, params: Record<string, string>): Promise<void> => {
+    const resultId = `a-action-${Date.now()}`;
+    setMessages((m) => [...m, { id: resultId, role: 'assistant', text: 'Running…', streaming: true, isActionResult: true }]);
+    try {
+      // For reconnect_node, the param key from the LLM is `id`; map to
+      // the server's expected `nodeId`. For open_reconnect_settings,
+      // no params needed — handle UI-side below.
+      let serverParams: Record<string, unknown> = {};
+      if (action === 'reconnect_node') {
+        serverParams = { nodeId: params['id'] ?? '' };
+      }
+
+      const resp = await authFetch(`${API_BASE}/api/chat/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, params: serverParams }),
+      });
+      const body = await resp.json() as {
+        ok?: boolean;
+        error?: string;
+        edgesAdded?: number;
+        label?: string;
+        uiHint?: { openPanel?: string; scrollTo?: string };
+      };
+
+      if (!resp.ok || !body.ok) {
+        setMessages((m) => m.map((msg) => msg.id === resultId ? { ...msg, text: `Action failed: ${body.error ?? `HTTP ${resp.status}`}`, streaming: false, error: true } : msg));
+        return;
+      }
+
+      // Success — compose a concise confirmation message.
+      let confirmText = '';
+      if (action === 'reconnect_node') {
+        const n = body.edgesAdded ?? 0;
+        confirmText = `✓ Reconnected **${body.label ?? params['id']}**. ${n === 0 ? 'No new edges — the node was already well-connected.' : `Added ${n} semantic_neighbor edge${n === 1 ? '' : 's'}.`}`;
+      } else if (action === 'open_reconnect_settings') {
+        setShowSettings(true);
+        setSelectedNodeId(null);
+        confirmText = '✓ Opened Settings. Scroll to **Graph Connections** for the Dry run / Apply / Reconsume controls.';
+      } else {
+        confirmText = `✓ Action "${action}" completed.`;
+      }
+
+      setMessages((m) => m.map((msg) => msg.id === resultId ? { ...msg, text: confirmText, streaming: false } : msg));
+    } catch (err) {
+      setMessages((m) => m.map((msg) => msg.id === resultId ? { ...msg, text: `Action failed: ${(err as Error).message}`, streaming: false, error: true } : msg));
+    }
+  }, []);
+
+  // V2.2: specialized prompt for "Generate docs for this node." Sends
+  // the node reference as a pill + a doc-request instruction that
+  // asks the LLM for a structured Markdown document. The chat bubble
+  // renders via the existing ChatMarkdown pipeline, so code blocks,
+  // tables, and Mermaid diagrams all render correctly.
+  //
+  // Quality depends entirely on the active LLM. Embedded Gemma 1B
+  // will produce a short stub; BYOK Claude / GPT-4o produces full
+  // Markdown with diagrams when the node content supports it. The
+  // UI doesn't gate on capability — the user sees what their model
+  // produces, which is the honest signal.
+  const DOCS_PROMPT = (
+    'Produce comprehensive developer-facing documentation for the node(s) attached to this conversation. Structure as Markdown with these sections:\n\n' +
+    '1. **Overview** — 1-2 paragraphs describing what this node represents.\n' +
+    '2. **Key Concepts** — bullet list of important terms and ideas.\n' +
+    '3. **Relationships** — how this connects to other systems or knowledge.\n' +
+    '4. **Code References** — if the node mentions files or line numbers, list them as a Markdown table (file | lines | purpose).\n' +
+    '5. **Diagram** — include a ```mermaid code block with a diagram if the node describes architecture, flows, or relationships. Skip this section if a diagram would not add value.\n' +
+    '6. **Usage / Context** — when and how this knowledge applies.\n\n' +
+    'Cite any claims with [node-id] markers. Do not invent details that are not in the provided context.'
+  );
+  const generateDocsFor = useCallback((nodeId: string): void => {
+    const marker = nodeId.includes(':') ? nodeId : `lore:${nodeId}`;
+    setPendingNodeRefs((refs) => {
+      if (refs.some((r) => r.marker === marker)) return refs;
+      const cached = nodeLabelCache.current.get(marker) ?? null;
+      return [...refs, { marker, label: cached }];
+    });
+    // Prefill input with the docs request. User can edit before send
+    // OR hit send as-is. Deliberately not auto-sending — one extra
+    // click is the safety belt against accidental invocations.
+    setInput((curr) => (curr ? curr : DOCS_PROMPT));
+    window.setTimeout(() => chatInputRef.current?.focus(), 50);
+  }, []);
+
+  // V2.2: Save an assistant message body as a .md file. Browser-side
+  // only — no server round-trip. Filename derives from the first
+  // non-empty heading or falls back to a timestamp. No external deps.
+  const downloadAssistantMessageAsMarkdown = useCallback((text: string): void => {
+    if (!text) return;
+    // Try to pull a filename from the first ATX heading.
+    const headingMatch = /^#{1,6}\s+(.+?)\s*$/m.exec(text);
+    const slug = (headingMatch ? headingMatch[1] : '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 60);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const filename = `${slug || 'lore-chat'}-${stamp}.md`;
+    const blob = new Blob([text], { type: 'text/markdown;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, []);
+
+  // V2.2: "Ask about this" — add the node as a removable pill above
+  // the chat input instead of stuffing a [node:id] marker into the
+  // textbox. On send (see sendMessage) the pending refs get serialised
+  // back into markers so the server's context-expansion path is
+  // unchanged. Label is fetched async; pill shows raw marker until then.
   const askAboutNode = (nodeId: string): void => {
     // Plugin-owned nodes use their prefix as the marker kind.
     // Core nodes get the `lore:` prefix to disambiguate.
     const marker = nodeId.includes(':') ? nodeId : `lore:${nodeId}`;
-    const prefill = `[node:${marker}] `;
-    setInput((curr) => (curr.startsWith(prefill) ? curr : prefill + curr));
+    setPendingNodeRefs((refs) => {
+      if (refs.some((r) => r.marker === marker)) return refs;
+      const cached = nodeLabelCache.current.get(marker) ?? null;
+      return [...refs, { marker, label: cached }];
+    });
+
+    // Fetch the label if not cached. Non-plugin (lore:) refs only —
+    // plugin-owned nodes (file:, symbol:) don't have /api/node yet.
+    if (marker.startsWith('lore:')) {
+      const rawId = marker.slice('lore:'.length);
+      if (!nodeLabelCache.current.has(marker)) {
+        void authFetch(`${API_BASE}/api/node?id=${encodeURIComponent(rawId)}`)
+          .then((r) => r.json())
+          .then((detail: { node?: { label?: string } }) => {
+            const label = detail?.node?.label ?? null;
+            if (label) {
+              nodeLabelCache.current.set(marker, label);
+              setPendingNodeRefs((refs) =>
+                refs.map((r) => (r.marker === marker ? { ...r, label } : r)),
+              );
+            }
+          })
+          .catch(() => { /* leave label null; pill still works */ });
+      }
+    }
+
     window.setTimeout(() => chatInputRef.current?.focus(), 50);
   };
+
+  const removePendingNodeRef = useCallback((marker: string): void => {
+    setPendingNodeRefs((refs) => refs.filter((r) => r.marker !== marker));
+  }, []);
 
   // ── Phase 2: file ingestion via /api/extract ────────────────────
   const triggerFilePicker = (): void => {
@@ -328,7 +577,7 @@ function App() {
     const mimeType = file.type || (isText ? 'text/plain' : 'application/octet-stream');
 
     try {
-      const resp = await fetch(`${API_BASE}/api/extract`, {
+      const resp = await authFetch(`${API_BASE}/api/extract`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -359,7 +608,7 @@ function App() {
     setReconnectMsg(mode === 'reconsume' ? 'Re-embedding every node + reconnecting…' : 'Embedding + scoring…');
     try {
       const endpoint = mode === 'reconsume' ? '/api/graph/reconsume' : '/api/graph/reconnect';
-      const resp = await fetch(`${API_BASE}${endpoint}`, {
+      const resp = await authFetch(`${API_BASE}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -401,14 +650,14 @@ function App() {
       confirmValue = 'DROP';
     }
     try {
-      const resp = await fetch(`${API_BASE}/api/orphan`, {
+      const resp = await authFetch(`${API_BASE}/api/orphan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ plugin, decision, confirm: confirmValue }),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       // Refresh health to clear the blocking modal.
-      const h = (await fetch(`${API_BASE}/api/health`).then((r) => r.json())) as HealthResponse;
+      const h = (await authFetch(`${API_BASE}/api/health`).then((r) => r.json())) as HealthResponse;
       setHealth(h);
     } catch (err) {
       setHealthError(`Orphan resolve failed: ${(err as Error).message}`);
@@ -427,18 +676,40 @@ function App() {
   // ── Chat / SSE streaming ─────────────────────────────────────────
   const sendMessage = async (): Promise<void> => {
     const text = input.trim();
-    if (!text || streaming) return;
-    const userMsg: ChatMessage = { id: `u-${Date.now()}`, role: 'user', text };
+    // Allow send when EITHER the user typed text OR they have pending
+    // node refs — "Ask about this" with no added text is a valid query.
+    if ((!text && pendingNodeRefs.length === 0) || streaming) return;
+
+    // Serialise pending refs back into [node:...] markers so the
+    // server's existing context-expansion path works unchanged.
+    const markerPrefix = pendingNodeRefs
+      .map((r) => `[node:${r.marker}]`)
+      .join(' ');
+    const wireMessage = markerPrefix
+      ? (text ? `${markerPrefix} ${text}` : markerPrefix)
+      : text;
+
+    // Display in the user bubble: clean text (or fallback if no text)
+    // plus the pills as structured refs. Don't put markers in the
+    // visible text body — that's what caused the ugly [node:…] in the
+    // chat log before.
+    const userMsg: ChatMessage = {
+      id: `u-${Date.now()}`,
+      role: 'user',
+      text: text || (pendingNodeRefs.length > 0 ? 'Ask about this' : ''),
+      nodeRefs: pendingNodeRefs.length > 0 ? [...pendingNodeRefs] : undefined,
+    };
     const assistantId = `a-${Date.now()}`;
     setMessages((m) => [...m, userMsg, { id: assistantId, role: 'assistant', text: '', streaming: true }]);
     setInput('');
+    setPendingNodeRefs([]);
     setStreaming(true);
 
     try {
-      const resp = await fetch(`${API_BASE}/api/chat`, {
+      const resp = await authFetch(`${API_BASE}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: wireMessage }),
       });
       if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
@@ -498,7 +769,33 @@ function App() {
                 gotError = true;
                 setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: evt.message ?? 'error', error: true, streaming: false } : msg)));
               } else if (evt.type === 'done') {
-                setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, streaming: false } : msg)));
+                // V2.2: on stream completion, parse action tokens out
+                // of the accumulated text and surface them as buttons.
+                // When autoExecuteChatActions is ON AND the active
+                // capability is native-tier, skip the button render
+                // and execute each action immediately. Embedded
+                // (suggestion_only) ALWAYS uses buttons regardless of
+                // the toggle — safety property documented in
+                // ToolCapability type.
+                const isNativeTier = capability?.toolCalling === 'native';
+                const shouldAutoExec = isNativeTier && autoExecuteChatActions;
+
+                setMessages((m) => m.map((msg) => {
+                  if (msg.id !== assistantId) return msg;
+                  const { cleaned, actions } = extractActions(msg.text);
+                  if (actions.length > 0 && shouldAutoExec) {
+                    // Fire-and-forget per extracted action. Each runs
+                    // runChatAction which inserts its own result bubble.
+                    actions.forEach((a) => { void runChatAction(a.action, a.params); });
+                    return { ...msg, text: cleaned, streaming: false };
+                  }
+                  return {
+                    ...msg,
+                    text: cleaned,
+                    streaming: false,
+                    ...(actions.length > 0 ? { actions } : {}),
+                  };
+                }));
               }
             } catch {
               // ignore malformed frame
@@ -578,9 +875,25 @@ function App() {
         onDrop={(e) => void onDrop(e)}
       >
         <header className="sidebar-header">
+          <div className="logo-area" title="Groundfloor Lore — local-first knowledge graph">
+            <img src="/favicon.svg" alt="" width="22" height="22" className="brand-mark" />
+            <span className="brand-wordmark">Lore</span>
+          </div>
           <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
           <div style={{ display: 'flex', gap: '0.25rem' }}>
-            <button className="icon-button" onClick={() => setShowSettings(!showSettings)} title="Settings">
+            <button
+              ref={settingsButtonRef}
+              className="icon-button"
+              onClick={() => {
+                // Settings + Node Detail Drawer both anchor at top-right;
+                // keep them mutually exclusive so neither obscures the
+                // other. Opening Settings closes the drawer.
+                const next = !showSettings;
+                setShowSettings(next);
+                if (next) setSelectedNodeId(null);
+              }}
+              title="Settings"
+            >
               <Settings size={20} />
             </button>
             <button className="icon-button" onClick={() => setSidebarOpen(false)} title="Hide chat panel">
@@ -597,9 +910,10 @@ function App() {
             {llmProvider === 'embedded' ? (
               <div className="chat-message ai-message glass-panel nudge-banner">
                 <p>
-                  ⚠ Using the built-in <strong>Qwen 0.5B</strong> — usable, but small. For better
-                  answers, add an API key (Anthropic / OpenAI) or switch to Ollama with a stronger
-                  local model in <em>Settings</em>.
+                  ⚠ Using the built-in <strong>Gemma 3 1B</strong> — usable, but small. For richer
+                  answers, docs, or diagrams, add an API key (Anthropic / OpenAI) or switch to Ollama
+                  with a stronger local model in <em>Settings</em>. The embedded model idle-unloads
+                  after 3 minutes to save memory — toggle in Settings if you prefer it always hot.
                 </p>
               </div>
             ) : null}
@@ -622,10 +936,65 @@ function App() {
                     <small>{Math.round(m.loading.progress * 100)}% — runs fully offline after download</small>
                   </div>
                 ) : (
-                  <p>
-                    {m.text}
-                    {m.streaming ? <span className="cursor-blink">▌</span> : null}
-                  </p>
+                  <>
+                    {m.nodeRefs && m.nodeRefs.length > 0 ? (
+                      <div className="node-ref-pills message-refs">
+                        {m.nodeRefs.map((r) => (
+                          <span key={r.marker} className="node-ref-pill" title={r.marker}>
+                            <span className="node-ref-pill-label">{r.label ?? r.marker}</span>
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {m.role === 'assistant' ? (
+                      // Assistant bubbles render as Markdown — so
+                      // BYOK models' code blocks, tables, and
+                      // ```mermaid diagrams actually show up.
+                      // During streaming we still show the cursor
+                      // inline with the rendered output.
+                      <div className={`chat-markdown-wrap${m.isActionResult ? ' action-result' : ''}`}>
+                        <ChatMarkdown source={m.text || ''} />
+                        {m.streaming ? <span className="cursor-blink">▌</span> : null}
+                        {m.actions && m.actions.length > 0 ? (
+                          <div className="chat-actions">
+                            {m.actions.map((a, i) => (
+                              <button
+                                key={`${a.action}-${i}`}
+                                type="button"
+                                className="chat-action-btn"
+                                onClick={() => void runChatAction(a.action, a.params)}
+                                title={`Action: ${a.action}`}
+                              >
+                                {a.label}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                        {/* V2.2: Save as .md on every completed
+                            assistant message. Hidden during streaming;
+                            hidden on banner-role system messages;
+                            hidden on empty bodies. */}
+                        {!m.streaming && m.text && m.text.length > 10 ? (
+                          <button
+                            type="button"
+                            className="chat-save-md"
+                            onClick={() => downloadAssistantMessageAsMarkdown(m.text)}
+                            title="Download this message as a Markdown file"
+                          >
+                            Save as .md
+                          </button>
+                        ) : null}
+                      </div>
+                    ) : (
+                      // User bubbles stay plain text — the user
+                      // typed it, don't re-interpret Markdown syntax
+                      // they didn't mean.
+                      <p>
+                        {m.text}
+                        {m.streaming ? <span className="cursor-blink">▌</span> : null}
+                      </p>
+                    )}
+                  </>
                 )}
               </div>
             ))}
@@ -634,18 +1003,47 @@ function App() {
 
           <div className="chat-input-area">
             <div className="input-wrapper glass-panel">
-              <input
-                ref={chatInputRef}
-                type="text"
-                placeholder={streaming ? 'Streaming…' : 'Query the knowledge graph…'}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={onInputKeyDown}
-                disabled={streaming}
-              />
-              <button className="send-button" onClick={() => void sendMessage()} disabled={streaming || !input.trim()}>
-                <MessageSquare size={18} />
-              </button>
+              {pendingNodeRefs.length > 0 ? (
+                <div className="node-ref-pills">
+                  {pendingNodeRefs.map((r) => (
+                    <span key={r.marker} className="node-ref-pill removable" title={r.marker}>
+                      <button
+                        type="button"
+                        className="node-ref-pill-remove"
+                        aria-label={`Remove ${r.label ?? r.marker}`}
+                        onClick={() => removePendingNodeRef(r.marker)}
+                      >
+                        ×
+                      </button>
+                      <span className="node-ref-pill-label">{r.label ?? r.marker}</span>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              <div className="input-wrapper-row">
+                <input
+                  ref={chatInputRef}
+                  type="text"
+                  placeholder={
+                    streaming
+                      ? 'Streaming…'
+                      : pendingNodeRefs.length > 0
+                        ? 'Ask a follow-up… (or send as-is)'
+                        : 'Query the knowledge graph…'
+                  }
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={onInputKeyDown}
+                  disabled={streaming}
+                />
+                <button
+                  className="send-button"
+                  onClick={() => void sendMessage()}
+                  disabled={streaming || (!input.trim() && pendingNodeRefs.length === 0)}
+                >
+                  <MessageSquare size={18} />
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -710,6 +1108,7 @@ function App() {
             focusNodeId={focusNodeId}
             onTopologyReady={handleTopologyReady}
             onNodeClick={handleNodeClick}
+            showInferred={showInferred}
           />
         </Suspense>
 
@@ -725,11 +1124,15 @@ function App() {
             askAboutNode(id);
             setSelectedNodeId(null);
           }}
+          onGenerateDocs={(id) => {
+            generateDocsFor(id);
+            setSelectedNodeId(null);
+          }}
         />
 
         {/* Dynamic Settings Sidebar (Slide-over) */}
         {showSettings && (
-          <div className="settings-panel glass-panel">
+          <div className="settings-panel glass-panel" ref={settingsPanelRef}>
             <h3>Configuration</h3>
 
             <div className="setting-group">
@@ -747,7 +1150,7 @@ function App() {
                 value={llmProvider}
                 onChange={(e) => handleProviderChange(e.target.value as LlmProvider)}
               >
-                <option value="embedded">Built-in Qwen 0.5B (no setup)</option>
+                <option value="embedded">Built-in Gemma 3 1B (no setup)</option>
                 <option value="anthropic">Anthropic API (BYOK)</option>
                 <option value="openai">OpenAI API (BYOK)</option>
                 <option value="ollama">Local Ollama (localhost:11434)</option>
@@ -762,7 +1165,7 @@ function App() {
                   llmProvider === 'ollama'
                     ? 'Not required for Ollama'
                     : llmProvider === 'embedded'
-                      ? 'Not required for built-in Qwen'
+                      ? 'Not required for built-in Gemma'
                       : 'sk-…'
                 }
                 className="ui-input"
@@ -775,6 +1178,64 @@ function App() {
                 Stored in your OS keychain. Never written to disk or localStorage.
               </p>
             </div>
+
+            {/* V2.2: Embedded model memory behavior. Only shown when the
+                embedded provider is selected — BYOK / Ollama don't load
+                a local pipeline so the toggle is irrelevant there. */}
+            {llmProvider === 'embedded' ? (
+              <div className="setting-group">
+                <label>Embedded model memory</label>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={keepEmbeddedModelHot}
+                    onChange={(e) => {
+                      setKeepEmbeddedModelHot(e.target.checked);
+                      void patchConfig({ keepEmbeddedModelHot: e.target.checked });
+                    }}
+                  />
+                  <span>Keep Gemma 3 1B in memory when idle</span>
+                </label>
+                <p className="help-text" style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '0.25rem' }}>
+                  OFF (default): model idle-unloads after 3 min of no
+                  queries — saves ~1.5 GB RAM. Next query reloads in
+                  ~5-10s. ON: model stays resident for instant
+                  responses; holds ~1.5 GB permanently. Pick ON if you
+                  have plenty of RAM and chat frequently.
+                </p>
+              </div>
+            ) : null}
+
+            {/* V2.2: auto-execute action tokens for native-tier BYOK
+                models only. Embedded (suggestion_only) ALWAYS uses
+                click-to-confirm buttons regardless of this toggle —
+                safety property so small-model action hallucinations
+                can't fire automatically. */}
+            {capability?.toolCalling === 'native' ? (
+              <div className="setting-group">
+                <label>Chat action execution</label>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={autoExecuteChatActions}
+                    onChange={(e) => {
+                      setAutoExecuteChatActions(e.target.checked);
+                      void patchConfig({ autoExecuteChatActions: e.target.checked });
+                    }}
+                  />
+                  <span>Auto-execute chat action suggestions</span>
+                </label>
+                <p className="help-text" style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '0.25rem' }}>
+                  OFF (default): every action suggestion renders as a
+                  button; you click to run. ON: action tokens from your
+                  BYOK LLM auto-execute — faster, but you trust the
+                  model not to propose bad actions. Embedded Gemma 1B
+                  always uses the button path regardless of this
+                  setting. Every action, button or auto, goes through
+                  the same server whitelist and is audit-logged.
+                </p>
+              </div>
+            ) : null}
 
             {/* V2.1: Workspace switching moved to the top-left chip
                 (WorkspacePicker). See the sidebar header above — the old
@@ -826,6 +1287,37 @@ function App() {
                 Change by editing <code>.lore/config.json</code> and restarting the daemon.
               </p>
             </div>
+
+            {/* Phase A (V2.2) — corpus language breakdown. Read-only
+                display of how many LoreNodes are tagged with each
+                language, plus how many are untagged (key "null"). See
+                docs/LANGUAGE_DETECTION.md: tagging is an explicit
+                caller opt-in; untagged counts are expected when
+                plugins or AI agents don't bother to pass `language`. */}
+            {languageBreakdown && Object.keys(languageBreakdown).length > 0 ? (
+              <div className="setting-group">
+                <label>Corpus Languages</label>
+                <div className="plugins-list">
+                  {Object.entries(languageBreakdown)
+                    .sort(([, a], [, b]) => b - a)
+                    .map(([lang, count]) => (
+                      <span
+                        key={lang}
+                        className="plugin-badge"
+                        title={lang === 'null' ? 'Untagged — treated as English / default' : `Explicitly tagged as ${lang}`}
+                      >
+                        {lang === 'null' ? 'untagged' : lang.toUpperCase()}: {count}
+                      </span>
+                    ))}
+                </div>
+                <p className="help-text">
+                  Tagging is explicit — see docs/LANGUAGE_DETECTION.md.
+                  Use the <code>detect_language</code> MCP tool or
+                  <code> POST /api/language/detect</code> before ingest
+                  if you want non-default tagging.
+                </p>
+              </div>
+            ) : null}
 
             {/* Phase 2: Ingest File (BYOK) */}
             <div className="setting-group">
@@ -1015,6 +1507,8 @@ function App() {
             setActiveTypes={(next) => setActiveTypes(next)}
             activeProjects={activeProjects ?? new Set()}
             setActiveProjects={(next) => setActiveProjects(next)}
+            showInferred={showInferred}
+            setShowInferred={setShowInferred}
           />
         </aside>
       ) : null}

@@ -133,6 +133,52 @@ export const developerPlugin: ILorePlugin = {
         return await contributeDeveloperTopology(ctx, limit);
     },
 
+    /**
+     * Phase 1 / C2 — add code-intelligence guidance to the chat system
+     * prompt. Tells the LLM: (a) prefer graph-backed impact analysis
+     * before speculating about callers/dependents, (b) treat
+     * confidence='inferred' edges as hints not facts, and (c) cite
+     * symbols by UID when they're available in-scope.
+     *
+     * The older `uiHints.systemPrompt` field predates this hook and was
+     * previously used only by the removed Mode pill. We route it through
+     * the new hook so it takes effect on every chat, and extend it with
+     * the C1 confidence-aware guidance.
+     */
+    /**
+     * Phase 5 / C12 — retention policy. Developer plugin keeps:
+     *   - decisions/conventions/architecture/bug_patterns FOREVER (they
+     *     age like wine — older decisions are more valuable as context)
+     *   - notes archived after 1 year (they're typically ephemeral
+     *     session handoffs / working-state checkpoints)
+     *   - troubleshooting kept forever (recurring issues benefit from
+     *     full history)
+     *
+     * `archive` action is handled by C11 when the daily-sweep runtime
+     * lands; until then this is declarative metadata the UI can show.
+     */
+    contributeRetentionPolicy() {
+        return [
+            { nodeType: 'decision',        condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
+            { nodeType: 'convention',      condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
+            { nodeType: 'architecture',    condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
+            { nodeType: 'bug_pattern',     condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
+            { nodeType: 'troubleshooting', condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
+            { nodeType: 'note',            condition: 'age' as const, ageThresholdDays: 365,    action: 'archive' as const },
+        ];
+    },
+
+    contributeSystemPrompt(_ctx: PluginContext): string | null {
+        return [
+            developerPlugin.uiHints.systemPrompt,
+            "When the graph shows an edge with confidence='inferred', treat the relationship as a hint " +
+            "derived from semantic similarity — not a user-asserted fact. Acknowledge uncertainty when " +
+            "reasoning over such edges. Extracted edges may be cited as established.",
+            'Before suggesting code edits on a symbol, call gitnexus_impact to surface blast radius. ' +
+            'Before renaming anything, use gitnexus_rename with dry_run: true and relay the preview.',
+        ].join(' ');
+    },
+
     async getTelemetryPayload(ctx: PluginContext): Promise<PluginTelemetryPayload | null> {
         // Phase 4 ships health-ping only; this payload is not yet sent on the wire.
         const graph = ctx.graph as { stats?: () => Promise<{ nodes: number; edges: number }> };
