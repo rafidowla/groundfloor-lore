@@ -55,6 +55,7 @@ interface ConfigResponse {
   extractionPath?: 'local-byok' | 'def-cloud';
   telemetryOptOut?: boolean;
   keepEmbeddedModelHot?: boolean;
+  autoExecuteChatActions?: boolean;
   capability: {
     provider: string;
     model: string;
@@ -164,6 +165,7 @@ function App() {
   const [extractionPath, setExtractionPath] = useState<'local-byok' | 'def-cloud'>('local-byok');
   const [telemetryOptOut, setTelemetryOptOut] = useState(false);
   const [keepEmbeddedModelHot, setKeepEmbeddedModelHot] = useState(false);
+  const [autoExecuteChatActions, setAutoExecuteChatActions] = useState(false);
   const [capability, setCapability] = useState<ConfigResponse['capability'] | null>(null);
   const [lastExtract, setLastExtract] = useState<ExtractResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -260,6 +262,7 @@ function App() {
         setExtractionPath(c.extractionPath ?? 'local-byok');
         setTelemetryOptOut(Boolean(c.telemetryOptOut));
         setKeepEmbeddedModelHot(Boolean(c.keepEmbeddedModelHot));
+        setAutoExecuteChatActions(Boolean(c.autoExecuteChatActions));
         setCapability(c.capability);
         setLanguageBreakdown(s?.languageBreakdown ?? null);
       } catch (err) {
@@ -708,9 +711,24 @@ function App() {
               } else if (evt.type === 'done') {
                 // V2.2: on stream completion, parse action tokens out
                 // of the accumulated text and surface them as buttons.
+                // When autoExecuteChatActions is ON AND the active
+                // capability is native-tier, skip the button render
+                // and execute each action immediately. Embedded
+                // (suggestion_only) ALWAYS uses buttons regardless of
+                // the toggle — safety property documented in
+                // ToolCapability type.
+                const isNativeTier = capability?.toolCalling === 'native';
+                const shouldAutoExec = isNativeTier && autoExecuteChatActions;
+
                 setMessages((m) => m.map((msg) => {
                   if (msg.id !== assistantId) return msg;
                   const { cleaned, actions } = extractActions(msg.text);
+                  if (actions.length > 0 && shouldAutoExec) {
+                    // Fire-and-forget per extracted action. Each runs
+                    // runChatAction which inserts its own result bubble.
+                    actions.forEach((a) => { void runChatAction(a.action, a.params); });
+                    return { ...msg, text: cleaned, streaming: false };
+                  }
                   return {
                     ...msg,
                     text: cleaned,
@@ -1106,6 +1124,37 @@ function App() {
                   ~5-10s. ON: model stays resident for instant
                   responses; holds ~1.5 GB permanently. Pick ON if you
                   have plenty of RAM and chat frequently.
+                </p>
+              </div>
+            ) : null}
+
+            {/* V2.2: auto-execute action tokens for native-tier BYOK
+                models only. Embedded (suggestion_only) ALWAYS uses
+                click-to-confirm buttons regardless of this toggle —
+                safety property so small-model action hallucinations
+                can't fire automatically. */}
+            {capability?.toolCalling === 'native' ? (
+              <div className="setting-group">
+                <label>Chat action execution</label>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={autoExecuteChatActions}
+                    onChange={(e) => {
+                      setAutoExecuteChatActions(e.target.checked);
+                      void patchConfig({ autoExecuteChatActions: e.target.checked });
+                    }}
+                  />
+                  <span>Auto-execute chat action suggestions</span>
+                </label>
+                <p className="help-text" style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '0.25rem' }}>
+                  OFF (default): every action suggestion renders as a
+                  button; you click to run. ON: action tokens from your
+                  BYOK LLM auto-execute — faster, but you trust the
+                  model not to propose bad actions. Embedded Gemma 1B
+                  always uses the button path regardless of this
+                  setting. Every action, button or auto, goes through
+                  the same server whitelist and is audit-logged.
                 </p>
               </div>
             ) : null}

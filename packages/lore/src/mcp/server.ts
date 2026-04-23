@@ -2075,66 +2075,90 @@ async function main(): Promise<void> {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
+                    const startedAt = Date.now();
+                    let auditAction = 'unknown';
+                    let auditArgs: Record<string, unknown> = {};
+                    let auditResult: 'success' | 'error' | 'denied-by-policy' = 'success';
+                    let auditResultDetail: string | undefined;
+                    let statusCode = 200;
+                    let responseBody: unknown = null;
                     try {
                         const payload = JSON.parse(body || '{}') as { action?: string; params?: Record<string, unknown> };
                         const action = payload.action ?? '';
                         const params = payload.params ?? {};
+                        auditAction = action;
+                        auditArgs = params;
 
                         if (action === 'reconnect_node') {
                             const rawId = typeof params['nodeId'] === 'string' ? (params['nodeId'] as string) : '';
-                            // Marker might be prefixed ("lore:xxx") or raw.
-                            // reconnectOneNode expects the raw node id.
                             const nodeId = rawId.startsWith('lore:') ? rawId.slice('lore:'.length) : rawId;
                             if (!nodeId) {
-                                res.writeHead(400, { 'Content-Type': 'application/json' });
-                                res.end(JSON.stringify({ error: 'nodeId required' }));
-                                return;
+                                statusCode = 400;
+                                responseBody = { error: 'nodeId required' };
+                                auditResult = 'denied-by-policy';
+                                auditResultDetail = 'missing nodeId';
+                            } else {
+                                const node = await graph.getNode(nodeId);
+                                if (!node) {
+                                    statusCode = 404;
+                                    responseBody = { error: `node '${nodeId}' not found` };
+                                    auditResult = 'denied-by-policy';
+                                    auditResultDetail = `node not found: ${nodeId}`;
+                                } else {
+                                    const result = await reconnectOneNode(graph, verbatimStore, pluginRegistry, {
+                                        id: node.id,
+                                        label: node.label,
+                                        content: node.content,
+                                        tags: node.tags,
+                                        type: node.type,
+                                        project: node.project,
+                                        ecosystem: node.ecosystem,
+                                    });
+                                    responseBody = {
+                                        ok: true,
+                                        action: 'reconnect_node',
+                                        nodeId,
+                                        label: node.label,
+                                        edgesAdded: result.added,
+                                        confidences: result.confidences,
+                                    };
+                                    auditResultDetail = `edgesAdded=${result.added}`;
+                                }
                             }
-                            const node = await graph.getNode(nodeId);
-                            if (!node) {
-                                res.writeHead(404, { 'Content-Type': 'application/json' });
-                                res.end(JSON.stringify({ error: `node '${nodeId}' not found` }));
-                                return;
-                            }
-                            const result = await reconnectOneNode(graph, verbatimStore, pluginRegistry, {
-                                id: node.id,
-                                label: node.label,
-                                content: node.content,
-                                tags: node.tags,
-                                type: node.type,
-                                project: node.project,
-                                ecosystem: node.ecosystem,
-                            });
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({
-                                ok: true,
-                                action: 'reconnect_node',
-                                nodeId,
-                                label: node.label,
-                                edgesAdded: result.added,
-                                confidences: result.confidences,
-                            }));
-                            return;
-                        }
-
-                        if (action === 'open_reconnect_settings') {
-                            // Pure UI hint — server just confirms the
-                            // action name is valid. UI handles the panel
-                            // navigation client-side.
-                            res.writeHead(200, { 'Content-Type': 'application/json' });
-                            res.end(JSON.stringify({
+                        } else if (action === 'open_reconnect_settings') {
+                            responseBody = {
                                 ok: true,
                                 action: 'open_reconnect_settings',
                                 uiHint: { openPanel: 'settings', scrollTo: 'graph-connections' },
-                            }));
-                            return;
+                            };
+                        } else {
+                            statusCode = 400;
+                            responseBody = { error: `unknown action '${action}'` };
+                            auditResult = 'denied-by-policy';
+                            auditResultDetail = `unknown action: ${action}`;
                         }
-
-                        res.writeHead(400, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: `unknown action '${action}'` }));
                     } catch (actionErr) {
-                        res.writeHead(500, { 'Content-Type': 'application/json' });
-                        res.end(JSON.stringify({ error: (actionErr as Error).message }));
+                        statusCode = 500;
+                        responseBody = { error: (actionErr as Error).message };
+                        auditResult = 'error';
+                        auditResultDetail = (actionErr as Error).message;
+                    } finally {
+                        // V2.2: every chat-action dispatch (button click OR
+                        // auto-executed) gets audit-logged with action name,
+                        // args, outcome, and duration. Append in finally
+                        // so failure paths log too. Same AuditLog the rest
+                        // of the server uses.
+                        try {
+                            auditLog.log({
+                                toolName: `chat_action:${auditAction}`,
+                                args: auditArgs,
+                                result: auditResult,
+                                resultDetail: auditResultDetail,
+                                durationMs: Date.now() - startedAt,
+                            });
+                        } catch { /* never let audit-log errors break the response */ }
+                        res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(responseBody));
                     }
                 });
                 return;

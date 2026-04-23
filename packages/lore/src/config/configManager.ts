@@ -67,6 +67,19 @@ export interface LoreConfig {
      * laptops running Dataplane + IDE + browser alongside Lore.
      */
     keepEmbeddedModelHot?: boolean;
+
+    /**
+     * V2.2 chat auto-execute (2026-04-23). When true AND the active
+     * LLM has toolCalling === 'native', any action-suggestion tokens
+     * the model emits are auto-executed without the user clicking the
+     * button. Audit log still records every execution. Only surfaces
+     * in Settings when the active provider is native-tier (Anthropic
+     * Claude 3.5+/4+, OpenAI GPT-4o/o-series); embedded Gemma 1B
+     * stays on the click-to-confirm path regardless of this flag.
+     * Default false — opt-in per user; small quality-of-life for
+     * those who trust their BYOK model not to hallucinate action tokens.
+     */
+    autoExecuteChatActions?: boolean;
 }
 
 export const DEFAULT_CONFIG: LoreConfig = {
@@ -82,6 +95,9 @@ export const DEFAULT_CONFIG: LoreConfig = {
     telemetryOptOut: false,
     // Idle-unload enabled by default — memory-friendly for laptops.
     keepEmbeddedModelHot: false,
+    // Auto-execute OFF by default — user must opt in per session for
+    // the BYOK-native tier. Embedded tier ignores this flag.
+    autoExecuteChatActions: false,
 };
 
 export class ConfigManager {
@@ -132,6 +148,7 @@ export class ConfigManager {
             'extractionPath',
             'telemetryOptOut',
             'keepEmbeddedModelHot',
+            'autoExecuteChatActions',
         ];
         const next: LoreConfig = { ...current };
         for (const key of allowed) {
