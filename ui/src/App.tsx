@@ -170,6 +170,10 @@ function App() {
   const [telemetryOptOut, setTelemetryOptOut] = useState(false);
   const [keepEmbeddedModelHot, setKeepEmbeddedModelHot] = useState(false);
   const [autoExecuteChatActions, setAutoExecuteChatActions] = useState(false);
+  // V2.2: dismiss flag for the pre-send complexity hint. Resets when
+  // the user clears the input (length 0) — next complex query gets a
+  // fresh chance to show the hint.
+  const [complexityHintDismissed, setComplexityHintDismissed] = useState(false);
   const [capability, setCapability] = useState<ConfigResponse['capability'] | null>(null);
   const [lastExtract, setLastExtract] = useState<ExtractResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1087,6 +1091,79 @@ function App() {
             <div ref={chatEndRef} />
           </div>
 
+          {/* V2.2: pre-send complexity hint. Fires when all of:
+                - User is on embedded provider (so they'd hit Gemma 1B)
+                - User has a BYOK key + it resolves to anthropic/openai
+                - Input looks complex: > 200 chars OR matches one of
+                  the high-effort-request patterns (generate, explain in
+                  detail, architecture, diagram, step-by-step, example)
+                - Not streaming
+                - User hasn't dismissed for this input
+              Click the "Send to X instead" button forces JUST THIS
+              message to BYOK; does not change Settings. Dismiss hides
+              until input clears or a new complex query appears. */}
+          {(() => {
+            if (llmProvider !== 'embedded') return null;
+            if (!hasApiKey) return null;
+            if (streaming) return null;
+            if (complexityHintDismissed) return null;
+            const trimmed = input.trim();
+            if (trimmed.length === 0) return null;
+            const COMPLEXITY_RE = /\b(generate|explain in detail|architecture|diagram|step[- ]by[- ]step|code example|write a|produce|walkthrough|comprehensive)\b/i;
+            const isComplex = trimmed.length > 200 || COMPLEXITY_RE.test(trimmed);
+            if (!isComplex) return null;
+            // We only show when the effective escalate target is a
+            // well-known cloud provider — skip for Ollama since the
+            // embedded-vs-ollama comparison isn't strictly "commercial."
+            const target = llmProvider as LlmProvider; // type; we're on 'embedded' here
+            void target;
+            // Resolve escalate target from capability: if user's
+            // *configured* BYOK provider in Settings isn't embedded,
+            // use that; else nothing to escalate to.
+            const escalateTo: LlmProvider | null =
+              capability?.toolCalling === 'native' && (capability.provider === 'anthropic' || capability.provider === 'openai')
+                ? capability.provider as LlmProvider
+                : null;
+            if (!escalateTo) return null;
+            const displayName = escalateTo === 'anthropic' ? 'Claude' : 'OpenAI';
+            return (
+              <div className="complexity-hint">
+                <span className="complexity-hint-text">
+                  ⚡ Looks complex — Gemma 1B may struggle.
+                </span>
+                <button
+                  type="button"
+                  className="complexity-hint-action"
+                  onClick={() => {
+                    const textToSend = input.trim();
+                    const refsToSend = [...pendingNodeRefs];
+                    void sendMessage({
+                      forceProvider: escalateTo,
+                      replayText: textToSend,
+                      replayRefs: refsToSend,
+                    });
+                    // sendMessage's replay path doesn't clear input/
+                    // pills on its own. Do it here for this one-shot
+                    // escalate send.
+                    setInput('');
+                    setPendingNodeRefs([]);
+                    setComplexityHintDismissed(false);
+                  }}
+                >
+                  Send to {displayName} instead
+                </button>
+                <button
+                  type="button"
+                  className="complexity-hint-dismiss"
+                  onClick={() => setComplexityHintDismissed(true)}
+                  aria-label="Dismiss hint"
+                >
+                  ×
+                </button>
+              </div>
+            );
+          })()}
+
           <div className="chat-input-area">
             <div className="input-wrapper glass-panel">
               {pendingNodeRefs.length > 0 ? (
@@ -1118,7 +1195,13 @@ function App() {
                         : 'Query the knowledge graph…'
                   }
                   value={input}
-                  onChange={(e) => setInput(e.target.value)}
+                  onChange={(e) => {
+                    setInput(e.target.value);
+                    // Reset the dismiss flag when the user clears the
+                    // input — next query gets a fresh chance to show
+                    // the hint.
+                    if (e.target.value.trim().length === 0) setComplexityHintDismissed(false);
+                  }}
                   onKeyDown={onInputKeyDown}
                   disabled={streaming}
                 />
