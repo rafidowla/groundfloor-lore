@@ -1356,7 +1356,16 @@ async function main(): Promise<void> {
     if (useHttp) {
         // HTTP daemon mode — per-session McpServer+transport pairs
         const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+            // Historical handlers stored `req.url` in `url` and did both
+            // route matching and query-param parsing off it. Strict-equality
+            // matches (previously `url === '/api/topology'`) silently 404 when the
+            // caller passes query params — caught in Phase 3 when the UI
+            // started sending `/api/topology?limit=10000`.
+            // Fix: keep `url` as the raw request URL so existing
+            // `new URL(url, 'http://localhost').searchParams` calls still
+            // work, and add a dedicated `pathname` for strict route matches.
             const url = req.url ?? '';
+            const pathname = url.split('?', 1)[0];
 
             // ── S3: first gate — Host + Origin + Bearer token validation ──
             // Rejects DNS-rebinding attempts (bad Host), cross-origin browser
@@ -1399,7 +1408,7 @@ async function main(): Promise<void> {
             // a hostile cross-origin tab can't reach here; (b) UI is always
             // same-origin on the daemon's port in production, or served
             // from localhost:5173 in dev (also allowed Origin).
-            if (url === '/api/auth/bootstrap' && req.method === 'GET') {
+            if (pathname === '/api/auth/bootstrap' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ token: authToken }));
                 return;
@@ -1412,8 +1421,8 @@ async function main(): Promise<void> {
             // can escape by switching workspaces). Matches Option C in
             // docs/V2_implementation_plan.md.
             const orphanExempt =
-                url === '/api/health' ||
-                url === '/api/orphan' ||
+                pathname === '/api/health' ||
+                pathname === '/api/orphan' ||
                 url.startsWith('/api/workspaces');
             if (url.startsWith('/api/') && !orphanExempt) {
                 const orphanState = pluginRegistry.getOrphanState();
@@ -1429,14 +1438,14 @@ async function main(): Promise<void> {
             }
 
             // Health check endpoint for monitoring
-            if (url === '/health' && req.method === 'GET') {
+            if (pathname === '/health' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ status: 'ok', version: '1.0.0', sessions: activeSessions.size }));
                 return;
             }
 
             // MCP endpoint
-            if (url === '/mcp') {
+            if (pathname === '/mcp') {
                 const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
                 // Route to existing session if header present
@@ -1541,7 +1550,7 @@ async function main(): Promise<void> {
             }
 
             // Save / create a node from the UI dashboard
-            if (url === '/api/node' && req.method === 'POST') {
+            if (pathname === '/api/node' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
@@ -1567,7 +1576,7 @@ async function main(): Promise<void> {
             // Mirror of the MCP `detect_language` tool and the plugin
             // context's ctx.detectLanguage(). Explicit-only, see
             // docs/LANGUAGE_DETECTION.md.
-            if (url === '/api/language/detect' && req.method === 'POST') {
+            if (pathname === '/api/language/detect' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
@@ -1611,7 +1620,7 @@ async function main(): Promise<void> {
             // HTTP mirror of the MCP `stats` tool — same payload shape.
             // Used by the UI to render corpus-wide info in Settings
             // (e.g. the Phase A language breakdown).
-            if (url === '/api/stats' && req.method === 'GET') {
+            if (pathname === '/api/stats' && req.method === 'GET') {
                 try {
                     const graphStats = await graph.getStats();
                     const languageBreakdown = await graph.getLanguageBreakdown();
@@ -1646,7 +1655,7 @@ async function main(): Promise<void> {
             //     would touch getTopology internals and the other 4 call sites.
             //     Deferred to a follow-up when a second pass on topology
             //     sampling is warranted.
-            if (url === '/api/topology' && req.method === 'GET') {
+            if (pathname === '/api/topology' && req.method === 'GET') {
                 try {
                     const TOPOLOGY_HARD_CAP = 20000;
                     const TOPOLOGY_MIN = 1000;
@@ -1687,7 +1696,7 @@ async function main(): Promise<void> {
             }
 
             // UI health check: status + active config snapshot + sync adapter status
-            if (url === '/api/health' && req.method === 'GET') {
+            if (pathname === '/api/health' && req.method === 'GET') {
                 try {
                     const cfg = configManager.read();
                     const orphanState = pluginRegistry.getOrphanState();
@@ -1714,13 +1723,13 @@ async function main(): Promise<void> {
             // independent graphs. Each workspace = its own .lore/ directory,
             // never cross-visible. Switching requires a daemon restart so the
             // Kùzu graph + VerbatimStore can re-initialize against the new path.
-            if (url === '/api/workspaces' && req.method === 'GET') {
+            if (pathname === '/api/workspaces' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(loadWorkspaces()));
                 return;
             }
 
-            if (url === '/api/workspaces' && req.method === 'POST') {
+            if (pathname === '/api/workspaces' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', () => {
@@ -1742,7 +1751,7 @@ async function main(): Promise<void> {
                 return;
             }
 
-            if (url === '/api/workspaces/switch' && req.method === 'POST') {
+            if (pathname === '/api/workspaces/switch' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', () => {
@@ -1811,7 +1820,7 @@ async function main(): Promise<void> {
             // proposed edges + similarity histogram so the UI can calibrate
             // the threshold before committing. apply=true prunes prior
             // inferred edges and inserts the new set.
-            if (url === '/api/graph/reconnect' && req.method === 'POST') {
+            if (pathname === '/api/graph/reconnect' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
@@ -1907,7 +1916,7 @@ async function main(): Promise<void> {
             // LoreNode + CodeFile (with child-symbol preview) + CodeSymbol,
             // re-embeds against the latest content, prunes old inferred
             // edges, and lays a fresh cross-pillar edge set. Always applies.
-            if (url === '/api/graph/reconsume' && req.method === 'POST') {
+            if (pathname === '/api/graph/reconsume' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
@@ -1972,7 +1981,7 @@ async function main(): Promise<void> {
             // V2.1 / Option C: ingest-files is developer-plugin-owned.
             // Core reaches it through the plugin's opaque api surface;
             // returns 501 if the developer plugin isn't active here.
-            if (url === '/api/graph/ingest-files' && req.method === 'POST') {
+            if (pathname === '/api/graph/ingest-files' && req.method === 'POST') {
                 try {
                     const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
                     const devApi = devPlugin?.api as
@@ -1996,13 +2005,13 @@ async function main(): Promise<void> {
             // Orphan plugin resolution endpoint. GET returns state; POST applies
             // the user's decision (keep/drop/reenable). 'drop' requires the
             // literal string "DROP" in confirm to match the CLI/UI prompt.
-            if (url === '/api/orphan' && req.method === 'GET') {
+            if (pathname === '/api/orphan' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify(pluginRegistry.getOrphanState()));
                 return;
             }
 
-            if (url === '/api/orphan' && req.method === 'POST') {
+            if (pathname === '/api/orphan' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', () => {
@@ -2039,7 +2048,7 @@ async function main(): Promise<void> {
             }
 
             // UI config read: returns the live config (without API keys)
-            if (url === '/api/config' && req.method === 'GET') {
+            if (pathname === '/api/config' && req.method === 'GET') {
                 try {
                     const cfg = configManager.read();
                     const hasKey = await hasApiKey(cfg.llmProvider);
@@ -2055,7 +2064,7 @@ async function main(): Promise<void> {
 
             // UI config write: PATCH partial updates. `apiKey` goes to keychain,
             // all other fields merge into .lore/config.json.
-            if (url === '/api/config' && req.method === 'PATCH') {
+            if (pathname === '/api/config' && req.method === 'PATCH') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
@@ -2095,7 +2104,7 @@ async function main(): Promise<void> {
             // + returns a chunking/caption plan (202), or rejects with the
             // accepted-types list (415). BYOK only — DEF Cloud path is
             // greyed out in UI until the Groundfloor sign-in workflow ships.
-            if (url === '/api/extract' && req.method === 'POST') {
+            if (pathname === '/api/extract' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', () => {
@@ -2139,7 +2148,7 @@ async function main(): Promise<void> {
             // Adding a new action requires: updating EMBEDDED_SYSTEM_PROMPT
             // action registry, updating the whitelist here, and updating
             // the UI action dispatcher. All three in one PR.
-            if (url === '/api/chat/action' && req.method === 'POST') {
+            if (pathname === '/api/chat/action' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
@@ -2236,7 +2245,7 @@ async function main(): Promise<void> {
             // Append-only; no authoritative dedup at write time —
             // aggregate() keeps the most recent rating per messageId.
             // Lets a user change their mind without losing history.
-            if (url === '/api/feedback' && req.method === 'POST') {
+            if (pathname === '/api/feedback' && req.method === 'POST') {
                 let fbBody = '';
                 req.on('data', (chunk: Buffer) => { fbBody += chunk.toString(); });
                 req.on('end', () => {
@@ -2290,7 +2299,7 @@ async function main(): Promise<void> {
 
             // Chat SSE stream — routes every message to the local/BYOK LLM.
             // Never falls back to any cloud pathway silently.
-            if (url === '/api/chat' && req.method === 'POST') {
+            if (pathname === '/api/chat' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
@@ -2531,7 +2540,7 @@ async function main(): Promise<void> {
 
             // C6 — List pending approvals. UI "Pending actions" panel
             // polls or long-polls this. Entries live ~60s then auto-deny.
-            if (url === '/api/approvals' && req.method === 'GET') {
+            if (pathname === '/api/approvals' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ pending: consentManager.list() }));
                 return;
@@ -2565,7 +2574,7 @@ async function main(): Promise<void> {
             //   POST /api/retention/sweep {apply?: boolean, plugins?: string[]}
             // Applies are consent-gated because archive mutates node
             // content (replaces with placeholder + sourceRef).
-            if (url === '/api/retention/sweep' && req.method === 'POST') {
+            if (pathname === '/api/retention/sweep' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
                 req.on('end', async () => {
@@ -2624,14 +2633,14 @@ async function main(): Promise<void> {
             // Daily-sweep enforcement is a separate runtime (not in this
             // commit); exposing the rules now lets the UI show them and
             // catches plugin misconfigurations early.
-            if (url === '/api/retention' && req.method === 'GET') {
+            if (pathname === '/api/retention' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ rules: pluginRegistry.collectRetentionPolicies() }));
                 return;
             }
 
             // C6b — External MCP client status.
-            if (url === '/api/mcp-clients' && req.method === 'GET') {
+            if (pathname === '/api/mcp-clients' && req.method === 'GET') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ clients: mcpClientRuntime.list() }));
                 return;
@@ -2663,7 +2672,7 @@ async function main(): Promise<void> {
 
             // C5 — Connector status. Lists registered connectors + last-
             // sync state. UI "Sources" panel will poll this.
-            if (url === '/api/connectors' && req.method === 'GET') {
+            if (pathname === '/api/connectors' && req.method === 'GET') {
                 try {
                     const status = connectorRegistry.listStatus();
                     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2722,7 +2731,7 @@ async function main(): Promise<void> {
             // C3.5 + C5.5 — Storage inspection + quota decision per
             // workspace. UI reads both from one call so the Storage
             // panel can show usage + budget state without a second hop.
-            if (url === '/api/storage' && req.method === 'GET') {
+            if (pathname === '/api/storage' && req.method === 'GET') {
                 try {
                     const dataHome = path.join(os.homedir(), '.groundfloor');
                     const workspaces = inspectAllWorkspaces(dataHome);
@@ -2748,7 +2757,7 @@ async function main(): Promise<void> {
             }
 
             // Visualizer Frontend Endpoint
-            if (url === '/explore' && req.method === 'GET') {
+            if (pathname === '/explore' && req.method === 'GET') {
                 try {
                     const __dirnameLocal = path.dirname(fileURLToPath(import.meta.url));
                     // When running from dist/mcp, root is ../../
