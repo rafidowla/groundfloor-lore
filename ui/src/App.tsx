@@ -111,6 +111,11 @@ interface ChatMessage {
    *  `start` event. Used to render a provider label + decide whether
    *  to show the "Try with BYOK" escalate button on embedded bubbles. */
   provider?: LlmProvider;
+  /** V2.2: user's current thumbs rating for this bubble. Set on
+   *  click, clearable by clicking the same thumb again. Persisted
+   *  server-side via POST /api/feedback — UI copy here is just the
+   *  current selection state. */
+  rating?: 'up' | 'down' | null;
 }
 
 /** Read a File object as base64 without the data: URL prefix. */
@@ -141,6 +146,14 @@ function App() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
   const [languageBreakdown, setLanguageBreakdown] = useState<Record<string, number> | null>(null);
+  // V2.2: feedback aggregate for Settings display. Lazily fetched
+  // when the Settings panel opens.
+  const [feedbackStats, setFeedbackStats] = useState<{
+    windowDays: number;
+    totalCount: number;
+    providerBreakdown: Record<string, { up: number; down: number; total: number; upRate: number }>;
+    modelBreakdown: Record<string, { up: number; down: number; total: number; upRate: number }>;
+  } | null>(null);
   const [workspaceSwitching, setWorkspaceSwitching] = useState<string | null>(null);
 
   // Chat state
@@ -229,6 +242,16 @@ function App() {
     setSelectedNodeId(nodeId);
     if (nodeId !== null) setShowSettings(false);
   }, []);
+
+  // V2.2: fetch feedback stats when Settings panel opens. Fire-and-
+  // forget; failures render as "no data yet."
+  useEffect(() => {
+    if (!showSettings) return;
+    void authFetch(`${API_BASE}/api/feedback/stats?days=30`)
+      .then((r) => r.ok ? r.json() as Promise<typeof feedbackStats> : null)
+      .then((data) => { if (data) setFeedbackStats(data); })
+      .catch(() => { /* leave null */ });
+  }, [showSettings]);
 
   // V2.2: click-outside-to-close for the Settings panel. Same pattern
   // NodeDetailDrawer uses. The gear button itself must be excluded
@@ -506,6 +529,50 @@ function App() {
     setInput((curr) => (curr ? curr : DOCS_PROMPT));
     window.setTimeout(() => chatInputRef.current?.focus(), 50);
   }, []);
+
+  // V2.2: record a thumbs-up / thumbs-down rating on an assistant
+  // bubble. Optimistic local update; server record is fire-and-
+  // forget (failed POSTs just log to console, UI stays consistent).
+  // Clicking the currently-selected thumb clears the rating.
+  const submitFeedback = useCallback(async (messageId: string, nextRating: 'up' | 'down'): Promise<void> => {
+    let serverRating: 'up' | 'down' | null = nextRating;
+    setMessages((m) => m.map((msg) => {
+      if (msg.id !== messageId) return msg;
+      const prior = msg.rating ?? null;
+      const resolved = prior === nextRating ? null : nextRating;
+      serverRating = resolved;
+      return { ...msg, rating: resolved };
+    }));
+    // Only POST when we're SETTING a rating (not when we're clearing).
+    // Server aggregate() dedups per messageId keeping the latest, so
+    // a cleared rating can't be expressed — we just stop counting it
+    // locally. v1 acceptable; a full "delete my rating" API comes
+    // later if the signal becomes important.
+    if (serverRating === null) return;
+    // Find the message to grab provider/model/query context.
+    const msg = messages.find((m) => m.id === messageId);
+    if (!msg) return;
+    // Query hash is computed server-side from the preceding user
+    // message's text — best-effort lookup.
+    const idx = messages.findIndex((m) => m.id === messageId);
+    const precedingUser = idx > 0 ? [...messages.slice(0, idx)].reverse().find((m) => m.role === 'user') : undefined;
+    try {
+      await authFetch(`${API_BASE}/api/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messageId,
+          rating: serverRating,
+          provider: msg.provider ?? 'unknown',
+          model: capability?.model ?? 'unknown',
+          query: precedingUser?.text ?? '',
+          responseLength: msg.text.length,
+        }),
+      });
+    } catch (err) {
+      console.warn('[feedback] post failed:', (err as Error).message);
+    }
+  }, [messages, capability]);
 
   // V2.2: escalate an assistant bubble — re-run the user message
   // that produced it, but through a different (typically BYOK)
@@ -1043,10 +1110,10 @@ function App() {
                             ))}
                           </div>
                         ) : null}
-                        {/* V2.2: message footer — provider label + escalate
-                            + save-as-md. Only renders after streaming
-                            completes, on non-empty bodies, on non-action
-                            bubbles. */}
+                        {/* V2.2: message footer — provider label + thumbs
+                            + escalate + save-as-md. Only renders after
+                            streaming completes, on non-empty bodies, on
+                            non-action bubbles. */}
                         {!m.streaming && m.text && m.text.length > 10 && !m.isActionResult ? (
                           <div className="chat-msg-footer">
                             {m.provider ? (
@@ -1054,6 +1121,24 @@ function App() {
                                 {m.provider}
                               </span>
                             ) : null}
+                            <button
+                              type="button"
+                              className={`chat-thumb chat-thumb-up${m.rating === 'up' ? ' active' : ''}`}
+                              onClick={() => void submitFeedback(m.id, 'up')}
+                              aria-label="Helpful"
+                              title="Helpful"
+                            >
+                              👍
+                            </button>
+                            <button
+                              type="button"
+                              className={`chat-thumb chat-thumb-down${m.rating === 'down' ? ' active' : ''}`}
+                              onClick={() => void submitFeedback(m.id, 'down')}
+                              aria-label="Not helpful"
+                              title="Not helpful"
+                            >
+                              👎
+                            </button>
                             {m.provider === 'embedded' && hasApiKey && (llmProvider === 'anthropic' || llmProvider === 'openai') ? (
                               <button
                                 type="button"
@@ -1484,6 +1569,33 @@ function App() {
                   Use the <code>detect_language</code> MCP tool or
                   <code> POST /api/language/detect</code> before ingest
                   if you want non-default tagging.
+                </p>
+              </div>
+            ) : null}
+
+            {/* V2.2: feedback aggregate. Helps the user (and us) see
+                whether the active model is actually landing good
+                answers. Stored locally; never egresses. */}
+            {feedbackStats && feedbackStats.totalCount > 0 ? (
+              <div className="setting-group">
+                <label>Answer Quality (last {feedbackStats.windowDays} days)</label>
+                <div className="plugins-list">
+                  {Object.entries(feedbackStats.providerBreakdown)
+                    .sort(([, a], [, b]) => b.total - a.total)
+                    .map(([prov, counts]) => (
+                      <span
+                        key={prov}
+                        className="plugin-badge"
+                        title={`${counts.up} 👍 / ${counts.down} 👎 over ${counts.total} rated messages`}
+                      >
+                        {prov}: {Math.round(counts.upRate * 100)}% 👍 ({counts.total})
+                      </span>
+                    ))}
+                </div>
+                <p className="help-text">
+                  Based on {feedbackStats.totalCount} rated messages.
+                  Click 👍 / 👎 on any chat answer to contribute.
+                  Data stays local — never egressed.
                 </p>
               </div>
             ) : null}

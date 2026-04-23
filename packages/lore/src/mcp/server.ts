@@ -30,6 +30,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { LocalGraph, type LoreNode } from '../engines/localGraph.js';
 import { VerbatimStore, buildVerbatimText } from '../engines/verbatimStore.js';
+import { FeedbackStore } from '../engines/feedbackStore.js';
 import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
 import { TsSdkAdapter } from '../engines/tsSdkAdapter.js';
 import fs from 'fs';
@@ -1160,6 +1161,9 @@ const connectorRegistry = buildDefaultConnectors(extractorRegistry, graphBasePat
  * and src/security/consent.ts.
  */
 const auditLog = new AuditLog();
+// V2.2: thumbs-up/down feedback store. Append-only JSONL at
+// ~/.groundfloor/feedback.jsonl. See engines/feedbackStore.ts.
+const feedbackStore = new FeedbackStore();
 const consentManager = new ConsentManager();
 
 /**
@@ -2161,6 +2165,62 @@ async function main(): Promise<void> {
                         res.end(JSON.stringify(responseBody));
                     }
                 });
+                return;
+            }
+
+            // V2.2: thumbs-up / thumbs-down feedback recording.
+            // Append-only; no authoritative dedup at write time —
+            // aggregate() keeps the most recent rating per messageId.
+            // Lets a user change their mind without losing history.
+            if (url === '/api/feedback' && req.method === 'POST') {
+                let fbBody = '';
+                req.on('data', (chunk: Buffer) => { fbBody += chunk.toString(); });
+                req.on('end', () => {
+                    try {
+                        const payload = JSON.parse(fbBody || '{}') as {
+                            messageId?: string;
+                            provider?: string;
+                            model?: string;
+                            rating?: 'up' | 'down';
+                            query?: string;
+                            responseLength?: number;
+                        };
+                        if (!payload.messageId || !payload.rating || (payload.rating !== 'up' && payload.rating !== 'down')) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'messageId + rating (up|down) required' }));
+                            return;
+                        }
+                        feedbackStore.record({
+                            messageId: payload.messageId,
+                            provider: payload.provider ?? 'unknown',
+                            model: payload.model ?? 'unknown',
+                            rating: payload.rating,
+                            queryHash: payload.query ? FeedbackStore.hashQuery(payload.query) : '',
+                            responseLength: payload.responseLength,
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ ok: true }));
+                    } catch (fbErr) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (fbErr as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            // V2.2: aggregate feedback stats for the Settings panel.
+            // Window defaults to 30 days, capped at 365 to bound read.
+            if (url.startsWith('/api/feedback/stats') && req.method === 'GET') {
+                try {
+                    const parsed = new URL(url, 'http://localhost');
+                    const days = Math.min(365, Math.max(1, parseInt(parsed.searchParams.get('days') ?? '30', 10) || 30));
+                    const agg = feedbackStore.aggregate(days);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ windowDays: days, ...agg }));
+                } catch (statsErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (statsErr as Error).message }));
+                }
                 return;
             }
 

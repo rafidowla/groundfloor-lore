@@ -425,6 +425,37 @@
   border-radius: 999px;
 }
 
+/* V2.2: thumbs-up / thumbs-down per assistant bubble. Active state
+   (the user's current rating for this message) gets a filled
+   background; inactive is a subtle hover target. */
+.chat-thumb {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  line-height: 1;
+  transition: background 0.15s, border-color 0.15s;
+  opacity: 0.55;
+}
+
+.chat-thumb:hover {
+  opacity: 1;
+  background: rgba(128, 128, 128, 0.1);
+}
+
+.chat-thumb.active {
+  opacity: 1;
+  border-color: rgba(168, 85, 247, 0.4);
+  background: rgba(168, 85, 247, 0.1);
+}
+
 .chat-escalate {
   display: inline-flex;
   align-items: center;

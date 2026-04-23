@@ -150,6 +150,7 @@ export function rotateIfNeeded(filePath: string, options: RotateOptions = {}): R
 export function rotateStandardLogs(dataHome: string): Array<{ path: string; result: RotateResult }> {
     const paths = [
         path.join(dataHome, 'audit.jsonl'),
+        path.join(dataHome, 'feedback.jsonl'),   // V2.2 thumbs feedback store
         path.join(dataHome, 'logs', 'lore-mcp.log'),
         path.join(dataHome, 'logs', 'lore-mcp.out'),
     ];
