@@ -3,7 +3,9 @@ import { Settings, MessageSquare, Moon, Sun, PanelLeft, PanelRight } from 'lucid
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import WorkspacePicker from './components/WorkspacePicker';
 import NodeDetailDrawer from './components/NodeDetailDrawer';
+import { ChatMarkdown } from './components/ChatMarkdown';
 import { authFetch } from './lib/authFetch';
+import 'highlight.js/styles/github-dark.css';
 import './App.css';
 
 // V2.1: code-split the graph renderer. Sigma.js + graphology adds ~180 KB
@@ -754,10 +756,25 @@ function App() {
                         ))}
                       </div>
                     ) : null}
-                    <p>
-                      {m.text}
-                      {m.streaming ? <span className="cursor-blink">▌</span> : null}
-                    </p>
+                    {m.role === 'assistant' ? (
+                      // Assistant bubbles render as Markdown — so
+                      // BYOK models' code blocks, tables, and
+                      // ```mermaid diagrams actually show up.
+                      // During streaming we still show the cursor
+                      // inline with the rendered output.
+                      <div className="chat-markdown-wrap">
+                        <ChatMarkdown source={m.text || ''} />
+                        {m.streaming ? <span className="cursor-blink">▌</span> : null}
+                      </div>
+                    ) : (
+                      // User bubbles stay plain text — the user
+                      // typed it, don't re-interpret Markdown syntax
+                      // they didn't mean.
+                      <p>
+                        {m.text}
+                        {m.streaming ? <span className="cursor-blink">▌</span> : null}
+                      </p>
+                    )}
                   </>
                 )}
               </div>
