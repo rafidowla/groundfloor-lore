@@ -2320,33 +2320,67 @@ async function main(): Promise<void> {
                             const suspicious: Array<{ source: string; patterns: string[] }> = [];
                             const chatCtx = graph.createPluginGraphContext();
                             for (const rawId of referencedIds) {
-                                const id = rawId.startsWith('lore:') ? rawId.slice(5) : rawId;
                                 try {
-                                    const refNode = await graph.getNode(id);
-                                    if (!refNode) continue;
-                                    const outRows = await chatCtx.queryRows(
-                                        `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->(m:LoreNode)
-                                         RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
-                                        { id },
-                                    ).catch(() => []);
-                                    const inRows = await chatCtx.queryRows(
-                                        `MATCH (m:LoreNode)-[e:LoreEdge]->(n:LoreNode {id: $id})
-                                         RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
-                                        { id },
-                                    ).catch(() => []);
-                                    const neighborLines = [...outRows, ...inRows]
-                                        .slice(0, 10)
-                                        .map((r) => `  - ${r.rel ?? 'related_to'} → ${r.type}: ${r.label} (${r.id})`)
-                                        .join('\n');
-                                    const rawBlock =
-                                        `Label: ${refNode.label}\nType: ${refNode.type}\n\n` +
-                                        `Content:\n${refNode.content || '(no content)'}\n\n` +
-                                        `Connected to:\n${neighborLines || '  (no edges yet)'}`;
-                                    const wrapped = wrapUntrustedContent(rawBlock, `lore:${refNode.id}`);
+                                    // V2.2 routing: three cases by marker prefix.
+                                    //   1. "lore:<id>" or no prefix → core LoreNode table
+                                    //   2. "<prefix>:<id>" where <prefix> is owned by a plugin
+                                    //      (e.g. file:, symbol:) → plugin.resolveChatContext
+                                    //   3. anything else → skip (fall-through for future plugins)
+                                    const isCore = rawId.startsWith('lore:') || !rawId.includes(':');
+                                    let rawBlock: string | null = null;
+                                    let sourceTag = '';
+
+                                    if (isCore) {
+                                        const id = rawId.startsWith('lore:') ? rawId.slice(5) : rawId;
+                                        const refNode = await graph.getNode(id);
+                                        if (!refNode) continue;
+                                        const outRows = await chatCtx.queryRows(
+                                            `MATCH (n:LoreNode {id: $id})-[e:LoreEdge]->(m:LoreNode)
+                                             RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
+                                            { id },
+                                        ).catch(() => []);
+                                        const inRows = await chatCtx.queryRows(
+                                            `MATCH (m:LoreNode)-[e:LoreEdge]->(n:LoreNode {id: $id})
+                                             RETURN m.id AS id, m.label AS label, m.type AS type, e.relation AS rel`,
+                                            { id },
+                                        ).catch(() => []);
+                                        const neighborLines = [...outRows, ...inRows]
+                                            .slice(0, 10)
+                                            .map((r) => `  - ${r.rel ?? 'related_to'} → ${r.type}: ${r.label} (${r.id})`)
+                                            .join('\n');
+                                        rawBlock =
+                                            `Label: ${refNode.label}\nType: ${refNode.type}\n\n` +
+                                            `Content:\n${refNode.content || '(no content)'}\n\n` +
+                                            `Connected to:\n${neighborLines || '  (no edges yet)'}`;
+                                        sourceTag = `lore:${refNode.id}`;
+                                    } else {
+                                        // Plugin-owned marker. Iterate active plugins
+                                        // and let the first one that recognizes the
+                                        // prefix return the context block.
+                                        for (const plugin of pluginRegistry.active()) {
+                                            if (typeof plugin.resolveChatContext !== 'function') continue;
+                                            const block = await plugin.resolveChatContext(rawId, chatCtx).catch(() => null);
+                                            if (block) {
+                                                const neighborLines = (block.neighbors ?? [])
+                                                    .slice(0, 10)
+                                                    .map((n) => `  - ${n.relation} → ${n.type}: ${n.label} (${n.id})`)
+                                                    .join('\n');
+                                                rawBlock =
+                                                    `Label: ${block.label}\nType: ${block.type}\n\n` +
+                                                    `Content:\n${block.content || '(no content)'}\n\n` +
+                                                    `Connected to:\n${neighborLines || '  (no edges yet)'}`;
+                                                sourceTag = rawId;
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    if (!rawBlock) continue;
+                                    const wrapped = wrapUntrustedContent(rawBlock, sourceTag);
                                     wrappedBlocks.push(wrapped.wrapped);
                                     if (wrapped.scan.suspicious) {
                                         suspicious.push({
-                                            source: `lore:${refNode.id}`,
+                                            source: sourceTag,
                                             patterns: wrapped.scan.patternsMatched,
                                         });
                                     }

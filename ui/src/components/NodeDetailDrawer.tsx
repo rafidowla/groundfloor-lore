@@ -6,7 +6,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { X, MessageSquare, FileText } from 'lucide-react';
+import { X, MessageSquare, FileText, RefreshCw } from 'lucide-react';
 import { authFetch } from '../lib/authFetch';
 
 interface NodeDetail {
@@ -36,6 +36,7 @@ interface NodeDetailDrawerProps {
     onClose: () => void;
     onAskAbout: (nodeId: string) => void;
     onGenerateDocs: (nodeId: string) => void;
+    onReconnectNode: (nodeId: string) => void;
 }
 
 export default function NodeDetailDrawer({
@@ -44,6 +45,7 @@ export default function NodeDetailDrawer({
     onClose,
     onAskAbout,
     onGenerateDocs,
+    onReconnectNode,
 }: NodeDetailDrawerProps) {
     // Core nodes are the lore: prefix or unprefixed. Plugin-owned nodes
     // (file:, symbol:) don't have a GET /api/node endpoint yet.
@@ -178,10 +180,18 @@ export default function NodeDetailDrawer({
                         <button
                             className="node-drawer-ask"
                             onClick={() => onAskAbout(displayDetail.node.id)}
-                            title="Pre-fill the chat with [node:id] so the LLM answers in context"
+                            title="Pre-fill the chat with this node attached so the LLM answers in context"
                         >
                             <MessageSquare size={14} />
                             Ask about this
+                        </button>
+                        <button
+                            className="node-drawer-reconnect"
+                            onClick={() => onReconnectNode(displayDetail.node.id)}
+                            title="Re-compute semantic edges for this node against the latest graph state — useful when a node looks orphaned or out of date"
+                        >
+                            <RefreshCw size={14} />
+                            Recalibrate
                         </button>
                         <button
                             className="node-drawer-generate"

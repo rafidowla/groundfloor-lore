@@ -247,6 +247,40 @@ export interface ILorePlugin {
     }>;
 
     /**
+     * V2.2 — resolve a plugin-owned node marker (e.g. "file:src/foo.ts"
+     * or "symbol:MyClass#someMethod") into a context block for the chat
+     * context expander. Called by /api/chat when a [node:...] marker
+     * with a prefix the plugin owns appears.
+     *
+     * Return `null` when this plugin doesn't recognize the prefix —
+     * core iterates remaining plugins until one claims the node or
+     * all return null. Core LoreNode ids (no prefix, or `lore:` prefix)
+     * never reach this hook; they're handled by the core path.
+     *
+     * Return a block with:
+     *   - label: human-readable title for the node
+     *   - type: node kind (e.g. "file", "symbol")
+     *   - content: best-effort body text to inject into LLM context
+     *     (file preview, symbol signature, doc comment — plugin's call)
+     *   - neighbors (optional): up to ~10 connected entities with
+     *     relation labels, to give the LLM one-hop context
+     *
+     * This is how chat becomes useful for plugin-owned graph data —
+     * without it, "Ask about this" on a CodeFile / CodeSymbol returns
+     * "I don't have enough information" because the default context
+     * expander only checks the core LoreNode table.
+     */
+    resolveChatContext?(
+        markerId: string,
+        ctx: PluginGraphContext,
+    ): Promise<{
+        label: string;
+        type: string;
+        content: string;
+        neighbors?: Array<{ id: string; label: string; type: string; relation: string }>;
+    } | null>;
+
+    /**
      * Phase 5 / C12 — retention policy rules owned by this plugin.
      *
      * A plugin declares how long its OWN node types should live and

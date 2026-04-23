@@ -907,7 +907,13 @@ function App() {
                 if (nodeMatch) requestFocus(nodeMatch[1]);
               } else if (evt.type === 'error') {
                 gotError = true;
-                setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: evt.message ?? 'error', error: true, streaming: false } : msg)));
+                // V2.2 bug-fix: on error, clear `loading` so the
+                // download progress panel stops rendering. Otherwise
+                // the bubble shows 100% download + red border + no
+                // text, which reads as "something broke." Setting
+                // loading: undefined lets the error message render
+                // in the normal text position with error styling.
+                setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: evt.message ?? 'error', error: true, streaming: false, loading: undefined } : msg)));
               } else if (evt.type === 'done') {
                 // V2.2: on stream completion, parse action tokens out
                 // of the accumulated text and surface them as buttons.
@@ -927,12 +933,16 @@ function App() {
                     // Fire-and-forget per extracted action. Each runs
                     // runChatAction which inserts its own result bubble.
                     actions.forEach((a) => { void runChatAction(a.action, a.params); });
-                    return { ...msg, text: cleaned, streaming: false };
+                    // loading: undefined — defensive clear in case the
+                    // stream produced only a download panel and then
+                    // raced to done without any tokens.
+                    return { ...msg, text: cleaned, streaming: false, loading: undefined };
                   }
                   return {
                     ...msg,
                     text: cleaned,
                     streaming: false,
+                    loading: undefined,
                     ...(actions.length > 0 ? { actions } : {}),
                   };
                 }));
@@ -1380,6 +1390,15 @@ function App() {
           }}
           onGenerateDocs={(id) => {
             generateDocsFor(id);
+            setSelectedNodeId(null);
+          }}
+          onReconnectNode={(id) => {
+            // V2.2: "Recalibrate" — route the drawer's reconnect
+            // button through the same /api/chat/action dispatch used
+            // for LLM-suggested action buttons, so the result bubble
+            // appears in chat with edge-count confirmation.
+            const marker = id.includes(':') ? id : `lore:${id}`;
+            void runChatAction('reconnect_node', { id: marker });
             setSelectedNodeId(null);
           }}
         />

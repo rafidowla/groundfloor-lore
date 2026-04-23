@@ -880,6 +880,14 @@
   background: var(--color-accent, #14b8a6);
 }
 
+.node-drawer-reconnect {
+  /* V2.2: Recalibrate — amber accent, signals "this will mutate the
+     graph by re-computing edges" (distinct from the teal "ask" which
+     is read-only and the purple "generate" which produces AI output). */
+  background: rgba(245, 158, 11, 0.88);
+  color: #ffffff;
+}
+
 .node-drawer-generate {
   /* V2.2: Generate docs — purple gradient to match the brand mark +
      chat-action buttons, signals "this will produce AI output." */
@@ -888,6 +896,7 @@
 }
 
 .node-drawer-ask:hover,
+.node-drawer-reconnect:hover,
 .node-drawer-generate:hover {
   opacity: 0.9;
 }

@@ -134,6 +134,151 @@ export const developerPlugin: ILorePlugin = {
     },
 
     /**
+     * V2.2 — make "Ask about this" work on CodeFile / CodeSymbol nodes.
+     * Before this hook existed the chat context expander only checked
+     * the core LoreNode table, so asking about a `file:src/foo.ts` or
+     * `symbol:SomeFn#doThing` marker returned no content and Gemma
+     * correctly (but uselessly) said "I don't have enough information
+     * in the knowledge graph to answer that."
+     *
+     * Prefix routing:
+     *   - "file:<path>"     → look up CodeFile by path, gather FileContains
+     *                         neighbors (symbols declared in the file) +
+     *                         LoreTouchesFile neighbors (lore nodes linked
+     *                         to the file)
+     *   - "symbol:<uid>"    → look up CodeSymbol, gather CodeRelation
+     *                         neighbors (callers/callees) + FileContains
+     *                         parent + LoreAppliesToCode neighbors
+     *
+     * Returns null for any other prefix so the next plugin gets a turn.
+     */
+    async resolveChatContext(markerId: string, ctx: PluginGraphContext) {
+        if (markerId.startsWith('file:')) {
+            const filePath = markerId.slice('file:'.length);
+            const fileRows = await ctx.queryRows(
+                `MATCH (f:CodeFile {path: $path})
+                 RETURN f.path AS path, f.language AS language, f.repo AS repo, f.loc AS loc`,
+                { path: filePath },
+            ).catch(() => []);
+            if (fileRows.length === 0) return null;
+            const f = fileRows[0] as Record<string, unknown>;
+
+            // Symbols declared in this file (FileContains outgoing)
+            const symRows = await ctx.queryRows(
+                `MATCH (f:CodeFile {path: $path})-[:FileContains]->(s:CodeSymbol)
+                 RETURN s.uid AS id, s.name AS label, s.kind AS type
+                 LIMIT 20`,
+                { path: filePath },
+            ).catch(() => []);
+            // Lore nodes that touch this file (LoreTouchesFile incoming)
+            const loreRows = await ctx.queryRows(
+                `MATCH (l:LoreNode)-[:LoreTouchesFile]->(f:CodeFile {path: $path})
+                 RETURN l.id AS id, l.label AS label, l.type AS type
+                 LIMIT 10`,
+                { path: filePath },
+            ).catch(() => []);
+
+            const neighbors = [
+                ...symRows.map((r) => ({
+                    id: String((r as Record<string, unknown>)['id'] ?? ''),
+                    label: String((r as Record<string, unknown>)['label'] ?? ''),
+                    type: String((r as Record<string, unknown>)['type'] ?? 'symbol'),
+                    relation: 'contains',
+                })),
+                ...loreRows.map((r) => ({
+                    id: String((r as Record<string, unknown>)['id'] ?? ''),
+                    label: String((r as Record<string, unknown>)['label'] ?? ''),
+                    type: String((r as Record<string, unknown>)['type'] ?? 'lore'),
+                    relation: 'touched_by',
+                })),
+            ];
+
+            const language = String(f['language'] ?? 'unknown');
+            const loc = f['loc'] != null ? String(f['loc']) : '?';
+            const repo = String(f['repo'] ?? '');
+            const content = [
+                `File: ${filePath}`,
+                `Language: ${language}`,
+                `Lines of code: ${loc}`,
+                repo ? `Repository: ${repo}` : null,
+                '',
+                `This file contains ${symRows.length} symbol${symRows.length === 1 ? '' : 's'}${symRows.length >= 20 ? ' (first 20 shown)' : ''}.`,
+                loreRows.length > 0
+                    ? `Linked to ${loreRows.length} knowledge node${loreRows.length === 1 ? '' : 's'}.`
+                    : 'No knowledge nodes are linked to this file yet — the graph may need a reconnect pass.',
+            ].filter(Boolean).join('\n');
+
+            return {
+                label: filePath,
+                type: 'code_file',
+                content,
+                neighbors,
+            };
+        }
+
+        if (markerId.startsWith('symbol:')) {
+            const uid = markerId.slice('symbol:'.length);
+            const symRows = await ctx.queryRows(
+                `MATCH (s:CodeSymbol {uid: $uid})
+                 RETURN s.uid AS uid, s.name AS name, s.kind AS kind, s.filePath AS filePath,
+                        s.lineStart AS lineStart, s.lineEnd AS lineEnd, s.signature AS signature,
+                        s.docComment AS docComment`,
+                { uid },
+            ).catch(() => []);
+            if (symRows.length === 0) return null;
+            const s = symRows[0] as Record<string, unknown>;
+
+            // Callers / callees via CodeRelation
+            const outRows = await ctx.queryRows(
+                `MATCH (s:CodeSymbol {uid: $uid})-[r:CodeRelation]->(t:CodeSymbol)
+                 RETURN t.uid AS id, t.name AS label, t.kind AS type, r.kind AS rel
+                 LIMIT 10`,
+                { uid },
+            ).catch(() => []);
+            const inRows = await ctx.queryRows(
+                `MATCH (t:CodeSymbol)-[r:CodeRelation]->(s:CodeSymbol {uid: $uid})
+                 RETURN t.uid AS id, t.name AS label, t.kind AS type, r.kind AS rel
+                 LIMIT 10`,
+                { uid },
+            ).catch(() => []);
+
+            const neighbors = [
+                ...outRows.map((r) => ({
+                    id: String((r as Record<string, unknown>)['id'] ?? ''),
+                    label: String((r as Record<string, unknown>)['label'] ?? ''),
+                    type: String((r as Record<string, unknown>)['type'] ?? 'symbol'),
+                    relation: String((r as Record<string, unknown>)['rel'] ?? 'calls'),
+                })),
+                ...inRows.map((r) => ({
+                    id: String((r as Record<string, unknown>)['id'] ?? ''),
+                    label: String((r as Record<string, unknown>)['label'] ?? ''),
+                    type: String((r as Record<string, unknown>)['type'] ?? 'symbol'),
+                    relation: `called_by:${String((r as Record<string, unknown>)['rel'] ?? 'calls')}`,
+                })),
+            ];
+
+            const content = [
+                `Symbol: ${String(s['name'] ?? uid)}`,
+                `Kind: ${String(s['kind'] ?? 'unknown')}`,
+                `File: ${String(s['filePath'] ?? '?')} (lines ${String(s['lineStart'] ?? '?')}-${String(s['lineEnd'] ?? '?')})`,
+                '',
+                s['signature'] ? `Signature:\n${String(s['signature'])}` : null,
+                '',
+                s['docComment'] ? `Documentation:\n${String(s['docComment'])}` : null,
+            ].filter(Boolean).join('\n');
+
+            return {
+                label: String(s['name'] ?? uid),
+                type: 'code_symbol',
+                content: content || `Symbol ${uid} found but has no signature or docComment recorded.`,
+                neighbors,
+            };
+        }
+
+        return null;
+    },
+
+    /**
      * Phase 1 / C2 — add code-intelligence guidance to the chat system
      * prompt. Tells the LLM: (a) prefer graph-backed impact analysis
      * before speculating about callers/dependents, (b) treat
