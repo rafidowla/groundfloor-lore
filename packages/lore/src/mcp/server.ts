@@ -2056,6 +2056,90 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // V2.2: chat action dispatcher. When the LLM emits an
+            // action-suggestion token like {{action:reconnect_node|...}}
+            // the UI renders it as a button. Click posts here with
+            // { action, params }. Server enforces the whitelist — only
+            // the exact action names from EMBEDDED_SYSTEM_PROMPT's
+            // action registry are honored. Every other string returns 400.
+            //
+            // Supported actions (Phase 1 — intentionally narrow):
+            //   reconnect_node { nodeId } — rebuild semantic_neighbor
+            //     edges for a single node via reconnectOneNode
+            //   open_reconnect_settings — pure UI hint, server acks OK
+            //
+            // Adding a new action requires: updating EMBEDDED_SYSTEM_PROMPT
+            // action registry, updating the whitelist here, and updating
+            // the UI action dispatcher. All three in one PR.
+            if (url === '/api/chat/action' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const payload = JSON.parse(body || '{}') as { action?: string; params?: Record<string, unknown> };
+                        const action = payload.action ?? '';
+                        const params = payload.params ?? {};
+
+                        if (action === 'reconnect_node') {
+                            const rawId = typeof params['nodeId'] === 'string' ? (params['nodeId'] as string) : '';
+                            // Marker might be prefixed ("lore:xxx") or raw.
+                            // reconnectOneNode expects the raw node id.
+                            const nodeId = rawId.startsWith('lore:') ? rawId.slice('lore:'.length) : rawId;
+                            if (!nodeId) {
+                                res.writeHead(400, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: 'nodeId required' }));
+                                return;
+                            }
+                            const node = await graph.getNode(nodeId);
+                            if (!node) {
+                                res.writeHead(404, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({ error: `node '${nodeId}' not found` }));
+                                return;
+                            }
+                            const result = await reconnectOneNode(graph, verbatimStore, pluginRegistry, {
+                                id: node.id,
+                                label: node.label,
+                                content: node.content,
+                                tags: node.tags,
+                                type: node.type,
+                                project: node.project,
+                                ecosystem: node.ecosystem,
+                            });
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({
+                                ok: true,
+                                action: 'reconnect_node',
+                                nodeId,
+                                label: node.label,
+                                edgesAdded: result.added,
+                                confidences: result.confidences,
+                            }));
+                            return;
+                        }
+
+                        if (action === 'open_reconnect_settings') {
+                            // Pure UI hint — server just confirms the
+                            // action name is valid. UI handles the panel
+                            // navigation client-side.
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({
+                                ok: true,
+                                action: 'open_reconnect_settings',
+                                uiHint: { openPanel: 'settings', scrollTo: 'graph-connections' },
+                            }));
+                            return;
+                        }
+
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: `unknown action '${action}'` }));
+                    } catch (actionErr) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (actionErr as Error).message }));
+                    }
+                });
+                return;
+            }
+
             // Chat SSE stream — routes every message to the local/BYOK LLM.
             // Never falls back to any cloud pathway silently.
             if (url === '/api/chat' && req.method === 'POST') {

@@ -307,6 +307,49 @@
   white-space: pre-wrap;
 }
 
+/* V2.2 action-suggestion buttons — rendered below the Markdown
+   text when the LLM emits {{action:...}} tokens. Primary button
+   styling (purple accent to match brand) makes them read as
+   affordances, not just prose. */
+.chat-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+
+.chat-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.85rem;
+  background: linear-gradient(90deg, rgba(168, 85, 247, 0.85) 0%, rgba(59, 130, 246, 0.85) 100%);
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: filter 0.15s;
+  box-shadow: 0 1px 4px rgba(168, 85, 247, 0.25);
+}
+
+.chat-action-btn:hover {
+  filter: brightness(1.08);
+}
+
+.chat-action-btn:active {
+  filter: brightness(0.95);
+}
+
+/* Action-result confirmation bubbles get a subtle left-border
+   accent so the user can visually distinguish them from regular
+   LLM answers. */
+.chat-markdown-wrap.action-result {
+  padding-left: 0.6rem;
+  border-left: 3px solid rgba(20, 184, 166, 0.55);
+}
+
 .chat-input-area {
   margin-top: 1rem;
 }

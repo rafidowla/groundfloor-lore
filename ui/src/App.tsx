@@ -93,6 +93,19 @@ interface ChatMessage {
   /** V2.2: node references attached via "Ask about this". Render as
    *  pills above the bubble; not part of the text body itself. */
   nodeRefs?: Array<{ marker: string; label: string | null }>;
+  /** V2.2: action-suggestion buttons parsed from the assistant's
+   *  {{action:...}} tokens. Null when the message contains no actions
+   *  (text-only answer). Preserves insertion order so buttons appear
+   *  below the text in the order the LLM emitted them. */
+  actions?: Array<{
+    action: string;
+    params: Record<string, string>;
+    label: string;
+  }>;
+  /** V2.2: if this assistant message is itself the result of a
+   *  user-confirmed action click, carry the metadata so the UI can
+   *  style it as a "system confirmation" instead of normal LLM chat. */
+  isActionResult?: boolean;
 }
 
 /** Read a File object as base64 without the data: URL prefix. */
@@ -360,6 +373,94 @@ function App() {
     window.setTimeout(() => void tick(), 800);
   };
 
+  // V2.2: parse {{action:name|key=value|...}} tokens out of an LLM
+  // response. Returns the cleaned text (tokens removed) plus the
+  // extracted actions array in emit order.
+  //
+  // Defensive: unknown action names are dropped silently (never
+  // rendered as a button) — prevents a hallucinated action from
+  // producing a clickable dead-end. Server-side whitelist is the
+  // authoritative check; this is a client-side pre-filter.
+  const KNOWN_ACTIONS = new Set(['reconnect_node', 'open_reconnect_settings']);
+  const ACTION_TOKEN_RE = /\{\{action:([^}]+)\}\}/g;
+  const extractActions = (rawText: string): {
+    cleaned: string;
+    actions: Array<{ action: string; params: Record<string, string>; label: string }>;
+  } => {
+    const actions: Array<{ action: string; params: Record<string, string>; label: string }> = [];
+    const cleaned = rawText.replace(ACTION_TOKEN_RE, (_full, inner: string) => {
+      // inner shape: "name|key=value|key=value"
+      const parts = inner.split('|').map((s) => s.trim()).filter(Boolean);
+      if (parts.length === 0) return '';
+      const action = parts[0];
+      if (!KNOWN_ACTIONS.has(action)) return ''; // drop unknown action
+      const params: Record<string, string> = {};
+      for (let i = 1; i < parts.length; i++) {
+        const eq = parts[i].indexOf('=');
+        if (eq < 0) continue;
+        const key = parts[i].slice(0, eq).trim();
+        const value = parts[i].slice(eq + 1).trim();
+        if (key) params[key] = value;
+      }
+      const label = params['label'] || 'Run action';
+      actions.push({ action, params, label });
+      return '';
+    });
+    return { cleaned: cleaned.replace(/\n\n+/g, '\n\n').trim(), actions };
+  };
+
+  // V2.2: execute an action button. POSTs to /api/chat/action, shows
+  // the result as a new assistant message styled as an action-result
+  // confirmation. Errors surface the same way (error styling).
+  const runChatAction = useCallback(async (action: string, params: Record<string, string>): Promise<void> => {
+    const resultId = `a-action-${Date.now()}`;
+    setMessages((m) => [...m, { id: resultId, role: 'assistant', text: 'Running…', streaming: true, isActionResult: true }]);
+    try {
+      // For reconnect_node, the param key from the LLM is `id`; map to
+      // the server's expected `nodeId`. For open_reconnect_settings,
+      // no params needed — handle UI-side below.
+      let serverParams: Record<string, unknown> = {};
+      if (action === 'reconnect_node') {
+        serverParams = { nodeId: params['id'] ?? '' };
+      }
+
+      const resp = await authFetch(`${API_BASE}/api/chat/action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, params: serverParams }),
+      });
+      const body = await resp.json() as {
+        ok?: boolean;
+        error?: string;
+        edgesAdded?: number;
+        label?: string;
+        uiHint?: { openPanel?: string; scrollTo?: string };
+      };
+
+      if (!resp.ok || !body.ok) {
+        setMessages((m) => m.map((msg) => msg.id === resultId ? { ...msg, text: `Action failed: ${body.error ?? `HTTP ${resp.status}`}`, streaming: false, error: true } : msg));
+        return;
+      }
+
+      // Success — compose a concise confirmation message.
+      let confirmText = '';
+      if (action === 'reconnect_node') {
+        const n = body.edgesAdded ?? 0;
+        confirmText = `✓ Reconnected **${body.label ?? params['id']}**. ${n === 0 ? 'No new edges — the node was already well-connected.' : `Added ${n} semantic_neighbor edge${n === 1 ? '' : 's'}.`}`;
+      } else if (action === 'open_reconnect_settings') {
+        setShowSettings(true);
+        setSelectedNodeId(null);
+        confirmText = '✓ Opened Settings. Scroll to **Graph Connections** for the Dry run / Apply / Reconsume controls.';
+      } else {
+        confirmText = `✓ Action "${action}" completed.`;
+      }
+
+      setMessages((m) => m.map((msg) => msg.id === resultId ? { ...msg, text: confirmText, streaming: false } : msg));
+    } catch (err) {
+      setMessages((m) => m.map((msg) => msg.id === resultId ? { ...msg, text: `Action failed: ${(err as Error).message}`, streaming: false, error: true } : msg));
+    }
+  }, []);
+
   // V2.2: "Ask about this" — add the node as a removable pill above
   // the chat input instead of stuffing a [node:id] marker into the
   // textbox. On send (see sendMessage) the pending refs get serialised
@@ -605,7 +706,18 @@ function App() {
                 gotError = true;
                 setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, text: evt.message ?? 'error', error: true, streaming: false } : msg)));
               } else if (evt.type === 'done') {
-                setMessages((m) => m.map((msg) => (msg.id === assistantId ? { ...msg, streaming: false } : msg)));
+                // V2.2: on stream completion, parse action tokens out
+                // of the accumulated text and surface them as buttons.
+                setMessages((m) => m.map((msg) => {
+                  if (msg.id !== assistantId) return msg;
+                  const { cleaned, actions } = extractActions(msg.text);
+                  return {
+                    ...msg,
+                    text: cleaned,
+                    streaming: false,
+                    ...(actions.length > 0 ? { actions } : {}),
+                  };
+                }));
               }
             } catch {
               // ignore malformed frame
@@ -762,9 +874,24 @@ function App() {
                       // ```mermaid diagrams actually show up.
                       // During streaming we still show the cursor
                       // inline with the rendered output.
-                      <div className="chat-markdown-wrap">
+                      <div className={`chat-markdown-wrap${m.isActionResult ? ' action-result' : ''}`}>
                         <ChatMarkdown source={m.text || ''} />
                         {m.streaming ? <span className="cursor-blink">▌</span> : null}
+                        {m.actions && m.actions.length > 0 ? (
+                          <div className="chat-actions">
+                            {m.actions.map((a, i) => (
+                              <button
+                                key={`${a.action}-${i}`}
+                                type="button"
+                                className="chat-action-btn"
+                                onClick={() => void runChatAction(a.action, a.params)}
+                                title={`Action: ${a.action}`}
+                              >
+                                {a.label}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
                     ) : (
                       // User bubbles stay plain text — the user
