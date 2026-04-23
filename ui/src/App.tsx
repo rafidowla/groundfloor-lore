@@ -52,6 +52,7 @@ interface ConfigResponse {
   hasApiKey: boolean;
   extractionPath?: 'local-byok' | 'def-cloud';
   telemetryOptOut?: boolean;
+  keepEmbeddedModelHot?: boolean;
   capability: {
     provider: string;
     model: string;
@@ -142,6 +143,7 @@ function App() {
   // beneath the file input so the user sees what the server decided).
   const [extractionPath, setExtractionPath] = useState<'local-byok' | 'def-cloud'>('local-byok');
   const [telemetryOptOut, setTelemetryOptOut] = useState(false);
+  const [keepEmbeddedModelHot, setKeepEmbeddedModelHot] = useState(false);
   const [capability, setCapability] = useState<ConfigResponse['capability'] | null>(null);
   const [lastExtract, setLastExtract] = useState<ExtractResult | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -237,6 +239,7 @@ function App() {
         setHasApiKey(c.hasApiKey);
         setExtractionPath(c.extractionPath ?? 'local-byok');
         setTelemetryOptOut(Boolean(c.telemetryOptOut));
+        setKeepEmbeddedModelHot(Boolean(c.keepEmbeddedModelHot));
         setCapability(c.capability);
         setLanguageBreakdown(s?.languageBreakdown ?? null);
       } catch (err) {
@@ -710,9 +713,10 @@ function App() {
             {llmProvider === 'embedded' ? (
               <div className="chat-message ai-message glass-panel nudge-banner">
                 <p>
-                  ⚠ Using the built-in <strong>Qwen 0.5B</strong> — usable, but small. For better
-                  answers, add an API key (Anthropic / OpenAI) or switch to Ollama with a stronger
-                  local model in <em>Settings</em>.
+                  ⚠ Using the built-in <strong>Gemma 3 1B</strong> — usable, but small. For richer
+                  answers, docs, or diagrams, add an API key (Anthropic / OpenAI) or switch to Ollama
+                  with a stronger local model in <em>Settings</em>. The embedded model idle-unloads
+                  after 3 minutes to save memory — toggle in Settings if you prefer it always hot.
                 </p>
               </div>
             ) : null}
@@ -901,7 +905,7 @@ function App() {
                 value={llmProvider}
                 onChange={(e) => handleProviderChange(e.target.value as LlmProvider)}
               >
-                <option value="embedded">Built-in Qwen 0.5B (no setup)</option>
+                <option value="embedded">Built-in Gemma 3 1B (no setup)</option>
                 <option value="anthropic">Anthropic API (BYOK)</option>
                 <option value="openai">OpenAI API (BYOK)</option>
                 <option value="ollama">Local Ollama (localhost:11434)</option>
@@ -916,7 +920,7 @@ function App() {
                   llmProvider === 'ollama'
                     ? 'Not required for Ollama'
                     : llmProvider === 'embedded'
-                      ? 'Not required for built-in Qwen'
+                      ? 'Not required for built-in Gemma'
                       : 'sk-…'
                 }
                 className="ui-input"
@@ -929,6 +933,33 @@ function App() {
                 Stored in your OS keychain. Never written to disk or localStorage.
               </p>
             </div>
+
+            {/* V2.2: Embedded model memory behavior. Only shown when the
+                embedded provider is selected — BYOK / Ollama don't load
+                a local pipeline so the toggle is irrelevant there. */}
+            {llmProvider === 'embedded' ? (
+              <div className="setting-group">
+                <label>Embedded model memory</label>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={keepEmbeddedModelHot}
+                    onChange={(e) => {
+                      setKeepEmbeddedModelHot(e.target.checked);
+                      void patchConfig({ keepEmbeddedModelHot: e.target.checked });
+                    }}
+                  />
+                  <span>Keep Gemma 3 1B in memory when idle</span>
+                </label>
+                <p className="help-text" style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '0.25rem' }}>
+                  OFF (default): model idle-unloads after 3 min of no
+                  queries — saves ~1.5 GB RAM. Next query reloads in
+                  ~5-10s. ON: model stays resident for instant
+                  responses; holds ~1.5 GB permanently. Pick ON if you
+                  have plenty of RAM and chat frequently.
+                </p>
+              </div>
+            ) : null}
 
             {/* V2.1: Workspace switching moved to the top-left chip
                 (WorkspacePicker). See the sidebar header above — the old

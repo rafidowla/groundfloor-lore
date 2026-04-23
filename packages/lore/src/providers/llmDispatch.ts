@@ -45,7 +45,13 @@ export interface LlmCapability {
 }
 
 const DEFAULT_MODELS: Record<string, string> = {
-    embedded: 'Xenova/Qwen1.5-0.5B-Chat',
+    // V2.2 upgrade (2026-04-20): Qwen 0.5B → Gemma 3 1B.
+    // Qwen 1.5 0.5B hallucinated heavily on grounded RAG (invented
+    // method names, procedural steps). Gemma 3 1B has better
+    // instruction-following (IFEval ~80), stays in-context well,
+    // Apache-compatible license, ~0.8 GB on disk q4f16, ~1.2-1.5 GB
+    // resident. See DECISIONS.md entry dated 2026-04-20.
+    embedded: 'onnx-community/gemma-3-1b-it-ONNX',
     anthropic: 'claude-3-5-sonnet-latest',
     openai: 'gpt-4o-mini',
     ollama: 'llama3.2',
@@ -70,7 +76,7 @@ export function getCapability(provider: LlmProvider, model?: string): LlmCapabil
     const resolvedModel = model ?? DEFAULT_MODELS[provider] ?? 'unknown';
     const lower = resolvedModel.toLowerCase();
 
-    // Embedded Qwen 0.5B is text-only; no image/audio capability.
+    // Embedded Gemma 3 1B is text-only; no image/audio capability.
     if (provider === 'embedded') {
         return {
             provider,
@@ -159,16 +165,94 @@ export async function* stream(
  * to Claude/GPT-4 class models. The UI surfaces a nudge banner whenever
  * this provider is active so the user knows why answers feel thin.
  */
-// Module-level pipeline cache. The 500 MB ONNX file loads once per
-// daemon lifetime, not per chat request. Keyed by model name so a
-// future switch between two embedded models still works. The value is
-// a Promise so concurrent requests during the first load all await the
-// same pipeline rather than racing to re-load.
+// V2.2: module-level pipeline cache with idle-unload.
+//
+// The embedded-model ONNX (~0.8-1.2 GB on disk, ~1.2-1.5 GB resident
+// once loaded) gets loaded on first chat request and kept warm so
+// subsequent requests are instant. Holding it forever, though, is a
+// real memory cost on laptops already under pressure (e.g. Dataplane
+// containers + IDE + browser). Default behavior: after N minutes of
+// no queries, dispose the pipeline, freeing the RAM. Next query pays
+// one reload (~5-10 s) and re-caches.
+//
+// User override via `keepEmbeddedModelHot` in config — UI Settings
+// exposes a toggle. ON = never unload. OFF (default) = 3-minute idle.
 type EmbeddedGenerator = {
     tokenizer: unknown;
+    dispose?: () => void | Promise<void>;
     (input: unknown, opts: Record<string, unknown>): Promise<unknown>;
 };
-const embeddedPipelineCache = new Map<string, Promise<EmbeddedGenerator>>();
+
+interface CachedPipeline {
+    promise: Promise<EmbeddedGenerator>;
+    lastUsedAt: number;
+}
+
+const embeddedPipelineCache = new Map<string, CachedPipeline>();
+
+const IDLE_UNLOAD_MS = 3 * 60 * 1000;           // 3 minutes
+const IDLE_CHECK_INTERVAL_MS = 30 * 1000;       // check every 30s
+
+let keepModelHot = false;
+let idleSweeper: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * setEmbeddedModelKeepHot — called by the config watcher when the user
+ * flips the "Keep embedded model in memory" toggle. ON => idle sweeper
+ * is disabled and any loaded model stays until daemon restart. OFF =>
+ * sweeper runs and unloads idle models.
+ */
+export function setEmbeddedModelKeepHot(on: boolean): void {
+    keepModelHot = on;
+    if (on) {
+        if (idleSweeper) {
+            clearInterval(idleSweeper);
+            idleSweeper = null;
+        }
+    } else {
+        ensureIdleSweeper();
+    }
+}
+
+function ensureIdleSweeper(): void {
+    if (idleSweeper !== null || keepModelHot) return;
+    idleSweeper = setInterval(() => {
+        const now = Date.now();
+        for (const [modelName, cached] of embeddedPipelineCache.entries()) {
+            if (now - cached.lastUsedAt < IDLE_UNLOAD_MS) continue;
+            // Drop the cache entry. The underlying Pipeline object loses
+            // its only reference and becomes GC-eligible. Transformers.js
+            // pipelines expose an optional dispose() hook on some
+            // architectures; call it if present for deterministic
+            // release of the ONNX runtime session.
+            console.error(`[llmDispatch] Idle-unload embedded model ${modelName} (idle ${Math.floor((now - cached.lastUsedAt) / 1000)}s)`);
+            embeddedPipelineCache.delete(modelName);
+            void cached.promise.then((gen) => {
+                try { gen.dispose?.(); } catch { /* ignore */ }
+            }).catch(() => { /* ignore */ });
+        }
+    }, IDLE_CHECK_INTERVAL_MS);
+    // Don't keep the event loop alive for this timer alone.
+    idleSweeper.unref?.();
+}
+
+// Start the sweeper immediately; setEmbeddedModelKeepHot(true) will
+// pause it later if the user opts in.
+ensureIdleSweeper();
+
+/**
+ * Phase 1 grounding prompt. See DECISIONS.md entry 2026-04-20 —
+ * "Embedded model upgrade + strict grounding." Kept here as a const
+ * so tests can import and verify, and so future edits are reviewable.
+ */
+const EMBEDDED_SYSTEM_PROMPT = `You are a knowledge-graph assistant for Lore, a local-first knowledge base. You answer ONLY from the context nodes provided in this conversation. If the context does not contain the answer, say exactly: "I don't have enough information in the knowledge graph to answer that." Do not speculate. Do not invent.
+
+Hard rules:
+- Never invent method names, API routes, node IDs, function names, or procedural steps that don't appear verbatim in the provided context.
+- Never claim you can perform actions (editing edges, re-running reconnect, deleting nodes, etc.). You cannot mutate anything. When asked to do something, tell the user which UI control does it: for example "Use Settings → Graph Connections → Apply to rebuild semantic edges."
+- Cite specific claims with the node ID in brackets, like [lore:decision-foo].
+- Be concise: 2-4 sentences unless more detail is explicitly asked.
+- If the user asks about a node that's missing from the context, say the node wasn't attached to this conversation.`;
 
 async function* streamEmbedded(message: string, model: string): AsyncGenerator<LlmChunk> {
     // Queue holds LlmChunks so it can interleave model-loading progress
@@ -196,13 +280,13 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
             env.cacheDir = path.join(os.homedir(), '.groundfloor', 'models');
             env.allowRemoteModels = true;
 
-            // Only load-and-cache the pipeline once per daemon. Subsequent
-            // chat requests reuse the in-memory generator with no disk I/O
-            // and no transformers-js re-initialization noise.
+            // Load-and-cache the pipeline once per daemon (or once per
+            // idle-unload cycle — see setEmbeddedModelKeepHot).
             let generator: EmbeddedGenerator;
             const cached = embeddedPipelineCache.get(model);
             if (cached) {
-                generator = await cached;
+                generator = await cached.promise;
+                cached.lastUsedAt = Date.now();
             } else {
                 console.error(`[llmDispatch] Loading embedded model ${model} (first run downloads to ${env.cacheDir})...`);
 
@@ -241,11 +325,15 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
                     quantized: true,
                     progress_callback,
                 });
-                embeddedPipelineCache.set(model, pipelinePromise);
+                const cacheEntry: CachedPipeline = {
+                    promise: pipelinePromise,
+                    lastUsedAt: Date.now(),
+                };
+                embeddedPipelineCache.set(model, cacheEntry);
                 try {
                     generator = await pipelinePromise;
                 } catch (loadErr) {
-                    // If loading failed, drop the cached promise so the
+                    // If loading failed, drop the cached entry so the
                     // next request can retry instead of failing forever.
                     embeddedPipelineCache.delete(model);
                     throw loadErr;
@@ -264,7 +352,7 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
             });
 
             const prompt = [
-                { role: 'system', content: 'You are a concise assistant. Keep answers short.' },
+                { role: 'system', content: EMBEDDED_SYSTEM_PROMPT },
                 { role: 'user', content: message },
             ];
             await generator(prompt, {

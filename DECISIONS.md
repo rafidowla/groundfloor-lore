@@ -58,3 +58,34 @@ Impact: `~/.claude.json` — stdio project entry removed; HTTP user-scope entry 
 Decision: Park the Dataplane runtime-connection work. Code integration is complete (`fireBootHealthPing()`, `/api/health` reports `bound/offline/opted-out/error/unknown`); what's missing is a `DATAPLANE_API_KEY` in the launchd plist's environment variables.
 Reason: Obtaining / creating the API key requires investigating the `groundfloor-dataplane-oss` sibling repo (method unknown from the Lore side). V2 + V2.1 work just landed; the user chose to ship the merge rather than branch into a side-quest.
 Impact: `/api/health` will continue to show `dataplane: "offline"` until revisited. See `docs/V2.1_status.md` → Deferred section for the exact resumption steps. Memory node `project_dataplane_connection_deferred` stored so future sessions recall the state.
+
+## 2026-04-20 — Embedded LLM upgrade: Qwen 0.5B → Gemma 3 1B + strict grounding prompt + idle unload
+Decision: Replace `Xenova/Qwen1.5-0.5B-Chat` with `onnx-community/gemma-3-1b-it-ONNX` (q4 quantized) as the default embedded chat model. Replace the generic system prompt with a strict grounding prompt that forbids hallucination and redirects action requests to UI controls. Add idle-unload of the loaded pipeline after 3 minutes of no queries, with a user-visible Settings toggle ("Keep embedded model in memory when idle") to override when memory isn't a concern.
+
+Reason:
+- Qwen 0.5B hallucinated severely on grounded RAG — invented method names, procedural steps, and claimed capabilities (e.g. "I can reconnect the edges" when asked about an orphan node). Observed live on 2026-04-20 example. See Lore node for the example transcript.
+- The previous system prompt ("You are a concise assistant. Keep answers short.") didn't constrain the model to the provided context, didn't say what to do when it couldn't answer, and didn't distinguish question-from-context vs request-to-mutate.
+- Gemma 3 1B has substantially better instruction-following (IFEval ~80 vs Qwen 1.5 0.5B at ~40), stays in-context well, and has first-class Transformers.js v4 support. License is Gemma Terms of Use — commercial-OK with standard prohibited-use policy pass-through. Verified against Google's license text (not the FUD version).
+- Laptop memory is already under pressure (user running Dataplane's 7 docker services + IDE + browser on 16 GB machine with 18 GB swap). Keeping any model resident permanently adds to that. Idle-unload at 3 min reclaims the ~1.5 GB the loaded Gemma pipeline holds, while the in-session cache keeps repeat queries fast.
+
+Alternatives considered:
+- Qwen3-1.7B-ONNX — better IFEval (~83) but ~2-2.5 GB resident. Too heavy for target memory profile.
+- SmolLM3-3B — biggest quality jump but ~3-4 GB resident. Out of scope.
+- Qwen3-0.6B — marginal upgrade over Qwen 1.5 0.5B; wasted an upgrade cycle.
+- Phi-4-mini — known hallucination issues on open-domain QA; wrong fit for RAG.
+- LFM (Liquid AI) — no ONNX path, no Transformers.js support. Architecturally incompatible.
+
+Impact:
+- `packages/lore/src/providers/llmDispatch.ts` — DEFAULT_MODELS.embedded, new EMBEDDED_SYSTEM_PROMPT constant, new CachedPipeline shape with lastUsedAt tracking, new idle sweeper + setEmbeddedModelKeepHot export.
+- `packages/lore/src/config/configManager.ts` — new `keepEmbeddedModelHot` field (default false) added to LoreConfig + DEFAULT_CONFIG + patch() allowlist.
+- `packages/lore/src/mcp/server.ts` — imports setEmbeddedModelKeepHot, seeds it from config at boot, re-applies on every PATCH /api/config.
+- `ui/src/App.tsx` — ConfigResponse gains keepEmbeddedModelHot, new state + fetch wiring, new Settings toggle (only shown when `llmProvider === 'embedded'`), banner + dropdown option text updated from "Qwen 0.5B" → "Gemma 3 1B".
+
+First-run UX: existing users on embedded provider will see a ~800 MB download on their next chat query. Progress bar is already wired (Phase 7a fix). Once cached, subsequent loads are fast.
+
+Not in scope (parked for follow-up commits):
+- Markdown + Mermaid rendering in chat bubbles (unlocks doc-generation value from BYOK)
+- Action-suggestion buttons in chat (structured widgets, not tool-calling)
+- Tool-calling in chat (grant the LLM permission to call a whitelisted subset of server tools; Gemma 3 + BYOK both support function-calling natively)
+- "Generate docs for this node" structured action with BYOK
+- Stale Qwen model cleanup — `lore models prune` CLI. For now users delete `~/.groundfloor/models/Xenova/Qwen1.5-0.5B-Chat/` manually if reclaiming disk.

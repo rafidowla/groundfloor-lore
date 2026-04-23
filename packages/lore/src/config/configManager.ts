@@ -56,18 +56,32 @@ export interface LoreConfig {
      * but persisted so Phase 4 can honor it on first implementation.
      */
     telemetryOptOut?: boolean;
+
+    /**
+     * V2.2 embedded-model upgrade (2026-04-20). When true, the
+     * embedded LLM pipeline stays resident in memory for the daemon
+     * lifetime (~1.2-1.5 GB RAM). When false (default), the pipeline
+     * gets idle-unloaded after 3 minutes of no queries — freeing the
+     * RAM when you're not actively chatting, at the cost of one
+     * ~5-10s reload on next use. Recommended OFF on memory-constrained
+     * laptops running Dataplane + IDE + browser alongside Lore.
+     */
+    keepEmbeddedModelHot?: boolean;
 }
 
 export const DEFAULT_CONFIG: LoreConfig = {
     plugins: ['developer'],
     pluginConfig: {},
-    // Default to the embedded Qwen 0.5B so a fresh install chats out of
-    // the box with no API keys or Ollama required. Users upgrade to
-    // Anthropic/OpenAI/Ollama from Settings once they have them.
+    // Default to the embedded Gemma 3 1B (upgraded from Qwen 0.5B in
+    // V2.2) so a fresh install chats out of the box with no API keys
+    // or Ollama required. Users upgrade to Anthropic/OpenAI/Ollama
+    // from Settings once they have them.
     llmProvider: 'embedded',
     workspaceAccount: 'local',
     extractionPath: 'local-byok',
     telemetryOptOut: false,
+    // Idle-unload enabled by default — memory-friendly for laptops.
+    keepEmbeddedModelHot: false,
 };
 
 export class ConfigManager {
@@ -117,6 +131,7 @@ export class ConfigManager {
             'plugins_last_boot',
             'extractionPath',
             'telemetryOptOut',
+            'keepEmbeddedModelHot',
         ];
         const next: LoreConfig = { ...current };
         for (const key of allowed) {

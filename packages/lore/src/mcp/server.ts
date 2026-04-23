@@ -48,7 +48,7 @@ import {
     deleteWorkspace,
     kebabCase,
 } from '../config/workspaces.js';
-import { stream as llmStream, getCapability } from '../providers/llmDispatch.js';
+import { stream as llmStream, getCapability, setEmbeddedModelKeepHot } from '../providers/llmDispatch.js';
 import { decide as decideExtraction, type ExtractPayload } from '../providers/extractRouter.js';
 import { reconnectGraph, reconnectOneNode } from '../engines/reconnect.js';
 import { readCursor, writeCursor } from '../engines/reconnectCursor.js';
@@ -183,6 +183,10 @@ const configManager = new ConfigManager(loreDir);
 const pluginRegistry = new PluginRegistry(configManager);
 pluginRegistry.boot();
 console.error(`[Lore MCP] Plugins active: ${configManager.read().plugins.join(', ') || '(none)'}`);
+
+// V2.2: seed the embedded-model keep-hot flag from persisted config on
+// boot. PATCH /api/config updates it at runtime (see that handler).
+setEmbeddedModelKeepHot(Boolean(configManager.read().keepEmbeddedModelHot));
 
 // Plugin schema registration runs inside main() after graph.initialize()
 // — see line ~1432 in main(). Doing it there avoids racing the Kùzu
@@ -1991,6 +1995,12 @@ async function main(): Promise<void> {
                         const update = JSON.parse(body || '{}') as Record<string, unknown>;
                         const { apiKey, ...configFields } = update;
                         const next = configManager.patch(configFields);
+                        // V2.2: mirror the keep-hot flag to the LLM dispatcher
+                        // so idle-unload behavior updates without a daemon
+                        // restart. Always push the resolved value (next.*)
+                        // rather than the incoming update to avoid partial
+                        // patches leaving stale state.
+                        setEmbeddedModelKeepHot(Boolean(next.keepEmbeddedModelHot));
                         if (typeof apiKey === 'string' && apiKey.length > 0) {
                             const ok = await setApiKey(next.llmProvider, apiKey);
                             if (!ok) {
