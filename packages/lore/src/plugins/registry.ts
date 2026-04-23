@@ -109,10 +109,33 @@ export class PluginRegistry {
     /**
      * registerTools — Invoke each active plugin's registrar against the
      * given McpServer instance. Called per-session in HTTP mode.
+     *
+     * Q1.2: Tag every tool a plugin registers with
+     * `_meta: { provenance: 'plugin:<name>' }` so MCP clients can filter
+     * tools by origin via `tools/list`. Core tools are tagged separately
+     * by server.ts before this runs; any tool that lacks a provenance
+     * stamp after both passes is a registration bug.
+     *
+     * The tagging reaches into the server's private `_registeredTools`
+     * map — that field is how the SDK itself returns `_meta` in the
+     * `tools/list` response (see node_modules/@modelcontextprotocol/sdk
+     * `server/mcp.js`, line ~86: `_meta: tool._meta`). We take a
+     * before/after snapshot of the map's keys so we only tag the tools
+     * the plugin actually added (not pre-existing core tools).
      */
     registerTools(server: McpServer, ctx: PluginContext): void {
+        const bag = (server as unknown as {
+            _registeredTools: Record<string, { _meta?: Record<string, unknown> }>;
+        })._registeredTools;
         for (const plugin of this.loaded.values()) {
+            const before = new Set(Object.keys(bag));
             plugin.registerTools(server, ctx);
+            for (const name of Object.keys(bag)) {
+                if (before.has(name)) continue;
+                const tool = bag[name];
+                if (!tool) continue;
+                tool._meta = { ...(tool._meta ?? {}), provenance: `plugin:${plugin.name}` };
+            }
         }
     }
 

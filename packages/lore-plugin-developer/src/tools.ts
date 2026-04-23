@@ -1,5 +1,5 @@
 /**
- * developer/tools.ts — Register the 10 developer-plugin MCP tools.
+ * developer/tools.ts — Register the 11 developer-plugin MCP tools.
  *
  * Called by ILorePlugin.registerTools(server, ctx) only when the
  * developer plugin is active in the workspace. The tools reach the
@@ -8,7 +8,7 @@
  * Tools:
  *   code_query, code_context, link_knowledge_to_code
  *   gitnexus_query, gitnexus_context, gitnexus_impact, gitnexus_cypher
- *   list_repos, detect_changes, rename
+ *   list_repos, detect_changes, rename, who_is_working
  */
 
 import { z } from 'zod';
@@ -22,8 +22,16 @@ interface WalLike {
     append(op: string, data: unknown): void;
 }
 
+interface SyncStatusLike {
+    walPending: number;
+    lastSync: string;
+    hasAdapter: boolean;
+    isAutoSyncing: boolean;
+}
+
 interface SyncEngineLike {
     getWal(): WalLike;
+    getStatus?(): SyncStatusLike;
 }
 
 export function registerDeveloperTools(
@@ -34,7 +42,8 @@ export function registerDeveloperTools(
     // WAL access via ctx.syncEngine — the WAL is core infrastructure
     // (offline-first sync lives in the core engine); plugins write to
     // it via this narrow cast rather than importing the engine directly.
-    const wal = (ctx.syncEngine as SyncEngineLike | null)?.getWal?.();
+    const syncEngine = ctx.syncEngine as SyncEngineLike | null;
+    const wal = syncEngine?.getWal?.();
 
     /* ─── code_query ───────────────────────────────────────────── */
     server.tool(
@@ -260,6 +269,55 @@ export function registerDeveloperTools(
                 return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
             } catch (err) {
                 return { content: [{ type: 'text' as const, text: `Rename failed: ${(err as Error).message}` }], isError: true };
+            }
+        },
+    );
+
+    /* ─── who_is_working ───────────────────────────────────────────
+     * Moved from core server.ts in Q1.2. Team-activity awareness is
+     * a developer-plugin concept (filters by `symbol`, surfaces dev
+     * activity) and belongs here; core no longer imports it.
+     * Reads sync status via the same ctx.syncEngine narrow cast used
+     * for WAL access above.
+     */
+    server.tool(
+        'who_is_working',
+        'See team developer activity — who is working on what, filtered by symbol or file',
+        {
+            symbol: z.string().optional().describe('Filter by symbol name (e.g., "UserService")'),
+        },
+        async ({ symbol }) => {
+            try {
+                const status = syncEngine?.getStatus?.();
+                if (!status || !status.hasAdapter) {
+                    return {
+                        content: [{
+                            type: 'text' as const,
+                            text: JSON.stringify({
+                                message: 'No remote sync adapter configured — team awareness requires a shared backend (Groundfloor Dataplane).',
+                                hint: 'Configure DATAPLANE_URL, DATAPLANE_API_KEY, DATAPLANE_TENANT_ID environment variables to enable team sync.',
+                                localStatus: status
+                                    ? { walPending: status.walPending, lastSync: status.lastSync }
+                                    : { walPending: 0, lastSync: 'unknown' },
+                            }, null, 2),
+                        }],
+                    };
+                }
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            message: 'Team awareness is available.',
+                            filter: symbol ?? 'all',
+                            note: 'Query remote backend for active developers.',
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return {
+                    content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }],
+                    isError: true,
+                };
             }
         },
     );

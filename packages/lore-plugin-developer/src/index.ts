@@ -45,6 +45,9 @@ const TOOL_NAMES = [
     'list_repos',
     'detect_changes',
     'rename',
+    // Q1.2 — moved from core server.ts. Team-awareness tool filters by
+    // developer symbol/file vocabulary, which is a plugin concern.
+    'who_is_working',
 ] as const;
 
 export const DEVELOPER_TOOL_NAMES: ReadonlyArray<string> = TOOL_NAMES;

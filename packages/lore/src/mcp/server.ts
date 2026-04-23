@@ -911,52 +911,10 @@ mcpServer.tool(
     },
 );
 
-/* ─── Tool: who_is_working ─────────────────────────────────────── */
-
-mcpServer.tool(
-    'who_is_working',
-    'See team developer activity — who is working on what, filtered by symbol or file',
-    {
-        symbol: z.string().optional().describe('Filter by symbol name (e.g., "UserService")'),
-    },
-    async ({ symbol }) => {
-        try {
-            const syncStatus = syncEngine.getStatus();
-
-            if (!syncStatus.hasAdapter) {
-                return {
-                    content: [{
-                        type: 'text' as const,
-                        text: JSON.stringify({
-                            message: 'No remote sync adapter configured — team awareness requires a shared backend (Groundfloor Dataplane).',
-                            hint: 'Configure DATAPLANE_URL, DATAPLANE_API_KEY, DATAPLANE_TENANT_ID environment variables to enable team sync.',
-                            localStatus: {
-                                walPending: syncStatus.walPending,
-                                lastSync: syncStatus.lastSync,
-                            },
-                        }, null, 2),
-                    }],
-                };
-            }
-
-            return {
-                content: [{
-                    type: 'text' as const,
-                    text: JSON.stringify({
-                        message: 'Team awareness is available.',
-                        filter: symbol ?? 'all',
-                        note: 'Query remote backend for active developers.',
-                    }, null, 2),
-                }],
-            };
-        } catch (error) {
-            return {
-                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
-                isError: true,
-            };
-        }
-    },
-);
+/* ─── Tool: who_is_working — MOVED (Q1.2) ──────────────────────── */
+// Registered by lore-plugin-developer (see packages/lore-plugin-developer/
+// src/tools.ts). Filters by developer symbol/file vocabulary → plugin
+// concern. Core no longer declares it.
 
 /* ─── Tool: sync_status ───────────────────────────────────────── */
 
@@ -1123,6 +1081,25 @@ mcpServer.tool(
 // pluginRegistry.registerTools(mcpServer, pluginCtx) runs at the end
 // of this factory function.
 
+
+/* ─── Q1.2 tool-provenance: tag all core tools before plugins run ─── */
+// Every `mcpServer.tool(…)` call above registers a core tool. Stamp
+// them with `_meta: { provenance: 'core' }` so MCP clients (Claude
+// Code, Cursor, etc.) can tell core tools apart from plugin-owned
+// ones in the `tools/list` response. Plugin tools get
+// `provenance: 'plugin:<name>'` inside pluginRegistry.registerTools
+// below. Deactivating a plugin in .lore/config.json drops its tools
+// out of tools/list because registerTools is never called for it.
+{
+    const coreBag = (mcpServer as unknown as {
+        _registeredTools: Record<string, { _meta?: Record<string, unknown> }>;
+    })._registeredTools;
+    for (const name of Object.keys(coreBag)) {
+        const tool = coreBag[name];
+        if (!tool) continue;
+        tool._meta = { ...(tool._meta ?? {}), provenance: 'core' };
+    }
+}
 
 /* ─── Plugin tool + resource registration ───────────────────── */
 
