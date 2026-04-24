@@ -16,6 +16,7 @@
         "test:arch": "node scripts/test-arch.mjs",
         "test:cache": "tsx test/cache-unit.ts",
         "test:unit:dataplane-graph": "tsx test/dataplane-graph-unit.ts",
+        "test:unit:dataplane-vector": "tsx test/dataplane-vector-store-unit.ts",
         "bench:cache": "node scripts/bench-cache.mjs",
         "test:e2e:phase-7a": "tsx test/e2e-phase-7a.ts",
         "test:e2e:language": "tsx test/e2e-language.ts",
@@ -24,7 +25,7 @@
         "test:e2e:all": "tsx test/run-all-e2e.ts",
         "test:scaffold-plugin": "tsx test/scaffold-plugin.test.ts",
         "test:unit:deferred": "tsx test/unit-deferred.ts",
-        "test": "npm run test:arch && npm run test:cache && npm run test:unit:dataplane-graph && tsc --noEmit && npm run test:unit:deferred"
+        "test": "npm run test:arch && npm run test:cache && npm run test:unit:dataplane-graph && npm run test:unit:dataplane-vector && tsc --noEmit && npm run test:unit:deferred"
     },
     "dependencies": {
         "@hono/node-server": "^1.19.14",

@@ -28,6 +28,15 @@
  *     - `label_contains: "..."`, `tags_contains: "..."` — substring
  *   That's the subset DataplaneGraph uses in slice 2. Adding more is
  *   trivial if a future caller needs it.
+ *
+ * Vector search (slice 3):
+ *   POST /v1/{tenant}/{coll}/vector/search — scores every stored row
+ *   against the query vector using cosine similarity (1 - cosine
+ *   distance). Records with no `vector` field are skipped. metadata_filter
+ *   is applied BEFORE the similarity ranking, using the same
+ *   matchesFilter() subset above. This is enough to validate the
+ *   DataplaneVectorStore roundtrip in e2e; it is NOT a production vector
+ *   index and makes no pretense to scale.
  */
 
 import http from 'node:http';
@@ -199,6 +208,39 @@ export async function startMockDataplane(): Promise<MockDataplane> {
                 store_.records = store_.records.filter((r) => !matchesFilter(r, filter));
                 const deleted = before - store_.records.length;
                 sendJson(res, 200, { success: true, data: { deleted }, error: null });
+                return;
+            }
+
+            // POST /v1/{tenant}/{coll}/vector/search — envelope { records, total_count, has_more }
+            // Body: { vector: number[], limit?: number, metadata_filter?: object, connection?: string }
+            // Scores records by cosine similarity; applies metadata_filter first.
+            if (sub === '/vector/search' && method === 'POST') {
+                const body = await readJson(req);
+                const queryVec = Array.isArray(body['vector']) ? (body['vector'] as number[]) : [];
+                const limit = typeof body['limit'] === 'number' ? (body['limit'] as number) : 10;
+                const filter = body['metadata_filter'] as Record_ | undefined;
+                const store_ = getCollection(tenantId, collection);
+                const scored: Array<{ rec: Record_; score: number; dist: number }> = [];
+                for (const rec of store_.records) {
+                    if (!matchesFilter(rec, filter)) continue;
+                    const v = rec['vector'];
+                    if (!Array.isArray(v) || queryVec.length === 0) continue;
+                    // cosine similarity on equal-length vectors
+                    let dot = 0, a2 = 0, b2 = 0;
+                    const n = Math.min(queryVec.length, v.length);
+                    for (let i = 0; i < n; i++) {
+                        const av = Number(queryVec[i]);
+                        const bv = Number((v as unknown[])[i]);
+                        dot += av * bv;
+                        a2 += av * av;
+                        b2 += bv * bv;
+                    }
+                    const cos = a2 === 0 || b2 === 0 ? 0 : dot / (Math.sqrt(a2) * Math.sqrt(b2));
+                    scored.push({ rec, score: cos, dist: 1 - cos });
+                }
+                scored.sort((x, y) => y.score - x.score);
+                const top = scored.slice(0, limit).map((s) => ({ ...s.rec, score: s.score, _distance: s.dist }));
+                sendJson(res, 200, { records: top, total_count: scored.length, has_more: scored.length > limit });
                 return;
             }
 

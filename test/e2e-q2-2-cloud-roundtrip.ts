@@ -1,24 +1,36 @@
 #!/usr/bin/env tsx
 /**
- * e2e-q2-2-cloud-roundtrip.ts — Q2.2 slice 2 cloud-mode roundtrip.
+ * e2e-q2-2-cloud-roundtrip.ts — Q2.2 cloud-mode roundtrip (slices 2 + 3).
  *
- * Q2.2 slice 2 wires DataplaneGraph behind the mode flag (Q2.1) so the
- * singleton daemon routes /api/* calls to the Dataplane engine per the
- * request's X-Lore-Workspace header. This e2e proves the wiring end to
- * end against an in-memory mock Dataplane:
+ * Q2.2 wires both a graph adapter (slice 2) and a vector-store adapter
+ * (slice 3) behind the Q2.1 mode flag. This e2e exercises the full
+ * singleton-daemon path against an in-memory mock Dataplane:
  *
- *   Case A — two-tenant isolation:
+ *   Case A — two-tenant isolation (slice 2 graph):
  *     Store node "node-alpha" as tenant "tenant-alpha".
  *     Store node "node-beta" as tenant "tenant-beta".
- *     Stats for tenant-alpha must be 1 (only alpha's node).
- *     Stats for tenant-beta must be 1 (only beta's node).
- *     Read node-alpha while asking as tenant-beta → not visible (getNode null).
+ *     Stats for each tenant reflect only that tenant's nodes.
+ *     Cross-tenant read of node-alpha as tenant-beta → 404.
  *     Verifies AsyncLocalStorage correctly propagates tenant through
  *     the HTTP handler into DataplaneGraph.tenantProvider().
  *
- *   Case B — upsert idempotency:
- *     Store "node-alpha" a second time with updated label.
- *     Stats still 1 (no duplicate); getNode returns the latest label.
+ *   Case B — upsert idempotency (slice 2 graph):
+ *     Re-store "node-alpha" with updated label. Snapshot shows count
+ *     unchanged (no duplicate row).
+ *
+ *   Case C — vector-store tenant isolation (slice 3):
+ *     Each ingest also fires a verbatim write (embed → insert into
+ *     lore_verbatim via DataplaneVectorStore). Snapshot must show:
+ *       - tenant-alpha has a lore_verbatim collection with the alpha row
+ *       - tenant-beta has a lore_verbatim collection with the beta row
+ *       - neither bucket leaks into the other
+ *     /api/stats for each tenant must carry verbatimDocuments=1. This
+ *     verifies cloud-mode VectorStore factory + tenant-routed embed +
+ *     upsert-via-updateByQuery+insert.
+ *
+ *   Case D — vector-store upsert idempotency (slice 3):
+ *     Re-store "node-alpha". lore_verbatim row count stays at 1 (the
+ *     updateByQuery → insert-on-0 path is idempotent across writes).
  *
  * The mock Dataplane is the test/helpers/mock-dataplane.ts shim.
  */
@@ -112,7 +124,7 @@ function cleanup(h: DaemonHandle | null): void {
 }
 
 async function main(): Promise<void> {
-    console.log('Q2.2 slice 2 — cloud roundtrip (DataplaneGraph + AsyncLocalStorage tenant routing)');
+    console.log('Q2.2 slices 2+3 — cloud roundtrip (DataplaneGraph + DataplaneVectorStore, AsyncLocalStorage tenant routing)');
     console.log('='.repeat(72));
 
     const mock: MockDataplane = await startMockDataplane();
@@ -194,8 +206,8 @@ async function main(): Promise<void> {
         assert.equal(crossRead.status, 404, `cross-tenant read must 404 for tenant-beta; got ${crossRead.status}`);
         console.log('  ok  two-tenant isolation: tenant buckets distinct, cross-tenant read denied');
 
-        // — Case B: upsert idempotency —
-        console.log('— Case B: upsert idempotency —');
+        // — Case B: upsert idempotency (graph) —
+        console.log('— Case B: upsert idempotency (graph) —');
         const rAlpha2 = await fetch(`http://127.0.0.1:${h.port}/api/node`, {
             method: 'POST',
             headers: hdrAlpha,
@@ -216,8 +228,62 @@ async function main(): Promise<void> {
         assert.equal(alphaNodes2, 1, `upsert should not duplicate; got ${alphaNodes2} nodes`);
         console.log('  ok  upsert idempotency: second store_node does not duplicate');
 
+        // — Case C: vector-store tenant isolation (slice 3) —
+        console.log('— Case C: vector-store tenant isolation (slice 3) —');
+        // DataplaneVectorStore.store runs async from the ingest handler
+        // (fire-and-forget). Poll briefly for the write to land in the mock.
+        // First run downloads the Xenova/all-MiniLM-L6-v2 embedder
+        // (~90 MB) before the store() call can resolve. Allow up to 120s.
+        const vectorReady = await (async () => {
+            const deadline = Date.now() + 120_000;
+            while (Date.now() < deadline) {
+                const s = mock.snapshot();
+                const a = s.tenants.find((t) => t.tenantId === 'tenant-alpha')
+                    ?.collections.find((c) => c.name === 'lore_verbatim')?.count ?? 0;
+                const b = s.tenants.find((t) => t.tenantId === 'tenant-beta')
+                    ?.collections.find((c) => c.name === 'lore_verbatim')?.count ?? 0;
+                if (a >= 1 && b >= 1) return true;
+                await new Promise((r) => setTimeout(r, 500));
+            }
+            return false;
+        })();
+        if (!vectorReady) {
+            // Spill the daemon log so CI can see why the write didn't happen.
+            console.error('daemon log (tail):\n' + (h?.log.text.slice(-4000) ?? '(no log)'));
+        }
+        assert.ok(vectorReady, 'vector-store writes did not land within 120s');
+        const snap3 = mock.snapshot();
+        const alphaVerbatim = snap3.tenants.find((t) => t.tenantId === 'tenant-alpha')
+            ?.collections.find((c) => c.name === 'lore_verbatim')?.count ?? 0;
+        const betaVerbatim = snap3.tenants.find((t) => t.tenantId === 'tenant-beta')
+            ?.collections.find((c) => c.name === 'lore_verbatim')?.count ?? 0;
+        assert.equal(alphaVerbatim, 1, `tenant-alpha expected 1 verbatim row, got ${alphaVerbatim}`);
+        assert.equal(betaVerbatim, 1, `tenant-beta expected 1 verbatim row, got ${betaVerbatim}`);
+
+        // /api/stats must report the tenant-scoped verbatim count.
+        const statsAlpha2 = await fetch(`http://127.0.0.1:${h.port}/api/stats`, { headers: hdrAlpha });
+        const sAlpha2 = await statsAlpha2.json() as { verbatimDocuments?: number };
+        assert.equal(sAlpha2.verbatimDocuments, 1, `tenant-alpha verbatim count via /api/stats expected 1, got ${sAlpha2.verbatimDocuments}`);
+        const statsBeta2 = await fetch(`http://127.0.0.1:${h.port}/api/stats`, { headers: hdrBeta });
+        const sBeta2 = await statsBeta2.json() as { verbatimDocuments?: number };
+        assert.equal(sBeta2.verbatimDocuments, 1, `tenant-beta verbatim count via /api/stats expected 1, got ${sBeta2.verbatimDocuments}`);
+        console.log('  ok  vector tenant isolation: each tenant has exactly 1 verbatim row, stats agree');
+
+        // — Case D: vector-store upsert idempotency (slice 3) —
+        console.log('— Case D: vector-store upsert idempotency (slice 3) —');
+        // Case B already did a re-ingest of node-alpha above — that also
+        // should have fired an idempotent verbatim write via
+        // DataplaneVectorStore.store (updateByQuery → insert on 0).
+        // Give the async write a moment to settle, then confirm no dup.
+        await new Promise((r) => setTimeout(r, 500));
+        const snap4 = mock.snapshot();
+        const alphaVerbatim2 = snap4.tenants.find((t) => t.tenantId === 'tenant-alpha')
+            ?.collections.find((c) => c.name === 'lore_verbatim')?.count ?? 0;
+        assert.equal(alphaVerbatim2, 1, `vector upsert should not duplicate; got ${alphaVerbatim2} rows`);
+        console.log('  ok  vector upsert idempotency: re-ingest does not duplicate verbatim rows');
+
         console.log('');
-        console.log('all Q2.2 slice-2 cases passed ✓');
+        console.log('all Q2.2 slice-2 + slice-3 cases passed ✓');
     } finally {
         cleanup(h);
         await mock.close();
