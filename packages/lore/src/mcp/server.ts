@@ -781,7 +781,16 @@ mcpServer.tool(
 
 mcpServer.tool(
     'analyze_graph',
-    'Answer shape-of-data questions (counts, group-by, time-series) against the local graph. Pass a natural-language `query` ("how many memories by month?") — core routes to the best-matching plugin projection — or pass `projection_id` (e.g. "developer/lore-nodes-by-type") to run a specific projection. Returns { columns, rows, sourceNodeIds, selectedProjection }. Airplane-safe: local queries only.',
+    [
+        'Answer shape-of-data questions (counts, group-by, time-series) against the local graph.',
+        'Pass a natural-language `query` ("how many memories by month?") — core routes to the best-matching plugin projection — or pass `projection_id` (e.g. "developer/lore-nodes-by-type") to run a specific projection.',
+        'Returns { columns, rows, sourceNodeIds, selectedProjection }. Airplane-safe: local queries only.',
+        '',
+        'Q1.6 A2UI rendering: after calling this tool, emit a render token so the canvas shows the result visually. The UI parses `{{render:<component>|<json>}}` tokens out of your reply and mounts the matching renderer in the canvas slot.',
+        '- `{{render:table|{"title":"...","columns":[...],"rows":[...],"sourceNodeIds":[...],"elapsedMs":N}}}` — tabular view. Always safe.',
+        '- `{{render:bar_chart|{"title":"...","columns":[...],"rows":[...],"sourceNodeIds":[...],"elapsedMs":N}}}` — horizontal bar chart. Best when there is exactly one dimension (or time) column and one measure column, and rows are <= ~50. The chart auto-picks axes from column `kind`.',
+        'Pass the tool result payload through verbatim (columns, rows, sourceNodeIds, elapsedMs). Add a short natural-language summary in your reply; the render token itself is hidden from the chat transcript once parsed.',
+    ].join('\n'),
     {
         query: z.string().optional().describe('Natural-language question. Intent-keyword matched against available projections.'),
         projection_id: z.string().optional().describe('Fully-qualified projection id "<plugin>/<id>". Bypasses intent routing.'),

@@ -4,6 +4,7 @@ import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import WorkspacePicker from './components/WorkspacePicker';
 import NodeDetailDrawer from './components/NodeDetailDrawer';
 import { ChatMarkdown } from './components/ChatMarkdown';
+import { A2uiRenderer } from './components/A2uiRenderer';
 import { authFetch } from './lib/authFetch';
 import 'highlight.js/styles/github-dark.css';
 import './App.css';
@@ -271,6 +272,16 @@ function App() {
   // automatically — no imperative reload needed.
   const [graphSizeLimit, setGraphSizeLimit] = useState<GraphSize>(() => loadGraphSizeLimit());
 
+  // Q1.6 — A2UI view-stack. Canvas defaults to the graph; a {{render:
+  // component|json}} token from the LLM swaps it to an overlaid
+  // renderer slot. SigmaCanvas stays mounted underneath (display
+  // toggle) so "back to graph" is instant, and re-renders don't pay
+  // a ForceAtlas2 re-layout cost on every round trip.
+  const [canvasView, setCanvasView] = useState<
+    | 'graph'
+    | { kind: 'a2ui'; id: string; component: string; props: Record<string, unknown> }
+  >('graph');
+
   // V2.1: node-click detail drawer state.
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const chatInputRef = useRef<HTMLInputElement | null>(null);
@@ -329,7 +340,7 @@ function App() {
         const [h, c, s] = await Promise.all([
           authFetch(`${API_BASE}/api/health`).then((r) => r.json() as Promise<HealthResponse>),
           authFetch(`${API_BASE}/api/config`).then((r) => r.json() as Promise<ConfigResponse>),
-          authFetch(`${API_BASE}/api/stats`).then((r) => r.json() as Promise<{ languageBreakdown?: Record<string, number> }>).catch(() => ({})),
+          authFetch(`${API_BASE}/api/stats`).then((r) => r.json() as Promise<{ languageBreakdown?: Record<string, number> }>).catch(() => ({} as { languageBreakdown?: Record<string, number> })),
         ]);
         setHealth(h);
         setLlmProvider(c.llmProvider);
@@ -459,14 +470,44 @@ function App() {
   // rendered as a button) — prevents a hallucinated action from
   // producing a clickable dead-end. Server-side whitelist is the
   // authoritative check; this is a client-side pre-filter.
+  //
+  // Q1.6: additionally parse {{render:component|json}} tokens — the
+  // A2UI view-stack hook. `component` is whitelisted too; the payload
+  // is a raw JSON object (NOT key=value pairs) because analytical
+  // projections return nested structures (columns array, rows array).
+  // When present, the canvas swaps from `graph` to an `a2ui` slot
+  // displaying the renderer with the parsed props. Tokens that fail
+  // to parse (invalid JSON, unknown component) are dropped silently.
   const KNOWN_ACTIONS = new Set(['reconnect_node', 'open_reconnect_settings']);
   const ACTION_TOKEN_RE = /\{\{action:([^}]+)\}\}/g;
+  // Render tokens use a LAZY match for the JSON body (`.*?`) so
+  // multiple tokens in one message each get parsed independently.
+  // The `s` flag lets the payload span newlines — LLMs sometimes
+  // pretty-print the JSON.
+  const KNOWN_RENDERERS = new Set(['table', 'bar_chart']);
+  const RENDER_TOKEN_RE = /\{\{render:([a-z_]+)\|(.*?)\}\}/gs;
   const extractActions = (rawText: string): {
     cleaned: string;
     actions: Array<{ action: string; params: Record<string, string>; label: string }>;
+    renders: Array<{ id: string; component: string; props: Record<string, unknown> }>;
   } => {
     const actions: Array<{ action: string; params: Record<string, string>; label: string }> = [];
-    const cleaned = rawText.replace(ACTION_TOKEN_RE, (_full, inner: string) => {
+    const renders: Array<{ id: string; component: string; props: Record<string, unknown> }> = [];
+    // Strip render tokens first so an action regex can't accidentally
+    // swallow a brace from inside a JSON body.
+    const afterRender = rawText.replace(RENDER_TOKEN_RE, (_full, component: string, payload: string) => {
+      if (!KNOWN_RENDERERS.has(component)) return '';
+      let props: Record<string, unknown>;
+      try {
+        props = JSON.parse(payload) as Record<string, unknown>;
+      } catch {
+        return ''; // drop malformed render token
+      }
+      const id = `r-${Date.now()}-${renders.length}`;
+      renders.push({ id, component, props });
+      return '';
+    });
+    const cleaned = afterRender.replace(ACTION_TOKEN_RE, (_full, inner: string) => {
       // inner shape: "name|key=value|key=value"
       const parts = inner.split('|').map((s) => s.trim()).filter(Boolean);
       if (parts.length === 0) return '';
@@ -484,7 +525,7 @@ function App() {
       actions.push({ action, params, label });
       return '';
     });
-    return { cleaned: cleaned.replace(/\n\n+/g, '\n\n').trim(), actions };
+    return { cleaned: cleaned.replace(/\n\n+/g, '\n\n').trim(), actions, renders };
   };
 
   // V2.2: execute an action button. POSTs to /api/chat/action, shows
@@ -937,7 +978,22 @@ function App() {
 
                 setMessages((m) => m.map((msg) => {
                   if (msg.id !== assistantId) return msg;
-                  const { cleaned, actions } = extractActions(msg.text);
+                  const { cleaned, actions, renders } = extractActions(msg.text);
+                  // Q1.6: route render tokens to the canvas view-stack.
+                  // Only the last render wins — the canvas is a single
+                  // slot, not a stack (yet). Order-insensitive from the
+                  // LLM's view: earlier tokens are superseded by later
+                  // ones in the same message, matching how a chat
+                  // transcript reads top-to-bottom.
+                  if (renders.length > 0) {
+                    const latest = renders[renders.length - 1];
+                    setCanvasView({
+                      kind: 'a2ui',
+                      id: latest.id,
+                      component: latest.component,
+                      props: latest.props,
+                    });
+                  }
                   if (actions.length > 0 && shouldAutoExec) {
                     // Fire-and-forget per extracted action. Each runs
                     // runChatAction which inserts its own result bubble.
@@ -1374,17 +1430,64 @@ function App() {
           </div>
         ) : null}
 
-        <Suspense fallback={<CanvasLoadingFallback />}>
-          <SigmaCanvas
-            activeTypes={activeTypes}
-            activeProjects={activeProjects}
-            focusNodeId={focusNodeId}
-            onTopologyReady={handleTopologyReady}
-            onNodeClick={handleNodeClick}
-            showInferred={showInferred}
-            graphSizeLimit={graphSizeLimit}
-          />
-        </Suspense>
+        {/* Q1.6 — Canvas view-stack. SigmaCanvas stays mounted underneath
+            so "back to graph" is instant and ForceAtlas2 doesn't re-run
+            on every LLM round-trip. The A2UI overlay only mounts when
+            the LLM emits a {{render:...}} token. */}
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            visibility: canvasView === 'graph' ? 'visible' : 'hidden',
+          }}
+        >
+          <Suspense fallback={<CanvasLoadingFallback />}>
+            <SigmaCanvas
+              activeTypes={activeTypes}
+              activeProjects={activeProjects}
+              focusNodeId={focusNodeId}
+              onTopologyReady={handleTopologyReady}
+              onNodeClick={handleNodeClick}
+              showInferred={showInferred}
+              graphSizeLimit={graphSizeLimit}
+            />
+          </Suspense>
+        </div>
+        {canvasView !== 'graph' ? (
+          <div
+            className="a2ui-canvas-overlay"
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'var(--color-bg, #0b0d12)',
+              zIndex: 4,
+              overflow: 'auto',
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setCanvasView('graph')}
+              aria-label="Back to graph"
+              title="Back to graph"
+              style={{
+                position: 'absolute',
+                top: '0.75rem',
+                left: '0.75rem',
+                zIndex: 6,
+                padding: '0.35rem 0.7rem',
+                fontSize: '0.8rem',
+                background: 'rgba(255,255,255,0.08)',
+                color: 'inherit',
+                border: '1px solid rgba(255,255,255,0.15)',
+                borderRadius: 4,
+                cursor: 'pointer',
+              }}
+            >
+              ← Back to graph
+            </button>
+            <A2uiRenderer component={canvasView.component} props={canvasView.props} />
+          </div>
+        ) : null}
 
         {/* Phase 3: truncation banner. /api/topology sets truncated:true
             when the graph exceeds the requested limit. The banner is a
