@@ -17,6 +17,7 @@
         "test:e2e:phase-7a": "tsx test/e2e-phase-7a.ts",
         "test:e2e:language": "tsx test/e2e-language.ts",
         "test:e2e:all": "tsx test/run-all-e2e.ts",
+        "test:scaffold-plugin": "tsx test/scaffold-plugin.test.ts",
         "test": "npm run test:arch && tsc --noEmit"
     },
     "dependencies": {
