@@ -540,4 +540,31 @@ export interface ILorePlugin {
      * Returning `null` or `[]` opts out.
      */
     contributeValidations?(ctx: PluginGraphContext): Promise<Array<{ warning: string }> | null>;
+
+    /**
+     * Register CLI subcommands this plugin contributes.
+     *
+     * Returned map key becomes `lore <command>`; the value supplies a
+     * handler (given CLI args) and a short help line. The plugin owns
+     * any plugin-specific vocabulary in help text — core CLI just lists
+     * and dispatches. Returning `null` or `{}` opts out.
+     *
+     * Handlers receive CLI args directly; they're responsible for
+     * booting whatever they need (graph, config, etc.). The plugin's
+     * own tests exercise them; core CLI treats them as opaque.
+     */
+    registerCliCommands?(): Record<string, { help: string; handler: (args: string[]) => Promise<void> }> | null;
+
+    /**
+     * Contribute plugin-specific doctor checks.
+     *
+     * Each check runs during `lore doctor` and contributes a line to
+     * the health report. Core owns graph / schema / filesystem checks;
+     * plugins own their own (e.g. GitNexus CLI availability for the
+     * developer plugin). An `ok: false` result increments the issue
+     * count that `lore doctor` exits non-zero on.
+     *
+     * Returning `null` or `[]` opts out.
+     */
+    contributeDoctorChecks?(ctx: PluginContext): Promise<Array<{ label: string; ok: boolean; message: string }> | null>;
 }

@@ -422,6 +422,68 @@ export class PluginRegistry {
         return out;
     }
 
+    /**
+     * Collect CLI commands contributed by active plugins. Keyed by
+     * command name (`lore <name>`). Collisions (two plugins claiming
+     * the same name) throw — treat as a boot-time misconfiguration.
+     */
+    collectCliCommands(): Record<string, { plugin: string; help: string; handler: (args: string[]) => Promise<void> }> {
+        const out: Record<string, { plugin: string; help: string; handler: (args: string[]) => Promise<void> }> = {};
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.registerCliCommands !== 'function') continue;
+            let commands: Record<string, { help: string; handler: (args: string[]) => Promise<void> }> | null;
+            try {
+                commands = plugin.registerCliCommands();
+            } catch (err) {
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.registerCliCommands threw: ${(err as Error).message}`,
+                );
+                continue;
+            }
+            if (!commands) continue;
+            for (const [name, cmd] of Object.entries(commands)) {
+                if (out[name]) {
+                    throw new Error(
+                        `CLI command collision: "${name}" is claimed by both "${out[name].plugin}" and "${plugin.name}".`,
+                    );
+                }
+                out[name] = { plugin: plugin.name, ...cmd };
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Aggregate doctor checks from every active plugin. Errors in a
+     * contributor are logged and rolled into an `ok: false` line so the
+     * overall run still completes.
+     */
+    async collectDoctorChecks(
+        ctx: PluginContext,
+    ): Promise<Array<{ plugin: string; label: string; ok: boolean; message: string }>> {
+        const out: Array<{ plugin: string; label: string; ok: boolean; message: string }> = [];
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.contributeDoctorChecks !== 'function') continue;
+            try {
+                const checks = await plugin.contributeDoctorChecks(ctx);
+                if (!checks || !Array.isArray(checks)) continue;
+                for (const c of checks) {
+                    if (c && typeof c.label === 'string') {
+                        out.push({ plugin: plugin.name, ...c });
+                    }
+                }
+            } catch (err) {
+                out.push({
+                    plugin: plugin.name,
+                    label: `${plugin.name} doctor checks`,
+                    ok: false,
+                    message: `Check run threw: ${(err as Error).message}`,
+                });
+            }
+        }
+        return out;
+    }
+
     private assertNoTableCollisions(): void {
         const owner = new Map<string, string>();
         for (const plugin of this.loaded.values()) {

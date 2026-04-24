@@ -34,6 +34,7 @@ import { pruneInferredDeveloperEdges } from './operations.js';
 import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology, recalibrateDeveloperNode } from './reconnect.js';
 import { buildDeveloperApi, bindApiSelfReference, type DeveloperApi } from './api.js';
 import { registerDeveloperTools } from './tools.js';
+import { indexCommand as devIndexCommand, ingestFilesCommand as devIngestFilesCommand } from './cli.js';
 
 const TOOL_NAMES = [
     'code_query',
@@ -530,6 +531,54 @@ export const developerPlugin: ILorePlugin = {
             // CodeSymbol table may not exist yet — skip the check.
         }
         return warnings;
+    },
+
+    /**
+     * Contribute `lore index` + `lore ingest-files` as plugin-owned
+     * CLI commands. The handlers live in ./cli.ts so the plugin boundary
+     * stays clean — core CLI just dispatches on name.
+     */
+    registerCliCommands() {
+        return {
+            index: {
+                help: 'Import code symbols from GitNexus into unified graph',
+                handler: devIndexCommand,
+            },
+            'ingest-files': {
+                help: 'Synthesize CodeFile nodes + FileContains edges from existing CodeSymbols',
+                handler: devIngestFilesCommand,
+            },
+        };
+    },
+
+    /**
+     * Plugin-owned doctor check: GitNexus CLI availability. Replaces
+     * the block in core cli/commands.ts that used to if-check
+     * `pluginRegistry.isActive('developer')`.
+     */
+    async contributeDoctorChecks(ctx: PluginContext) {
+        const api = (developerPlugin as ILorePlugin & { api?: DeveloperApi }).api;
+        if (!api) {
+            return [{
+                label: 'developer plugin',
+                ok: false,
+                message: 'developer plugin api unavailable — registerSchema did not run.',
+            }];
+        }
+        if (api.isGitNexusAvailable()) {
+            const repos = api.listGitNexusRepos();
+            return [{
+                label: 'developer plugin',
+                ok: true,
+                message: `GitNexus CLI available: ${repos.length} repo(s) indexed`,
+            }];
+        }
+        return [{
+            label: 'developer plugin',
+            ok: false,
+            message: 'GitNexus CLI not found — install with: npm install -g gitnexus',
+        }];
+        void ctx;
     },
 
     async getTelemetryPayload(ctx: PluginContext): Promise<PluginTelemetryPayload | null> {

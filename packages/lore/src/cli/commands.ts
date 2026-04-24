@@ -18,10 +18,6 @@ import http from 'http';
 import { LocalGraph } from '../engines/localGraph.js';
 import { SyncEngine } from '../engines/syncEngine.js';
 import { ConfigManager } from '../config/configManager.js';
-// `lore index` + `lore doctor` reach the GitNexus-backed code indexer
-// through the developer plugin's opaque api. See src/plugins/developer/
-// codeIndexer.ts for the implementation.
-import type { DeveloperApi, IndexResult } from '@lore-plugin-developer/api.js';
 
 /* ─── Shared Helpers ──────────────────────────────────────────── */
 
@@ -208,120 +204,6 @@ export async function serveCommand(args: string[]): Promise<void> {
     await import('../mcp/server.js');
 }
 
-/* ─── Command: index ─────────────────────────────────────── */
-
-/**
- * indexCommand — Import code symbols from GitNexus into the unified Lore graph.
- *
- * Purpose:
- *   Reads GitNexus .gitnexus/ Kùzu databases and imports all code symbols
- *   and relationships into Lore's unified graph. Enables cross-pillar queries
- *   between knowledge nodes and code symbols.
- *
- * @param args - Optional repo name. If omitted, imports all indexed repos.
- *
- * Side Effects:
- *   - Opens GitNexus DB read-only for each repo.
- *   - Clears existing code symbols before re-import (idempotent).
- *   - Writes CodeSymbol + CodeRelation to Lore Kùzu graph.
- *
- * Error Behavior: Prints per-repo results. Non-fatal errors are collected.
- */
-export async function indexCommand(args: string[]): Promise<void> {
-    const basePath = resolveGraphBasePath();
-    const loreDir = path.join(basePath, '.lore');
-
-    if (!fs.existsSync(loreDir)) {
-        console.error('❌ No .lore/ directory found. Run "lore init" first.');
-        process.exit(1);
-    }
-
-    const { ConfigManager } = await import('../config/configManager.js');
-    const { PluginRegistry } = await import('../plugins/registry.js');
-    const graph = new LocalGraph(basePath);
-    const registry = new PluginRegistry(new ConfigManager(loreDir));
-    registry.boot();
-    await graph.initialize();
-    await registry.registerSchemas(graph.createPluginGraphContext());
-
-    const devPlugin = registry.active().find((p) => p.name === 'developer');
-    const devApi = devPlugin?.api as DeveloperApi | undefined;
-    if (!devApi) {
-        console.error('❌ `lore index` requires the "developer" plugin. Add "developer" to .lore/config.json plugins[].');
-        await graph.close();
-        process.exit(1);
-    }
-
-    const specificRepo = args[0];
-
-    if (specificRepo) {
-        const repoEntry = devApi.getGitNexusRepo(specificRepo);
-        if (!repoEntry) {
-            console.error(`❌ Repository '${specificRepo}' not found in GitNexus registry.`);
-            console.error('  Available repos:');
-            for (const repo of devApi.listGitNexusRepos()) {
-                console.error(`    - ${repo.name} (${repo.stats.nodes} symbols)`);
-            }
-            await graph.close();
-            process.exit(1);
-        }
-
-        console.log(`→ Indexing '${specificRepo}' from GitNexus...`);
-        const result = await devApi.importFromGitNexus(repoEntry);
-        printIndexResult(result);
-    } else {
-        const repos = devApi.listGitNexusRepos();
-        if (repos.length === 0) {
-            console.error('❌ No GitNexus-indexed repos found.');
-            console.error('  Run "gitnexus analyze <path>" to index a repo first.');
-            await graph.close();
-            process.exit(1);
-        }
-
-        console.log(`→ Indexing ${repos.length} repo(s) from GitNexus...`);
-        console.log('');
-
-        for (const repo of repos) {
-            console.log(`  ─── ${repo.name} (${repo.stats.nodes} GitNexus symbols) ───`);
-            const result = await devApi.importFromGitNexus(repo);
-            printIndexResult(result);
-            console.log('');
-        }
-    }
-
-    // Show updated stats
-    const stats = await graph.getStats();
-    console.log('═══════════════════════════════════════════════════════════');
-    console.log('  Unified Graph Stats:');
-    console.log(`    Knowledge: ${stats.nodeCount} nodes, ${stats.edgeCount} edges`);
-    const devStats = stats.pluginStats?.['developer'] ?? {};
-    console.log(`    Code:      ${devStats['codeSymbolCount'] ?? 0} symbols, ${devStats['codeRelationCount'] ?? 0} relations`);
-    console.log('═══════════════════════════════════════════════════════════');
-
-    await graph.close();
-}
-
-/**
- * printIndexResult — Display the result of a code index operation.
- */
-function printIndexResult(result: IndexResult): void {
-    console.log(`  ✓ ${result.symbolsImported} symbols imported`);
-    console.log(`  ✓ ${result.relationsImported} relations imported`);
-    if (result.symbolsCleared > 0) {
-        console.log(`  ✓ ${result.symbolsCleared} old symbols cleared`);
-    }
-    console.log(`  ✓ Duration: ${result.durationMs}ms`);
-    if (result.errors.length > 0) {
-        console.log(`  ⚠ ${result.errors.length} non-fatal errors`);
-        for (const error of result.errors.slice(0, 5)) {
-            console.log(`    - ${error}`);
-        }
-        if (result.errors.length > 5) {
-            console.log(`    ... and ${result.errors.length - 5} more`);
-        }
-    }
-}
-
 /* ─── Command: sync ───────────────────────────────────────────── */
 
 /**
@@ -382,10 +264,15 @@ export async function statusCommand(_args: string[]): Promise<void> {
         process.exit(1);
     }
 
+    const { PluginRegistry } = await import('../plugins/registry.js');
     const graph = new LocalGraph(basePath);
+    const registry = new PluginRegistry(new ConfigManager(loreDir));
+    registry.boot();
     await graph.initialize();
+    await registry.registerSchemas(graph.createPluginGraphContext());
 
     const stats = await graph.getStats();
+    stats.pluginStats = await registry.collectPluginStats(graph.createPluginGraphContext());
     const syncEngine = new SyncEngine(graph, loreDir, null);
     const syncStatus = syncEngine.getStatus();
 
@@ -427,16 +314,17 @@ export async function statusCommand(_args: string[]): Promise<void> {
         }
     }
     console.log('');
-    const developerStats = stats.pluginStats?.['developer'] ?? {};
-    const codeSymbolCount = (developerStats['codeSymbolCount'] as number | undefined) ?? 0;
-    const codeRelationCount = (developerStats['codeRelationCount'] as number | undefined) ?? 0;
-    console.log('  Code Graph');
-    console.log(`    Symbols:   ${codeSymbolCount}`);
-    console.log(`    Relations: ${codeRelationCount}`);
-    if (codeSymbolCount === 0) {
-        console.log('    (run "lore index" to import from GitNexus)');
+    // Plugin-contributed stats render generically — core never names
+    // plugin-specific metrics. Each active plugin gets a section.
+    const pluginStatsMap = stats.pluginStats ?? {};
+    for (const [pluginName, metrics] of Object.entries(pluginStatsMap)) {
+        if (Object.keys(metrics).length === 0) continue;
+        console.log(`  ${pluginName} plugin`);
+        for (const [metric, count] of Object.entries(metrics)) {
+            console.log(`    ${metric}: ${count}`);
+        }
+        console.log('');
     }
-    console.log('');
     console.log('  Sync');
     console.log(`    WAL pending:   ${syncStatus.walPending} entries`);
     console.log(`    Last sync:     ${syncStatus.lastSync === '1970-01-01T00:00:00.000Z' ? 'never' : syncStatus.lastSync}`);
@@ -584,12 +472,16 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         issues++;
     }
 
-    // Check 8: Active plugins + per-plugin health (developer plugin owns
-    // the GitNexus-availability check it used to drive in core).
+    // Check 8: Active plugins + each plugin's self-reported doctor checks.
+    // Core owns NO plugin-specific logic here — every contribution flows
+    // through ILorePlugin.contributeDoctorChecks.
     try {
         const { ConfigManager } = await import('../config/configManager.js');
         const { PluginRegistry } = await import('../plugins/registry.js');
-        const registry = new PluginRegistry(new ConfigManager(loreDir));
+        const { VerbatimStore } = await import('../engines/verbatimStore.js');
+        const { SyncEngine } = await import('../engines/syncEngine.js');
+        const configManager = new ConfigManager(loreDir);
+        const registry = new PluginRegistry(configManager);
         registry.boot();
         const graph = new LocalGraph(basePath);
         await graph.initialize();
@@ -597,16 +489,22 @@ export async function doctorCommand(_args: string[]): Promise<void> {
         const active = registry.active().map((p) => p.name);
         console.log(`  ✓ Active plugins: ${active.join(', ') || '(none)'}`);
 
-        const devPlugin = registry.active().find((p) => p.name === 'developer');
-        const devApi = devPlugin?.api as DeveloperApi | undefined;
-        if (devApi) {
-            if (devApi.isGitNexusAvailable()) {
-                const repos = devApi.listGitNexusRepos();
-                console.log(`  ✓ GitNexus CLI available: ${repos.length} repo(s) indexed`);
-            } else {
-                console.log('  ✗ GitNexus CLI not found — install with: npm install -g gitnexus');
-                issues++;
-            }
+        const verbatimStore = new VerbatimStore(loreDir);
+        const syncEngine = new SyncEngine(graph, loreDir, null);
+        const pluginCtx = {
+            graph,
+            verbatimStore,
+            syncEngine,
+            syncAdapter: null,
+            schemaLoader: null,
+            scope: { project: '*', ecosystem: '*' },
+            loreDir,
+        };
+        const checks = await registry.collectDoctorChecks(pluginCtx);
+        for (const c of checks) {
+            const glyph = c.ok ? '✓' : '✗';
+            console.log(`  ${glyph} ${c.message}`);
+            if (!c.ok) issues++;
         }
         await graph.close();
     } catch (pluginErr) {
@@ -1092,8 +990,7 @@ ${protocolContent}
         console.log('  ✅ Setup complete!');
         console.log('');
         console.log('  Next steps:');
-        console.log('    cd ~/your-project && gitnexus analyze .   # Index a project');
-        console.log('    lore index                                # Import into Lore');
+        console.log('    lore --help                               # See plugin commands');
         console.log('    lore join gf://host:port/ns?token=...     # Join a team (optional)');
     } else {
         console.log(`  ⚠ Setup completed with ${issues} issue(s). Run 'lore doctor' for details.`);
@@ -1430,50 +1327,6 @@ function findTsFiles(dir: string, fileList: string[] = []): string[] {
         }
     }
     return fileList;
-}
-
-/**
- * ingestFilesCommand — Materialize CodeFile nodes from existing CodeSymbols.
- *
- * V2.1: the developer lore has CodeSymbols but zero CodeFile nodes, so
- * queries like "which files does this decision touch?" are impossible
- * until we model files. This walks every CodeSymbol, groups by filePath,
- * and creates one CodeFile per distinct path plus a FileContains edge
- * from the file to each of its symbols.
- *
- * Idempotent — safe to re-run after pulling more symbols via `lore index`.
- */
-export async function ingestFilesCommand(_args: string[]): Promise<void> {
-    // V2.1 / Option C: this command is developer-plugin-specific but lives
-    // in core CLI for discoverability. We reach the plugin by booting the
-    // registry + its schemas, then calling through the opaque api field.
-    const { ConfigManager } = await import('../config/configManager.js');
-    const { PluginRegistry } = await import('../plugins/registry.js');
-    const basePath = path.join(os.homedir(), '.groundfloor');
-    const loreDir = path.join(basePath, '.lore');
-    const graph = new LocalGraph(basePath);
-    const registry = new PluginRegistry(new ConfigManager(loreDir));
-    registry.boot();
-    await graph.initialize();
-    await registry.registerSchemas(graph.createPluginGraphContext());
-
-    const devPlugin = registry.active().find((p) => p.name === 'developer');
-    const devApi = devPlugin?.api as
-        | { ingestFilesFromSymbols: () => Promise<{ filesCreated: number; edgesCreated: number }> }
-        | undefined;
-    if (!devApi) {
-        console.error('  ✗ ingest-files requires the "developer" plugin. Add "developer" to .lore/config.json plugins[].');
-        await graph.close();
-        return;
-    }
-    console.log('');
-    console.log('  Ingesting files from existing CodeSymbols…');
-    const stats = await devApi.ingestFilesFromSymbols();
-    console.log(`  ✓ ${stats.filesCreated} CodeFile node(s) synthesized`);
-    console.log(`  ✓ ${stats.edgesCreated} FileContains edge(s) created`);
-    await graph.close();
-    console.log('');
-    console.log('  Next: `lore reconnect` to link LoreNode knowledge to these files via semantic similarity.');
 }
 
 /**

@@ -20,30 +20,51 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand, modelsCommand, scaffoldPluginCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, setupCommand, joinCommand, lintCommand, auditCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand, modelsCommand, scaffoldPluginCommand } from './commands.js';
+import { ConfigManager } from '../config/configManager.js';
+import { PluginRegistry } from '../plugins/registry.js';
+import path from 'path';
+import os from 'os';
 
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
 const args = process.argv.slice(2);
 const command = args[0];
 
-const HELP_TEXT = `
-@groundfloor/lore — Unified Developer Intelligence Engine
+/**
+ * Lazily boot a PluginRegistry to list/dispatch plugin-contributed
+ * commands. Used for `--help` discovery and for any subcommand name
+ * that isn't a core command.
+ */
+function loadPluginCliCommands(): Record<string, { plugin: string; help: string; handler: (args: string[]) => Promise<void> }> {
+    try {
+        const basePath = path.join(os.homedir(), '.groundfloor');
+        const loreDir = path.join(basePath, '.lore');
+        const registry = new PluginRegistry(new ConfigManager(loreDir));
+        registry.boot();
+        return registry.collectCliCommands();
+    } catch {
+        // No .lore/ yet (pre-init) or plugin boot failed — return empty
+        // so `lore setup` / `lore init` still work.
+        return {};
+    }
+}
+
+const CORE_HELP = `
+@groundfloor/lore — Unified Intelligence Engine
 
 Usage: lore <command> [options]
 
-Commands:
+Core commands:
   setup     One-time setup (graph, daemon, IDE config)
   join      Connect to a team's shared database
   init      Initialize .lore/ graph in the current repo
   serve     Start the MCP server (default: stdio, --http for daemon)
-  index     Import code symbols from GitNexus into unified graph
   sync      Push pending changes and pull from remote
   status    Show graph statistics and sync status
   doctor    Diagnose configuration and connectivity
   lint      Check graph health and relationships
   audit     Verify local codebase against Master Data Models
-  ingest-files   Synthesize CodeFile nodes + FileContains edges from existing CodeSymbols
   reconnect      Compute semantic_neighbor edges between LoreNodes (dry-run unless --apply)
   reconsume      Re-embed every node with fresh content + apply the full reconnect pass
   storage        Show per-workspace disk usage breakdown + SSD free
@@ -61,11 +82,20 @@ Options:
 Examples:
   lore setup                             # Full onboarding (solo)
   lore join gf://host:8001/ns?token=...  # Join a team
-  lore index                             # Import all GitNexus repos
-  lore index groundfloor-v2.5            # Import a specific repo
   lore status                            # Show current graph stats
   lore doctor                            # Check health
 `;
+
+function renderHelp(): string {
+    const pluginCommands = loadPluginCliCommands();
+    const entries = Object.entries(pluginCommands);
+    if (entries.length === 0) return CORE_HELP;
+    const pluginLines = ['', 'Plugin commands:'];
+    for (const [name, cmd] of entries) {
+        pluginLines.push(`  ${name.padEnd(14)} ${cmd.help}  (${cmd.plugin})`);
+    }
+    return CORE_HELP + pluginLines.join('\n') + '\n';
+}
 
 /* ─── Command Routing ─────────────────────────────────────────── */
 
@@ -77,7 +107,7 @@ Examples:
  */
 async function main(): Promise<void> {
     if (!command || command === '--help' || command === '-h') {
-        console.log(HELP_TEXT);
+        console.log(renderHelp());
         process.exit(0);
     }
 
@@ -105,17 +135,11 @@ async function main(): Promise<void> {
         case 'doctor':
             await doctorCommand(commandArgs);
             break;
-        case 'index':
-            await indexCommand(commandArgs);
-            break;
         case 'lint':
             await lintCommand(commandArgs);
             break;
         case 'audit':
             await auditCommand(commandArgs);
-            break;
-        case 'ingest-files':
-            await ingestFilesCommand(commandArgs);
             break;
         case 'reconnect':
             await reconnectCommand(commandArgs);
@@ -147,10 +171,18 @@ async function main(): Promise<void> {
         case 'scaffold-plugin':
             await scaffoldPluginCommand(commandArgs);
             break;
-        default:
+        default: {
+            // Dispatch to plugin-contributed commands if any match.
+            const pluginCommands = loadPluginCliCommands();
+            const pluginCmd = pluginCommands[command];
+            if (pluginCmd) {
+                await pluginCmd.handler(commandArgs);
+                break;
+            }
             console.error(`Unknown command: '${command}'`);
             console.error(`Run 'lore --help' for available commands.`);
             process.exit(1);
+        }
     }
 
     // Explicit exit prevents segfault from @kineviz/kuzu-lite native addon

@@ -1,47 +1,4 @@
 {
   "note": "Known plugin-boundary violations tracked as technical debt. New violations must either be fixed or added here with a justification.",
-  "entries": [
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/cli/commands.ts",
-      "token": "CodeFile",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/cli/commands.ts",
-      "token": "FileContains",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/cli/commands.ts",
-      "token": "gitnexus",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/cli/commands.ts",
-      "token": "GitNexus",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/cli/index.ts",
-      "token": "CodeFile",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/cli/index.ts",
-      "token": "FileContains",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/cli/index.ts",
-      "token": "GitNexus",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    }
-  ]
+  "entries": []
 }
