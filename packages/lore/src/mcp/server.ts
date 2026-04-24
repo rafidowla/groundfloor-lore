@@ -1169,6 +1169,48 @@ mcpServer.tool(
     },
 );
 
+/* ─── Tool: sync_now (Q1.1 closure) ──────────────────────────── */
+//
+// Manually trigger a Dataplane sync round-trip from an MCP client.
+// Mirrors POST /api/sync/now. Useful for (a) agents that want to
+// flush the WAL deterministically before asking a question that
+// depends on fresh remote data, and (b) smoke-testing the
+// Dataplane binding without shelling out to curl.
+//
+// `direction` defaults to 'both'. Airplane-safe: missing adapter
+// or unreachable Dataplane returns a structured failure object
+// rather than throwing.
+
+mcpServer.tool(
+    'sync_now',
+    'Manually trigger a Dataplane sync round-trip. `direction` ∈ {push, pull, both} (default: both). Returns push/pull counts and any errors. Airplane-safe — failure returns a structured error, not an exception.',
+    {
+        direction: z.enum(['push', 'pull', 'both']).optional().describe('Which leg(s) to run. Default: both.'),
+    },
+    async ({ direction }) => {
+        try {
+            const dir = direction ?? 'both';
+            const payload: Record<string, unknown> = {};
+            if (dir === 'push' || dir === 'both') {
+                const p = await syncEngine.pushPending();
+                payload['push'] = p;
+            }
+            if (dir === 'pull' || dir === 'both') {
+                const p = await syncEngine.pullRemote();
+                payload['pull'] = p;
+            }
+            return {
+                content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
 /* ─── Tool: get_hot_context ───────────────────────────────────── */
 
 mcpServer.tool(
@@ -1914,6 +1956,68 @@ async function main(): Promise<void> {
                 } catch (err) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ status: 'degraded', error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // Q1.1 closure — Manual sync endpoints. The daemon's
+            // syncEngine holds the live, keychain-upgraded adapter;
+            // the `lore sync` CLI creates its own SyncEngine with a
+            // null adapter (offline-only fallback), so it cannot
+            // drive the Dataplane round-trip. These endpoints let
+            // the Lore UI, CLI over HTTP, or an external caller
+            // trigger the real push/pull through the bound adapter.
+            //
+            //   POST /api/sync/push  → pushPending(); drains WAL on
+            //                          success, reports counts + errors
+            //   POST /api/sync/pull  → pullRemote(); upserts remote
+            //                          deltas into local Kùzu
+            //   POST /api/sync/now   → full cycle (push then pull)
+            //
+            // Airplane-safe: if no adapter or the Dataplane is
+            // unreachable, returns a 200 with `ok: false` + human
+            // error string rather than throwing; local graph is
+            // untouched.
+            if (pathname === '/api/sync/push' && req.method === 'POST') {
+                try {
+                    const result = await syncEngine.pushPending();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        ok: result.failures === 0,
+                        nodesPushed: result.nodesPushed,
+                        edgesPushed: result.edgesPushed,
+                        failures: result.failures,
+                        errors: result.errors,
+                    }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
+                }
+                return;
+            }
+            if (pathname === '/api/sync/pull' && req.method === 'POST') {
+                try {
+                    const result = await syncEngine.pullRemote();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, ...result }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
+                }
+                return;
+            }
+            if (pathname === '/api/sync/now' && req.method === 'POST') {
+                try {
+                    const result = await syncEngine.sync();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        ok: result.push.failures === 0,
+                        push: result.push,
+                        pull: result.pull,
+                    }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: false, error: (err as Error).message }));
                 }
                 return;
             }

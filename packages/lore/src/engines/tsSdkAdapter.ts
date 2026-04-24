@@ -60,7 +60,20 @@ export class TsSdkAdapter implements SyncAdapter {
         let edgesPushed = 0;
         const errors: string[] = [];
 
-        // Push nodes
+        // Push nodes — upsert via updateByQuery + insert fallback.
+        //
+        // Why not `client.update({id: ...}, doc)`? That SDK method issues
+        // `PUT /v1/:tenant/:collection` with `{filter, updates}`, which
+        // Dataplane does not accept (no PUT handler on the collection
+        // resource — returns 405). Dataplane's update contract uses
+        // `PUT /v1/:tenant/:collection/update-by-query` with the Rust
+        // enum-shaped filter `{id_eq: "<id>"}` and `fields: {...}`. The
+        // SDK exposes this as `updateByQuery(tenant, coll, filter, fields)`.
+        //
+        // Upsert order: try update first; if 0 rows matched, fall through
+        // to `insert`. This mirrors the TS-SDK's original intent and is
+        // idempotent on re-runs (second call to the same id finds the row
+        // and updates it).
         for (const node of nodes) {
             try {
                 const doc = {
@@ -77,8 +90,13 @@ export class TsSdkAdapter implements SyncAdapter {
                     sync_id: `${node.id}-${node.updatedAt}`,
                 };
 
-                const updateRes = await this.client!.update(this.config.tenantId, 'lore_node', { id: node.id }, doc);
-                if (updateRes.updated === 0) {
+                const updateRes = await this.client!.updateByQuery(
+                    this.config.tenantId,
+                    'lore_node',
+                    { id_eq: node.id },
+                    doc,
+                );
+                if ((updateRes?.updated ?? 0) === 0) {
                     await this.client!.insert(this.config.tenantId, 'lore_node', doc);
                 }
                 nodesPushed++;
