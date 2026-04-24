@@ -34,6 +34,8 @@ import { bindWorkspaceToRequest, requireCurrentTenantId } from '../security/work
 // @ts-ignore - workspace-linked SDK lacks full Node16 exports declaration
 import { GroundfloorClient } from 'groundfloor-ts-sdk';
 import { VerbatimStore, buildVerbatimText } from '../engines/verbatimStore.js';
+import { DataplaneVectorStore } from '../engines/dataplaneVectorStore.js';
+import type { VectorProvider } from '../providers/types.js';
 import { FeedbackStore } from '../engines/feedbackStore.js';
 import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
 import { TsSdkAdapter } from '../engines/tsSdkAdapter.js';
@@ -244,7 +246,44 @@ function createGraph(): LoreGraph {
     });
 }
 let graph: LoreGraph = createGraph();
-const verbatimStore = new VerbatimStore(graphBasePath);
+
+// Q2.2 slice 3 — Mode-conditional vector-store factory.
+//
+//   local mode: embedded LanceDB VerbatimStore at the active workspace path.
+//   cloud mode: DataplaneVectorStore fronting groundfloor-ts-sdk's vector
+//               extension. Embedding stays local (same Xenova pipeline);
+//               only storage + similarity-search IO crosses to Dataplane.
+//
+// Both implement VectorProvider. Call sites that touch only the provider
+// surface (store/search/delete/count/initialize/close) work uniformly.
+// Two call sites still reach past VectorProvider (reconnect's getById,
+// orphan reaper's listIds); those run through LocalGraph-coupled code
+// paths today and stay guarded by `graph instanceof LocalGraph` — cloud
+// reconnect lands in a later slice. See docs/dataplane-vector-adapter.md.
+type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
+function createVectorStore(): LoreVectorStore {
+    if (deploymentMode === 'cloud') {
+        const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
+        const apiKey = process.env['DATAPLANE_API_KEY'] ?? '';
+        const orgId = process.env['DATAPLANE_ORG_ID'] ?? 'default';
+        // Share the pattern with createGraph(): pending-keychain is a
+        // placeholder satisfied by the same maybeUpgradeAdapterFromKeychain
+        // rebuild when a keychain credential is present.
+        const client = new GroundfloorClient(baseUrl, apiKey || 'pending-keychain');
+        return new DataplaneVectorStore({
+            client,
+            tenantProvider: () => requireCurrentTenantId(),
+            orgId,
+        });
+    }
+    return new VerbatimStore(graphBasePath);
+}
+const verbatimStore: LoreVectorStore = createVectorStore();
+// VectorProvider-only façade. Most server.ts call sites operate through
+// this interface; the raw `verbatimStore` binding is preserved for the
+// two LocalGraph-only consumers (reconnect.getById and the orphan reaper).
+const verbatimProvider: VectorProvider = verbatimStore;
+void verbatimProvider; // reserved for future cloud-only callers
 const pluginRegistry = new PluginRegistry(configManager);
 pluginRegistry.boot();
 console.error(`[Lore MCP] Plugins active: ${configManager.read().plugins.join(', ') || '(none)'}`);
@@ -477,7 +516,11 @@ mcpServer.tool(
                 // cloud mode will get a Dataplane-native variant in a later
                 // slice. Cast is safe: reconnect only runs in local mode
                 // today, and cloud ingest doesn't invoke this hook path.
-                void reconnectOneNode(graph as LocalGraph, verbatimStore, pluginRegistry, {
+                // Q2.2 slice 3 — verbatimStore cast to VerbatimStore is
+                // safe here because this call is already LocalGraph-only
+                // (see `graph as LocalGraph` above). Cloud-mode reconnect
+                // lands in a later slice.
+                void reconnectOneNode(graph as LocalGraph, verbatimStore as VerbatimStore, pluginRegistry, {
                     id,
                     label,
                     content: content ?? '',
@@ -1967,7 +2010,27 @@ async function main(): Promise<void> {
                             res.end(JSON.stringify({ error: 'id, type, and label are required' }));
                             return;
                         }
-                        await graph.upsertNode(nodeData);
+                        const node = await graph.upsertNode(nodeData);
+                        // Q2.2 slice 3 — mirror the MCP `store_node` tool's
+                        // verbatim write so semantic search stays in sync
+                        // regardless of ingest surface. Fire-and-forget
+                        // (the HTTP response shouldn't block on embedding).
+                        verbatimStore.store({
+                            id: nodeData.id,
+                            text: buildVerbatimText(
+                                nodeData.label,
+                                nodeData.content ?? '',
+                                nodeData.tags ?? '',
+                            ),
+                            metadata: {
+                                type: nodeData.type,
+                                label: nodeData.label,
+                                tags: nodeData.tags ?? '',
+                                project: node.project,
+                                ecosystem: node.ecosystem,
+                                updatedAt: node.updatedAt,
+                            },
+                        }).catch((err) => console.error(`[Lore MCP] VerbatimStore write failed for ${redactId(nodeData.id)}: ${redactError(err)}`));
                         res.writeHead(200, { 'Content-Type': 'application/json' });
                         res.end(JSON.stringify({ ok: true, id: nodeData.id }));
                     } catch (saveErr) {
@@ -2490,7 +2553,7 @@ async function main(): Promise<void> {
                         }
                         // Q2.2 — reconnect is a local-only plugin-heavy op today;
                         // cloud-mode reconnect is a slice-3 follow-up.
-                        const result = await reconnectGraph(graph as LocalGraph, verbatimStore, pluginRegistry, {
+                        const result = await reconnectGraph(graph as LocalGraph, verbatimStore as VerbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
                             dryRun: !apply,
@@ -2572,7 +2635,7 @@ async function main(): Promise<void> {
                             return;
                         }
                         // Q2.2 — see reconnectGraph note above; cloud-mode path deferred to slice 3.
-                        const result = await reconnectGraph(graph as LocalGraph, verbatimStore, pluginRegistry, {
+                        const result = await reconnectGraph(graph as LocalGraph, verbatimStore as VerbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
                             dryRun: false,
@@ -2824,7 +2887,7 @@ async function main(): Promise<void> {
                                         auditResultDetail = `node not found: ${nodeId}`;
                                     } else {
                                         // Q2.2 — see reconnect note above; cloud-mode reconnect deferred.
-                                        const result = await reconnectOneNode(graph as LocalGraph, verbatimStore, pluginRegistry, {
+                                        const result = await reconnectOneNode(graph as LocalGraph, verbatimStore as VerbatimStore, pluginRegistry, {
                                             id: node.id,
                                             label: node.label,
                                             content: node.content,
