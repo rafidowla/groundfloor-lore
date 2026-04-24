@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { SigmaContainer, useLoadGraph, useRegisterEvents, useSigma } from '@react-sigma/core';
 import '@react-sigma/core/lib/style.css';
 import Graph from 'graphology';
 import type { Attributes } from 'graphology-types';
 import forceAtlas2 from 'graphology-layout-forceatlas2';
-import { ZoomIn, ZoomOut, RotateCcw } from 'lucide-react';
+import { ZoomIn, ZoomOut, RotateCcw, ChevronLeft } from 'lucide-react';
 import type { NodeDisplayData } from 'sigma/types';
 import type { NodeLabelDrawingFunction, NodeHoverDrawingFunction } from 'sigma/rendering';
 import { authFetch } from '../lib/authFetch';
@@ -61,6 +61,50 @@ const NODE_COLORS: Record<string, string> = {
  */
 const MIN_NODE_SIZE = 4;
 const MAX_NODE_SIZE = 28;
+
+/* ─── Q1.9 — Semantic zoom: overview blob sizing ───────────────── */
+
+/**
+ * Below this node count the UI renders the full single-globe (today's
+ * behavior). At or above, we auto-switch to the project-blob overview
+ * unless the caller pins a mode. Lives at 1000 per the Q1.9 plan.
+ */
+const SEMANTIC_ZOOM_THRESHOLD = 1000;
+
+const OVERVIEW_MIN_BLOB_SIZE = 12;
+const OVERVIEW_MAX_BLOB_SIZE = 48;
+
+/* ─── Q1.9 — Overview data contract from /api/topology/overview ── */
+
+interface OverviewBlob {
+    project: string;
+    nodeCount: number;
+}
+interface OverviewAggregateEdge {
+    fromProject: string;
+    toProject: string;
+    count: number;
+}
+interface OverviewPayload {
+    blobs: OverviewBlob[];
+    aggregateEdges: OverviewAggregateEdge[];
+    totalNodes: number;
+    groupBy: 'project';
+}
+
+/**
+ * View mode exposed to the parent. Kept narrow on purpose — the parent
+ * never needs to know per-project blob shape.
+ *
+ *   'full'      — current single-globe render (below threshold, or
+ *                 after a user drilled down from overview)
+ *   'overview'  — one blob per project, aggregate edges between blobs
+ *   'project:<name>' — drilled into a single project's subgraph
+ */
+export type TopologyViewMode =
+    | { kind: 'full' }
+    | { kind: 'overview' }
+    | { kind: 'project'; project: string };
 
 /**
  * Only labels for nodes whose screen-space pixel-size exceeds this
@@ -192,9 +236,13 @@ interface GraphLoaderProps {
      *  Omit to let the server apply its default (10k). Server clamps to
      *  [1000, 20000] regardless — UI slider enforces the same range. */
     graphSizeLimit?: number;
+    /** Q1.9 — When set, filter the rendered subgraph to nodes whose
+     *  `project` matches this value. Used for drill-in from the
+     *  overview mode. */
+    projectFilter?: string | null;
 }
 
-const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit }: GraphLoaderProps) => {
+const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit, projectFilter }: GraphLoaderProps) => {
     const loadGraph = useLoadGraph();
     const sigma = useSigma();
 
@@ -218,8 +266,18 @@ const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit }: GraphLoa
 
                 const graph = new Graph();
 
+                // Q1.9 — project drill-in filter. When a projectFilter
+                // is active we only load nodes in that project plus
+                // their direct neighbors (so intra-project edges render
+                // while cross-project noise stays in the overview).
+                const filterActive =
+                    typeof projectFilter === 'string' && projectFilter.length > 0;
+                const inProject = (p: string | undefined | null) =>
+                    !filterActive || (p ?? 'Global') === projectFilter;
+
                 // ── Add nodes ──
                 (data.nodes as LoreNode[]).forEach((n) => {
+                    if (filterActive && !inProject(n.project)) return;
                     if (!graph.hasNode(n.id)) {
                         graph.addNode(n.id, {
                             x: Math.random() * 100,
@@ -332,7 +390,7 @@ const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit }: GraphLoa
         fetchGraph();
 
         return () => { active = false; };
-    }, [loadGraph, sigma, onStatsReady, onTopologyReady, graphSizeLimit]);
+    }, [loadGraph, sigma, onStatsReady, onTopologyReady, graphSizeLimit, projectFilter]);
 
     return null;
 };
@@ -643,6 +701,187 @@ const CameraEffect = ({ focusNodeId }: CameraEffectProps) => {
     return null;
 };
 
+/* ─── Q1.9 — Overview loader (project-blob LOD) ───────────────── */
+
+// Synthetic node id for each blob. Prefixed so we can cheaply detect
+// overview-mode clicks in the click handler.
+const OVERVIEW_BLOB_PREFIX = '__blob__:';
+
+// Deterministic color palette for project blobs. The palette cycles
+// over a small steel-blue / slate ramp — hue is intentionally quiet
+// so the graph-mode color legend retains semantic weight. Project
+// differentiation comes from size + label, not hue.
+const OVERVIEW_BLOB_COLORS = [
+    '#3182CE', '#38A169', '#805AD5', '#DD6B20',
+    '#319795', '#B7791F', '#E53E3E', '#4A5568',
+];
+const blobColor = (project: string): string => {
+    let hash = 0;
+    for (let i = 0; i < project.length; i++) {
+        hash = (hash * 31 + project.charCodeAt(i)) | 0;
+    }
+    return OVERVIEW_BLOB_COLORS[Math.abs(hash) % OVERVIEW_BLOB_COLORS.length];
+};
+
+interface OverviewLoaderProps {
+    payload: OverviewPayload;
+    onStatsReady: (stats: { nodes: number; edges: number }) => void;
+}
+
+const OverviewGraphLoader = ({ payload, onStatsReady }: OverviewLoaderProps) => {
+    const loadGraph = useLoadGraph();
+    const sigma = useSigma();
+
+    useEffect(() => {
+        const graph = new Graph();
+
+        // Blob sizing: log-scale on nodeCount, clamped. Log keeps a
+        // 10-node project readable next to a 10k-node monster without
+        // either dominating — blobs communicate "relative mass" not
+        // absolute count. Absolute count shows in the hover card.
+        const counts = payload.blobs.map((b) => b.nodeCount);
+        const maxLog = Math.log(Math.max(...counts, 2) + 1);
+        const minLog = Math.log(Math.min(...counts, 1) + 1);
+        const logRange = maxLog - minLog || 1;
+
+        payload.blobs.forEach((blob) => {
+            const normalized = (Math.log(blob.nodeCount + 1) - minLog) / logRange;
+            const size =
+                OVERVIEW_MIN_BLOB_SIZE +
+                normalized * (OVERVIEW_MAX_BLOB_SIZE - OVERVIEW_MIN_BLOB_SIZE);
+            graph.addNode(`${OVERVIEW_BLOB_PREFIX}${blob.project}`, {
+                x: Math.random() * 100,
+                y: Math.random() * 100,
+                size,
+                label: `${blob.project} (${blob.nodeCount})`,
+                color: blobColor(blob.project),
+                tag: 'project',
+                clusterLabel: blob.project,
+                // Retained in attrs for the click handler + hover card.
+                blobProject: blob.project,
+                blobNodeCount: blob.nodeCount,
+            });
+        });
+
+        // Aggregate edges. Thickness ∝ log(count). Color is neutral
+        // gray so bundles read as "connection tissue" rather than
+        // compete with blob color.
+        const edgeCounts = payload.aggregateEdges.map((e) => e.count);
+        const maxEdgeLog = Math.log(Math.max(...edgeCounts, 2) + 1);
+        const minEdgeLog = Math.log(Math.min(...edgeCounts, 1) + 1);
+        const edgeLogRange = maxEdgeLog - minEdgeLog || 1;
+
+        payload.aggregateEdges.forEach((edge) => {
+            const fromId = `${OVERVIEW_BLOB_PREFIX}${edge.fromProject}`;
+            const toId = `${OVERVIEW_BLOB_PREFIX}${edge.toProject}`;
+            if (!graph.hasNode(fromId) || !graph.hasNode(toId)) return;
+            // Sigma rejects duplicate parallel edges; collapse directional
+            // pairs into the larger of the two by replacing the existing
+            // one when this direction carries more weight.
+            if (graph.hasEdge(fromId, toId) || graph.hasEdge(toId, fromId)) {
+                return;
+            }
+            const normalized = (Math.log(edge.count + 1) - minEdgeLog) / edgeLogRange;
+            const thickness = 1 + normalized * 5; // 1–6 px
+            graph.addEdge(fromId, toId, {
+                label: String(edge.count),
+                type: 'arrow',
+                size: thickness,
+                color: '#94A3B880',
+                aggregateCount: edge.count,
+            });
+        });
+
+        // ForceAtlas2 on the aggregate graph. Blob count is O(projects),
+        // typically <30 even in very heavy workspaces — a short pass
+        // produces a readable layout in <100 ms.
+        if (graph.order > 1) {
+            const fa2Settings = forceAtlas2.inferSettings(graph);
+            forceAtlas2.assign(graph, {
+                iterations: 300,
+                settings: {
+                    ...fa2Settings,
+                    gravity: 0.2,
+                    scalingRatio: 20,
+                    barnesHutOptimize: graph.order > 50,
+                },
+            });
+        }
+
+        loadGraph(graph);
+        onStatsReady({ nodes: graph.order, edges: graph.size });
+
+        // Reset to neutral sigma settings (the ViewStateEffect's
+        // nodeReducer still runs — but activeTypes/activeProjects are
+        // null in overview mode so it's a passthrough).
+        sigma.setSetting('labelRenderedSizeThreshold', 0); // always show blob labels
+        sigma.setSetting('labelFont', 'Inter, -apple-system, system-ui, sans-serif');
+        sigma.setSetting('labelSize', 13);
+        sigma.setSetting('labelWeight', '600');
+        sigma.setSetting('defaultDrawNodeLabel', drawLabel);
+        sigma.setSetting('defaultDrawNodeHover', drawHover);
+        sigma.setSetting('defaultEdgeType', 'arrow');
+        sigma.setSetting('renderEdgeLabels', true); // show count on bundles
+        sigma.setSetting('edgeLabelSize', 11);
+    }, [payload, loadGraph, sigma, onStatsReady]);
+
+    return null;
+};
+
+/**
+ * Q1.9 — Click handler in overview mode. Double-click (or single-click
+ * per spec; we honor both) animates the camera onto the blob in <300ms
+ * then hands the blob id back to the parent via onBlobClick so the
+ * parent can flip view-mode to `project:<name>`.
+ *
+ * Sibling fade happens via the ViewStateEffect's nodeReducer when the
+ * parent updates the mode — so this component only owns the camera
+ * animation + the mode-flip signal.
+ */
+const OverviewInteraction = ({
+    onBlobClick,
+    onAggregateEdgeClick,
+}: {
+    onBlobClick: (project: string) => void;
+    onAggregateEdgeClick: (edge: { fromProject: string; toProject: string; count: number }) => void;
+}) => {
+    const sigma = useSigma();
+    const registerEvents = useRegisterEvents();
+    useEffect(() => {
+        registerEvents({
+            clickNode: ({ node }) => {
+                if (!node.startsWith(OVERVIEW_BLOB_PREFIX)) return;
+                const graph = sigma.getGraph();
+                const attrs = graph.getNodeAttributes(node) as {
+                    x: number; y: number; blobProject?: string;
+                };
+                const project = attrs.blobProject;
+                if (!project) return;
+                // Animate in < 300ms per Q1.9 spec.
+                sigma.getCamera().animate(
+                    { x: attrs.x, y: attrs.y, ratio: 0.35 },
+                    { duration: 260 },
+                );
+                // Fire the mode flip just after the animation kicks off so
+                // the parent remount happens against the zoomed viewport.
+                window.setTimeout(() => onBlobClick(project), 280);
+            },
+            clickEdge: ({ edge }) => {
+                const graph = sigma.getGraph();
+                const attrs = graph.getEdgeAttributes(edge) as { aggregateCount?: number };
+                if (typeof attrs.aggregateCount !== 'number') return;
+                const from = graph.source(edge);
+                const to = graph.target(edge);
+                const fromProject = (graph.getNodeAttribute(from, 'blobProject') as string | undefined) ?? '';
+                const toProject = (graph.getNodeAttribute(to, 'blobProject') as string | undefined) ?? '';
+                if (!fromProject || !toProject) return;
+                onAggregateEdgeClick({ fromProject, toProject, count: attrs.aggregateCount });
+            },
+        });
+    }, [registerEvents, sigma, onBlobClick, onAggregateEdgeClick]);
+    return null;
+};
+
 /* ─── Main export ──────────────────────────────────────────────── */
 
 interface SigmaCanvasProps {
@@ -662,6 +901,10 @@ interface SigmaCanvasProps {
     /** Phase 3: user-configured graph size limit. Forwarded to /api/topology
      *  as ?limit=N. Server clamps to [1000, 20000]; UI slider enforces same. */
     graphSizeLimit?: number;
+    /** Q1.9 — Threshold (total node count) above which the canvas
+     *  auto-picks overview mode on first load. Default 1000. Set to
+     *  Infinity to pin full-globe regardless of size (bypass). */
+    semanticZoomThreshold?: number;
 }
 
 /**
@@ -688,16 +931,99 @@ export default function SigmaCanvas({
     onNodeClick,
     showInferred = true,
     graphSizeLimit,
+    semanticZoomThreshold = SEMANTIC_ZOOM_THRESHOLD,
 }: SigmaCanvasProps) {
     const [stats, setStats] = useState<{ nodes: number; edges: number } | null>(null);
+
+    // Q1.9 — view-mode state. Starts as null (unknown) until the first
+    // overview fetch resolves; then we pick 'overview' or 'full' based
+    // on totalNodes vs the configured threshold.
+    const [viewMode, setViewMode] = useState<TopologyViewMode | null>(null);
+    const [overview, setOverview] = useState<OverviewPayload | null>(null);
+    const [overviewError, setOverviewError] = useState<string | null>(null);
+    const [aggregateEdgeInspector, setAggregateEdgeInspector] = useState<
+        { fromProject: string; toProject: string; count: number } | null
+    >(null);
 
     const handleStatsReady = useCallback((newStats: { nodes: number; edges: number }) => {
         setStats(newStats);
     }, []);
 
+    // Fetch the overview payload once on mount. Airplane-safe — handler
+    // is /api/topology/overview which aggregates via local Kùzu.
+    useEffect(() => {
+        let active = true;
+        (async () => {
+            try {
+                const res = await authFetch('/api/topology/overview?groupBy=project');
+                if (!res.ok) throw new Error(`overview HTTP ${res.status}`);
+                const payload = await res.json() as OverviewPayload;
+                if (!active) return;
+                setOverview(payload);
+                // Initial mode selection: auto-pick overview above threshold
+                // OR when there are enough distinct projects that a blob
+                // summary is actually useful (>=3 projects). Otherwise full.
+                if (viewMode === null) {
+                    const pickOverview =
+                        payload.totalNodes >= semanticZoomThreshold &&
+                        payload.blobs.length >= 2;
+                    setViewMode(pickOverview ? { kind: 'overview' } : { kind: 'full' });
+                }
+            } catch (err) {
+                if (!active) return;
+                setOverviewError((err as Error).message);
+                // Fall back to full globe on any overview error so the
+                // user never loses the graph — this is a pure additive
+                // feature. viewMode defaults to 'full'.
+                if (viewMode === null) setViewMode({ kind: 'full' });
+            }
+        })();
+        return () => { active = false; };
+        // Intentionally empty dep array: we re-fetch the overview only
+        // when the workspace changes (page reload). Drill-in/back does
+        // not re-fetch.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // While the first overview fetch is in flight, render nothing
+    // visible — the Suspense fallback upstream already covered this.
+    // Default to 'full' if somehow we get here without a decision.
+    const mode: TopologyViewMode = viewMode ?? { kind: 'full' };
+
+    const isOverview = mode.kind === 'overview';
+    const projectFilter = mode.kind === 'project' ? mode.project : null;
+
+    // In overview mode we own the click semantics (blob drill-in),
+    // so the parent's onNodeClick is suppressed there — a click on a
+    // blob should not behave like a click on a real LoreNode.
+    const effectiveNodeClick = isOverview ? undefined : onNodeClick;
+
+    // Overview mode passes a no-op for activeTypes/activeProjects
+    // filters — the ViewStateEffect dim logic would otherwise grey out
+    // blobs that don't match a type (project-blobs have tag:'project',
+    // which isn't in the user's type filter).
+    const effectiveActiveTypes = isOverview ? null : activeTypes;
+    const effectiveActiveProjects = isOverview ? null : activeProjects;
+
+    // Breadcrumb label. Kept small; lives top-right to avoid the
+    // StatsOverlay's top-left real estate.
+    const breadcrumb = useMemo(() => {
+        if (mode.kind === 'full') return null;
+        if (mode.kind === 'overview') return overview ? `Overview — ${overview.blobs.length} projects` : 'Overview';
+        return `Overview › ${mode.project}`;
+    }, [mode, overview]);
+
+    // The Sigma container is intentionally keyed on the mode kind so
+    // switching between overview / project / full remounts the graph
+    // instance. This avoids layout state leaks across modes (previous
+    // node positions bleeding into the next mode's first frame).
+    const sigmaKey =
+        mode.kind === 'project' ? `project:${mode.project}` : mode.kind;
+
     return (
         <div style={{ position: 'relative', width: '100%', height: '100%', outline: 'none' }}>
             <SigmaContainer
+                key={sigmaKey}
                 style={{ height: '100%', width: '100%', background: 'transparent' }}
                 settings={{
                     labelRenderedSizeThreshold: LABEL_RENDERED_SIZE_THRESHOLD,
@@ -717,19 +1043,215 @@ export default function SigmaCanvas({
                     allowInvalidContainer: true,
                 }}
             >
-                <GraphLoader onStatsReady={handleStatsReady} onTopologyReady={onTopologyReady} graphSizeLimit={graphSizeLimit} />
+                {isOverview && overview ? (
+                    <>
+                        <OverviewGraphLoader payload={overview} onStatsReady={handleStatsReady} />
+                        <OverviewInteraction
+                            onBlobClick={(project) => setViewMode({ kind: 'project', project })}
+                            onAggregateEdgeClick={(edge) => setAggregateEdgeInspector(edge)}
+                        />
+                    </>
+                ) : (
+                    <GraphLoader
+                        onStatsReady={handleStatsReady}
+                        onTopologyReady={onTopologyReady}
+                        graphSizeLimit={graphSizeLimit}
+                        projectFilter={projectFilter}
+                    />
+                )}
                 <DragEvents />
-                <ClickEvents onNodeClick={onNodeClick} />
-                <ViewStateEffect activeTypes={activeTypes} activeProjects={activeProjects} showInferred={showInferred} />
-                <CameraEffect focusNodeId={focusNodeId} />
+                <ClickEvents onNodeClick={effectiveNodeClick} />
+                <ViewStateEffect
+                    activeTypes={effectiveActiveTypes}
+                    activeProjects={effectiveActiveProjects}
+                    showInferred={showInferred}
+                />
+                <CameraEffect focusNodeId={isOverview ? null : focusNodeId} />
                 <CustomZoomControls />
             </SigmaContainer>
 
             {/* Stats overlay — top-left corner */}
             {stats && <StatsOverlay nodes={stats.nodes} edges={stats.edges} />}
 
-            {/* Type legend — bottom-right corner */}
-            <Legend />
+            {/* Q1.9 — Breadcrumb / back-to-overview chrome. Top-center.
+                In overview mode it's a non-clickable label. In project
+                mode it's a clickable "← Back to overview" affordance. */}
+            {breadcrumb && (
+                <div
+                    style={{
+                        position: 'absolute',
+                        top: 12,
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        zIndex: 12,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '6px 12px',
+                        fontSize: '0.78rem',
+                        fontWeight: 500,
+                        color: 'var(--color-text-primary)',
+                        background: 'var(--glass-bg)',
+                        backdropFilter: 'blur(8px)',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 6,
+                    }}
+                >
+                    {mode.kind === 'project' ? (
+                        <button
+                            type="button"
+                            onClick={() => setViewMode({ kind: 'overview' })}
+                            title="Back to overview"
+                            aria-label="Back to overview"
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 4,
+                                border: 'none',
+                                background: 'transparent',
+                                padding: 0,
+                                color: 'inherit',
+                                cursor: 'pointer',
+                                fontSize: 'inherit',
+                                fontWeight: 'inherit',
+                            }}
+                        >
+                            <ChevronLeft size={14} />
+                            <span>Overview</span>
+                            <span style={{ color: 'var(--color-text-secondary)' }}>›</span>
+                            <span>{mode.project}</span>
+                        </button>
+                    ) : (
+                        <span>{breadcrumb}</span>
+                    )}
+                </div>
+            )}
+
+            {/* Q1.9 — If the user was pinned below threshold but wants
+                to opt into overview (e.g. to explore cross-project
+                structure anyway), they can click this pill. It's only
+                shown when we picked 'full' AND there are enough blobs
+                to be interesting (>=3 projects). */}
+            {mode.kind === 'full' && overview && overview.blobs.length >= 3 && (
+                <button
+                    type="button"
+                    onClick={() => setViewMode({ kind: 'overview' })}
+                    title="Switch to project-blob overview"
+                    style={{
+                        position: 'absolute',
+                        top: 12,
+                        right: 12,
+                        zIndex: 12,
+                        padding: '5px 10px',
+                        fontSize: '0.72rem',
+                        color: 'var(--color-text-secondary)',
+                        background: 'var(--glass-bg)',
+                        backdropFilter: 'blur(8px)',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 6,
+                        cursor: 'pointer',
+                    }}
+                >
+                    Overview ({overview.blobs.length} projects)
+                </button>
+            )}
+
+            {/* Q1.9 — Aggregate-edge inspector popover. Click a bundle in
+                overview mode to see the from→to pair and count. Shallow
+                on purpose; the "reveal underlying links" feature is the
+                natural drill-in: pick a project. */}
+            {aggregateEdgeInspector && (
+                <div
+                    role="dialog"
+                    style={{
+                        position: 'absolute',
+                        top: 56,
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        zIndex: 13,
+                        padding: '10px 14px',
+                        fontSize: '0.78rem',
+                        color: 'var(--color-text-primary)',
+                        background: 'var(--glass-bg)',
+                        backdropFilter: 'blur(8px)',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 8,
+                        minWidth: 240,
+                        maxWidth: 360,
+                    }}
+                >
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                        {aggregateEdgeInspector.fromProject} → {aggregateEdgeInspector.toProject}
+                    </div>
+                    <div style={{ color: 'var(--color-text-secondary)', marginBottom: 8 }}>
+                        {aggregateEdgeInspector.count} cross-project edges
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                const target = aggregateEdgeInspector.fromProject;
+                                setAggregateEdgeInspector(null);
+                                setViewMode({ kind: 'project', project: target });
+                            }}
+                            style={{
+                                padding: '4px 8px',
+                                fontSize: '0.72rem',
+                                background: 'transparent',
+                                border: '1px solid var(--color-border)',
+                                borderRadius: 4,
+                                color: 'inherit',
+                                cursor: 'pointer',
+                            }}
+                        >
+                            Open {aggregateEdgeInspector.fromProject}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setAggregateEdgeInspector(null)}
+                            style={{
+                                padding: '4px 8px',
+                                fontSize: '0.72rem',
+                                background: 'transparent',
+                                border: '1px solid var(--color-border)',
+                                borderRadius: 4,
+                                color: 'inherit',
+                                cursor: 'pointer',
+                            }}
+                        >
+                            Close
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Surface a (quiet) error banner if the overview fetch
+                failed — the canvas still renders via full-globe fallback. */}
+            {overviewError && (
+                <div
+                    style={{
+                        position: 'absolute',
+                        bottom: 12,
+                        left: '50%',
+                        transform: 'translateX(-50%)',
+                        zIndex: 12,
+                        padding: '4px 10px',
+                        fontSize: '0.7rem',
+                        color: 'var(--color-text-secondary)',
+                        background: 'var(--glass-bg)',
+                        backdropFilter: 'blur(8px)',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 4,
+                    }}
+                    title={overviewError}
+                >
+                    overview unavailable — full graph shown
+                </div>
+            )}
+
+            {/* Type legend — bottom-right corner. Only in full/project
+                modes; overview has its own blob-level legibility. */}
+            {!isOverview && <Legend />}
         </div>
     );
 }

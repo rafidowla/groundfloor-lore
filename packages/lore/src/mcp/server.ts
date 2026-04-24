@@ -1942,6 +1942,44 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // Q1.9 — Semantic-zoom overview. Returns one aggregate blob
+            // per project + cross-project edge bundle counts. Aggregation
+            // runs on local Kùzu via graph.getTopologyOverview() — no
+            // network, no plugin vocab leaked (grouping is on the opaque
+            // `project` string that every LoreNode carries).
+            //
+            //   GET /api/topology/overview?groupBy=project
+            //
+            // Response:
+            //   { blobs:          [{ project, nodeCount }],
+            //     aggregateEdges: [{ fromProject, toProject, count }],
+            //     totalNodes:     number,
+            //     groupBy:        "project" }
+            //
+            // `groupBy` is echoed back so future group-by axes (e.g.
+            // by-type, by-ecosystem) can be added without breaking the
+            // frontend's parse. Only `project` is supported today.
+            if (pathname === '/api/topology/overview' && req.method === 'GET') {
+                try {
+                    const urlObj = new URL(req.url ?? '/api/topology/overview', 'http://local');
+                    const groupBy = urlObj.searchParams.get('groupBy') ?? 'project';
+                    if (groupBy !== 'project') {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            error: `Unsupported groupBy "${groupBy}". Only "project" is supported.`,
+                        }));
+                        return;
+                    }
+                    const overview = await graph.getTopologyOverview();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ...overview, groupBy }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
             // UI health check: status + active config snapshot + sync adapter status
             if (pathname === '/api/health' && req.method === 'GET') {
                 try {
