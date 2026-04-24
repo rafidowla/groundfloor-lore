@@ -69,16 +69,21 @@ function isResolved(node: LoreNode): boolean {
     return typeof stamp === 'string' && stamp.length > 0;
 }
 
-/** Pull file paths out of a node — both from tags (comma-separated
- *  `file:src/foo.ts` entries) and from metadata.filePaths (a clean
- *  list when the node was stored explicitly). */
+/** Pull file paths out of a node. Three sources, all optional:
+ *    - metadata.trigger_paths (canonical — see docs/deferred-node-schema.md)
+ *    - metadata.filePaths (legacy alias kept for back-compat with the
+ *      first Q1.7 pass that shipped before the schema doc landed)
+ *    - `file:<path>` entries in tags (sugar for simple cases)
+ *  Any source can supply the list; the union is what we match on. */
 function extractFilePaths(node: LoreNode): string[] {
     const out = new Set<string>();
     const meta = parseMetadata(node.metadata);
-    const metaList = meta['filePaths'];
-    if (Array.isArray(metaList)) {
-        for (const item of metaList) {
-            if (typeof item === 'string' && item) out.add(item);
+    for (const key of ['trigger_paths', 'filePaths']) {
+        const list = meta[key];
+        if (Array.isArray(list)) {
+            for (const item of list) {
+                if (typeof item === 'string' && item) out.add(item);
+            }
         }
     }
     // Allow `file:src/foo.ts` style tags so authors don't need the
@@ -88,6 +93,16 @@ function extractFilePaths(node: LoreNode): string[] {
         if (t.startsWith('file:')) out.add(t.slice('file:'.length));
     }
     return Array.from(out);
+}
+
+/** Pull trigger_tags out of metadata. These are conceptual keywords
+ *  (not paths) that the author wants the surfacing layer to match on
+ *  alongside the free-text label/content/tags substring search. */
+function extractTriggerTags(node: LoreNode): string[] {
+    const meta = parseMetadata(node.metadata);
+    const list = meta['trigger_tags'];
+    if (!Array.isArray(list)) return [];
+    return list.filter((t): t is string => typeof t === 'string' && t.length > 0);
 }
 
 function ageDays(node: LoreNode): number {
@@ -131,7 +146,9 @@ export async function findDeferredMatches(
 
         let topicHit = false;
         if (!fileHit && topic) {
-            const hay = [node.label, node.content, node.tags].filter(Boolean).join(' ').toLowerCase();
+            const triggerTags = extractTriggerTags(node).join(' ');
+            const hay = [node.label, node.content, node.tags, triggerTags]
+                .filter(Boolean).join(' ').toLowerCase();
             topicHit = hay.includes(topic);
         }
 
