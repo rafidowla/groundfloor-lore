@@ -54,6 +54,7 @@ import type {
     TraversalResult,
     GraphStats,
 } from '../providers/types.js';
+import type { PluginCloudSchemaContext } from '../plugins/types.js';
 import { detectLanguage } from './language.js';
 
 /**
@@ -112,6 +113,18 @@ interface SdkClient {
     };
 }
 
+/**
+ * Q2.2 slice 4 — plugin cloud-schema hook entry handed to DataplaneGraph
+ * via `setPluginSchemaHooks`. The hook runs once per tenant's first touch,
+ * after core lore_node + lore_edge are in place. `plugin` is only used for
+ * error messages so operators can tell WHICH plugin's cloud schema failed
+ * when a push misbehaves.
+ */
+export interface PluginCloudSchemaHook {
+    plugin: string;
+    run: (ctx: PluginCloudSchemaContext) => Promise<void>;
+}
+
 export class DataplaneGraph implements GraphProvider {
     private readonly client: SdkClient;
     private readonly tenantProvider: TenantProvider;
@@ -125,12 +138,36 @@ export class DataplaneGraph implements GraphProvider {
      * concurrent first-hits don't race on createCollection.
      */
     private readonly tenantInit = new Map<string, Promise<void>>();
+    /**
+     * Q2.2 slice 4 — plugin-contributed schema hooks. Populated by
+     * server.ts after PluginRegistry.boot() (plugins don't exist when
+     * the adapter is first constructed). Empty until setPluginSchemaHooks
+     * is called; an empty list is a valid state — core collections
+     * still get pushed, plugin-owned collections simply don't.
+     */
+    private pluginSchemaHooks: PluginCloudSchemaHook[] = [];
 
     constructor(config: DataplaneGraphConfig) {
         this.client = config.client as unknown as SdkClient;
         this.tenantProvider = config.tenantProvider;
         this.orgId = config.orgId;
         this.connection = config.connection;
+    }
+
+    /**
+     * Q2.2 slice 4 — attach plugin cloud-schema hooks.
+     *
+     * Called from server.ts AFTER PluginRegistry.boot() and
+     * DataplaneGraph construction. Each hook runs exactly once per
+     * tenant (inside ensureTenantInitialized), after core collections.
+     *
+     * Replacing the list is allowed (e.g. hot-reload on config
+     * change); it only affects tenants that haven't been initialized
+     * yet. Already-initialized tenants keep whatever schema was
+     * pushed on their first touch — no retroactive migration.
+     */
+    setPluginSchemaHooks(hooks: PluginCloudSchemaHook[]): void {
+        this.pluginSchemaHooks = [...hooks];
     }
 
     /**
@@ -198,6 +235,31 @@ export class DataplaneGraph implements GraphProvider {
                 { name: 'created_at', field_type: 'string' },
             ],
         });
+
+        // Q2.2 slice 4 — fan out to plugin-contributed cloud schemas.
+        // Each hook receives a PluginCloudSchemaContext bound to this
+        // tenant. Plugin errors bubble so ensureTenantInitialized can
+        // drop the cached promise and retry on the next request (same
+        // retry semantics as core-collection failure).
+        if (this.pluginSchemaHooks.length > 0) {
+            const ctx: PluginCloudSchemaContext = {
+                tenantId,
+                orgId: this.orgId,
+                ensureCollection: (schema: unknown) => this.ensureCollection(tenantId, schema),
+            };
+            for (const hook of this.pluginSchemaHooks) {
+                try {
+                    await hook.run(ctx);
+                } catch (err) {
+                    // Annotate which plugin blew up so operators can
+                    // root-cause quickly from the daemon log line.
+                    const msg = (err as Error).message ?? String(err);
+                    throw new Error(
+                        `Plugin "${hook.plugin}" registerCloudSchema failed for tenant "${tenantId}": ${msg}`,
+                    );
+                }
+            }
+        }
     }
 
     private async ensureCollection(tenantId: string, schema: unknown): Promise<void> {
@@ -526,19 +588,29 @@ export class DataplaneGraph implements GraphProvider {
     }
 
     /**
-     * createPluginGraphContext — Slice-1 stub.
+     * createPluginGraphContext — cloud-mode plugin Cypher bridge.
      *
-     * Plugin-owned Cypher against a cloud tenant requires translating
-     * Kùzu Cypher to Dataplane's AQL/SQL surface via executeRaw, plus
-     * per-plugin schema provisioning. That's a later slice. For Q2.2
-     * slice 1, the cloud-mode daemon refuses plugin graph calls with a
-     * descriptive error; operators who need plugin features run local
-     * mode (Q2.1 default).
+     * Q2.2 status:
+     *   - slice 1: stub, blanket-throws on any call.
+     *   - slice 4: schema parity lands via `registerCloudSchema` hook
+     *     (plugin collections now exist in cloud mode), but OP routing
+     *     (translating Kùzu Cypher to Dataplane AQL/SQL via executeRaw)
+     *     is still out of scope. executeQuery/queryRows throw a
+     *     structured error that names the plugin operation for
+     *     root-causing; bumpEpoch is a no-op; detectLanguage is pure.
      *
-     * bumpEpoch() is a no-op — there is no in-proc read cache in cloud
-     * mode (Dataplane handles caching / change-feed invalidation).
-     * detectLanguage() is still pure (no graph access), so we delegate
-     * directly to the core detector.
+     * Why op routing is deferred:
+     *   The developer plugin runs ~25 distinct parameterized Cypher
+     *   patterns (MERGE, MATCH-WHERE-CONTAINS, rel-typed CREATE). Each
+     *   needs a faithful AQL/SQL translation. That's intentionally a
+     *   multi-PR slice — see the q2-2-slice-3 "SCOPE DEFERRED" list.
+     *   Operators who need plugin features today run cloud-mode with
+     *   ENABLE_PLUGINS_IN_CLOUD=never unset AND run the `developer`
+     *   plugin in local mode behind a separate daemon.
+     *
+     * The cypher snippet + params are attached to the thrown error so
+     * the daemon log line tells operators exactly which op to lift
+     * first when planning the next slice.
      */
     createPluginGraphContext(): {
         executeQuery(cypher: string, params?: Record<string, unknown>): Promise<unknown>;
@@ -546,16 +618,23 @@ export class DataplaneGraph implements GraphProvider {
         bumpEpoch(): void;
         detectLanguage(text: string, options?: { threshold?: number; minLength?: number }): { language: string | null; confidence: number };
     } {
-        const refuse = (): never => {
-            throw new Error(
-                'DataplaneGraph: plugin graph operations are not available in cloud mode ' +
-                '(Q2.2 slice 1). Run the daemon with LORE_DEPLOYMENT_MODE=local, or wait for ' +
-                'the plugin-cloud-parity slice.',
+        const refuse = (op: string, cypher: string): never => {
+            // Keep the snippet short in the error message — full query is
+            // on err.cypher for debuggers. One line for log-grep friendliness.
+            const snippet = cypher.trim().replace(/\s+/g, ' ').slice(0, 120);
+            const err = new Error(
+                `DataplaneGraph.${op} refused: plugin Cypher routing is not available in ` +
+                `cloud mode yet (Q2.2 slice 4 landed schema parity; op routing is a ` +
+                `follow-up). Cypher: "${snippet}${cypher.length > 120 ? '…' : ''}". ` +
+                `Run the daemon with LORE_DEPLOYMENT_MODE=local for plugin features, or ` +
+                `wait for the plugin-op-routing slice.`,
             );
+            (err as Error & { cypher?: string }).cypher = cypher;
+            throw err;
         };
         return {
-            executeQuery: async () => refuse(),
-            queryRows: async () => refuse(),
+            executeQuery: async (cypher: string) => refuse('executeQuery', cypher),
+            queryRows: async (cypher: string) => refuse('queryRows', cypher),
             bumpEpoch: () => { /* no-op in cloud mode */ },
             // Language detection is a pure function (no graph access).
             detectLanguage: (text: string, options?: { threshold?: number; minLength?: number }) => {

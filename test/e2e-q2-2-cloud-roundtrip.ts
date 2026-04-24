@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * e2e-q2-2-cloud-roundtrip.ts — Q2.2 cloud-mode roundtrip (slices 2 + 3).
+ * e2e-q2-2-cloud-roundtrip.ts — Q2.2 cloud-mode roundtrip (slices 2 + 3 + 4).
  *
  * Q2.2 wires both a graph adapter (slice 2) and a vector-store adapter
  * (slice 3) behind the Q2.1 mode flag. This e2e exercises the full
@@ -32,6 +32,16 @@
  *     Re-store "node-alpha". lore_verbatim row count stays at 1 (the
  *     updateByQuery → insert-on-0 path is idempotent across writes).
  *
+ *   Case E — plugin cloud-schema provisioning (slice 4):
+ *     Default config has the `developer` plugin active. Cloud mode wires
+ *     its `registerCloudSchema` hook into DataplaneGraph on boot; each
+ *     tenant's first touch fans out the 7 developer collections
+ *     (developer_code_symbol, developer_code_file, etc.) alongside the
+ *     core lore_node + lore_edge. Mock snapshot must show all
+ *     DEVELOPER_CLOUD_COLLECTIONS in both tenant-alpha and tenant-beta.
+ *     (Cypher→AQL op routing deferred to a follow-up slice; this case
+ *     covers schema parity only.)
+ *
  * The mock Dataplane is the test/helpers/mock-dataplane.ts shim.
  */
 
@@ -43,6 +53,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { startMockDataplane, type MockDataplane } from './helpers/mock-dataplane.js';
+import { DEVELOPER_CLOUD_COLLECTIONS } from '../packages/lore-plugin-developer/src/cloudSchema.js';
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const SERVER_ENTRY = path.join(REPO_ROOT, 'packages/lore/src/mcp/server.ts');
@@ -282,8 +293,34 @@ async function main(): Promise<void> {
         assert.equal(alphaVerbatim2, 1, `vector upsert should not duplicate; got ${alphaVerbatim2} rows`);
         console.log('  ok  vector upsert idempotency: re-ingest does not duplicate verbatim rows');
 
+        // — Case E: plugin cloud-schema provisioning (slice 4) —
+        console.log('— Case E: plugin cloud-schema provisioning (slice 4) —');
+        // The developer plugin is active by default (configManager default
+        // `plugins: ['developer']`). Cloud mode wires its registerCloudSchema
+        // hook into DataplaneGraph.setPluginSchemaHooks, and pushSchemaFor
+        // runs those hooks on each tenant's first touch. Cases A+C already
+        // touched tenant-alpha and tenant-beta. Every developer collection
+        // must therefore exist in both buckets (empty is fine — we're
+        // verifying schema parity, not data).
+        const snapPlugin = mock.snapshot();
+        for (const tenant of ['tenant-alpha', 'tenant-beta']) {
+            const bucket = snapPlugin.tenants.find((t) => t.tenantId === tenant);
+            assert.ok(bucket, `plugin-schema: tenant ${tenant} must have a bucket`);
+            const names = new Set(bucket!.collections.map((c) => c.name));
+            for (const expected of DEVELOPER_CLOUD_COLLECTIONS) {
+                assert.ok(
+                    names.has(expected),
+                    `plugin-schema: tenant ${tenant} missing collection "${expected}" (present: ${[...names].sort().join(', ')})`,
+                );
+            }
+        }
+        console.log(
+            `  ok  plugin cloud schema: developer plugin's ${DEVELOPER_CLOUD_COLLECTIONS.length} ` +
+            `collections provisioned in both tenant buckets`,
+        );
+
         console.log('');
-        console.log('all Q2.2 slice-2 + slice-3 cases passed ✓');
+        console.log('all Q2.2 slice-2 + slice-3 + slice-4 cases passed ✓');
     } finally {
         cleanup(h);
         await mock.close();

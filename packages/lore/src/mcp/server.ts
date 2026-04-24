@@ -288,6 +288,24 @@ const pluginRegistry = new PluginRegistry(configManager);
 pluginRegistry.boot();
 console.error(`[Lore MCP] Plugins active: ${configManager.read().plugins.join(', ') || '(none)'}`);
 
+// Q2.2 slice 4 — Attach plugin cloud-schema hooks to DataplaneGraph.
+// LocalGraph doesn't need this: its schema push runs via the Kùzu-oriented
+// `registerSchema` hook through pluginRegistry.registerSchemas() inside
+// main(). In cloud mode the Cypher path doesn't apply, so plugins that
+// want cloud parity implement the separate `registerCloudSchema` hook
+// and DataplaneGraph fans them out on each tenant's first touch.
+if (deploymentMode === 'cloud') {
+    const cloudHooks = pluginRegistry.collectCloudSchemaHooks();
+    (graph as DataplaneGraph).setPluginSchemaHooks(cloudHooks);
+    if (cloudHooks.length > 0) {
+        console.error(
+            `[Lore MCP] Cloud plugin schemas ready: ${cloudHooks.map((h) => h.plugin).join(', ')}`,
+        );
+    } else {
+        console.error('[Lore MCP] No plugins declared cloud schemas (plugin ops remain local-mode-only)');
+    }
+}
+
 // V2.2: seed the embedded-model keep-hot flag from persisted config on
 // boot. PATCH /api/config updates it at runtime (see that handler).
 setEmbeddedModelKeepHot(Boolean(configManager.read().keepEmbeddedModelHot));
@@ -371,6 +389,14 @@ async function maybeUpgradeAdapterFromKeychain(): Promise<'keychain' | 'env' | '
             tenantProvider: () => requireCurrentTenantId(),
             orgId,
         });
+        // Q2.2 slice 4 — Re-attach plugin cloud-schema hooks to the
+        // rebuilt DataplaneGraph. The hooks are per-adapter state (not
+        // global), so the keychain-upgraded graph would otherwise start
+        // fresh with no plugin schemas. pluginRegistry is already booted
+        // at this point, so collecting hooks is cheap and sync.
+        (graph as DataplaneGraph).setPluginSchemaHooks(
+            pluginRegistry.collectCloudSchemaHooks(),
+        );
     }
     return 'keychain';
 }

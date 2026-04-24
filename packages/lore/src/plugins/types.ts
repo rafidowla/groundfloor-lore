@@ -63,6 +63,45 @@ export interface PluginGraphContext {
 }
 
 /**
+ * PluginCloudSchemaContext — Q2.2 slice 4. Narrow surface plugins use to
+ * provision their owned collections against the Dataplane when the daemon
+ * runs in cloud mode. Handed to `registerCloudSchema`.
+ *
+ * Shape and idempotency mirror DataplaneGraph's core collection push:
+ *   - ensureCollection swallows "already exists"/409 errors so the hook is
+ *     safe to call on every tenant's first touch, including tenants whose
+ *     collections were provisioned in a prior daemon.
+ *   - tenantId is resolved per-hook-call by the adapter; plugins never
+ *     read AsyncLocalStorage themselves.
+ *   - orgId is the ReBAC partitioning key the Lore daemon stamps onto
+ *     every record; plugins should include it on collections that carry
+ *     org-scoped rows (same convention as lore_node/lore_edge).
+ *
+ * This is intentionally a different context from `PluginGraphContext`:
+ *   - PluginGraphContext is Cypher-oriented (embedded Kùzu shape).
+ *   - PluginCloudSchemaContext is Dataplane-CollectionSchema-oriented.
+ *
+ * A plugin that wants cloud parity implements BOTH hooks with the same
+ * logical schema expressed in each backend's vocabulary. The schemas do
+ * NOT need to be bit-identical — e.g. Kùzu `INT32` vs Dataplane `int`.
+ */
+export interface PluginCloudSchemaContext {
+    /** Tenant the collections are provisioned for (per-request). */
+    readonly tenantId: string;
+    /** Org id callers should stamp onto rows + index for ReBAC. */
+    readonly orgId: string;
+    /**
+     * Idempotent schema push. `schema` is a Dataplane CollectionSchema
+     * object (`{ name, fields: [{ name, field_type, primary_key?, … }] }`).
+     * "already exists" / 409 responses are swallowed. Any other error
+     * rejects the promise — the adapter then drops its cached init
+     * promise so the next request retries instead of latching a
+     * permanent failed state.
+     */
+    ensureCollection(schema: unknown): Promise<void>;
+}
+
+/**
  * EmbeddableNode — What plugins hand back from `contributeReconnectNodes`.
  * The id is already prefixed (e.g. `file:src/foo.ts`, `symbol:abc123`) so
  * a single vector search returns hits across all pillars and the core
@@ -357,6 +396,33 @@ export interface ILorePlugin {
      * Returning an error throws the boot — collisions here are fatal.
      */
     registerSchema?(ctx: PluginGraphContext): Promise<void>;
+
+    /**
+     * Q2.2 slice 4 — cloud-mode schema provisioning.
+     *
+     * Invoked once per tenant on the tenant's first touch to Dataplane
+     * (DataplaneGraph's per-tenant lazy init), AFTER the core
+     * `lore_node` + `lore_edge` collections are in place. Plugins declare
+     * their own collections using the Dataplane `CollectionSchema` shape
+     * (`{ name, fields: [...] }`). The schemas are pushed via
+     * `ctx.ensureCollection`, which is idempotent on "already exists" —
+     * safe for repeat boots against provisioned tenants.
+     *
+     * Naming convention: `${pluginName}_${kind}` (kebab/snake your
+     * choice, but lowercase) to prevent cross-plugin collisions in a
+     * shared Dataplane tenant. e.g. `developer_code_symbol`,
+     * `developer_code_file`.
+     *
+     * Plugins that don't implement this hook skip the push — their
+     * graph ops are still not available in cloud mode (Cypher→AQL
+     * translation is a later slice), but core's own collections and
+     * any other plugins' collections still get provisioned.
+     *
+     * Local mode (LocalGraph) never calls this hook — `registerSchema`
+     * covers that backend. A plugin supporting cloud parity must
+     * implement BOTH.
+     */
+    registerCloudSchema?(ctx: PluginCloudSchemaContext): Promise<void>;
 
     /**
      * V2.1 — contribute additional nodes to the reconnect pass's vector

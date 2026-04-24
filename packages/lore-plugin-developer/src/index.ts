@@ -23,6 +23,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type {
     AnalyticalProjection,
     ILorePlugin,
+    PluginCloudSchemaContext,
     PluginContext,
     PluginGraphContext,
     PluginTelemetryPayload,
@@ -30,6 +31,7 @@ import type {
     ReconnectEdgeProposal,
 } from '@lore-core/plugins/types.js';
 import { registerDeveloperSchema } from './schema.js';
+import { registerDeveloperCloudSchema } from './cloudSchema.js';
 import { pruneInferredDeveloperEdges } from './operations.js';
 import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology, recalibrateDeveloperNode } from './reconnect.js';
 import { buildDeveloperApi, bindApiSelfReference, type DeveloperApi } from './api.js';
@@ -121,6 +123,27 @@ export const developerPlugin: ILorePlugin = {
         const api = buildDeveloperApi(ctx);
         bindApiSelfReference(api);
         (developerPlugin as ILorePlugin & { api?: DeveloperApi }).api = api;
+    },
+
+    /**
+     * Q2.2 slice 4 — cloud-mode schema push.
+     *
+     * Invoked by DataplaneGraph on each tenant's first touch, AFTER
+     * core lore_node / lore_edge collections are provisioned. Lands 7
+     * developer-owned collections that mirror the 7 Kùzu tables this
+     * plugin declares in ./schema.ts. Idempotent on "already exists" —
+     * safe across daemon restarts and across many tenants.
+     *
+     * Plugin operations (MERGE/MATCH/CREATE Cypher over these
+     * collections) are NOT yet routed in cloud mode — that's a
+     * follow-up slice (see createPluginGraphContext stub on
+     * DataplaneGraph). This slice establishes schema parity so the
+     * collections EXIST when op routing lands, and so operators
+     * enabling cloud mode today see their tenant's schema land
+     * without manual provisioning.
+     */
+    async registerCloudSchema(ctx: PluginCloudSchemaContext): Promise<void> {
+        await registerDeveloperCloudSchema(ctx);
     },
 
     /**
