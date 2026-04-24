@@ -14,10 +14,12 @@
         "cli": "tsx packages/lore/src/cli/index.ts",
         "test:http": "tsx test/http-test.ts",
         "test:arch": "node scripts/test-arch.mjs",
+        "test:cache": "tsx test/cache-unit.ts",
+        "bench:cache": "node scripts/bench-cache.mjs",
         "test:e2e:phase-7a": "tsx test/e2e-phase-7a.ts",
         "test:e2e:language": "tsx test/e2e-language.ts",
         "test:e2e:all": "tsx test/run-all-e2e.ts",
-        "test": "npm run test:arch && tsc --noEmit"
+        "test": "npm run test:arch && npm run test:cache && tsc --noEmit"
     },
     "dependencies": {
         "@hono/node-server": "^1.19.14",
