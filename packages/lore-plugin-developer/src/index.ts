@@ -446,7 +446,7 @@ export const developerPlugin: ILorePlugin = {
                 async run(ctx: PluginGraphContext) {
                     const rows = await ctx.queryRows(
                         `MATCH (f:CodeFile)-[:FileContains]->(s:CodeSymbol)
-                         RETURN f.relPath AS file_path, f.id AS file_id, count(s) AS symbol_count
+                         RETURN f.path AS file_path, f.path AS file_id, count(s) AS symbol_count
                          ORDER BY symbol_count DESC
                          LIMIT 50`,
                         {},
