@@ -120,6 +120,23 @@ Retires `deferred-plugin-recalibrate-hook` from the last V2 follow-up commit.
 
 **Dependency:** Q1.2, Q1.4.
 
+### Q1.9 — Semantic zoom for topology canvas (project-blob LOD)
+Single-globe-per-workspace renders fine at ~500 nodes, starts thrashing ForceAtlas2 at ~5k, and becomes unusable at the firm 20k hard cap. Introduce level-of-detail rendering on the existing SigmaCanvas: zoomed out shows one blob per project (size = node count, position = ForceAtlas2 run on the aggregate project-to-project graph with cross-project edge counts). Click/double-click a blob → camera animates in, siblings fade to background. Zoomed in = today's experience, unchanged.
+
+Preserves Q1.6's single-canvas discipline — no page navigation, no layout thrash on drill-in, no new route. Cross-project edges remain visible at overview level as aggregate bundles (thickness = count, clickable to reveal the underlying node-to-node links). Implemented via sigma.js `reducer` functions + `camera.animate` — no new renderer, no schema change.
+
+New endpoint: `GET /api/topology/overview?groupBy=project` returning `{ blobs: [{project, nodeCount, centerX, centerY}], aggregateEdges: [{fromProject, toProject, count}] }`. Server-side aggregation on local Kùzu (airplane-safe). Uses the existing `project` field on every node — no migration.
+
+**Acceptance:**
+- Landing workspace view renders as project-blobs (not full node graph) when workspace node count exceeds a configurable threshold (default 1000)
+- Click/double-click a blob animates camera into that project's subgraph within 300ms; sibling blobs dim but remain on canvas
+- Cross-project aggregate edges render at overview; clicking one reveals the underlying node-to-node links without leaving the canvas
+- "Back to overview" control (breadcrumb or zoom-out affordance) returns to blob view without triggering re-layout
+- Airplane-mode: works (aggregation is a local Kùzu query; rendering is client-side)
+- Below threshold, canvas still renders the full single-globe view — no regression for small workspaces (developer plugin today at ~486 nodes)
+
+**Dependency:** Q1.6.
+
 ---
 
 ## Q2 — Cloud / enterprise, server mode
@@ -223,13 +240,14 @@ Lore ships as a single accelerator: service + MCP + skills + admin UI. One-comma
 ```
 V2 ship
   └─▶ Q1.1 Dataplane runtime binding
-        ├─▶ Q1.2 boundary cleanup ─▶ Q1.4 portable IR ─▶ Q1.5 analytical ─▶ Q1.6 A2UI
+        ├─▶ Q1.2 boundary cleanup ─▶ Q1.4 portable IR ─▶ Q1.5 analytical ─▶ Q1.6 A2UI ─▶ Q1.9 semantic zoom
         │                              └─▶ Q1.8 recalibrate hook
         └─▶ Q2.1 server mode ─▶ Q2.2 cloud storage ─▶ Q2.3 Redis cache ─▶ Q2.4 voice
                               └─▶ Q2.5 SpiceDB ─▶ Q2.6 Client Portal ─▶ Q2.8 accelerator
 
 Parallel-able against main path: Q1.3 local cache, Q1.7 deferred surfacing.
 A2UI richer renderers (Q2.7) parallel to Q2.1–Q2.6 once Q1.6 ships.
+Q1.9 semantic zoom can ship independently any time after Q1.6 — no downstream blockers.
 ```
 
 **Demo milestones:**
