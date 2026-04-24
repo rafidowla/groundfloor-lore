@@ -100,6 +100,35 @@ export interface LoreConfig {
         enabled: boolean;
         perPluginOptOut: string[];
     };
+
+    /**
+     * Q1.3 — local read-cache tier (in-proc LRU + TTL).
+     *
+     *   enabled: master switch. When false, the cache is constructed
+     *            in pass-through mode — every read hits the graph.
+     *            Kept for troubleshooting; off is never the recommended
+     *            default because the cache is process-local and free.
+     *   ttlSeconds: entry lifetime before the next read misses. Default
+     *               60 seconds matches a user-session-level expectation:
+     *               "a write I did is immediately visible; results I
+     *               read go stale within the minute if nobody else
+     *               touches them." Range clamped to 1..3600 at load.
+     *   maxEntries: LRU ceiling. Default 500 — typical hot-path work
+     *               repeats within that window (search + listNodes +
+     *               getNode fanout during recall). Range 16..50_000.
+     *
+     * Environment override: LORE_CACHE_DISABLED=1 wins over the
+     * setting and forces pass-through. Used by the benchmark harness
+     * to get a clean cold baseline; available as an operator lever.
+     *
+     * Default: enabled with the numbers above. Airplane-safe — cache
+     * is 100% in-proc; no network, no disk.
+     */
+    localCache?: {
+        enabled: boolean;
+        ttlSeconds: number;
+        maxEntries: number;
+    };
 }
 
 export const DEFAULT_CONFIG: LoreConfig = {
@@ -123,6 +152,15 @@ export const DEFAULT_CONFIG: LoreConfig = {
     analyticalProjections: {
         enabled: true,
         perPluginOptOut: [],
+    },
+    // Q1.3 — local in-proc LRU read cache, default-on. See
+    // docs/cache-key-contract.md for the shape; shipped values match
+    // the ones wired in LocalGraph's constructor defaults so disk
+    // config and code defaults don't drift.
+    localCache: {
+        enabled: true,
+        ttlSeconds: 60,
+        maxEntries: 500,
     },
 };
 
@@ -176,6 +214,7 @@ export class ConfigManager {
             'keepEmbeddedModelHot',
             'autoExecuteChatActions',
             'analyticalProjections',
+            'localCache',
         ];
         const next: LoreConfig = { ...current };
         for (const key of allowed) {

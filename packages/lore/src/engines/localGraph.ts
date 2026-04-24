@@ -147,7 +147,15 @@ export class LocalGraph implements GraphProvider {
      */
     constructor(
         basePath: string,
-        opts: { workspaceId?: string; cacheMaxSize?: number; cacheTtlMs?: number } = {},
+        opts: {
+            workspaceId?: string;
+            cacheMaxSize?: number;
+            cacheTtlMs?: number;
+            /** Q1.3 — force pass-through mode from Settings (localCache.enabled=false).
+             *  The env killswitch LORE_CACHE_DISABLED=1 still wins for operator
+             *  override; this option is the normal user-settings path. */
+            cacheDisabled?: boolean;
+        } = {},
     ) {
         const loreDir = path.join(basePath, '.lore');
         fs.mkdirSync(loreDir, { recursive: true });
@@ -161,13 +169,31 @@ export class LocalGraph implements GraphProvider {
         this.readCache = new ReadCache({
             maxSize: opts.cacheMaxSize ?? 500,
             ttlMs: opts.cacheTtlMs ?? 60_000,
-            disabled: process.env.LORE_CACHE_DISABLED === '1',
+            disabled: process.env.LORE_CACHE_DISABLED === '1' || opts.cacheDisabled === true,
         });
     }
 
     /** Cache-instrumentation for admin/benchmark callers. */
     getCacheStats(): CacheStats {
         return this.readCache.stats();
+    }
+
+    /** Runtime reconfig hook — PATCH /api/config forwards the Settings
+     *  cache block here so toggling on/off, TTL, and max-entries takes
+     *  effect immediately, no daemon restart. The env killswitch
+     *  LORE_CACHE_DISABLED=1 still forces disabled regardless. */
+    reconfigureCache(opts: { enabled?: boolean; ttlSeconds?: number; maxEntries?: number }): void {
+        const patch: { disabled?: boolean; ttlMs?: number; maxSize?: number } = {};
+        if (typeof opts.enabled === 'boolean') {
+            patch.disabled = opts.enabled === false || process.env.LORE_CACHE_DISABLED === '1';
+        }
+        if (typeof opts.ttlSeconds === 'number') {
+            patch.ttlMs = Math.max(1, Math.min(3600, opts.ttlSeconds)) * 1000;
+        }
+        if (typeof opts.maxEntries === 'number') {
+            patch.maxSize = Math.max(16, Math.min(50_000, opts.maxEntries));
+        }
+        this.readCache.configure(patch);
     }
 
     /**

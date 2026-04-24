@@ -108,9 +108,9 @@ export interface CacheOptions {
  */
 export class ReadCache {
     private readonly map = new Map<string, CacheEntry<unknown>>();
-    private readonly maxSize: number;
-    private readonly ttlMs: number;
-    private readonly disabled: boolean;
+    private maxSize: number;
+    private ttlMs: number;
+    private disabled: boolean;
     private _epoch = 0;
     private _hits = 0;
     private _misses = 0;
@@ -187,6 +187,31 @@ export class ReadCache {
     clear(): void {
         if (this.map.size > 0) this._invalidations += 1;
         this.map.clear();
+    }
+
+    /** Runtime reconfiguration — used by PATCH /api/config so the
+     *  Settings toggle takes effect without a daemon restart. Shrinks
+     *  the LRU on the spot if the new maxSize is smaller; flipping the
+     *  disabled bit clears the map so stale entries can't leak past a
+     *  disable. TTL changes only affect future inserts (existing
+     *  entries keep the TTL they were inserted with). */
+    configure(opts: Partial<CacheOptions>): void {
+        if (typeof opts.maxSize === 'number' && opts.maxSize > 0) {
+            this.maxSize = opts.maxSize;
+            while (this.map.size > this.maxSize) {
+                const oldest = this.map.keys().next().value;
+                if (oldest === undefined) break;
+                this.map.delete(oldest);
+                this._evictions += 1;
+            }
+        }
+        if (typeof opts.ttlMs === 'number' && opts.ttlMs > 0) {
+            this.ttlMs = opts.ttlMs;
+        }
+        if (typeof opts.disabled === 'boolean') {
+            if (opts.disabled && !this.disabled) this.clear();
+            this.disabled = opts.disabled;
+        }
     }
 
     stats(): CacheStats {

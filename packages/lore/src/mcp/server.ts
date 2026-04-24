@@ -177,10 +177,24 @@ const domainSchema = schemaLoader.get();
 const nodeTypesEnum = z.enum(domainSchema.nodeTypes as [string, ...string[]]);
 const edgeRelationsEnum = z.enum(domainSchema.edgeRelations as [string, ...string[]]);
 
-const graph = new LocalGraph(graphBasePath);
-const verbatimStore = new VerbatimStore(graphBasePath);
+// Settings are read BEFORE graph construction so Q1.3 cache knobs
+// (enabled / ttlSeconds / maxEntries) flow into the ReadCache at
+// construction time. LORE_CACHE_DISABLED=1 still wins as the operator
+// killswitch inside LocalGraph; the settings path is the normal one.
 const loreDir = path.join(graphBasePath, '.lore');
 const configManager = new ConfigManager(loreDir);
+const bootConfig = configManager.read();
+const cacheCfg = bootConfig.localCache;
+const cacheTtlMs = Math.max(1, Math.min(3600, cacheCfg?.ttlSeconds ?? 60)) * 1000;
+const cacheMaxSize = Math.max(16, Math.min(50_000, cacheCfg?.maxEntries ?? 500));
+const cacheDisabled = cacheCfg?.enabled === false;
+
+const graph = new LocalGraph(graphBasePath, {
+    cacheTtlMs,
+    cacheMaxSize,
+    cacheDisabled,
+});
+const verbatimStore = new VerbatimStore(graphBasePath);
 const pluginRegistry = new PluginRegistry(configManager);
 pluginRegistry.boot();
 console.error(`[Lore MCP] Plugins active: ${configManager.read().plugins.join(', ') || '(none)'}`);
@@ -2496,6 +2510,13 @@ async function main(): Promise<void> {
                         // rather than the incoming update to avoid partial
                         // patches leaving stale state.
                         setEmbeddedModelKeepHot(Boolean(next.keepEmbeddedModelHot));
+                        // Q1.3 — mirror the read-cache settings to the
+                        // running LocalGraph so a Settings flip takes
+                        // effect without a daemon restart. The env
+                        // killswitch LORE_CACHE_DISABLED=1 still wins.
+                        if (next.localCache) {
+                            graph.reconfigureCache(next.localCache);
+                        }
                         if (typeof apiKey === 'string' && apiKey.length > 0) {
                             const ok = await setApiKey(next.llmProvider, apiKey);
                             if (!ok) {
