@@ -1251,6 +1251,7 @@ export class LocalGraph implements GraphProvider {
     createPluginGraphContext(): {
         executeQuery(cypher: string, params?: Record<string, unknown>): Promise<unknown>;
         queryRows(cypher: string, params?: Record<string, unknown>): Promise<Array<Record<string, unknown>>>;
+        bumpEpoch(): void;
         detectLanguage(text: string, options?: { threshold?: number; minLength?: number }): { language: string | null; confidence: number };
     } {
         return {
@@ -1275,6 +1276,16 @@ export class LocalGraph implements GraphProvider {
                 }
                 const rows = await result.getAll();
                 return rows as Array<Record<string, unknown>>;
+            },
+            // Q1.3 — plugins that write via raw Cypher must call this
+            // after a CREATE / MERGE / DELETE / SET so core's read cache
+            // drops stale rows. Core's own writes bump internally; plugins
+            // reach the same epoch counter through this hook. See
+            // src/plugins/types.ts :: PluginGraphContext.bumpEpoch for
+            // the contract and the `deferred-plugin-graph-context-bumpepoch-hook`
+            // node for the full rationale.
+            bumpEpoch: () => {
+                this.readCache.bumpEpoch();
             },
             // Phase A (V2.2) — expose the language-detection capability
             // to plugins. See docs/LANGUAGE_DETECTION.md for the contract:

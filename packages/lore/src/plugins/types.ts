@@ -42,6 +42,24 @@ export interface PluginGraphContext {
      * plugin. Returns an array of plain objects keyed by the RETURN names.
      */
     queryRows(cypher: string, params?: Record<string, unknown>): Promise<Array<Record<string, unknown>>>;
+
+    /**
+     * Q1.3 — Invalidate the core read cache.
+     *
+     * Plugin authors MUST call this after any `executeQuery` that runs
+     * a CREATE / MERGE / DELETE / SET / DETACH DELETE — anything that
+     * mutates graph state. Core's own write paths bump the cache epoch
+     * automatically via LocalGraph.*, but when plugins reach for raw
+     * Cypher through this context, core can't observe the mutation.
+     * Without an explicit bump, cached reads (getNode, search, listNodes,
+     * traverse) can return stale results until the next core write.
+     *
+     * Pure-read executeQuery calls do NOT need to bump.
+     *
+     * The operation is constant-time (monotonic counter increment) and
+     * safe to call multiple times in a transaction.
+     */
+    bumpEpoch(): void;
 }
 
 /**
