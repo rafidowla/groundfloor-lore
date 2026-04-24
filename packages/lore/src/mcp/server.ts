@@ -576,8 +576,9 @@ mcpServer.tool(
         topic: z.string().describe('Topic to recall (e.g., "BaaSClient", "auth conventions")'),
         depth: z.number().optional().describe('Traversal depth from each search result (default: 1)'),
         queryLanguage: z.string().optional().describe('ISO 639-1 code for the query language. Same semantics as `search` — optional; adds a cross-language hint to the response when the corpus is mostly in a different language.'),
+        filePaths: z.array(z.string()).optional().describe('Q1.7: file paths from the current work context (e.g. from a PostToolUse edit hook). Any deferred-* node whose stored file list overlaps these paths is auto-surfaced in the `deferred` sidecar field, even if it doesn\'t match the topic text.'),
     },
-    async ({ topic, depth, queryLanguage }) => {
+    async ({ topic, depth, queryLanguage, filePaths }) => {
         try {
             const verbatimCount = await verbatimStore.count();
             let seedNodeIds: string[] = [];
@@ -598,6 +599,13 @@ mcpServer.tool(
                 }
             }
 
+            // Q1.7 — deferred-Lore surfacing. Run alongside the search
+            // so it fires even when the topic itself returns zero hits
+            // (the PostToolUse hook often passes a filepath with no
+            // conceptual topic — still surface the deferred work).
+            const { findDeferredMatches } = await import('../engines/deferred.js');
+            const deferredMatches = await findDeferredMatches(graph, { topic, filePaths });
+
             if (searchResults.length === 0) {
                 const earlyHint = queryLanguage ? await buildLanguageHint(queryLanguage) : null;
                 return {
@@ -608,6 +616,7 @@ mcpServer.tool(
                             scope: { project: detectedScope.project, ecosystem: detectedScope.ecosystem },
                             message: `No knowledge found for topic '${topic}'.`,
                             results: [],
+                            ...(deferredMatches.length > 0 ? { deferred: deferredMatches } : {}),
                             ...(earlyHint ? { hint: earlyHint } : {}),
                         }, null, 2),
                     }],
@@ -660,7 +669,59 @@ mcpServer.tool(
                             project: item.node.project, source: item.source,
                             language: item.node.language ?? null,
                         })),
+                        ...(deferredMatches.length > 0 ? { deferred: deferredMatches } : {}),
                         ...(hint ? { hint } : {}),
+                    }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: resolve_deferred (Q1.7) ───────────────────────────── */
+//
+// Closes a deferred-* Lore node by stamping metadata.resolved_at (and
+// optionally metadata.resolved_by_commit). The node stays in the graph
+// for historical context; subsequent `recall()` calls simply skip
+// resolved items in their deferred-sidecar scan.
+//
+// This is the counter-side of the surfacing behavior: the point of
+// Q1.7 is not just "Claude sees deferred work" but also "Claude can
+// mark it done once the work lands." A human-maintained status field
+// in markdown would drift; the MCP round-trip keeps the canonical
+// state in Kùzu.
+
+mcpServer.tool(
+    'resolve_deferred',
+    'Mark a deferred-* Lore node as resolved. Stamps metadata.resolved_at (ISO timestamp) and optionally metadata.resolved_by_commit. After resolving, `recall()` no longer auto-surfaces the node.',
+    {
+        id: z.string().describe('Deferred node ID (must start with "deferred-")'),
+        commit: z.string().optional().describe('Optional commit SHA that resolved the deferred work'),
+    },
+    async ({ id, commit }) => {
+        try {
+            const { stampResolved } = await import('../engines/deferred.js');
+            const result = await stampResolved(graph, id, commit);
+            if (!result) {
+                return {
+                    content: [{ type: 'text' as const, text: `Deferred node '${id}' not found.` }],
+                    isError: true,
+                };
+            }
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        id: result.node.id,
+                        label: result.node.label,
+                        resolved_at: result.metadata['resolved_at'],
+                        resolved_by_commit: result.metadata['resolved_by_commit'] ?? null,
+                        message: `Deferred node '${id}' stamped as resolved.`,
                     }, null, 2),
                 }],
             };
