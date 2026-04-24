@@ -30,7 +30,7 @@ import type {
 } from '@lore-core/plugins/types.js';
 import { registerDeveloperSchema } from './schema.js';
 import { pruneInferredDeveloperEdges } from './operations.js';
-import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology } from './reconnect.js';
+import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology, recalibrateDeveloperNode } from './reconnect.js';
 import { buildDeveloperApi, bindApiSelfReference, type DeveloperApi } from './api.js';
 import { registerDeveloperTools } from './tools.js';
 
@@ -134,6 +134,20 @@ export const developerPlugin: ILorePlugin = {
 
     async contributeTopology(ctx: PluginGraphContext, limit: number) {
         return await contributeDeveloperTopology(ctx, limit);
+    },
+
+    /**
+     * Q1.8 — Plugin recalibrate hook. Handles `file:<path>` and
+     * `symbol:<uid>` markers. Returns null for any other prefix so
+     * the server's dispatcher can try the next plugin.
+     *
+     * Implementation lives in `./reconnect.ts` alongside the full
+     * reconnect pass — recalibrate is the single-node variant of the
+     * same flow, and keeping them in one module lets them share the
+     * embedding/enrichment machinery.
+     */
+    async recalibrate(markerId: string, ctx: PluginContext) {
+        return await recalibrateDeveloperNode(markerId, ctx);
     },
 
     /**

@@ -322,4 +322,39 @@ export interface ILorePlugin {
      * same instruction.
      */
     contributeSystemPrompt?(ctx: PluginContext): string | null;
+
+    /**
+     * Q1.8 — Plugin recalibrate hook. Given a plugin-owned node marker
+     * (e.g. `file:src/foo.ts`, `symbol:<uid>`), rebuild the node's
+     * semantic edges against the latest graph state. Called by the
+     * /api/chat/action `reconnect_node` dispatcher when the node id
+     * carries a non-core prefix.
+     *
+     * Return shape mirrors core `reconnectOneNode`:
+     *   { added: <edges written>, confidences: <sim scores, 0..1> }
+     *
+     * Return `null` when this plugin doesn't own the marker's prefix —
+     * the server iterates remaining plugins until one claims it or all
+     * return null (in which case the dispatcher responds with 400).
+     *
+     * The hook is intentionally given a `PluginContext` (not just
+     * PluginGraphContext) so plugins can reach the verbatim store,
+     * syncEngine, etc. without another indirection. `ctx.graph` is the
+     * LocalGraph; `ctx.verbatimStore` is the VerbatimStore. Plugins
+     * cast to the concrete types they already import directly.
+     *
+     * Implementations should:
+     *   1. Check the marker prefix; return null if unrecognized.
+     *   2. Look up the node in the plugin's own tables.
+     *   3. Build embedding text and re-store via verbatim with the
+     *      plugin's canonical prefixed id.
+     *   4. Run a vector search, filter by minSim, and route matches
+     *      through the same `routeReconnectEdge` path used by the
+     *      full reconnect pass (or whatever plugin-specific rel tables
+     *      apply).
+     */
+    recalibrate?(
+        markerId: string,
+        ctx: PluginContext,
+    ): Promise<{ added: number; confidences: number[] } | null>;
 }

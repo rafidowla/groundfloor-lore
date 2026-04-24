@@ -2206,38 +2206,94 @@ async function main(): Promise<void> {
 
                         if (action === 'reconnect_node') {
                             const rawId = typeof params['nodeId'] === 'string' ? (params['nodeId'] as string) : '';
-                            const nodeId = rawId.startsWith('lore:') ? rawId.slice('lore:'.length) : rawId;
-                            if (!nodeId) {
+                            if (!rawId) {
                                 statusCode = 400;
                                 responseBody = { error: 'nodeId required' };
                                 auditResult = 'denied-by-policy';
                                 auditResultDetail = 'missing nodeId';
                             } else {
-                                const node = await graph.getNode(nodeId);
-                                if (!node) {
-                                    statusCode = 404;
-                                    responseBody = { error: `node '${nodeId}' not found` };
-                                    auditResult = 'denied-by-policy';
-                                    auditResultDetail = `node not found: ${nodeId}`;
+                                // Q1.8 — prefix routing. `lore:` or no prefix →
+                                // core LoreNode + reconnectOneNode. Any other
+                                // `<prefix>:<id>` shape → dispatch to the first
+                                // active plugin whose `recalibrate` claims it.
+                                // This replaces the old 404 on plugin-owned nodes
+                                // (file:, symbol:) and makes Recalibrate work on
+                                // CodeFile / CodeSymbol drawer entries.
+                                const isCoreId = rawId.startsWith('lore:') || !rawId.includes(':');
+                                if (isCoreId) {
+                                    const nodeId = rawId.startsWith('lore:') ? rawId.slice('lore:'.length) : rawId;
+                                    const node = await graph.getNode(nodeId);
+                                    if (!node) {
+                                        statusCode = 404;
+                                        responseBody = { error: `node '${nodeId}' not found` };
+                                        auditResult = 'denied-by-policy';
+                                        auditResultDetail = `node not found: ${nodeId}`;
+                                    } else {
+                                        const result = await reconnectOneNode(graph, verbatimStore, pluginRegistry, {
+                                            id: node.id,
+                                            label: node.label,
+                                            content: node.content,
+                                            tags: node.tags,
+                                            type: node.type,
+                                            project: node.project,
+                                            ecosystem: node.ecosystem,
+                                        });
+                                        responseBody = {
+                                            ok: true,
+                                            action: 'reconnect_node',
+                                            nodeId,
+                                            label: node.label,
+                                            edgesAdded: result.added,
+                                            confidences: result.confidences,
+                                        };
+                                        auditResultDetail = `edgesAdded=${result.added}`;
+                                    }
                                 } else {
-                                    const result = await reconnectOneNode(graph, verbatimStore, pluginRegistry, {
-                                        id: node.id,
-                                        label: node.label,
-                                        content: node.content,
-                                        tags: node.tags,
-                                        type: node.type,
-                                        project: node.project,
-                                        ecosystem: node.ecosystem,
-                                    });
-                                    responseBody = {
-                                        ok: true,
-                                        action: 'reconnect_node',
-                                        nodeId,
-                                        label: node.label,
-                                        edgesAdded: result.added,
-                                        confidences: result.confidences,
+                                    // Plugin-owned marker. Iterate active plugins;
+                                    // first non-null return wins. If none handle,
+                                    // 400 — this is a misrouted action, not a
+                                    // missing node.
+                                    const pluginCtx = {
+                                        graph,
+                                        verbatimStore,
+                                        syncEngine,
+                                        syncAdapter: adapter,
+                                        schemaLoader,
+                                        scope: detectedScope,
+                                        loreDir,
                                     };
-                                    auditResultDetail = `edgesAdded=${result.added}`;
+                                    let handled: { added: number; confidences: number[] } | null = null;
+                                    let handledBy = '';
+                                    for (const plugin of pluginRegistry.active()) {
+                                        if (typeof plugin.recalibrate !== 'function') continue;
+                                        try {
+                                            const r = await plugin.recalibrate(rawId, pluginCtx);
+                                            if (r) {
+                                                handled = r;
+                                                handledBy = plugin.name;
+                                                break;
+                                            }
+                                        } catch (recErr) {
+                                            console.error(`[/api/chat/action] plugin '${plugin.name}'.recalibrate threw for '${redactId(rawId)}': ${redactError(recErr)}`);
+                                        }
+                                    }
+                                    if (!handled) {
+                                        statusCode = 400;
+                                        responseBody = { error: `no active plugin claims prefix for '${rawId}'` };
+                                        auditResult = 'denied-by-policy';
+                                        auditResultDetail = `no plugin route: ${rawId}`;
+                                    } else {
+                                        responseBody = {
+                                            ok: true,
+                                            action: 'reconnect_node',
+                                            nodeId: rawId,
+                                            label: rawId,
+                                            edgesAdded: handled.added,
+                                            confidences: handled.confidences,
+                                            handledBy: `plugin:${handledBy}`,
+                                        };
+                                        auditResultDetail = `plugin=${handledBy} edgesAdded=${handled.added}`;
+                                    }
                                 }
                             }
                         } else if (action === 'open_reconnect_settings') {

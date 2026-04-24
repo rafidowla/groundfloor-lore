@@ -183,21 +183,23 @@ export default function NodeDetailDrawer({
                             <MessageSquare size={14} />
                             Ask about this
                         </button>
-                        {/* Recalibrate is scoped to core LoreNodes. The server path
-                            (/api/chat/action reconnect_node → reconnectOneNode) only
-                            understands the core LoreNode table; plugin-owned nodes
-                            (file:, symbol:) would 404. Hide the button for those
-                            until a per-plugin recalibrate hook exists. */}
-                        {isCore ? (
-                            <button
-                                className="node-drawer-reconnect"
-                                onClick={() => onReconnectNode(displayDetail.node.id)}
-                                title="Re-compute semantic edges for this node against the latest graph state — useful when a node looks orphaned or out of date"
-                            >
-                                <RefreshCw size={14} />
-                                Recalibrate
-                            </button>
-                        ) : null}
+                        {/* Q1.8 — Recalibrate now works on plugin-owned nodes
+                            too. The server dispatcher prefix-routes the
+                            request: `lore:` / unprefixed → core
+                            reconnectOneNode; `file:` / `symbol:` / other
+                            plugin prefixes → ILorePlugin.recalibrate on the
+                            first active plugin that claims the prefix. If no
+                            plugin handles it, the server responds 400 and the
+                            UI surfaces that as an error (same path as any
+                            other action failure). */}
+                        <button
+                            className="node-drawer-reconnect"
+                            onClick={() => onReconnectNode(displayDetail.node.id)}
+                            title="Re-compute semantic edges for this node against the latest graph state — useful when a node looks orphaned or out of date"
+                        >
+                            <RefreshCw size={14} />
+                            Recalibrate
+                        </button>
                     </div>
                 </div>
             ) : null}
