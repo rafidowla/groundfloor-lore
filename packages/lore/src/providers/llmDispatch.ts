@@ -236,6 +236,17 @@ type EmbeddedGenerator = {
 interface CachedPipeline {
     promise: Promise<EmbeddedGenerator>;
     lastUsedAt: number;
+    /**
+     * Active-consumer refcount. Bumped on every entry to streamEmbedded
+     * that touches this cache entry (pre-load AND during generation),
+     * decremented in the finally. Bug fix 2026-04-24: the idle sweeper
+     * used to dispose sessions while they were still being awaited —
+     * a download taking longer than IDLE_UNLOAD_MS, or a single
+     * generation that outran the timer, would throw "Session already
+     * disposed" and the subsequent reload spin the model from scratch.
+     * Sweeper now skips any entry with inFlight > 0.
+     */
+    inFlight: number;
 }
 
 const embeddedPipelineCache = new Map<string, CachedPipeline>();
@@ -269,6 +280,12 @@ function ensureIdleSweeper(): void {
     idleSweeper = setInterval(() => {
         const now = Date.now();
         for (const [modelName, cached] of embeddedPipelineCache.entries()) {
+            // Bug fix 2026-04-24: never dispose an entry that still has
+            // an active consumer. A query that's downloading the model
+            // for the first time (can exceed 3 min on cold caches) or
+            // a slow generation (long prompt, slow hardware) would
+            // otherwise have its session ripped out from underneath.
+            if (cached.inFlight > 0) continue;
             if (now - cached.lastUsedAt < IDLE_UNLOAD_MS) continue;
             // Drop the cache entry. The underlying Pipeline object loses
             // its only reference and becomes GC-eligible. Transformers.js
@@ -329,6 +346,11 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
         if (r) r();
     };
 
+    // Held across the IIFE so the finally block can always decrement
+    // inFlight and stamp lastUsedAt regardless of which branch we took
+    // or whether we threw. See CachedPipeline.inFlight for the contract.
+    let activeCache: CachedPipeline | null = null;
+
     const genPromise = (async () => {
         try {
             const transformers = await import('@huggingface/transformers');
@@ -347,6 +369,10 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
             let generator: EmbeddedGenerator;
             const cached = embeddedPipelineCache.get(model);
             if (cached) {
+                // Claim the entry BEFORE we await its promise so the
+                // sweeper can't dispose it out from under us.
+                cached.inFlight++;
+                activeCache = cached;
                 generator = await cached.promise;
                 cached.lastUsedAt = Date.now();
             } else {
@@ -390,7 +416,13 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
                 const cacheEntry: CachedPipeline = {
                     promise: pipelinePromise,
                     lastUsedAt: Date.now(),
+                    // Claim immediately — the download IS the in-flight
+                    // work. Without this, a >3 min download gets swept
+                    // out mid-load and we're back to "loading again
+                    // and again" after every failed stream.
+                    inFlight: 1,
                 };
+                activeCache = cacheEntry;
                 embeddedPipelineCache.set(model, cacheEntry);
                 try {
                     generator = await pipelinePromise;
@@ -398,6 +430,7 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
                     // If loading failed, drop the cached entry so the
                     // next request can retry instead of failing forever.
                     embeddedPipelineCache.delete(model);
+                    activeCache = null; // already gone; skip the finally decrement
                     throw loadErr;
                 }
             }
@@ -424,7 +457,23 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
             });
         } catch (err) {
             streamingError = { message: (err as Error).message };
+            // If the error looks like a disposed/closed ONNX session,
+            // evict the cache so the next query reloads cleanly rather
+            // than re-hitting the same dead handle. Belt-and-braces —
+            // the inFlight guard above should prevent this, but if a
+            // disposal slipped through (e.g. user-driven reconfigure),
+            // we don't want the next chat to loop on the same corpse.
+            const msg = (err as Error | undefined)?.message ?? '';
+            if (activeCache && /dispos|closed|session/i.test(msg)) {
+                if (embeddedPipelineCache.get(model) === activeCache) {
+                    embeddedPipelineCache.delete(model);
+                }
+            }
         } finally {
+            if (activeCache) {
+                activeCache.inFlight = Math.max(0, activeCache.inFlight - 1);
+                activeCache.lastUsedAt = Date.now();
+            }
             streamingDone = true;
             notify();
         }
