@@ -15,7 +15,14 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { ILorePlugin, PluginContext, PluginGraphContext, PluginIR } from './types.js';
+import type {
+    AnalyticalProjection,
+    AnalyticalProjectionResult,
+    ILorePlugin,
+    PluginContext,
+    PluginGraphContext,
+    PluginIR,
+} from './types.js';
 import type { ConfigManager, LoreConfig } from '../config/configManager.js';
 import type { PluginHistoryEntry } from '../config/configManager.js';
 import { developerPlugin } from '@lore-plugin-developer/index.js';
@@ -237,6 +244,77 @@ export class PluginRegistry {
             out.push({ plugin: plugin.name, version: plugin.version, ir });
         }
         return out;
+    }
+
+    /**
+     * Q1.5 — collect every active plugin's analytical projections,
+     * honoring both the global `analyticalProjections.enabled` toggle
+     * and the per-plugin opt-out list.
+     *
+     * Returns a flat array tagged with the contributing plugin's name
+     * so callers (analyze_graph, /api/analytics/projections) can
+     * display "powered by <plugin>" and route IDs unambiguously.
+     * Projection ids are namespaced as `<plugin>/<id>` in the returned
+     * tuple's fully-qualified form; callers use `fqId` for routing.
+     *
+     * Empty array when disabled globally. Plugin exceptions are
+     * logged and skipped — one misbehaving contributor never blocks
+     * the rest of the catalog.
+     */
+    collectAnalyticalProjections(): Array<{ plugin: string; fqId: string; projection: AnalyticalProjection }> {
+        const config = this.configManager.read();
+        const settings = config.analyticalProjections;
+        if (settings && settings.enabled === false) return [];
+        const optOut = new Set(settings?.perPluginOptOut ?? []);
+
+        const out: Array<{ plugin: string; fqId: string; projection: AnalyticalProjection }> = [];
+        for (const plugin of this.loaded.values()) {
+            if (optOut.has(plugin.name)) continue;
+            if (typeof plugin.contributeAnalyticalProjections !== 'function') continue;
+            try {
+                const list = plugin.contributeAnalyticalProjections();
+                if (!list || !Array.isArray(list)) continue;
+                for (const projection of list) {
+                    out.push({
+                        plugin: plugin.name,
+                        fqId: `${plugin.name}/${projection.id}`,
+                        projection,
+                    });
+                }
+            } catch (err) {
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.contributeAnalyticalProjections threw: ${(err as Error).message}`,
+                );
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Q1.5 — execute a projection by its fully-qualified id
+     * (`<plugin>/<projection-id>`). Wraps the plugin's `run()` with
+     * timing, error isolation, and airplane-mode guarantees (the hook
+     * contract requires local-only queries; core doesn't enforce
+     * network isolation at runtime — the contract is the gate).
+     *
+     * Returns `null` when:
+     *   - global analytical-projection toggle is off
+     *   - the projection id isn't registered
+     *   - the owning plugin is in the opt-out list
+     *
+     * Exceptions bubble up — the caller is expected to convert them
+     * into 500s or LLM-friendly error text. A projection blowing up
+     * mid-run is a bug worth surfacing, not silently swallowing.
+     */
+    async runAnalyticalProjection(
+        fqId: string,
+        ctx: PluginGraphContext,
+    ): Promise<AnalyticalProjectionResult | null> {
+        const entry = this.collectAnalyticalProjections().find((e) => e.fqId === fqId);
+        if (!entry) return null;
+        const start = Date.now();
+        const result = await entry.projection.run(ctx);
+        return { ...result, elapsedMs: Date.now() - start };
     }
 
     /** Combined node type enum across active plugins + the base schema. */

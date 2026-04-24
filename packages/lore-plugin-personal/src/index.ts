@@ -29,6 +29,7 @@
  */
 
 import type {
+    AnalyticalProjection,
     ILorePlugin,
     PluginContext,
     PluginGraphContext,
@@ -129,6 +130,90 @@ export const personalPlugin: ILorePlugin = {
             { nodeType: 'Person',        condition: 'age', ageThresholdDays: 10_000, action: 'keep-forever' },
             { nodeType: 'Place',         condition: 'age', ageThresholdDays: 10_000, action: 'keep-forever' },
             { nodeType: 'PersonalEvent', condition: 'age', ageThresholdDays: 10_000, action: 'keep-forever' },
+        ];
+    },
+
+    /**
+     * Q1.5 — personal analytical projections.
+     *
+     * Three flavors covering the core "shape of my life" questions:
+     *   - memories-by-month : time-series, powers the Q1.6 line chart
+     *     "when did we do things?" view.
+     *   - events-upcoming-by-week : forward-looking time-series for
+     *     planning view. Distinct from the `upcoming` MCP tool — that
+     *     returns individual events; this returns weekly bucket counts.
+     *   - people-by-relation : grouping the relationship graph —
+     *     "how many people are family vs colleague vs friend?"
+     */
+    contributeAnalyticalProjections(): AnalyticalProjection[] {
+        return [
+            {
+                id: 'memories-by-month',
+                label: 'Memories by month',
+                description: 'Count of memories grouped by the YYYY-MM bucket of their occurredAt date.',
+                intentKeywords: ['memory', 'memories', 'month', 'when', 'by', 'timeline'],
+                columns: [
+                    { name: 'month', kind: 'time', description: 'YYYY-MM' },
+                    { name: 'memory_count', kind: 'measure' },
+                ],
+                async run(ctx: PluginGraphContext) {
+                    const rows = await ctx.queryRows(
+                        `MATCH (m:Memory)
+                         WHERE m.occurredAt IS NOT NULL AND m.occurredAt <> ''
+                         RETURN substring(m.occurredAt, 0, 7) AS month, count(m) AS memory_count
+                         ORDER BY month`,
+                        {},
+                    );
+                    const ids = await ctx.queryRows(
+                        'MATCH (m:Memory) WHERE m.occurredAt IS NOT NULL AND m.occurredAt <> \'\' RETURN m.id AS id',
+                        {},
+                    );
+                    return {
+                        columns: [
+                            { name: 'month', kind: 'time' as const },
+                            { name: 'memory_count', kind: 'measure' as const },
+                        ],
+                        rows: rows.map((r) => ({
+                            month: String(r.month ?? ''),
+                            memory_count: Number(r.memory_count ?? 0),
+                        })),
+                        sourceNodeIds: ids.map((r) => String(r.id ?? '')).filter(Boolean),
+                    };
+                },
+            },
+            {
+                id: 'people-by-relation',
+                label: 'People by declared relation',
+                description: 'Count of Person nodes grouped by the PersonRelatedTo relation label (family, friend, colleague, etc.).',
+                intentKeywords: ['people', 'person', 'relation', 'family', 'friend', 'colleague', 'how many'],
+                columns: [
+                    { name: 'relation', kind: 'dimension' },
+                    { name: 'person_count', kind: 'measure' },
+                ],
+                async run(ctx: PluginGraphContext) {
+                    const rows = await ctx.queryRows(
+                        `MATCH (:Person)-[r:PersonRelatedTo]->(p:Person)
+                         RETURN r.relationLabel AS relation, count(DISTINCT p) AS person_count
+                         ORDER BY person_count DESC`,
+                        {},
+                    );
+                    const ids = await ctx.queryRows(
+                        'MATCH (p:Person) RETURN p.id AS id LIMIT 500',
+                        {},
+                    );
+                    return {
+                        columns: [
+                            { name: 'relation', kind: 'dimension' as const },
+                            { name: 'person_count', kind: 'measure' as const },
+                        ],
+                        rows: rows.map((r) => ({
+                            relation: String(r.relation ?? '(unlabeled)'),
+                            person_count: Number(r.person_count ?? 0),
+                        })),
+                        sourceNodeIds: ids.map((r) => String(r.id ?? '')).filter(Boolean),
+                    };
+                },
+            },
         ];
     },
 };

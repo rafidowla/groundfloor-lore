@@ -192,6 +192,85 @@ export interface PluginIR {
 }
 
 /**
+ * AnalyticalProjectionColumn — One column in a projection's result set.
+ *
+ * `kind` matters for downstream renderers (Q1.6 canvas view-stack):
+ *   - 'dimension' : grouping/categorical axis (bar chart x-axis, table
+ *                   group-by column). Values are strings.
+ *   - 'time'      : temporal axis — ISO-8601 date or month bucket. Line
+ *                   charts / time-series renderers key on this.
+ *   - 'measure'   : numeric aggregate (count, sum, avg). Bar-chart
+ *                   y-axis / table summable column.
+ */
+export interface AnalyticalProjectionColumn {
+    name: string;
+    kind: 'dimension' | 'time' | 'measure';
+    description?: string;
+}
+
+/**
+ * AnalyticalProjectionRow — A single result row. Keys match the
+ * projection's declared column names. Values are the raw projected
+ * data (string | number | null). No nested structures — if a plugin
+ * wants structured output it should flatten into multiple columns.
+ */
+export type AnalyticalProjectionRow = Record<string, string | number | null>;
+
+/**
+ * AnalyticalProjectionResult — What a projection's `run()` returns.
+ * The `sourceNodeIds` field carries the ids of every node that
+ * contributed to the aggregate, so `recall`-style callers can echo
+ * "click to see sources" without the projection having to emit them
+ * inline per row. If a projection can't cheaply enumerate sources
+ * (e.g. a 100k-node aggregation), it returns an empty array — the
+ * tradeoff is explicit, not a silent truncation.
+ */
+export interface AnalyticalProjectionResult {
+    columns: AnalyticalProjectionColumn[];
+    rows: AnalyticalProjectionRow[];
+    sourceNodeIds: string[];
+    /** Wall-clock time the projection took, in milliseconds. Populated by
+     *  the registry's `runProjection` wrapper; projections don't self-time. */
+    elapsedMs?: number;
+}
+
+/**
+ * AnalyticalProjection — Q1.5. A declarative, runnable shape-of-data
+ * question a plugin exposes to core's query engine.
+ *
+ * Why "projection" not "query": core doesn't let the LLM author raw
+ * Cypher against plugin tables (too much surface for abuse, too brittle
+ * across plugin upgrades). Projections are a curated catalog — each
+ * plugin publishes a small set of well-named analytical questions
+ * ("contracts by jurisdiction", "memories per month", "symbols per
+ * file"), the LLM picks one by `id`, and the plugin runs it.
+ *
+ * Intent routing:
+ *   `intentKeywords` is a rough-match hint for `analyze_graph`'s
+ *   intent detector. Matching is substring + case-insensitive; the
+ *   detector picks the projection with the most keyword hits. Plugins
+ *   that want deterministic routing should include uniquely-scoped
+ *   keywords (e.g. 'contract', 'clause' rather than 'document').
+ *
+ * `run()` must be airplane-safe — projections are local queries against
+ * the plugin's own Kùzu tables. No network calls.
+ */
+export interface AnalyticalProjection {
+    /** Stable, kebab-case id unique within a plugin (e.g. 'contracts-by-jurisdiction'). */
+    id: string;
+    /** One-line human description for UI / tool output. */
+    label: string;
+    /** Longer description for tool discovery. */
+    description: string;
+    /** Substring-match hints for natural-language intent routing. */
+    intentKeywords: string[];
+    /** Columns the result set will contain (declared for renderer hints). */
+    columns: AnalyticalProjectionColumn[];
+    /** Execute the projection. Must be local / airplane-safe. */
+    run(ctx: PluginGraphContext): Promise<AnalyticalProjectionResult>;
+}
+
+/**
  * ILorePlugin — The contract every plugin must satisfy.
  * Must be a pure object (no module-level side effects on import) so the
  * registry can introspect without booting the plugin.
@@ -412,4 +491,28 @@ export interface ILorePlugin {
         markerId: string,
         ctx: PluginContext,
     ): Promise<{ added: number; confidences: number[] } | null>;
+
+    /**
+     * Q1.5 — contribute analytical projections.
+     *
+     * Returning an array of AnalyticalProjection descriptors. Each
+     * projection is a named, runnable shape-of-data question. Core's
+     * `analyze_graph` tool aggregates projections across active plugins,
+     * routes a natural-language query to the best-matching projection
+     * (by intentKeywords), and returns tabular results.
+     *
+     * Returning `null` or `[]` opts the plugin out — no projections
+     * surface in `analyze_graph`, but the plugin's nodes are still
+     * reachable via `recall` and its native tools.
+     *
+     * The user can further disable a plugin's projections at runtime
+     * via `config.analyticalProjections.perPluginOptOut`. Core honors
+     * the opt-out before calling this hook; plugins don't need to
+     * self-gate.
+     *
+     * Projections run LOCAL queries against the plugin's own tables —
+     * no network, airplane-mode compatible. Execution is wrapped by
+     * the registry so exceptions don't crash chat.
+     */
+    contributeAnalyticalProjections?(): AnalyticalProjection[] | null;
 }

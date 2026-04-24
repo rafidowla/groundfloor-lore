@@ -80,6 +80,26 @@ export interface LoreConfig {
      * those who trust their BYOK model not to hallucinate action tokens.
      */
     autoExecuteChatActions?: boolean;
+
+    /**
+     * Q1.5 — analytical projection capability.
+     *
+     *   enabled: global master switch. When false, `analyze_graph`
+     *            refuses with a friendly "disabled in Settings" message
+     *            and no projection hooks are called.
+     *   perPluginOptOut: active plugins whose projections are hidden.
+     *            Lets a workspace use the developer plugin for code
+     *            context while silencing its analytical surface (e.g.
+     *            privacy-sensitive teams who don't want "symbols per
+     *            file" queryable).
+     *
+     * Default: enabled with no opt-outs. Airplane-safe either way —
+     * projections are local queries.
+     */
+    analyticalProjections?: {
+        enabled: boolean;
+        perPluginOptOut: string[];
+    };
 }
 
 export const DEFAULT_CONFIG: LoreConfig = {
@@ -98,6 +118,12 @@ export const DEFAULT_CONFIG: LoreConfig = {
     // Auto-execute OFF by default — user must opt in per session for
     // the BYOK-native tier. Embedded tier ignores this flag.
     autoExecuteChatActions: false,
+    // Q1.5 — analytical projections default-on; opt-out empty. Toggled
+    // via Settings once the Q1.6 canvas exposes a switch.
+    analyticalProjections: {
+        enabled: true,
+        perPluginOptOut: [],
+    },
 };
 
 export class ConfigManager {
@@ -149,6 +175,7 @@ export class ConfigManager {
             'telemetryOptOut',
             'keepEmbeddedModelHot',
             'autoExecuteChatActions',
+            'analyticalProjections',
         ];
         const next: LoreConfig = { ...current };
         for (const key of allowed) {

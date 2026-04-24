@@ -20,6 +20,7 @@
  */
 
 import type {
+    AnalyticalProjection,
     ILorePlugin,
     PluginContext,
     PluginGraphContext,
@@ -131,6 +132,86 @@ export const legalPlugin: ILorePlugin = {
             { nodeType: 'Clause',       condition: 'age', ageThresholdDays: 10_000, action: 'keep-forever' },
             { nodeType: 'Party',        condition: 'age', ageThresholdDays: 10_000, action: 'keep-forever' },
             { nodeType: 'Jurisdiction', condition: 'age', ageThresholdDays: 10_000, action: 'keep-forever' },
+        ];
+    },
+
+    /**
+     * Q1.5 — legal analytical projections.
+     *
+     * Small curated catalog for the featherweight plugin:
+     *   - contracts-by-jurisdiction: grouping contracts across
+     *     jurisdictions — the question a paralegal actually asks when
+     *     wrangling a global portfolio.
+     *   - clauses-per-contract: content-density check, useful for
+     *     spotting outliers (a contract with 200 clauses vs the norm
+     *     of 12 is a review flag).
+     *   - parties-by-role: role distribution across the workspace.
+     */
+    contributeAnalyticalProjections(): AnalyticalProjection[] {
+        return [
+            {
+                id: 'contracts-by-jurisdiction',
+                label: 'Contracts by jurisdiction',
+                description: 'Count of contracts grouped by their governing jurisdiction, sorted by frequency.',
+                intentKeywords: ['contract', 'jurisdiction', 'governing', 'law', 'by'],
+                columns: [
+                    { name: 'jurisdiction', kind: 'dimension', description: 'Jurisdiction name' },
+                    { name: 'contract_count', kind: 'measure', description: 'Number of contracts governed by this jurisdiction' },
+                ],
+                async run(ctx: PluginGraphContext) {
+                    const rows = await ctx.queryRows(
+                        `MATCH (c:Contract)-[:ContractGovernedBy]->(j:Jurisdiction)
+                         RETURN j.displayName AS jurisdiction, count(c) AS contract_count
+                         ORDER BY contract_count DESC`,
+                        {},
+                    );
+                    const sourceIds = await ctx.queryRows(
+                        'MATCH (c:Contract)-[:ContractGovernedBy]->(:Jurisdiction) RETURN c.id AS id',
+                        {},
+                    );
+                    return {
+                        columns: [
+                            { name: 'jurisdiction', kind: 'dimension' as const },
+                            { name: 'contract_count', kind: 'measure' as const },
+                        ],
+                        rows: rows.map((r) => ({
+                            jurisdiction: String(r.jurisdiction ?? ''),
+                            contract_count: Number(r.contract_count ?? 0),
+                        })),
+                        sourceNodeIds: sourceIds.map((r) => String(r.id ?? '')).filter(Boolean),
+                    };
+                },
+            },
+            {
+                id: 'clauses-per-contract',
+                label: 'Clauses per contract',
+                description: 'For each contract, how many clauses it contains. Sorted descending — outliers surface first.',
+                intentKeywords: ['clause', 'contract', 'count', 'per', 'how many'],
+                columns: [
+                    { name: 'contract', kind: 'dimension' },
+                    { name: 'clause_count', kind: 'measure' },
+                ],
+                async run(ctx: PluginGraphContext) {
+                    const rows = await ctx.queryRows(
+                        `MATCH (c:Contract)-[:ContractContainsClause]->(cl:Clause)
+                         RETURN c.displayName AS contract, c.id AS contract_id, count(cl) AS clause_count
+                         ORDER BY clause_count DESC
+                         LIMIT 100`,
+                        {},
+                    );
+                    return {
+                        columns: [
+                            { name: 'contract', kind: 'dimension' as const },
+                            { name: 'clause_count', kind: 'measure' as const },
+                        ],
+                        rows: rows.map((r) => ({
+                            contract: String(r.contract ?? ''),
+                            clause_count: Number(r.clause_count ?? 0),
+                        })),
+                        sourceNodeIds: rows.map((r) => String(r.contract_id ?? '')).filter(Boolean),
+                    };
+                },
+            },
         ];
     },
 };

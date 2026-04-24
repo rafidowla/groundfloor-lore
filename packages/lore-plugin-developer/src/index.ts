@@ -21,6 +21,7 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type {
+    AnalyticalProjection,
     ILorePlugin,
     PluginContext,
     PluginGraphContext,
@@ -344,6 +345,124 @@ export const developerPlugin: ILorePlugin = {
             { nodeType: 'bug_pattern',     condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
             { nodeType: 'troubleshooting', condition: 'age' as const, ageThresholdDays: 10_000, action: 'keep-forever' as const },
             { nodeType: 'note',            condition: 'age' as const, ageThresholdDays: 365,    action: 'archive' as const },
+        ];
+    },
+
+    /**
+     * Q1.5 — developer analytical projections.
+     *
+     * Three projections targeting the "shape of my code" questions
+     * the LoreNode graph layer can answer without hitting gitnexus:
+     *   - lore-nodes-by-type: breakdown of institutional knowledge
+     *     by type (decision / convention / bug_pattern / ...).
+     *   - lore-nodes-by-month: authoring velocity — when did we
+     *     last write things down?
+     *   - symbols-per-file: top-N files by symbol count — complexity
+     *     hotspots. Intentionally capped at LIMIT 50 so the projection
+     *     returns a renderable table even on 10k-symbol repos.
+     *
+     * All three run against the tables this plugin already owns
+     * (LoreNode, CodeFile, CodeSymbol) — no cross-plugin reads.
+     */
+    contributeAnalyticalProjections(): AnalyticalProjection[] {
+        return [
+            {
+                id: 'lore-nodes-by-type',
+                label: 'Lore nodes by type',
+                description: 'Count of LoreNode entries grouped by type (decision, convention, bug_pattern, etc.), sorted by frequency.',
+                intentKeywords: ['lore', 'node', 'type', 'decision', 'convention', 'how many', 'by'],
+                columns: [
+                    { name: 'type', kind: 'dimension' },
+                    { name: 'count', kind: 'measure' },
+                ],
+                async run(ctx: PluginGraphContext) {
+                    const rows = await ctx.queryRows(
+                        `MATCH (n:LoreNode)
+                         RETURN n.type AS type, count(n) AS count
+                         ORDER BY count DESC`,
+                        {},
+                    );
+                    const ids = await ctx.queryRows(
+                        'MATCH (n:LoreNode) RETURN n.id AS id',
+                        {},
+                    );
+                    return {
+                        columns: [
+                            { name: 'type', kind: 'dimension' as const },
+                            { name: 'count', kind: 'measure' as const },
+                        ],
+                        rows: rows.map((r) => ({
+                            type: String(r.type ?? '(untyped)'),
+                            count: Number(r.count ?? 0),
+                        })),
+                        sourceNodeIds: ids.map((r) => String(r.id ?? '')).filter(Boolean),
+                    };
+                },
+            },
+            {
+                id: 'lore-nodes-by-month',
+                label: 'Lore nodes authored by month',
+                description: 'Count of LoreNode entries grouped by YYYY-MM of their createdAt timestamp. Reveals knowledge-capture velocity.',
+                intentKeywords: ['lore', 'node', 'month', 'velocity', 'when', 'authored', 'created'],
+                columns: [
+                    { name: 'month', kind: 'time' },
+                    { name: 'count', kind: 'measure' },
+                ],
+                async run(ctx: PluginGraphContext) {
+                    const rows = await ctx.queryRows(
+                        `MATCH (n:LoreNode)
+                         WHERE n.createdAt IS NOT NULL AND n.createdAt <> ''
+                         RETURN substring(n.createdAt, 0, 7) AS month, count(n) AS count
+                         ORDER BY month`,
+                        {},
+                    );
+                    const ids = await ctx.queryRows(
+                        'MATCH (n:LoreNode) WHERE n.createdAt IS NOT NULL RETURN n.id AS id',
+                        {},
+                    );
+                    return {
+                        columns: [
+                            { name: 'month', kind: 'time' as const },
+                            { name: 'count', kind: 'measure' as const },
+                        ],
+                        rows: rows.map((r) => ({
+                            month: String(r.month ?? ''),
+                            count: Number(r.count ?? 0),
+                        })),
+                        sourceNodeIds: ids.map((r) => String(r.id ?? '')).filter(Boolean),
+                    };
+                },
+            },
+            {
+                id: 'symbols-per-file',
+                label: 'Symbols per file (top 50)',
+                description: 'Top 50 CodeFiles by number of CodeSymbols they contain. Complexity hotspots surface first.',
+                intentKeywords: ['symbol', 'file', 'per', 'complexity', 'count', 'top'],
+                columns: [
+                    { name: 'file_path', kind: 'dimension' },
+                    { name: 'symbol_count', kind: 'measure' },
+                ],
+                async run(ctx: PluginGraphContext) {
+                    const rows = await ctx.queryRows(
+                        `MATCH (f:CodeFile)-[:FileContains]->(s:CodeSymbol)
+                         RETURN f.relPath AS file_path, f.id AS file_id, count(s) AS symbol_count
+                         ORDER BY symbol_count DESC
+                         LIMIT 50`,
+                        {},
+                    );
+                    return {
+                        columns: [
+                            { name: 'file_path', kind: 'dimension' as const },
+                            { name: 'symbol_count', kind: 'measure' as const },
+                        ],
+                        rows: rows.map((r) => ({
+                            file_path: String(r.file_path ?? ''),
+                            symbol_count: Number(r.symbol_count ?? 0),
+                        })),
+                        sourceNodeIds: rows.map((r) => String(r.file_id ?? '')).filter(Boolean),
+                    };
+                },
+            },
         ];
     },
 

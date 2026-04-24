@@ -763,6 +763,129 @@ mcpServer.tool(
     },
 );
 
+/* ─── Tool: analyze_graph (Q1.5) ──────────────────────────────── */
+//
+// Natural-language query → analytical projection. The LLM describes
+// the shape-of-data question ("how many memories by month", "contracts
+// by jurisdiction"); core routes to the best-matching projection by
+// intent-keyword overlap and runs it locally. Result is a tabular
+// payload with declared columns, rows, and source node ids.
+//
+// Airplane-safe: projections are local Kùzu queries. No network I/O.
+// Per-plugin opt-out and global disable honored via config toggles.
+//
+// When `projection_id` is supplied explicitly (fully-qualified form
+// `<plugin>/<id>`), routing is skipped — the tool runs the exact
+// projection asked for. Agents that want deterministic execution
+// (tests, scripted dashboards) should pass `projection_id`.
+
+mcpServer.tool(
+    'analyze_graph',
+    'Answer shape-of-data questions (counts, group-by, time-series) against the local graph. Pass a natural-language `query` ("how many memories by month?") — core routes to the best-matching plugin projection — or pass `projection_id` (e.g. "developer/lore-nodes-by-type") to run a specific projection. Returns { columns, rows, sourceNodeIds, selectedProjection }. Airplane-safe: local queries only.',
+    {
+        query: z.string().optional().describe('Natural-language question. Intent-keyword matched against available projections.'),
+        projection_id: z.string().optional().describe('Fully-qualified projection id "<plugin>/<id>". Bypasses intent routing.'),
+    },
+    async ({ query, projection_id }) => {
+        try {
+            const catalog = pluginRegistry.collectAnalyticalProjections();
+            if (catalog.length === 0) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            error: 'No analytical projections available. Either the feature is disabled in Settings (`analyticalProjections.enabled`) or no active plugin exposes projections.',
+                            availableProjections: [],
+                        }, null, 2),
+                    }],
+                };
+            }
+
+            let chosenFqId: string | null = null;
+            let routingScore: number | null = null;
+
+            if (projection_id) {
+                chosenFqId = projection_id;
+            } else if (query) {
+                // Rough-match intent routing: normalize query, count
+                // keyword hits per projection, pick the highest. Ties
+                // broken by plugin registration order (first match wins).
+                const q = query.toLowerCase();
+                let best: { fqId: string; score: number } | null = null;
+                for (const entry of catalog) {
+                    let score = 0;
+                    for (const kw of entry.projection.intentKeywords) {
+                        if (q.includes(kw.toLowerCase())) score += 1;
+                    }
+                    if (score > 0 && (best === null || score > best.score)) {
+                        best = { fqId: entry.fqId, score };
+                    }
+                }
+                if (best) {
+                    chosenFqId = best.fqId;
+                    routingScore = best.score;
+                }
+            }
+
+            if (!chosenFqId) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            error: query
+                                ? `No projection matched the query "${query}". Try a more specific keyword or pass projection_id directly.`
+                                : 'Either `query` or `projection_id` is required.',
+                            availableProjections: catalog.map((e) => ({
+                                fqId: e.fqId,
+                                label: e.projection.label,
+                                description: e.projection.description,
+                                intentKeywords: e.projection.intentKeywords,
+                            })),
+                        }, null, 2),
+                    }],
+                };
+            }
+
+            const graphCtx = graph.createPluginGraphContext();
+            const result = await pluginRegistry.runAnalyticalProjection(chosenFqId, graphCtx);
+            if (!result) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            error: `Projection '${chosenFqId}' not found or opted out. Available: ${catalog.map((e) => e.fqId).join(', ')}`,
+                        }, null, 2),
+                    }],
+                };
+            }
+
+            const entry = catalog.find((e) => e.fqId === chosenFqId)!;
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        selectedProjection: {
+                            fqId: chosenFqId,
+                            plugin: entry.plugin,
+                            label: entry.projection.label,
+                            routingScore,
+                        },
+                        columns: result.columns,
+                        rows: result.rows,
+                        sourceNodeIds: result.sourceNodeIds,
+                        elapsedMs: result.elapsedMs,
+                    }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
 /**
  * buildLanguageHint — Phase B (V2.2). Given the caller's declared
  * `queryLanguage`, compare it against the corpus language breakdown.
@@ -1807,6 +1930,91 @@ async function main(): Promise<void> {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (err as Error).message }));
                 }
+                return;
+            }
+
+            // Q1.5 — Analytical projection catalog.
+            //
+            //   GET /api/analytics/projections
+            //     → { projections: [{ plugin, fqId, label, description,
+            //                          columns, intentKeywords }...],
+            //         enabled: boolean, perPluginOptOut: string[] }
+            //
+            // The UI enumerates this to populate a projection picker in
+            // the Q1.6 canvas view-stack. The `enabled` flag + opt-out
+            // list are echoed back so the UI can show "Analytical
+            // projections are disabled in Settings" rather than "no
+            // projections available" when the distinction matters.
+            if (pathname === '/api/analytics/projections' && req.method === 'GET') {
+                try {
+                    const config = configManager.read();
+                    const settings = config.analyticalProjections ?? { enabled: true, perPluginOptOut: [] };
+                    const entries = pluginRegistry.collectAnalyticalProjections();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        enabled: settings.enabled,
+                        perPluginOptOut: settings.perPluginOptOut ?? [],
+                        projections: entries.map((e) => ({
+                            plugin: e.plugin,
+                            fqId: e.fqId,
+                            id: e.projection.id,
+                            label: e.projection.label,
+                            description: e.projection.description,
+                            columns: e.projection.columns,
+                            intentKeywords: e.projection.intentKeywords,
+                        })),
+                    }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // Q1.5 — Run a specific projection by fully-qualified id.
+            //
+            //   POST /api/analytics/projections/run
+            //     body: { fqId: "<plugin>/<projection-id>" }
+            //     → { columns, rows, sourceNodeIds, elapsedMs }
+            //     → 404 when fqId doesn't match or is opted out
+            //     → 403 when analyticalProjections.enabled === false
+            //
+            // Runs under the same PluginGraphContext the MCP tool uses;
+            // airplane-safe by hook contract.
+            if (pathname === '/api/analytics/projections/run' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const { fqId } = JSON.parse(body || '{}') as { fqId?: string };
+                        if (!fqId || typeof fqId !== 'string') {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'fqId (string) required in body' }));
+                            return;
+                        }
+                        const config = configManager.read();
+                        if (config.analyticalProjections?.enabled === false) {
+                            res.writeHead(403, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'Analytical projections are disabled in Settings' }));
+                            return;
+                        }
+                        const graphCtx = graph.createPluginGraphContext();
+                        const result = await pluginRegistry.runAnalyticalProjection(fqId, graphCtx);
+                        if (!result) {
+                            res.writeHead(404, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({
+                                error: `Projection '${fqId}' not found or opted out.`,
+                                available: pluginRegistry.collectAnalyticalProjections().map((e) => e.fqId),
+                            }));
+                            return;
+                        }
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ fqId, ...result }));
+                    } catch (err) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
                 return;
             }
 
