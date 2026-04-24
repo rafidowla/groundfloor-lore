@@ -13,13 +13,11 @@
  *
  * Node Tables:
  *   - LoreNode: decisions, conventions, bug patterns, architecture notes
- *   - CodeSymbol: functions, classes, methods, interfaces (future)
- *   - DevActivity: developer branch/file tracking (future)
+ *   Plugins contribute additional node tables through registerSchema.
  *
  * Relationship Tables:
  *   - LoreEdge: knowledge ↔ knowledge relationships
- *   - LoreAppliesToCode: knowledge ↔ code cross-pillar edges (future)
- *   - CodeRelation: code ↔ code relationships (future)
+ *   Plugins contribute additional edge tables through registerSchema.
  *
  * Side Effects: Creates/reads .lore/graph/ directory in the specified base path.
  * Determinism: Deterministic for a given database state.
@@ -40,73 +38,6 @@ import { ReadCache, cacheKey, type CacheStats } from './cache.js';
 export type { LoreNode, LoreEdge, TraversalResult, GraphStats };
 
 /* ─── Types ───────────────────────────────────────────────────── */
-
-
-
-/**
- * CodeSymbol — A code element imported from GitNexus.
- *
- * Represents a function, class, method, interface, or other
- * structural code element with its location and relationships.
- */
-export interface CodeSymbol {
-    /** Unique identifier from GitNexus */
-    uid: string;
-    /** Symbol name */
-    name: string;
-    /** Kind: Function, Class, Method, Interface, File, etc. */
-    kind: string;
-    /** Source file path relative to repo root */
-    filePath: string;
-    /** Line number where the symbol starts */
-    startLine: number;
-    /** Line number where the symbol ends */
-    endLine: number;
-    /** Symbol source content (may be empty for large symbols) */
-    content: string;
-    /** Function/method signature */
-    signature: string;
-    /** Return type annotation */
-    returnType: string;
-    /** Number of parameters (for functions/methods) */
-    parameterCount: number;
-    /** Repository this symbol belongs to */
-    repo: string;
-}
-
-/**
- * CodeRelationEdge — A relationship between two code symbols.
- */
-export interface CodeRelationEdge {
-    sourceUid: string;
-    targetUid: string;
-    type: string;
-    confidence: number;
-    reason: string;
-}
-
-/**
- * DevActivity — A developer activity event for team awareness.
- *
- * Tracks which developer is working on which file/project
- * to enable real-time team coordination and awareness.
- */
-export interface DevActivity {
-    /** developer identifier (e.g., git user.email or hostname) */
-    dev: string;
-    /** project name */
-    project: string;
-    /** action type: 'editing', 'reviewing', 'debugging', 'idle' */
-    action: string;
-    /** file being worked on (optional) */
-    filePath: string;
-    /** ISO 8601 timestamp of this activity */
-    timestamp: string;
-    /** tool being used: 'cursor', 'antigravity', 'vscode', etc. */
-    tool: string;
-}
-
-
 
 /**
  * LoreGraphError — Custom error for graph operations.
@@ -287,11 +218,10 @@ export class LocalGraph implements GraphProvider {
                 )
             `);
 
-            // V2.1 / Option C: plugin-owned tables (CodeSymbol, CodeFile,
-            // CodeRelation, FileContains, LoreAppliesToCode, LoreTouchesFile,
-            // DevActivity) are created by their respective plugin's
-            // `registerSchema` hook, invoked by PluginRegistry after the
-            // core tables above are in place. Core Lore is plugin-agnostic.
+            // V2.1 / Option C: plugin-owned node and edge tables are
+            // created by each plugin's `registerSchema` hook, invoked by
+            // PluginRegistry after the core tables above are in place.
+            // Core Lore is plugin-agnostic — it never names plugin tables.
 
             // ─── Schema Migrations ─────────────────────────────────────────
             // Add columns that may be missing from older databases.
@@ -657,9 +587,9 @@ export class LocalGraph implements GraphProvider {
     }
 
     // V2.1 / Option C: cross-pillar operations (pruneInferredCrossEdges,
-    // listCodeFiles*, listCodeSymbols) moved to src/plugins/developer/
-    // operations.ts. Callers now reach them via
-    // pluginRegistry.get('developer')?.api.*. Keeping the core engine
+    // and any plugin-owned listers) are moved to the relevant plugin's
+    // operations module. Callers reach them via
+    // pluginRegistry.get('<plugin>')?.api.*. Keeping the core engine
     // ignorant of whether any specific plugin is active.
 
     /**

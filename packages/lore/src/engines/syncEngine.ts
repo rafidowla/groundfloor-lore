@@ -29,14 +29,21 @@
 
 import fs from 'fs';
 import path from 'path';
-import type { LoreNode, LoreEdge, CodeSymbol, CodeRelationEdge, LocalGraph } from './localGraph.js';
+import type { LoreNode, LoreEdge, LocalGraph } from './localGraph.js';
 
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
  * WalOperation — The type of operation recorded in the WAL.
+ *
+ * Core recognizes three operations. Plugins may append entries with
+ * arbitrary op strings (e.g. `link_knowledge_to_code`); pushPending
+ * drains those through `SyncAdapter.pushPluginData` when the entry
+ * carries `pluginName` + `kind` fields, otherwise they're truncated
+ * on successful sync without a remote push. This keeps core blind
+ * to plugin-specific vocabulary while preserving plugin extensibility.
  */
-export type WalOperation = 'upsert_node' | 'add_edge' | 'delete_node' | 'upsert_code_symbol' | 'add_code_relation' | 'link_knowledge_to_code';
+export type WalOperation = 'upsert_node' | 'add_edge' | 'delete_node' | (string & {});
 
 /**
  * WalEntry — A single write operation buffered in the WAL.
@@ -67,29 +74,6 @@ export interface SyncResult {
     failures: number;
     /** Error messages for failed entries */
     errors: string[];
-}
-
-/**
- * DevActivity — Developer activity snapshot for team awareness.
- *
- * Purpose: Tracks what each developer is working on, enabling
- *   conflict detection and team visibility.
- */
-export interface DevActivity {
-    /** Developer identifier (hostname or configured name) */
-    developer: string;
-    /** Organization ID for multi-tenant isolation */
-    orgId: string;
-    /** Current git branch */
-    branch: string;
-    /** Repository name */
-    repo: string;
-    /** List of recently modified symbol names */
-    modifiedSymbols: string[];
-    /** List of recently modified file paths */
-    modifiedFiles: string[];
-    /** ISO 8601 timestamp of last activity */
-    lastActive: string;
 }
 
 /**
@@ -130,25 +114,6 @@ export interface SyncAdapter {
     pull(since: string): Promise<{ nodes: LoreNode[]; edges: LoreEdge[] }>;
 
     /**
-     * heartbeat — Broadcast developer activity to the team.
-     *
-     * @param activity - Current developer activity snapshot.
-     *
-     * Side Effects: Writes to remote dev_activity table.
-     */
-    heartbeat(activity: DevActivity): Promise<void>;
-
-    /**
-     * queryActivity — Query team activity, optionally filtered by symbol.
-     *
-     * @param symbol - Optional symbol name to filter by.
-     * @returns Array of recent developer activity records.
-     *
-     * Side Effects: Reads from remote database.
-     */
-    queryActivity(symbol?: string): Promise<DevActivity[]>;
-
-    /**
      * isConnected — Check if the remote backend is reachable.
      *
      * @returns true if connected and authenticated.
@@ -158,16 +123,27 @@ export interface SyncAdapter {
     isConnected(): Promise<boolean>;
 
     /**
-     * pushCodeData — Push code symbols and relations to remote.
+     * pushPluginData — Opaque typed push for plugin-owned records.
      *
-     * @param symbols - CodeSymbol records to upsert.
-     * @param relations - CodeRelationEdge records to create.
-     * @returns Push result summary.
+     * Replaces the former `pushCodeData` developer-specific hook. Core
+     * routes any WAL entry that declares `pluginName` + `kind` through
+     * this method, so remote backends can persist arbitrary plugin
+     * records (code symbols, memories, contracts, …) without core ever
+     * knowing their shape. The adapter picks the remote collection name
+     * (typically `${pluginName}_${kind}`) and upsert strategy.
      *
-     * Side Effects: Writes to remote code_symbol/code_relation tables.
-     * Idempotency: Yes — upsert by UID.
+     * Adapters that don't support plugin data should return a zero-count
+     * SyncResult rather than throwing — the WAL still truncates on
+     * successful core push.
+     *
+     * @param pluginName - Name of the contributing plugin (e.g. 'developer').
+     * @param kind       - Record kind within that plugin (e.g. 'code_symbol').
+     * @param records    - Opaque array of records; adapter interprets shape.
+     *
+     * Side Effects: Writes to remote storage.
+     * Idempotency: Yes — adapter upserts by id.
      */
-    pushCodeData(symbols: CodeSymbol[], relations: CodeRelationEdge[]): Promise<SyncResult>;
+    pushPluginData(pluginName: string, kind: string, records: unknown[]): Promise<SyncResult>;
 
     /**
      * connect — Establish connection to the remote backend.
@@ -375,12 +351,15 @@ export class SyncEngine {
             return { nodesPushed: 0, edgesPushed: 0, failures: 0, errors: [] };
         }
 
-        // Group entries by type
+        // Group entries by type. Core recognizes upsert_node / add_edge /
+        // delete_node; any other op is plugin-owned and routed by its
+        // (pluginName, kind) tuple if declared. Plugin entries without a
+        // pluginName field silently drain (backwards-compat for early
+        // plugin ops that don't mark ownership).
         const nodes: LoreNode[] = [];
         const edges: LoreEdge[] = [];
         const deletedIds: string[] = [];
-        const codeSymbols: CodeSymbol[] = [];
-        const codeRelations: CodeRelationEdge[] = [];
+        const pluginBuckets = new Map<string, unknown[]>(); // key: "pluginName\tkind"
 
         for (const entry of entries) {
             switch (entry.op) {
@@ -393,15 +372,20 @@ export class SyncEngine {
                 case 'delete_node':
                     deletedIds.push(entry.data['id'] as string);
                     break;
-                case 'upsert_code_symbol':
-                    codeSymbols.push(entry.data as unknown as CodeSymbol);
+                default: {
+                    const pluginName = typeof entry.data['pluginName'] === 'string'
+                        ? (entry.data['pluginName'] as string)
+                        : null;
+                    const kind = typeof entry.data['kind'] === 'string'
+                        ? (entry.data['kind'] as string)
+                        : entry.op;
+                    if (!pluginName) break;
+                    const key = `${pluginName}\t${kind}`;
+                    const bucket = pluginBuckets.get(key) ?? [];
+                    bucket.push(entry.data);
+                    pluginBuckets.set(key, bucket);
                     break;
-                case 'add_code_relation':
-                    codeRelations.push(entry.data as unknown as CodeRelationEdge);
-                    break;
-                case 'link_knowledge_to_code':
-                    // Cross-pillar links are captured in code_symbol push
-                    break;
+                }
             }
         }
 
@@ -417,23 +401,37 @@ export class SyncEngine {
                 }
             }
 
-            // Push code data if present
-            let codeResult: SyncResult = { nodesPushed: 0, edgesPushed: 0, failures: 0, errors: [] };
-            if (codeSymbols.length > 0 || codeRelations.length > 0) {
-                codeResult = await this.adapter!.pushCodeData(codeSymbols, codeRelations);
+            // Drain plugin-owned buckets via the opaque pushPluginData hook.
+            let pluginPushed = 0;
+            let pluginFailures = 0;
+            const pluginErrors: string[] = [];
+            for (const [key, records] of pluginBuckets) {
+                const [pluginName, kind] = key.split('\t');
+                if (!pluginName || !kind || records.length === 0) continue;
+                try {
+                    const r = await this.adapter.pushPluginData(pluginName, kind, records);
+                    pluginPushed += r.nodesPushed + r.edgesPushed;
+                    pluginFailures += r.failures;
+                    pluginErrors.push(...r.errors);
+                } catch (pluginErr) {
+                    pluginFailures += records.length;
+                    pluginErrors.push(
+                        `Plugin '${pluginName}' kind '${kind}': ${(pluginErr as Error).message}`,
+                    );
+                }
             }
 
             // Only truncate WAL if ALL pushes succeeded
-            if (result.failures === 0 && codeResult.failures === 0) {
+            if (result.failures === 0 && pluginFailures === 0) {
                 this.wal.truncate();
                 this.writeLastSync(new Date().toISOString());
             }
 
             return {
-                nodesPushed: result.nodesPushed + codeResult.nodesPushed,
-                edgesPushed: result.edgesPushed + codeResult.edgesPushed,
-                failures: result.failures + codeResult.failures,
-                errors: [...result.errors, ...codeResult.errors],
+                nodesPushed: result.nodesPushed + pluginPushed,
+                edgesPushed: result.edgesPushed,
+                failures: result.failures + pluginFailures,
+                errors: [...result.errors, ...pluginErrors],
             };
         } catch (pushError) {
             return {

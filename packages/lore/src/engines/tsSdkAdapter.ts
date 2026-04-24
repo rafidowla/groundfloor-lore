@@ -16,8 +16,8 @@
 
 // @ts-ignore - Local workspace linking lacks full Node16 exports declaration
 import { GroundfloorClient } from 'groundfloor-ts-sdk';
-import type { LoreNode, LoreEdge, CodeSymbol, CodeRelationEdge } from './localGraph.js';
-import type { SyncAdapter, SyncResult, DevActivity } from './syncEngine.js';
+import type { LoreNode, LoreEdge } from './localGraph.js';
+import type { SyncAdapter, SyncResult } from './syncEngine.js';
 
 export interface TsSdkConfig {
     baseUrl: string;
@@ -153,117 +153,50 @@ export class TsSdkAdapter implements SyncAdapter {
         }
     }
 
-    async heartbeat(activity: DevActivity): Promise<void> {
+    /**
+     * pushPluginData — Opaque record push for plugin-owned WAL entries.
+     *
+     * Collection naming convention: `${pluginName}_${kind}`. Each record
+     * is expected to carry an `id` field for upsert; the adapter tries
+     * `updateByQuery` first and falls back to `insert` on a zero-match
+     * response (the same pattern used for LoreNode push to work around
+     * Dataplane's PUT 405 on collection resources — see commit b25b114).
+     * Records that lack an `id` are inserted unconditionally.
+     */
+    async pushPluginData(pluginName: string, kind: string, records: unknown[]): Promise<SyncResult> {
         this.ensureConnected();
-        try {
-            const filter = { developer: activity.developer, org_id: activity.orgId };
-            const doc = {
-                developer: activity.developer,
-                org_id: activity.orgId,
-                branch: activity.branch,
-                repo: activity.repo,
-                modified_symbols: activity.modifiedSymbols,
-                modified_files: activity.modifiedFiles,
-                last_active: new Date().toISOString()
-            };
-            const updateRes = await this.client!.update(this.config.tenantId, 'dev_activity', filter, doc);
-            if (updateRes.updated === 0) {
-                await this.client!.insert(this.config.tenantId, 'dev_activity', doc);
-            }
-        } catch (error) {
-            throw new Error(`Heartbeat failed: ${(error as Error).message}`);
-        }
-    }
-
-    async queryActivity(symbol?: string): Promise<DevActivity[]> {
-        this.ensureConnected();
-        try {
-            const res = await this.client!.query(this.config.tenantId, 'dev_activity', {
-                filter: { org_id: this.config.orgId },
-                limit: 50,
-                sort: [{ field: 'last_active', direction: 'desc' }]
-            });
-            let records = res.records || [];
-            
-            // Strictly enforce 1 hour constraint client side
-            const oneHourAgo = new Date(Date.now() - 3600000).getTime();
-            records = records.filter((r: any) => new Date(r.last_active).getTime() > oneHourAgo);
-            
-            if (symbol) {
-                records = records.filter((r: any) => r.modified_symbols && r.modified_symbols.includes(symbol));
-            }
-
-            return records.map((record: any) => ({
-                developer: record.developer ?? '',
-                orgId: record.org_id ?? '',
-                branch: record.branch ?? '',
-                repo: record.repo ?? '',
-                modifiedSymbols: record.modified_symbols ?? [],
-                modifiedFiles: record.modified_files ?? [],
-                lastActive: record.last_active ?? '',
-            }));
-        } catch (error) {
-            throw new Error(`Activity query failed: ${(error as Error).message}`);
-        }
-    }
-
-    async pushCodeData(symbols: CodeSymbol[], relations: CodeRelationEdge[]): Promise<SyncResult> {
-        this.ensureConnected();
+        const collection = `${pluginName}_${kind}`;
         let nodesPushed = 0;
-        let edgesPushed = 0;
         const errors: string[] = [];
 
-        // Push symbols
-        for (const symbol of symbols) {
+        for (const record of records) {
             try {
                 const doc = {
-                    id: symbol.uid,
-                    name: symbol.name,
-                    kind: symbol.kind,
-                    filePath: symbol.filePath,
-                    startLine: symbol.startLine,
-                    endLine: symbol.endLine,
-                    signature: symbol.signature,
-                    returnType: symbol.returnType,
-                    parameterCount: symbol.parameterCount,
-                    repo: symbol.repo,
+                    ...(record as Record<string, unknown>),
                     org_id: this.config.orgId,
-                    updated_at: new Date().toISOString()
+                    updated_at: new Date().toISOString(),
                 };
-                const updateRes = await this.client!.update(this.config.tenantId, 'code_symbol', { id: symbol.uid }, doc);
-                if (updateRes.updated === 0) {
-                    await this.client!.insert(this.config.tenantId, 'code_symbol', doc);
+                const id = (doc as Record<string, unknown>)['id'];
+                if (typeof id === 'string' && id.length > 0) {
+                    const updateRes = await this.client!.updateByQuery(
+                        this.config.tenantId,
+                        collection,
+                        { id_eq: id },
+                        doc,
+                    );
+                    if ((updateRes?.updated ?? 0) === 0) {
+                        await this.client!.insert(this.config.tenantId, collection, doc);
+                    }
+                } else {
+                    await this.client!.insert(this.config.tenantId, collection, doc);
                 }
                 nodesPushed++;
             } catch (error) {
-                errors.push(`CodeSymbol '${symbol.uid}': ${(error as Error).message}`);
+                errors.push(`${collection}: ${(error as Error).message}`);
             }
         }
 
-        // Push relations
-        for (const relation of relations) {
-            try {
-                const doc = {
-                    id: `${relation.sourceUid}-${relation.type}-${relation.targetUid}`,
-                    sourceUid: relation.sourceUid,
-                    targetUid: relation.targetUid,
-                    type: relation.type,
-                    confidence: relation.confidence,
-                    reason: relation.reason,
-                    org_id: this.config.orgId,
-                    updated_at: new Date().toISOString()
-                };
-                const updateRes = await this.client!.update(this.config.tenantId, 'code_relation', { id: doc.id }, doc);
-                if (updateRes.updated === 0) {
-                    await this.client!.insert(this.config.tenantId, 'code_relation', doc);
-                }
-                edgesPushed++;
-            } catch (error) {
-                errors.push(`CodeRelation '${relation.sourceUid}→${relation.targetUid}': ${(error as Error).message}`);
-            }
-        }
-
-        return { nodesPushed, edgesPushed, failures: errors.length, errors };
+        return { nodesPushed, edgesPushed: 0, failures: errors.length, errors };
     }
 
     private ensureConnected(): void {
