@@ -38,7 +38,7 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { SchemaLoader } from '../schemas/loader.js';
-import { ConfigManager } from '../config/configManager.js';
+import { ConfigManager, resolveDeploymentMode } from '../config/configManager.js';
 import { setApiKey, getApiKey, hasApiKey, deleteApiKey } from '../config/keychain.js';
 import {
     loadWorkspaces,
@@ -188,6 +188,14 @@ const cacheCfg = bootConfig.localCache;
 const cacheTtlMs = Math.max(1, Math.min(3600, cacheCfg?.ttlSeconds ?? 60)) * 1000;
 const cacheMaxSize = Math.max(16, Math.min(50_000, cacheCfg?.maxEntries ?? 500));
 const cacheDisabled = cacheCfg?.enabled === false;
+
+// Q2.1 — Resolve deployment mode at module scope. Env (LORE_DEPLOYMENT_MODE)
+// wins over config; default is 'local'. HTTP handlers, /api/health, and
+// main()'s boot gate all read this single source of truth. The cloud-mode
+// boot preflight (adapter presence) runs inside main() below, *after*
+// maybeUpgradeAdapterFromKeychain() — checking here would race the
+// keychain upgrade and spuriously refuse to start.
+const deploymentMode: 'local' | 'cloud' = resolveDeploymentMode(bootConfig);
 
 const graph = new LocalGraph(graphBasePath, {
     cacheTtlMs,
@@ -1544,6 +1552,24 @@ async function main(): Promise<void> {
         console.error(`[Lore MCP] Keychain upgrade failed (non-fatal): ${(kcErr as Error).message}`);
     }
 
+    // Q2.1 — Server mode preflight. Runs AFTER the keychain upgrade so
+    // the adapter binding has settled. Cloud mode MUST have a Dataplane
+    // adapter (keychain 'dataplane' account or DATAPLANE_API_KEY env);
+    // storage adapters land in Q2.2 but the deployment target itself
+    // makes no sense without a cloud data layer, so refuse to boot
+    // rather than silently falling back to local-only Kùzu reads.
+    // Local mode just logs the effective mode for visibility.
+    console.error(`[Lore MCP] Deployment mode: ${deploymentMode}`);
+    if (deploymentMode === 'cloud' && !adapter) {
+        console.error(
+            '[Lore MCP] FATAL — cloud mode requires a Dataplane credential. ' +
+            "Set one via `security add-generic-password -a dataplane -s groundfloor-lore -w <token> -U` " +
+            'or DATAPLANE_API_KEY env. To run without Dataplane, unset ' +
+            "LORE_DEPLOYMENT_MODE (or set it to 'local').",
+        );
+        process.exit(78); // EX_CONFIG — config is valid but insufficient
+    }
+
     // Q1.1 — Dataplane runtime binding. Fire the boot health-ping AFTER
     // the adapter has been resolved (env → keychain upgrade). Fire-and-
     // forget; daemon boot must not block on network I/O. On success:
@@ -1670,6 +1696,35 @@ async function main(): Promise<void> {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ token: authToken }));
                 return;
+            }
+
+            // Q2.1 — Cloud-mode multi-tenancy contract. Every /api/*
+            // request must identify its tenant workspace via the
+            // `X-Lore-Workspace` header. Q2.1 validates presence only
+            // (shape = non-empty string); actual per-workspace graph
+            // routing lands in Q2.2 when the cloud storage adapters
+            // (Arango/Qdrant/Postgres) ship. Exemptions mirror the
+            // orphan-gate exemptions so the UI can still bootstrap,
+            // check health, and resolve orphans / workspaces even
+            // before the picker has chosen a tenant.
+            if (deploymentMode === 'cloud' && url.startsWith('/api/')) {
+                const headerExempt =
+                    pathname === '/api/auth/bootstrap' ||
+                    pathname === '/api/health' ||
+                    pathname === '/api/orphan' ||
+                    url.startsWith('/api/workspaces');
+                if (!headerExempt) {
+                    const wsHeader = req.headers['x-lore-workspace'];
+                    const workspaceId = Array.isArray(wsHeader) ? wsHeader[0] : wsHeader;
+                    if (!workspaceId || workspaceId.trim().length === 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            code: 'workspace_header_required',
+                            message: "cloud mode requires 'X-Lore-Workspace: <workspace-id>' on /api/* requests",
+                        }));
+                        return;
+                    }
+                }
             }
 
             // Orphan-decision gate: when a plugin has been deactivated but the
@@ -2010,6 +2065,10 @@ async function main(): Promise<void> {
                         telemetryOptOut: Boolean(cfg.telemetryOptOut),
                         sessions: activeSessions.size,
                         orphans: orphanState.orphans,
+                        // Q2.1 — surface the effective deployment mode so
+                        // the smoke test and Settings UI can observe it
+                        // without reparsing config or env.
+                        deploymentMode,
                     }));
                 } catch (err) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });

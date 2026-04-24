@@ -51,6 +51,32 @@ const PLUGIN_SCOPED_TOKENS = [
 ];
 
 /**
+ * Q2.1 — Forbidden direct cloud-DB driver imports.
+ *
+ * Per D-017 (2026-04-21), all cloud-mode data access must go through
+ * Dataplane via `groundfloor-ts-sdk`. Core Lore code must NEVER import
+ * a cloud-DB driver directly — not even "just for a migration" or
+ * "just for a benchmark". Any direct driver leaks tenant-isolation,
+ * ReBAC, and change-feed invalidation guarantees that Dataplane owns.
+ *
+ * Matches `import ... from 'pg'` / `from '@arangodb/...'` / etc. in
+ * the FIRST segment of a bare specifier. Scoped packages match the
+ * scope+name pair. Does not match npm-style relative paths.
+ */
+const FORBIDDEN_CLOUD_DRIVERS = [
+    'pg',                  // Postgres
+    'postgres',            // alt Postgres driver
+    '@arangodb/arangojs',  // Arango server SDK
+    'arangojs',            // Arango JS driver
+    '@qdrant/js-client-rest', // Qdrant
+    'qdrant-client',       // Qdrant (alt)
+    '@zilliz/milvus2-sdk-node', // Zilliz / Milvus
+    'milvus-sdk',          // Milvus (alt)
+    'ioredis',             // Redis
+    'redis',               // Redis (legacy)
+];
+
+/**
  * Core files that legitimately reference plugin-scoped tokens — usually
  * because they document the rule itself or hold the one sanctioned
  * plugin-by-name knowledge. Small and justified.
@@ -92,6 +118,10 @@ function scanAll() {
     const files = walk(srcRoot).concat(walk(path.join(repoRoot, 'scripts')));
     const violations = [];
     const importFromPluginsRe = /import\s+[^;]*?from\s+['"]([^'"]*plugins[/\\][^'"]+)['"]/g;
+    // Q2.1 — match any `import ... from '<specifier>'` or `require('<specifier>')`
+    // to catch forbidden cloud-DB drivers. First segment of the specifier
+    // is compared against the forbidden list.
+    const anyImportRe = /(?:import\s+[^;]*?from|require\s*\()\s*['"]([^'"]+)['"]/g;
     const tokenRegexes = PLUGIN_SCOPED_TOKENS.map((t) => ({
         token: t,
         re: new RegExp(`\\b${t}\\b`, 'g'),
@@ -131,6 +161,24 @@ function scanAll() {
             re.lastIndex = 0;
             if (re.test(stripped)) {
                 violations.push({ rule: 'no-plugin-vocab', file: relPath, token });
+            }
+        }
+
+        // Q2.1 — forbidden cloud-DB driver imports. Scan every .ts/.mjs/.js
+        // file in scope. Apply to both core AND plugin files: D-017 is
+        // universal — plugins talk to Dataplane via the TS SDK too.
+        anyImportRe.lastIndex = 0;
+        let dm;
+        while ((dm = anyImportRe.exec(content)) !== null) {
+            const spec = dm[1];
+            // Bare specifier only — relative / absolute paths are local code
+            if (spec.startsWith('.') || spec.startsWith('/')) continue;
+            // Normalize: take the first segment (package or scope+pkg)
+            const firstSeg = spec.startsWith('@')
+                ? spec.split('/').slice(0, 2).join('/')
+                : spec.split('/')[0];
+            if (FORBIDDEN_CLOUD_DRIVERS.includes(firstSeg)) {
+                violations.push({ rule: 'no-direct-cloud-driver', file: relPath, token: firstSeg });
             }
         }
     }
@@ -204,8 +252,16 @@ for (const [file, vs] of grouped) {
 }
 console.error(
     '\nHow to fix:\n' +
+    '  [no-plugin-import / no-plugin-vocab]\n' +
     '  1. Move the offending logic into src/plugins/<name>/ and route through an ILorePlugin hook.\n' +
     '  2. OR, if genuinely legacy (existed before C-4), re-run `npm run test:arch -- --update-baseline` to record.\n' +
-    '  3. OR, if genuinely core, add the file to ALLOWED_IN_CORE in scripts/test-arch.mjs with a comment.\n',
+    '  3. OR, if genuinely core, add the file to ALLOWED_IN_CORE in scripts/test-arch.mjs with a comment.\n' +
+    '\n' +
+    '  [no-direct-cloud-driver]\n' +
+    '  Per D-017 (universal Dataplane access), cloud-DB drivers must never be\n' +
+    '  imported directly. Route through groundfloor-ts-sdk / TsSdkAdapter and\n' +
+    '  let Dataplane own tenant isolation, ReBAC, and change-feed invalidation.\n' +
+    "  If you need a capability Dataplane doesn't expose, raise it there — don't\n" +
+    '  bypass.\n',
 );
 process.exit(1);
