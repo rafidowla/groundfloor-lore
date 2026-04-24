@@ -77,6 +77,9 @@ export async function upsertCodeSymbol(ctx: PluginGraphContext, symbol: CodeSymb
             repo: symbol.repo,
         },
     );
+    // Q1.3 — plugin write via raw Cypher; bump read-cache epoch so
+    // cached getNode/search/listNodes calls don't return stale rows.
+    ctx.bumpEpoch();
 }
 
 export async function addCodeRelation(ctx: PluginGraphContext, edge: CodeRelationEdge): Promise<void> {
@@ -91,6 +94,7 @@ export async function addCodeRelation(ctx: PluginGraphContext, edge: CodeRelatio
             reason: edge.reason,
         },
     );
+    ctx.bumpEpoch(); // Q1.3
 }
 
 /* ─── CodeSymbol read path (used by MCP tools) ────────────────── */
@@ -222,6 +226,7 @@ export async function clearCodeSymbols(ctx: PluginGraphContext, repo: string): P
     await ctx.executeQuery(
         `MATCH (s:CodeSymbol {repo: '${escapeString(repo)}'}) DELETE s`,
     );
+    ctx.bumpEpoch(); // Q1.3 — bulk delete batch; single bump covers all four.
     return count;
 }
 
@@ -243,6 +248,7 @@ export async function recordDevActivity(ctx: PluginGraphContext, activity: DevAc
             tool: activity.tool,
         },
     );
+    ctx.bumpEpoch(); // Q1.3
 }
 
 export async function getActiveDevs(
@@ -288,6 +294,7 @@ export async function clearStaleActivity(
             await ctx.executeQuery(
                 `MATCH (a:DevActivity) WHERE a.timestamp < '${cutoff}' DELETE a`,
             );
+            ctx.bumpEpoch(); // Q1.3
         }
         return count;
     } catch {
@@ -313,6 +320,7 @@ export async function upsertCodeFile(
             lastModified: file.lastModified ?? new Date().toISOString(),
         },
     );
+    ctx.bumpEpoch(); // Q1.3
 }
 
 export async function addFileContains(
@@ -325,6 +333,7 @@ export async function addFileContains(
          MERGE (f)-[:FileContains]->(s)`,
         { path: filePath, uid: symbolUid },
     );
+    ctx.bumpEpoch(); // Q1.3
 }
 
 export async function addLoreTouchesFile(
@@ -339,6 +348,7 @@ export async function addLoreTouchesFile(
          SET r.relation = $relation`,
         { id: loreNodeId, path: filePath, relation },
     );
+    ctx.bumpEpoch(); // Q1.3
 }
 
 /* ─── CodeSymbol ──────────────────────────────────────────────── */
@@ -354,6 +364,7 @@ export async function linkKnowledgeToCode(
          CREATE (n)-[:LoreAppliesToCode {relation: $relation}]->(s)`,
         { nodeId, symbolUid, relation },
     );
+    ctx.bumpEpoch(); // Q1.3
 }
 
 export async function listCodeFiles(
@@ -514,6 +525,7 @@ export async function pruneInferredDeveloperEdges(
             `MATCH ()-[e:LoreTouchesFile]->() WHERE e.relation STARTS WITH $p DELETE e`,
             { p: relationPrefix },
         );
+        if (touchesFile > 0) ctx.bumpEpoch(); // Q1.3
     } catch { /* table may be missing on older graphs */ }
     try {
         const ac = await ctx.queryRows(
@@ -525,6 +537,7 @@ export async function pruneInferredDeveloperEdges(
             `MATCH ()-[e:LoreAppliesToCode]->() WHERE e.relation STARTS WITH $p DELETE e`,
             { p: relationPrefix },
         );
+        if (appliesToCode > 0) ctx.bumpEpoch(); // Q1.3
     } catch { /* ignore */ }
     return { touchesFile, appliesToCode };
 }

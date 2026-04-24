@@ -218,6 +218,50 @@ await withGraph(async (g) => {
     ok(hasPersonalToGlobal, 'aggregateEdges contains personal-plugin → Global (fold working)');
 });
 
+// ─── 8. Plugin raw-Cypher write × cache invalidation ─────────────────
+// Q1.3 follow-up: closes deferred-plugin-graph-context-bumpepoch-hook.
+// Plugin authors reach the graph through PluginGraphContext.executeQuery
+// — core can't observe a raw-Cypher write. If bumpEpoch isn't wired,
+// cached reads of LoreNode will return pre-write rows until the next
+// core write. This test drives a write purely through the plugin
+// surface and asserts the core-owned getNode cache sees the update.
+console.log('\n─── 8. Plugin write via PluginGraphContext bumps cache epoch ───');
+await withGraph(async (g) => {
+    const id = 'xsect-plugin-bump-1';
+    await g.upsertNode({ id, type: 'note', label: 'core-v1', content: 'c1', tags: '', metadata: '', project: 'xsect', ecosystem: 'test' });
+
+    // Warm the cache.
+    await g.getNode(id);
+    await g.getNode(id);
+    const statsWarm = g.getCacheStats();
+    ok(statsWarm.hits >= 1, `core getNode cached (hits=${statsWarm.hits})`);
+    const epochBeforePluginWrite = g.readCache.epoch;
+
+    // Write through the plugin surface — do NOT touch core's upsertNode.
+    const pctx = g.createPluginGraphContext();
+    await pctx.executeQuery(
+        `MATCH (n:LoreNode {id: $id}) SET n.label = $label, n.content = $content`,
+        { id, label: 'plugin-v2', content: 'c2' },
+    );
+    // The contract: plugin author must call bumpEpoch after a write.
+    pctx.bumpEpoch();
+
+    ok(g.readCache.epoch > epochBeforePluginWrite,
+       `plugin bumpEpoch moved epoch ${epochBeforePluginWrite}→${g.readCache.epoch}`);
+
+    const afterPlugin = await g.getNode(id);
+    ok(afterPlugin?.label === 'plugin-v2',
+       `getNode sees plugin-written label (got "${afterPlugin?.label}")`);
+    ok(afterPlugin?.content === 'c2',
+       `getNode sees plugin-written content (got "${afterPlugin?.content}")`);
+
+    // Negative companion: a pure-read executeQuery must NOT bump the epoch.
+    const epochBeforeRead = g.readCache.epoch;
+    await pctx.queryRows(`MATCH (n:LoreNode {id: $id}) RETURN n.label AS l`, { id });
+    ok(g.readCache.epoch === epochBeforeRead,
+       'pure read through plugin context does not bump epoch');
+});
+
 console.log('');
 console.log(`─── Summary: ${passed}/${passed + failed} passed ───`);
 process.exit(failed === 0 ? 0 : 1);
