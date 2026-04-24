@@ -129,6 +129,28 @@ export interface LoreConfig {
         ttlSeconds: number;
         maxEntries: number;
     };
+
+    /**
+     * Q2.1 — Deployment mode switch (Path A consolidation, 2026-04-20).
+     *
+     *   'local' (default)  Single-user daemon on one workstation. Uses the
+     *                      embedded Kùzu graph under the active workspace
+     *                      directory, no Dataplane dependency required.
+     *   'cloud'            Multi-tenant server mode. Boot REFUSES without
+     *                      a Dataplane credential (keychain `dataplane`
+     *                      account, or DATAPLANE_API_KEY env). Every
+     *                      authenticated /api/* request must carry an
+     *                      `X-Lore-Workspace` header identifying the
+     *                      tenant workspace. Per-workspace graph routing
+     *                      and cloud storage adapters (Arango, Qdrant/
+     *                      Zilliz, Postgres) land in Q2.2 — Q2.1 ships
+     *                      only the deployment-mode scaffolding.
+     *
+     * Env override: LORE_DEPLOYMENT_MODE=cloud wins over the config file
+     * (useful for container images and launchd plists that pin the mode
+     * without touching user config).
+     */
+    deploymentMode?: 'local' | 'cloud';
 }
 
 export const DEFAULT_CONFIG: LoreConfig = {
@@ -162,7 +184,30 @@ export const DEFAULT_CONFIG: LoreConfig = {
         ttlSeconds: 60,
         maxEntries: 500,
     },
+    // Q2.1 — Default to local mode. Fresh installs and existing users
+    // stay on the embedded single-user daemon. Server/container images
+    // flip to 'cloud' via env (LORE_DEPLOYMENT_MODE) or explicit config.
+    deploymentMode: 'local',
 };
+
+/**
+ * Q2.1 — Resolve the effective deployment mode.
+ *
+ * Precedence: env var > config file > DEFAULT_CONFIG ('local').
+ * `LORE_DEPLOYMENT_MODE` accepts case-insensitive 'local' or 'cloud';
+ * any other value logs a warning and is ignored (falls through to
+ * config). Never throws — invalid config falls back to 'local' so a
+ * typo in config.json doesn't brick the daemon.
+ */
+export function resolveDeploymentMode(config: LoreConfig): 'local' | 'cloud' {
+    const envRaw = process.env['LORE_DEPLOYMENT_MODE'];
+    if (envRaw) {
+        const envLower = envRaw.trim().toLowerCase();
+        if (envLower === 'local' || envLower === 'cloud') return envLower;
+        console.error(`[Lore MCP] Ignoring invalid LORE_DEPLOYMENT_MODE=${envRaw} (expected 'local' or 'cloud')`);
+    }
+    return config.deploymentMode === 'cloud' ? 'cloud' : 'local';
+}
 
 export class ConfigManager {
     private readonly configPath: string;
@@ -215,6 +260,7 @@ export class ConfigManager {
             'autoExecuteChatActions',
             'analyticalProjections',
             'localCache',
+            'deploymentMode',
         ];
         const next: LoreConfig = { ...current };
         for (const key of allowed) {
