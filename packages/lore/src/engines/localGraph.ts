@@ -982,26 +982,11 @@ export class LocalGraph implements GraphProvider {
                 if (nodeType) typeBreakdown[nodeType] = count;
             }
 
-            // Code intelligence stats
-            let codeSymbolCount = 0;
-            let codeRelationCount = 0;
-            try {
-                const codeResult = await this.connection.query(
-                    'MATCH (s:CodeSymbol) RETURN count(s) AS cnt',
-                ) as QueryResult;
-                const codeRows = await codeResult.getAll();
-                codeSymbolCount = (codeRows[0] as Record<string, unknown>)?.['cnt'] as number ?? 0;
-
-                const codeRelResult = await this.connection.query(
-                    'MATCH ()-[r:CodeRelation]->() RETURN count(r) AS cnt',
-                ) as QueryResult;
-                const codeRelRows = await codeRelResult.getAll();
-                codeRelationCount = (codeRelRows[0] as Record<string, unknown>)?.['cnt'] as number ?? 0;
-            } catch {
-                // Code tables may not exist in older graphs
-            }
-
-            return { nodeCount, edgeCount, typeBreakdown, codeSymbolCount, codeRelationCount };
+            // Plugin-specific counts (CodeSymbol, Memory, Contract, …)
+            // are collected by PluginRegistry.collectPluginStats and
+            // merged into `pluginStats` one layer up. Core only knows
+            // about LoreNode / LoreEdge / type breakdown here.
+            return { nodeCount, edgeCount, typeBreakdown, pluginStats: {} };
         } catch (error) {
             throw new LoreGraphError(
                 `Failed to get graph stats`,
@@ -1063,18 +1048,10 @@ export class LocalGraph implements GraphProvider {
                 warnings.push(`Orphan: ${record['type']} node '${record['id']}' has no relationships.`);
             }
 
-            // Rule 2: Bug patterns missing code links
-            try {
-                const bugQuery = `MATCH (n:LoreNode) WHERE n.type = 'bug_pattern' AND NOT (n)-[:LoreAppliesToCode]->(:CodeSymbol) RETURN n.id AS id`;
-                const bugResult = await this.connection.query(bugQuery) as QueryResult;
-                for (const row of await bugResult.getAll()) {
-                    const record = row as Record<string, unknown>;
-                    warnings.push(`Missing Link: bug_pattern '${record['id']}' is not linked to any CodeSymbol.`);
-                }
-            } catch {
-                // Ignore if Code tables aren't indexed yet
-            }
-
+            // Plugin-specific validations (e.g. "bug_pattern not linked
+            // to a code symbol") are contributed via
+            // ILorePlugin.contributeValidations and merged by callers.
+            // Core's lint only knows the plugin-agnostic shape: orphans.
             return warnings;
         } catch (error) {
             throw new LoreGraphError('Failed to lint graph', 'lintGraph', error);

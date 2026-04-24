@@ -42,60 +42,6 @@
       "file": "packages/lore/src/cli/index.ts",
       "token": "GitNexus",
       "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/engines/localGraph.ts",
-      "token": "CodeSymbol",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/engines/localGraph.ts",
-      "token": "LoreAppliesToCode",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/engines/localGraph.ts",
-      "token": "CodeRelation",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/engines/localGraph.ts",
-      "token": "DevActivity",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/engines/syncEngine.ts",
-      "token": "CodeSymbol",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/engines/syncEngine.ts",
-      "token": "DevActivity",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/engines/tsSdkAdapter.ts",
-      "token": "CodeSymbol",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/engines/tsSdkAdapter.ts",
-      "token": "CodeRelation",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
-    },
-    {
-      "rule": "no-plugin-vocab",
-      "file": "packages/lore/src/engines/tsSdkAdapter.ts",
-      "token": "DevActivity",
-      "justification": "Legacy V2.1 debt — to be moved into plugin in a follow-up."
     }
   ]
 }

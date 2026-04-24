@@ -371,6 +371,57 @@ export class PluginRegistry {
         return next;
     }
 
+    /**
+     * Collect plugin-specific stats from each active plugin's
+     * `contributeStats` hook. Results are keyed by plugin name, mirroring
+     * the shape `GraphStats.pluginStats` expects. Errors are logged and
+     * that plugin is skipped — a bad stats contributor never crashes the
+     * stats endpoint.
+     */
+    async collectPluginStats(ctx: PluginGraphContext): Promise<Record<string, Record<string, number>>> {
+        const out: Record<string, Record<string, number>> = {};
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.contributeStats !== 'function') continue;
+            try {
+                const stats = await plugin.contributeStats(ctx);
+                if (stats && Object.keys(stats).length > 0) {
+                    out[plugin.name] = stats;
+                }
+            } catch (err) {
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.contributeStats threw: ${(err as Error).message}`,
+                );
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Collect plugin-specific validation warnings from each active
+     * plugin's `contributeValidations` hook. Flat array in registration
+     * order. Errors are logged; the plugin is skipped.
+     */
+    async collectValidations(ctx: PluginGraphContext): Promise<Array<{ warning: string }>> {
+        const out: Array<{ warning: string }> = [];
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.contributeValidations !== 'function') continue;
+            try {
+                const warnings = await plugin.contributeValidations(ctx);
+                if (!warnings || !Array.isArray(warnings)) continue;
+                for (const w of warnings) {
+                    if (w && typeof w.warning === 'string' && w.warning.trim()) {
+                        out.push({ warning: w.warning });
+                    }
+                }
+            } catch (err) {
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.contributeValidations threw: ${(err as Error).message}`,
+                );
+            }
+        }
+        return out;
+    }
+
     private assertNoTableCollisions(): void {
         const owner = new Map<string, string>();
         for (const plugin of this.loaded.values()) {

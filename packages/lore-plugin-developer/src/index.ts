@@ -477,6 +477,61 @@ export const developerPlugin: ILorePlugin = {
         ].join(' ');
     },
 
+    /**
+     * Developer-owned graph stats surfaced under
+     * `GraphStats.pluginStats.developer`. Keeps the old
+     * `codeSymbolCount` / `codeRelationCount` keys so downstream
+     * callers (graphReport, MCP stats endpoint, UI) read the same
+     * metric names they did before the boundary cleanup.
+     */
+    async contributeStats(ctx: PluginGraphContext): Promise<Record<string, number> | null> {
+        let codeSymbolCount = 0;
+        let codeRelationCount = 0;
+        try {
+            const symRows = await ctx.queryRows(
+                'MATCH (s:CodeSymbol) RETURN count(s) AS cnt',
+            );
+            codeSymbolCount = Number((symRows[0] as Record<string, unknown>)?.['cnt'] ?? 0);
+        } catch {
+            // Table may not exist yet (fresh graph before registerSchema).
+        }
+        try {
+            const relRows = await ctx.queryRows(
+                'MATCH ()-[r:CodeRelation]->() RETURN count(r) AS cnt',
+            );
+            codeRelationCount = Number((relRows[0] as Record<string, unknown>)?.['cnt'] ?? 0);
+        } catch {
+            // Same rationale as above.
+        }
+        return { codeSymbolCount, codeRelationCount };
+    },
+
+    /**
+     * Developer-owned lint warning: bug_pattern nodes that aren't
+     * linked to any CodeSymbol via LoreAppliesToCode. Lives in the
+     * plugin because both the predicate (LoreAppliesToCode) and the
+     * target (CodeSymbol) are developer-scoped vocabulary.
+     */
+    async contributeValidations(ctx: PluginGraphContext): Promise<Array<{ warning: string }> | null> {
+        const warnings: Array<{ warning: string }> = [];
+        try {
+            const rows = await ctx.queryRows(
+                `MATCH (n:LoreNode)
+                 WHERE n.type = 'bug_pattern' AND NOT (n)-[:LoreAppliesToCode]->(:CodeSymbol)
+                 RETURN n.id AS id`,
+            );
+            for (const row of rows) {
+                const id = String((row as Record<string, unknown>)['id'] ?? '');
+                if (id) {
+                    warnings.push({ warning: `Missing Link: bug_pattern '${id}' is not linked to any CodeSymbol.` });
+                }
+            }
+        } catch {
+            // CodeSymbol table may not exist yet — skip the check.
+        }
+        return warnings;
+    },
+
     async getTelemetryPayload(ctx: PluginContext): Promise<PluginTelemetryPayload | null> {
         // Phase 4 ships health-ping only; this payload is not yet sent on the wire.
         const graph = ctx.graph as { stats?: () => Promise<{ nodes: number; edges: number }> };

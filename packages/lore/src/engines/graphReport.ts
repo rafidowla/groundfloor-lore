@@ -20,11 +20,18 @@
  */
 
 import type { LocalGraph } from './localGraph.js';
+import type { PluginRegistry } from '../plugins/registry.js';
 
 export interface ReportOptions {
     project?: string;
     /** Hard cap on top-N listings. */
     topN?: number;
+    /**
+     * Optional plugin registry. When provided, plugin-contributed stats
+     * merge into the report's Summary section. Omitted in tests / scripts
+     * that run without a registry — core stats still render.
+     */
+    registry?: PluginRegistry;
 }
 
 /**
@@ -40,6 +47,9 @@ export async function writeGraphReport(
 
     // ─── Summary ────────────────────────────────────────────────
     const stats = await graph.getStats();
+    if (opts.registry) {
+        stats.pluginStats = await opts.registry.collectPluginStats(ctx);
+    }
 
     // Edge confidence breakdown
     const confRows = await ctx.queryRows(
@@ -92,8 +102,11 @@ export async function writeGraphReport(
     lines.push('');
     lines.push(`- **Nodes**: ${stats.nodeCount}`);
     lines.push(`- **Edges**: ${stats.edgeCount}`);
-    lines.push(`- **Code symbols** (developer plugin): ${stats.codeSymbolCount}`);
-    lines.push(`- **Code relations**: ${stats.codeRelationCount}`);
+    for (const [pluginName, metrics] of Object.entries(stats.pluginStats ?? {})) {
+        for (const [metric, count] of Object.entries(metrics)) {
+            lines.push(`- **${metric}** (${pluginName} plugin): ${count}`);
+        }
+    }
     lines.push('');
     lines.push('### Nodes by type');
     lines.push('');

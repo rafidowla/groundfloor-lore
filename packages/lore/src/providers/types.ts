@@ -68,13 +68,24 @@ export interface TraversalResult {
 
 /**
  * High level statistics interface for Graph health monitoring.
+ *
+ * Core fields (nodeCount, edgeCount, typeBreakdown) describe the
+ * LoreNode / LoreEdge surface core owns. Plugin-specific counts
+ * (e.g. code symbols, memories, contracts) live under `pluginStats`,
+ * keyed by plugin name then by metric name. Core never names these
+ * metrics — they're whatever a plugin returns from `contributeStats`.
+ *
+ * Example:
+ *   pluginStats: {
+ *     developer: { codeSymbolCount: 241, codeRelationCount: 496 },
+ *     personal:  { memoryCount: 54 },
+ *   }
  */
 export interface GraphStats {
     nodeCount: number;
     edgeCount: number;
     typeBreakdown: Record<string, number>;
-    codeSymbolCount: number;
-    codeRelationCount: number;
+    pluginStats: Record<string, Record<string, number>>;
 }
 
 /**

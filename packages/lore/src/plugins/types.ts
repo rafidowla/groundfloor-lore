@@ -515,4 +515,29 @@ export interface ILorePlugin {
      * the registry so exceptions don't crash chat.
      */
     contributeAnalyticalProjections?(): AnalyticalProjection[] | null;
+
+    /**
+     * Contribute plugin-specific stats to `graph.getStats()`.
+     *
+     * Core emits nodeCount / edgeCount / typeBreakdown (label-introspected
+     * from Kùzu). Anything plugin-specific — `codeSymbolCount`,
+     * `memoryCount`, `contractCount` — lives here, keyed by the plugin's
+     * own metric names. Results land under `stats.pluginStats[pluginName]`.
+     *
+     * Returning `null` or `{}` opts out.
+     */
+    contributeStats?(ctx: PluginGraphContext): Promise<Record<string, number> | null>;
+
+    /**
+     * Contribute plugin-specific graph validations.
+     *
+     * Each entry is a human-readable warning the plugin discovered while
+     * linting its own tables (e.g. "3 bug_pattern nodes aren't linked to
+     * any CodeSymbol"). Core aggregates warnings from all active plugins
+     * into the graph-report warning list; plugins never name each other's
+     * vocabulary.
+     *
+     * Returning `null` or `[]` opts out.
+     */
+    contributeValidations?(ctx: PluginGraphContext): Promise<Array<{ warning: string }> | null>;
 }

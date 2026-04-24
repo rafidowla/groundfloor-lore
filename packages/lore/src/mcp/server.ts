@@ -1082,6 +1082,9 @@ mcpServer.tool(
     async () => {
         try {
             const graphStats = await graph.getStats();
+            graphStats.pluginStats = await pluginRegistry.collectPluginStats(
+                graph.createPluginGraphContext(),
+            );
             const languageBreakdown = await graph.getLanguageBreakdown();
             return {
                 content: [{
@@ -1864,6 +1867,9 @@ async function main(): Promise<void> {
             if (pathname === '/api/stats' && req.method === 'GET') {
                 try {
                     const graphStats = await graph.getStats();
+                    graphStats.pluginStats = await pluginRegistry.collectPluginStats(
+                        graph.createPluginGraphContext(),
+                    );
                     const languageBreakdown = await graph.getLanguageBreakdown();
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({
@@ -3186,6 +3192,7 @@ async function main(): Promise<void> {
                     const md = await writeGraphReport(graph, {
                         project,
                         topN: Number.isFinite(topN) ? topN : 20,
+                        registry: pluginRegistry,
                     });
                     res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
                     res.end(md);

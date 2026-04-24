@@ -294,7 +294,8 @@ export async function indexCommand(args: string[]): Promise<void> {
     console.log('═══════════════════════════════════════════════════════════');
     console.log('  Unified Graph Stats:');
     console.log(`    Knowledge: ${stats.nodeCount} nodes, ${stats.edgeCount} edges`);
-    console.log(`    Code:      ${stats.codeSymbolCount} symbols, ${stats.codeRelationCount} relations`);
+    const devStats = stats.pluginStats?.['developer'] ?? {};
+    console.log(`    Code:      ${devStats['codeSymbolCount'] ?? 0} symbols, ${devStats['codeRelationCount'] ?? 0} relations`);
     console.log('═══════════════════════════════════════════════════════════');
 
     await graph.close();
@@ -426,10 +427,13 @@ export async function statusCommand(_args: string[]): Promise<void> {
         }
     }
     console.log('');
+    const developerStats = stats.pluginStats?.['developer'] ?? {};
+    const codeSymbolCount = (developerStats['codeSymbolCount'] as number | undefined) ?? 0;
+    const codeRelationCount = (developerStats['codeRelationCount'] as number | undefined) ?? 0;
     console.log('  Code Graph');
-    console.log(`    Symbols:   ${stats.codeSymbolCount}`);
-    console.log(`    Relations: ${stats.codeRelationCount}`);
-    if (stats.codeSymbolCount === 0) {
+    console.log(`    Symbols:   ${codeSymbolCount}`);
+    console.log(`    Relations: ${codeRelationCount}`);
+    if (codeSymbolCount === 0) {
         console.log('    (run "lore index" to import from GitNexus)');
     }
     console.log('');
