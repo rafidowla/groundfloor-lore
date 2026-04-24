@@ -45,6 +45,17 @@ export const legalPlugin: ILorePlugin = {
     nodeTypes: ['Contract', 'Clause', 'Party', 'Jurisdiction'],
     edgeRelations: ['contains', 'involves', 'governed_by'],
 
+    // Q1.4 — Featherweight IR. Legal is the minimum viable plugin:
+    // four nodes, three edges, no custom tools. IR keeps pace with
+    // the tables declared in schema.ts.
+    ir: {
+        version: '1.0.0',
+        ownedNodeTables: ['Contract', 'Clause', 'Party', 'Jurisdiction'],
+        ownedEdgeTables: ['ContractContainsClause', 'ContractInvolvesParty', 'ContractGovernedBy'],
+        nodeKinds: ['Contract', 'Clause', 'Party', 'Jurisdiction'],
+        edgeKinds: ['contains', 'involves', 'governed_by'],
+    },
+
     uiHints: {
         modeLabel: 'Legal',
         systemPrompt: 'Legal vocabulary active — contracts, clauses, parties, jurisdictions.',

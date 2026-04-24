@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand, modelsCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, indexCommand, setupCommand, joinCommand, lintCommand, auditCommand, ingestFilesCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand, modelsCommand, scaffoldPluginCommand } from './commands.js';
 
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -53,6 +53,7 @@ Commands:
   migrate        One-off migrations (today: v1-sqlite → Kùzu)
   verbatim       LanceDB verbatim store tools (today: reap orphan embeddings)
   models         Manage cached LLM models (today: prune unused ONNX weights)
+  scaffold-plugin  Scaffold a new plugin skeleton under packages/lore-plugin-<name>/
 
 Options:
   --help    Show this help message
@@ -142,6 +143,9 @@ async function main(): Promise<void> {
             break;
         case 'models':
             await modelsCommand(commandArgs);
+            break;
+        case 'scaffold-plugin':
+            await scaffoldPluginCommand(commandArgs);
             break;
         default:
             console.error(`Unknown command: '${command}'`);

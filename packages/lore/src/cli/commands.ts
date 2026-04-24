@@ -2317,3 +2317,299 @@ async function fetchReportViaDaemon(project?: string, topN?: number): Promise<st
     });
 }
 
+/* ─── Command: scaffold-plugin (Q1.4) ─────────────────────────── */
+
+/**
+ * scaffoldPluginCommand — Generate a new plugin skeleton under
+ * `packages/lore-plugin-<name>/` with a working IR stub.
+ *
+ * Q1.4 / decision D-D: "Each plugin invents a narrow IR it serializes
+ * into." The scaffold's whole job is to front-load the IR question —
+ * the first file the user fills in is the IR descriptor. Anything
+ * generated here boots cleanly against the current core without
+ * hand-editing tsconfig paths.
+ *
+ * Steps:
+ *   1. Validate kebab-case name (lowercase, digits, hyphens).
+ *   2. Refuse if `packages/lore-plugin-<name>/` already exists.
+ *   3. Write src/{index.ts, schema.ts, tools.ts} + README.md.
+ *   4. Patch root tsconfig.json: add `@lore-plugin-<name>/*` path
+ *      alias and `packages/lore-plugin-<name>/src/**\/*` include.
+ *   5. Print next steps: add to `BUILTIN_PLUGINS` in registry.ts,
+ *      activate in `.lore/config.json`, rebuild.
+ *
+ * Acceptance (per post_v2_plan.md Q1.4):
+ *   "New plugin template can be scaffolded with `npx lore
+ *    scaffold-plugin <name>` and has a working IR on first boot."
+ *
+ * Intentionally does NOT auto-register in BUILTIN_PLUGINS — that
+ * edit is a one-liner and leaving it manual keeps the scaffolder
+ * side-effect-free outside the new plugin's directory (plus one
+ * tsconfig patch).
+ */
+export async function scaffoldPluginCommand(args: string[]): Promise<void> {
+    const name = args[0];
+    if (!name) {
+        console.error('Usage: lore scaffold-plugin <name>');
+        console.error('  name must be kebab-case (lowercase, digits, hyphens).');
+        console.error('  Example: lore scaffold-plugin finance');
+        process.exit(1);
+    }
+    if (!/^[a-z][a-z0-9-]*[a-z0-9]$/.test(name)) {
+        console.error(`Invalid plugin name: '${name}'.`);
+        console.error('  Must be kebab-case: start with a letter, end with letter/digit,');
+        console.error('  contain only lowercase letters, digits, and hyphens.');
+        process.exit(1);
+    }
+
+    // Find the monorepo root — this CLI runs from any subdir but the
+    // scaffolder writes to packages/ at the repo root.
+    const repoRoot = findRepoRoot();
+    const packagesDir = path.join(repoRoot, 'packages');
+    if (!fs.existsSync(packagesDir)) {
+        console.error(`No packages/ directory at ${repoRoot}. Run this from a groundfloor-lore checkout.`);
+        process.exit(1);
+    }
+
+    const pluginDir = path.join(packagesDir, `lore-plugin-${name}`);
+    if (fs.existsSync(pluginDir)) {
+        console.error(`Plugin directory already exists: ${pluginDir}`);
+        console.error('  Pick a different name or delete the existing directory first.');
+        process.exit(1);
+    }
+
+    const pascal = name.split('-').map((s) => s.charAt(0).toUpperCase() + s.slice(1)).join('');
+    const capConst = `${pascal.charAt(0).toLowerCase()}${pascal.slice(1)}Plugin`;
+
+    // Derived table/kind names — intentionally minimal IR stub.
+    // One node table (NoteOne), one edge table (NoteRefersTo). The
+    // user replaces these with their real domain on first edit.
+    const nodeTable = `${pascal}Note`;
+    const edgeTable = `${pascal}RefersTo`;
+    const nodeKind = `${name}_note`;
+
+    fs.mkdirSync(path.join(pluginDir, 'src'), { recursive: true });
+
+    // Defeat tsc-alias rewriting: if the literal `@lore-core/plugins/...`
+    // string appears in this file's source, tsc-alias replaces it with a
+    // relative path at build time — which corrupts the scaffolded
+    // plugin's imports (they'd be relative to the CLI dist, not to the
+    // new plugin dir). Assembling the path at runtime from split parts
+    // keeps the full aliased path out of the compiled output.
+    const CORE_TYPES = '@' + 'lore-core/plugins/types.js';
+
+    /* ─── src/schema.ts ───────────────────────────────────────── */
+    const schemaTs = `/**
+ * schema.ts — ${pascal} plugin Kùzu schema.
+ *
+ * Q1.4 IR stub. Replace \`${nodeTable}\` and \`${edgeTable}\` with
+ * your real domain node + edge tables. The node and edge names here
+ * must match the \`ir\` descriptor in index.ts — the registry uses
+ * the declared IR to check for cross-plugin table-name collisions
+ * at boot.
+ */
+
+import type { PluginGraphContext } from '${CORE_TYPES}';
+
+export async function register${pascal}Schema(ctx: PluginGraphContext): Promise<void> {
+    await ctx.executeQuery(\`
+        CREATE NODE TABLE IF NOT EXISTS ${nodeTable} (
+            id STRING,
+            displayName STRING,
+            content STRING,
+            createdAt STRING,
+            updatedAt STRING,
+            PRIMARY KEY (id)
+        )
+    \`);
+
+    await ctx.executeQuery(\`
+        CREATE REL TABLE IF NOT EXISTS ${edgeTable} (
+            FROM ${nodeTable} TO ${nodeTable},
+            note STRING,
+            confidence STRING DEFAULT 'extracted'
+        )
+    \`);
+}
+`;
+
+    /* ─── src/tools.ts ─────────────────────────────────────────── */
+    const toolsTs = `/**
+ * tools.ts — ${pascal} plugin MCP tool registrations.
+ *
+ * Q1.4 stub. Plugins can ship tool-free (see the legal plugin
+ * exemplar) — the LLM will use core's generic store_node /
+ * store_edge against this plugin's IR. Add domain-specific tools
+ * here when you want deterministic flows (recall_x, upcoming_y).
+ */
+
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { PluginContext } from '${CORE_TYPES}';
+
+export const ${pascal.toUpperCase()}_TOOL_NAMES: readonly string[] = [];
+
+export function register${pascal}Tools(_server: McpServer, _ctx: PluginContext): void {
+    // Intentionally empty — tool-free is a first-class pattern.
+    // Uncomment and extend when you need domain-specific tools:
+    //
+    // server.tool(
+    //     '${name}_upcoming',
+    //     'Summary of what you are looking at',
+    //     { days: z.number().optional() },
+    //     async ({ days }) => { ... }
+    // );
+}
+`;
+
+    /* ─── src/index.ts ─────────────────────────────────────────── */
+    const indexTs = `/**
+ * index.ts — ${pascal} plugin manifest.
+ *
+ * Generated by \`lore scaffold-plugin ${name}\`. Replace the IR stub
+ * below with your real domain vocabulary, then:
+ *
+ *   1. Add this plugin to the BUILTIN_PLUGINS map in
+ *      packages/lore/src/plugins/registry.ts:
+ *
+ *        import { ${capConst} } from '@lore-plugin-${name}/index.js';
+ *        const BUILTIN_PLUGINS = { ..., ${name}: ${capConst} };
+ *
+ *   2. Activate in .lore/config.json:
+ *
+ *        { "plugins": ["${name}"] }
+ *
+ *   3. Rebuild: \`npm run build && launchctl kickstart -k
+ *      gui/\\\$UID/com.groundfloor.lore\`
+ *
+ *   4. Verify: \`curl http://127.0.0.1:3847/api/plugins/ir\` shows
+ *      your plugin's declared IR.
+ */
+
+import type {
+    ILorePlugin,
+    PluginContext,
+    PluginGraphContext,
+    RetentionRule,
+} from '${CORE_TYPES}';
+import { register${pascal}Schema } from './schema.js';
+import { register${pascal}Tools } from './tools.js';
+
+export const ${capConst}: ILorePlugin = {
+    name: '${name}',
+    version: '0.1.0',
+    description: '${pascal} plugin — scaffolded stub. Replace this description.',
+
+    // Legacy flat fields — kept in sync with \`ir\` below. Future
+    // versions of core will read \`ir\` exclusively; for now both
+    // fields are written so older tooling still works.
+    ownedTables: ['${nodeTable}', '${edgeTable}'],
+    nodeTypes: ['${nodeKind}'],
+    edgeRelations: ['refers_to'],
+
+    // Q1.4 — Declarative IR. The authoritative shape descriptor.
+    ir: {
+        version: '0.1.0',
+        ownedNodeTables: ['${nodeTable}'],
+        ownedEdgeTables: ['${edgeTable}'],
+        nodeKinds: ['${nodeKind}'],
+        edgeKinds: ['refers_to'],
+    },
+
+    uiHints: {
+        modeLabel: '${pascal}',
+        systemPrompt: '${pascal} vocabulary active.',
+        defaultFilterTypes: ['${nodeKind}'],
+        cameraFocusTag: '${name}',
+    },
+
+    registerTools(server, ctx: PluginContext) {
+        register${pascal}Tools(server, ctx);
+    },
+
+    async registerSchema(ctx: PluginGraphContext) {
+        await register${pascal}Schema(ctx);
+    },
+
+    contributeSystemPrompt(_ctx: PluginContext): string | null {
+        return '${pascal} knowledge is active in this workspace.';
+    },
+
+    contributeRetentionPolicy(): RetentionRule[] {
+        return [
+            { nodeType: '${nodeKind}', condition: 'age', ageThresholdDays: 10_000, action: 'keep-forever' },
+        ];
+    },
+};
+`;
+
+    /* ─── README.md ────────────────────────────────────────────── */
+    const readme = `# @lore-plugin-${name}
+
+Scaffolded plugin — replace this README with your plugin's story.
+
+## IR
+
+- Node tables: \`${nodeTable}\`
+- Edge tables: \`${edgeTable}\`
+- Node kinds: \`${nodeKind}\`
+- Edge kinds: \`refers_to\`
+
+See \`src/index.ts\` for the full manifest and \`src/schema.ts\` for
+the Kùzu schema definitions.
+
+## Activation
+
+1. Register in \`packages/lore/src/plugins/registry.ts\` BUILTIN_PLUGINS.
+2. Add \`${name}\` to \`.lore/config.json\` plugins array.
+3. Rebuild.
+`;
+
+    fs.writeFileSync(path.join(pluginDir, 'src', 'schema.ts'), schemaTs);
+    fs.writeFileSync(path.join(pluginDir, 'src', 'tools.ts'), toolsTs);
+    fs.writeFileSync(path.join(pluginDir, 'src', 'index.ts'), indexTs);
+    fs.writeFileSync(path.join(pluginDir, 'README.md'), readme);
+
+    /* ─── Patch root tsconfig.json ──────────────────────────────── */
+    // Add the new path alias + include glob. Read-modify-write the
+    // JSON as a string with targeted replacements so we preserve the
+    // exact formatting (comments, trailing commas, indentation) the
+    // hand-written tsconfig uses.
+    const tsconfigPath = path.join(repoRoot, 'tsconfig.json');
+    let tsconfig = fs.readFileSync(tsconfigPath, 'utf-8');
+    const aliasKey = `"@lore-plugin-${name}/*"`;
+    const includeGlob = `"packages/lore-plugin-${name}/src/**/*"`;
+
+    if (!tsconfig.includes(aliasKey)) {
+        // Insert the new alias right before the closing brace of the
+        // `paths` object. Anchor on the known last-entry pattern.
+        tsconfig = tsconfig.replace(
+            /("@lore-plugin-legal\/\*":\s*\[[^\]]*\])(\s*\n\s*\})/,
+            `$1,\n            ${aliasKey}: ["packages/lore-plugin-${name}/src/*"]$2`,
+        );
+    }
+    if (!tsconfig.includes(includeGlob)) {
+        tsconfig = tsconfig.replace(
+            /("packages\/lore-plugin-legal\/src\/\*\*\/\*")(\s*\n\s*\])/,
+            `$1,\n        ${includeGlob}$2`,
+        );
+    }
+    fs.writeFileSync(tsconfigPath, tsconfig);
+
+    console.log(`Created packages/lore-plugin-${name}/`);
+    console.log(`  src/index.ts    — manifest + IR descriptor`);
+    console.log(`  src/schema.ts   — Kùzu tables (${nodeTable}, ${edgeTable})`);
+    console.log(`  src/tools.ts    — MCP tool registrar (empty stub)`);
+    console.log(`  README.md`);
+    console.log(`Patched tsconfig.json:`);
+    console.log(`  + @lore-plugin-${name}/* path alias`);
+    console.log(`  + packages/lore-plugin-${name}/src/**/* include`);
+    console.log(``);
+    console.log(`Next steps:`);
+    console.log(`  1. Edit src/index.ts — replace the IR stub with your real domain.`);
+    console.log(`  2. Add to packages/lore/src/plugins/registry.ts:`);
+    console.log(`       import { ${capConst} } from '@lore-plugin-${name}/index.js';`);
+    console.log(`       const BUILTIN_PLUGINS = { ..., ${name}: ${capConst} };`);
+    console.log(`  3. Activate: add "${name}" to .lore/config.json plugins[].`);
+    console.log(`  4. Rebuild: npm run build`);
+    console.log(`  5. Verify: curl http://127.0.0.1:3847/api/plugins/ir (auth-gated).`);
+}

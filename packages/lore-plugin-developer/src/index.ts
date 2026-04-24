@@ -65,6 +65,23 @@ export const developerPlugin: ILorePlugin = {
     nodeTypes: ['decision', 'convention', 'bug_pattern', 'architecture', 'troubleshooting', 'code_symbol'],
     edgeRelations: ['references', 'supersedes', 'implements', 'called_by', 'refers_to'],
 
+    // Q1.4 — Declarative IR. Authoritative descriptor for the
+    // developer plugin's contribution to the graph: CodeFile +
+    // CodeSymbol node tables plus the REF_BY symbol-call REL, and
+    // the seven LoreNode subtypes this plugin reasons about.
+    // `ownedTables` above still works for compat; the registry and
+    // tooling prefer `ir.*` when set.
+    ir: {
+        version: '1.0.0',
+        // CodeFile is declared by registerSchema but historically
+        // missing from ownedTables (pre-Q1.4 oversight); the IR
+        // entry pulls it back into the declared surface.
+        ownedNodeTables: ['CodeFile', 'CodeSymbol'],
+        ownedEdgeTables: ['REF_BY', 'FileContains', 'CodeRelation', 'LoreTouchesFile', 'LoreAppliesToCode'],
+        nodeKinds: ['decision', 'convention', 'bug_pattern', 'architecture', 'troubleshooting', 'code_file', 'code_symbol'],
+        edgeKinds: ['references', 'supersedes', 'implements', 'called_by', 'refers_to', 'contains', 'touches', 'applies_to'],
+    },
+
     uiHints: {
         modeLabel: 'Developer',
         systemPrompt:

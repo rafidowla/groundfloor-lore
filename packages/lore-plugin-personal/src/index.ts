@@ -62,6 +62,18 @@ export const personalPlugin: ILorePlugin = {
     nodeTypes: ['Person', 'Place', 'PersonalEvent', 'Memory'],
     edgeRelations: ['lives_at', 'involves', 'occurred_at', 'related_to'],
 
+    // Q1.4 — Declarative IR. Four domain nodes (Person, Place,
+    // PersonalEvent, Memory) plus five relationship tables that
+    // connect them. No overlap with core vocabulary — everything
+    // here is plugin-native.
+    ir: {
+        version: '1.0.0',
+        ownedNodeTables: ['Person', 'Place', 'PersonalEvent', 'Memory'],
+        ownedEdgeTables: ['PersonLivesAt', 'PersonInvolves', 'MemoryInvolves', 'MemoryOccurredAt', 'PersonRelatedTo'],
+        nodeKinds: ['Person', 'Place', 'PersonalEvent', 'Memory'],
+        edgeKinds: ['lives_at', 'involves', 'occurred_at', 'related_to'],
+    },
+
     uiHints: {
         modeLabel: 'Personal',
         systemPrompt: 'Personal knowledge graph active — warm tone, private by default.',

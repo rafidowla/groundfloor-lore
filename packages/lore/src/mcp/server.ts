@@ -734,6 +734,35 @@ mcpServer.tool(
     },
 );
 
+/* ─── Tool: list_plugin_ir (Q1.4) ─────────────────────────────── */
+//
+// Returns the declared IR (Intermediate Representation) for every
+// active plugin. Mirrors GET /api/plugins/ir — exposed as an MCP tool
+// so agents (Claude Code, Cursor) can introspect which plugins own
+// which node/edge tables before issuing store_node / store_edge calls.
+
+mcpServer.tool(
+    'list_plugin_ir',
+    'List the declared IR descriptor for every active plugin: owned node/edge tables, node/edge kinds, IR version. Use this to understand which plugin owns which vocabulary in the graph.',
+    {},
+    async () => {
+        try {
+            const entries = pluginRegistry.collectIR();
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({ plugins: entries }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
 /**
  * buildLanguageHint — Phase B (V2.2). Given the caller's declared
  * `queryLanguage`, compare it against the corpus language breakdown.
@@ -1753,6 +1782,30 @@ async function main(): Promise<void> {
                 } catch (err) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ status: 'degraded', error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // Q1.4 — Plugin IR introspection. Returns the declared IR
+            // descriptor for every active plugin: owned node/edge
+            // tables, node/edge kinds, and IR version. Useful for:
+            //   - Admin UI: "what does this plugin bring to the graph?"
+            //   - Analytical projection (Q1.5): the projection engine
+            //     reads node/edge kinds from here to know which tables
+            //     the plugin opts into for aggregation queries.
+            //   - Scaffolder validation: new plugins can diff their
+            //     IR against live descriptors to catch collisions
+            //     before boot.
+            // Plugins that haven't adopted `ir` yet get a synthesized
+            // descriptor with `version: "0.0.0"` — the migration signal.
+            if (pathname === '/api/plugins/ir' && req.method === 'GET') {
+                try {
+                    const entries = pluginRegistry.collectIR();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ plugins: entries }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
                 }
                 return;
             }

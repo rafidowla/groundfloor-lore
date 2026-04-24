@@ -15,7 +15,7 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { ILorePlugin, PluginContext, PluginGraphContext } from './types.js';
+import type { ILorePlugin, PluginContext, PluginGraphContext, PluginIR } from './types.js';
 import type { ConfigManager, LoreConfig } from '../config/configManager.js';
 import type { PluginHistoryEntry } from '../config/configManager.js';
 import { developerPlugin } from '@lore-plugin-developer/index.js';
@@ -212,6 +212,31 @@ export class PluginRegistry {
     /** Iterate active plugins in activation order. */
     active(): ILorePlugin[] {
         return Array.from(this.loaded.values());
+    }
+
+    /**
+     * Q1.4 — Collect declared IR across active plugins. Returns one
+     * entry per active plugin with its `ir` descriptor; plugins that
+     * haven't migrated (no `ir` field) get a synthesized descriptor
+     * derived from their `ownedTables` / `nodeTypes` / `edgeRelations`
+     * flat fields. That synthesized IR marks `ownedEdgeTables` as `[]`
+     * because we can't tell node tables from edge tables from the
+     * legacy flat list — adopting `ir` explicitly is the migration
+     * path to the complete descriptor.
+     */
+    collectIR(): Array<{ plugin: string; version: string; ir: PluginIR }> {
+        const out: Array<{ plugin: string; version: string; ir: PluginIR }> = [];
+        for (const plugin of this.loaded.values()) {
+            const ir: PluginIR = plugin.ir ?? {
+                version: '0.0.0',
+                ownedNodeTables: plugin.ownedTables ?? [],
+                ownedEdgeTables: [],
+                nodeKinds: plugin.nodeTypes ?? [],
+                edgeKinds: plugin.edgeRelations ?? [],
+            };
+            out.push({ plugin: plugin.name, version: plugin.version, ir });
+        }
+        return out;
     }
 
     /** Combined node type enum across active plugins + the base schema. */

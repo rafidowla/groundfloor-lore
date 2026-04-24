@@ -150,6 +150,48 @@ export interface RetentionRule {
 }
 
 /**
+ * PluginIR — A plugin's declared Intermediate Representation.
+ *
+ * Q1.4 / decision D-D per docs/post_v2_plan.md: "Each plugin invents a
+ * narrow IR it serializes into. No generalized CommonMark/OOXML
+ * chasing." Making the IR a first-class, declarative field — rather
+ * than inferring it from `registerSchema` side effects — lets tooling
+ * enumerate a plugin's shape without booting it:
+ *
+ *   - Scaffolder (`lore scaffold-plugin`) generates a stub with a
+ *     working IR on the first boot.
+ *   - `/api/plugins/ir` returns the aggregated IR for UI + docs.
+ *   - Analytical projection (Q1.5) reads node/edge kinds from here
+ *     to know which projections a plugin opts into.
+ *   - `test:arch` gains a stricter rule: core must not reference any
+ *     node or edge kind declared in a plugin's IR.
+ *
+ * Split of fields:
+ *   ownedNodeTables : Kùzu node tables this plugin CREATEs. Collision-
+ *                     checked at boot.
+ *   ownedEdgeTables : Kùzu REL tables this plugin CREATEs.
+ *   nodeKinds       : domain node-type labels used in tags / metadata
+ *                     (e.g. 'Person', 'code_symbol', 'Contract').
+ *                     Not always 1:1 with ownedNodeTables — a plugin
+ *                     can contribute `nodeType: 'decision'` to the
+ *                     shared LoreNode table without owning a table.
+ *   edgeKinds       : relation labels (e.g. 'lives_at', 'applies_to').
+ *   version         : IR schema version — plugin bumps on breaking
+ *                     change. Clients can migrate or refuse to load.
+ *
+ * The older flat fields (`ownedTables`, `nodeTypes`, `edgeRelations`)
+ * stay as a parallel compat surface until every plugin has migrated;
+ * the registry prefers `ir.*` when present and falls back otherwise.
+ */
+export interface PluginIR {
+    version: string;
+    ownedNodeTables: string[];
+    ownedEdgeTables: string[];
+    nodeKinds: string[];
+    edgeKinds: string[];
+}
+
+/**
  * ILorePlugin — The contract every plugin must satisfy.
  * Must be a pure object (no module-level side effects on import) so the
  * registry can introspect without booting the plugin.
@@ -164,12 +206,25 @@ export interface ILorePlugin {
      * Kùzu table names this plugin owns. Used for:
      *   (a) collision checks across active plugins at boot
      *   (b) orphan detection when a plugin is deactivated
+     *
+     * Q1.4 note: superseded by `ir.ownedNodeTables` + `ir.ownedEdgeTables`
+     * when `ir` is present. Kept as a parallel field for compat with
+     * plugins that haven't adopted the declarative IR yet.
      */
     ownedTables: string[];
 
-    /** Additional node / edge kinds this plugin introduces. */
+    /** Additional node / edge kinds this plugin introduces.
+     *  Q1.4: mirror of `ir.nodeKinds` / `ir.edgeKinds`. */
     nodeTypes: string[];
     edgeRelations: string[];
+
+    /**
+     * Q1.4 — Declarative IR descriptor. Optional during migration;
+     * every new plugin should declare one. Scaffolder-generated
+     * plugins start with an IR stub. See PluginIR jsdoc above for
+     * the contract.
+     */
+    ir?: PluginIR;
 
     /** UI behavior for the Mode pill (Phase 3). */
     uiHints: PluginUiHints;
