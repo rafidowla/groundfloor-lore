@@ -864,6 +864,107 @@ export class LocalGraph implements GraphProvider {
     }
 
     /**
+     * Q1.9 — Semantic-zoom overview aggregation.
+     *
+     * Produces one "blob" per project with a total node count and a
+     * list of cross-project aggregate edges (bundles). Aggregation
+     * runs entirely on local Kùzu — airplane-safe, no network, no
+     * plugin vocab (group key is the opaque `project` string that
+     * every LoreNode carries).
+     *
+     * Shape:
+     *   { blobs:          [{ project, nodeCount }],
+     *     aggregateEdges: [{ fromProject, toProject, count }],
+     *     totalNodes:     number }
+     *
+     * Positional layout (centerX/centerY) is NOT computed server-side.
+     * Clients run ForceAtlas2 on the aggregate project-to-project
+     * graph; keeping positions client-side lets the browser handle
+     * layout and avoids a server dependency on a graph library.
+     *
+     * Only lore↔lore edges are aggregated here. Plugin topology slices
+     * (file:, symbol: nodes + their edges) aren't counted — they
+     * belong to a single workspace's project scope already, and
+     * cross-project plugin edges are rare and orthogonal to the
+     * overview's goal of "how do my memory clusters connect".
+     */
+    async getTopologyOverview(): Promise<{
+        blobs: Array<{ project: string; nodeCount: number }>;
+        aggregateEdges: Array<{ fromProject: string; toProject: string; count: number }>;
+        totalNodes: number;
+    }> {
+        await this.initialize();
+
+        try {
+            const GLOBAL = 'Global';
+
+            // Node counts grouped by project. COALESCE-equivalent: we
+            // fold NULL/empty project into 'Global' client-side so the
+            // Cypher stays portable across Kùzu versions.
+            const blobResult = await this.connection.query(
+                `MATCH (n:LoreNode)
+                 RETURN n.project AS project, count(*) AS cnt`,
+            ) as QueryResult;
+            const blobRows = await blobResult.getAll();
+
+            const blobMap = new Map<string, number>();
+            let totalNodes = 0;
+            for (const row of blobRows as Array<Record<string, unknown>>) {
+                const rawProject = row['project'];
+                const key =
+                    typeof rawProject === 'string' && rawProject.length > 0
+                        ? rawProject
+                        : GLOBAL;
+                const count = Number(row['cnt'] ?? 0);
+                blobMap.set(key, (blobMap.get(key) ?? 0) + count);
+                totalNodes += count;
+            }
+            const blobs = Array.from(blobMap.entries())
+                .map(([project, nodeCount]) => ({ project, nodeCount }))
+                .sort((a, b) => b.nodeCount - a.nodeCount);
+
+            // Cross-project aggregate edges. Pull (fromProject,
+            // toProject) pairs and let the client key them; Kùzu's
+            // GROUP BY story is simpler when we aggregate in JS for
+            // tuples across two columns.
+            const edgeResult = await this.connection.query(
+                `MATCH (a:LoreNode)-[:LoreEdge]->(b:LoreNode)
+                 RETURN a.project AS fromProject, b.project AS toProject`,
+            ) as QueryResult;
+            const edgeRows = await edgeResult.getAll();
+
+            const edgeMap = new Map<string, number>();
+            for (const row of edgeRows as Array<Record<string, unknown>>) {
+                const rawFrom = row['fromProject'];
+                const rawTo = row['toProject'];
+                const from =
+                    typeof rawFrom === 'string' && rawFrom.length > 0
+                        ? rawFrom
+                        : GLOBAL;
+                const to =
+                    typeof rawTo === 'string' && rawTo.length > 0
+                        ? rawTo
+                        : GLOBAL;
+                if (from === to) continue; // intra-project edges excluded
+                const key = `${from}\x00${to}`;
+                edgeMap.set(key, (edgeMap.get(key) ?? 0) + 1);
+            }
+            const aggregateEdges = Array.from(edgeMap.entries()).map(([key, count]) => {
+                const [fromProject, toProject] = key.split('\x00');
+                return { fromProject, toProject, count };
+            });
+
+            return { blobs, aggregateEdges, totalNodes };
+        } catch (error) {
+            throw new LoreGraphError(
+                'Failed to extract topology overview',
+                'getTopologyOverview',
+                error,
+            );
+        }
+    }
+
+    /**
      * listNodes — List all nodes with optional type/tag/scope filters.
      *
      * @param type - Optional node type filter.

@@ -14,6 +14,16 @@ async function main() {
         assert.ok(Array.isArray(data.edges), 'Response should contain edges array');
         console.log(`  ✓ Successfully fetched topology with ${data.nodes.length} nodes and ${data.edges.length} edges.\n`);
 
+        console.log('Fetching /api/topology/overview (Q1.9)...');
+        const overviewRes = await fetch('http://127.0.0.1:3847/api/topology/overview?groupBy=project');
+        assert.strictEqual(overviewRes.status, 200, `Expected 200 OK, got ${overviewRes.status}`);
+        const overview = await overviewRes.json();
+        assert.ok(Array.isArray(overview.blobs), 'Overview response should contain blobs array');
+        assert.ok(Array.isArray(overview.aggregateEdges), 'Overview response should contain aggregateEdges array');
+        assert.strictEqual(overview.groupBy, 'project', 'Overview should echo groupBy');
+        assert.strictEqual(typeof overview.totalNodes, 'number', 'Overview should carry totalNodes');
+        console.log(`  ✓ Overview: ${overview.blobs.length} blobs, ${overview.aggregateEdges.length} aggregate edges, ${overview.totalNodes} total nodes.\n`);
+
         console.log('Fetching /explore...');
         const exploreRes = await fetch('http://127.0.0.1:3847/explore');
         assert.strictEqual(exploreRes.status, 200, `Expected 200 OK, got ${exploreRes.status}`);
