@@ -25,6 +25,7 @@ const suites: Suite[] = [
     { name: 'Phase 7a (operational hygiene)', script: 'e2e-phase-7a.ts' },
     { name: 'V2.2 multilingual',              script: 'e2e-language.ts' },
     { name: 'Q1.9 overview aggregation',      script: 'e2e-q1-9-overview.ts' },
+    { name: 'Q1 intersections (1.3×1.4×1.7×1.9)', script: 'e2e-q1-intersections.ts' },
 ];
 
 function runOne(suite: Suite): Promise<number> {
