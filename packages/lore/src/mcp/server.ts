@@ -29,6 +29,10 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { LocalGraph, type LoreNode } from '../engines/localGraph.js';
+import { DataplaneGraph } from '../engines/dataplaneGraph.js';
+import { bindWorkspaceToRequest, requireCurrentTenantId } from '../security/workspaceContext.js';
+// @ts-ignore - workspace-linked SDK lacks full Node16 exports declaration
+import { GroundfloorClient } from 'groundfloor-ts-sdk';
 import { VerbatimStore, buildVerbatimText } from '../engines/verbatimStore.js';
 import { FeedbackStore } from '../engines/feedbackStore.js';
 import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
@@ -197,11 +201,49 @@ const cacheDisabled = cacheCfg?.enabled === false;
 // keychain upgrade and spuriously refuse to start.
 const deploymentMode: 'local' | 'cloud' = resolveDeploymentMode(bootConfig);
 
-const graph = new LocalGraph(graphBasePath, {
-    cacheTtlMs,
-    cacheMaxSize,
-    cacheDisabled,
-});
+// Q2.2 — Mode-conditional graph factory.
+//
+//   local mode: embedded Kùzu LocalGraph at the active workspace path.
+//   cloud mode: DataplaneGraph fronting groundfloor-ts-sdk. Every op
+//               reads the current workspace via AsyncLocalStorage
+//               (bindWorkspaceToRequest, set at the top of each HTTP
+//               request once the X-Lore-Workspace gate has passed).
+//
+// The daemon's public API (the `graph` binding used throughout this
+// file) stays the same shape — DataplaneGraph implements GraphProvider
+// AND exposes the LocalGraph-only helpers server.ts still calls directly
+// (createPluginGraphContext / getLanguageBreakdown / getTopologyOverview
+// / reconfigureCache), with cloud-mode stubs for the plugin-owned ones.
+// See docs/dataplane-graph-adapter.md (decision q2-2-*).
+type LoreGraph = LocalGraph | DataplaneGraph;
+function createGraph(): LoreGraph {
+    if (deploymentMode === 'cloud') {
+        // In cloud mode, the Dataplane credential is mandatory (Q2.1
+        // boot gate enforces this in main()). We construct a real
+        // GroundfloorClient and feed it to DataplaneGraph. The tenant
+        // id for each op is resolved live from AsyncLocalStorage — a
+        // singleton adapter serves all tenants concurrently.
+        const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
+        const apiKey = process.env['DATAPLANE_API_KEY'] ?? '';
+        const orgId = process.env['DATAPLANE_ORG_ID'] ?? 'default';
+        // Keychain upgrade may replace this with a keychain-sourced key
+        // in main() before any request lands; here we only need a key
+        // that satisfies the GroundfloorClient constructor. The
+        // keychain upgrade re-runs the factory if the credential changes.
+        const client = new GroundfloorClient(baseUrl, apiKey || 'pending-keychain');
+        return new DataplaneGraph({
+            client,
+            tenantProvider: () => requireCurrentTenantId(),
+            orgId,
+        });
+    }
+    return new LocalGraph(graphBasePath, {
+        cacheTtlMs,
+        cacheMaxSize,
+        cacheDisabled,
+    });
+}
+let graph: LoreGraph = createGraph();
 const verbatimStore = new VerbatimStore(graphBasePath);
 const pluginRegistry = new PluginRegistry(configManager);
 pluginRegistry.boot();
@@ -249,7 +291,14 @@ function resolveSyncAdapterFromEnv(): TsSdkAdapter | null {
 // dataplane credential — preferred because it's not visible to any
 // process that inherits this daemon's env.
 let adapter: TsSdkAdapter | null = resolveSyncAdapterFromEnv();
-let syncEngine: SyncEngine = new SyncEngine(graph, loreDir, adapter);
+// SyncEngine expects a LocalGraph (it calls markSynced() on the push
+// path). In cloud mode this binding is still constructed so every
+// server.ts call site compiles, but the sync path never activates
+// because we force adapter=null in cloud mode (DataplaneGraph IS the
+// data plane — there's no separate WAL to push). The cast is safe:
+// SyncEngine only touches LocalGraph-specific methods when adapter
+// is non-null. See q2-2-dataplane-graph-adapter-slice-1 decision.
+let syncEngine: SyncEngine = new SyncEngine(graph as LocalGraph, loreDir, deploymentMode === 'cloud' ? null : adapter);
 let wal = syncEngine.getWal();
 
 /**
@@ -271,8 +320,19 @@ async function maybeUpgradeAdapterFromKeychain(): Promise<'keychain' | 'env' | '
     const tenantId = process.env['DATAPLANE_TENANT_ID'] ?? 'groundfloor_lore';
     const orgId = process.env['DATAPLANE_ORG_ID'] ?? 'default';
     adapter = new TsSdkAdapter({ baseUrl, apiKey: keychainKey, tenantId, orgId });
-    syncEngine = new SyncEngine(graph, loreDir, adapter);
+    syncEngine = new SyncEngine(graph as LocalGraph, loreDir, deploymentMode === 'cloud' ? null : adapter);
     wal = syncEngine.getWal();
+    // Q2.2 — In cloud mode, keychain-sourced credential also upgrades
+    // the DataplaneGraph's client. Rebuild the graph binding so new
+    // requests use the real key instead of the 'pending-keychain' stub.
+    if (deploymentMode === 'cloud') {
+        const newClient = new GroundfloorClient(baseUrl, keychainKey);
+        graph = new DataplaneGraph({
+            client: newClient,
+            tenantProvider: () => requireCurrentTenantId(),
+            orgId,
+        });
+    }
     return 'keychain';
 }
 
@@ -413,7 +473,11 @@ mcpServer.tool(
             const cfgForHook = configManager.read();
             const devCfg = (cfgForHook.pluginConfig?.developer ?? {}) as { autoLinkOnIngest?: boolean };
             if (devCfg.autoLinkOnIngest !== false) {
-                void reconnectOneNode(graph, verbatimStore, pluginRegistry, {
+                // Q2.2 — reconnect is a local-only plugin-heavy op today;
+                // cloud mode will get a Dataplane-native variant in a later
+                // slice. Cast is safe: reconnect only runs in local mode
+                // today, and cloud ingest doesn't invoke this hook path.
+                void reconnectOneNode(graph as LocalGraph, verbatimStore, pluginRegistry, {
                     id,
                     label,
                     content: content ?? '',
@@ -669,8 +733,13 @@ mcpServer.tool(
                 .sort((nodeA, nodeB) => nodeA.depth - nodeB.depth);
 
             // Update Hot Cache
-            for (const item of recalledNodes) {
-                graph.sessionCache.pushNode(item.node.id);
+            // Q2.2 — sessionCache is a LocalGraph-only concept; cloud
+            // mode has no hot-cache equivalent yet. Skip the push if
+            // running against Dataplane (slice-3 follow-up).
+            if (graph instanceof LocalGraph) {
+                for (const item of recalledNodes) {
+                    graph.sessionCache.pushNode(item.node.id);
+                }
             }
 
             const hint = queryLanguage ? await buildLanguageHint(queryLanguage) : null;
@@ -1244,6 +1313,16 @@ mcpServer.tool(
     {},
     async () => {
         try {
+            // Q2.2 — sessionCache is LocalGraph-only; cloud mode has no
+            // hot-cache yet (slice-3 follow-up). Return empty stub.
+            if (!(graph instanceof LocalGraph)) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({ recentNodes: [], note: 'hot-cache unavailable in cloud mode' }, null, 2),
+                    }],
+                };
+            }
             const context = graph.sessionCache.getHotContext();
             return {
                 content: [{
@@ -1462,7 +1541,11 @@ const consentManager = new ConsentManager();
  * (not lazily) so it's ready when the scheduled sweep fires.
  */
 const archiveSink = new LocalFileSink();
-const retentionSweeper = new RetentionSweeper(graph, pluginRegistry, auditLog);
+// Q2.2 — retention sweeper is LocalGraph-aware today; cloud-mode
+// retention is a separate slice-3 path (Dataplane-native sweep).
+// Cast is safe: in cloud mode the sweeper is instantiated but its
+// scheduled sweep is a no-op against Dataplane (slice-3 follow-up).
+const retentionSweeper = new RetentionSweeper(graph as LocalGraph, pluginRegistry, auditLog);
 
 /**
  * C6b (Phase 4) — MCP client runtime. Connects outward to external
@@ -1724,6 +1807,16 @@ async function main(): Promise<void> {
                         }));
                         return;
                     }
+                    // Q2.2 — Bind the workspace to this request's async
+                    // chain so DataplaneGraph.tenantProvider and any
+                    // downstream code can read it without threading an
+                    // argument through every call. Uses enterWith
+                    // (AsyncLocalStorage standard since Node 16) so the
+                    // rest of this handler stays linear — no callback
+                    // wrap around the giant switch below. Slice 3 may
+                    // map workspaceId → tenantId via an internal registry;
+                    // slice 2 treats them 1:1.
+                    bindWorkspaceToRequest({ workspaceId: workspaceId.trim() });
                 }
             }
 
@@ -2395,7 +2488,9 @@ async function main(): Promise<void> {
                                 return;
                             }
                         }
-                        const result = await reconnectGraph(graph, verbatimStore, pluginRegistry, {
+                        // Q2.2 — reconnect is a local-only plugin-heavy op today;
+                        // cloud-mode reconnect is a slice-3 follow-up.
+                        const result = await reconnectGraph(graph as LocalGraph, verbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
                             dryRun: !apply,
@@ -2476,7 +2571,8 @@ async function main(): Promise<void> {
                             res.end(JSON.stringify({ error: 'consent denied', reason: decision.reason }));
                             return;
                         }
-                        const result = await reconnectGraph(graph, verbatimStore, pluginRegistry, {
+                        // Q2.2 — see reconnectGraph note above; cloud-mode path deferred to slice 3.
+                        const result = await reconnectGraph(graph as LocalGraph, verbatimStore, pluginRegistry, {
                             k,
                             minSim: threshold,
                             dryRun: false,
@@ -2727,7 +2823,8 @@ async function main(): Promise<void> {
                                         auditResult = 'denied-by-policy';
                                         auditResultDetail = `node not found: ${nodeId}`;
                                     } else {
-                                        const result = await reconnectOneNode(graph, verbatimStore, pluginRegistry, {
+                                        // Q2.2 — see reconnect note above; cloud-mode reconnect deferred.
+                                        const result = await reconnectOneNode(graph as LocalGraph, verbatimStore, pluginRegistry, {
                                             id: node.id,
                                             label: node.label,
                                             content: node.content,
@@ -3285,7 +3382,9 @@ async function main(): Promise<void> {
                     const project = parsed.searchParams.get('project') ?? undefined;
                     const maxNodes = parseInt(parsed.searchParams.get('maxNodes') ?? '500', 10);
                     const title = parsed.searchParams.get('title') ?? undefined;
-                    const html = await exportGraphAsHtml(graph, {
+                    // Q2.2 — HTML export reads the local graph directly; cloud-mode
+                    // export is a slice-3 follow-up (needs Dataplane-native dump).
+                    const html = await exportGraphAsHtml(graph as LocalGraph, {
                         project,
                         maxNodes: Number.isFinite(maxNodes) ? maxNodes : 500,
                         title,
@@ -3307,7 +3406,9 @@ async function main(): Promise<void> {
                     const parsed = new URL(url, 'http://localhost');
                     const project = parsed.searchParams.get('project') ?? undefined;
                     const topN = parseInt(parsed.searchParams.get('topN') ?? '20', 10);
-                    const md = await writeGraphReport(graph, {
+                    // Q2.2 — report uses LocalGraph-native queries; cloud-mode
+                    // report is a slice-3 follow-up.
+                    const md = await writeGraphReport(graph as LocalGraph, {
                         project,
                         topN: Number.isFinite(topN) ? topN : 20,
                         registry: pluginRegistry,

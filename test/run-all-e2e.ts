@@ -27,6 +27,7 @@ const suites: Suite[] = [
     { name: 'Q1.9 overview aggregation',      script: 'e2e-q1-9-overview.ts' },
     { name: 'Q1 intersections (1.3×1.4×1.7×1.9)', script: 'e2e-q1-intersections.ts' },
     { name: 'Q2.1 server mode (deploy toggle)', script: 'e2e-q2-1-server-mode.ts' },
+    { name: 'Q2.2 cloud roundtrip (DataplaneGraph)', script: 'e2e-q2-2-cloud-roundtrip.ts' },
 ];
 
 function runOne(suite: Suite): Promise<number> {

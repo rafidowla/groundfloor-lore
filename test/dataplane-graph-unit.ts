@@ -92,41 +92,75 @@ function test(name: string, fn: () => Promise<void> | void): () => Promise<void>
 }
 
 const tests = [
-    test('initialize() pushes both collections', async () => {
+    test('initialize() is a no-op (slice-2: per-tenant lazy push)', async () => {
         const { adapter, client } = buildAdapter();
         client.responses['createCollection'] = {};
         await adapter.initialize();
         const createCalls = client.calls.filter((c) => c.method === 'createCollection');
-        assert.equal(createCalls.length, 2, 'expected lore_node + lore_edge createCollection');
-        const names = createCalls.map((c) => {
-            const schema = c.args[1] as { name: string };
-            return schema.name;
+        assert.equal(createCalls.length, 0, 'boot-time initialize must not hit Dataplane');
+    }),
+
+    test('first op per tenant pushes both collections (lazy)', async () => {
+        const { adapter, client } = buildAdapter();
+        client.responses['createCollection'] = {};
+        client.responses['get'] = null;
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        await adapter.upsertNode({
+            id: 'n-init', type: 'note', label: 'x', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}',
         });
+        const createCalls = client.calls.filter((c) => c.method === 'createCollection');
+        assert.equal(createCalls.length, 2, 'expected lore_node + lore_edge createCollection on first op');
+        const names = createCalls.map((c) => (c.args[1] as { name: string }).name);
         assert.deepEqual(names.sort(), ['lore_edge', 'lore_node']);
-        // All calls carried the tenant from the provider.
         for (const c of createCalls) assert.equal(c.args[0], 'tenant-alpha');
     }),
 
-    test('initialize() is idempotent when collections already exist', async () => {
+    test('second op on same tenant does NOT re-push schema', async () => {
         const { adapter, client } = buildAdapter();
-        client.throws['createCollection'] = new Error('collection already exists');
-        await adapter.initialize(); // must not throw
-        // Second call — initialized flag short-circuits.
-        const count1 = client.calls.filter((c) => c.method === 'createCollection').length;
-        await adapter.initialize();
-        const count2 = client.calls.filter((c) => c.method === 'createCollection').length;
-        assert.equal(count1, count2, 'second initialize() must not re-push schema');
+        client.responses['createCollection'] = {};
+        client.responses['get'] = null;
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        await adapter.upsertNode({ id: 'a', type: 't', label: 'a', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' });
+        const firstCount = client.calls.filter((c) => c.method === 'createCollection').length;
+        await adapter.upsertNode({ id: 'b', type: 't', label: 'b', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' });
+        const secondCount = client.calls.filter((c) => c.method === 'createCollection').length;
+        assert.equal(secondCount, firstCount, 'schema push must be memoized per tenant');
     }),
 
-    test('initialize() rethrows non-"already exists" createCollection errors', async () => {
+    test('lazy push tolerates "already exists" on createCollection', async () => {
+        const { adapter, client } = buildAdapter();
+        client.throws['createCollection'] = new Error('collection already exists');
+        client.responses['get'] = null;
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        // Must not throw — "already exists" is swallowed.
+        await adapter.upsertNode({ id: 'a', type: 't', label: 'a', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' });
+        const inserts = client.calls.filter((c) => c.method === 'insert');
+        assert.equal(inserts.length, 1, 'op should proceed past idempotent schema push');
+    }),
+
+    test('lazy push rethrows non-"already exists" createCollection errors and retries next time', async () => {
         const { adapter, client } = buildAdapter();
         client.throws['createCollection'] = new Error('auth failure');
         let threw = false;
-        try { await adapter.initialize(); } catch (err) {
+        try {
+            await adapter.upsertNode({ id: 'a', type: 't', label: 'a', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' });
+        } catch (err) {
             threw = true;
             assert.match((err as Error).message, /auth failure/);
         }
         assert.ok(threw, 'expected non-exists error to propagate');
+        // Retry must actually re-attempt (the cached promise is dropped on failure).
+        delete client.throws['createCollection'];
+        client.responses['createCollection'] = {};
+        client.responses['get'] = null;
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        await adapter.upsertNode({ id: 'a', type: 't', label: 'a', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' });
+        const createCount = client.calls.filter((c) => c.method === 'createCollection').length;
+        assert.ok(createCount >= 3, `expected retry after failure (≥3 total createCollection calls), got ${createCount}`);
     }),
 
     test('upsertNode inserts when updateByQuery matches 0', async () => {
