@@ -38,6 +38,8 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
+import { startMockDataplane, type MockDataplane } from './helpers/mock-dataplane.js';
+
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const SERVER_ENTRY = path.join(REPO_ROOT, 'packages/lore/src/mcp/server.ts');
 
@@ -83,6 +85,13 @@ async function waitForReady(port: number, timeoutMs = 20_000): Promise<boolean> 
 async function spawnDaemon(opts: {
     mode?: 'local' | 'cloud';
     dataplaneApiKey?: string;
+    /**
+     * When set (Q2.2 slice 2), points DATAPLANE_URL at a reachable mock
+     * so cloud-mode graph ops actually roundtrip. When absent, the URL
+     * falls through to a black hole (the daemon's ping fails fast but
+     * boot still proceeds — used by the "cloud without Dataplane" case).
+     */
+    dataplaneUrl?: string;
 }): Promise<DaemonHandle> {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-q2-1-'));
     const port = await findFreePort();
@@ -95,9 +104,12 @@ async function spawnDaemon(opts: {
     if (opts.mode) env.LORE_DEPLOYMENT_MODE = opts.mode;
     if (opts.dataplaneApiKey) {
         env.DATAPLANE_API_KEY = opts.dataplaneApiKey;
-        // Point the ping at a black hole so it fails fast; the daemon
-        // tolerates the failure and boot proceeds (dataplane=error).
-        env.DATAPLANE_URL = 'http://127.0.0.1:9';
+        // Q2.2 slice 2: cloud-mode graph ops route through DataplaneGraph,
+        // so the e2e needs a reachable Dataplane. Case 3 passes a mock URL;
+        // absent case falls through to a black hole (ping fails fast, boot
+        // proceeds with dataplane=error — only useful before slice 2 wired
+        // DataplaneGraph).
+        env.DATAPLANE_URL = opts.dataplaneUrl ?? 'http://127.0.0.1:9';
     }
 
     const proc = spawn('npx', ['tsx', SERVER_ENTRY, '--http'], {
@@ -204,8 +216,16 @@ async function caseCloudWithoutCredential(): Promise<void> {
 async function caseCloudWithCredential(): Promise<void> {
     console.log('— Case 3: cloud mode with env-sourced credential —');
     let h: DaemonHandle | null = null;
+    // Q2.2 slice 2: cloud-mode routes through DataplaneGraph, so this
+    // case now boots against a mock Dataplane. The assertions (roundtrip
+    // succeeds; header gate enforced) are unchanged.
+    const mock: MockDataplane = await startMockDataplane();
     try {
-        h = await spawnDaemon({ mode: 'cloud', dataplaneApiKey: 'q2-1-smoke-test-key' });
+        h = await spawnDaemon({
+            mode: 'cloud',
+            dataplaneApiKey: 'q2-1-smoke-test-key',
+            dataplaneUrl: mock.url,
+        });
         const ready = await waitForReady(h.port);
         if (!ready) throw new Error(`daemon never became ready\nSTDERR:\n${h.log.text}`);
         h.token = await fetchAuthToken(h.port);
@@ -252,6 +272,7 @@ async function caseCloudWithCredential(): Promise<void> {
         console.log('  ok  cloud-with-creds: boot → mode=cloud → reject-no-header → accept-with-header → roundtrip');
     } finally {
         cleanup(h);
+        await mock.close();
     }
 }
 

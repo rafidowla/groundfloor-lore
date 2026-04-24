@@ -117,7 +117,14 @@ export class DataplaneGraph implements GraphProvider {
     private readonly tenantProvider: TenantProvider;
     private readonly orgId: string;
     private readonly connection?: string;
-    private initialized = false;
+    /**
+     * Per-tenant schema-push state. Collections are provisioned lazily
+     * on the first op for each tenant (boot time doesn't know which
+     * tenants will connect — the singleton serves many). Keys are
+     * tenant ids; value is the in-flight or settled promise so
+     * concurrent first-hits don't race on createCollection.
+     */
+    private readonly tenantInit = new Map<string, Promise<void>>();
 
     constructor(config: DataplaneGraphConfig) {
         this.client = config.client as unknown as SdkClient;
@@ -127,21 +134,43 @@ export class DataplaneGraph implements GraphProvider {
     }
 
     /**
-     * initialize — Idempotent schema push for lore_node + lore_edge.
+     * initialize — Top-level no-op at boot.
      *
-     * Safe to call multiple times; subsequent calls hit the "already
-     * exists" error path and return cleanly. Called by server.ts once
-     * on daemon boot in cloud mode.
-     *
-     * NB: pushes against the CURRENT tenantProvider's tenant, which is
-     * expected to be a boot-time system tenant or the first tenant that
-     * hits the daemon. Full per-workspace schema push (one collection set
-     * per tenant) is a later slice — slice 1 assumes collections are
-     * provisioned ahead of time for each tenant that will ever connect.
+     * Schema push is per-tenant and lazy: the daemon is a singleton
+     * serving many workspaces, and at boot time no workspace is bound
+     * (no request yet). Each method that touches Dataplane calls
+     * `ensureTenantInitialized(tenantId)` which fires createCollection
+     * once per tenant, idempotently, with in-flight dedup so concurrent
+     * first-hits don't race.
      */
     async initialize(): Promise<void> {
-        if (this.initialized) return;
-        const tenantId = this.tenantProvider();
+        // Intentionally empty. Per-tenant init fires inside the CRUD
+        // path (ensureTenantInitialized).
+    }
+
+    /**
+     * ensureTenantInitialized — Idempotent schema push for one tenant.
+     *
+     * Called from every method that hits Dataplane. First call for a
+     * given tenant pushes lore_node + lore_edge collections; subsequent
+     * calls return the cached promise (no network hit). Collection
+     * "already exists" errors are swallowed — safe for re-boots against
+     * a tenant that was previously provisioned.
+     */
+    private ensureTenantInitialized(tenantId: string): Promise<void> {
+        const existing = this.tenantInit.get(tenantId);
+        if (existing) return existing;
+        const p = this.pushSchemaFor(tenantId).catch((err) => {
+            // Drop the failed promise so the next call retries rather
+            // than seeing a permanent failed state.
+            this.tenantInit.delete(tenantId);
+            throw err;
+        });
+        this.tenantInit.set(tenantId, p);
+        return p;
+    }
+
+    private async pushSchemaFor(tenantId: string): Promise<void> {
         await this.ensureCollection(tenantId, {
             name: NODE_COLLECTION,
             fields: [
@@ -169,7 +198,6 @@ export class DataplaneGraph implements GraphProvider {
                 { name: 'created_at', field_type: 'string' },
             ],
         });
-        this.initialized = true;
     }
 
     private async ensureCollection(tenantId: string, schema: unknown): Promise<void> {
@@ -188,6 +216,7 @@ export class DataplaneGraph implements GraphProvider {
         nodeData: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
     ): Promise<LoreNode> {
         const tenantId = this.tenantProvider();
+        await this.ensureTenantInitialized(tenantId);
         const now = new Date().toISOString();
         const existing = await this.tryGet(tenantId, nodeData.id);
         const existingCreated = existing && typeof existing['created_at'] === 'string' ? (existing['created_at'] as string) : null;
@@ -236,6 +265,7 @@ export class DataplaneGraph implements GraphProvider {
 
     async getNode(id: string): Promise<LoreNode | null> {
         const tenantId = this.tenantProvider();
+        await this.ensureTenantInitialized(tenantId);
         const record = await this.tryGet(tenantId, id);
         if (!record) return null;
         return this.recordToLoreNode(record);
@@ -276,6 +306,7 @@ export class DataplaneGraph implements GraphProvider {
 
     async deleteNode(id: string): Promise<boolean> {
         const tenantId = this.tenantProvider();
+        await this.ensureTenantInitialized(tenantId);
         const res = await this.client.deleteByQuery(
             tenantId,
             NODE_COLLECTION,
@@ -287,6 +318,7 @@ export class DataplaneGraph implements GraphProvider {
 
     async addEdge(edge: LoreEdge): Promise<void> {
         const tenantId = this.tenantProvider();
+        await this.ensureTenantInitialized(tenantId);
         const now = new Date().toISOString();
         const edgeId = `${edge.sourceId}__${edge.relation}__${edge.targetId}`;
         // Write to lore_edge collection for portability across connectors
@@ -329,6 +361,7 @@ export class DataplaneGraph implements GraphProvider {
 
     async traverse(nodeId: string, maxDepth = 2): Promise<TraversalResult[]> {
         const tenantId = this.tenantProvider();
+        await this.ensureTenantInitialized(tenantId);
         try {
             const res = await this.client.graph.traverse<Record<string, unknown>>(
                 tenantId,
@@ -368,6 +401,7 @@ export class DataplaneGraph implements GraphProvider {
         ecosystem?: string,
     ): Promise<LoreNode[]> {
         const tenantId = this.tenantProvider();
+        await this.ensureTenantInitialized(tenantId);
         // Slice 1 — substring match on label/content via query filter
         // (`contains`). Full-text search with ranking is a later slice;
         // the SDK exposes `client.search(...)` for Phase 2 tsvector.
@@ -393,6 +427,7 @@ export class DataplaneGraph implements GraphProvider {
         ecosystem?: string,
     ): Promise<LoreNode[]> {
         const tenantId = this.tenantProvider();
+        await this.ensureTenantInitialized(tenantId);
         const filter: Record<string, unknown> = { org_id: this.orgId };
         if (type) filter['type'] = type;
         if (project) filter['project'] = project;
@@ -411,6 +446,7 @@ export class DataplaneGraph implements GraphProvider {
 
     async getStats(): Promise<GraphStats> {
         const tenantId = this.tenantProvider();
+        await this.ensureTenantInitialized(tenantId);
         const orgFilter = { org_id: this.orgId };
         const [nodeCount, edgeCount] = await Promise.all([
             this.client.count(tenantId, NODE_COLLECTION, orgFilter, this.connection).catch(() => 0),
@@ -429,6 +465,7 @@ export class DataplaneGraph implements GraphProvider {
 
     async getTopology(limit = 100): Promise<{ nodes: unknown[]; edges: unknown[] }> {
         const tenantId = this.tenantProvider();
+        await this.ensureTenantInitialized(tenantId);
         const orgFilter = { org_id: this.orgId };
         const [nodesRes, edgesRes] = await Promise.all([
             this.client.query<Record<string, unknown>>(tenantId, NODE_COLLECTION, { filter: orgFilter, limit }, this.connection).catch(() => ({ records: [] as Record<string, unknown>[] })),
@@ -446,6 +483,33 @@ export class DataplaneGraph implements GraphProvider {
                 relation: r['relation'],
             })),
         };
+    }
+
+    /**
+     * getTopologyOverview — Slice-2 stub for Q1.9 memory-cluster overview.
+     *
+     * Returns an empty overview in cloud mode. Full implementation needs
+     * a SDK aggregate API (group-by + cross-project edge counting) which
+     * lands in a later slice. Callers gracefully degrade to "no overview
+     * available" when blobs is empty.
+     */
+    async getTopologyOverview(): Promise<{
+        blobs: Array<{ project: string; nodeCount: number }>;
+        aggregateEdges: Array<{ fromProject: string; toProject: string; count: number }>;
+        totalNodes: number;
+    }> {
+        return { blobs: [], aggregateEdges: [], totalNodes: 0 };
+    }
+
+    /**
+     * reconfigureCache — No-op in cloud mode.
+     *
+     * The Q1.3 local read cache doesn't apply to DataplaneGraph; Dataplane
+     * owns caching and change-feed invalidation. Kept for API compatibility
+     * with LocalGraph so PATCH /api/config can call it unconditionally.
+     */
+    reconfigureCache(_opts: { enabled?: boolean; ttlSeconds?: number; maxEntries?: number }): void {
+        // intentional no-op
     }
 
     /**

@@ -20,6 +20,7 @@
         "test:e2e:phase-7a": "tsx test/e2e-phase-7a.ts",
         "test:e2e:language": "tsx test/e2e-language.ts",
         "test:e2e:q2-1": "tsx test/e2e-q2-1-server-mode.ts",
+        "test:e2e:q2-2": "tsx test/e2e-q2-2-cloud-roundtrip.ts",
         "test:e2e:all": "tsx test/run-all-e2e.ts",
         "test:scaffold-plugin": "tsx test/scaffold-plugin.test.ts",
         "test:unit:deferred": "tsx test/unit-deferred.ts",
