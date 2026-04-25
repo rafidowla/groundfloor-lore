@@ -141,37 +141,34 @@ const tests: Array<() => Promise<void>> = [
         // loading the HF model. We inspect properties only — no embed() call,
         // no network/disk activity.
         //
-        // Slice 7: multilingual-e5-small surfaced as a first-class export
-        // alongside the MiniLM default. Default left at MiniLM to avoid
-        // forcing every existing install to redownload + invalidate
-        // existing LanceDB vectors on upgrade. Operators opt into e5 by
-        // setting LORE_LOCAL_EMBEDDING_MODEL or constructing with
-        // MULTILINGUAL_E5_SMALL_MODEL_ID.
+        // Post-slice-7 flip: multilingual-e5-small is now the default.
+        // The migration tool from PR #30 made it safe to flip — existing
+        // installs get a non-fatal fingerprint warning on daemon start
+        // until they run `lore migrate embedding-model --apply`.
+        // MiniLM remains exposed as MINILM_L6_V2_MODEL_ID for operators
+        // who explicitly prefer the English-only model.
         const p = new LocalEmbeddingProvider();
         assert.equal(p.modelId, DEFAULT_LOCAL_MODEL_ID);
         assert.equal(p.dimension, DEFAULT_LOCAL_MODEL_DIM);
-        assert.equal(DEFAULT_LOCAL_MODEL_ID, 'Xenova/all-MiniLM-L6-v2');
+        assert.equal(DEFAULT_LOCAL_MODEL_ID, 'Xenova/multilingual-e5-small');
         assert.equal(DEFAULT_LOCAL_MODEL_DIM, 384);
 
-        // Slice 7: e5-small opt-in is constructable without hardcoding
-        // the magic string at the call site.
+        // The slice-7 alias still resolves to the same string — back-compat
+        // for telemetry / plugin manifests that import the constant by name.
         assert.equal(MULTILINGUAL_E5_SMALL_MODEL_ID, 'Xenova/multilingual-e5-small');
         assert.equal(MULTILINGUAL_E5_SMALL_MODEL_DIM, 384);
-        const e5 = new LocalEmbeddingProvider({
-            modelId: MULTILINGUAL_E5_SMALL_MODEL_ID,
-            dimension: MULTILINGUAL_E5_SMALL_MODEL_DIM,
-        });
-        assert.equal(e5.modelId, 'Xenova/multilingual-e5-small');
-        assert.equal(e5.dimension, 384);
+        assert.equal(MULTILINGUAL_E5_SMALL_MODEL_ID, DEFAULT_LOCAL_MODEL_ID,
+            'after flip, the alias and the default are the same string');
 
-        // Schema-width parity is the property that makes this a clean
-        // opt-in: both models produce 384-d vectors, so the LanceDB
-        // schema doesn't need to change. (Vector contents differ, of
-        // course — operators must drop+rebuild lore_verbatim when they
-        // swap or retrieval quality silently degrades.)
-        assert.equal(DEFAULT_LOCAL_MODEL_DIM, MULTILINGUAL_E5_SMALL_MODEL_DIM,
-            'MiniLM and e5-small share dimension — schema-compatible swap');
-        console.log('  ok  LocalEmbeddingProvider constants (MiniLM default + e5-small opt-in, both 384-d)');
+        // MiniLM is now the explicit-opt-in path.
+        const minilm = new LocalEmbeddingProvider({
+            modelId: 'Xenova/all-MiniLM-L6-v2',
+            dimension: 384,
+        });
+        assert.equal(minilm.modelId, 'Xenova/all-MiniLM-L6-v2');
+        assert.equal(minilm.dimension, 384);
+
+        console.log('  ok  LocalEmbeddingProvider constants (e5-small default + MiniLM opt-in, both 384-d)');
     },
 ];
 

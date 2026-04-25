@@ -1,14 +1,14 @@
 /**
- * localEmbeddingProvider.ts — Q2.2 slice 6a + slice 7.
+ * localEmbeddingProvider.ts — Q2.2 slice 6a + slice 7 + post-7 default flip.
  *
  * In-process EmbeddingProvider backed by HuggingFace Transformers.js.
  * Loads the configured Xenova model (default
- * `Xenova/all-MiniLM-L6-v2`, 384-d, mean-pooled, L2-normalized) on
- * first call and reuses the singleton for every subsequent embed.
+ * `Xenova/multilingual-e5-small`, 384-d, mean-pooled, L2-normalized)
+ * on first call and reuses the singleton for every subsequent embed.
  *
  * Why a singleton:
- *   The HF pipeline cold-loads the model file (~80MB MiniLM, ~120MB
- *   e5-small) and the WebGPU / WASM runtime; loading it twice would
+ *   The HF pipeline cold-loads the model file (~120MB e5-small, ~80MB
+ *   MiniLM) and the WebGPU / WASM runtime; loading it twice would
  *   double daemon RAM and slow first-request latency. The class shares
  *   a module-scoped cache so constructing multiple instances (test
  *   harness, multi-store wiring) doesn't multiply the cost.
@@ -20,20 +20,21 @@
  *     EmbeddingProvider interface (providers/types.ts).
  *   - 6b: OpenAICompatEmbeddingProvider sits beside this class for
  *     hosted-model deployments (BGE-M3 1024-d, OpenAI, etc.).
- *   - 7 (this slice): exposed `Xenova/multilingual-e5-small` as a
- *     first-class option (export + env opt-in). Same 384-d output,
- *     same pooling + normalization, but covers ~100 languages with
- *     stronger retrieval quality. Default left at MiniLM intentionally:
- *     existing operators have MiniLM cached on disk and reconnected
- *     vectors; flipping the default would force every existing
- *     install to download ~120MB on first daemon boot AND silently
- *     produce vectors that don't match their existing LanceDB rows.
- *     Operators wanting multilingual configure it explicitly via
- *     `LORE_LOCAL_EMBEDDING_MODEL=Xenova/multilingual-e5-small` (server
- *     factory) or by passing `{ modelId: MULTILINGUAL_E5_SMALL_MODEL_ID }`
- *     to the constructor. A future slice will add migration tooling
- *     (drop+rebuild `lore_verbatim`, modelId fingerprint check) to
- *     make flipping the default safe.
+ *   - 7: exposed `Xenova/multilingual-e5-small` as a first-class
+ *     option (export + env opt-in). Same 384-d output, same pooling +
+ *     normalization, but covers ~100 languages with stronger retrieval
+ *     quality. Default left at MiniLM at the time to avoid forcing
+ *     every existing install to redownload + silently invalidate
+ *     their existing LanceDB vectors.
+ *   - post-7 (this change): default flipped to e5-small now that the
+ *     migration tool from PR #30 (`lore migrate embedding-model`)
+ *     exists. New installs get multilingual retrieval out of the box.
+ *     Existing installs see a startup warning from the fingerprint
+ *     check until they run the migration; the warning is intentionally
+ *     non-fatal so the daemon doesn't refuse to start mid-upgrade.
+ *     `Xenova/all-MiniLM-L6-v2` remains exported as
+ *     `MINILM_L6_V2_MODEL_ID` for operators who explicitly want the
+ *     English-only model (lower RAM, faster embed).
  */
 
 // @ts-ignore — Local workspace linking lacks full Node16 exports declaration
@@ -45,24 +46,43 @@ import type { EmbeddingProvider } from './types.js';
  * The default model used by the local provider when no override is
  * supplied. Kept as a public export so call sites that need to assert
  * the value (telemetry, schema versioning) can reference one constant.
+ *
+ * Post-7 flip: was `Xenova/all-MiniLM-L6-v2` until the migration tool
+ * landed in PR #30 (`engines/migrateEmbeddingModel.ts`). New installs
+ * now get multilingual retrieval by default. Existing installs see
+ * a non-fatal fingerprint-mismatch warning on daemon start until they
+ * run `lore migrate embedding-model --to Xenova/multilingual-e5-small
+ * --apply`.
  */
-export const DEFAULT_LOCAL_MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
+export const DEFAULT_LOCAL_MODEL_ID = 'Xenova/multilingual-e5-small';
 /** Dimension of `DEFAULT_LOCAL_MODEL_ID`. */
 export const DEFAULT_LOCAL_MODEL_DIM = 384;
+
 /**
- * Slice 7: opt-in multilingual default. Same 384-d output as MiniLM
- * (so the LanceDB schema width is compatible) but covers ~100
- * languages. Constructing
- * `new LocalEmbeddingProvider({ modelId: MULTILINGUAL_E5_SMALL_MODEL_ID })`
- * — or setting `LORE_LOCAL_EMBEDDING_MODEL=Xenova/multilingual-e5-small`
- * in the server factory — selects this. NOTE: switching against an
- * existing graph silently invalidates retrieval quality (vectors
- * embed to a different space). Drop+rebuild `lore_verbatim` (full
- * reconnect pass) when you swap.
+ * Slice 7 alias retained for back-compat. Equal to
+ * `DEFAULT_LOCAL_MODEL_ID` after the post-7 flip — kept as a separate
+ * export so external code that imports the constant by name (telemetry
+ * dashboards, plugin manifests, third-party scaffolds) doesn't break.
  */
 export const MULTILINGUAL_E5_SMALL_MODEL_ID = 'Xenova/multilingual-e5-small';
 /** Dimension of `MULTILINGUAL_E5_SMALL_MODEL_ID`. */
 export const MULTILINGUAL_E5_SMALL_MODEL_DIM = 384;
+
+/**
+ * The pre-flip default. Exposed so operators who explicitly want the
+ * English-only model (lower RAM ~80MB vs ~120MB, faster embed by ~25%
+ * on cold cache) can configure it without typing the magic string.
+ *
+ *   new LocalEmbeddingProvider({ modelId: MINILM_L6_V2_MODEL_ID })
+ *   LORE_LOCAL_EMBEDDING_MODEL=Xenova/all-MiniLM-L6-v2
+ *
+ * Same 384-d width as the new default; switching against an existing
+ * graph still requires `lore migrate embedding-model` because the
+ * vectors live in different spaces.
+ */
+export const MINILM_L6_V2_MODEL_ID = 'Xenova/all-MiniLM-L6-v2';
+/** Dimension of `MINILM_L6_V2_MODEL_ID`. */
+export const MINILM_L6_V2_MODEL_DIM = 384;
 
 /** Module-scoped pipeline cache — see "Why a singleton" above. */
 let pipelineInstance: any = null;
