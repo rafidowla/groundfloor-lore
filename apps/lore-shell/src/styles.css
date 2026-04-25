@@ -292,3 +292,152 @@ footer code {
     overflow: auto;
     max-height: 400px;
 }
+
+/* Daemon status pill + probe (Phase 3c) */
+
+.daemon-cell {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.daemon {
+    display: inline-block;
+    padding: 0.1rem 0.45rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    border: 1px solid var(--border);
+    background: var(--bg);
+}
+
+button.probe,
+button.refresh {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    padding: 0.2rem 0.6rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    cursor: pointer;
+}
+
+button.probe:hover:not(:disabled),
+button.refresh:hover:not(:disabled) {
+    background: var(--bg-alt);
+}
+
+button.probe:disabled,
+button.refresh:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Inspector tabs + table (Phase 3c) */
+
+.inspector-tabs {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.inspector-tabs h3 {
+    margin: 0;
+    font-size: 1rem;
+}
+
+.inspector-tabs .hint {
+    margin: 0;
+    color: var(--fg-dim);
+    font-size: 0.8rem;
+    font-style: italic;
+}
+
+.tabs {
+    display: flex;
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.tab {
+    background: transparent;
+    color: var(--fg-dim);
+    border: 0;
+    border-bottom: 2px solid transparent;
+    padding: 0.4rem 0.75rem;
+    font-size: 0.85rem;
+    cursor: pointer;
+    margin-bottom: -1px;
+}
+
+.tab:hover {
+    color: var(--fg);
+}
+
+.tab.active {
+    color: var(--fg);
+    border-bottom-color: var(--accent);
+}
+
+.inspector {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.75rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.inspector-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    border: 0;
+    padding: 0;
+}
+
+.inspector-header h3 {
+    margin: 0;
+    font-size: 0.95rem;
+    flex: 1;
+}
+
+.inspector .empty {
+    margin: 0;
+    color: var(--fg-dim);
+    font-size: 0.85rem;
+    font-style: italic;
+}
+
+.inspector table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.inspector th,
+.inspector td {
+    text-align: left;
+    padding: 0.35rem 0.6rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+}
+
+.inspector th {
+    font-weight: 600;
+    color: var(--fg-dim);
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.inspector tbody tr:hover {
+    background: var(--bg-alt);
+}
+
+.inspector-footer {
+    color: var(--fg-dim);
+    font-size: 0.75rem;
+    border: 0;
+    padding: 0;
+}

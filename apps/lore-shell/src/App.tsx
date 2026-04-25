@@ -5,25 +5,41 @@ import {
     type LoadedManifest,
     type LoadManifestError,
     type InspectorPanel,
+    type TableInspector as TableInspectorConfig,
     loadManifest,
     pickManifestFile,
     describeError,
     parseLoadError,
 } from './manifest';
+import { TableInspector } from './TableInspector';
+import {
+    daemonHealth,
+    parseDaemonError,
+    describeDaemonError,
+    type HealthReport,
+} from './loreClient';
 
 interface ShellInfo {
     version: string;
     loreDaemonStatus: 'unknown' | 'absent' | 'running';
 }
 
+type DaemonProbe =
+    | { kind: 'idle' }
+    | { kind: 'probing' }
+    | { kind: 'ok'; report: HealthReport }
+    | { kind: 'error'; message: string };
+
 /**
- * Phase 3b — adds the manifest loader. The shell can now open a
- * `plugin.json` from disk, validate it via the Rust IPC command, and
- * display its contributions in a structured viewer.
+ * Phase 3c — adds the daemon HTTP bridge. The shell can now:
+ *   1. Probe the running Lore daemon's `/api/health` (button under the
+ *      status section).
+ *   2. Render `TableInspector` panels by fetching `/api/topology` and
+ *      filtering to the entity type the manifest declares.
  *
- * Inspector renderers (TableInspector, GraphInspector, etc.) are
- * displayed here as *summaries* only — actually executing a query
- * against the running Lore daemon and rendering rows lands in 3c.
+ * Daemon discovery + connection (sibling launchd service) lands in 3d;
+ * for now the daemon must already be running on `LORE_PORT` (3847 by
+ * default) when the shell starts.
  */
 export function App() {
     const [info, setInfo] = useState<ShellInfo | null>(null);
@@ -33,11 +49,30 @@ export function App() {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
 
+    const [probe, setProbe] = useState<DaemonProbe>({ kind: 'idle' });
+
     useEffect(() => {
         invoke<ShellInfo>('shell_info')
             .then(setInfo)
             .catch((e) => setInfoError(String(e)));
     }, []);
+
+    async function onProbeClicked() {
+        setProbe({ kind: 'probing' });
+        try {
+            const report = await daemonHealth();
+            setProbe({ kind: 'ok', report });
+        } catch (e) {
+            const parsed = parseDaemonError(e);
+            setProbe({
+                kind: 'error',
+                message:
+                    parsed.kind === 'Unknown'
+                        ? `Unexpected error: ${parsed.detail.message}`
+                        : describeDaemonError(parsed),
+            });
+        }
+    }
 
     async function onLoadClicked() {
         setLoadError(null);
@@ -64,7 +99,7 @@ export function App() {
         <main className="shell-root">
             <header>
                 <h1>Lore</h1>
-                <span className="tag">Phase 3b — manifest loader</span>
+                <span className="tag">Phase 3c — daemon bridge + table inspector</span>
             </header>
 
             <section className="status">
@@ -75,8 +110,16 @@ export function App() {
                         <dt>Shell version</dt>
                         <dd>{info.version}</dd>
                         <dt>Lore daemon</dt>
-                        <dd className={`daemon daemon-${info.loreDaemonStatus}`}>
-                            {info.loreDaemonStatus}
+                        <dd className="daemon-cell">
+                            <DaemonStatusPill probe={probe} fallback={info.loreDaemonStatus} />
+                            <button
+                                type="button"
+                                className="probe"
+                                onClick={onProbeClicked}
+                                disabled={probe.kind === 'probing'}
+                            >
+                                {probe.kind === 'probing' ? 'Probing…' : 'Probe'}
+                            </button>
                         </dd>
                     </dl>
                 ) : (
@@ -96,22 +139,68 @@ export function App() {
                     )}
                 </div>
                 {loadError && <p className="error">{loadError}</p>}
-                {loaded && <ManifestView loaded={loaded} />}
+                {loaded && <ManifestView loaded={loaded} daemonReachable={probe.kind === 'ok'} />}
             </section>
 
             <footer>
                 <p>
-                    Inspector queries against the Lore daemon land in 3c.
-                    Daemon discovery + connect (sibling launchd service)
-                    lands in 3d. See <code>docs/plugin-manifest-spec.md</code>.
+                    Daemon discovery + connect (sibling launchd service) lands
+                    in 3d. See <code>docs/plugin-manifest-spec.md</code>.
                 </p>
             </footer>
         </main>
     );
 }
 
-function ManifestView({ loaded }: { loaded: LoadedManifest }) {
+function DaemonStatusPill({
+    probe,
+    fallback,
+}: {
+    probe: DaemonProbe;
+    fallback: 'unknown' | 'absent' | 'running';
+}) {
+    if (probe.kind === 'ok') {
+        return (
+            <span
+                className="daemon daemon-running"
+                title={`port ${probe.report.port}${
+                    probe.report.version ? ` · v${probe.report.version}` : ''
+                }`}
+            >
+                running · port {probe.report.port}
+            </span>
+        );
+    }
+    if (probe.kind === 'error') {
+        return (
+            <span className="daemon daemon-absent" title={probe.message}>
+                unreachable
+            </span>
+        );
+    }
+    if (probe.kind === 'probing') {
+        return <span className="daemon daemon-unknown">probing…</span>;
+    }
+    return <span className={`daemon daemon-${fallback}`}>{fallback}</span>;
+}
+
+function ManifestView({
+    loaded,
+    daemonReachable,
+}: {
+    loaded: LoadedManifest;
+    daemonReachable: boolean;
+}) {
     const m = loaded.manifest;
+    const inspectors = m.lore?.inspectors ?? [];
+    const tableInspectors = inspectors.filter(
+        (i): i is TableInspectorConfig => i.kind === 'table',
+    );
+
+    const [activeTab, setActiveTab] = useState<string | null>(
+        tableInspectors[0]?.id ?? null,
+    );
+
     return (
         <div className="manifest">
             <header className="manifest-header">
@@ -143,11 +232,11 @@ function ManifestView({ loaded }: { loaded: LoadedManifest }) {
                             </>
                         )}
                     </dl>
-                    {m.lore.inspectors && m.lore.inspectors.length > 0 && (
+                    {inspectors.length > 0 && (
                         <>
                             <h4>Inspectors</h4>
                             <ul className="inspectors">
-                                {m.lore.inspectors.map((i) => (
+                                {inspectors.map((i) => (
                                     <InspectorSummary key={i.id} inspector={i} />
                                 ))}
                             </ul>
@@ -194,6 +283,39 @@ function ManifestView({ loaded }: { loaded: LoadedManifest }) {
                                 ))}
                             </ul>
                         </>
+                    )}
+                </section>
+            )}
+
+            {tableInspectors.length > 0 && (
+                <section className="inspector-tabs">
+                    <h3>Live data</h3>
+                    {!daemonReachable && (
+                        <p className="hint">
+                            Probe the daemon first (above) to enable live
+                            queries. The shell only fetches when you've
+                            confirmed the daemon is reachable.
+                        </p>
+                    )}
+                    <div className="tabs">
+                        {tableInspectors.map((i) => (
+                            <button
+                                key={i.id}
+                                type="button"
+                                className={`tab${activeTab === i.id ? ' active' : ''}`}
+                                onClick={() => setActiveTab(i.id)}
+                            >
+                                {i.label}
+                            </button>
+                        ))}
+                    </div>
+                    {daemonReachable && activeTab && (
+                        <TableInspector
+                            key={activeTab}
+                            config={
+                                tableInspectors.find((i) => i.id === activeTab)!
+                            }
+                        />
                     )}
                 </section>
             )}
