@@ -21,6 +21,12 @@ tauri-plugin-fs = "2"
 tauri-plugin-shell = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Phase 3c — HTTP client for talking to the local Lore daemon.
+# rustls-tls (not native-tls) keeps the build statically linked and avoids
+# pulling in OpenSSL on macOS/Linux. We only call http://127.0.0.1:<port>
+# right now, but rustls-tls is cheap and future-proofs Dataplane (https) calls.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [dev-dependencies]
 tempfile = "3"
