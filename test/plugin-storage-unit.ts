@@ -112,12 +112,15 @@ async function makeKuzuFixture(): Promise<KuzuFixture> {
         // referential errors, then node tables.
         await _sharedFixture.conn.query('MATCH (n:Item) DETACH DELETE n');
         await _sharedFixture.conn.query('MATCH (n:Tag) DETACH DELETE n');
+        await _sharedFixture.conn.query('MATCH (n:Doc) DETACH DELETE n');
         return _sharedFixture;
     }
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-storage-test-'));
     const db = new Database(path.join(dir, 'graph'));
     const conn = new Connection(db);
-    // Two node tables + one edge table — minimal shape covering all cases.
+    // Three node tables + two edge tables — Item/Tag share the default PK
+    // 'id'; Doc has a different PK 'path' so we can exercise asymmetric
+    // srcIdField/tgtIdField hints (FileContains-style edges added in 5b).
     await conn.query(`CREATE NODE TABLE Item (
         id STRING, name STRING, kind STRING, score INT64, createdAt STRING,
         PRIMARY KEY (id)
@@ -126,9 +129,17 @@ async function makeKuzuFixture(): Promise<KuzuFixture> {
         id STRING, name STRING,
         PRIMARY KEY (id)
     )`);
+    await conn.query(`CREATE NODE TABLE Doc (
+        path STRING, title STRING,
+        PRIMARY KEY (path)
+    )`);
     await conn.query(`CREATE REL TABLE TagsItem (
         FROM Tag TO Item,
         weight DOUBLE, kind STRING
+    )`);
+    await conn.query(`CREATE REL TABLE DocContains (
+        FROM Doc TO Item,
+        relation STRING
     )`);
     const readCache = { bumpEpoch: () => { /* counter not asserted in tests */ } };
     const storage = new KuzuPluginStorage(conn, readCache);
@@ -570,6 +581,95 @@ const tests = [
         await storage.count('coll');
         const ts = client.calls.filter((c) => c.method === 'count').map((c) => c.args[0]);
         assert.deepEqual(ts, ['ta', 'tb', 'tc']);
+    }),
+
+    /* ─── asymmetric edge idField (slice 5b) ─────────────── */
+    test('Kuzu: addEdge / traverse / deleteEdgesWhere with asymmetric idField (srcIdField path, tgtIdField id)', async () => {
+        const fx = await makeKuzuFixture();
+        try {
+            await fx.storage.upsert('Doc', 'path', { path: 'src/foo.ts', title: 'foo' });
+            await fx.storage.upsert('Doc', 'path', { path: 'src/bar.ts', title: 'bar' });
+            await fx.storage.upsert('Item', 'id', { id: 'sym1', name: 'sym1', kind: 'fn', score: 0, createdAt: '' });
+            await fx.storage.upsert('Item', 'id', { id: 'sym2', name: 'sym2', kind: 'fn', score: 0, createdAt: '' });
+
+            // Asymmetric hint: source side keys on `path`, target side
+            // keys on `id`. Same shape developer-plugin's FileContains uses.
+            const hint = {
+                srcLabel: 'Doc',
+                tgtLabel: 'Item',
+                srcIdField: 'path',
+                tgtIdField: 'id',
+            };
+            await fx.storage.addEdge('DocContains', 'src/foo.ts', 'sym1', { relation: 'declares' }, hint);
+            await fx.storage.addEdge('DocContains', 'src/foo.ts', 'sym2', { relation: 'declares' }, hint);
+            await fx.storage.addEdge('DocContains', 'src/bar.ts', 'sym2', { relation: 'declares' }, hint);
+
+            // Out from src/foo.ts → both syms.
+            const out = await fx.storage.traverse('DocContains', 'src/foo.ts', 'out', undefined, hint);
+            assert.equal(out.length, 2);
+            assert.deepEqual(out.map((r) => r.targetId).sort(), ['sym1', 'sym2']);
+            // EdgeRow.sourceId carries the path (the source-side PK).
+            assert.equal(out[0]!.sourceId, 'src/foo.ts');
+
+            // In to sym2 → both docs.
+            const inSym2 = await fx.storage.traverse('DocContains', 'sym2', 'in', undefined, hint);
+            assert.equal(inSym2.length, 2);
+            assert.deepEqual(inSym2.map((r) => r.sourceId).sort(), ['src/bar.ts', 'src/foo.ts']);
+
+            // Delete by sourceId='src/foo.ts' — substrate must remap the
+            // keyset shorthand to the per-side PK field.
+            const deleted = await fx.storage.deleteEdgesWhere(
+                'DocContains', { eq: { sourceId: 'src/foo.ts' } }, hint,
+            );
+            assert.equal(deleted, 2);
+            const remaining = await fx.storage.traverse('DocContains', 'sym2', 'in', undefined, hint);
+            assert.equal(remaining.length, 1);
+            assert.equal(remaining[0]!.sourceId, 'src/bar.ts');
+        } finally {
+            fx.cleanup();
+        }
+    }),
+
+    /* ─── countEdges (slice 5b) ────────────────────────────── */
+    test('Kuzu: countEdges with empty filter + with filter', async () => {
+        const fx = await makeKuzuFixture();
+        try {
+            await fx.storage.upsert('Item', 'id', { id: 'i1', name: 'i1', kind: 'x', score: 0, createdAt: '' });
+            await fx.storage.upsert('Tag', 'id', { id: 't1', name: 't1' });
+            await fx.storage.upsert('Tag', 'id', { id: 't2', name: 't2' });
+            const hint = { srcLabel: 'Tag', tgtLabel: 'Item' };
+            await fx.storage.addEdge('TagsItem', 't1', 'i1', { kind: 'a', weight: 1 }, hint);
+            await fx.storage.addEdge('TagsItem', 't2', 'i1', { kind: 'b', weight: 1 }, hint);
+
+            assert.equal(await fx.storage.countEdges('TagsItem', {}, hint), 2);
+            assert.equal(await fx.storage.countEdges('TagsItem', { eq: { kind: 'a' } }, hint), 1);
+            assert.equal(await fx.storage.countEdges('TagsItem', { eq: { sourceId: 't1' } }, hint), 1);
+        } finally {
+            fx.cleanup();
+        }
+    }),
+
+    test('Dataplane: countEdges remaps sourceId/targetId keys + delegates to client.count', async () => {
+        const client = new FakeSdkClient();
+        client.responses['count'] = 5;
+        const storage = new DataplanePluginStorage({ client, tenantProvider: () => 't' });
+
+        // Empty filter
+        assert.equal(await storage.countEdges('rel', {}), 5);
+        const c1 = client.calls.find((c) => c.method === 'count')!;
+        assert.deepEqual(c1.args[2], {});
+
+        // Filter with edge keyset shorthand → translated to source_id_eq / target_id_eq
+        client.calls.length = 0;
+        await storage.countEdges('rel', { eq: { sourceId: 'a', kind: 'x' } });
+        const c2 = client.calls.find((c) => c.method === 'count')!;
+        assert.deepEqual(c2.args[2], { source_id_eq: 'a', kind_eq: 'x' });
+
+        // startsWith on edge prop
+        client.calls.length = 0;
+        await storage.countEdges('rel', { startsWith: { relation: 'lore_' } });
+        const c3 = client.calls.find((c) => c.method === 'count')!;
+        assert.deepEqual(c3.args[2], { relation_starts_with: 'lore_' });
     }),
 
     /* ─── substrate parity sanity check ───────────────────── */

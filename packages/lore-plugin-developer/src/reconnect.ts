@@ -25,6 +25,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { PluginGraphContext, PluginContext, EmbeddableNode, ReconnectEdgeProposal } from '@lore-core/plugins/types.js';
 import { listCodeSymbols, listCodeFilesWithPreview, addLoreTouchesFile, linkKnowledgeToCode } from './operations.js';
+import {
+    CODE_FILE,
+    CODE_RELATION,
+    CODE_SYMBOL,
+    FILE_CONTAINS,
+    HINT_CODE_RELATION,
+    HINT_FILE_CONTAINS,
+    HINT_LORE_APPLIES_TO_CODE,
+    HINT_LORE_TOUCHES_FILE,
+    LORE_APPLIES_TO_CODE,
+    LORE_TOUCHES_FILE,
+    collName,
+} from './collections.js';
 import { buildVerbatimText, type VerbatimStore } from '@lore-core/engines/verbatimStore.js';
 
 const PREFIX_LORE = 'lore:';
@@ -178,56 +191,135 @@ export async function contributeDeveloperTopology(
     const nodes: Array<{ id: string; label: string; type: string; project?: string; group?: string }> = [];
     const edges: Array<{ from: string; to: string; label: string }> = [];
 
+    // PluginStorage doesn't enumerate edges without an anchor. We emit
+    // edges per-anchor: traverse outgoing FileContains from each
+    // CodeFile (gets every FileContains edge), incoming
+    // LoreTouchesFile from each CodeFile (gets every such edge),
+    // outgoing CodeRelation from each CodeSymbol (gets every code-call
+    // edge), and incoming LoreAppliesToCode from each CodeSymbol
+    // (gets every cross-pillar applies-to edge). The traversal
+    // pattern is uniform across substrates.
     try {
-        const fileRows = await ctx.queryRows(`MATCH (f:CodeFile) RETURN f LIMIT ${limit}`);
-        for (const row of fileRows) {
-            const f = row.f as Record<string, unknown>;
-            const pathStr = (f?.path as string) ?? '';
+        const fileRows = await ctx.storage.find<Record<string, unknown>>(
+            collName(ctx.storage, CODE_FILE),
+            {},
+            { limit },
+        );
+        for (const f of fileRows) {
+            const pathStr = String(f['path'] ?? '');
             nodes.push({
                 id: `file:${pathStr}`,
                 label: pathStr.split('/').slice(-2).join('/'),
                 type: 'code_file',
-                project: f?.repo as string | undefined,
+                project: (f['repo'] as string | undefined) ?? undefined,
                 group: 'code_file',
             });
         }
-        const fcRows = await ctx.queryRows(
-            `MATCH (f:CodeFile)-[:FileContains]->(s:CodeSymbol) RETURN f.path AS fpath, s.uid AS suid LIMIT ${limit * 4}`,
-        );
-        for (const row of fcRows) {
-            edges.push({ from: `file:${row.fpath}`, to: `symbol:${row.suid}`, label: 'contains' });
+
+        const fcColl = collName(ctx.storage, FILE_CONTAINS);
+        const ltColl = collName(ctx.storage, LORE_TOUCHES_FILE);
+        let fcBudget = limit * 4;
+        for (const f of fileRows) {
+            const pathStr = String(f['path'] ?? '');
+            if (!pathStr || fcBudget <= 0) break;
+            const fcEdges = await ctx.storage.traverse(
+                fcColl,
+                pathStr,
+                'out',
+                { limit: fcBudget },
+                HINT_FILE_CONTAINS,
+            );
+            for (const e of fcEdges) {
+                edges.push({ from: `file:${e.sourceId}`, to: `symbol:${e.targetId}`, label: 'contains' });
+                fcBudget--;
+                if (fcBudget <= 0) break;
+            }
         }
-        const ltRows = await ctx.queryRows(
-            `MATCH (n:LoreNode)-[r:LoreTouchesFile]->(f:CodeFile) RETURN n.id AS nid, f.path AS fpath, r.relation AS rel LIMIT ${limit}`,
-        );
-        for (const row of ltRows) {
-            edges.push({ from: row.nid as string, to: `file:${row.fpath}`, label: (row.rel as string) ?? 'touches' });
+
+        let ltBudget = limit;
+        for (const f of fileRows) {
+            const pathStr = String(f['path'] ?? '');
+            if (!pathStr || ltBudget <= 0) break;
+            const ltEdges = await ctx.storage.traverse<{ relation?: string }>(
+                ltColl,
+                pathStr,
+                'in',
+                { limit: ltBudget },
+                HINT_LORE_TOUCHES_FILE,
+            );
+            for (const e of ltEdges) {
+                edges.push({
+                    from: e.sourceId,
+                    to: `file:${e.targetId}`,
+                    label: e.edgeProps.relation ?? 'touches',
+                });
+                ltBudget--;
+                if (ltBudget <= 0) break;
+            }
         }
     } catch { /* tables may be missing on older graphs */ }
 
     try {
-        const symRows = await ctx.queryRows(`MATCH (s:CodeSymbol) RETURN s LIMIT ${limit * 4}`);
-        for (const row of symRows) {
-            const s = row.s as Record<string, unknown>;
+        const symRows = await ctx.storage.find<Record<string, unknown>>(
+            collName(ctx.storage, CODE_SYMBOL),
+            {},
+            { limit: limit * 4 },
+        );
+        for (const s of symRows) {
+            const uid = String(s['uid'] ?? '');
             nodes.push({
-                id: `symbol:${s?.uid}`,
-                label: (s?.name as string) ?? '',
+                id: `symbol:${uid}`,
+                label: String(s['name'] ?? ''),
                 type: 'code_symbol',
-                project: s?.repo as string | undefined,
+                project: (s['repo'] as string | undefined) ?? undefined,
                 group: 'code_symbol',
             });
         }
-        const crRows = await ctx.queryRows(
-            `MATCH (a:CodeSymbol)-[e:CodeRelation]->(b:CodeSymbol) RETURN a.uid AS src, e.type AS rel, b.uid AS dst LIMIT ${limit * 4}`,
-        );
-        for (const row of crRows) {
-            edges.push({ from: `symbol:${row.src}`, to: `symbol:${row.dst}`, label: row.rel as string });
+
+        const crColl = collName(ctx.storage, CODE_RELATION);
+        const laColl = collName(ctx.storage, LORE_APPLIES_TO_CODE);
+        let crBudget = limit * 4;
+        for (const s of symRows) {
+            const uid = String(s['uid'] ?? '');
+            if (!uid || crBudget <= 0) break;
+            const crEdges = await ctx.storage.traverse<{ type?: string }>(
+                crColl,
+                uid,
+                'out',
+                { limit: crBudget },
+                HINT_CODE_RELATION,
+            );
+            for (const e of crEdges) {
+                edges.push({
+                    from: `symbol:${e.sourceId}`,
+                    to: `symbol:${e.targetId}`,
+                    label: e.edgeProps.type ?? '',
+                });
+                crBudget--;
+                if (crBudget <= 0) break;
+            }
         }
-        const laRows = await ctx.queryRows(
-            `MATCH (n:LoreNode)-[e:LoreAppliesToCode]->(s:CodeSymbol) RETURN n.id AS nid, s.uid AS suid, e.relation AS rel LIMIT ${limit}`,
-        );
-        for (const row of laRows) {
-            edges.push({ from: row.nid as string, to: `symbol:${row.suid}`, label: (row.rel as string) ?? 'applies_to' });
+
+        let laBudget = limit;
+        for (const s of symRows) {
+            const uid = String(s['uid'] ?? '');
+            if (!uid || laBudget <= 0) break;
+            const laEdges = await ctx.storage.traverse<{ relation?: string }>(
+                laColl,
+                uid,
+                'in',
+                { limit: laBudget },
+                HINT_LORE_APPLIES_TO_CODE,
+            );
+            for (const e of laEdges) {
+                edges.push({
+                    from: e.sourceId,
+                    to: `symbol:${e.targetId}`,
+                    label: e.edgeProps.relation ?? 'applies_to',
+                });
+                laBudget--;
+                if (laBudget <= 0) break;
+            }
         }
     } catch { /* ignore */ }
 
@@ -379,13 +471,12 @@ async function buildSingleEmbeddable(
     loadRepoRoots();
     if (markerId.startsWith(PREFIX_FILE)) {
         const filePath = markerId.slice(PREFIX_FILE.length);
-        const fileRows = await ctx.queryRows(
-            `MATCH (f:CodeFile {path: $path})
-             RETURN f.path AS path, f.language AS language, f.repo AS repo`,
-            { path: filePath },
-        ).catch(() => []);
-        if (fileRows.length === 0) return null;
-        const f = fileRows[0] as Record<string, unknown>;
+        const f = await ctx.storage.get<Record<string, unknown>>(
+            collName(ctx.storage, CODE_FILE),
+            'path',
+            filePath,
+        ).catch(() => null);
+        if (!f) return null;
         const repo = String(f['repo'] ?? '');
         const language = String(f['language'] ?? '');
         const slug = filePath.split('/').slice(-2).join('/');
@@ -407,15 +498,12 @@ async function buildSingleEmbeddable(
     }
     if (markerId.startsWith(PREFIX_SYMBOL)) {
         const uid = markerId.slice(PREFIX_SYMBOL.length);
-        const symRows = await ctx.queryRows(
-            `MATCH (s:CodeSymbol {uid: $uid})
-             RETURN s.uid AS uid, s.name AS name, s.kind AS kind, s.filePath AS filePath,
-                    s.signature AS signature, s.content AS content, s.repo AS repo,
-                    s.startLine AS startLine, s.endLine AS endLine`,
-            { uid },
-        ).catch(() => []);
-        if (symRows.length === 0) return null;
-        const s = symRows[0] as Record<string, unknown>;
+        const s = await ctx.storage.get<Record<string, unknown>>(
+            collName(ctx.storage, CODE_SYMBOL),
+            'uid',
+            uid,
+        ).catch(() => null);
+        if (!s) return null;
         const name = String(s['name'] ?? uid);
         const kind = String(s['kind'] ?? '');
         const filePath = String(s['filePath'] ?? '');

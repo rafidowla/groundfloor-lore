@@ -119,6 +119,69 @@ function buildWhereClause(
 }
 
 /**
+ * Translate an edge-filter (which may use the keyset shorthand
+ * `sourceId` / `source_id` / `targetId` / `target_id`) into a Cypher
+ * WHERE clause that pins anchors on the source/target node aliases.
+ *
+ * Kùzu MATCHs an edge as `(s)-[e:Coll]->(t)`; the filter keys split into
+ * three: side-pinning ids → `s.<srcIdField>` / `t.<tgtIdField>`, and
+ * everything else → `e.<key>`. Used by both `deleteEdgesWhere` and
+ * `countEdges` so the shorthand works identically across them.
+ */
+function buildEdgeWhere(
+    filter: Filter | undefined,
+    srcIdField: string,
+    tgtIdField: string,
+): { whereSql: string; params: Record<string, unknown> } {
+    const f = filter ?? {};
+    const eFilter: Filter = {};
+    const sIdEq: unknown[] = [];
+    const tIdEq: unknown[] = [];
+
+    const splitKeyset = (
+        src: Record<string, unknown> | undefined,
+        dst: Record<string, unknown>,
+    ) => {
+        if (!src) return;
+        for (const [k, v] of Object.entries(src)) {
+            if (k === 'sourceId' || k === 'source_id') sIdEq.push(v);
+            else if (k === 'targetId' || k === 'target_id') tIdEq.push(v);
+            else dst[k] = v;
+        }
+    };
+    const cloneOp = (op: keyof Filter) => {
+        const v = (f[op] ?? {}) as Record<string, unknown>;
+        const dst: Record<string, unknown> = {};
+        splitKeyset(v, dst);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (eFilter as any)[op] = dst;
+    };
+    cloneOp('eq');
+    cloneOp('contains');
+    cloneOp('startsWith');
+    cloneOp('gt');
+    cloneOp('gte');
+    cloneOp('lt');
+    cloneOp('lte');
+    cloneOp('in');
+
+    const { where: edgeWhere, params: edgeParams } = buildWhereClause(eFilter, 'e', 'p');
+    const extraClauses: string[] = [];
+    const params: Record<string, unknown> = { ...edgeParams };
+    if (sIdEq.length > 0) {
+        params['__src'] = sIdEq[0];
+        extraClauses.push(`s.${srcIdField} = $__src`);
+    }
+    if (tIdEq.length > 0) {
+        params['__tgt'] = tIdEq[0];
+        extraClauses.push(`t.${tgtIdField} = $__tgt`);
+    }
+    const allWheres = [edgeWhere.replace(/^WHERE\s+/, ''), ...extraClauses].filter((s) => s.length > 0);
+    const whereSql = allWheres.length > 0 ? `WHERE ${allWheres.join(' AND ')}` : '';
+    return { whereSql, params };
+}
+
+/**
  * Strip the alias prefix from result keys so callers see clean field
  * names. Kùzu's `getAll()` returns keys like `n.id`, `n.label` when the
  * RETURN clause is `n.*`. Plugins shouldn't have to know about that.
@@ -136,6 +199,7 @@ function stripAlias(rows: Array<Record<string, unknown>>, alias: string): Array<
 }
 
 export class KuzuPluginStorage implements PluginStorage {
+    readonly mode = 'kuzu' as const;
     private readonly connection: Connection;
     private readonly readCache: ReadCacheHandle;
     private readonly ensureInit?: () => Promise<void>;
@@ -264,7 +328,7 @@ export class KuzuPluginStorage implements PluginStorage {
         props: Record<string, unknown> = {},
         hint?: EdgeShapeHint,
     ): Promise<void> {
-        const { srcLabel, tgtLabel, idField } = this.requireHint(coll, hint);
+        const { srcLabel, tgtLabel, srcIdField, tgtIdField } = this.requireHint(coll, hint);
         const propKeys = Object.keys(props);
         const params: Record<string, unknown> = { __src: sourceId, __tgt: targetId };
         const setClauses: string[] = [];
@@ -276,7 +340,7 @@ export class KuzuPluginStorage implements PluginStorage {
         const propsSql = setClauses.length > 0 ? `{${setClauses.join(', ')}}` : '';
         const cypher =
             `MATCH (s:${srcLabel}), (t:${tgtLabel}) ` +
-            `WHERE s.${idField} = $__src AND t.${idField} = $__tgt ` +
+            `WHERE s.${srcIdField} = $__src AND t.${tgtIdField} = $__tgt ` +
             `CREATE (s)-[:${coll} ${propsSql}]->(t)`;
         await this.run(cypher, params);
         this.readCache.bumpEpoch();
@@ -289,7 +353,7 @@ export class KuzuPluginStorage implements PluginStorage {
         props: Record<string, unknown> = {},
         hint?: EdgeShapeHint,
     ): Promise<void> {
-        const { srcLabel, tgtLabel, idField } = this.requireHint(coll, hint);
+        const { srcLabel, tgtLabel, srcIdField, tgtIdField } = this.requireHint(coll, hint);
         const propKeys = Object.keys(props);
         const params: Record<string, unknown> = { __src: sourceId, __tgt: targetId };
         const setClauses: string[] = [];
@@ -301,7 +365,7 @@ export class KuzuPluginStorage implements PluginStorage {
         const setSql = setClauses.length > 0 ? `SET ${setClauses.join(', ')}` : '';
         const cypher =
             `MATCH (s:${srcLabel}), (t:${tgtLabel}) ` +
-            `WHERE s.${idField} = $__src AND t.${idField} = $__tgt ` +
+            `WHERE s.${srcIdField} = $__src AND t.${tgtIdField} = $__tgt ` +
             `MERGE (s)-[e:${coll}]->(t) ${setSql}`;
         await this.run(cypher, params);
         this.readCache.bumpEpoch();
@@ -314,7 +378,7 @@ export class KuzuPluginStorage implements PluginStorage {
         opts?: TraverseOptions,
         hint?: EdgeShapeHint,
     ): Promise<EdgeRow<TProps>[]> {
-        const { srcLabel, tgtLabel, idField } = this.requireHint(coll, hint);
+        const { srcLabel, tgtLabel, srcIdField, tgtIdField } = this.requireHint(coll, hint);
         // Direction shapes the MATCH arrow.
         let pattern: string;
         if (dir === 'out') {
@@ -331,16 +395,16 @@ export class KuzuPluginStorage implements PluginStorage {
 
         const anchorClause =
             dir === 'out'
-                ? `s.${idField} = $__anchor`
+                ? `s.${srcIdField} = $__anchor`
                 : dir === 'in'
-                  ? `t.${idField} = $__anchor`
-                  : `(s.${idField} = $__anchor OR t.${idField} = $__anchor)`;
+                  ? `t.${tgtIdField} = $__anchor`
+                  : `(s.${srcIdField} = $__anchor OR t.${tgtIdField} = $__anchor)`;
 
         const { where: edgeWhere, params: edgeParams } = buildWhereClause(opts?.filter, 'e', 'p');
         const allWheres = [anchorClause, edgeWhere.replace(/^WHERE\s+/, '')].filter((s) => s.length > 0);
         const whereSql = `WHERE ${allWheres.join(' AND ')}`;
 
-        let cypher = `MATCH ${pattern} ${whereSql} RETURN e.*, s.${idField} AS __src, t.${idField} AS __tgt`;
+        let cypher = `MATCH ${pattern} ${whereSql} RETURN e.*, s.${srcIdField} AS __src, t.${tgtIdField} AS __tgt`;
         if (typeof opts?.limit === 'number' && opts.limit >= 0) {
             cypher += ` LIMIT ${Math.floor(opts.limit)}`;
         }
@@ -366,55 +430,8 @@ export class KuzuPluginStorage implements PluginStorage {
         filter: Filter,
         hint?: EdgeShapeHint,
     ): Promise<number> {
-        const { srcLabel, tgtLabel } = this.requireHint(coll, hint);
-        // Filter keys can target source_id / target_id by name; map them
-        // onto the s/t aliases. Everything else applies to e.
-        const f = filter ?? {};
-        const eFilter: Filter = {};
-        const sIdEq: unknown[] = [];
-        const tIdEq: unknown[] = [];
-        const idField = hint?.idField ?? 'id';
-
-        const splitKeyset = (
-            src: Record<string, unknown> | undefined,
-            dst: Record<string, unknown>,
-        ) => {
-            if (!src) return;
-            for (const [k, v] of Object.entries(src)) {
-                if (k === 'sourceId' || k === 'source_id') sIdEq.push(v);
-                else if (k === 'targetId' || k === 'target_id') tIdEq.push(v);
-                else dst[k] = v;
-            }
-        };
-        const cloneOp = (op: keyof Filter) => {
-            const v = (f[op] ?? {}) as Record<string, unknown>;
-            const dst: Record<string, unknown> = {};
-            splitKeyset(v, dst);
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (eFilter as any)[op] = dst;
-        };
-        cloneOp('eq');
-        cloneOp('contains');
-        cloneOp('startsWith');
-        cloneOp('gt');
-        cloneOp('gte');
-        cloneOp('lt');
-        cloneOp('lte');
-        cloneOp('in');
-
-        const { where: edgeWhere, params: edgeParams } = buildWhereClause(eFilter, 'e', 'p');
-        const extraClauses: string[] = [];
-        const params: Record<string, unknown> = { ...edgeParams };
-        if (sIdEq.length > 0) {
-            params['__src'] = sIdEq[0];
-            extraClauses.push(`s.${idField} = $__src`);
-        }
-        if (tIdEq.length > 0) {
-            params['__tgt'] = tIdEq[0];
-            extraClauses.push(`t.${idField} = $__tgt`);
-        }
-        const allWheres = [edgeWhere.replace(/^WHERE\s+/, ''), ...extraClauses].filter((s) => s.length > 0);
-        const whereSql = allWheres.length > 0 ? `WHERE ${allWheres.join(' AND ')}` : '';
+        const { srcLabel, tgtLabel, srcIdField, tgtIdField } = this.requireHint(coll, hint);
+        const { whereSql, params } = buildEdgeWhere(filter, srcIdField, tgtIdField);
 
         // Count first (DELETE doesn't return the row count).
         const countRows = await this.runRows(
@@ -432,6 +449,23 @@ export class KuzuPluginStorage implements PluginStorage {
         return cnt;
     }
 
+    async countEdges(
+        coll: string,
+        filter?: Filter,
+        hint?: EdgeShapeHint,
+    ): Promise<number> {
+        const { srcLabel, tgtLabel, srcIdField, tgtIdField } = this.requireHint(coll, hint);
+        const { whereSql, params } = buildEdgeWhere(filter, srcIdField, tgtIdField);
+        const rows = await this.runRows(
+            `MATCH (s:${srcLabel})-[e:${coll}]->(t:${tgtLabel}) ${whereSql} RETURN count(e) AS cnt`,
+            params,
+        );
+        const cntRaw = rows[0]?.['cnt'];
+        if (typeof cntRaw === 'number') return cntRaw;
+        if (typeof cntRaw === 'bigint') return Number(cntRaw);
+        return 0;
+    }
+
     /* ─── private ──────────────────────────────────────────────── */
 
     private requireHint(
@@ -445,10 +479,13 @@ export class KuzuPluginStorage implements PluginStorage {
                     `node labels). Slice 5c removes this when declareCollection lands.`,
             );
         }
+        const idField = hint.idField ?? 'id';
         return {
             srcLabel: hint.srcLabel,
             tgtLabel: hint.tgtLabel,
-            idField: hint.idField ?? 'id',
+            idField,
+            srcIdField: hint.srcIdField ?? idField,
+            tgtIdField: hint.tgtIdField ?? idField,
         };
     }
 }
