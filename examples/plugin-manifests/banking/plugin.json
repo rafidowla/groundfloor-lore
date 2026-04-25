@@ -1,0 +1,81 @@
+{
+    "manifestVersion": 1,
+    "name": "banking",
+    "version": "0.0.1",
+    "description": "Reference manifest — personal banking domain. Accounts, transactions, counterparties, categories. Demonstrates a plugin manifest authored OUTSIDE the Lore monorepo, validated by the same spec. Runtime not implemented; this is a scaffold for plugin authors.",
+    "author": "Groundfloor (reference example)",
+    "license": "MIT",
+    "homepage": "https://github.com/rafidowla/groundfloor-lore/tree/main/examples/plugin-manifests/banking",
+
+    "lore": {
+        "module": "./dist/index.js",
+        "inspectors": [
+            {
+                "id": "accounts",
+                "label": "Accounts",
+                "icon": "credit-card",
+                "kind": "table",
+                "entity": "Account",
+                "columns": [
+                    { "field": "displayName", "label": "Account", "flex": 2 },
+                    { "field": "institution", "label": "Bank", "width": 180 },
+                    { "field": "accountKind", "label": "Type", "width": 120 },
+                    { "field": "currency", "label": "Ccy", "width": 70 },
+                    { "field": "balance", "label": "Balance", "width": 140, "type": "number" },
+                    { "field": "asOf", "label": "As of", "width": 160, "type": "date" }
+                ],
+                "sort": { "field": "displayName", "order": "asc" },
+                "filters": [
+                    { "field": "institution", "kind": "text" },
+                    {
+                        "field": "accountKind",
+                        "kind": "select",
+                        "options": ["checking", "savings", "credit", "brokerage", "loan", "retirement"]
+                    }
+                ]
+            },
+            {
+                "id": "transactions",
+                "label": "Transactions",
+                "icon": "list",
+                "kind": "timeline",
+                "entity": "Transaction",
+                "dateField": "postedAt",
+                "labelField": "description",
+                "groupBy": "category"
+            },
+            {
+                "id": "counterparties",
+                "label": "Counterparties",
+                "icon": "building",
+                "kind": "table",
+                "entity": "Counterparty",
+                "columns": [
+                    { "field": "displayName", "label": "Name", "flex": 2 },
+                    { "field": "category", "label": "Category", "width": 160 },
+                    { "field": "txCount", "label": "Tx", "width": 80, "type": "number" },
+                    { "field": "lastSeenAt", "label": "Last seen", "width": 160, "type": "date" }
+                ],
+                "sort": { "field": "lastSeenAt", "order": "desc" }
+            },
+            {
+                "id": "money-graph",
+                "label": "Money graph",
+                "icon": "graph",
+                "kind": "graph",
+                "entity": "Account",
+                "depth": 2,
+                "edgeTypes": ["TransactionFromAccount", "TransactionToAccount", "TransactionWithCounterparty"]
+            }
+        ],
+        "permissions": [
+            "fs:read:.",
+            "credentials:read:plaid",
+            "net:api.plaid.com"
+        ]
+    },
+
+    "engines": {
+        "lore": ">=2.0.0"
+    }
+}

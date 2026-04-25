@@ -1,0 +1,81 @@
+{
+    "manifestVersion": 1,
+    "name": "legal",
+    "version": "0.1.0",
+    "description": "Contracts, clauses, parties, jurisdictions — featherweight legal-domain vocabulary. Schema + prompt only, no custom tools. The exemplar that proves a domain plugin can cost a day, not a week.",
+    "author": "Groundfloor",
+    "license": "MIT",
+    "homepage": "https://github.com/rafidowla/groundfloor-lore/tree/main/packages/lore-plugin-legal",
+
+    "lore": {
+        "module": "../../dist/lore-plugin-legal/src/index.js",
+        "inspectors": [
+            {
+                "id": "contracts",
+                "label": "Contracts",
+                "icon": "file-text",
+                "kind": "table",
+                "entity": "Contract",
+                "columns": [
+                    { "field": "displayName", "label": "Title", "flex": 3 },
+                    { "field": "jurisdiction", "label": "Jurisdiction", "width": 140 },
+                    { "field": "effectiveDate", "label": "Effective", "width": 130, "type": "date" },
+                    { "field": "expiryDate", "label": "Expires", "width": 130, "type": "date" }
+                ],
+                "sort": { "field": "effectiveDate", "order": "desc" },
+                "filters": [
+                    { "field": "displayName", "kind": "text" },
+                    { "field": "jurisdiction", "kind": "text" }
+                ]
+            },
+            {
+                "id": "clauses",
+                "label": "Clauses",
+                "icon": "list",
+                "kind": "table",
+                "entity": "Clause",
+                "columns": [
+                    { "field": "displayName", "label": "Clause", "flex": 2 },
+                    { "field": "kind", "label": "Kind", "width": 160 },
+                    { "field": "sectionRef", "label": "Section", "width": 120 },
+                    { "field": "content", "label": "Text", "flex": 4 }
+                ],
+                "filters": [
+                    {
+                        "field": "kind",
+                        "kind": "select",
+                        "options": ["indemnity", "liability", "termination", "confidentiality", "ip", "payment", "other"]
+                    }
+                ]
+            },
+            {
+                "id": "parties",
+                "label": "Parties",
+                "icon": "users",
+                "kind": "table",
+                "entity": "Party",
+                "columns": [
+                    { "field": "displayName", "label": "Name", "flex": 2 },
+                    { "field": "kind", "label": "Kind", "width": 140 },
+                    { "field": "notes", "label": "Notes", "flex": 3 }
+                ]
+            },
+            {
+                "id": "contract-graph",
+                "label": "Contract graph",
+                "icon": "graph",
+                "kind": "graph",
+                "entity": "Contract",
+                "depth": 2,
+                "edgeTypes": ["ContractContainsClause", "ContractInvolvesParty", "ContractGovernedBy"]
+            }
+        ],
+        "permissions": [
+            "fs:read:."
+        ]
+    },
+
+    "engines": {
+        "lore": ">=2.0.0"
+    }
+}

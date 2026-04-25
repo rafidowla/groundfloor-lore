@@ -1,0 +1,70 @@
+{
+    "manifestVersion": 1,
+    "name": "rag",
+    "version": "0.0.1",
+    "description": "Reference manifest — generic RAG (retrieval-augmented generation) domain. Documents, chunks, sources. Demonstrates the document-kind inspector and a plugin whose value is mostly storage + retrieval, not custom tools. Runtime not implemented; this is a scaffold for plugin authors.",
+    "author": "Groundfloor (reference example)",
+    "license": "MIT",
+    "homepage": "https://github.com/rafidowla/groundfloor-lore/tree/main/examples/plugin-manifests/rag",
+
+    "lore": {
+        "module": "./dist/index.js",
+        "inspectors": [
+            {
+                "id": "documents",
+                "label": "Documents",
+                "icon": "file-text",
+                "kind": "document",
+                "entity": "Document",
+                "labelField": "title",
+                "contentField": "content"
+            },
+            {
+                "id": "chunks",
+                "label": "Chunks",
+                "icon": "list",
+                "kind": "table",
+                "entity": "Chunk",
+                "columns": [
+                    { "field": "documentTitle", "label": "Document", "flex": 2 },
+                    { "field": "ordinal", "label": "#", "width": 70, "type": "number" },
+                    { "field": "tokens", "label": "Tokens", "width": 90, "type": "number" },
+                    { "field": "snippet", "label": "Snippet", "flex": 4 }
+                ],
+                "sort": { "field": "documentTitle", "order": "asc" },
+                "filters": [
+                    { "field": "documentTitle", "kind": "text" }
+                ]
+            },
+            {
+                "id": "sources",
+                "label": "Sources",
+                "icon": "link",
+                "kind": "table",
+                "entity": "Source",
+                "columns": [
+                    { "field": "displayName", "label": "Source", "flex": 2 },
+                    { "field": "kind", "label": "Kind", "width": 140 },
+                    { "field": "uri", "label": "URI", "flex": 3 },
+                    { "field": "ingestedAt", "label": "Ingested", "width": 160, "type": "date" }
+                ],
+                "sort": { "field": "ingestedAt", "order": "desc" },
+                "filters": [
+                    {
+                        "field": "kind",
+                        "kind": "select",
+                        "options": ["pdf", "html", "markdown", "transcript", "email", "other"]
+                    }
+                ]
+            }
+        ],
+        "permissions": [
+            "fs:read:.",
+            "net:*"
+        ]
+    },
+
+    "engines": {
+        "lore": ">=2.0.0"
+    }
+}

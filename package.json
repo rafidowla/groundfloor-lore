@@ -26,7 +26,8 @@
         "test:scaffold-plugin": "tsx test/scaffold-plugin.test.ts",
         "test:unit:deferred": "tsx test/unit-deferred.ts",
         "test:manifest:developer": "tsx test/manifest-developer-plugin.test.ts",
-        "test": "npm run test:arch && npm run test:cache && npm run test:unit:dataplane-graph && npm run test:unit:dataplane-vector && tsc --noEmit && npm run test:unit:deferred && npm run test:manifest:developer"
+        "test:manifest:reference": "tsx test/manifest-reference-plugins.test.ts",
+        "test": "npm run test:arch && npm run test:cache && npm run test:unit:dataplane-graph && npm run test:unit:dataplane-vector && tsc --noEmit && npm run test:unit:deferred && npm run test:manifest:developer && npm run test:manifest:reference"
     },
     "dependencies": {
         "@hono/node-server": "^1.19.14",
