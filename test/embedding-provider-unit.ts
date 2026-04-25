@@ -25,6 +25,8 @@ import {
     LocalEmbeddingProvider,
     DEFAULT_LOCAL_MODEL_ID,
     DEFAULT_LOCAL_MODEL_DIM,
+    MULTILINGUAL_E5_SMALL_MODEL_ID,
+    MULTILINGUAL_E5_SMALL_MODEL_DIM,
 } from '../packages/lore/src/providers/localEmbeddingProvider.js';
 import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
 
@@ -138,16 +140,38 @@ const tests: Array<() => Promise<void>> = [
         // Test: LocalEmbeddingProvider exposes documented constants without
         // loading the HF model. We inspect properties only — no embed() call,
         // no network/disk activity.
+        //
+        // Slice 7: multilingual-e5-small surfaced as a first-class export
+        // alongside the MiniLM default. Default left at MiniLM to avoid
+        // forcing every existing install to redownload + invalidate
+        // existing LanceDB vectors on upgrade. Operators opt into e5 by
+        // setting LORE_LOCAL_EMBEDDING_MODEL or constructing with
+        // MULTILINGUAL_E5_SMALL_MODEL_ID.
         const p = new LocalEmbeddingProvider();
         assert.equal(p.modelId, DEFAULT_LOCAL_MODEL_ID);
         assert.equal(p.dimension, DEFAULT_LOCAL_MODEL_DIM);
         assert.equal(DEFAULT_LOCAL_MODEL_ID, 'Xenova/all-MiniLM-L6-v2');
         assert.equal(DEFAULT_LOCAL_MODEL_DIM, 384);
 
-        const custom = new LocalEmbeddingProvider({ modelId: 'Xenova/multilingual-e5-small', dimension: 384 });
-        assert.equal(custom.modelId, 'Xenova/multilingual-e5-small');
-        assert.equal(custom.dimension, 384);
-        console.log('  ok  LocalEmbeddingProvider exposes model id + dimension constants');
+        // Slice 7: e5-small opt-in is constructable without hardcoding
+        // the magic string at the call site.
+        assert.equal(MULTILINGUAL_E5_SMALL_MODEL_ID, 'Xenova/multilingual-e5-small');
+        assert.equal(MULTILINGUAL_E5_SMALL_MODEL_DIM, 384);
+        const e5 = new LocalEmbeddingProvider({
+            modelId: MULTILINGUAL_E5_SMALL_MODEL_ID,
+            dimension: MULTILINGUAL_E5_SMALL_MODEL_DIM,
+        });
+        assert.equal(e5.modelId, 'Xenova/multilingual-e5-small');
+        assert.equal(e5.dimension, 384);
+
+        // Schema-width parity is the property that makes this a clean
+        // opt-in: both models produce 384-d vectors, so the LanceDB
+        // schema doesn't need to change. (Vector contents differ, of
+        // course — operators must drop+rebuild lore_verbatim when they
+        // swap or retrieval quality silently degrades.)
+        assert.equal(DEFAULT_LOCAL_MODEL_DIM, MULTILINGUAL_E5_SMALL_MODEL_DIM,
+            'MiniLM and e5-small share dimension — schema-compatible swap');
+        console.log('  ok  LocalEmbeddingProvider constants (MiniLM default + e5-small opt-in, both 384-d)');
     },
 ];
 

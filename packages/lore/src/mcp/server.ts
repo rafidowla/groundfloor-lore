@@ -262,18 +262,31 @@ let graph: LoreGraph = createGraph();
 // orphan reaper's listIds); those run through LocalGraph-coupled code
 // paths today and stay guarded by `graph instanceof LocalGraph` — cloud
 // reconnect lands in a later slice. See docs/dataplane-vector-adapter.md.
-// Q2.2 slice 6a/6b — single EmbeddingProvider injected into both vector
-// stores. Slice 6a established the abstraction; slice 6b adds the
-// remote OpenAI-compatible path so users can run hosted BGE-M3 (or any
-// other model exposed by an OpenAI-compatible server: Ollama, vLLM, HF
-// TEI, OpenAI itself, future Lore Cloud) without changing the vector
-// stores. Slice 7 will rotate the local default model.
+// Q2.2 slice 6a/6b/7 — single EmbeddingProvider injected into both
+// vector stores. Slice 6a established the abstraction; slice 6b adds
+// the remote OpenAI-compatible path so users can run hosted BGE-M3 (or
+// any other model exposed by an OpenAI-compatible server: Ollama, vLLM,
+// HF TEI, OpenAI itself, future Lore Cloud) without changing the
+// vector stores. Slice 7 surfaces multilingual-e5-small as a
+// first-class local option (same 384-d width as MiniLM, ~100 languages).
 //
 // Selection precedence (highest → lowest):
 //   1. LORE_EMBEDDING_PROVIDER=openai_compat → remote provider
 //      Requires LORE_EMBEDDING_BASE_URL, LORE_EMBEDDING_MODEL,
 //      LORE_EMBEDDING_DIMENSION. LORE_EMBEDDING_API_KEY optional.
-//   2. (default) LocalEmbeddingProvider — Xenova/all-MiniLM-L6-v2.
+//   2. LORE_LOCAL_EMBEDDING_MODEL=<modelId> → local override
+//      Optional LORE_LOCAL_EMBEDDING_DIM (defaults to 384, the width
+//      of both MiniLM and e5-small). Use this to opt into
+//      Xenova/multilingual-e5-small without changing code.
+//   3. (default) LocalEmbeddingProvider — Xenova/all-MiniLM-L6-v2.
+//
+// Default left at MiniLM intentionally (slice 7 commit message): existing
+// installs already have it cached + reconnected; flipping the default
+// would force every operator to download a new model on first boot AND
+// silently produce vectors that don't match their existing LanceDB
+// rows. A future slice with proper migration tooling (modelId
+// fingerprint check + automatic drop+rebuild prompt) will make
+// flipping safe.
 //
 // The vector stores below stay untouched regardless of which branch
 // fires.
@@ -300,8 +313,28 @@ function createEmbeddingProvider(): EmbeddingProvider {
         );
         return new OpenAICompatEmbeddingProvider({ baseUrl, modelId, dimension, apiKey });
     }
-    console.error('[Lore MCP] Embedding provider: local (Xenova/all-MiniLM-L6-v2, 384-d)');
-    return new LocalEmbeddingProvider();
+
+    const localModelOverride = (process.env['LORE_LOCAL_EMBEDDING_MODEL'] ?? '').trim();
+    const localDimRaw = (process.env['LORE_LOCAL_EMBEDDING_DIM'] ?? '').trim();
+    if (localModelOverride) {
+        const dim = localDimRaw ? Number.parseInt(localDimRaw, 10) : undefined;
+        if (localDimRaw && (!Number.isInteger(dim) || (dim ?? 0) <= 0)) {
+            throw new Error(
+                `[Lore MCP] LORE_LOCAL_EMBEDDING_DIM must be a positive integer (got ${JSON.stringify(localDimRaw)})`
+            );
+        }
+        const provider = new LocalEmbeddingProvider({ modelId: localModelOverride, ...(dim ? { dimension: dim } : {}) });
+        console.error(
+            `[Lore MCP] Embedding provider: local override (model=${provider.modelId}, dim=${provider.dimension})`
+        );
+        return provider;
+    }
+
+    const provider = new LocalEmbeddingProvider();
+    console.error(
+        `[Lore MCP] Embedding provider: local (model=${provider.modelId}, dim=${provider.dimension})`
+    );
+    return provider;
 }
 const embeddingProvider: EmbeddingProvider = createEmbeddingProvider();
 
