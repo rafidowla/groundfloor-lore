@@ -1,0 +1,78 @@
+{
+    "manifestVersion": 1,
+    "name": "sample-personal",
+    "version": "0.1.0",
+    "description": "Sample personal-knowledge plugin used as a fixture for the lore-shell manifest loader. Contributes to both Lore and DEF primitives.",
+    "author": "Groundfloor",
+    "license": "MIT",
+    "homepage": "https://example.com/personal-plugin",
+
+    "lore": {
+        "module": "./dist/index.js",
+        "inspectors": [
+            {
+                "id": "emails",
+                "label": "Emails",
+                "icon": "mail",
+                "kind": "table",
+                "entity": "Email",
+                "columns": [
+                    { "field": "sender", "label": "From", "width": 200 },
+                    { "field": "subject", "label": "Subject", "flex": 1 },
+                    { "field": "received", "label": "Date", "width": 140, "type": "date" }
+                ],
+                "sort": { "field": "received", "order": "desc" },
+                "filters": [
+                    { "field": "sender", "kind": "text" },
+                    { "field": "tags", "kind": "multi-select" }
+                ]
+            },
+            {
+                "id": "files",
+                "label": "Files",
+                "icon": "folder",
+                "kind": "table",
+                "entity": "File",
+                "columns": [
+                    { "field": "path", "label": "Path", "flex": 1 },
+                    { "field": "modified", "label": "Modified", "width": 160, "type": "date" }
+                ]
+            }
+        ],
+        "permissions": [
+            "fs:read:~/Documents",
+            "fs:write:~/.lore/personal",
+            "credentials:store:gmail-oauth"
+        ]
+    },
+
+    "def": {
+        "required": false,
+        "agents": [
+            {
+                "name": "personal-assistant",
+                "displayName": "Personal Assistant",
+                "system": "You are a personal assistant with access to my emails, files, and notes.",
+                "model": "claude-sonnet-4.7",
+                "tools": [
+                    "lore:sample-personal:search_emails",
+                    "lore:builtin:search",
+                    "lore:builtin:recall"
+                ],
+                "memory": { "kind": "lore", "workspace": "personal" }
+            }
+        ],
+        "scheduledTasks": [
+            {
+                "id": "morning-briefing",
+                "agent": "personal-assistant",
+                "trigger": { "kind": "cron", "expression": "0 9 * * 1-5" },
+                "prompt": "Summarise overnight emails and today's calendar."
+            }
+        ]
+    },
+
+    "engines": {
+        "lore": ">=2.2.0"
+    }
+}

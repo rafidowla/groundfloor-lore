@@ -1,0 +1,14 @@
+{
+    "$schema": "../gen/schemas/desktop-schema.json",
+    "identifier": "default",
+    "description": "Default capabilities for the Lore shell window. Phase 3a scope: invoke shell_info; later phases narrow + extend (fs:read for plugin.json, dialog:open for plugin install, shell spawn for the lore daemon).",
+    "windows": ["main"],
+    "permissions": [
+        "core:default",
+        "core:window:default",
+        "core:event:default",
+        "dialog:default",
+        "fs:default",
+        "shell:default"
+    ]
+}
