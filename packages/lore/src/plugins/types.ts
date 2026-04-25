@@ -19,18 +19,43 @@
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { PluginStorage } from './storage.js';
+
+export type { PluginStorage, Filter, FindOptions, TraverseOptions, EdgeRow, EdgeShapeHint } from './storage.js';
 
 /**
  * PluginGraphContext — Narrow surface exposed to plugins for reading from
- * or writing to the Kùzu graph without importing the LocalGraph class
- * directly (which would invert the dependency).
+ * or writing to the substrate-bound graph without importing engine
+ * classes directly (which would invert the dependency).
  *
  * Handed to registerSchema / contributeReconnectNodes / routeReconnectEdge.
- * The executeQuery signature mirrors kuzu-lite's so plugins can run raw
- * Cypher when they need to.
+ *
+ * SUBSTRATE PORTABILITY (Q2.2 slice 5a):
+ *   Plugins should write business logic against `storage` (PluginStorage)
+ *   — substrate-portable, runs on Kùzu and Dataplane identically. The
+ *   raw `executeQuery` / `queryRows` Cypher path is kept for backward
+ *   compatibility; new plugin code should NOT use it. Cypher-on-cloud
+ *   throws (Cypher is Kùzu-specific; Dataplane speaks AQL).
+ *
+ *   Migration path: existing developer-plugin Cypher calls move to
+ *   `storage.*` in slice 5b. After that, executeQuery/queryRows
+ *   become deprecated and removed in a future slice.
  */
 export interface PluginGraphContext {
     /**
+     * Substrate-portable plugin storage — preferred surface for ALL new
+     * plugin code. Same calls work in local and cloud modes.
+     *
+     * See `src/plugins/storage.ts` for the interface and Filter shape.
+     */
+    storage: PluginStorage;
+
+    /**
+     * @deprecated Q2.2 slice 5a — Use `storage.*` for substrate-portable
+     * plugin code. Raw Cypher only works in local mode (Kùzu); cloud-mode
+     * daemons reject these calls. Slice 5b cuts the developer plugin
+     * over and removes Cypher from any new plugin path.
+     *
      * Execute a parameterized Cypher query. Plugins use this both for
      * schema creation (CREATE NODE TABLE …) and for operational reads.
      * Throws on syntax / execution error; caller decides to recover.
@@ -38,6 +63,9 @@ export interface PluginGraphContext {
     executeQuery(cypher: string, params?: Record<string, unknown>): Promise<unknown>;
 
     /**
+     * @deprecated Q2.2 slice 5a — Use `storage.find` / `storage.get` for
+     * substrate-portable reads. Cypher-only; cloud mode rejects these.
+     *
      * Materialized row list helper — common enough to hoist out of every
      * plugin. Returns an array of plain objects keyed by the RETURN names.
      */
@@ -48,13 +76,10 @@ export interface PluginGraphContext {
      *
      * Plugin authors MUST call this after any `executeQuery` that runs
      * a CREATE / MERGE / DELETE / SET / DETACH DELETE — anything that
-     * mutates graph state. Core's own write paths bump the cache epoch
-     * automatically via LocalGraph.*, but when plugins reach for raw
-     * Cypher through this context, core can't observe the mutation.
-     * Without an explicit bump, cached reads (getNode, search, listNodes,
-     * traverse) can return stale results until the next core write.
-     *
-     * Pure-read executeQuery calls do NOT need to bump.
+     * mutates graph state. The `storage.*` mutating methods (upsert /
+     * deleteWhere / addEdge / upsertEdge / deleteEdgesWhere) call bumpEpoch
+     * internally — plugins on PluginStorage do NOT need to call it manually.
+     * The hook remains exposed for the legacy raw-Cypher path.
      *
      * The operation is constant-time (monotonic counter increment) and
      * safe to call multiple times in a transaction.
