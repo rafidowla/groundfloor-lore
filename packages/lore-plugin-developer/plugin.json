@@ -1,0 +1,89 @@
+{
+    "manifestVersion": 1,
+    "name": "developer",
+    "version": "2.0.0",
+    "description": "Code intelligence + institutional knowledge for engineering workspaces. Bridges the Lore memory graph to a project's code via GitNexus, exposing call graphs, impact analysis, and knowledge↔symbol links.",
+    "author": "Groundfloor",
+    "license": "MIT",
+    "homepage": "https://github.com/rafidowla/groundfloor-lore/tree/main/packages/lore-plugin-developer",
+
+    "lore": {
+        "module": "../../dist/lore-plugin-developer/src/index.js",
+        "inspectors": [
+            {
+                "id": "symbols",
+                "label": "Symbols",
+                "icon": "code",
+                "kind": "table",
+                "entity": "CodeSymbol",
+                "columns": [
+                    { "field": "name", "label": "Name", "flex": 2 },
+                    { "field": "kind", "label": "Kind", "width": 110 },
+                    { "field": "filePath", "label": "File", "flex": 3 },
+                    { "field": "startLine", "label": "Line", "width": 70, "type": "number" },
+                    { "field": "repo", "label": "Repo", "width": 140 }
+                ],
+                "sort": { "field": "name", "order": "asc" },
+                "filters": [
+                    { "field": "name", "kind": "text" },
+                    {
+                        "field": "kind",
+                        "kind": "select",
+                        "options": ["function", "class", "method", "interface", "type", "section"]
+                    },
+                    { "field": "repo", "kind": "text" }
+                ]
+            },
+            {
+                "id": "files",
+                "label": "Files",
+                "icon": "file",
+                "kind": "table",
+                "entity": "CodeFile",
+                "columns": [
+                    { "field": "path", "label": "Path", "flex": 4 },
+                    { "field": "language", "label": "Lang", "width": 110 },
+                    { "field": "loc", "label": "LOC", "width": 80, "type": "number" },
+                    { "field": "repo", "label": "Repo", "width": 140 },
+                    { "field": "lastModified", "label": "Modified", "width": 160, "type": "date" }
+                ],
+                "sort": { "field": "lastModified", "order": "desc" },
+                "filters": [
+                    { "field": "path", "kind": "text" },
+                    {
+                        "field": "language",
+                        "kind": "select",
+                        "options": ["typescript", "javascript", "python", "rust", "go", "java"]
+                    }
+                ]
+            },
+            {
+                "id": "activity",
+                "label": "Team activity",
+                "icon": "activity",
+                "kind": "timeline",
+                "entity": "DevActivity",
+                "dateField": "timestamp",
+                "labelField": "action",
+                "groupBy": "dev"
+            },
+            {
+                "id": "callgraph",
+                "label": "Call graph",
+                "icon": "graph",
+                "kind": "graph",
+                "entity": "CodeSymbol",
+                "depth": 2,
+                "edgeTypes": ["CodeRelation", "FileContains"]
+            }
+        ],
+        "permissions": [
+            "fs:read:.",
+            "net:127.0.0.1:7842"
+        ]
+    },
+
+    "engines": {
+        "lore": ">=2.0.0"
+    }
+}
