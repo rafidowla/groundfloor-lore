@@ -16,12 +16,13 @@
  *   LocalGraph-era concerns and remain unsupported in cloud mode until a
  *   later slice adds cloud-mode reconnect.
  *
- * Embedding stays local:
- *   Queries and documents are embedded in-process via the same
- *   `Xenova/all-MiniLM-L6-v2` pipeline VerbatimStore uses. Keeps the
- *   roundtrip small (one `search` hit, not two) and matches Q2.2's scope
- *   — Q2.2 is *storage* adapters; embedding service offload is a later
- *   Q2.x slice if needed.
+ * Embedding:
+ *   Slice 3 embedded in-process with a duplicated Xenova pipeline.
+ *   Slice 6a extracted that into the EmbeddingProvider interface
+ *   (providers/types.ts). The default — LocalEmbeddingProvider — keeps
+ *   embedding in-process so the roundtrip stays small (one `search`
+ *   hit, not two). Slice 6b will plug a DataplaneEmbeddingProvider in
+ *   without touching this file.
  *
  * Tenancy & schema:
  *   - `tenantProvider: () => string` returns the current request's tenant
@@ -50,15 +51,15 @@
  */
 
 // @ts-ignore - Local workspace linking lacks full Node16 exports declaration
-import { pipeline } from '@huggingface/transformers';
-// @ts-ignore - Local workspace linking lacks full Node16 exports declaration
 import { GroundfloorClient } from 'groundfloor-ts-sdk';
 
 import type {
+    EmbeddingProvider,
     VectorProvider,
     VerbatimDocument,
     VerbatimSearchResult,
 } from '../providers/types.js';
+import { LocalEmbeddingProvider } from '../providers/localEmbeddingProvider.js';
 
 export class DataplaneVectorStoreError extends Error {
     public operation: string;
@@ -90,13 +91,15 @@ export interface DataplaneVectorStoreConfig {
      * Omit to let Dataplane pick the primary.
      */
     connection?: string;
-    /** Override embedder (testing). If omitted the Xenova pipeline is used. */
-    embedder?: (text: string) => Promise<number[]>;
+    /**
+     * Embedding provider (slice 6a). Defaults to a fresh
+     * LocalEmbeddingProvider; tests inject a deterministic stub.
+     * Slice 6b's DataplaneEmbeddingProvider plugs in here.
+     */
+    embeddingProvider?: EmbeddingProvider;
 }
 
 const VERBATIM_COLLECTION = 'lore_verbatim';
-/** Xenova/all-MiniLM-L6-v2 dimension — shared with VerbatimStore. */
-const EMBEDDING_DIM = 384;
 
 // Typed handle to the SDK surface we actually use. Declared locally so the
 // arch lint (no direct cloud driver imports) keeps ignoring this file.
@@ -116,32 +119,12 @@ interface SdkVectorClient {
     };
 }
 
-/* ─── embedder singleton (shared with VerbatimStore semantics) ───────── */
-
-let pipelineInstance: any = null;
-let pipelineLoadingPromise: Promise<any> | null = null;
-
-async function getEmbeddingPipeline(): Promise<any> {
-    if (pipelineInstance) return pipelineInstance;
-    if (!pipelineLoadingPromise) {
-        pipelineLoadingPromise = pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
-    }
-    pipelineInstance = await pipelineLoadingPromise;
-    return pipelineInstance;
-}
-
-async function defaultEmbed(text: string): Promise<number[]> {
-    const embedder = await getEmbeddingPipeline();
-    const output = await embedder(text, { pooling: 'mean', normalize: true });
-    return Array.from(output.data) as number[];
-}
-
 export class DataplaneVectorStore implements VectorProvider {
     private readonly client: SdkVectorClient;
     private readonly tenantProvider: TenantProvider;
     private readonly orgId: string;
     private readonly connection?: string;
-    private readonly embed: (text: string) => Promise<number[]>;
+    private readonly embeddingProvider: EmbeddingProvider;
     /**
      * Per-tenant schema-push state. Same lazy pattern as DataplaneGraph:
      * first op per tenant creates the collection; concurrent first-hits
@@ -155,18 +138,20 @@ export class DataplaneVectorStore implements VectorProvider {
         this.tenantProvider = config.tenantProvider;
         this.orgId = config.orgId;
         this.connection = config.connection;
-        this.embed = config.embedder ?? defaultEmbed;
+        this.embeddingProvider = config.embeddingProvider ?? new LocalEmbeddingProvider();
     }
 
     /**
-     * initialize — No-op at boot.
+     * initialize — Warm the embedder.
      *
-     * Schema push is per-tenant and lazy (see DataplaneGraph for the
-     * rationale). Each write/read method calls
-     * `ensureTenantInitialized(tenantId)` internally.
+     * Cloud schema push is per-tenant and lazy (see DataplaneGraph for
+     * the rationale). Each write/read method calls
+     * `ensureTenantInitialized(tenantId)` internally. The boot-time
+     * call here just kicks the embedder model-load so the first
+     * request doesn't pay for it.
      */
     async initialize(): Promise<void> {
-        // intentionally empty
+        await this.embeddingProvider.initialize();
     }
 
     private ensureTenantInitialized(tenantId: string): Promise<void> {
@@ -188,7 +173,11 @@ export class DataplaneVectorStore implements VectorProvider {
                 {
                     name: 'vector',
                     field_type: 'vector',
-                    dimension: EMBEDDING_DIM,
+                    // Slice 6a: read dimension from the injected provider
+                    // so 6b's DataplaneEmbeddingProvider (BGE-M3, 1024-d)
+                    // and slice 7's multilingual-e5-small (384-d but a
+                    // different model) provision the right field width.
+                    dimension: this.embeddingProvider.dimension,
                     required: true,
                 },
                 { name: 'text', field_type: 'string' },
@@ -216,7 +205,7 @@ export class DataplaneVectorStore implements VectorProvider {
         try {
             const tenantId = this.tenantProvider();
             await this.ensureTenantInitialized(tenantId);
-            const vector = await this.embed(doc.text);
+            const vector = await this.embeddingProvider.embed(doc.text);
             // security_scopes is a string[] in the metadata contract.
             // pgvector / Arango vector connectors vary in how they store
             // arrays; we join on a separator for portability and split
@@ -262,7 +251,7 @@ export class DataplaneVectorStore implements VectorProvider {
         try {
             const tenantId = this.tenantProvider();
             await this.ensureTenantInitialized(tenantId);
-            const vector = await this.embed(query);
+            const vector = await this.embeddingProvider.embed(query);
             const metadataFilter: Record<string, unknown> = { org_id: this.orgId };
             if (filter) {
                 for (const [k, v] of Object.entries(filter)) {

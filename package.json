@@ -17,6 +17,7 @@
         "test:cache": "tsx test/cache-unit.ts",
         "test:unit:dataplane-graph": "tsx test/dataplane-graph-unit.ts",
         "test:unit:dataplane-vector": "tsx test/dataplane-vector-store-unit.ts",
+        "test:unit:embedding-provider": "tsx test/embedding-provider-unit.ts",
         "test:unit:plugin-storage": "tsx test/plugin-storage-unit.ts",
         "bench:cache": "node scripts/bench-cache.mjs",
         "test:e2e:phase-7a": "tsx test/e2e-phase-7a.ts",
@@ -28,7 +29,7 @@
         "test:unit:deferred": "tsx test/unit-deferred.ts",
         "test:manifest:developer": "tsx test/manifest-developer-plugin.test.ts",
         "test:manifest:reference": "tsx test/manifest-reference-plugins.test.ts",
-        "test": "npm run test:arch && npm run test:cache && npm run test:unit:dataplane-graph && npm run test:unit:dataplane-vector && npm run test:unit:plugin-storage && tsc --noEmit && npm run test:unit:deferred && npm run test:manifest:developer && npm run test:manifest:reference"
+        "test": "npm run test:arch && npm run test:cache && npm run test:unit:dataplane-graph && npm run test:unit:dataplane-vector && npm run test:unit:embedding-provider && npm run test:unit:plugin-storage && tsc --noEmit && npm run test:unit:deferred && npm run test:manifest:developer && npm run test:manifest:reference"
     },
     "dependencies": {
         "@hono/node-server": "^1.19.14",
