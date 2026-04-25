@@ -140,12 +140,16 @@ function scanAll() {
             // Sanctioned cross-boundary imports:
             //   - plugins/types.js        — ILorePlugin contract
             //   - plugins/registry.js     — dispatcher
+            //   - plugins/storage.js      — Q2.2 slice 5a substrate-portable
+            //     PluginStorage contract. Same status as types.js — a pure
+            //     interface the engines implement and plugins consume.
             //   - plugins/<name>/api.js   — plugin's public contract. The
             //     api module is the ONE place a plugin declares its
             //     outward-facing surface; importing the type is how core
             //     callers (e.g. CLI orchestration) stay loosely coupled.
             if (importedPath.endsWith('plugins/types.js') || importedPath.endsWith('plugins/types')) continue;
             if (importedPath.endsWith('plugins/registry.js') || importedPath.endsWith('plugins/registry')) continue;
+            if (importedPath.endsWith('plugins/storage.js') || importedPath.endsWith('plugins/storage')) continue;
             if (/plugins\/[^/]+\/api(\.js)?$/.test(importedPath)) continue;
             // Path-alias imports (V2.1 workspace split): @lore-plugin-<name>/api.js
             // is the sanctioned way to reach a plugin's public surface.

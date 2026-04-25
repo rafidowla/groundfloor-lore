@@ -55,7 +55,9 @@ import type {
     GraphStats,
 } from '../providers/types.js';
 import type { PluginCloudSchemaContext } from '../plugins/types.js';
+import type { PluginStorage } from '../plugins/storage.js';
 import { detectLanguage } from './language.js';
+import { DataplanePluginStorage, type PluginStorageSdkClient } from './dataplanePluginStorage.js';
 
 /**
  * Resolve the current tenant for a SDK call. Called once per operation so
@@ -613,11 +615,29 @@ export class DataplaneGraph implements GraphProvider {
      * first when planning the next slice.
      */
     createPluginGraphContext(): {
+        storage: PluginStorage;
         executeQuery(cypher: string, params?: Record<string, unknown>): Promise<unknown>;
         queryRows(cypher: string, params?: Record<string, unknown>): Promise<Array<Record<string, unknown>>>;
         bumpEpoch(): void;
         detectLanguage(text: string, options?: { threshold?: number; minLength?: number }): { language: string | null; confidence: number };
     } {
+        // Q2.2 slice 5a — substrate-portable storage. Plugins on `storage.*`
+        // run identically here and on Kùzu in local mode. The legacy
+        // executeQuery/queryRows still throw the slice-4 stub error so
+        // unmigrated plugin code (developer plugin until slice 5b) gets a
+        // clear "use storage" message instead of silent failure.
+        const storage: PluginStorage = new DataplanePluginStorage({
+            client: this.client as unknown as PluginStorageSdkClient,
+            tenantProvider: () => {
+                const tenantId = this.tenantProvider();
+                // Lazy schema push: same per-tenant init guard as the
+                // core node/edge writes use. Plugin collections were
+                // pushed in slice 4's registerCloudSchema fan-out.
+                void this.ensureTenantInitialized(tenantId);
+                return tenantId;
+            },
+            connection: this.connection,
+        });
         const refuse = (op: string, cypher: string): never => {
             // Keep the snippet short in the error message — full query is
             // on err.cypher for debuggers. One line for log-grep friendliness.
@@ -633,6 +653,7 @@ export class DataplaneGraph implements GraphProvider {
             throw err;
         };
         return {
+            storage,
             executeQuery: async (cypher: string) => refuse('executeQuery', cypher),
             queryRows: async (cypher: string) => refuse('queryRows', cypher),
             bumpEpoch: () => { /* no-op in cloud mode */ },

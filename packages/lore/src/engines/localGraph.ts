@@ -33,8 +33,10 @@ import fs from 'fs';
 // the CodeFile operations it supports.
 
 import type { GraphProvider, LoreNode, LoreEdge, TraversalResult, GraphStats } from '../providers/types.js';
+import type { PluginStorage } from '../plugins/storage.js';
 import { detectLanguage } from './language.js';
 import { ReadCache, cacheKey, type CacheStats } from './cache.js';
+import { KuzuPluginStorage } from './kuzuPluginStorage.js';
 export type { LoreNode, LoreEdge, TraversalResult, GraphStats };
 
 /* ─── Types ───────────────────────────────────────────────────── */
@@ -1249,12 +1251,24 @@ export class LocalGraph implements GraphProvider {
      * raw Connection so plugins can't reach into LocalGraph internals.
      */
     createPluginGraphContext(): {
+        storage: PluginStorage;
         executeQuery(cypher: string, params?: Record<string, unknown>): Promise<unknown>;
         queryRows(cypher: string, params?: Record<string, unknown>): Promise<Array<Record<string, unknown>>>;
         bumpEpoch(): void;
         detectLanguage(text: string, options?: { threshold?: number; minLength?: number }): { language: string | null; confidence: number };
     } {
+        // Q2.2 slice 5a — substrate-portable storage. Plugins write business
+        // logic against `ctx.storage.*`; same calls run on Kùzu (here) or
+        // Dataplane (cloud mode) without code changes. The legacy
+        // executeQuery/queryRows path stays for the developer plugin until
+        // slice 5b migrates it.
+        const storage: PluginStorage = new KuzuPluginStorage(
+            this.connection,
+            this.readCache,
+            () => this.initialize(),
+        );
         return {
+            storage,
             executeQuery: async (cypher: string, params?: Record<string, unknown>) => {
                 await this.initialize();
                 if (!params || Object.keys(params).length === 0) {
