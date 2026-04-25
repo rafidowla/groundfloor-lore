@@ -108,13 +108,18 @@ export interface EdgeRow<TProps = Record<string, unknown>> {
 }
 
 /**
- * EdgeShapeHint — slice-5a transitional. Tells the Kùzu adapter the
- * source/target node labels for an edge collection (Cypher MATCH on a
- * REL needs the labels). Cloud adapter ignores this — its edge
- * collections carry source_id/target_id as plain string columns.
+ * EdgeShapeHint — slice-5a transitional, slice-5c deprecated.
  *
- * Will be removed in slice 5c when `declareCollection` makes labels
- * implicit.
+ * Tells the Kùzu adapter the source/target node labels for an edge
+ * collection (Cypher MATCH on a REL needs the labels). Cloud adapter
+ * ignores it — its edge collections carry source_id/target_id as plain
+ * string columns.
+ *
+ * As of slice 5c, plugins should call `declareCollection` at boot
+ * instead — the adapter then resolves edge labels and per-side primary
+ * keys automatically, and the hint argument is unnecessary. The hint
+ * remains supported as an explicit override for legacy / undeclared
+ * collections, but new code should not pass it.
  *
  * Asymmetric idFields: developer-plugin edges connect tables whose
  * primary keys differ (e.g. FileContains links CodeFile.path → CodeSymbol.uid).
@@ -133,6 +138,66 @@ export interface EdgeShapeHint {
     /** Target-side id field; overrides `idField` for the target. */
     tgtIdField?: string;
 }
+
+/**
+ * NodeCollectionDecl — declarative metadata a plugin registers once per
+ * node collection (slice 5c). After registration, plugins call storage
+ * ops with just the canonical `name`; the adapter resolves substrate-
+ * specific names + primary-key fields automatically.
+ */
+export interface NodeCollectionDecl {
+    kind: 'node';
+    /**
+     * Canonical name plugins pass to storage ops. Choose any consistent
+     * convention (the Kùzu PascalCase or the cloud snake_case form, or
+     * something independent). The adapter remaps to the substrate name
+     * via `kuzuTable` / `cloudCollection`.
+     */
+    name: string;
+    /** Primary key field name. Defaults to "id". */
+    primaryKey?: string;
+    /**
+     * Kùzu NODE TABLE label. Defaults to `name`. Set this when your
+     * canonical `name` differs from the Kùzu table created in
+     * registerSchema (e.g. `name: 'developer_code_symbol'` but
+     * `kuzuTable: 'CodeSymbol'`).
+     */
+    kuzuTable?: string;
+    /**
+     * Cloud collection name. Defaults to `name`. Set this when your
+     * canonical `name` differs from the cloud collection declared in
+     * registerCloudSchema.
+     */
+    cloudCollection?: string;
+}
+
+/**
+ * EdgeCollectionDecl — declarative metadata for an edge collection.
+ * `source` and `target` reference previously-declared node collections
+ * by canonical `name`; the adapter pulls each side's primary-key field
+ * and substrate label out of those node decls so the plugin doesn't
+ * have to repeat them per edge.
+ */
+export interface EdgeCollectionDecl {
+    kind: 'edge';
+    /** Canonical name plugins pass to storage edge ops. */
+    name: string;
+    /**
+     * Canonical name of the node collection on the source side. MUST
+     * have been declared (or be declared in the same boot) — the
+     * adapter uses its primary key + label.
+     */
+    source: string;
+    /** Canonical name of the node collection on the target side. */
+    target: string;
+    /** Kùzu REL TABLE label. Defaults to `name`. */
+    kuzuTable?: string;
+    /** Cloud collection name. Defaults to `name`. */
+    cloudCollection?: string;
+}
+
+/** Discriminated union for `declareCollection`. */
+export type CollectionDecl = NodeCollectionDecl | EdgeCollectionDecl;
 
 /**
  * PluginStorage — the only storage surface a plugin author needs to
@@ -167,6 +232,26 @@ export interface PluginStorage {
      * making the substrate-name remap implicit.
      */
     readonly mode: 'kuzu' | 'dataplane';
+
+    /* ─── Schema declaration (slice 5c) ──────────────────────────── */
+
+    /**
+     * Register a collection so subsequent storage ops can resolve
+     * substrate-specific names + edge metadata automatically. Idempotent
+     * on the same `name` (re-declarations replace the previous entry).
+     *
+     * Plugins typically call this from `registerSchema` for every
+     * collection they own. Once a collection is declared:
+     *   - Plugin code passes the canonical `name` to ops; the adapter
+     *     remaps to `kuzuTable` / `cloudCollection` per substrate.
+     *   - `EdgeShapeHint` becomes optional — the adapter derives source
+     *     / target labels and primary-key fields from the registered
+     *     node-collection decls.
+     *
+     * Undeclared collections still work via the legacy hint-based path,
+     * which lets existing tests and one-off scratch ops keep going.
+     */
+    declareCollection(decl: CollectionDecl): void;
 
     /* ─── Node ops ───────────────────────────────────────────────── */
 

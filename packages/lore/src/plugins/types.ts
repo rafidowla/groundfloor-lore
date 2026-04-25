@@ -423,6 +423,27 @@ export interface ILorePlugin {
     registerSchema?(ctx: PluginGraphContext): Promise<void>;
 
     /**
+     * Q2.2 slice 5c — declarative collection registration.
+     *
+     * Called once at boot for every active plugin, after `registerSchema`
+     * (local mode) and after each tenant's first cloud touch (cloud
+     * mode), with the active substrate's storage adapter. The plugin
+     * returns CollectionDecls describing every node + edge collection it
+     * owns; core wires each into the storage adapter via
+     * `storage.declareCollection`.
+     *
+     * After registration, plugin code passes the canonical `name` to
+     * storage ops — the adapter resolves substrate-specific names
+     * (kuzuTable / cloudCollection) and edge metadata (source/target
+     * labels + primary keys) automatically. EdgeShapeHint becomes
+     * unnecessary.
+     *
+     * Plugins that skip this hook still work via the legacy hint-based
+     * path; new plugins should always implement it.
+     */
+    contributeCollectionDecls?(): import('./storage.js').CollectionDecl[];
+
+    /**
      * Q2.2 slice 4 — cloud-mode schema provisioning.
      *
      * Invoked once per tenant on the tenant's first touch to Dataplane

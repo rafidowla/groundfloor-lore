@@ -34,18 +34,14 @@ import { registerDeveloperSchema } from './schema.js';
 import { registerDeveloperCloudSchema } from './cloudSchema.js';
 import { pruneInferredDeveloperEdges } from './operations.js';
 import {
-    CODE_FILE,
-    CODE_RELATION,
-    CODE_SYMBOL,
-    FILE_CONTAINS,
-    HINT_CODE_RELATION,
-    HINT_FILE_CONTAINS,
-    HINT_LORE_APPLIES_TO_CODE,
-    HINT_LORE_TOUCHES_FILE,
-    LORE_APPLIES_TO_CODE,
-    LORE_NODE,
-    LORE_TOUCHES_FILE,
-    collName,
+    CODE_FILE_COLL,
+    CODE_RELATION_COLL,
+    CODE_SYMBOL_COLL,
+    FILE_CONTAINS_COLL,
+    LORE_APPLIES_TO_CODE_COLL,
+    LORE_NODE_COLL,
+    LORE_TOUCHES_FILE_COLL,
+    developerCollectionDecls,
 } from './collections.js';
 import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology, recalibrateDeveloperNode } from './reconnect.js';
 import { buildDeveloperApi, bindApiSelfReference, type DeveloperApi } from './api.js';
@@ -121,6 +117,20 @@ export const developerPlugin: ILorePlugin = {
             return;
         }
         registerDeveloperTools(server, api, ctx);
+    },
+
+    /**
+     * Q2.2 slice 5c — declare canonical → substrate-name mappings.
+     *
+     * Applied by PluginRegistry.registerSchemas() before the per-plugin
+     * registerSchema/registerCloudSchema runs, so storage ops issued
+     * from inside those hooks (or any later op) can resolve the
+     * substrate-specific table/collection name + the edge source/target
+     * primary-key fields automatically. Replaces the per-call EdgeShapeHint
+     * threading and the substrate-pair lookup table from slice 5b.
+     */
+    contributeCollectionDecls() {
+        return developerCollectionDecls;
     },
 
     /**
@@ -229,7 +239,7 @@ export const developerPlugin: ILorePlugin = {
         if (markerId.startsWith('file:')) {
             const filePath = markerId.slice('file:'.length);
             const f = await ctx.storage.get<Record<string, unknown>>(
-                collName(ctx.storage, CODE_FILE),
+                CODE_FILE_COLL,
                 'path',
                 filePath,
             ).catch(() => null);
@@ -239,34 +249,32 @@ export const developerPlugin: ILorePlugin = {
             // Two-step: traverse FileContains, then fetch the connected
             // CodeSymbols by uid.
             const fcEdges = await ctx.storage.traverse(
-                collName(ctx.storage, FILE_CONTAINS),
+                FILE_CONTAINS_COLL,
                 filePath,
                 'out',
                 { limit: 20 },
-                HINT_FILE_CONTAINS,
             ).catch(() => []);
             const symUids = fcEdges.map((e) => e.targetId).filter(Boolean);
             const symRows: Array<Record<string, unknown>> = symUids.length === 0
                 ? []
                 : await ctx.storage.find<Record<string, unknown>>(
-                    collName(ctx.storage, CODE_SYMBOL),
+                    CODE_SYMBOL_COLL,
                     { in: { uid: symUids } },
                     { limit: 20 },
                 ).catch(() => []);
 
             // Lore nodes that touch this file (LoreTouchesFile incoming).
             const ltEdges = await ctx.storage.traverse(
-                collName(ctx.storage, LORE_TOUCHES_FILE),
+                LORE_TOUCHES_FILE_COLL,
                 filePath,
                 'in',
                 { limit: 10 },
-                HINT_LORE_TOUCHES_FILE,
             ).catch(() => []);
             const loreIds = ltEdges.map((e) => e.sourceId).filter(Boolean);
             const loreRows: Array<Record<string, unknown>> = loreIds.length === 0
                 ? []
                 : await ctx.storage.find<Record<string, unknown>>(
-                    collName(ctx.storage, LORE_NODE),
+                    LORE_NODE_COLL,
                     { in: { id: loreIds } },
                     { limit: 10 },
                 ).catch(() => []);
@@ -312,7 +320,7 @@ export const developerPlugin: ILorePlugin = {
         if (markerId.startsWith('symbol:')) {
             const uid = markerId.slice('symbol:'.length);
             const s = await ctx.storage.get<Record<string, unknown>>(
-                collName(ctx.storage, CODE_SYMBOL),
+                CODE_SYMBOL_COLL,
                 'uid',
                 uid,
             ).catch(() => null);
@@ -321,37 +329,33 @@ export const developerPlugin: ILorePlugin = {
             // Callers / callees via CodeRelation. Two-step like above:
             // traverse the edges, then fetch the connected CodeSymbol
             // rows by uid.
-            const symColl = collName(ctx.storage, CODE_SYMBOL);
-            const relColl = collName(ctx.storage, CODE_RELATION);
             const outEdges = await ctx.storage.traverse<{ kind?: string }>(
-                relColl,
+                CODE_RELATION_COLL,
                 uid,
                 'out',
                 { limit: 10 },
-                HINT_CODE_RELATION,
             ).catch(() => []);
             const outIds = outEdges.map((e) => e.targetId).filter(Boolean);
             const outRows: Array<Record<string, unknown>> = outIds.length === 0
                 ? []
                 : await ctx.storage.find<Record<string, unknown>>(
-                    symColl,
+                    CODE_SYMBOL_COLL,
                     { in: { uid: outIds } },
                     { limit: 10 },
                 ).catch(() => []);
             const outById = new Map(outRows.map((r) => [String(r['uid'] ?? ''), r]));
 
             const inEdges = await ctx.storage.traverse<{ kind?: string }>(
-                relColl,
+                CODE_RELATION_COLL,
                 uid,
                 'in',
                 { limit: 10 },
-                HINT_CODE_RELATION,
             ).catch(() => []);
             const inIds = inEdges.map((e) => e.sourceId).filter(Boolean);
             const inRows: Array<Record<string, unknown>> = inIds.length === 0
                 ? []
                 : await ctx.storage.find<Record<string, unknown>>(
-                    symColl,
+                    CODE_SYMBOL_COLL,
                     { in: { uid: inIds } },
                     { limit: 10 },
                 ).catch(() => []);
@@ -468,7 +472,7 @@ export const developerPlugin: ILorePlugin = {
                     // most), so the round-trip cost is acceptable. The
                     // limit is a safety cap, not a real boundary.
                     const all = await ctx.storage.find<Record<string, unknown>>(
-                        collName(ctx.storage, LORE_NODE),
+                        LORE_NODE_COLL,
                         {},
                         { limit: 100_000 },
                     );
@@ -506,7 +510,7 @@ export const developerPlugin: ILorePlugin = {
                     // Substrate-portable JS-side aggregation. See the
                     // sibling lore-nodes-by-type projection for rationale.
                     const all = await ctx.storage.find<Record<string, unknown>>(
-                        collName(ctx.storage, LORE_NODE),
+                        LORE_NODE_COLL,
                         {},
                         { limit: 100_000 },
                     );
@@ -550,7 +554,7 @@ export const developerPlugin: ILorePlugin = {
                     // edge traversal entirely. Cap at 100k symbols — same
                     // safety margin as ingestFilesFromSymbols.
                     const all = await ctx.storage.find<Record<string, unknown>>(
-                        collName(ctx.storage, CODE_SYMBOL),
+                        CODE_SYMBOL_COLL,
                         {},
                         { limit: 100_000 },
                     );
@@ -599,16 +603,12 @@ export const developerPlugin: ILorePlugin = {
         let codeSymbolCount = 0;
         let codeRelationCount = 0;
         try {
-            codeSymbolCount = await ctx.storage.count(collName(ctx.storage, CODE_SYMBOL), {});
+            codeSymbolCount = await ctx.storage.count(CODE_SYMBOL_COLL, {});
         } catch {
             // Table may not exist yet (fresh graph before registerSchema).
         }
         try {
-            codeRelationCount = await ctx.storage.countEdges(
-                collName(ctx.storage, CODE_RELATION),
-                {},
-                HINT_CODE_RELATION,
-            );
+            codeRelationCount = await ctx.storage.countEdges(CODE_RELATION_COLL, {});
         } catch {
             // Same rationale as above.
         }
@@ -630,20 +630,18 @@ export const developerPlugin: ILorePlugin = {
             // traverse + emptiness test. Bounded by the (typically
             // small) bug_pattern population — substrate-portable.
             const bugRows = await ctx.storage.find<Record<string, unknown>>(
-                collName(ctx.storage, LORE_NODE),
+                LORE_NODE_COLL,
                 { eq: { type: 'bug_pattern' } },
                 { limit: 1_000 },
             );
-            const lacColl = collName(ctx.storage, LORE_APPLIES_TO_CODE);
             for (const row of bugRows) {
                 const id = String(row['id'] ?? '');
                 if (!id) continue;
                 const edges = await ctx.storage.traverse(
-                    lacColl,
+                    LORE_APPLIES_TO_CODE_COLL,
                     id,
                     'out',
                     { limit: 1 },
-                    HINT_LORE_APPLIES_TO_CODE,
                 ).catch(() => []);
                 if (edges.length === 0) {
                     warnings.push({ warning: `Missing Link: bug_pattern '${id}' is not linked to any CodeSymbol.` });
