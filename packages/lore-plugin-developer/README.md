@@ -8,18 +8,42 @@ for querying code context alongside decisions and bug patterns.
 ## Layout
 
 ```
-packages/lore-plugin-developer/src/
-├── index.ts           ILorePlugin definition + all hooks wired
-├── schema.ts          Kùzu tables the plugin owns
-├── operations.ts      Low-level graph ops (takes PluginGraphContext)
-├── api.ts             DeveloperApi — the public surface core callers use
-├── types.ts           CodeSymbol / CodeRelationEdge / DevActivity
-├── tools.ts           10 MCP tool registrations
-├── reconnect.ts       Reconnect-pass contributions + disk-read content
-├── codeIndexer.ts     `lore index` — imports from GitNexus
-├── gitnexusProxy.ts   HTTP wrapper around the gitnexus CLI
-└── nativeTools.ts     detect_changes / rename / list_repos helpers
+packages/lore-plugin-developer/
+├── plugin.json        Bundle-level manifest the Tauri shell reads
+└── src/
+    ├── index.ts           ILorePlugin definition + all hooks wired
+    ├── schema.ts          Kùzu tables the plugin owns
+    ├── operations.ts      Low-level graph ops (takes PluginGraphContext)
+    ├── api.ts             DeveloperApi — the public surface core callers use
+    ├── types.ts           CodeSymbol / CodeRelationEdge / DevActivity
+    ├── tools.ts           10 MCP tool registrations
+    ├── reconnect.ts       Reconnect-pass contributions + disk-read content
+    ├── codeIndexer.ts     `lore index` — imports from GitNexus
+    ├── gitnexusProxy.ts   HTTP wrapper around the gitnexus CLI
+    └── nativeTools.ts     detect_changes / rename / list_repos helpers
 ```
+
+## Manifest
+
+`plugin.json` is the bundle-level descriptor the Tauri shell reads on
+install. It declares:
+
+- The runtime entry point (`lore.module` → `dist/lore-plugin-developer/src/index.js`)
+- Inspector panels the shell renders as tabs:
+  - **Symbols** (table over `CodeSymbol`)
+  - **Files** (table over `CodeFile`)
+  - **Team activity** (timeline over `DevActivity`)
+  - **Call graph** (graph over `CodeSymbol` with depth=2)
+- Permissions the plugin needs (`fs:read:.`, `net:127.0.0.1:7842` for
+  the GitNexus daemon)
+- Engine compatibility (`engines.lore: ">=2.0.0"`)
+
+The manifest is validated end-to-end by
+`npm run test:manifest:developer`. That script enforces the same
+structural rules the shell's Rust loader does, plus the schema-level
+checks the loader defers to TypeScript (inspector kinds, column shape,
+permission namespaces). If the spec changes, this test fails until the
+manifest is updated to match.
 
 ## Contract
 
