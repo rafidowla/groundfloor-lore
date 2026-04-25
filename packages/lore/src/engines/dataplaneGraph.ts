@@ -148,6 +148,11 @@ export class DataplaneGraph implements GraphProvider {
      * still get pushed, plugin-owned collections simply don't.
      */
     private pluginSchemaHooks: PluginCloudSchemaHook[] = [];
+    /**
+     * Slice 5c — cached PluginStorage. See createPluginGraphContext for
+     * rationale; the closure tenantProvider keeps it multi-tenant-safe.
+     */
+    private cachedPluginStorage: DataplanePluginStorage | null = null;
 
     constructor(config: DataplaneGraphConfig) {
         this.client = config.client as unknown as SdkClient;
@@ -622,22 +627,28 @@ export class DataplaneGraph implements GraphProvider {
         detectLanguage(text: string, options?: { threshold?: number; minLength?: number }): { language: string | null; confidence: number };
     } {
         // Q2.2 slice 5a — substrate-portable storage. Plugins on `storage.*`
-        // run identically here and on Kùzu in local mode. The legacy
-        // executeQuery/queryRows still throw the slice-4 stub error so
-        // unmigrated plugin code (developer plugin until slice 5b) gets a
-        // clear "use storage" message instead of silent failure.
-        const storage: PluginStorage = new DataplanePluginStorage({
-            client: this.client as unknown as PluginStorageSdkClient,
-            tenantProvider: () => {
-                const tenantId = this.tenantProvider();
-                // Lazy schema push: same per-tenant init guard as the
-                // core node/edge writes use. Plugin collections were
-                // pushed in slice 4's registerCloudSchema fan-out.
-                void this.ensureTenantInitialized(tenantId);
-                return tenantId;
-            },
-            connection: this.connection,
-        });
+        // run identically here and on Kùzu in local mode.
+        //
+        // Slice 5c — single instance cached on the engine so collection
+        // declarations (declareCollection) persist across every
+        // createPluginGraphContext() call. The internal tenantProvider
+        // closure still resolves per-op via AsyncLocalStorage, so a
+        // single shared adapter is multi-tenant-safe.
+        if (!this.cachedPluginStorage) {
+            this.cachedPluginStorage = new DataplanePluginStorage({
+                client: this.client as unknown as PluginStorageSdkClient,
+                tenantProvider: () => {
+                    const tenantId = this.tenantProvider();
+                    // Lazy schema push: same per-tenant init guard as the
+                    // core node/edge writes use. Plugin collections were
+                    // pushed in slice 4's registerCloudSchema fan-out.
+                    void this.ensureTenantInitialized(tenantId);
+                    return tenantId;
+                },
+                connection: this.connection,
+            });
+        }
+        const storage: PluginStorage = this.cachedPluginStorage;
         const refuse = (op: string, cypher: string): never => {
             // Keep the snippet short in the error message — full query is
             // on err.cypher for debuggers. One line for log-grep friendliness.

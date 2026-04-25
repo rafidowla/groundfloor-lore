@@ -7,13 +7,13 @@
  * function bodies now compile to Kùzu (local mode) and Dataplane (cloud
  * mode) without changes.
  *
- * Migration notes (slice 5b):
- *   - Substrate names live in `./collections.ts` (Kùzu PascalCase ↔
- *     cloud snake_case). Each call picks the right one via
- *     `collName(ctx.storage, ...)`.
- *   - Edge ops carry an EdgeShapeHint pinning Kùzu source/target labels;
- *     the cloud adapter ignores them. Hints removed in slice 5c by
- *     `declareCollection`.
+ * Migration notes:
+ *   - 5b: storage ops took a substrate-pair lookup ("collName") + a
+ *     per-call EdgeShapeHint pinning Kùzu source/target labels.
+ *   - 5c (this file): both went away. Plugins pass canonical names from
+ *     ./collections.ts (CODE_SYMBOL_COLL, FILE_CONTAINS_COLL, …) and the
+ *     adapter resolves substrate-specific names + edge metadata via
+ *     declareCollection() (boot-time, see ./index.ts contributeCollectionDecls).
  *   - PluginStorage's mutating methods bump the read cache internally —
  *     the legacy `ctx.bumpEpoch()` calls that surrounded raw Cypher
  *     writes go away.
@@ -40,19 +40,14 @@ import path from 'path';
 import type { PluginGraphContext } from '@lore-core/plugins/types.js';
 import type { CodeSymbol, CodeRelationEdge, DevActivity } from './types.js';
 import {
-    CODE_FILE,
-    CODE_RELATION,
-    CODE_SYMBOL,
-    DEV_ACTIVITY,
-    FILE_CONTAINS,
-    HINT_CODE_RELATION,
-    HINT_FILE_CONTAINS,
-    HINT_LORE_APPLIES_TO_CODE,
-    HINT_LORE_TOUCHES_FILE,
-    LORE_APPLIES_TO_CODE,
-    LORE_NODE,
-    LORE_TOUCHES_FILE,
-    collName,
+    CODE_FILE_COLL,
+    CODE_RELATION_COLL,
+    CODE_SYMBOL_COLL,
+    DEV_ACTIVITY_COLL,
+    FILE_CONTAINS_COLL,
+    LORE_APPLIES_TO_CODE_COLL,
+    LORE_NODE_COLL,
+    LORE_TOUCHES_FILE_COLL,
 } from './collections.js';
 
 function rowToCodeSymbol(row: Record<string, unknown>): CodeSymbol {
@@ -86,7 +81,7 @@ function rowToLoreNodeLike(row: Record<string, unknown>): Record<string, unknown
 /* ─── CodeSymbol write path (used by `lore index`) ────────────── */
 
 export async function upsertCodeSymbol(ctx: PluginGraphContext, symbol: CodeSymbol): Promise<void> {
-    await ctx.storage.upsert(collName(ctx.storage, CODE_SYMBOL), 'uid', {
+    await ctx.storage.upsert(CODE_SYMBOL_COLL, 'uid', {
         uid: symbol.uid,
         name: symbol.name,
         kind: symbol.kind,
@@ -105,11 +100,10 @@ export async function addCodeRelation(ctx: PluginGraphContext, edge: CodeRelatio
     // Existing semantics: CREATE (non-idempotent; legacy code calls this
     // from a controlled re-index path that clears CodeSymbols first).
     await ctx.storage.addEdge(
-        collName(ctx.storage, CODE_RELATION),
+        CODE_RELATION_COLL,
         edge.sourceUid,
         edge.targetUid,
         { type: edge.type, confidence: edge.confidence, reason: edge.reason },
-        HINT_CODE_RELATION,
     );
 }
 
@@ -127,16 +121,15 @@ export async function queryCodeSymbols(
     // matched substrings used by the MCP tool this hasn't been observed
     // to matter, and the alternative was an OR translation we chose not
     // to extend the Filter shape with for the sake of one call site.
-    const coll = collName(ctx.storage, CODE_SYMBOL);
     const repoEq = repo ? { eq: { repo } } : {};
     const [byName, byPath] = await Promise.all([
         ctx.storage.find<Record<string, unknown>>(
-            coll,
+            CODE_SYMBOL_COLL,
             { contains: { name: query }, ...repoEq },
             { limit },
         ),
         ctx.storage.find<Record<string, unknown>>(
-            coll,
+            CODE_SYMBOL_COLL,
             { contains: { filePath: query }, ...repoEq },
             { limit },
         ),
@@ -156,7 +149,7 @@ export async function queryCodeSymbols(
 export async function queryCodeSymbolsByName(ctx: PluginGraphContext, name: string): Promise<CodeSymbol[]> {
     try {
         const rows = await ctx.storage.find<Record<string, unknown>>(
-            collName(ctx.storage, CODE_SYMBOL),
+            CODE_SYMBOL_COLL,
             { eq: { name } },
         );
         return rows.map(rowToCodeSymbol);
@@ -168,7 +161,7 @@ export async function queryCodeSymbolsByName(ctx: PluginGraphContext, name: stri
 export async function getCodeSymbolByUid(ctx: PluginGraphContext, uid: string): Promise<CodeSymbol | null> {
     try {
         const row = await ctx.storage.get<Record<string, unknown>>(
-            collName(ctx.storage, CODE_SYMBOL),
+            CODE_SYMBOL_COLL,
             'uid',
             uid,
         );
@@ -187,12 +180,7 @@ export async function getCodeSymbolContext(
     callees: CodeSymbol[];
     knowledge: Record<string, unknown>[];
 }> {
-    const symColl = collName(ctx.storage, CODE_SYMBOL);
-    const relColl = collName(ctx.storage, CODE_RELATION);
-    const lacColl = collName(ctx.storage, LORE_APPLIES_TO_CODE);
-    const loreColl = collName(ctx.storage, LORE_NODE);
-
-    const symRow = await ctx.storage.get<Record<string, unknown>>(symColl, 'uid', uid);
+    const symRow = await ctx.storage.get<Record<string, unknown>>(CODE_SYMBOL_COLL, 'uid', uid);
     const symbol = symRow ? rowToCodeSymbol(symRow) : null;
 
     // Cross-collection joins aren't expressible in PluginStorage —
@@ -201,42 +189,38 @@ export async function getCodeSymbolContext(
     // both substrates handle the IN-list translation natively.
 
     const callerEdges = await ctx.storage.traverse(
-        relColl,
+        CODE_RELATION_COLL,
         uid,
         'in',
         { filter: { eq: { type: 'CALLS' } } },
-        HINT_CODE_RELATION,
     );
     const callerIds = callerEdges.map((e) => e.sourceId).filter(Boolean);
     const callerRows = callerIds.length === 0
         ? []
-        : await ctx.storage.find<Record<string, unknown>>(symColl, { in: { uid: callerIds } });
+        : await ctx.storage.find<Record<string, unknown>>(CODE_SYMBOL_COLL, { in: { uid: callerIds } });
     const callers = callerRows.map(rowToCodeSymbol);
 
     const calleeEdges = await ctx.storage.traverse(
-        relColl,
+        CODE_RELATION_COLL,
         uid,
         'out',
         { filter: { eq: { type: 'CALLS' } } },
-        HINT_CODE_RELATION,
     );
     const calleeIds = calleeEdges.map((e) => e.targetId).filter(Boolean);
     const calleeRows = calleeIds.length === 0
         ? []
-        : await ctx.storage.find<Record<string, unknown>>(symColl, { in: { uid: calleeIds } });
+        : await ctx.storage.find<Record<string, unknown>>(CODE_SYMBOL_COLL, { in: { uid: calleeIds } });
     const callees = calleeRows.map(rowToCodeSymbol);
 
     const knowledgeEdges = await ctx.storage.traverse(
-        lacColl,
+        LORE_APPLIES_TO_CODE_COLL,
         uid,
         'in',
-        undefined,
-        HINT_LORE_APPLIES_TO_CODE,
     );
     const knowledgeIds = knowledgeEdges.map((e) => e.sourceId).filter(Boolean);
     const knowledgeRows = knowledgeIds.length === 0
         ? []
-        : await ctx.storage.find<Record<string, unknown>>(loreColl, { in: { id: knowledgeIds } });
+        : await ctx.storage.find<Record<string, unknown>>(LORE_NODE_COLL, { in: { id: knowledgeIds } });
     const knowledge = knowledgeRows.map(rowToLoreNodeLike);
 
     return { symbol, callers, callees, knowledge };
@@ -245,11 +229,9 @@ export async function getCodeSymbolContext(
 export async function getCodeRelationsTo(ctx: PluginGraphContext, targetUid: string): Promise<CodeRelationEdge[]> {
     try {
         const edges = await ctx.storage.traverse<{ type?: string; confidence?: number; reason?: string }>(
-            collName(ctx.storage, CODE_RELATION),
+            CODE_RELATION_COLL,
             targetUid,
             'in',
-            undefined,
-            HINT_CODE_RELATION,
         );
         return edges.map((e) => ({
             sourceUid: e.sourceId,
@@ -273,10 +255,8 @@ export async function getCrossPillarEdges(
     // O(N) round-trips per repo. Acceptable at maintenance time (this
     // call only runs as part of a clear-and-reindex pass).
     try {
-        const symColl = collName(ctx.storage, CODE_SYMBOL);
-        const lacColl = collName(ctx.storage, LORE_APPLIES_TO_CODE);
         const symbols = await ctx.storage.find<Record<string, unknown>>(
-            symColl,
+            CODE_SYMBOL_COLL,
             { eq: { repo } },
         );
         const out: { nodeId: string; symbolUid: string; relation: string }[] = [];
@@ -284,11 +264,9 @@ export async function getCrossPillarEdges(
             const uid = String(s['uid'] ?? '');
             if (!uid) continue;
             const edges = await ctx.storage.traverse<{ relation?: string }>(
-                lacColl,
+                LORE_APPLIES_TO_CODE_COLL,
                 uid,
                 'in',
-                undefined,
-                HINT_LORE_APPLIES_TO_CODE,
             );
             for (const e of edges) {
                 out.push({
@@ -305,8 +283,7 @@ export async function getCrossPillarEdges(
 }
 
 export async function clearCodeSymbols(ctx: PluginGraphContext, repo: string): Promise<number> {
-    const symColl = collName(ctx.storage, CODE_SYMBOL);
-    const count = await ctx.storage.count(symColl, { eq: { repo } });
+    const count = await ctx.storage.count(CODE_SYMBOL_COLL, { eq: { repo } });
     if (count === 0) return 0;
 
     if (ctx.storage.mode === 'dataplane') {
@@ -314,27 +291,24 @@ export async function clearCodeSymbols(ctx: PluginGraphContext, repo: string): P
         // semantics don't apply. Walk the symbols once and clean up
         // their outgoing/incoming edges per-uid before dropping the
         // nodes.
-        const relColl = collName(ctx.storage, CODE_RELATION);
-        const lacColl = collName(ctx.storage, LORE_APPLIES_TO_CODE);
-        const fcColl = collName(ctx.storage, FILE_CONTAINS);
         const symbols = await ctx.storage.find<Record<string, unknown>>(
-            symColl,
+            CODE_SYMBOL_COLL,
             { eq: { repo } },
             { limit: 100_000 },
         );
         for (const s of symbols) {
             const uid = String(s['uid'] ?? '');
             if (!uid) continue;
-            await ctx.storage.deleteEdgesWhere(relColl, { eq: { sourceId: uid } }, HINT_CODE_RELATION);
-            await ctx.storage.deleteEdgesWhere(relColl, { eq: { targetId: uid } }, HINT_CODE_RELATION);
-            await ctx.storage.deleteEdgesWhere(lacColl, { eq: { targetId: uid } }, HINT_LORE_APPLIES_TO_CODE);
-            await ctx.storage.deleteEdgesWhere(fcColl, { eq: { targetId: uid } }, HINT_FILE_CONTAINS);
+            await ctx.storage.deleteEdgesWhere(CODE_RELATION_COLL, { eq: { sourceId: uid } });
+            await ctx.storage.deleteEdgesWhere(CODE_RELATION_COLL, { eq: { targetId: uid } });
+            await ctx.storage.deleteEdgesWhere(LORE_APPLIES_TO_CODE_COLL, { eq: { targetId: uid } });
+            await ctx.storage.deleteEdgesWhere(FILE_CONTAINS_COLL, { eq: { targetId: uid } });
         }
     }
 
     // Kùzu: DETACH DELETE inside deleteWhere strips attached edges.
     // Cloud: edges already cleaned above; this drops the symbol nodes.
-    await ctx.storage.deleteWhere(symColl, { eq: { repo } });
+    await ctx.storage.deleteWhere(CODE_SYMBOL_COLL, { eq: { repo } });
     return count;
 }
 
@@ -342,7 +316,7 @@ export async function clearCodeSymbols(ctx: PluginGraphContext, repo: string): P
 
 export async function recordDevActivity(ctx: PluginGraphContext, activity: DevActivity): Promise<void> {
     const id = `${activity.dev}::${activity.project}`;
-    await ctx.storage.upsert(collName(ctx.storage, DEV_ACTIVITY), 'id', {
+    await ctx.storage.upsert(DEV_ACTIVITY_COLL, 'id', {
         id,
         dev: activity.dev,
         project: activity.project,
@@ -366,7 +340,7 @@ export async function getActiveDevs(
         // against minor timestamp-format drift across substrates).
         const filter = project ? { eq: { project } } : {};
         const rows = await ctx.storage.find<Record<string, unknown>>(
-            collName(ctx.storage, DEV_ACTIVITY),
+            DEV_ACTIVITY_COLL,
             filter,
         );
         return rows
@@ -390,10 +364,9 @@ export async function clearStaleActivity(
 ): Promise<number> {
     try {
         const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000).toISOString();
-        const coll = collName(ctx.storage, DEV_ACTIVITY);
         const filter = { lt: { timestamp: cutoff } };
-        const count = await ctx.storage.count(coll, filter);
-        if (count > 0) await ctx.storage.deleteWhere(coll, filter);
+        const count = await ctx.storage.count(DEV_ACTIVITY_COLL, filter);
+        if (count > 0) await ctx.storage.deleteWhere(DEV_ACTIVITY_COLL, filter);
         return count;
     } catch {
         return 0;
@@ -406,7 +379,7 @@ export async function upsertCodeFile(
     ctx: PluginGraphContext,
     file: { path: string; language?: string; loc?: number; repo?: string; lastModified?: string },
 ): Promise<void> {
-    await ctx.storage.upsert(collName(ctx.storage, CODE_FILE), 'path', {
+    await ctx.storage.upsert(CODE_FILE_COLL, 'path', {
         path: file.path,
         language: file.language ?? '',
         loc: file.loc ?? 0,
@@ -422,11 +395,10 @@ export async function addFileContains(
 ): Promise<void> {
     // MERGE in legacy code → upsertEdge. Idempotent.
     await ctx.storage.upsertEdge(
-        collName(ctx.storage, FILE_CONTAINS),
+        FILE_CONTAINS_COLL,
         filePath,
         symbolUid,
         {},
-        HINT_FILE_CONTAINS,
     );
 }
 
@@ -438,11 +410,10 @@ export async function addLoreTouchesFile(
 ): Promise<void> {
     // MERGE … SET r.relation = … → upsertEdge.
     await ctx.storage.upsertEdge(
-        collName(ctx.storage, LORE_TOUCHES_FILE),
+        LORE_TOUCHES_FILE_COLL,
         loreNodeId,
         filePath,
         { relation },
-        HINT_LORE_TOUCHES_FILE,
     );
 }
 
@@ -457,11 +428,10 @@ export async function linkKnowledgeToCode(
     // Legacy semantics: CREATE (non-idempotent — caller manages dedup
     // via the prune-then-rebuild pattern).
     await ctx.storage.addEdge(
-        collName(ctx.storage, LORE_APPLIES_TO_CODE),
+        LORE_APPLIES_TO_CODE_COLL,
         nodeId,
         symbolUid,
         { relation },
-        HINT_LORE_APPLIES_TO_CODE,
     );
 }
 
@@ -470,7 +440,7 @@ export async function listCodeFiles(
 ): Promise<Array<{ path: string; language: string; repo: string }>> {
     try {
         const rows = await ctx.storage.find<Record<string, unknown>>(
-            collName(ctx.storage, CODE_FILE),
+            CODE_FILE_COLL,
             {},
         );
         return rows.map((r) => ({
@@ -489,7 +459,7 @@ export async function listCodeSymbols(
 ): Promise<Array<{ uid: string; name: string; kind: string; filePath: string; signature: string; content: string; repo: string; startLine: number; endLine: number }>> {
     try {
         const rows = await ctx.storage.find<Record<string, unknown>>(
-            collName(ctx.storage, CODE_SYMBOL),
+            CODE_SYMBOL_COLL,
             {},
             { limit },
         );
@@ -519,12 +489,11 @@ export async function listCodeFilesWithPreview(
     maxBytes: number = 2048,
 ): Promise<Array<{ path: string; language: string; repo: string; preview: string }>> {
     const files = await listCodeFiles(ctx);
-    const symColl = collName(ctx.storage, CODE_SYMBOL);
     const out: Array<{ path: string; language: string; repo: string; preview: string }> = [];
     for (const f of files) {
         try {
             const rows = await ctx.storage.find<Record<string, unknown>>(
-                symColl,
+                CODE_SYMBOL_COLL,
                 { eq: { filePath: f.path } },
             );
             const symbols = rows.map((r) => ({
@@ -625,16 +594,14 @@ export async function pruneInferredDeveloperEdges(
     let appliesToCode = 0;
     try {
         touchesFile = await ctx.storage.deleteEdgesWhere(
-            collName(ctx.storage, LORE_TOUCHES_FILE),
+            LORE_TOUCHES_FILE_COLL,
             { startsWith: { relation: relationPrefix } },
-            HINT_LORE_TOUCHES_FILE,
         );
     } catch { /* table may be missing on older graphs */ }
     try {
         appliesToCode = await ctx.storage.deleteEdgesWhere(
-            collName(ctx.storage, LORE_APPLIES_TO_CODE),
+            LORE_APPLIES_TO_CODE_COLL,
             { startsWith: { relation: relationPrefix } },
-            HINT_LORE_APPLIES_TO_CODE,
         );
     } catch { /* ignore */ }
     return { touchesFile, appliesToCode };

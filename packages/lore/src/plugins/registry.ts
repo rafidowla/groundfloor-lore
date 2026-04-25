@@ -154,9 +154,40 @@ export class PluginRegistry {
      * own node/rel tables. Throws on any failure (bad schema = fatal).
      */
     async registerSchemas(ctx: PluginGraphContext): Promise<void> {
+        // Slice 5c — apply declarative collection registrations to the
+        // active storage adapter FIRST so subsequent plugin ops can
+        // resolve canonical → substrate names + edge metadata implicitly.
+        // Runs before registerSchema (which is Cypher-oriented and fails
+        // in cloud mode); decls are pure registration and substrate-
+        // independent, so they land safely in either mode. Idempotent
+        // on the same canonical name.
+        this.applyCollectionDecls(ctx.storage);
         for (const plugin of this.loaded.values()) {
             if (typeof plugin.registerSchema === 'function') {
                 await plugin.registerSchema(ctx);
+            }
+        }
+    }
+
+    /**
+     * Slice 5c — iterate active plugins, collect their CollectionDecls,
+     * and feed each into `storage.declareCollection`. Public so cloud-
+     * mode setup paths (which build a fresh storage view per request)
+     * can re-apply decls without going through registerSchemas.
+     */
+    applyCollectionDecls(storage: import('./storage.js').PluginStorage): void {
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.contributeCollectionDecls !== 'function') continue;
+            try {
+                const decls = plugin.contributeCollectionDecls();
+                if (!Array.isArray(decls)) continue;
+                for (const decl of decls) {
+                    storage.declareCollection(decl);
+                }
+            } catch (err) {
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.contributeCollectionDecls threw: ${(err as Error).message}`,
+                );
             }
         }
     }

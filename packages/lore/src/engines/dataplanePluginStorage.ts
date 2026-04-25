@@ -38,6 +38,7 @@
 
 import type { TenantProvider } from './dataplaneGraph.js';
 import type {
+    CollectionDecl,
     EdgeRow,
     EdgeShapeHint,
     Filter,
@@ -132,11 +133,29 @@ export class DataplanePluginStorage implements PluginStorage {
     private readonly client: PluginStorageSdkClient;
     private readonly tenantProvider: TenantProvider;
     private readonly connection?: string;
+    /** Slice 5c — registry of declared collections by canonical name. */
+    private readonly decls = new Map<string, CollectionDecl>();
 
     constructor(config: DataplanePluginStorageConfig) {
         this.client = config.client;
         this.tenantProvider = config.tenantProvider;
         this.connection = config.connection;
+    }
+
+    /* ─── Schema declaration (slice 5c) ───────────────────────── */
+
+    declareCollection(decl: CollectionDecl): void {
+        this.decls.set(decl.name, decl);
+    }
+
+    /**
+     * Resolve canonical → cloud collection name. Defaults to `coll`
+     * when no declaration is registered (legacy / undeclared path).
+     */
+    private resolveCloudColl(coll: string): string {
+        const d = this.decls.get(coll);
+        if (!d) return coll;
+        return d.cloudCollection ?? coll;
     }
 
     /* ─── Node ops ─────────────────────────────────────────────── */
@@ -153,10 +172,11 @@ export class DataplanePluginStorage implements PluginStorage {
             );
         }
         const tenantId = this.tenantProvider();
+        const target = this.resolveCloudColl(coll);
         const filter = { [`${keyField}_eq`]: keyVal };
-        const res = await this.client.updateByQuery(tenantId, coll, filter, doc, this.connection);
+        const res = await this.client.updateByQuery(tenantId, target, filter, doc, this.connection);
         if ((res?.updated ?? 0) === 0) {
-            await this.client.insert(tenantId, coll, doc, this.connection);
+            await this.client.insert(tenantId, target, doc, this.connection);
         }
     }
 
@@ -166,9 +186,10 @@ export class DataplanePluginStorage implements PluginStorage {
         key: unknown,
     ): Promise<T | null> {
         const tenantId = this.tenantProvider();
+        const target = this.resolveCloudColl(coll);
         const res = await this.client.query<Record<string, unknown>>(
             tenantId,
-            coll,
+            target,
             { filter: { [`${keyField}_eq`]: key }, limit: 1 },
             this.connection,
         );
@@ -181,6 +202,7 @@ export class DataplanePluginStorage implements PluginStorage {
         opts?: FindOptions,
     ): Promise<T[]> {
         const tenantId = this.tenantProvider();
+        const target = this.resolveCloudColl(coll);
         const dpFilter = filterToDataplane(filter);
         const queryOpts: Record<string, unknown> = { filter: dpFilter };
         if (typeof opts?.limit === 'number' && opts.limit >= 0) queryOpts['limit'] = Math.floor(opts.limit);
@@ -190,7 +212,7 @@ export class DataplanePluginStorage implements PluginStorage {
         }
         const res = await this.client.query<Record<string, unknown>>(
             tenantId,
-            coll,
+            target,
             queryOpts,
             this.connection,
         );
@@ -199,14 +221,16 @@ export class DataplanePluginStorage implements PluginStorage {
 
     async count(coll: string, filter?: Filter): Promise<number> {
         const tenantId = this.tenantProvider();
+        const target = this.resolveCloudColl(coll);
         const dpFilter = filterToDataplane(filter);
-        return await this.client.count(tenantId, coll, dpFilter, this.connection);
+        return await this.client.count(tenantId, target, dpFilter, this.connection);
     }
 
     async deleteWhere(coll: string, filter: Filter): Promise<number> {
         const tenantId = this.tenantProvider();
+        const target = this.resolveCloudColl(coll);
         const dpFilter = filterToDataplane(filter);
-        const res = await this.client.deleteByQuery(tenantId, coll, dpFilter, this.connection);
+        const res = await this.client.deleteByQuery(tenantId, target, dpFilter, this.connection);
         return res?.deleted ?? 0;
     }
 
@@ -220,13 +244,15 @@ export class DataplanePluginStorage implements PluginStorage {
         _hint?: EdgeShapeHint,
     ): Promise<void> {
         // Cloud edges are plain rows in a regular collection. The hint
-        // is ignored — kept on the interface for Kùzu parity, removed
-        // in slice 5c.
+        // is ignored — kept on the interface for Kùzu parity (and as a
+        // legacy override for undeclared collections); slice 5c plugins
+        // pass nothing here.
         const tenantId = this.tenantProvider();
+        const target = this.resolveCloudColl(coll);
         const id = `${sourceId}__${targetId}`;
         await this.client.insert(
             tenantId,
-            coll,
+            target,
             {
                 id,
                 source_id: sourceId,
@@ -245,12 +271,13 @@ export class DataplanePluginStorage implements PluginStorage {
         _hint?: EdgeShapeHint,
     ): Promise<void> {
         const tenantId = this.tenantProvider();
+        const target = this.resolveCloudColl(coll);
         const id = `${sourceId}__${targetId}`;
         const doc = { id, source_id: sourceId, target_id: targetId, ...props };
         const filter = { source_id_eq: sourceId, target_id_eq: targetId };
-        const res = await this.client.updateByQuery(tenantId, coll, filter, doc, this.connection);
+        const res = await this.client.updateByQuery(tenantId, target, filter, doc, this.connection);
         if ((res?.updated ?? 0) === 0) {
-            await this.client.insert(tenantId, coll, doc, this.connection);
+            await this.client.insert(tenantId, target, doc, this.connection);
         }
     }
 
@@ -262,6 +289,7 @@ export class DataplanePluginStorage implements PluginStorage {
         _hint?: EdgeShapeHint,
     ): Promise<EdgeRow<TProps>[]> {
         const tenantId = this.tenantProvider();
+        const target = this.resolveCloudColl(coll);
         const baseFilter = filterToDataplane(opts?.filter);
         const limit = typeof opts?.limit === 'number' && opts.limit >= 0 ? Math.floor(opts.limit) : undefined;
 
@@ -271,7 +299,7 @@ export class DataplanePluginStorage implements PluginStorage {
             if (limit !== undefined) queryOpts['limit'] = limit;
             const res = await this.client.query<Record<string, unknown>>(
                 tenantId,
-                coll,
+                target,
                 queryOpts,
                 this.connection,
             );
@@ -317,8 +345,9 @@ export class DataplanePluginStorage implements PluginStorage {
         _hint?: EdgeShapeHint,
     ): Promise<number> {
         const tenantId = this.tenantProvider();
+        const target = this.resolveCloudColl(coll);
         const dpFilter = filterToDataplane(remapEdgeFilterKeys(filter));
-        const res = await this.client.deleteByQuery(tenantId, coll, dpFilter, this.connection);
+        const res = await this.client.deleteByQuery(tenantId, target, dpFilter, this.connection);
         return res?.deleted ?? 0;
     }
 
@@ -328,8 +357,9 @@ export class DataplanePluginStorage implements PluginStorage {
         _hint?: EdgeShapeHint,
     ): Promise<number> {
         const tenantId = this.tenantProvider();
+        const target = this.resolveCloudColl(coll);
         const dpFilter = filterToDataplane(remapEdgeFilterKeys(filter));
-        return await this.client.count(tenantId, coll, dpFilter, this.connection);
+        return await this.client.count(tenantId, target, dpFilter, this.connection);
     }
 }
 

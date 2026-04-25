@@ -137,6 +137,12 @@ export class LocalGraph implements GraphProvider {
      * clean cold baseline). See src/engines/cache.ts. */
     public readCache: ReadCache;
     private readonly workspaceId: string;
+    /**
+     * Slice 5c — single PluginStorage instance shared across every
+     * createPluginGraphContext() call. See the method for rationale
+     * (declareCollection registry would otherwise reset per call).
+     */
+    private cachedPluginStorage: KuzuPluginStorage | null = null;
 
     /**
      * Creates a new LocalGraph instance.
@@ -1259,14 +1265,21 @@ export class LocalGraph implements GraphProvider {
     } {
         // Q2.2 slice 5a — substrate-portable storage. Plugins write business
         // logic against `ctx.storage.*`; same calls run on Kùzu (here) or
-        // Dataplane (cloud mode) without code changes. The legacy
-        // executeQuery/queryRows path stays for the developer plugin until
-        // slice 5b migrates it.
-        const storage: PluginStorage = new KuzuPluginStorage(
-            this.connection,
-            this.readCache,
-            () => this.initialize(),
-        );
+        // Dataplane (cloud mode) without code changes.
+        //
+        // Slice 5c — single instance cached on the engine so collection
+        // declarations (declareCollection) persist across every
+        // createPluginGraphContext() call. Without the cache the registry
+        // would reset on each plugin op and the canonical→substrate name
+        // remap would silently fall back to passthrough.
+        if (!this.cachedPluginStorage) {
+            this.cachedPluginStorage = new KuzuPluginStorage(
+                this.connection,
+                this.readCache,
+                () => this.initialize(),
+            );
+        }
+        const storage: PluginStorage = this.cachedPluginStorage;
         return {
             storage,
             executeQuery: async (cypher: string, params?: Record<string, unknown>) => {

@@ -26,17 +26,12 @@ import path from 'node:path';
 import type { PluginGraphContext, PluginContext, EmbeddableNode, ReconnectEdgeProposal } from '@lore-core/plugins/types.js';
 import { listCodeSymbols, listCodeFilesWithPreview, addLoreTouchesFile, linkKnowledgeToCode } from './operations.js';
 import {
-    CODE_FILE,
-    CODE_RELATION,
-    CODE_SYMBOL,
-    FILE_CONTAINS,
-    HINT_CODE_RELATION,
-    HINT_FILE_CONTAINS,
-    HINT_LORE_APPLIES_TO_CODE,
-    HINT_LORE_TOUCHES_FILE,
-    LORE_APPLIES_TO_CODE,
-    LORE_TOUCHES_FILE,
-    collName,
+    CODE_FILE_COLL,
+    CODE_RELATION_COLL,
+    CODE_SYMBOL_COLL,
+    FILE_CONTAINS_COLL,
+    LORE_APPLIES_TO_CODE_COLL,
+    LORE_TOUCHES_FILE_COLL,
 } from './collections.js';
 import { buildVerbatimText, type VerbatimStore } from '@lore-core/engines/verbatimStore.js';
 
@@ -201,7 +196,7 @@ export async function contributeDeveloperTopology(
     // pattern is uniform across substrates.
     try {
         const fileRows = await ctx.storage.find<Record<string, unknown>>(
-            collName(ctx.storage, CODE_FILE),
+            CODE_FILE_COLL,
             {},
             { limit },
         );
@@ -216,18 +211,15 @@ export async function contributeDeveloperTopology(
             });
         }
 
-        const fcColl = collName(ctx.storage, FILE_CONTAINS);
-        const ltColl = collName(ctx.storage, LORE_TOUCHES_FILE);
         let fcBudget = limit * 4;
         for (const f of fileRows) {
             const pathStr = String(f['path'] ?? '');
             if (!pathStr || fcBudget <= 0) break;
             const fcEdges = await ctx.storage.traverse(
-                fcColl,
+                FILE_CONTAINS_COLL,
                 pathStr,
                 'out',
                 { limit: fcBudget },
-                HINT_FILE_CONTAINS,
             );
             for (const e of fcEdges) {
                 edges.push({ from: `file:${e.sourceId}`, to: `symbol:${e.targetId}`, label: 'contains' });
@@ -241,11 +233,10 @@ export async function contributeDeveloperTopology(
             const pathStr = String(f['path'] ?? '');
             if (!pathStr || ltBudget <= 0) break;
             const ltEdges = await ctx.storage.traverse<{ relation?: string }>(
-                ltColl,
+                LORE_TOUCHES_FILE_COLL,
                 pathStr,
                 'in',
                 { limit: ltBudget },
-                HINT_LORE_TOUCHES_FILE,
             );
             for (const e of ltEdges) {
                 edges.push({
@@ -261,7 +252,7 @@ export async function contributeDeveloperTopology(
 
     try {
         const symRows = await ctx.storage.find<Record<string, unknown>>(
-            collName(ctx.storage, CODE_SYMBOL),
+            CODE_SYMBOL_COLL,
             {},
             { limit: limit * 4 },
         );
@@ -276,18 +267,15 @@ export async function contributeDeveloperTopology(
             });
         }
 
-        const crColl = collName(ctx.storage, CODE_RELATION);
-        const laColl = collName(ctx.storage, LORE_APPLIES_TO_CODE);
         let crBudget = limit * 4;
         for (const s of symRows) {
             const uid = String(s['uid'] ?? '');
             if (!uid || crBudget <= 0) break;
             const crEdges = await ctx.storage.traverse<{ type?: string }>(
-                crColl,
+                CODE_RELATION_COLL,
                 uid,
                 'out',
                 { limit: crBudget },
-                HINT_CODE_RELATION,
             );
             for (const e of crEdges) {
                 edges.push({
@@ -305,11 +293,10 @@ export async function contributeDeveloperTopology(
             const uid = String(s['uid'] ?? '');
             if (!uid || laBudget <= 0) break;
             const laEdges = await ctx.storage.traverse<{ relation?: string }>(
-                laColl,
+                LORE_APPLIES_TO_CODE_COLL,
                 uid,
                 'in',
                 { limit: laBudget },
-                HINT_LORE_APPLIES_TO_CODE,
             );
             for (const e of laEdges) {
                 edges.push({
@@ -472,7 +459,7 @@ async function buildSingleEmbeddable(
     if (markerId.startsWith(PREFIX_FILE)) {
         const filePath = markerId.slice(PREFIX_FILE.length);
         const f = await ctx.storage.get<Record<string, unknown>>(
-            collName(ctx.storage, CODE_FILE),
+            CODE_FILE_COLL,
             'path',
             filePath,
         ).catch(() => null);
@@ -499,7 +486,7 @@ async function buildSingleEmbeddable(
     if (markerId.startsWith(PREFIX_SYMBOL)) {
         const uid = markerId.slice(PREFIX_SYMBOL.length);
         const s = await ctx.storage.get<Record<string, unknown>>(
-            collName(ctx.storage, CODE_SYMBOL),
+            CODE_SYMBOL_COLL,
             'uid',
             uid,
         ).catch(() => null);

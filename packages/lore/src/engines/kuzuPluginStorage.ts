@@ -31,10 +31,13 @@
 
 import type { Connection, QueryResult } from '@kineviz/kuzu-lite';
 import type {
+    CollectionDecl,
+    EdgeCollectionDecl,
     EdgeRow,
     EdgeShapeHint,
     Filter,
     FindOptions,
+    NodeCollectionDecl,
     PluginStorage,
     TraverseOptions,
 } from '../plugins/storage.js';
@@ -203,6 +206,14 @@ export class KuzuPluginStorage implements PluginStorage {
     private readonly connection: Connection;
     private readonly readCache: ReadCacheHandle;
     private readonly ensureInit?: () => Promise<void>;
+    /**
+     * Slice 5c — registry of declared collections by canonical name.
+     * Populated via `declareCollection`; consulted on every op to
+     * resolve substrate-specific names + edge metadata. If a coll
+     * name is absent, ops fall through to the legacy hint-based
+     * path (or pass the name through unchanged for nodes).
+     */
+    private readonly decls = new Map<string, CollectionDecl>();
 
     constructor(
         connection: Connection,
@@ -212,6 +223,54 @@ export class KuzuPluginStorage implements PluginStorage {
         this.connection = connection;
         this.readCache = readCache;
         this.ensureInit = ensureInit;
+    }
+
+    /* ─── Schema declaration (slice 5c) ───────────────────────── */
+
+    declareCollection(decl: CollectionDecl): void {
+        this.decls.set(decl.name, decl);
+    }
+
+    /**
+     * Resolve canonical → Kùzu table label. Defaults to `coll` when no
+     * declaration is registered (legacy path).
+     */
+    private resolveTable(coll: string): string {
+        const d = this.decls.get(coll);
+        if (!d) return coll;
+        return d.kuzuTable ?? coll;
+    }
+
+    /**
+     * Resolve a node-collection's primary key field. Defaults to "id"
+     * when undeclared.
+     */
+    private resolveNodeKey(coll: string): string {
+        const d = this.decls.get(coll);
+        if (!d || d.kind !== 'node') return 'id';
+        return (d as NodeCollectionDecl).primaryKey ?? 'id';
+    }
+
+    /**
+     * Edge metadata for the registered edge collection — substrate
+     * label + each side's primary-key field. Returns null if `coll` is
+     * not declared as an edge collection (caller must fall back to the
+     * explicit hint).
+     */
+    private resolveEdge(coll: string):
+        | { srcLabel: string; tgtLabel: string; srcIdField: string; tgtIdField: string; relTable: string }
+        | null {
+        const d = this.decls.get(coll);
+        if (!d || d.kind !== 'edge') return null;
+        const e = d as EdgeCollectionDecl;
+        const relTable = e.kuzuTable ?? e.name;
+        const srcDecl = this.decls.get(e.source);
+        const tgtDecl = this.decls.get(e.target);
+        const srcLabel = (srcDecl && srcDecl.kind === 'node' ? (srcDecl as NodeCollectionDecl).kuzuTable : undefined) ?? e.source;
+        const tgtLabel = (tgtDecl && tgtDecl.kind === 'node' ? (tgtDecl as NodeCollectionDecl).kuzuTable : undefined) ?? e.target;
+        const srcIdField = (srcDecl && srcDecl.kind === 'node' ? (srcDecl as NodeCollectionDecl).primaryKey : undefined) ?? 'id';
+        const tgtIdField = (tgtDecl && tgtDecl.kind === 'node' ? (tgtDecl as NodeCollectionDecl).primaryKey : undefined) ?? 'id';
+        return { srcLabel, tgtLabel, srcIdField, tgtIdField, relTable };
     }
 
     /* ─── internal helpers ─────────────────────────────────────── */
@@ -258,7 +317,8 @@ export class KuzuPluginStorage implements PluginStorage {
             params[p] = doc[k];
         }
         const setSql = setClauses.length > 0 ? `SET ${setClauses.join(', ')}` : '';
-        const cypher = `MERGE (n:${coll} {${keyField}: $__key}) ${setSql}`;
+        const table = this.resolveTable(coll);
+        const cypher = `MERGE (n:${table} {${keyField}: $__key}) ${setSql}`;
         await this.run(cypher, params);
         this.readCache.bumpEpoch();
     }
@@ -268,8 +328,9 @@ export class KuzuPluginStorage implements PluginStorage {
         keyField: string,
         key: unknown,
     ): Promise<T | null> {
+        const table = this.resolveTable(coll);
         const rows = await this.runRows(
-            `MATCH (n:${coll}) WHERE n.${keyField} = $__key RETURN n.*`,
+            `MATCH (n:${table}) WHERE n.${keyField} = $__key RETURN n.*`,
             { __key: key },
         );
         if (rows.length === 0) return null;
@@ -282,7 +343,8 @@ export class KuzuPluginStorage implements PluginStorage {
         opts?: FindOptions,
     ): Promise<T[]> {
         const { where, params } = buildWhereClause(filter, 'n', 'p');
-        let cypher = `MATCH (n:${coll}) ${where} RETURN n.*`;
+        const table = this.resolveTable(coll);
+        let cypher = `MATCH (n:${table}) ${where} RETURN n.*`;
         if (opts?.orderBy) {
             const dir = opts.orderDir === 'desc' ? 'DESC' : 'ASC';
             cypher += ` ORDER BY n.${opts.orderBy} ${dir}`;
@@ -296,8 +358,9 @@ export class KuzuPluginStorage implements PluginStorage {
 
     async count(coll: string, filter?: Filter): Promise<number> {
         const { where, params } = buildWhereClause(filter, 'n', 'p');
+        const table = this.resolveTable(coll);
         const rows = await this.runRows(
-            `MATCH (n:${coll}) ${where} RETURN count(n) AS cnt`,
+            `MATCH (n:${table}) ${where} RETURN count(n) AS cnt`,
             params,
         );
         const n = rows[0]?.['cnt'];
@@ -308,13 +371,14 @@ export class KuzuPluginStorage implements PluginStorage {
 
     async deleteWhere(coll: string, filter: Filter): Promise<number> {
         const { where, params } = buildWhereClause(filter, 'n', 'p');
+        const table = this.resolveTable(coll);
         // Two-pass to return the count: count first, then delete. Kùzu
         // doesn't expose affected-row counts on DELETE the way SQL does.
         const before = await this.count(coll, filter);
         if (before === 0) return 0;
         // DETACH DELETE so participating edges go too — saves plugins
         // from cleaning up edge rows manually.
-        await this.run(`MATCH (n:${coll}) ${where} DETACH DELETE n`, params);
+        await this.run(`MATCH (n:${table}) ${where} DETACH DELETE n`, params);
         this.readCache.bumpEpoch();
         return before;
     }
@@ -328,7 +392,7 @@ export class KuzuPluginStorage implements PluginStorage {
         props: Record<string, unknown> = {},
         hint?: EdgeShapeHint,
     ): Promise<void> {
-        const { srcLabel, tgtLabel, srcIdField, tgtIdField } = this.requireHint(coll, hint);
+        const shape = this.resolveEdgeShape(coll, hint);
         const propKeys = Object.keys(props);
         const params: Record<string, unknown> = { __src: sourceId, __tgt: targetId };
         const setClauses: string[] = [];
@@ -339,9 +403,9 @@ export class KuzuPluginStorage implements PluginStorage {
         }
         const propsSql = setClauses.length > 0 ? `{${setClauses.join(', ')}}` : '';
         const cypher =
-            `MATCH (s:${srcLabel}), (t:${tgtLabel}) ` +
-            `WHERE s.${srcIdField} = $__src AND t.${tgtIdField} = $__tgt ` +
-            `CREATE (s)-[:${coll} ${propsSql}]->(t)`;
+            `MATCH (s:${shape.srcLabel}), (t:${shape.tgtLabel}) ` +
+            `WHERE s.${shape.srcIdField} = $__src AND t.${shape.tgtIdField} = $__tgt ` +
+            `CREATE (s)-[:${shape.relTable} ${propsSql}]->(t)`;
         await this.run(cypher, params);
         this.readCache.bumpEpoch();
     }
@@ -353,7 +417,7 @@ export class KuzuPluginStorage implements PluginStorage {
         props: Record<string, unknown> = {},
         hint?: EdgeShapeHint,
     ): Promise<void> {
-        const { srcLabel, tgtLabel, srcIdField, tgtIdField } = this.requireHint(coll, hint);
+        const shape = this.resolveEdgeShape(coll, hint);
         const propKeys = Object.keys(props);
         const params: Record<string, unknown> = { __src: sourceId, __tgt: targetId };
         const setClauses: string[] = [];
@@ -364,9 +428,9 @@ export class KuzuPluginStorage implements PluginStorage {
         }
         const setSql = setClauses.length > 0 ? `SET ${setClauses.join(', ')}` : '';
         const cypher =
-            `MATCH (s:${srcLabel}), (t:${tgtLabel}) ` +
-            `WHERE s.${srcIdField} = $__src AND t.${tgtIdField} = $__tgt ` +
-            `MERGE (s)-[e:${coll}]->(t) ${setSql}`;
+            `MATCH (s:${shape.srcLabel}), (t:${shape.tgtLabel}) ` +
+            `WHERE s.${shape.srcIdField} = $__src AND t.${shape.tgtIdField} = $__tgt ` +
+            `MERGE (s)-[e:${shape.relTable}]->(t) ${setSql}`;
         await this.run(cypher, params);
         this.readCache.bumpEpoch();
     }
@@ -378,19 +442,19 @@ export class KuzuPluginStorage implements PluginStorage {
         opts?: TraverseOptions,
         hint?: EdgeShapeHint,
     ): Promise<EdgeRow<TProps>[]> {
-        const { srcLabel, tgtLabel, srcIdField, tgtIdField } = this.requireHint(coll, hint);
+        const { srcLabel, tgtLabel, srcIdField, tgtIdField, relTable } = this.resolveEdgeShape(coll, hint);
         // Direction shapes the MATCH arrow.
         let pattern: string;
         if (dir === 'out') {
-            pattern = `(s:${srcLabel})-[e:${coll}]->(t:${tgtLabel})`;
+            pattern = `(s:${srcLabel})-[e:${relTable}]->(t:${tgtLabel})`;
         } else if (dir === 'in') {
-            pattern = `(s:${srcLabel})-[e:${coll}]->(t:${tgtLabel})`;
+            pattern = `(s:${srcLabel})-[e:${relTable}]->(t:${tgtLabel})`;
         } else {
             // 'both' — undirected match. Source/target labels both apply
             // (since the same edge collection always connects the same
             // labels), but we don't know which side the anchor will be
             // on until match time. Kùzu accepts undirected `-[e:Coll]-`.
-            pattern = `(s:${srcLabel})-[e:${coll}]-(t:${tgtLabel})`;
+            pattern = `(s:${srcLabel})-[e:${relTable}]-(t:${tgtLabel})`;
         }
 
         const anchorClause =
@@ -430,19 +494,19 @@ export class KuzuPluginStorage implements PluginStorage {
         filter: Filter,
         hint?: EdgeShapeHint,
     ): Promise<number> {
-        const { srcLabel, tgtLabel, srcIdField, tgtIdField } = this.requireHint(coll, hint);
+        const { srcLabel, tgtLabel, srcIdField, tgtIdField, relTable } = this.resolveEdgeShape(coll, hint);
         const { whereSql, params } = buildEdgeWhere(filter, srcIdField, tgtIdField);
 
         // Count first (DELETE doesn't return the row count).
         const countRows = await this.runRows(
-            `MATCH (s:${srcLabel})-[e:${coll}]->(t:${tgtLabel}) ${whereSql} RETURN count(e) AS cnt`,
+            `MATCH (s:${srcLabel})-[e:${relTable}]->(t:${tgtLabel}) ${whereSql} RETURN count(e) AS cnt`,
             params,
         );
         const cntRaw = countRows[0]?.['cnt'];
         const cnt = typeof cntRaw === 'number' ? cntRaw : typeof cntRaw === 'bigint' ? Number(cntRaw) : 0;
         if (cnt === 0) return 0;
         await this.run(
-            `MATCH (s:${srcLabel})-[e:${coll}]->(t:${tgtLabel}) ${whereSql} DELETE e`,
+            `MATCH (s:${srcLabel})-[e:${relTable}]->(t:${tgtLabel}) ${whereSql} DELETE e`,
             params,
         );
         this.readCache.bumpEpoch();
@@ -454,10 +518,10 @@ export class KuzuPluginStorage implements PluginStorage {
         filter?: Filter,
         hint?: EdgeShapeHint,
     ): Promise<number> {
-        const { srcLabel, tgtLabel, srcIdField, tgtIdField } = this.requireHint(coll, hint);
+        const { srcLabel, tgtLabel, srcIdField, tgtIdField, relTable } = this.resolveEdgeShape(coll, hint);
         const { whereSql, params } = buildEdgeWhere(filter, srcIdField, tgtIdField);
         const rows = await this.runRows(
-            `MATCH (s:${srcLabel})-[e:${coll}]->(t:${tgtLabel}) ${whereSql} RETURN count(e) AS cnt`,
+            `MATCH (s:${srcLabel})-[e:${relTable}]->(t:${tgtLabel}) ${whereSql} RETURN count(e) AS cnt`,
             params,
         );
         const cntRaw = rows[0]?.['cnt'];
@@ -468,24 +532,39 @@ export class KuzuPluginStorage implements PluginStorage {
 
     /* ─── private ──────────────────────────────────────────────── */
 
-    private requireHint(
+    /**
+     * Resolve the source/target labels + id fields + the actual REL
+     * table name for an edge op. Order of resolution:
+     *
+     *   1. Registered EdgeCollectionDecl (slice 5c) — the preferred path.
+     *   2. Explicit EdgeShapeHint (slice 5a/5b legacy) — still supported
+     *      so existing callers don't break and ad-hoc / undeclared
+     *      collections (test fixtures, scratch ops) can still operate.
+     *
+     * If neither is available, throws — Cypher MATCH on a REL fundamentally
+     * needs the node-table labels.
+     */
+    private resolveEdgeShape(
         coll: string,
         hint: EdgeShapeHint | undefined,
-    ): Required<EdgeShapeHint> {
+    ): { srcLabel: string; tgtLabel: string; srcIdField: string; tgtIdField: string; relTable: string } {
+        const declResolved = this.resolveEdge(coll);
+        if (declResolved) return declResolved;
         if (!hint || !hint.srcLabel || !hint.tgtLabel) {
             throw new Error(
-                `KuzuPluginStorage: edge op on '${coll}' requires EdgeShapeHint ` +
-                    `{ srcLabel, tgtLabel } (Cypher MATCH on a REL needs the ` +
-                    `node labels). Slice 5c removes this when declareCollection lands.`,
+                `KuzuPluginStorage: edge op on '${coll}' requires either a ` +
+                    `registered EdgeCollectionDecl (declareCollection) or an ` +
+                    `EdgeShapeHint { srcLabel, tgtLabel } (Cypher MATCH on a ` +
+                    `REL needs the node-table labels).`,
             );
         }
         const idField = hint.idField ?? 'id';
         return {
             srcLabel: hint.srcLabel,
             tgtLabel: hint.tgtLabel,
-            idField,
             srcIdField: hint.srcIdField ?? idField,
             tgtIdField: hint.tgtIdField ?? idField,
+            relTable: coll,
         };
     }
 }
