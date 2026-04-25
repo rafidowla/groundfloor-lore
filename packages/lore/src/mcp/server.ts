@@ -35,7 +35,8 @@ import { bindWorkspaceToRequest, requireCurrentTenantId } from '../security/work
 import { GroundfloorClient } from 'groundfloor-ts-sdk';
 import { VerbatimStore, buildVerbatimText } from '../engines/verbatimStore.js';
 import { DataplaneVectorStore } from '../engines/dataplaneVectorStore.js';
-import type { VectorProvider } from '../providers/types.js';
+import type { EmbeddingProvider, VectorProvider } from '../providers/types.js';
+import { LocalEmbeddingProvider } from '../providers/localEmbeddingProvider.js';
 import { FeedbackStore } from '../engines/feedbackStore.js';
 import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
 import { TsSdkAdapter } from '../engines/tsSdkAdapter.js';
@@ -260,6 +261,17 @@ let graph: LoreGraph = createGraph();
 // orphan reaper's listIds); those run through LocalGraph-coupled code
 // paths today and stay guarded by `graph instanceof LocalGraph` — cloud
 // reconnect lands in a later slice. See docs/dataplane-vector-adapter.md.
+// Q2.2 slice 6a — single EmbeddingProvider injected into both vector
+// stores. Default is the in-process Xenova model; slice 6b will branch
+// here on `deploymentMode === 'cloud'` to instantiate a
+// DataplaneEmbeddingProvider that hits the cloud BGE-M3 service. Slice
+// 7 will swap the local default to multilingual-e5-small. Either way,
+// the vector stores below stay untouched.
+function createEmbeddingProvider(): EmbeddingProvider {
+    return new LocalEmbeddingProvider();
+}
+const embeddingProvider: EmbeddingProvider = createEmbeddingProvider();
+
 type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
 function createVectorStore(): LoreVectorStore {
     if (deploymentMode === 'cloud') {
@@ -274,9 +286,10 @@ function createVectorStore(): LoreVectorStore {
             client,
             tenantProvider: () => requireCurrentTenantId(),
             orgId,
+            embeddingProvider,
         });
     }
-    return new VerbatimStore(graphBasePath);
+    return new VerbatimStore(graphBasePath, embeddingProvider);
 }
 const verbatimStore: LoreVectorStore = createVectorStore();
 // VectorProvider-only façade. Most server.ts call sites operate through

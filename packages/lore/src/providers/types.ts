@@ -134,6 +134,51 @@ export interface VerbatimSearchResult {
 }
 
 /**
+ * Abstract EmbeddingProvider Interface (Q2.2 slice 6a).
+ *
+ * Decouples *embedding* (text → vector) from *vector storage* (the
+ * VectorProvider implementations below). Both VerbatimStore (local
+ * LanceDB) and DataplaneVectorStore (cloud) used to instantiate the
+ * Xenova Transformers.js pipeline directly via duplicated singletons.
+ * This interface lets us swap in a cloud-side embedder later (slice 6b
+ * routes embedding through Dataplane's BGE-M3 service so embeddings
+ * happen tenant-side, not in the daemon process) and a different local
+ * model (slice 7 swaps to multilingual-e5-small) without touching the
+ * vector stores.
+ *
+ * Contract:
+ *   - `dimension` and `modelId` are stable for the lifetime of the
+ *     provider instance. Vector stores read `dimension` once at boot
+ *     (LanceDB schema, Dataplane vector field decl).
+ *   - `initialize()` lazy-loads any heavyweight resources (HF model
+ *     download, SDK auth handshake). May be called multiple times;
+ *     idempotent.
+ *   - `embed(text)` is called per-document and per-query. Implementations
+ *     should normalize the output to L2 length 1 (cosine similarity is
+ *     the common case downstream — pgvector, Arango vector, LanceDB).
+ *   - Errors bubble; vector stores wrap them into their own *StoreError.
+ *
+ * Implementations:
+ *   - LocalEmbeddingProvider — Xenova Transformers.js pipeline in-process
+ *     (slice 6a, current default).
+ *   - DataplaneEmbeddingProvider — POSTs to Dataplane's embedding service
+ *     (slice 6b).
+ */
+export interface EmbeddingProvider {
+    /** Vector dimension produced by `embed()`. Stable for the instance. */
+    readonly dimension: number;
+    /** Identifier for telemetry / logs (e.g. `'Xenova/all-MiniLM-L6-v2'`). */
+    readonly modelId: string;
+    /**
+     * Lazy initialization hook. Idempotent; safe to call multiple times.
+     * Vector stores call this from their own `initialize()`.
+     */
+    initialize(): Promise<void>;
+    /** Encode a single text into an L2-normalized vector. */
+    embed(text: string): Promise<number[]>;
+}
+
+/**
  * Abstract VectorProvider Interface
  * Defines the contract that ANY vector database (Local LanceDB, Pinecone, Cloud) must satisfy.
  */

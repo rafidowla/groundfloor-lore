@@ -54,6 +54,21 @@ class FakeClient {
     count = (...args: unknown[]) => this.dispatch('count', args);
 }
 
+/**
+ * Build an EmbeddingProvider stub for tests. Slice 6a routes embedding
+ * through the EmbeddingProvider interface; pre-6a tests passed a bare
+ * `embedder` function. The shape below is the minimum the adapter
+ * actually reads.
+ */
+function fakeEmbedder(fn: (t: string) => Promise<number[]>) {
+    return {
+        modelId: 'fake/test',
+        dimension: 4,
+        initialize: async () => {},
+        embed: fn,
+    };
+}
+
 function buildAdapter(overrides: { tenant?: string; orgId?: string; embedder?: (t: string) => Promise<number[]> } = {}): {
     adapter: DataplaneVectorStore;
     client: FakeClient;
@@ -64,11 +79,11 @@ function buildAdapter(overrides: { tenant?: string; orgId?: string; embedder?: (
         client: client as any,
         tenantProvider: () => overrides.tenant ?? 'tenant-alpha',
         orgId: overrides.orgId ?? 'org-main',
-        embedder: overrides.embedder ?? (async (t: string) => {
+        embeddingProvider: fakeEmbedder(overrides.embedder ?? (async (t: string) => {
             // deterministic stub: vector of length 4 tied to input length
             const n = Math.min(8, t.length);
             return [n / 10, (n + 1) / 10, (n + 2) / 10, (n + 3) / 10];
-        }),
+        })),
     });
     return { adapter, client };
 }
@@ -236,7 +251,7 @@ const tests = [
             client: client as any,
             tenantProvider: () => current,
             orgId: 'org-main',
-            embedder: async () => [0.1, 0.2, 0.3, 0.4],
+            embeddingProvider: fakeEmbedder(async () => [0.1, 0.2, 0.3, 0.4]),
         });
         await adapter.store({ id: 'a', text: 'x', metadata: {} });
         current = 'tenant-b';
