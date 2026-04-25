@@ -66,6 +66,24 @@ pub struct HealthReport {
     pub status: String,
     pub version: Option<String>,
     pub sessions: Option<u64>,
+    /// Phase 8 — Dataplane bind state, surfaced from the daemon's
+    /// /api/health payload. One of: "unknown" / "offline" / "opted-out"
+    /// / "bound" / "error". The shell renders this as a separate pill
+    /// alongside the daemon-status pill so the user can see at a glance
+    /// whether their workspace is currently syncing to the team
+    /// dataplane.
+    pub dataplane: Option<String>,
+    /// Effective deployment mode reported by the daemon: "local"
+    /// (single-process Kùzu+LanceDB) or "cloud" (Dataplane-backed).
+    /// Optional because older daemons (<2.1) won't include it.
+    #[serde(rename = "deploymentMode")]
+    pub deployment_mode: Option<String>,
+    /// Whether telemetry is opted out — when true, the daemon never
+    /// fires the dataplane health ping. Surface it so the pill can
+    /// distinguish "no key" (offline) from "key exists but user
+    /// disabled it" (opted-out).
+    #[serde(rename = "telemetryOptOut")]
+    pub telemetry_opt_out: Option<bool>,
 }
 
 /// Wire shape of `/api/topology`. Deliberately permissive — node/edge
@@ -96,6 +114,14 @@ struct HealthBody {
     version: Option<String>,
     #[serde(default)]
     sessions: Option<u64>,
+    /// Phase 8 — daemon's Dataplane bind state. See server.ts
+    /// `getDataplaneState()`. May be absent on older daemons.
+    #[serde(default)]
+    dataplane: Option<String>,
+    #[serde(default, rename = "deploymentMode")]
+    deployment_mode: Option<String>,
+    #[serde(default, rename = "telemetryOptOut")]
+    telemetry_opt_out: Option<bool>,
 }
 
 /// Token cache. Bootstrap is idempotent on the daemon side, but the
@@ -209,6 +235,9 @@ pub async fn health() -> Result<HealthReport, DaemonError> {
         status: body.status.unwrap_or_else(|| "ok".to_string()),
         version: body.version,
         sessions: body.sessions,
+        dataplane: body.dataplane,
+        deployment_mode: body.deployment_mode,
+        telemetry_opt_out: body.telemetry_opt_out,
     })
 }
 
@@ -309,5 +338,35 @@ mod tests {
         // We only care that the function returns *some* sensible u16.
         let p = daemon_port();
         assert!(p > 0);
+    }
+
+    #[test]
+    fn health_body_parses_with_dataplane_fields() {
+        // Phase 8 — the daemon's /api/health includes dataplane,
+        // deploymentMode, and telemetryOptOut. We must surface them.
+        let raw = r#"{
+            "status": "ok",
+            "version": "2.1.0",
+            "sessions": 3,
+            "dataplane": "bound",
+            "deploymentMode": "cloud",
+            "telemetryOptOut": false
+        }"#;
+        let body: HealthBody = serde_json::from_str(raw).expect("parses");
+        assert_eq!(body.dataplane.as_deref(), Some("bound"));
+        assert_eq!(body.deployment_mode.as_deref(), Some("cloud"));
+        assert_eq!(body.telemetry_opt_out, Some(false));
+    }
+
+    #[test]
+    fn health_body_tolerates_missing_dataplane_fields() {
+        // Older daemons (<2.1) omit these. We must NOT fail to parse —
+        // the shell still needs to render a daemon-status pill even
+        // against a stale daemon that doesn't yet expose dataplane.
+        let raw = r#"{ "status": "ok", "version": "2.0.0" }"#;
+        let body: HealthBody = serde_json::from_str(raw).expect("parses");
+        assert!(body.dataplane.is_none());
+        assert!(body.deployment_mode.is_none());
+        assert!(body.telemetry_opt_out.is_none());
     }
 }

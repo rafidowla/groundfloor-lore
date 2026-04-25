@@ -22,6 +22,56 @@ export interface HealthReport {
     status: string;
     version?: string | null;
     sessions?: number | null;
+    /**
+     * Phase 8 — Dataplane bind state from the daemon. Optional because
+     * older daemons (<2.1) don't include it.
+     */
+    dataplane?: DataplaneState | null;
+    /** "local" | "cloud" — daemon's effective deployment mode. */
+    deploymentMode?: 'local' | 'cloud' | null;
+    /** Whether the user disabled telemetry. When true, dataplane is "opted-out". */
+    telemetryOptOut?: boolean | null;
+}
+
+/**
+ * Phase 8 — Dataplane bind state, mirroring the daemon's
+ * `getDataplaneState()` (server.ts).
+ *
+ *   - `unknown`    : ping hasn't fired yet (early boot)
+ *   - `offline`    : no credential present (DATAPLANE_API_KEY env or
+ *                    keychain `dataplane` account both empty)
+ *   - `opted-out`  : telemetry disabled in config; ping skipped
+ *   - `bound`      : credential present AND tenant /health responded 2xx
+ *   - `error`      : credential present but tenant unreachable / error
+ */
+export type DataplaneState =
+    | 'unknown'
+    | 'offline'
+    | 'opted-out'
+    | 'bound'
+    | 'error';
+
+export function describeDataplaneState(
+    s: DataplaneState | null | undefined,
+    deploymentMode?: 'local' | 'cloud' | null,
+): string {
+    if (s == null) {
+        return 'Daemon does not report Dataplane state (older version). Cloud sync status unknown.';
+    }
+    switch (s) {
+        case 'unknown':
+            return 'Dataplane health ping has not fired yet — daemon is still booting.';
+        case 'offline':
+            return deploymentMode === 'cloud'
+                ? 'Cloud-mode daemon, but no Dataplane credential found. Add DATAPLANE_API_KEY to your launchd plist (or store it in keychain account "dataplane") and restart the daemon.'
+                : 'Local-mode daemon — Dataplane sync intentionally not configured. Add a credential and restart to enable cloud team sync.';
+        case 'opted-out':
+            return 'Telemetry is disabled (config.telemetryOptOut). Dataplane sync is intentionally skipped. Re-enable in settings if you want cloud team sync.';
+        case 'bound':
+            return 'Bound to Dataplane — your workspace is syncing to the team tenant.';
+        case 'error':
+            return 'Credential present but tenant unreachable. Check your network and that the Dataplane URL is correct (DATAPLANE_URL env on the daemon).';
+    }
 }
 
 /**
