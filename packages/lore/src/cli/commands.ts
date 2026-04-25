@@ -1831,10 +1831,20 @@ import { migrateV1Sqlite } from '../engines/v1Migration.js';
  */
 export async function migrateCommand(args: string[]): Promise<void> {
     const target = args[0];
+    if (target === 'embedding-model') {
+        await migrateEmbeddingModelCommand(args.slice(1));
+        return;
+    }
     if (target !== 'v1-sqlite') {
-        console.error('usage: lore migrate v1-sqlite [<path>] [--apply] [--archive]');
-        console.error('       Default path: ~/.groundfloor/knowledge.db');
-        console.error('       Default is dry-run. Use --apply to write to the Kùzu graph.');
+        console.error('usage: lore migrate <target> [options]');
+        console.error('');
+        console.error('Targets:');
+        console.error('  v1-sqlite [<path>] [--apply] [--archive]');
+        console.error('      Migrate a V1 knowledge.db SQLite file into the Kùzu graph.');
+        console.error('      Default path: ~/.groundfloor/knowledge.db');
+        console.error('  embedding-model --to <modelId> [--dim <n>] [--apply] [--force]');
+        console.error('      Re-embed the corpus into a different model\'s vector space.');
+        console.error('      Default is dry-run. Use --apply to drop+rebuild lore_verbatim.');
         process.exit(1);
     }
 
@@ -2535,6 +2545,158 @@ export async function resolveDeferredCommand(args: string[]): Promise<void> {
         }
         console.log('');
         console.log('Node remains in graph; subsequent recall() calls will not surface it.');
+    } finally {
+        await graph.close();
+    }
+}
+
+/* ─── Q2.2 follow-up to slice 7: embedding-model migration ────── */
+
+/**
+ * migrateEmbeddingModelCommand — `lore migrate embedding-model
+ *   --to <modelId> [--dim <n>] [--apply] [--force]`
+ *
+ * Re-embeds the entire corpus into a different model's vector space.
+ * See `engines/migrateEmbeddingModel.ts` for the rationale and the
+ * step ordering. This file is the thin CLI wrapper.
+ *
+ * Defaults:
+ *   - dimension: 384 (matches MiniLM and multilingual-e5-small)
+ *   - mode: dry-run (use --apply to drop the table and re-embed)
+ *   - provider: LocalEmbeddingProvider with the target modelId. To
+ *     migrate to a remote (BGE-M3 1024-d) model, set the standard
+ *     LORE_EMBEDDING_PROVIDER=openai_compat env vars before running
+ *     and the command will pick up that provider via the same
+ *     resolver the daemon uses.
+ *
+ * Also runs as a no-op when the on-disk fingerprint already matches
+ * the target — running it twice in a row is safe.
+ */
+export async function migrateEmbeddingModelCommand(args: string[]): Promise<void> {
+    const toIdx = args.indexOf('--to');
+    const dimIdx = args.indexOf('--dim');
+    const apply = args.includes('--apply');
+    const force = args.includes('--force');
+
+    const targetModelId = toIdx >= 0 ? args[toIdx + 1] : '';
+    if (!targetModelId) {
+        console.error('usage: lore migrate embedding-model --to <modelId> [--dim <n>] [--apply] [--force]');
+        console.error('');
+        console.error('Examples:');
+        console.error('  lore migrate embedding-model --to Xenova/multilingual-e5-small');
+        console.error('     # dry-run: print plan only');
+        console.error('  lore migrate embedding-model --to Xenova/multilingual-e5-small --apply');
+        console.error('     # drop+rebuild lore_verbatim with the new model');
+        console.error('  lore migrate embedding-model --to BAAI/bge-m3 --dim 1024 --apply');
+        console.error('     # cross-dim migration (set LORE_EMBEDDING_PROVIDER=openai_compat and');
+        console.error('     # the LORE_EMBEDDING_BASE_URL/MODEL/DIMENSION env vars beforehand)');
+        process.exit(1);
+    }
+    const targetDimension = dimIdx >= 0 ? Number.parseInt(args[dimIdx + 1], 10) : 384;
+    if (!Number.isInteger(targetDimension) || targetDimension <= 0) {
+        console.error(`--dim must be a positive integer (got ${args[dimIdx + 1]})`);
+        process.exit(1);
+    }
+
+    const basePath = path.join(os.homedir(), '.groundfloor');
+    const loreDir = path.join(basePath, '.lore');
+
+    const { LocalGraph } = await import('../engines/localGraph.js');
+    const { ConfigManager } = await import('../config/configManager.js');
+    const { PluginRegistry } = await import('../plugins/registry.js');
+    const { LocalEmbeddingProvider } = await import('../providers/localEmbeddingProvider.js');
+    const { OpenAICompatEmbeddingProvider } = await import('../providers/openAICompatEmbeddingProvider.js');
+    const { migrateEmbeddingModel } = await import('../engines/migrateEmbeddingModel.js');
+    const { readFingerprintOrLegacy, getFingerprintPath } = await import('../engines/embeddingFingerprint.js');
+
+    // Resolve the target provider. Honor the same env-var contract the
+    // daemon uses (server.ts:createEmbeddingProvider) so a "remote
+    // BGE-M3" migration just sets the env and runs the CLI.
+    const remoteKind = (process.env['LORE_EMBEDDING_PROVIDER'] ?? '').trim().toLowerCase();
+    let provider;
+    if (remoteKind === 'openai_compat' || remoteKind === 'compat' || remoteKind === 'remote') {
+        const baseUrl = process.env['LORE_EMBEDDING_BASE_URL'] ?? '';
+        const modelId = process.env['LORE_EMBEDDING_MODEL'] ?? targetModelId;
+        const apiKey = process.env['LORE_EMBEDDING_API_KEY'] ?? undefined;
+        if (!baseUrl) {
+            console.error('LORE_EMBEDDING_PROVIDER=openai_compat requires LORE_EMBEDDING_BASE_URL');
+            process.exit(1);
+        }
+        provider = new OpenAICompatEmbeddingProvider({
+            baseUrl, modelId, dimension: targetDimension, apiKey,
+        });
+    } else {
+        provider = new LocalEmbeddingProvider({ modelId: targetModelId, dimension: targetDimension });
+    }
+
+    const graph = new LocalGraph(basePath);
+    const registry = new PluginRegistry(new ConfigManager(loreDir));
+    registry.boot();
+    try {
+        await graph.initialize();
+    } catch (err) {
+        // Kùzu is single-writer; if the daemon is up it holds the lock
+        // and direct opens fail. Same pattern as `lore reconsume`.
+        // Detect the typical message and translate to actionable guidance.
+        const msg = (err as Error)?.message ?? '';
+        console.error('');
+        console.error(`Could not open the local graph: ${msg}`);
+        console.error('');
+        console.error('This usually means the Lore daemon is running and holds the single-writer lock.');
+        console.error('Stop the daemon, run the migration, then start it back up:');
+        console.error('');
+        console.error('  launchctl bootout gui/$UID/com.groundfloor.lore   # macOS');
+        console.error('  systemctl --user stop lore                         # linux');
+        console.error('');
+        console.error('  lore migrate embedding-model --to <id> --apply');
+        console.error('');
+        console.error('  launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.groundfloor.lore.plist  # macOS');
+        console.error('  systemctl --user start lore                                                       # linux');
+        process.exit(1);
+    }
+    await registry.registerSchemas(graph.createPluginGraphContext());
+
+    const current = readFingerprintOrLegacy(basePath);
+    console.log('');
+    console.log('Embedding-model migration');
+    console.log(`  From:   model="${current.modelId}", dim=${current.dimension}`);
+    console.log(`  To:     model="${targetModelId}", dim=${targetDimension}`);
+    console.log(`  Provider: ${provider.constructor.name} (${provider.modelId})`);
+    console.log(`  Mode:   ${apply ? 'APPLY' : 'DRY-RUN (use --apply to actually re-embed)'}`);
+    if (force) console.log('  Force:  YES (will rebuild even if fingerprint matches)');
+    console.log(`  Fingerprint: ${getFingerprintPath(basePath)}`);
+    console.log('');
+
+    try {
+        const result = await migrateEmbeddingModel(basePath, graph, registry, {
+            targetModelId,
+            targetDimension,
+            targetProvider: provider,
+            dryRun: !apply,
+            force,
+        });
+
+        if (result.skipped) {
+            console.log('No-op: on-disk fingerprint already matches the target.');
+            console.log('       Re-run with --force to rebuild from scratch anyway.');
+            return;
+        }
+
+        console.log('─── Result ──────────────────────────────────');
+        console.log(`  Nodes scanned:        ${result.nodesScanned}`);
+        console.log(`  Embeddings written:   ${result.embeddingsWritten}${apply ? '' : ' (would be)'}`);
+        console.log(`  Table dropped:        ${result.tableDropped ? 'yes' : 'no (was missing)'}`);
+        console.log(`  Fingerprint written:  ${result.fingerprintWritten ? 'yes' : 'no'}`);
+        if (result.completedAt) console.log(`  Completed at:         ${result.completedAt}`);
+        console.log('');
+
+        if (!apply) {
+            console.log('Dry-run complete. Re-run with --apply to commit.');
+            console.log('NOTE: --apply DROPS lore_verbatim and re-embeds every LoreNode + plugin contribution.');
+            console.log('      On a 10k-node graph with the local MiniLM provider this takes ~5 minutes.');
+        } else {
+            console.log('Migration applied. Daemon should be restarted so it picks up the new fingerprint.');
+        }
     } finally {
         await graph.close();
     }

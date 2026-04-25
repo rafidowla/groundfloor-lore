@@ -5,6 +5,7 @@ import * as path from 'path';
 
 import type { EmbeddingProvider, VectorProvider, VerbatimDocument, VerbatimSearchResult } from '../providers/types.js';
 import { LocalEmbeddingProvider } from '../providers/localEmbeddingProvider.js';
+import { checkCompatibility, readFingerprint, writeFingerprint } from './embeddingFingerprint.js';
 export type { VerbatimDocument, VerbatimSearchResult };
 
 export class VerbatimStoreError extends Error {
@@ -63,7 +64,11 @@ export class VerbatimStore implements VectorProvider {
     private readonly embeddingProvider: EmbeddingProvider;
     private readonly verbatimSchema: Schema;
 
+    /** Cached basePath so initialize() can read/write the fingerprint sidecar. */
+    private readonly basePath: string;
+
     constructor(basePath: string, embeddingProvider?: EmbeddingProvider) {
+        this.basePath = basePath;
         this.lancedbPath = path.join(basePath, '.lore', 'lancedb');
         fs.mkdirSync(this.lancedbPath, { recursive: true });
         // Default to the local Xenova provider when none is injected.
@@ -86,6 +91,45 @@ export class VerbatimStore implements VectorProvider {
             } catch (e) {
                 // Table doesn't exist yet; it will be created on first store()
                 this.table = null;
+            }
+            // Embedding-model fingerprint check (slice 7 follow-up).
+            // Two cases:
+            //   1. Table exists + no fingerprint on disk → legacy store
+            //      (pre-fingerprint MiniLM/384). Stamp it now so the
+            //      next config change can detect a mismatch. We assume
+            //      the configured provider is what the legacy operator
+            //      used, which holds for the default install.
+            //   2. Table exists + fingerprint exists → check it matches
+            //      the configured provider. On mismatch, log a clear
+            //      action item and continue (warn-only): refusing to
+            //      start the daemon over a config drift would be worse
+            //      UX than degraded retrieval until the operator runs
+            //      `lore migrate embedding-model`.
+            //   3. Table missing → defer the fingerprint write until
+            //      first store(); we don't know yet that this install
+            //      will actually use embeddings (some operators run
+            //      core-only).
+            const expected = {
+                modelId: this.embeddingProvider.modelId,
+                dimension: this.embeddingProvider.dimension,
+            };
+            const onDisk = readFingerprint(this.basePath);
+            if (this.table && onDisk == null) {
+                // Stamp legacy store with what the runtime provider thinks.
+                try {
+                    writeFingerprint(this.basePath, expected);
+                } catch (err) {
+                    // Best-effort; missing fingerprint is non-fatal.
+                    console.error(`[VerbatimStore] could not stamp legacy fingerprint: ${(err as Error).message}`);
+                }
+            } else if (this.table && onDisk != null) {
+                const compat = checkCompatibility(this.basePath, expected);
+                if (!compat.matches) {
+                    // Multi-line warn — mismatch is structurally important.
+                    for (const line of compat.message.split('\n')) {
+                        console.error(`[VerbatimStore] ${line}`);
+                    }
+                }
             }
             this.initialized = true;
         } catch (error: any) {
@@ -119,6 +163,16 @@ export class VerbatimStore implements VectorProvider {
                 console.log('[VerbatimStore] Creating new table with explicit schema...');
                 this.table = await this.db.createEmptyTable('lore_verbatim', this.verbatimSchema);
                 await this.table.add([row]);
+                // Stamp the fingerprint at table-birth so subsequent
+                // daemon starts can detect a model-config drift.
+                try {
+                    writeFingerprint(this.basePath, {
+                        modelId: this.embeddingProvider.modelId,
+                        dimension: this.embeddingProvider.dimension,
+                    });
+                } catch (err) {
+                    console.error(`[VerbatimStore] could not write fingerprint on table create: ${(err as Error).message}`);
+                }
             } else {
                 await this.table.add([row]);
             }

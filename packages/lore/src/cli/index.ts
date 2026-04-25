@@ -71,7 +71,7 @@ Core commands:
   report         Write/print GRAPH_REPORT.md — human-readable graph digest
   export html    Write a standalone HTML graph snapshot (offline-viewable)
   snapshot       One-shot folder scan → HTML snapshot (no workspace ingest)
-  migrate        One-off migrations (today: v1-sqlite → Kùzu)
+  migrate        One-off migrations (v1-sqlite → Kùzu, embedding-model swap)
   verbatim       LanceDB verbatim store tools (today: reap orphan embeddings)
   models         Manage cached LLM models (today: prune unused ONNX weights)
   scaffold-plugin  Scaffold a new plugin skeleton under packages/lore-plugin-<name>/
