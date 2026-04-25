@@ -115,3 +115,25 @@ The three tools above pass that bar. Anything else can wait for a signal.
 Shipping **MVP** in Phase 5 of Lore V2.2. Real-user feedback drives
 follow-on priorities — the post-MVP items above are not a roadmap
 they're an opt-in catalog.
+
+## Manifest
+
+`plugin.json` declares the bundle-level surface the Lore shell loads
+when this plugin is active in a workspace:
+
+- 5 inspectors over Personal-plugin entities:
+  - **People** (`Person`) — table sorted by name, filterable by role
+  - **Places** (`Place`) — table with `kind` selector
+    (home/work/school/restaurant/travel/other)
+  - **Events** (`PersonalEvent`) — timeline grouped by `kind`
+  - **Memories** (`Memory`) — timeline ordered by `occurredAt`
+  - **People graph** — graph traversal over `PersonRelatedTo`,
+    `PersonLivesAt`, `PersonInvolves`, `MemoryInvolves`
+- Permissions: `fs:read:.`, `credentials:read:personal`
+- `engines.lore: ">=2.0.0"`
+
+Validate it against the spec:
+
+```bash
+npm run test:manifest:reference
+```

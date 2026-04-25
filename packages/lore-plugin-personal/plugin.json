@@ -1,0 +1,92 @@
+{
+    "manifestVersion": 1,
+    "name": "personal",
+    "version": "0.2.0",
+    "description": "People, places, events, and memories — your second brain for one life. Privately on disk, searchable through chat, grounded in the photos, emails, voice memos, and documents you actually have.",
+    "author": "Groundfloor",
+    "license": "MIT",
+    "homepage": "https://github.com/rafidowla/groundfloor-lore/tree/main/packages/lore-plugin-personal",
+
+    "lore": {
+        "module": "../../dist/lore-plugin-personal/src/index.js",
+        "inspectors": [
+            {
+                "id": "people",
+                "label": "People",
+                "icon": "users",
+                "kind": "table",
+                "entity": "Person",
+                "columns": [
+                    { "field": "displayName", "label": "Name", "flex": 2 },
+                    { "field": "role", "label": "Role", "width": 160 },
+                    { "field": "givenName", "label": "First", "width": 120 },
+                    { "field": "familyName", "label": "Last", "width": 120 },
+                    { "field": "updatedAt", "label": "Updated", "width": 160, "type": "date" }
+                ],
+                "sort": { "field": "displayName", "order": "asc" },
+                "filters": [
+                    { "field": "displayName", "kind": "text" },
+                    { "field": "role", "kind": "text" }
+                ]
+            },
+            {
+                "id": "places",
+                "label": "Places",
+                "icon": "map-pin",
+                "kind": "table",
+                "entity": "Place",
+                "columns": [
+                    { "field": "displayName", "label": "Name", "flex": 2 },
+                    { "field": "kind", "label": "Kind", "width": 140 },
+                    { "field": "address", "label": "Address", "flex": 3 },
+                    { "field": "updatedAt", "label": "Updated", "width": 160, "type": "date" }
+                ],
+                "sort": { "field": "displayName", "order": "asc" },
+                "filters": [
+                    { "field": "displayName", "kind": "text" },
+                    {
+                        "field": "kind",
+                        "kind": "select",
+                        "options": ["home", "work", "school", "restaurant", "travel", "other"]
+                    }
+                ]
+            },
+            {
+                "id": "events",
+                "label": "Events",
+                "icon": "calendar",
+                "kind": "timeline",
+                "entity": "PersonalEvent",
+                "dateField": "startsAt",
+                "labelField": "displayName",
+                "groupBy": "kind"
+            },
+            {
+                "id": "memories",
+                "label": "Memories",
+                "icon": "image",
+                "kind": "timeline",
+                "entity": "Memory",
+                "dateField": "occurredAt",
+                "labelField": "displayName"
+            },
+            {
+                "id": "people-graph",
+                "label": "People graph",
+                "icon": "graph",
+                "kind": "graph",
+                "entity": "Person",
+                "depth": 2,
+                "edgeTypes": ["PersonRelatedTo", "PersonLivesAt", "PersonInvolves", "MemoryInvolves"]
+            }
+        ],
+        "permissions": [
+            "fs:read:.",
+            "credentials:read:personal"
+        ]
+    },
+
+    "engines": {
+        "lore": ">=2.0.0"
+    }
+}
