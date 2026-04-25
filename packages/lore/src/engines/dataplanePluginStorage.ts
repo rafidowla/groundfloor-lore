@@ -128,6 +128,7 @@ export function filterToDataplane(filter: Filter | undefined): Record<string, un
 }
 
 export class DataplanePluginStorage implements PluginStorage {
+    readonly mode = 'dataplane' as const;
     private readonly client: PluginStorageSdkClient;
     private readonly tenantProvider: TenantProvider;
     private readonly connection?: string;
@@ -315,42 +316,59 @@ export class DataplanePluginStorage implements PluginStorage {
         filter: Filter,
         _hint?: EdgeShapeHint,
     ): Promise<number> {
-        // Filter keys named `sourceId` / `targetId` on the portable
-        // surface map onto cloud's `source_id` / `target_id`. Translate
-        // first so plugins don't need to learn cloud-specific naming.
-        const remapped: Filter = {};
-        const remapBag = (
-            src: Record<string, unknown> | undefined,
-        ): Record<string, unknown> | undefined => {
-            if (!src) return src;
-            const out: Record<string, unknown> = {};
-            for (const [k, v] of Object.entries(src)) {
-                if (k === 'sourceId') out['source_id'] = v;
-                else if (k === 'targetId') out['target_id'] = v;
-                else out[k] = v;
-            }
-            return out;
-        };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (remapped as any).eq = remapBag(filter.eq as Record<string, unknown> | undefined);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (remapped as any).contains = remapBag(filter.contains as Record<string, unknown> | undefined);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (remapped as any).startsWith = remapBag(filter.startsWith as Record<string, unknown> | undefined);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (remapped as any).gt = remapBag(filter.gt as Record<string, unknown> | undefined);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (remapped as any).gte = remapBag(filter.gte as Record<string, unknown> | undefined);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (remapped as any).lt = remapBag(filter.lt as Record<string, unknown> | undefined);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (remapped as any).lte = remapBag(filter.lte as Record<string, unknown> | undefined);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (remapped as any).in = remapBag(filter.in as Record<string, unknown> | undefined);
-
         const tenantId = this.tenantProvider();
-        const dpFilter = filterToDataplane(remapped);
+        const dpFilter = filterToDataplane(remapEdgeFilterKeys(filter));
         const res = await this.client.deleteByQuery(tenantId, coll, dpFilter, this.connection);
         return res?.deleted ?? 0;
     }
+
+    async countEdges(
+        coll: string,
+        filter?: Filter,
+        _hint?: EdgeShapeHint,
+    ): Promise<number> {
+        const tenantId = this.tenantProvider();
+        const dpFilter = filterToDataplane(remapEdgeFilterKeys(filter));
+        return await this.client.count(tenantId, coll, dpFilter, this.connection);
+    }
+}
+
+/**
+ * Remap portable edge-filter keys (`sourceId` / `targetId`) onto the
+ * cloud's column names (`source_id` / `target_id`) before the suffix
+ * translation. Used by both `deleteEdgesWhere` and `countEdges` so the
+ * shorthand works identically.
+ */
+function remapEdgeFilterKeys(filter: Filter | undefined): Filter | undefined {
+    if (!filter) return filter;
+    const remapBag = (
+        src: Record<string, unknown> | undefined,
+    ): Record<string, unknown> | undefined => {
+        if (!src) return src;
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(src)) {
+            if (k === 'sourceId') out['source_id'] = v;
+            else if (k === 'targetId') out['target_id'] = v;
+            else out[k] = v;
+        }
+        return out;
+    };
+    const remapped: Filter = {};
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (remapped as any).eq = remapBag(filter.eq as Record<string, unknown> | undefined);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (remapped as any).contains = remapBag(filter.contains as Record<string, unknown> | undefined);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (remapped as any).startsWith = remapBag(filter.startsWith as Record<string, unknown> | undefined);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (remapped as any).gt = remapBag(filter.gt as Record<string, unknown> | undefined);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (remapped as any).gte = remapBag(filter.gte as Record<string, unknown> | undefined);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (remapped as any).lt = remapBag(filter.lt as Record<string, unknown> | undefined);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (remapped as any).lte = remapBag(filter.lte as Record<string, unknown> | undefined);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (remapped as any).in = remapBag(filter.in as Record<string, unknown> | undefined);
+    return remapped;
 }

@@ -33,6 +33,20 @@ import type {
 import { registerDeveloperSchema } from './schema.js';
 import { registerDeveloperCloudSchema } from './cloudSchema.js';
 import { pruneInferredDeveloperEdges } from './operations.js';
+import {
+    CODE_FILE,
+    CODE_RELATION,
+    CODE_SYMBOL,
+    FILE_CONTAINS,
+    HINT_CODE_RELATION,
+    HINT_FILE_CONTAINS,
+    HINT_LORE_APPLIES_TO_CODE,
+    HINT_LORE_TOUCHES_FILE,
+    LORE_APPLIES_TO_CODE,
+    LORE_NODE,
+    LORE_TOUCHES_FILE,
+    collName,
+} from './collections.js';
 import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology, recalibrateDeveloperNode } from './reconnect.js';
 import { buildDeveloperApi, bindApiSelfReference, type DeveloperApi } from './api.js';
 import { registerDeveloperTools } from './tools.js';
@@ -214,40 +228,60 @@ export const developerPlugin: ILorePlugin = {
     async resolveChatContext(markerId: string, ctx: PluginGraphContext) {
         if (markerId.startsWith('file:')) {
             const filePath = markerId.slice('file:'.length);
-            const fileRows = await ctx.queryRows(
-                `MATCH (f:CodeFile {path: $path})
-                 RETURN f.path AS path, f.language AS language, f.repo AS repo, f.loc AS loc`,
-                { path: filePath },
-            ).catch(() => []);
-            if (fileRows.length === 0) return null;
-            const f = fileRows[0] as Record<string, unknown>;
+            const f = await ctx.storage.get<Record<string, unknown>>(
+                collName(ctx.storage, CODE_FILE),
+                'path',
+                filePath,
+            ).catch(() => null);
+            if (!f) return null;
 
-            // Symbols declared in this file (FileContains outgoing)
-            const symRows = await ctx.queryRows(
-                `MATCH (f:CodeFile {path: $path})-[:FileContains]->(s:CodeSymbol)
-                 RETURN s.uid AS id, s.name AS label, s.kind AS type
-                 LIMIT 20`,
-                { path: filePath },
+            // Symbols declared in this file (FileContains outgoing).
+            // Two-step: traverse FileContains, then fetch the connected
+            // CodeSymbols by uid.
+            const fcEdges = await ctx.storage.traverse(
+                collName(ctx.storage, FILE_CONTAINS),
+                filePath,
+                'out',
+                { limit: 20 },
+                HINT_FILE_CONTAINS,
             ).catch(() => []);
-            // Lore nodes that touch this file (LoreTouchesFile incoming)
-            const loreRows = await ctx.queryRows(
-                `MATCH (l:LoreNode)-[:LoreTouchesFile]->(f:CodeFile {path: $path})
-                 RETURN l.id AS id, l.label AS label, l.type AS type
-                 LIMIT 10`,
-                { path: filePath },
+            const symUids = fcEdges.map((e) => e.targetId).filter(Boolean);
+            const symRows: Array<Record<string, unknown>> = symUids.length === 0
+                ? []
+                : await ctx.storage.find<Record<string, unknown>>(
+                    collName(ctx.storage, CODE_SYMBOL),
+                    { in: { uid: symUids } },
+                    { limit: 20 },
+                ).catch(() => []);
+
+            // Lore nodes that touch this file (LoreTouchesFile incoming).
+            const ltEdges = await ctx.storage.traverse(
+                collName(ctx.storage, LORE_TOUCHES_FILE),
+                filePath,
+                'in',
+                { limit: 10 },
+                HINT_LORE_TOUCHES_FILE,
             ).catch(() => []);
+            const loreIds = ltEdges.map((e) => e.sourceId).filter(Boolean);
+            const loreRows: Array<Record<string, unknown>> = loreIds.length === 0
+                ? []
+                : await ctx.storage.find<Record<string, unknown>>(
+                    collName(ctx.storage, LORE_NODE),
+                    { in: { id: loreIds } },
+                    { limit: 10 },
+                ).catch(() => []);
 
             const neighbors = [
                 ...symRows.map((r) => ({
-                    id: String((r as Record<string, unknown>)['id'] ?? ''),
-                    label: String((r as Record<string, unknown>)['label'] ?? ''),
-                    type: String((r as Record<string, unknown>)['type'] ?? 'symbol'),
+                    id: String(r['uid'] ?? ''),
+                    label: String(r['name'] ?? ''),
+                    type: String(r['kind'] ?? 'symbol'),
                     relation: 'contains',
                 })),
                 ...loreRows.map((r) => ({
-                    id: String((r as Record<string, unknown>)['id'] ?? ''),
-                    label: String((r as Record<string, unknown>)['label'] ?? ''),
-                    type: String((r as Record<string, unknown>)['type'] ?? 'lore'),
+                    id: String(r['id'] ?? ''),
+                    label: String(r['label'] ?? ''),
+                    type: String(r['type'] ?? 'lore'),
                     relation: 'touched_by',
                 })),
             ];
@@ -261,9 +295,9 @@ export const developerPlugin: ILorePlugin = {
                 `Lines of code: ${loc}`,
                 repo ? `Repository: ${repo}` : null,
                 '',
-                `This file contains ${symRows.length} symbol${symRows.length === 1 ? '' : 's'}${symRows.length >= 20 ? ' (first 20 shown)' : ''}.`,
-                loreRows.length > 0
-                    ? `Linked to ${loreRows.length} knowledge node${loreRows.length === 1 ? '' : 's'}.`
+                `This file contains ${fcEdges.length} symbol${fcEdges.length === 1 ? '' : 's'}${fcEdges.length >= 20 ? ' (first 20 shown)' : ''}.`,
+                ltEdges.length > 0
+                    ? `Linked to ${ltEdges.length} knowledge node${ltEdges.length === 1 ? '' : 's'}.`
                     : 'No knowledge nodes are linked to this file yet — the graph may need a reconnect pass.',
             ].filter(Boolean).join('\n');
 
@@ -277,43 +311,71 @@ export const developerPlugin: ILorePlugin = {
 
         if (markerId.startsWith('symbol:')) {
             const uid = markerId.slice('symbol:'.length);
-            const symRows = await ctx.queryRows(
-                `MATCH (s:CodeSymbol {uid: $uid})
-                 RETURN s.uid AS uid, s.name AS name, s.kind AS kind, s.filePath AS filePath,
-                        s.lineStart AS lineStart, s.lineEnd AS lineEnd, s.signature AS signature,
-                        s.docComment AS docComment`,
-                { uid },
-            ).catch(() => []);
-            if (symRows.length === 0) return null;
-            const s = symRows[0] as Record<string, unknown>;
+            const s = await ctx.storage.get<Record<string, unknown>>(
+                collName(ctx.storage, CODE_SYMBOL),
+                'uid',
+                uid,
+            ).catch(() => null);
+            if (!s) return null;
 
-            // Callers / callees via CodeRelation
-            const outRows = await ctx.queryRows(
-                `MATCH (s:CodeSymbol {uid: $uid})-[r:CodeRelation]->(t:CodeSymbol)
-                 RETURN t.uid AS id, t.name AS label, t.kind AS type, r.kind AS rel
-                 LIMIT 10`,
-                { uid },
+            // Callers / callees via CodeRelation. Two-step like above:
+            // traverse the edges, then fetch the connected CodeSymbol
+            // rows by uid.
+            const symColl = collName(ctx.storage, CODE_SYMBOL);
+            const relColl = collName(ctx.storage, CODE_RELATION);
+            const outEdges = await ctx.storage.traverse<{ kind?: string }>(
+                relColl,
+                uid,
+                'out',
+                { limit: 10 },
+                HINT_CODE_RELATION,
             ).catch(() => []);
-            const inRows = await ctx.queryRows(
-                `MATCH (t:CodeSymbol)-[r:CodeRelation]->(s:CodeSymbol {uid: $uid})
-                 RETURN t.uid AS id, t.name AS label, t.kind AS type, r.kind AS rel
-                 LIMIT 10`,
-                { uid },
+            const outIds = outEdges.map((e) => e.targetId).filter(Boolean);
+            const outRows: Array<Record<string, unknown>> = outIds.length === 0
+                ? []
+                : await ctx.storage.find<Record<string, unknown>>(
+                    symColl,
+                    { in: { uid: outIds } },
+                    { limit: 10 },
+                ).catch(() => []);
+            const outById = new Map(outRows.map((r) => [String(r['uid'] ?? ''), r]));
+
+            const inEdges = await ctx.storage.traverse<{ kind?: string }>(
+                relColl,
+                uid,
+                'in',
+                { limit: 10 },
+                HINT_CODE_RELATION,
             ).catch(() => []);
+            const inIds = inEdges.map((e) => e.sourceId).filter(Boolean);
+            const inRows: Array<Record<string, unknown>> = inIds.length === 0
+                ? []
+                : await ctx.storage.find<Record<string, unknown>>(
+                    symColl,
+                    { in: { uid: inIds } },
+                    { limit: 10 },
+                ).catch(() => []);
+            const inById = new Map(inRows.map((r) => [String(r['uid'] ?? ''), r]));
 
             const neighbors = [
-                ...outRows.map((r) => ({
-                    id: String((r as Record<string, unknown>)['id'] ?? ''),
-                    label: String((r as Record<string, unknown>)['label'] ?? ''),
-                    type: String((r as Record<string, unknown>)['type'] ?? 'symbol'),
-                    relation: String((r as Record<string, unknown>)['rel'] ?? 'calls'),
-                })),
-                ...inRows.map((r) => ({
-                    id: String((r as Record<string, unknown>)['id'] ?? ''),
-                    label: String((r as Record<string, unknown>)['label'] ?? ''),
-                    type: String((r as Record<string, unknown>)['type'] ?? 'symbol'),
-                    relation: `called_by:${String((r as Record<string, unknown>)['rel'] ?? 'calls')}`,
-                })),
+                ...outEdges.map((e) => {
+                    const r = outById.get(e.targetId) ?? {};
+                    return {
+                        id: e.targetId,
+                        label: String(r['name'] ?? ''),
+                        type: String(r['kind'] ?? 'symbol'),
+                        relation: String(e.edgeProps.kind ?? 'calls'),
+                    };
+                }),
+                ...inEdges.map((e) => {
+                    const r = inById.get(e.sourceId) ?? {};
+                    return {
+                        id: e.sourceId,
+                        label: String(r['name'] ?? ''),
+                        type: String(r['kind'] ?? 'symbol'),
+                        relation: `called_by:${String(e.edgeProps.kind ?? 'calls')}`,
+                    };
+                }),
             ];
 
             const content = [
@@ -400,26 +462,34 @@ export const developerPlugin: ILorePlugin = {
                     { name: 'count', kind: 'measure' },
                 ],
                 async run(ctx: PluginGraphContext) {
-                    const rows = await ctx.queryRows(
-                        `MATCH (n:LoreNode)
-                         RETURN n.type AS type, count(n) AS count
-                         ORDER BY count DESC`,
+                    // Substrate-portable: PluginStorage has no GROUP BY,
+                    // so we pull the (id, type) pairs and aggregate in JS.
+                    // LoreNode populations are bounded (lo thousands at
+                    // most), so the round-trip cost is acceptable. The
+                    // limit is a safety cap, not a real boundary.
+                    const all = await ctx.storage.find<Record<string, unknown>>(
+                        collName(ctx.storage, LORE_NODE),
                         {},
+                        { limit: 100_000 },
                     );
-                    const ids = await ctx.queryRows(
-                        'MATCH (n:LoreNode) RETURN n.id AS id',
-                        {},
-                    );
+                    const counts = new Map<string, number>();
+                    const sourceNodeIds: string[] = [];
+                    for (const r of all) {
+                        const id = String(r['id'] ?? '');
+                        if (id) sourceNodeIds.push(id);
+                        const type = String(r['type'] ?? '(untyped)');
+                        counts.set(type, (counts.get(type) ?? 0) + 1);
+                    }
+                    const rows = [...counts.entries()]
+                        .map(([type, count]) => ({ type, count }))
+                        .sort((a, b) => b.count - a.count);
                     return {
                         columns: [
                             { name: 'type', kind: 'dimension' as const },
                             { name: 'count', kind: 'measure' as const },
                         ],
-                        rows: rows.map((r) => ({
-                            type: String(r.type ?? '(untyped)'),
-                            count: Number(r.count ?? 0),
-                        })),
-                        sourceNodeIds: ids.map((r) => String(r.id ?? '')).filter(Boolean),
+                        rows,
+                        sourceNodeIds,
                     };
                 },
             },
@@ -433,27 +503,33 @@ export const developerPlugin: ILorePlugin = {
                     { name: 'count', kind: 'measure' },
                 ],
                 async run(ctx: PluginGraphContext) {
-                    const rows = await ctx.queryRows(
-                        `MATCH (n:LoreNode)
-                         WHERE n.createdAt IS NOT NULL AND n.createdAt <> ''
-                         RETURN substring(n.createdAt, 0, 7) AS month, count(n) AS count
-                         ORDER BY month`,
+                    // Substrate-portable JS-side aggregation. See the
+                    // sibling lore-nodes-by-type projection for rationale.
+                    const all = await ctx.storage.find<Record<string, unknown>>(
+                        collName(ctx.storage, LORE_NODE),
                         {},
+                        { limit: 100_000 },
                     );
-                    const ids = await ctx.queryRows(
-                        'MATCH (n:LoreNode) WHERE n.createdAt IS NOT NULL RETURN n.id AS id',
-                        {},
-                    );
+                    const counts = new Map<string, number>();
+                    const sourceNodeIds: string[] = [];
+                    for (const r of all) {
+                        const createdAt = String(r['createdAt'] ?? '');
+                        if (!createdAt) continue;
+                        const id = String(r['id'] ?? '');
+                        if (id) sourceNodeIds.push(id);
+                        const month = createdAt.slice(0, 7);
+                        counts.set(month, (counts.get(month) ?? 0) + 1);
+                    }
+                    const rows = [...counts.entries()]
+                        .map(([month, count]) => ({ month, count }))
+                        .sort((a, b) => a.month.localeCompare(b.month));
                     return {
                         columns: [
                             { name: 'month', kind: 'time' as const },
                             { name: 'count', kind: 'measure' as const },
                         ],
-                        rows: rows.map((r) => ({
-                            month: String(r.month ?? ''),
-                            count: Number(r.count ?? 0),
-                        })),
-                        sourceNodeIds: ids.map((r) => String(r.id ?? '')).filter(Boolean),
+                        rows,
+                        sourceNodeIds,
                     };
                 },
             },
@@ -467,23 +543,34 @@ export const developerPlugin: ILorePlugin = {
                     { name: 'symbol_count', kind: 'measure' },
                 ],
                 async run(ctx: PluginGraphContext) {
-                    const rows = await ctx.queryRows(
-                        `MATCH (f:CodeFile)-[:FileContains]->(s:CodeSymbol)
-                         RETURN f.path AS file_path, f.path AS file_id, count(s) AS symbol_count
-                         ORDER BY symbol_count DESC
-                         LIMIT 50`,
+                    // Substrate-portable: count symbols per file by
+                    // grouping CodeSymbol rows by filePath in JS.
+                    // CodeSymbol carries `filePath` directly (it's how
+                    // FileContains was synthesized), so we can skip the
+                    // edge traversal entirely. Cap at 100k symbols — same
+                    // safety margin as ingestFilesFromSymbols.
+                    const all = await ctx.storage.find<Record<string, unknown>>(
+                        collName(ctx.storage, CODE_SYMBOL),
                         {},
+                        { limit: 100_000 },
                     );
+                    const counts = new Map<string, number>();
+                    for (const r of all) {
+                        const filePath = String(r['filePath'] ?? '');
+                        if (!filePath) continue;
+                        counts.set(filePath, (counts.get(filePath) ?? 0) + 1);
+                    }
+                    const rows = [...counts.entries()]
+                        .map(([file_path, symbol_count]) => ({ file_path, symbol_count }))
+                        .sort((a, b) => b.symbol_count - a.symbol_count)
+                        .slice(0, 50);
                     return {
                         columns: [
                             { name: 'file_path', kind: 'dimension' as const },
                             { name: 'symbol_count', kind: 'measure' as const },
                         ],
-                        rows: rows.map((r) => ({
-                            file_path: String(r.file_path ?? ''),
-                            symbol_count: Number(r.symbol_count ?? 0),
-                        })),
-                        sourceNodeIds: rows.map((r) => String(r.file_id ?? '')).filter(Boolean),
+                        rows,
+                        sourceNodeIds: rows.map((r) => r.file_path).filter(Boolean),
                     };
                 },
             },
@@ -512,18 +599,16 @@ export const developerPlugin: ILorePlugin = {
         let codeSymbolCount = 0;
         let codeRelationCount = 0;
         try {
-            const symRows = await ctx.queryRows(
-                'MATCH (s:CodeSymbol) RETURN count(s) AS cnt',
-            );
-            codeSymbolCount = Number((symRows[0] as Record<string, unknown>)?.['cnt'] ?? 0);
+            codeSymbolCount = await ctx.storage.count(collName(ctx.storage, CODE_SYMBOL), {});
         } catch {
             // Table may not exist yet (fresh graph before registerSchema).
         }
         try {
-            const relRows = await ctx.queryRows(
-                'MATCH ()-[r:CodeRelation]->() RETURN count(r) AS cnt',
+            codeRelationCount = await ctx.storage.countEdges(
+                collName(ctx.storage, CODE_RELATION),
+                {},
+                HINT_CODE_RELATION,
             );
-            codeRelationCount = Number((relRows[0] as Record<string, unknown>)?.['cnt'] ?? 0);
         } catch {
             // Same rationale as above.
         }
@@ -539,14 +624,28 @@ export const developerPlugin: ILorePlugin = {
     async contributeValidations(ctx: PluginGraphContext): Promise<Array<{ warning: string }> | null> {
         const warnings: Array<{ warning: string }> = [];
         try {
-            const rows = await ctx.queryRows(
-                `MATCH (n:LoreNode)
-                 WHERE n.type = 'bug_pattern' AND NOT (n)-[:LoreAppliesToCode]->(:CodeSymbol)
-                 RETURN n.id AS id`,
+            // Find all bug_pattern nodes, then check each for outgoing
+            // LoreAppliesToCode edges. PluginStorage has no NOT-EXISTS
+            // operator, so we do the existence check via per-node
+            // traverse + emptiness test. Bounded by the (typically
+            // small) bug_pattern population — substrate-portable.
+            const bugRows = await ctx.storage.find<Record<string, unknown>>(
+                collName(ctx.storage, LORE_NODE),
+                { eq: { type: 'bug_pattern' } },
+                { limit: 1_000 },
             );
-            for (const row of rows) {
-                const id = String((row as Record<string, unknown>)['id'] ?? '');
-                if (id) {
+            const lacColl = collName(ctx.storage, LORE_APPLIES_TO_CODE);
+            for (const row of bugRows) {
+                const id = String(row['id'] ?? '');
+                if (!id) continue;
+                const edges = await ctx.storage.traverse(
+                    lacColl,
+                    id,
+                    'out',
+                    { limit: 1 },
+                    HINT_LORE_APPLIES_TO_CODE,
+                ).catch(() => []);
+                if (edges.length === 0) {
                     warnings.push({ warning: `Missing Link: bug_pattern '${id}' is not linked to any CodeSymbol.` });
                 }
             }

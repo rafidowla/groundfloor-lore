@@ -115,14 +115,23 @@ export interface EdgeRow<TProps = Record<string, unknown>> {
  *
  * Will be removed in slice 5c when `declareCollection` makes labels
  * implicit.
+ *
+ * Asymmetric idFields: developer-plugin edges connect tables whose
+ * primary keys differ (e.g. FileContains links CodeFile.path → CodeSymbol.uid).
+ * `srcIdField` / `tgtIdField` are the per-side overrides; if a side is
+ * absent, the adapter falls back to `idField`, then to "id".
  */
 export interface EdgeShapeHint {
     /** Kùzu node-table label of the source side. */
     srcLabel?: string;
     /** Kùzu node-table label of the target side. */
     tgtLabel?: string;
-    /** Field on each side that holds the id (defaults to "id"). */
+    /** Default id field for both sides (defaults to "id"). */
     idField?: string;
+    /** Source-side id field; overrides `idField` for the source. */
+    srcIdField?: string;
+    /** Target-side id field; overrides `idField` for the target. */
+    tgtIdField?: string;
 }
 
 /**
@@ -146,6 +155,19 @@ export interface EdgeShapeHint {
  *     in cloud mode).
  */
 export interface PluginStorage {
+    /**
+     * Substrate flag — `'kuzu'` for the local KuzuPluginStorage adapter,
+     * `'dataplane'` for the cloud DataplanePluginStorage adapter.
+     *
+     * Plugin code is substrate-portable, but a few callsites legitimately
+     * need to know the mode — chiefly to translate between Kùzu PascalCase
+     * table names (e.g. `CodeSymbol`) and the snake_case cloud collection
+     * names (e.g. `developer_code_symbol`). Plugins should branch on this
+     * sparingly; the long-term direction is `declareCollection` (slice 5c)
+     * making the substrate-name remap implicit.
+     */
+    readonly mode: 'kuzu' | 'dataplane';
+
     /* ─── Node ops ───────────────────────────────────────────────── */
 
     /**
@@ -268,6 +290,21 @@ export interface PluginStorage {
     deleteEdgesWhere(
         coll: string,
         filter: Filter,
+        hint?: EdgeShapeHint,
+    ): Promise<number>;
+
+    /**
+     * Edge row count (slice 5b addition). Mirrors `count` for nodes —
+     * needed because `find` doesn't traverse edge tables and plugins still
+     * want raw "how many edges of this kind exist" stats (e.g. graph
+     * stats, telemetry payloads). Filter applies to edge properties (or
+     * `sourceId` / `targetId` as keyset shorthand the adapter remaps).
+     *
+     * Empty filter counts every edge in the collection.
+     */
+    countEdges(
+        coll: string,
+        filter?: Filter,
         hint?: EdgeShapeHint,
     ): Promise<number>;
 }
