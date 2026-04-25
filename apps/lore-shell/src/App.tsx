@@ -17,7 +17,10 @@ import {
     parseDaemonError,
     describeDaemonError,
     describeLaunchdState,
+    describeDataplaneState,
     type DiscoverReport,
+    type HealthReport,
+    type DataplaneState,
 } from './loreClient';
 
 interface ShellInfo {
@@ -105,7 +108,7 @@ export function App() {
         <main className="shell-root">
             <header>
                 <h1>Lore</h1>
-                <span className="tag">Phase 3d — launchd discovery</span>
+                <span className="tag">Phase 8 — Dataplane sync visibility</span>
             </header>
 
             <section className="status">
@@ -127,6 +130,14 @@ export function App() {
                                 {probe.kind === 'discovering' ? 'Discovering…' : 'Re-probe'}
                             </button>
                         </dd>
+                        {probe.kind === 'ok' && probe.report.http_health && (
+                            <>
+                                <dt>Dataplane</dt>
+                                <dd className="daemon-cell">
+                                    <DataplanePill health={probe.report.http_health} />
+                                </dd>
+                            </>
+                        )}
                         {probe.kind === 'ok' && (
                             <DiscoveryDetail report={probe.report} />
                         )}
@@ -225,6 +236,99 @@ function DaemonStatusPill({
         return <span className="daemon daemon-unknown">discovering…</span>;
     }
     return <span className={`daemon daemon-${fallback}`}>{fallback}</span>;
+}
+
+/**
+ * Phase 8 — Dataplane bind-state pill.
+ *
+ * Renders alongside the daemon-status pill so the user can see at a
+ * glance whether their workspace is currently syncing to the team
+ * Dataplane. State sourcing:
+ *
+ *   `health.dataplane`         — daemon's bind state (offline / opted-out / bound / error / unknown)
+ *   `health.deploymentMode`    — local vs. cloud, used to phrase the
+ *                                "offline" tooltip differently
+ *   `health.telemetryOptOut`   — informational, surfaced in tooltip
+ *
+ * Pill colour:
+ *   bound      → green
+ *   opted-out  → grey + italic
+ *   offline    → grey (when local-mode) / orange warning (when cloud-mode)
+ *   error      → red
+ *   unknown    → unstyled (boot in progress)
+ *
+ * Backwards compat: a daemon that doesn't expose `dataplane` (older
+ * than 2.1) renders as "unsupported" and links to the launchd plist
+ * remediation hint.
+ */
+function DataplanePill({ health }: { health: HealthReport }) {
+    const state = health.dataplane ?? null;
+    const deploymentMode = health.deploymentMode ?? null;
+    const tooltip = describeDataplaneState(state, deploymentMode);
+
+    if (state == null) {
+        return (
+            <span
+                className="daemon daemon-unknown"
+                title={tooltip}
+            >
+                unsupported
+                <span className="dim"> · daemon &lt;2.1</span>
+            </span>
+        );
+    }
+
+    const cls = pillClassForDataplane(state, deploymentMode);
+    const label = labelForDataplane(state, deploymentMode);
+    const optOutMark = health.telemetryOptOut ? ' · telemetry off' : '';
+    return (
+        <span className={`daemon ${cls}`} title={tooltip}>
+            {label}
+            <span className="dim">
+                {deploymentMode ? ` · ${deploymentMode} mode` : ''}
+                {optOutMark}
+            </span>
+        </span>
+    );
+}
+
+function pillClassForDataplane(
+    state: DataplaneState,
+    deploymentMode: 'local' | 'cloud' | null,
+): string {
+    switch (state) {
+        case 'bound':
+            return 'daemon-running';
+        case 'error':
+            return 'daemon-absent';
+        case 'opted-out':
+            return 'daemon-unknown';
+        case 'offline':
+            // Cloud-mode-and-offline is a misconfiguration the user
+            // should fix (orange warning). Local-mode-and-offline is
+            // expected (grey).
+            return deploymentMode === 'cloud' ? 'daemon-warning' : 'daemon-unknown';
+        case 'unknown':
+            return 'daemon-unknown';
+    }
+}
+
+function labelForDataplane(
+    state: DataplaneState,
+    deploymentMode: 'local' | 'cloud' | null,
+): string {
+    switch (state) {
+        case 'bound':
+            return 'bound';
+        case 'error':
+            return 'error';
+        case 'opted-out':
+            return 'opted out';
+        case 'offline':
+            return deploymentMode === 'cloud' ? 'offline (no key)' : 'offline';
+        case 'unknown':
+            return 'starting…';
+    }
 }
 
 function DiscoveryDetail({ report }: { report: DiscoverReport }) {
