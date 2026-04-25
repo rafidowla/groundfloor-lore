@@ -1,0 +1,133 @@
+:root {
+    color-scheme: light dark;
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI',
+        sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+
+    --bg: #fafafa;
+    --bg-alt: #fff;
+    --fg: #1a1a1a;
+    --fg-dim: #666;
+    --border: #e5e5e5;
+    --accent: #0066cc;
+    --error: #c0392b;
+    --ok: #27ae60;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #1a1a1a;
+        --bg-alt: #242424;
+        --fg: #e5e5e5;
+        --fg-dim: #999;
+        --border: #333;
+        --accent: #4a9eff;
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+}
+
+body {
+    background: var(--bg);
+    color: var(--fg);
+}
+
+.shell-root {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 1.5rem 2rem;
+    gap: 1.5rem;
+}
+
+header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 1rem;
+}
+
+header h1 {
+    margin: 0;
+    font-size: 1.5rem;
+    font-weight: 600;
+}
+
+.tag {
+    font-size: 0.75rem;
+    color: var(--fg-dim);
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    padding: 0.15rem 0.5rem;
+    border-radius: 999px;
+}
+
+.status {
+    flex: 1;
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.25rem;
+}
+
+.status dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 0.5rem 1rem;
+    margin: 0;
+}
+
+.status dt {
+    color: var(--fg-dim);
+    font-weight: 500;
+}
+
+.status dd {
+    margin: 0;
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+}
+
+.daemon-running {
+    color: var(--ok);
+}
+
+.daemon-absent {
+    color: var(--error);
+}
+
+.daemon-unknown {
+    color: var(--fg-dim);
+}
+
+.error {
+    color: var(--error);
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 0.85rem;
+    margin: 0;
+}
+
+footer {
+    color: var(--fg-dim);
+    font-size: 0.8rem;
+}
+
+footer code {
+    background: var(--bg-alt);
+    border: 1px solid var(--border);
+    padding: 0.05rem 0.3rem;
+    border-radius: 3px;
+    font-size: 0.8rem;
+}
