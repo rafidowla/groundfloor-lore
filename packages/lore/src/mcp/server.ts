@@ -37,6 +37,7 @@ import { VerbatimStore, buildVerbatimText } from '../engines/verbatimStore.js';
 import { DataplaneVectorStore } from '../engines/dataplaneVectorStore.js';
 import type { EmbeddingProvider, VectorProvider } from '../providers/types.js';
 import { LocalEmbeddingProvider } from '../providers/localEmbeddingProvider.js';
+import { OpenAICompatEmbeddingProvider } from '../providers/openAICompatEmbeddingProvider.js';
 import { FeedbackStore } from '../engines/feedbackStore.js';
 import { SyncEngine, WriteAheadLog } from '../engines/syncEngine.js';
 import { TsSdkAdapter } from '../engines/tsSdkAdapter.js';
@@ -261,13 +262,45 @@ let graph: LoreGraph = createGraph();
 // orphan reaper's listIds); those run through LocalGraph-coupled code
 // paths today and stay guarded by `graph instanceof LocalGraph` — cloud
 // reconnect lands in a later slice. See docs/dataplane-vector-adapter.md.
-// Q2.2 slice 6a — single EmbeddingProvider injected into both vector
-// stores. Default is the in-process Xenova model; slice 6b will branch
-// here on `deploymentMode === 'cloud'` to instantiate a
-// DataplaneEmbeddingProvider that hits the cloud BGE-M3 service. Slice
-// 7 will swap the local default to multilingual-e5-small. Either way,
-// the vector stores below stay untouched.
+// Q2.2 slice 6a/6b — single EmbeddingProvider injected into both vector
+// stores. Slice 6a established the abstraction; slice 6b adds the
+// remote OpenAI-compatible path so users can run hosted BGE-M3 (or any
+// other model exposed by an OpenAI-compatible server: Ollama, vLLM, HF
+// TEI, OpenAI itself, future Lore Cloud) without changing the vector
+// stores. Slice 7 will rotate the local default model.
+//
+// Selection precedence (highest → lowest):
+//   1. LORE_EMBEDDING_PROVIDER=openai_compat → remote provider
+//      Requires LORE_EMBEDDING_BASE_URL, LORE_EMBEDDING_MODEL,
+//      LORE_EMBEDDING_DIMENSION. LORE_EMBEDDING_API_KEY optional.
+//   2. (default) LocalEmbeddingProvider — Xenova/all-MiniLM-L6-v2.
+//
+// The vector stores below stay untouched regardless of which branch
+// fires.
 function createEmbeddingProvider(): EmbeddingProvider {
+    const providerKind = (process.env['LORE_EMBEDDING_PROVIDER'] ?? '').trim().toLowerCase();
+    if (providerKind === 'openai_compat' || providerKind === 'compat' || providerKind === 'remote') {
+        const baseUrl = process.env['LORE_EMBEDDING_BASE_URL'] ?? '';
+        const modelId = process.env['LORE_EMBEDDING_MODEL'] ?? '';
+        const dimRaw = process.env['LORE_EMBEDDING_DIMENSION'] ?? '';
+        const apiKey = process.env['LORE_EMBEDDING_API_KEY'] ?? undefined;
+        const dimension = Number.parseInt(dimRaw, 10);
+
+        const missing: string[] = [];
+        if (!baseUrl) missing.push('LORE_EMBEDDING_BASE_URL');
+        if (!modelId) missing.push('LORE_EMBEDDING_MODEL');
+        if (!Number.isInteger(dimension) || dimension <= 0) missing.push('LORE_EMBEDDING_DIMENSION');
+        if (missing.length > 0) {
+            throw new Error(
+                `[Lore MCP] LORE_EMBEDDING_PROVIDER=${providerKind} requires: ${missing.join(', ')}`
+            );
+        }
+        console.error(
+            `[Lore MCP] Embedding provider: openai_compat (model=${modelId}, dim=${dimension}, base=${baseUrl})`
+        );
+        return new OpenAICompatEmbeddingProvider({ baseUrl, modelId, dimension, apiKey });
+    }
+    console.error('[Lore MCP] Embedding provider: local (Xenova/all-MiniLM-L6-v2, 384-d)');
     return new LocalEmbeddingProvider();
 }
 const embeddingProvider: EmbeddingProvider = createEmbeddingProvider();
