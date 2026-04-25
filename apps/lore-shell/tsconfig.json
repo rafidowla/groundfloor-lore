@@ -20,6 +20,6 @@
             "@lore/manifest": ["../../packages/lore/src/plugins/manifest.ts"]
         }
     },
-    "include": ["src"],
+    "include": ["src", "../../packages/lore/src/plugins/manifest.ts"],
     "references": []
 }
