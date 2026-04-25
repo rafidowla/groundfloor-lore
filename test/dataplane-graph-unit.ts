@@ -402,6 +402,205 @@ const tests = [
         assert.ok(tenantsSeen.has('tenant-a'));
         assert.ok(tenantsSeen.has('tenant-b'));
     }),
+
+    // ── Q2.2 slice 4 — setPluginSchemaHooks (cloud schema parity) ──
+
+    test('slice-4: plugin schema hook runs on first tenant touch, after core collections', async () => {
+        const { adapter, client } = buildAdapter();
+        client.responses['createCollection'] = {};
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        let hookRan = 0;
+        const seenOrder: string[] = [];
+        // Observe createCollection order by tagging each dispatch.
+        const origCreate = client.createCollection;
+        client.createCollection = (...args: unknown[]) => {
+            const schema = args[1] as { name?: string } | undefined;
+            if (schema?.name) seenOrder.push(schema.name);
+            return origCreate(...args);
+        };
+        adapter.setPluginSchemaHooks([
+            {
+                plugin: 'developer',
+                run: async (ctx) => {
+                    hookRan++;
+                    assert.equal(ctx.tenantId, 'tenant-alpha');
+                    assert.equal(ctx.orgId, 'org-main');
+                    await ctx.ensureCollection({ name: 'developer_code_symbol', fields: [] });
+                },
+            },
+        ]);
+        await adapter.upsertNode({ id: 'x', type: 'note', label: 'L', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' });
+        assert.equal(hookRan, 1, 'plugin hook must run exactly once on first touch');
+        // Core collections first, then plugin collection.
+        assert.deepEqual(seenOrder, ['lore_node', 'lore_edge', 'developer_code_symbol']);
+    }),
+
+    test('slice-4: plugin hook is NOT re-run on subsequent touches for the same tenant', async () => {
+        const { adapter, client } = buildAdapter();
+        client.responses['createCollection'] = {};
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        let hookRan = 0;
+        adapter.setPluginSchemaHooks([
+            {
+                plugin: 'developer',
+                run: async (ctx) => {
+                    hookRan++;
+                    await ctx.ensureCollection({ name: 'developer_code_symbol', fields: [] });
+                },
+            },
+        ]);
+        const node = { id: 'x', type: 'note', label: 'L', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' };
+        await adapter.upsertNode(node);
+        await adapter.upsertNode({ ...node, id: 'y' });
+        await adapter.upsertNode({ ...node, id: 'z' });
+        assert.equal(hookRan, 1, 'hook memoized per tenant — should fire once across 3 touches');
+    }),
+
+    test('slice-4: plugin hook runs per tenant (new tenant = fresh invocation)', async () => {
+        const client = new FakeClient();
+        client.responses['createCollection'] = {};
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        let current = 'tenant-a';
+        const adapter = new DataplaneGraph({
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            client: client as any,
+            tenantProvider: () => current,
+            orgId: 'org-main',
+        });
+        const tenantsSeenByHook: string[] = [];
+        adapter.setPluginSchemaHooks([
+            {
+                plugin: 'developer',
+                run: async (ctx) => {
+                    tenantsSeenByHook.push(ctx.tenantId);
+                },
+            },
+        ]);
+        const node = { id: 'x', type: 'note', label: 'L', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' };
+        await adapter.upsertNode(node);
+        current = 'tenant-b';
+        await adapter.upsertNode({ ...node, id: 'y' });
+        current = 'tenant-a';
+        await adapter.upsertNode({ ...node, id: 'z' });
+        assert.deepEqual(tenantsSeenByHook, ['tenant-a', 'tenant-b']);
+    }),
+
+    test('slice-4: plugin hook error is annotated with plugin name and tenant', async () => {
+        const { adapter, client } = buildAdapter();
+        client.responses['createCollection'] = {};
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        adapter.setPluginSchemaHooks([
+            {
+                plugin: 'developer',
+                run: async () => {
+                    throw new Error('boom from inside plugin');
+                },
+            },
+        ]);
+        let caught: Error | null = null;
+        try {
+            await adapter.upsertNode({ id: 'x', type: 'note', label: 'L', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' });
+        } catch (err) {
+            caught = err as Error;
+        }
+        assert.ok(caught, 'hook error must bubble');
+        assert.match(caught!.message, /Plugin "developer"/);
+        assert.match(caught!.message, /tenant "tenant-alpha"/);
+        assert.match(caught!.message, /boom from inside plugin/);
+    }),
+
+    test('slice-4: failed hook drops cached init so next op retries', async () => {
+        const { adapter, client } = buildAdapter();
+        client.responses['createCollection'] = {};
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        let callNum = 0;
+        adapter.setPluginSchemaHooks([
+            {
+                plugin: 'developer',
+                run: async () => {
+                    callNum++;
+                    if (callNum === 1) throw new Error('transient');
+                    // second call: succeed
+                },
+            },
+        ]);
+        const node = { id: 'x', type: 'note', label: 'L', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' };
+        let threw = false;
+        try { await adapter.upsertNode(node); } catch { threw = true; }
+        assert.ok(threw, 'first touch must throw');
+        // Second call should retry the hook (and succeed).
+        await adapter.upsertNode({ ...node, id: 'y' });
+        assert.equal(callNum, 2, 'hook must be re-invoked after failure');
+    }),
+
+    test('slice-4: empty hook list is valid — no extra createCollection calls', async () => {
+        const { adapter, client } = buildAdapter();
+        client.responses['createCollection'] = {};
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        adapter.setPluginSchemaHooks([]);
+        await adapter.upsertNode({ id: 'x', type: 'note', label: 'L', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' });
+        const createCalls = client.calls.filter((c) => c.method === 'createCollection');
+        // Only core collections (lore_node + lore_edge), no plugin collections.
+        assert.equal(createCalls.length, 2);
+        const names = createCalls.map((c) => (c.args[1] as { name: string }).name).sort();
+        assert.deepEqual(names, ['lore_edge', 'lore_node']);
+    }),
+
+    test('slice-4: multiple plugin hooks all run, in registration order', async () => {
+        const { adapter, client } = buildAdapter();
+        client.responses['createCollection'] = {};
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        const order: string[] = [];
+        adapter.setPluginSchemaHooks([
+            { plugin: 'alpha', run: async () => { order.push('alpha'); } },
+            { plugin: 'beta', run: async () => { order.push('beta'); } },
+            { plugin: 'gamma', run: async () => { order.push('gamma'); } },
+        ]);
+        await adapter.upsertNode({ id: 'x', type: 'note', label: 'L', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' });
+        assert.deepEqual(order, ['alpha', 'beta', 'gamma']);
+    }),
+
+    test('slice-4: setPluginSchemaHooks replacement before first touch is honored', async () => {
+        const { adapter, client } = buildAdapter();
+        client.responses['createCollection'] = {};
+        client.responses['updateByQuery'] = { updated: 0 };
+        client.responses['insert'] = {};
+        let firstRan = false;
+        let secondRan = false;
+        adapter.setPluginSchemaHooks([
+            { plugin: 'first', run: async () => { firstRan = true; } },
+        ]);
+        // Replace before any tenant is touched.
+        adapter.setPluginSchemaHooks([
+            { plugin: 'second', run: async () => { secondRan = true; } },
+        ]);
+        await adapter.upsertNode({ id: 'x', type: 'note', label: 'L', content: '', tags: '', project: '*', ecosystem: '*', metadata: '{}' });
+        assert.equal(firstRan, false, 'replaced hook must not run');
+        assert.equal(secondRan, true, 'replacement hook must run');
+    }),
+
+    test('slice-4: createPluginGraphContext error includes op name + cypher snippet', async () => {
+        const { adapter } = buildAdapter();
+        const ctx = adapter.createPluginGraphContext();
+        const cypher = 'MATCH (n:CodeSymbol) WHERE n.name = "foo" RETURN n.uid, n.filePath LIMIT 10';
+        let caught: (Error & { cypher?: string }) | null = null;
+        try {
+            await ctx.executeQuery(cypher);
+        } catch (err) {
+            caught = err as Error & { cypher?: string };
+        }
+        assert.ok(caught, 'executeQuery must throw');
+        assert.match(caught!.message, /executeQuery refused/);
+        assert.match(caught!.message, /MATCH \(n:CodeSymbol\)/);
+        assert.equal(caught!.cypher, cypher, 'err.cypher must preserve full original cypher');
+    }),
 ];
 
 async function main(): Promise<void> {

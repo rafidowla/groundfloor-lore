@@ -19,6 +19,7 @@ import type {
     AnalyticalProjection,
     AnalyticalProjectionResult,
     ILorePlugin,
+    PluginCloudSchemaContext,
     PluginContext,
     PluginGraphContext,
     PluginIR,
@@ -158,6 +159,36 @@ export class PluginRegistry {
                 await plugin.registerSchema(ctx);
             }
         }
+    }
+
+    /**
+     * Q2.2 slice 4 — collect each active plugin's cloud-schema hook.
+     *
+     * Returns one entry per plugin that implements `registerCloudSchema`,
+     * with the hook pre-bound to the plugin instance so the adapter can
+     * invoke without re-plumbing `this`. Plugins without the hook are
+     * omitted (they have no cloud-mode opinion — that's a valid choice).
+     *
+     * The adapter (DataplaneGraph) iterates this list inside its
+     * per-tenant lazy init. Collection names are the plugin's
+     * responsibility — the registry doesn't verify, but plugins should
+     * follow the `${plugin}_${kind}` convention to avoid collisions in
+     * a shared Dataplane tenant.
+     */
+    collectCloudSchemaHooks(): Array<{
+        plugin: string;
+        run: (ctx: PluginCloudSchemaContext) => Promise<void>;
+    }> {
+        const out: Array<{ plugin: string; run: (ctx: PluginCloudSchemaContext) => Promise<void> }> = [];
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.registerCloudSchema === 'function') {
+                out.push({
+                    plugin: plugin.name,
+                    run: plugin.registerCloudSchema.bind(plugin),
+                });
+            }
+        }
+        return out;
     }
 
     isActive(pluginName: string): boolean {
