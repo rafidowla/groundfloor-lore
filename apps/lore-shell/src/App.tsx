@@ -13,10 +13,11 @@ import {
 } from './manifest';
 import { TableInspector } from './TableInspector';
 import {
-    daemonHealth,
+    discoverDaemon,
     parseDaemonError,
     describeDaemonError,
-    type HealthReport,
+    describeLaunchdState,
+    type DiscoverReport,
 } from './loreClient';
 
 interface ShellInfo {
@@ -24,22 +25,24 @@ interface ShellInfo {
     loreDaemonStatus: 'unknown' | 'absent' | 'running';
 }
 
-type DaemonProbe =
+type DiscoverState =
     | { kind: 'idle' }
-    | { kind: 'probing' }
-    | { kind: 'ok'; report: HealthReport }
+    | { kind: 'discovering' }
+    | { kind: 'ok'; report: DiscoverReport }
     | { kind: 'error'; message: string };
 
 /**
- * Phase 3c — adds the daemon HTTP bridge. The shell can now:
- *   1. Probe the running Lore daemon's `/api/health` (button under the
- *      status section).
- *   2. Render `TableInspector` panels by fetching `/api/topology` and
- *      filtering to the entity type the manifest declares.
+ * Phase 3d — adds launchd-aware daemon discovery. On boot the shell asks
+ * Rust to:
+ *   1. Locate the daemon's launchd plist (macOS).
+ *   2. Read launchctl state (loaded / not loaded / running with PID).
+ *   3. Probe the HTTP health endpoint.
  *
- * Daemon discovery + connection (sibling launchd service) lands in 3d;
- * for now the daemon must already be running on `LORE_PORT` (3847 by
- * default) when the shell starts.
+ * The combined report lets the UI explain *why* the daemon is or isn't
+ * reachable — and tell the user the exact `launchctl load` command if
+ * the plist is present but not loaded. The shell is still strictly
+ * read-only against launchd; we never start, stop, or signal the
+ * daemon. See `docs/SHELL_LIFECYCLE.md` for the contract.
  */
 export function App() {
     const [info, setInfo] = useState<ShellInfo | null>(null);
@@ -49,18 +52,21 @@ export function App() {
     const [loadError, setLoadError] = useState<string | null>(null);
     const [loading, setLoading] = useState(false);
 
-    const [probe, setProbe] = useState<DaemonProbe>({ kind: 'idle' });
+    const [probe, setProbe] = useState<DiscoverState>({ kind: 'idle' });
 
     useEffect(() => {
         invoke<ShellInfo>('shell_info')
             .then(setInfo)
             .catch((e) => setInfoError(String(e)));
+        // Run discovery on boot — no manual button needed in 3d.
+        runDiscovery();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    async function onProbeClicked() {
-        setProbe({ kind: 'probing' });
+    async function runDiscovery() {
+        setProbe({ kind: 'discovering' });
         try {
-            const report = await daemonHealth();
+            const report = await discoverDaemon();
             setProbe({ kind: 'ok', report });
         } catch (e) {
             const parsed = parseDaemonError(e);
@@ -99,7 +105,7 @@ export function App() {
         <main className="shell-root">
             <header>
                 <h1>Lore</h1>
-                <span className="tag">Phase 3c — daemon bridge + table inspector</span>
+                <span className="tag">Phase 3d — launchd discovery</span>
             </header>
 
             <section className="status">
@@ -115,12 +121,15 @@ export function App() {
                             <button
                                 type="button"
                                 className="probe"
-                                onClick={onProbeClicked}
-                                disabled={probe.kind === 'probing'}
+                                onClick={runDiscovery}
+                                disabled={probe.kind === 'discovering'}
                             >
-                                {probe.kind === 'probing' ? 'Probing…' : 'Probe'}
+                                {probe.kind === 'discovering' ? 'Discovering…' : 'Re-probe'}
                             </button>
                         </dd>
+                        {probe.kind === 'ok' && (
+                            <DiscoveryDetail report={probe.report} />
+                        )}
                     </dl>
                 ) : (
                     <p>Booting…</p>
@@ -139,13 +148,22 @@ export function App() {
                     )}
                 </div>
                 {loadError && <p className="error">{loadError}</p>}
-                {loaded && <ManifestView loaded={loaded} daemonReachable={probe.kind === 'ok'} />}
+                {loaded && (
+                    <ManifestView
+                        loaded={loaded}
+                        daemonReachable={
+                            probe.kind === 'ok' && probe.report.http_health != null
+                        }
+                    />
+                )}
             </section>
 
             <footer>
                 <p>
-                    Daemon discovery + connect (sibling launchd service) lands
-                    in 3d. See <code>docs/plugin-manifest-spec.md</code>.
+                    Shell ↔ daemon is sibling, not parent — closing this window
+                    never kills the daemon. External MCP clients (Claude Code,
+                    Cursor, Antigravity, ChatGPT local) keep working.
+                    See <code>docs/SHELL_LIFECYCLE.md</code>.
                 </p>
             </footer>
         </main>
@@ -156,32 +174,83 @@ function DaemonStatusPill({
     probe,
     fallback,
 }: {
-    probe: DaemonProbe;
+    probe: DiscoverState;
     fallback: 'unknown' | 'absent' | 'running';
 }) {
     if (probe.kind === 'ok') {
+        const healthy = probe.report.http_health != null;
+        const launchdRunning = probe.report.launchd.kind === 'Running';
+        if (healthy && launchdRunning) {
+            const pid =
+                probe.report.launchd.kind === 'Running'
+                    ? probe.report.launchd.pid
+                    : null;
+            const port = probe.report.http_health!.port;
+            return (
+                <span
+                    className="daemon daemon-running"
+                    title={`launchd-managed · PID ${pid} · port ${port}`}
+                >
+                    running · PID {pid} · port {port}
+                </span>
+            );
+        }
+        if (healthy && !launchdRunning) {
+            return (
+                <span
+                    className="daemon daemon-warning"
+                    title="HTTP responds but no launchd job — daemon was started manually."
+                >
+                    running (manual)
+                </span>
+            );
+        }
         return (
             <span
-                className="daemon daemon-running"
-                title={`port ${probe.report.port}${
-                    probe.report.version ? ` · v${probe.report.version}` : ''
-                }`}
+                className="daemon daemon-absent"
+                title={describeLaunchdState(probe.report.launchd)}
             >
-                running · port {probe.report.port}
+                unreachable
             </span>
         );
     }
     if (probe.kind === 'error') {
         return (
             <span className="daemon daemon-absent" title={probe.message}>
-                unreachable
+                error
             </span>
         );
     }
-    if (probe.kind === 'probing') {
-        return <span className="daemon daemon-unknown">probing…</span>;
+    if (probe.kind === 'discovering') {
+        return <span className="daemon daemon-unknown">discovering…</span>;
     }
     return <span className={`daemon daemon-${fallback}`}>{fallback}</span>;
+}
+
+function DiscoveryDetail({ report }: { report: DiscoverReport }) {
+    return (
+        <>
+            <dt>launchd</dt>
+            <dd>
+                <code>{report.launchd.kind}</code>
+                <span className="dim"> · {describeLaunchdState(report.launchd)}</span>
+            </dd>
+            {report.launchd.kind === 'NotLoaded' && (
+                <dd className="hint">
+                    Run in a Terminal:{' '}
+                    <code>launchctl load {report.launchd.plist_path}</code>
+                </dd>
+            )}
+            {report.http_error && (
+                <>
+                    <dt>HTTP</dt>
+                    <dd className="dim">
+                        {describeDaemonError(report.http_error)}
+                    </dd>
+                </>
+            )}
+        </>
+    );
 }
 
 function ManifestView({

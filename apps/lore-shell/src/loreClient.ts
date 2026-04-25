@@ -75,6 +75,51 @@ export async function daemonTopology(limit = 5000): Promise<TopologyResponse> {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Phase 3d — discovery (launchd state + HTTP probe in one call).
+// ────────────────────────────────────────────────────────────────────────
+
+export type LaunchdState =
+    | { kind: 'NotApplicable' }
+    | { kind: 'PlistMissing' }
+    | { kind: 'NotLoaded'; plist_path: string }
+    | { kind: 'Running'; plist_path: string; pid: number }
+    | { kind: 'LoadedNotRunning'; plist_path: string }
+    | { kind: 'UnknownError'; message: string };
+
+export interface DiscoverReport {
+    platform: 'macos' | 'linux' | 'windows' | 'other';
+    launchd: LaunchdState;
+    http_health: HealthReport | null;
+    http_error: DaemonError | null;
+}
+
+export async function discoverDaemon(): Promise<DiscoverReport> {
+    return await invoke<DiscoverReport>('discover_daemon');
+}
+
+/**
+ * Human-readable description of a `LaunchdState`. Use for tooltips /
+ * inline hints. The kind itself drives styling (running / warning /
+ * error pill colour).
+ */
+export function describeLaunchdState(s: LaunchdState): string {
+    switch (s.kind) {
+        case 'NotApplicable':
+            return 'launchd is macOS-only. On this platform the daemon must be started by another mechanism (systemd / sc.exe / manual).';
+        case 'PlistMissing':
+            return 'No com.groundfloor.lore.plist found in standard LaunchAgents paths. Install the daemon via its installer to register the launchd job.';
+        case 'NotLoaded':
+            return `Plist exists at ${s.plist_path} but is not loaded. Run \`launchctl load ${s.plist_path}\` to start the daemon.`;
+        case 'Running':
+            return `Daemon running under launchd · PID ${s.pid} · plist ${s.plist_path}`;
+        case 'LoadedNotRunning':
+            return `Job loaded (plist ${s.plist_path}) but no PID — between respawns or KeepAlive=false.`;
+        case 'UnknownError':
+            return `launchctl error: ${s.message}`;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Error helpers
 // ────────────────────────────────────────────────────────────────────────
 

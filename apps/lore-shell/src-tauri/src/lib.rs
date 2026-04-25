@@ -1,16 +1,18 @@
 //! Lore Shell — Tauri 2 host process.
 //!
 //! Phase 3a was the scaffold. Phase 3b added the manifest loader IPC
-//! command. Phase 3c adds the HTTP bridge to the running Lore daemon
-//! (health probe + topology fetch). Daemon discovery + connection
-//! (revised — sibling launchd service, not shell-spawned child) lands
-//! in 3d.
+//! command. Phase 3c added the HTTP bridge to the running Lore daemon
+//! (health probe + topology fetch). Phase 3d adds launchd-aware
+//! discovery so the shell can tell the user *why* the daemon is
+//! reachable or not — see `discovery.rs` for the sibling-not-child
+//! lifecycle contract.
 
 use std::path::PathBuf;
 
 use serde::Serialize;
 
 mod daemon;
+mod discovery;
 mod manifest;
 
 /// Shell metadata reported to the frontend on boot.
@@ -75,6 +77,16 @@ async fn daemon_topology(limit: u32) -> Result<daemon::TopologyResponse, daemon:
     daemon::topology(limit).await
 }
 
+/// Phase 3d — read-only daemon discovery. Reports launchd job state
+/// (macOS only today) PLUS HTTP health in a single payload so the UI
+/// can render an actionable status (e.g. "plist found but not loaded —
+/// run `launchctl load`"). This is read-only by design; the shell
+/// never starts, stops, or kills the daemon. See `discovery.rs`.
+#[tauri::command]
+async fn discover_daemon() -> discovery::DiscoverReport {
+    discovery::discover().await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -85,7 +97,8 @@ pub fn run() {
             shell_info,
             load_manifest,
             daemon_health,
-            daemon_topology
+            daemon_topology,
+            discover_daemon
         ])
         .run(tauri::generate_context!())
         .expect("error while running lore-shell tauri application");

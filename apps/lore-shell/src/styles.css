@@ -112,6 +112,17 @@ header h1 {
     color: var(--fg-dim);
 }
 
+.daemon-warning {
+    color: #c08020;
+}
+
+.status .hint {
+    grid-column: 1 / -1;
+    font-size: 0.8rem;
+    color: var(--fg-dim);
+    font-style: italic;
+}
+
 .error {
     color: var(--error);
     font-family: 'SF Mono', Menlo, Consolas, monospace;
