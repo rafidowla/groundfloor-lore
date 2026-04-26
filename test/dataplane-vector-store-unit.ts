@@ -61,11 +61,18 @@ class FakeClient {
  * actually reads.
  */
 function fakeEmbedder(fn: (t: string) => Promise<number[]>) {
+    // The asymmetric-prefix follow-up split embed() into embedQuery /
+    // embedDocument. For tests we pass through the same function for
+    // all three so the adapter sees a stable per-input vector — the
+    // adapter is responsible for picking which method to call, not for
+    // synthesising prefixes.
     return {
         modelId: 'fake/test',
         dimension: 4,
         initialize: async () => {},
         embed: fn,
+        embedQuery: fn,
+        embedDocument: fn,
     };
 }
 

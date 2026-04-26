@@ -828,7 +828,18 @@ mcpServer.tool(
                 searchResults = await graph.search(topic, 10, detectedScope.project, detectedScope.ecosystem);
             } else {
                 for (const id of seedNodeIds) {
-                    const node = await graph.getNode(id);
+                    // Verbatim ids are namespaced with a prefix
+                    // ("lore:<rawId>" for core LoreNodes, plugin-prefixed
+                    // for plugin contributions). graph.getNode expects
+                    // the raw id — strip the lore: prefix here. Plugin-
+                    // prefixed ids (file:, symbol:, …) are not core-
+                    // addressable; they're skipped because graph.getNode
+                    // returns null for them, which matches the pre-fix
+                    // behaviour for plugin nodes. The /api/node handler
+                    // already does this strip; recall was missing it
+                    // and silently produced empty results.
+                    const stripped = id.startsWith('lore:') ? id.slice(5) : id;
+                    const node = await graph.getNode(stripped);
                     if (node) searchResults.push(node);
                 }
             }

@@ -205,7 +205,7 @@ export class DataplaneVectorStore implements VectorProvider {
         try {
             const tenantId = this.tenantProvider();
             await this.ensureTenantInitialized(tenantId);
-            const vector = await this.embeddingProvider.embed(doc.text);
+            const vector = await this.embeddingProvider.embedDocument(doc.text);
             // security_scopes is a string[] in the metadata contract.
             // pgvector / Arango vector connectors vary in how they store
             // arrays; we join on a separator for portability and split
@@ -251,7 +251,7 @@ export class DataplaneVectorStore implements VectorProvider {
         try {
             const tenantId = this.tenantProvider();
             await this.ensureTenantInitialized(tenantId);
-            const vector = await this.embeddingProvider.embed(query);
+            const vector = await this.embeddingProvider.embedQuery(query);
             const metadataFilter: Record<string, unknown> = { org_id: this.orgId };
             if (filter) {
                 for (const [k, v] of Object.entries(filter)) {
