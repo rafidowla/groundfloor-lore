@@ -125,6 +125,23 @@ export class OpenAICompatEmbeddingProvider implements EmbeddingProvider {
         // Intentionally empty.
     }
 
+    /**
+     * Hosted OpenAI-compatible embeddings endpoints (OpenAI, Ollama,
+     * vLLM, HF TEI, lore-cloud) are symmetric from the client's view —
+     * the server handles any model-specific prefixing internally if
+     * the model needs it. So query/document/embed all produce the
+     * same vector for the same text. Provide both interface methods
+     * as passthrough delegations to keep the EmbeddingProvider
+     * surface consistent.
+     */
+    async embedQuery(text: string): Promise<number[]> {
+        return this.embed(text);
+    }
+
+    async embedDocument(text: string): Promise<number[]> {
+        return this.embed(text);
+    }
+
     async embed(text: string): Promise<number[]> {
         const body = JSON.stringify({
             input: [text],

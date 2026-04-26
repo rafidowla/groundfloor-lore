@@ -114,20 +114,67 @@ export interface LocalEmbeddingProviderOptions {
     dimension?: number;
 }
 
+/**
+ * Detect e5-family models. The intfloat/e5 family (and Xenova mirrors)
+ * are *asymmetric*: queries and documents are embedded in different
+ * sub-regions of the space and cosine similarity only works when the
+ * caller prepends "query: " or "passage: " before tokenizing. Without
+ * the prefixes the model still produces 384-d vectors, but recall
+ * scores collapse to near-random.
+ *
+ * This regex is intentionally permissive — matches "e5-small",
+ * "e5-large", "multilingual-e5-small", "intfloat/e5-base-v2", etc. —
+ * because every e5 release ships the same prefix requirement.
+ *
+ * Other asymmetric models (BGE-large-en-v1.5 wants "Represent this
+ * sentence for searching relevant passages: " on queries only) need
+ * their own detection branch when we add them. BGE-M3 doesn't need
+ * prefixes — it routes asymmetry internally.
+ */
+function isE5Family(modelId: string): boolean {
+    return /(^|[/\-_])e5([\-_]|$)/i.test(modelId);
+}
+
 export class LocalEmbeddingProvider implements EmbeddingProvider {
     public readonly modelId: string;
     public readonly dimension: number;
+    /** Cached prefix mode so we don't re-run the regex on every embed. */
+    private readonly asymmetric: boolean;
 
     constructor(opts: LocalEmbeddingProviderOptions = {}) {
         this.modelId = opts.modelId ?? DEFAULT_LOCAL_MODEL_ID;
         this.dimension = opts.dimension ?? DEFAULT_LOCAL_MODEL_DIM;
+        this.asymmetric = isE5Family(this.modelId);
     }
 
     async initialize(): Promise<void> {
         await loadPipeline(this.modelId);
     }
 
+    /**
+     * Generic embed. For asymmetric (e5) models we treat this as the
+     * document-side path — that's the conservative choice because all
+     * stored data goes through `store()` → `embedDocument()` and any
+     * remaining caller of plain `embed()` is more likely persisting
+     * than querying. Direct callers that want the query-side variant
+     * must use `embedQuery()` explicitly.
+     */
     async embed(text: string): Promise<number[]> {
+        return this.asymmetric ? this.embedDocument(text) : this.runEmbed(text);
+    }
+
+    async embedQuery(text: string): Promise<number[]> {
+        if (this.asymmetric) return this.runEmbed(`query: ${text}`);
+        return this.runEmbed(text);
+    }
+
+    async embedDocument(text: string): Promise<number[]> {
+        if (this.asymmetric) return this.runEmbed(`passage: ${text}`);
+        return this.runEmbed(text);
+    }
+
+    /** Inner: tokenize, mean-pool, L2-normalize. */
+    private async runEmbed(text: string): Promise<number[]> {
         const embedder = await loadPipeline(this.modelId);
         const output = await embedder(text, { pooling: 'mean', normalize: true });
         return Array.from(output.data) as number[];

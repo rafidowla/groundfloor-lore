@@ -174,8 +174,37 @@ export interface EmbeddingProvider {
      * Vector stores call this from their own `initialize()`.
      */
     initialize(): Promise<void>;
-    /** Encode a single text into an L2-normalized vector. */
+    /**
+     * Generic embed — used for symmetric models (MiniLM, BGE-M3) where
+     * queries and documents share an embedding space without prefixes.
+     * For asymmetric models (e5 family) call sites should prefer
+     * `embedQuery` / `embedDocument` so the implementation can prepend
+     * the model-required `query: ` / `passage: ` prefix.
+     *
+     * Default behaviour: an implementation may treat `embed()` as a
+     * synonym for `embedDocument()` — that's the safer choice for an
+     * asymmetric model where the doc-side prefix is what's stored.
+     */
     embed(text: string): Promise<number[]>;
+    /**
+     * Encode a query string into a vector. For asymmetric models like
+     * `intfloat/multilingual-e5-small`, prepends "query: " before
+     * embedding (the e5 model card requires this for retrieval to
+     * work — without it cosine similarity scores collapse and recall
+     * returns nothing). For symmetric models, equivalent to `embed()`.
+     */
+    embedQuery(text: string): Promise<number[]>;
+    /**
+     * Encode a document/passage string into a vector. For asymmetric
+     * models, prepends "passage: " before embedding. For symmetric
+     * models, equivalent to `embed()`.
+     *
+     * VerbatimStore.store() and DataplaneVectorStore.store() call this;
+     * VerbatimStore.search() and DataplaneVectorStore.search() call
+     * `embedQuery`. The asymmetric prefix lives in the provider, not
+     * in the storage layer, so storage stays model-agnostic.
+     */
+    embedDocument(text: string): Promise<number[]>;
 }
 
 /**

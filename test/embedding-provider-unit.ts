@@ -56,21 +56,50 @@ class FakeClient {
     count = (...args: unknown[]) => this.dispatch('count', args);
 }
 
-function fakeProvider(opts: { dimension?: number; modelId?: string } = {}): EmbeddingProvider & { initCalls: number; embedCalls: number } {
+interface FakeProviderHandle {
+    initCalls: number;
+    /** Total embed-side calls (embed + embedQuery + embedDocument). */
+    embedCalls: number;
+    queryCalls: number;
+    documentCalls: number;
+    /** Last raw text seen by the inner embed function (post-prefix). */
+    lastText: string | null;
+}
+
+function fakeProvider(opts: { dimension?: number; modelId?: string } = {}): EmbeddingProvider & FakeProviderHandle {
     let initCalls = 0;
     let embedCalls = 0;
+    let queryCalls = 0;
+    let documentCalls = 0;
+    let lastText: string | null = null;
     const p = {
         modelId: opts.modelId ?? 'fake/test',
         dimension: opts.dimension ?? 4,
         async initialize() { initCalls++; },
-        async embed(_text: string) {
+        async embed(text: string) {
             embedCalls++;
+            lastText = text;
+            return new Array(p.dimension).fill(0.5);
+        },
+        async embedQuery(text: string) {
+            queryCalls++;
+            embedCalls++;
+            lastText = text;
+            return new Array(p.dimension).fill(0.5);
+        },
+        async embedDocument(text: string) {
+            documentCalls++;
+            embedCalls++;
+            lastText = text;
             return new Array(p.dimension).fill(0.5);
         },
     };
     Object.defineProperty(p, 'initCalls', { get: () => initCalls });
     Object.defineProperty(p, 'embedCalls', { get: () => embedCalls });
-    return p as EmbeddingProvider & { initCalls: number; embedCalls: number };
+    Object.defineProperty(p, 'queryCalls', { get: () => queryCalls });
+    Object.defineProperty(p, 'documentCalls', { get: () => documentCalls });
+    Object.defineProperty(p, 'lastText', { get: () => lastText });
+    return p as EmbeddingProvider & FakeProviderHandle;
 }
 
 const tests: Array<() => Promise<void>> = [
@@ -107,11 +136,15 @@ const tests: Array<() => Promise<void>> = [
         });
         await adapter.store({ id: 'n1', text: 'doc', metadata: {} });
         await adapter.search('query');
-        assert.equal(provider.embedCalls, 2, 'embed() is called once per store + once per search');
+        // Post-fix: store() goes through embedDocument, search() through
+        // embedQuery — neither hits the generic embed() any more.
+        assert.equal(provider.embedCalls, 2, 'two total embed-side calls (one store + one search)');
+        assert.equal(provider.documentCalls, 1, 'store() routes to embedDocument()');
+        assert.equal(provider.queryCalls, 1, 'search() routes to embedQuery()');
         const insert = client.calls.find((c) => c.method === 'updateByQuery')!;
         const row = insert.args[3] as { vector: number[] };
         assert.deepEqual(row.vector, [0.5, 0.5, 0.5, 0.5], 'provider vector reaches the upsert payload');
-        console.log('  ok  store + search route through EmbeddingProvider.embed');
+        console.log('  ok  store + search route through embedDocument / embedQuery');
     },
 
     async () => {
@@ -169,6 +202,94 @@ const tests: Array<() => Promise<void>> = [
         assert.equal(minilm.dimension, 384);
 
         console.log('  ok  LocalEmbeddingProvider constants (e5-small default + MiniLM opt-in, both 384-d)');
+    },
+
+    async () => {
+        // Test: e5 detection routes through asymmetric prefix path.
+        // We verify the BEHAVIOUR (which method is called, what prefix
+        // gets prepended) without actually loading a model — by spying
+        // on a subclass that overrides the inner runEmbed.
+        //
+        // Without prefixes, e5 retrieval scores collapse below the
+        // similarity threshold and recall returns nothing. This test
+        // locks the contract that prevents that regression.
+        const seen: Array<{ method: string; text: string }> = [];
+        class SpyLocal extends LocalEmbeddingProvider {
+            async initialize(): Promise<void> { /* no-op */ }
+            // Intercept the inner embed by overriding all three public
+            // methods to record + return a fake vector.
+            async embed(text: string): Promise<number[]> {
+                seen.push({ method: 'embed', text });
+                return super.embed(text).catch(() => new Array(this.dimension).fill(0));
+            }
+        }
+        // Asymmetric (e5) provider — embed() should defer to embedDocument
+        // (passage prefix), embedQuery should add "query: ".
+        const e5 = new SpyLocal({ modelId: 'Xenova/multilingual-e5-small', dimension: 384 });
+        seen.length = 0;
+        // Force the prefixed dispatch without invoking the real HF model
+        // by stubbing runEmbed via a private-property override. We
+        // exercise the public API and verify the text that WOULD reach
+        // tokenization carries the prefix.
+        const recorded: string[] = [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (e5 as any).runEmbed = async (text: string) => {
+            recorded.push(text);
+            return new Array(384).fill(0.1);
+        };
+        await e5.embedQuery('hello world');
+        await e5.embedDocument('hello world');
+        await e5.embed('hello world');
+        assert.equal(recorded.length, 3, 'three calls reached the inner embed path');
+        assert.equal(recorded[0], 'query: hello world', 'embedQuery prepends "query: " for e5');
+        assert.equal(recorded[1], 'passage: hello world', 'embedDocument prepends "passage: " for e5');
+        assert.equal(recorded[2], 'passage: hello world', 'embed() defers to document path for asymmetric models');
+
+        // Symmetric (MiniLM) provider — all three methods should pass
+        // text through unchanged.
+        const minilm = new SpyLocal({ modelId: 'Xenova/all-MiniLM-L6-v2', dimension: 384 });
+        const recordedSym: string[] = [];
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (minilm as any).runEmbed = async (text: string) => {
+            recordedSym.push(text);
+            return new Array(384).fill(0.1);
+        };
+        await minilm.embedQuery('hello world');
+        await minilm.embedDocument('hello world');
+        await minilm.embed('hello world');
+        assert.deepEqual(recordedSym, ['hello world', 'hello world', 'hello world'],
+            'symmetric models pass text through unchanged for all three methods');
+        console.log('  ok  e5-family asymmetric prefixing + MiniLM symmetric passthrough');
+    },
+
+    async () => {
+        // Test: regex catches the e5 variants we care about and doesn't
+        // false-positive on neighbours. Black-box via constructor — the
+        // regex isn't exported and shouldn't need to be.
+        const cases: Array<[string, 'asymmetric' | 'symmetric']> = [
+            ['Xenova/multilingual-e5-small', 'asymmetric'],
+            ['Xenova/multilingual-e5-large', 'asymmetric'],
+            ['intfloat/e5-small-v2', 'asymmetric'],
+            ['intfloat/e5-base-v2', 'asymmetric'],
+            ['Xenova/all-MiniLM-L6-v2', 'symmetric'],
+            ['BAAI/bge-m3', 'symmetric'],
+            ['BAAI/bge-large-en-v1.5', 'symmetric'],   // BGE has its own prefix scheme; out of scope here.
+            ['some/model-with-e5-in-name', 'asymmetric'],  // permissive — fine for telemetry-id case.
+            ['some/teleporter5', 'symmetric'],  // "5" alone shouldn't trigger; no e5 boundary.
+        ];
+        for (const [modelId, expected] of cases) {
+            const p = new LocalEmbeddingProvider({ modelId, dimension: 384 });
+            const recorded: string[] = [];
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            (p as any).runEmbed = async (text: string) => {
+                recorded.push(text);
+                return new Array(384).fill(0.1);
+            };
+            await p.embedQuery('x');
+            const got = recorded[0] === 'query: x' ? 'asymmetric' : 'symmetric';
+            assert.equal(got, expected, `${modelId} should be ${expected}, got ${got}`);
+        }
+        console.log('  ok  e5 detection regex covers known variants without false positives');
     },
 ];
 

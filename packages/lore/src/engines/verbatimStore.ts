@@ -143,7 +143,11 @@ export class VerbatimStore implements VectorProvider {
                 throw new Error('Store not initialized');
             }
 
-            const vector = await this.embeddingProvider.embed(doc.text);
+            // Asymmetric models (e5 family) expect documents to be
+            // prefixed "passage: " before tokenization. embedDocument
+            // adds the prefix when the provider needs it; for
+            // symmetric models (MiniLM, BGE-M3) it's a passthrough.
+            const vector = await this.embeddingProvider.embedDocument(doc.text);
 
             const row = {
                 vector,
@@ -187,7 +191,8 @@ export class VerbatimStore implements VectorProvider {
                 return [];
             }
 
-            const vector = await this.embeddingProvider.embed(query);
+            // Query side of the asymmetric pair: e5 needs "query: ".
+            const vector = await this.embeddingProvider.embedQuery(query);
 
             let queryBuilder = this.table.vectorSearch(vector as number[]).limit(limit);
             if (filter) {
