@@ -1,66 +1,79 @@
 # DEF Local-First — Architecture Decision
 
-> **Decision (2026-04):** DEF will NOT carry its own persistent
-> storage layer. It uses Lore as its memory substrate via MCP, and
-> embedded SQLite only for transient runtime state. SurrealDB drops
-> from "required" to "optional cloud backend" — parallel to the
-> Dataplane in Lore.
+> **Decision (2026-04, updated 2026-04-26):** DEF carries no persistent
+> storage of its own. Durable knowledge flows through **Lore via MCP**.
+> Cloud storage flows through **Dataplane** (via the groundfloor-python
+> SDK). **SurrealDB has been removed** — it is not the cloud backend
+> and not a fallback. Transient runtime state is Redis (db 1, shared
+> namespace with Dataplane's Redis) in cloud mode and embedded SQLite
+> in local mode.
+
+> **2026-04-26 update.** This document originally said "SurrealDB stays
+> available as the cloud backend." That was the Phase 5a plan. Phase 5b
+> shipped in DEF and went further: SurrealDB is gone from the active
+> path entirely. Dataplane is the only cloud backend. The text below
+> has been corrected to match the code in `digital-employee-framework`
+> as of 2026-04-26 (see DEF's `CHANGELOG.md` Phase 5b entry).
 
 ## The problem
 
-DEF (Decision-Execution Framework — the agent runtime that pairs with
-Lore as Primitive #2) currently requires SurrealDB for memory,
+DEF (Digital Employee Framework — the agent runtime that pairs with
+Lore as Primitive #2) originally required SurrealDB for memory,
 agent-run history, and scheduled-task state. SurrealDB is a fine
 production database, but it carries a 100MB-class native binary, a
 network port, and an ops surface (auth, schema migrations, backups)
-that is incompatible with a "build your second brain locally" product
-shape.
+that is incompatible with a "build your second brain locally"
+product shape — and it duplicated storage Lore already provided.
 
 The Lore product is **local-first by default, cloud-optional**:
 
 | Component | Local | Cloud (optional) |
 |-----------|-------|-------------------|
-| Lore graph | Kùzu (embedded)         | Dataplane (Postgres + Qdrant) |
-| Lore vectors | LanceDB (embedded)    | Dataplane (Qdrant)            |
-| DEF memory | (currently SurrealDB)   | (currently SurrealDB)         |
-| DEF agent state | (currently SurrealDB) | (currently SurrealDB)      |
+| Lore graph        | Kùzu (embedded)         | Dataplane (Postgres + Qdrant) |
+| Lore vectors      | LanceDB (embedded)      | Dataplane (Qdrant)            |
+| DEF durable memory| Lore via MCP (local)    | Lore via MCP → Dataplane      |
+| DEF agent state   | Lore via MCP (local)    | Dataplane (direct, via SDK)   |
+| DEF transient state| SQLite (single file)   | Redis db 1 (shared with Dataplane) |
 
-DEF is the only primitive that pulls a native server into the local
-install. Either we port it to embedded storage, or we delete its
-persistent layer entirely. This document picks the second option.
+DEF was the only primitive that pulled a native server into the local
+install. Phase 5b deleted that requirement entirely.
 
 ## The decision — DEF has no persistent storage of its own
 
-DEF moves to a "stateless agent runtime" shape:
+DEF runs as a "stateless agent runtime":
 
 1. **All durable knowledge** (decisions, plans, conversation memory)
-   stored in Lore via MCP. Lore is already the memory substrate; DEF
-   was duplicating it.
+   is written to Lore via MCP. Lore is the memory substrate; DEF was
+   duplicating it.
 2. **All transient runtime state** (in-flight conversation, current
-   tool call, intermediate results) lives in **embedded SQLite** —
-   single file, no server, no port, no migrations crisis when the
-   user upgrades.
+   tool call, intermediate results) lives in **embedded SQLite** in
+   local mode and **Redis db 1** in cloud mode. Both are scoped to
+   the DEF process — losing them means losing the in-flight turn,
+   nothing more.
 3. **Scheduled tasks** persist as Lore nodes (`type: 'scheduled-task'`
    with cron + agent fields), so they survive process restarts via
-   Lore, not DEF.
+   Lore, not DEF. Implementation: `app/adapters/lore/scheduled_task_store.py`.
 4. **Agent-run history** is a stream of Lore nodes (`type: 'agent-run'`
    with `started_at`, `agent`, `tools_called`, `outcome`). Lore's
    timeline inspector renders them; DEF's UI queries them via MCP.
-5. **SurrealDB stays available as the cloud backend** (parallel to
-   Dataplane), but is no longer the local default. Cloud-mode users
-   get team-shared agent state through SurrealDB; local-mode users
-   get the same data from Lore.
+   Implementation: `app/adapters/lore/lore_memory_adapter.py`.
+5. **SurrealDB has been removed.** It is not the cloud backend.
+   Cloud-mode users get team-shared agent state through Dataplane,
+   not SurrealDB. The Python `surrealdb` package is still in
+   `pyproject.toml` as a vestigial dependency; the active code path
+   raises `NotImplementedError` if anyone selects it
+   (`app/core/dependencies.py`). Cleanup of the unused dep is
+   tracked separately.
 
 ### What this trades
 
 We give up:
 - DEF-specific schema features (live queries, change streams, native
-  RPC) for the local case. These exist for cloud-mode if a workspace
-  needs them.
+  RPC) that SurrealDB used to provide. None proved load-bearing.
 - A separate transactional boundary between DEF and Lore. Now any
-  agent-run write goes through `lore.store_node` + an MCP roundtrip
-  — slightly slower than a direct DB call but bounded by the same
-  IPC the rest of the local stack uses.
+  agent-run write goes through `lore.store_node` plus an MCP
+  roundtrip — slightly slower than a direct DB call but bounded by
+  the same IPC the rest of the local stack uses.
 
 We gain:
 - Zero new processes / ports / native binaries on local install.
@@ -70,11 +83,13 @@ We gain:
   conversation as memory — without duplicate ingest pipelines.
 - Cloud and local diverge only at the storage tier, not the API
   surface.
+- One fewer dependency in cloud deployments (no SurrealDB cluster,
+  no SurrealDB ops).
 
 ### What this does NOT change
 
 - DEF still has its own runtime (model providers, tool calling,
-  agent loop). Refactor scope is **storage only**.
+  agent loop). Refactor scope was **storage only**.
 - The plugin manifest spec stays as-is. Plugins still contribute
   `def.agents` and `def.scheduledTasks` opaquely; DEF still owns
   the schema for those.
@@ -95,12 +110,18 @@ We gain:
         │   Lore daemon     │    │  DEF runtime    │
         │ (launchd/systemd) │    │ (launchd/sysd)  │
         ├───────────────────┤    ├─────────────────┤
-        │  Kùzu (graph)     │    │ SQLite (transient) │
-        │  LanceDB (vectors)│    │  ↕ MCP client   │
-        └─────┬─────────────┘    └─────┬───────────┘
-              │ MCP server               │
-              └──────────────────────────┘
+        │ Local mode:       │    │ Local: SQLite   │
+        │  Kùzu (graph)     │    │ Cloud: Redis    │
+        │  LanceDB (vectors)│    │ (transient only)│
+        │ Cloud mode:       │    │   ↕ MCP client  │
+        │  Dataplane        │    │   to Lore       │
+        │  Dataplane (qdrant)│    │   ↕ Dataplane   │
+        └─────┬─────────────┘    │   SDK direct    │
+              │ MCP server        └─────┬───────────┘
+              └────────────────────────┘
                   DEF reads/writes durable data via Lore's MCP
+                  DEF writes its own vector/relational data
+                  via the groundfloor-python SDK to Dataplane
 ```
 
 Both daemons are sibling launchd services (per
@@ -111,30 +132,33 @@ the shell never kills either.
 
 | Action                         | Where it goes |
 |--------------------------------|---------------|
-| User starts a conversation     | DEF SQLite (transient) |
-| Agent calls a tool             | DEF SQLite (in-flight)  |
-| Conversation completes         | DEF emits `agent-run` to Lore via `store_node`; SQLite row deleted |
+| User starts a conversation     | DEF transient store (SQLite locally, Redis db 1 in cloud) |
+| Agent calls a tool             | Same transient store, in-flight |
+| Conversation completes         | DEF emits `agent-run` to Lore via `store_node`; transient row deleted |
 | User schedules a recurring task | DEF emits `scheduled-task` node to Lore; cron loop in DEF reads from Lore |
 | User searches "what did we decide about X" | Lore's `recall` returns both human-stored decisions AND past agent-run summaries — same query, same surface |
-| User restarts the machine      | DEF SQLite empty (transient OK to lose); Lore data fully restored |
+| User restarts the machine      | Transient store empty (OK to lose); Lore data fully restored |
+| Cloud-mode teammate adds a task | Dataplane is the shared truth; both teammates' DEF runtimes see it through Lore-via-MCP |
 
-## Migration path for existing DEF users
+## Migration path — completed
 
-DEF currently in production at any cloud-mode workspace keeps its
-SurrealDB. Migration is **opt-in per workspace**:
+Original phase plan (Phase 5a–5e) is closed:
 
-1. **Phase 5a (this design)**: lock the decision, write migration
-   spec, do not break existing installs.
-2. **Phase 5b (DEF project)**: implement the SQLite + MCP client
-   path in DEF. Ship behind a `DEF_STORAGE=lore` flag.
-3. **Phase 5c (DEF project)**: dual-write phase. New installs default
-   to `lore`; existing installs stay on SurrealDB until explicitly
-   migrated.
-4. **Phase 5d (DEF project)**: migration tool reads SurrealDB →
-   replays as Lore nodes via MCP. Idempotent. Workspace owner runs
-   it at their convenience.
-5. **Phase 5e (DEF project)**: SurrealDB becomes purely cloud-tier;
-   local default is `lore`.
+1. **Phase 5a** — wrote this design, locked the decision (2026-04).
+2. **Phase 5b** — implemented in DEF: `lore_memory_adapter.py`,
+   `scheduled_task_store.py`, `lore_mcp_client.py` shipped.
+   `ACTIVE_MEMORY_PROVIDER=lore` is the default. Tracked in DEF's
+   `CHANGELOG.md` under "Phase 5b — Lore-backed durable knowledge".
+3. **Phase 5c / 5d** — folded into 5b. There was no dual-write
+   period; the SurrealDB path was already raising `NotImplementedError`
+   in DEF's `dependencies.py`, so existing local installs had nothing
+   to migrate from.
+4. **Phase 5e** — `docker-compose.cloud.yml` rewritten to drop
+   SurrealDB / Milvus / Etcd / Minio. DEF cloud deployments now
+   attach to the Dataplane network (`STORAGE_PROVIDER=gf_cloud`,
+   `GROUNDFLOOR_DATAPLANE_URL=http://engine:8080`) and use Dataplane
+   for both vector and relational storage. Tracked in DEF's
+   `CHANGELOG.md` under "Local cloud-replica setup".
 
 ## Open questions (handed off to DEF project)
 
@@ -147,24 +171,33 @@ implementation:
    former. The DEF project should pilot both.
 2. **Agent-run pruning** — Lore caps at 20k nodes. If DEF emits one
    `agent-run` per conversation, an active user blows the cap in
-   weeks. DEF needs a configurable retention policy (e.g. summarise +
-   roll up runs older than 30 days).
-3. **Tool-call traces** — currently a SurrealDB live-query feed for
-   the DEF UI. Replacement: SQLite tail + (optional) NDJSON file?
-   Spec defers to DEF.
+   weeks. DEF needs a configurable retention policy. Phase 5b shipped
+   `RetentionSweeper` (`app/adapters/lore/retention.py`) with a 90-day
+   default and monthly rollups; tune as real usage data arrives.
+3. **Tool-call traces** — formerly a SurrealDB live-query feed for the
+   DEF UI. Replacement shipped: NDJSON forensic span sink
+   (`app/adapters/local/ndjson_tracer.py`), gated by `DEF_TRACE_FILE`.
 4. **Multi-DEF instances** — does the DEF runtime support multiple
-   workspaces simultaneously, the way Lore does? Today: yes, via
-   SurrealDB tenanting. Tomorrow with SQLite: each workspace gets
-   its own SQLite file. Confirm this assumption with the DEF project.
+   workspaces simultaneously, the way Lore does? Each workspace gets
+   its own SQLite file in local mode; in cloud mode workspaces share
+   Redis db 1 with namespacing. Confirm the namespacing scheme with
+   the DEF project before scaling tenant counts.
+5. **Vestigial `surrealdb` Python package** — still listed in
+   `pyproject.toml` even though no live code path uses it. Track
+   removal in DEF's housekeeping backlog.
 
 ## Decision provenance
 
-This decision was driven by the question "DEF right now does not have
-a local version — it requires SurrealDB. Shouldn't we make it work
-with Kùzu and LanceDB for local deployment?" The answer turned out to
-be neither — DEF doesn't need its own embedded graph because Lore
-already is one. Lore knowledge node `def-no-local-storage` records
-the decision; this file is its human-readable form.
+The original question was "DEF right now does not have a local version
+— it requires SurrealDB. Shouldn't we make it work with Kùzu and
+LanceDB for local deployment?" The answer turned out to be neither —
+DEF doesn't need its own embedded graph because Lore already is one.
+The 2026-04-26 update extended that reasoning to the cloud tier:
+DEF doesn't need SurrealDB in cloud either, because Dataplane already
+is the cloud storage layer. Lore knowledge nodes
+`def-no-local-storage` (original) and
+`def-storage-on-dataplane-not-surrealdb-2026-04` (this update) record
+the chain.
 
 Related decisions:
 - `shell-daemon-lifecycle-sibling-not-child` (`docs/SHELL_LIFECYCLE.md`)
@@ -174,15 +207,12 @@ Related decisions:
   manifest carries both `lore.*` and `def.*` contributions; this
   refactor leaves the manifest spec untouched.
 
-## What's blocked on this
+## What was blocked on this
 
-- Phase 6 (DEF integration as shell primitive #2) waits on Phase 5b's
-  `DEF_STORAGE=lore` mode landing in DEF. Without it, the shell would
-  pull SurrealDB into every install — incompatible with the local-
-  first product shape.
-- Phase 7 (external reference plugins) does not block on this; those
-  plugins can declare `def.*` contributions today, and they'll
-  activate once DEF's local-first runtime ships.
+- Phase 6 (DEF integration as shell primitive #2) waited on Phase 5b's
+  `DEF_STORAGE=lore` mode landing in DEF. Phase 5b shipped, Phase 6
+  shipped, see "Phase 6 — Shell-side discovery" below.
+- Phase 7 (external reference plugins) does not block on this.
 
 ## Phase 6 — Shell-side discovery (shipped 2026-04-25)
 

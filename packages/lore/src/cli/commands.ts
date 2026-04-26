@@ -2701,3 +2701,275 @@ export async function migrateEmbeddingModelCommand(args: string[]): Promise<void
         await graph.close();
     }
 }
+
+/* ─── Command: recall ─────────────────────────────────────────── */
+
+/**
+ * recallCommand — `lore recall <topic> [--cross-project] [--max N] [--full]`
+ *
+ * Compact-by-default knowledge recall for shell hooks and humans on the CLI.
+ * The MCP tool of the same name is the AI-facing surface; this command is
+ * the Bash-callable equivalent so the UserPromptSubmit hook can pipe a
+ * short summary into the AI's context. Output is plain text, capped at
+ * roughly 2KB unless --full is passed.
+ *
+ * Two-tier principle: default emits id + label + 1-line snippet; --full
+ * dumps the rich body. A future Stop hook or human running `lore recall`
+ * to grep their own knowledge benefits from both.
+ *
+ * Daemon-aware: when the local Lore daemon is running on
+ * 127.0.0.1:3847, this command hits /api/recall over HTTP rather than
+ * opening Kùzu directly (which would clash with the daemon's exclusive
+ * lock). Falls back to a direct LocalGraph open when the daemon is
+ * unreachable — useful for scripted scenarios with no daemon up.
+ */
+async function tryHttpRecall(topic: string, crossProject: boolean, maxHits: number): Promise<unknown | null> {
+    return new Promise((resolve) => {
+        const params = new URLSearchParams({
+            topic,
+            crossProject: String(crossProject),
+            max: String(maxHits),
+        });
+        const req = http.get(
+            `http://127.0.0.1:3847/api/recall?${params.toString()}`,
+            { timeout: 2000 },
+            (res) => {
+                if (res.statusCode !== 200) {
+                    res.resume();
+                    resolve(null);
+                    return;
+                }
+                let body = '';
+                res.on('data', (chunk) => { body += chunk; });
+                res.on('end', () => {
+                    try { resolve(JSON.parse(body)); } catch { resolve(null); }
+                });
+            },
+        );
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+}
+
+async function tryHttpGetFull(id: string): Promise<unknown | null> {
+    return new Promise((resolve) => {
+        const params = new URLSearchParams({ id });
+        const req = http.get(
+            `http://127.0.0.1:3847/api/node-full?${params.toString()}`,
+            { timeout: 2000 },
+            (res) => {
+                if (res.statusCode !== 200) {
+                    res.resume();
+                    resolve(null);
+                    return;
+                }
+                let body = '';
+                res.on('data', (chunk) => { body += chunk; });
+                res.on('end', () => {
+                    try { resolve(JSON.parse(body)); } catch { resolve(null); }
+                });
+            },
+        );
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+}
+
+interface HttpRecallResult {
+    topic: string;
+    crossProject: boolean;
+    hits: number;
+    projects: string[];
+    results: Array<{ id: string; type: string; label: string; project: string; tags: string; snippet: string | null }>;
+}
+
+function printRecallResult(topic: string, crossProject: boolean, hits: number, projectsSeen: string[], rows: Array<{ id: string; type: string; label: string; project: string; tags: string; snippet: string | null; content?: string }>, fullMode: boolean): void {
+    if (hits === 0) {
+        console.log(`<lore-recall topic="${topic}" cross-project=${crossProject} hits="0">`);
+        console.log('  No matches.');
+        console.log('</lore-recall>');
+        return;
+    }
+    console.log(`<lore-recall topic="${topic}" cross-project=${crossProject} hits="${hits}" projects="${projectsSeen.join(',')}">`);
+    const byProject = new Map<string, typeof rows>();
+    for (const r of rows) {
+        const p = r.project ?? '*';
+        if (!byProject.has(p)) byProject.set(p, []);
+        byProject.get(p)?.push(r);
+    }
+    for (const [proj, list] of byProject) {
+        console.log(`  [${proj}]`);
+        for (const r of list) {
+            console.log(`    • ${r.id} (${r.type}) — ${r.label}`);
+            if (fullMode && r.content) {
+                console.log(`      ${r.content.replace(/\n/g, '\n      ')}`);
+            } else if (r.snippet) {
+                console.log(`      ${r.snippet}`);
+            }
+            if (r.tags) console.log(`      tags: ${r.tags}`);
+        }
+    }
+    if (!fullMode) console.log(`  Tip: lore get-full <id> for full body.`);
+    console.log('</lore-recall>');
+}
+
+export async function recallCommand(args: string[]): Promise<void> {
+    const topic = args.find((a) => !a.startsWith('--'));
+    if (!topic) {
+        console.error('Usage: lore recall <topic> [--cross-project] [--max N] [--full]');
+        process.exit(1);
+    }
+    const crossProject = args.includes('--cross-project');
+    const fullMode = args.includes('--full');
+    const maxIdx = args.indexOf('--max');
+    const maxHits = maxIdx >= 0 && args[maxIdx + 1] ? parseInt(args[maxIdx + 1] ?? '8', 10) : 8;
+
+    // Daemon-first path: if the daemon is up, hit HTTP and avoid the
+    // Kùzu lock. This is also the path the UserPromptSubmit hook
+    // depends on — the daemon is almost always up when Claude Code is.
+    const httpResult = await tryHttpRecall(topic, crossProject, maxHits) as HttpRecallResult | null;
+    if (httpResult) {
+        printRecallResult(topic, crossProject, httpResult.hits, httpResult.projects, httpResult.results, fullMode);
+        return;
+    }
+
+    // Fall back to direct graph open (daemon not running).
+    const basePath = resolveGraphBasePath();
+    const graph = new LocalGraph(basePath);
+    try {
+        // Resolve project scope from registry (mirrors mcp/server.ts:resolveProjectScope)
+        const registryPath = path.join(os.homedir(), '.groundfloor', 'projects.json');
+        let projectName = '*';
+        let ecosystem = '*';
+        if (!crossProject) {
+            try {
+                const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
+                const cwd = process.cwd();
+                for (const [name, mapping] of Object.entries(registry.projects)) {
+                    const projectMapping = mapping as { ecosystem: string; paths: string[] };
+                    for (const pathFragment of projectMapping.paths) {
+                        if (cwd.includes(pathFragment)) {
+                            projectName = name;
+                            ecosystem = projectMapping.ecosystem;
+                            break;
+                        }
+                    }
+                }
+            } catch {
+                /* No registry — fall through to '*' */
+            }
+        }
+
+        const hits = await graph.search(topic, maxHits, projectName, ecosystem);
+        if (hits.length === 0) {
+            console.log(`<lore-recall topic="${topic}" cross-project=${crossProject} hits="0">`);
+            console.log('  No matches.');
+            console.log('</lore-recall>');
+            return;
+        }
+
+        const projectsSeen = new Set<string>();
+        for (const node of hits) projectsSeen.add(node.project ?? '*');
+        const SNIPPET_LEN = 120;
+
+        console.log(`<lore-recall topic="${topic}" cross-project=${crossProject} hits="${hits.length}" projects="${Array.from(projectsSeen).join(',')}">`);
+        const byProject = new Map<string, typeof hits>();
+        for (const n of hits) {
+            const p = n.project ?? '*';
+            if (!byProject.has(p)) byProject.set(p, []);
+            byProject.get(p)?.push(n);
+        }
+        for (const [proj, nodes] of byProject) {
+            console.log(`  [${proj}]`);
+            for (const node of nodes) {
+                if (fullMode) {
+                    console.log(`    • ${node.id} (${node.type}) — ${node.label}`);
+                    if (node.tags) console.log(`      tags: ${node.tags}`);
+                    if (node.content) console.log(`      ${node.content.replace(/\n/g, '\n      ')}`);
+                } else {
+                    const snippet = typeof node.content === 'string'
+                        ? (node.content.length > SNIPPET_LEN
+                            ? node.content.slice(0, SNIPPET_LEN).replace(/\s+/g, ' ').trim() + '…'
+                            : node.content.replace(/\s+/g, ' ').trim())
+                        : '';
+                    console.log(`    • ${node.id} (${node.type}) — ${node.label}`);
+                    if (snippet) console.log(`      ${snippet}`);
+                }
+            }
+        }
+        if (!fullMode) {
+            console.log(`  Tip: lore get-full <id> for full body.`);
+        }
+        console.log('</lore-recall>');
+    } finally {
+        await graph.close();
+    }
+}
+
+/* ─── Command: get-full ───────────────────────────────────────── */
+
+/**
+ * getFullCommand — `lore get-full <id>`
+ *
+ * Companion to `lore recall`. Fetches the full body of a single Lore
+ * node by id. Lookup is cross-project — ids are globally unique. Mirrors
+ * the `get_full` MCP tool, but emits human-readable text instead of JSON.
+ */
+export async function getFullCommand(args: string[]): Promise<void> {
+    const id = args[0];
+    if (!id) {
+        console.error('Usage: lore get-full <id>');
+        process.exit(1);
+    }
+
+    // Daemon-first path. /api/node/full handles the same lookup
+    // without needing a Kùzu lock.
+    const httpResult = await tryHttpGetFull(id) as { found: boolean; id?: string; type?: string; label?: string; project?: string; tags?: string; content?: string; language?: string | null; metadata?: unknown } | null;
+    if (httpResult && httpResult.found) {
+        console.log(`─── ${httpResult.id} ───`);
+        console.log(`type:    ${httpResult.type}`);
+        console.log(`label:   ${httpResult.label}`);
+        console.log(`project: ${httpResult.project ?? '(default)'}`);
+        if (httpResult.tags) console.log(`tags:    ${httpResult.tags}`);
+        if (httpResult.language) console.log(`language: ${httpResult.language}`);
+        console.log('');
+        console.log(httpResult.content ?? '(no content)');
+        if (httpResult.metadata) {
+            console.log('');
+            console.log('─── metadata ───');
+            console.log(typeof httpResult.metadata === 'string' ? httpResult.metadata : JSON.stringify(httpResult.metadata, null, 2));
+        }
+        return;
+    }
+    if (httpResult && !httpResult.found) {
+        console.error(`Node '${id}' not found via daemon HTTP. If it lives in a sibling project, recall it first with --cross-project.`);
+        process.exit(1);
+    }
+
+    // Fall back to direct graph open (daemon not running).
+    const stripped = id.startsWith('lore:') ? id.slice(5) : id;
+    const basePath = resolveGraphBasePath();
+    const graph = new LocalGraph(basePath);
+    try {
+        const node = await graph.getNode(stripped);
+        if (!node) {
+            console.error(`Node '${id}' not found. If it lives in a sibling project, recall it first with --cross-project.`);
+            process.exit(1);
+        }
+        console.log(`─── ${node.id} ───`);
+        console.log(`type:    ${node.type}`);
+        console.log(`label:   ${node.label}`);
+        console.log(`project: ${node.project ?? '(default)'}`);
+        if (node.tags) console.log(`tags:    ${node.tags}`);
+        if (node.language) console.log(`language: ${node.language}`);
+        console.log('');
+        console.log(node.content ?? '(no content)');
+        if (node.metadata) {
+            console.log('');
+            console.log('─── metadata ───');
+            console.log(typeof node.metadata === 'string' ? node.metadata : JSON.stringify(node.metadata, null, 2));
+        }
+    } finally {
+        await graph.close();
+    }
+}

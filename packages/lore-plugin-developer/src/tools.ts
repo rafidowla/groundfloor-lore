@@ -7,8 +7,13 @@
  *
  * Tools:
  *   code_query, code_context, link_knowledge_to_code
- *   gitnexus_query, gitnexus_context, gitnexus_impact, gitnexus_cypher
+ *   code_flow_search, code_full_context, code_impact, code_cypher
  *   list_repos, detect_changes, rename, who_is_working
+ *
+ * Naming note: the four tools that delegate to the underlying code
+ * indexer (formerly gitnexus_*) are exposed under the `code_*` family
+ * to keep the user-facing surface free of internal-dependency names.
+ * The indexer dependency is plumbing; users see "Lore code intelligence."
  */
 
 import { z } from 'zod';
@@ -59,7 +64,7 @@ export function registerDeveloperTools(
                 const results = await api.queryCodeSymbols(query, repo, limit ?? 20);
                 if (results.length === 0) {
                     return {
-                        content: [{ type: 'text' as const, text: `No code symbols found matching "${query}". Run "lore index" to import code from GitNexus.` }],
+                        content: [{ type: 'text' as const, text: `No code symbols found matching "${query}". Run "lore index" to import code.` }],
                     };
                 }
                 return {
@@ -133,10 +138,10 @@ export function registerDeveloperTools(
         },
     );
 
-    /* ─── gitnexus proxy tools ─────────────────────────────────── */
+    /* ─── code intelligence (live indexer) ─────────────────────── */
     server.tool(
-        'gitnexus_query',
-        'Search code execution flows using GitNexus (BM25 + semantic vector search)',
+        'code_flow_search',
+        'Search code execution flows by concept. Returns process-grouped results ranked by relevance (BM25 + semantic vector search).',
         {
             query: z.string().describe('Natural language or keyword search query'),
             repo: z.string().optional().describe('Target repository name'),
@@ -149,8 +154,8 @@ export function registerDeveloperTools(
     );
 
     server.tool(
-        'gitnexus_context',
-        '360° view of a code symbol: callers, callees, processes, imports (via GitNexus)',
+        'code_full_context',
+        '360° live-indexer view of a code symbol: callers, callees, processes, imports. Deeper than code_context (which reads stored Lore data).',
         {
             name: z.string().describe('Symbol name'),
             repo: z.string().optional().describe('Target repository name'),
@@ -162,8 +167,8 @@ export function registerDeveloperTools(
     );
 
     server.tool(
-        'gitnexus_impact',
-        'Blast radius analysis: what breaks if you change a symbol (via GitNexus)',
+        'code_impact',
+        'Blast radius analysis: what breaks if you change a symbol. Returns direct callers, indirect dependencies, and risk level.',
         {
             target: z.string().describe('Symbol or file to analyze'),
             repo: z.string().optional().describe('Target repository name'),
@@ -176,8 +181,8 @@ export function registerDeveloperTools(
     );
 
     server.tool(
-        'gitnexus_cypher',
-        'Execute raw Cypher query against the GitNexus code knowledge graph',
+        'code_cypher',
+        'Execute a raw Cypher query against the code knowledge graph (advanced — prefer code_query / code_flow_search for normal use).',
         {
             query: z.string().describe('Cypher query to execute'),
             repo: z.string().optional().describe('Target repository name'),
@@ -191,7 +196,7 @@ export function registerDeveloperTools(
     /* ─── list_repos ───────────────────────────────────────────── */
     server.tool(
         'list_repos',
-        'List all repositories indexed by GitNexus',
+        'List all repositories indexed by Lore',
         {},
         async () => {
             try {

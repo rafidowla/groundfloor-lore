@@ -55,6 +55,15 @@ const PUBLIC_API_PATHS = new Set<string>([
     '/health',
     '/api/health',
     '/api/auth/bootstrap',
+    // Read-only knowledge fetches used by the lore CLI's `recall` /
+    // `get-full` commands and by Claude Code's UserPromptSubmit hook.
+    // Same threat model as /api/health: still gated by Host+Origin
+    // (localhost only), and the data exposed is anything already readable
+    // from the local Kùzu file. Adding these here keeps the hook fast
+    // (no bootstrap roundtrip per prompt) without weakening the auth
+    // posture for remote / cross-origin callers.
+    '/api/recall',
+    '/api/node-full',
 ]);
 
 /**

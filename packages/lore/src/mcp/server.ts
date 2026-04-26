@@ -805,27 +805,33 @@ mcpServer.tool(
 
 mcpServer.tool(
     'recall',
-    'High-level knowledge recall: searches for a topic and traverses related nodes',
+    'High-level knowledge recall: searches for a topic and traverses related nodes. Defaults to a compact summary (top hits, label + 1-line snippet) so the response stays under ~2KB and AI agents do not blow their context window. Pass mode="full" for the rich JSON, or use the get_full tool to fetch one node\'s body by id.',
     {
         topic: z.string().describe('Topic to recall (e.g., "BaaSClient", "auth conventions")'),
         depth: z.number().optional().describe('Traversal depth from each search result (default: 1)'),
         queryLanguage: z.string().optional().describe('ISO 639-1 code for the query language. Same semantics as `search` — optional; adds a cross-language hint to the response when the corpus is mostly in a different language.'),
         filePaths: z.array(z.string()).optional().describe('Q1.7: file paths from the current work context (e.g. from a PostToolUse edit hook). Any deferred-* node whose stored file list overlaps these paths is auto-surfaced in the `deferred` sidecar field, even if it doesn\'t match the topic text.'),
+        mode: z.enum(['summary', 'full']).optional().describe('Response shape. "summary" (default) returns top hits with label + 1-line snippet only — meant for AI agents. "full" returns the rich JSON with full node bodies — meant for the human-facing CLI.'),
+        crossProject: z.boolean().optional().describe('When true, ignores the current project scope and searches every project. Each hit is tagged with its project. Use this when looking for prior work that may have happened in a sibling repo (e.g. DEF, dataplane, managrid).'),
     },
-    async ({ topic, depth, queryLanguage, filePaths }) => {
+    async ({ topic, depth, queryLanguage, filePaths, mode, crossProject }) => {
         try {
+            const responseMode = mode ?? 'summary';
+            const useCrossProject = crossProject ?? false;
+            const projectScope = useCrossProject ? '*' : detectedScope.project;
+            const ecosystemScope = useCrossProject ? '*' : detectedScope.ecosystem;
             const verbatimCount = await verbatimStore.count();
             let seedNodeIds: string[] = [];
-            
+
             if (verbatimCount > 0) {
                 const results = await verbatimStore.search(topic, 10);
                 seedNodeIds = results.map(r => r.id);
             }
-            
+
             let searchResults: LoreNode[] = [];
-            
+
             if (verbatimCount === 0 || seedNodeIds.length === 0) {
-                searchResults = await graph.search(topic, 10, detectedScope.project, detectedScope.ecosystem);
+                searchResults = await graph.search(topic, 10, projectScope, ecosystemScope);
             } else {
                 for (const id of seedNodeIds) {
                     // Verbatim ids are namespaced with a prefix
@@ -858,8 +864,9 @@ mcpServer.tool(
                         type: 'text' as const,
                         text: JSON.stringify({
                             topic,
-                            scope: { project: detectedScope.project, ecosystem: detectedScope.ecosystem },
-                            message: `No knowledge found for topic '${topic}'.`,
+                            scope: { project: projectScope, ecosystem: ecosystemScope },
+                            crossProject: useCrossProject,
+                            message: `No knowledge found for topic '${topic}'${useCrossProject ? ' (searched across all projects)' : ''}.`,
                             results: [],
                             ...(deferredMatches.length > 0 ? { deferred: deferredMatches } : {}),
                             ...(earlyHint ? { hint: earlyHint } : {}),
@@ -903,13 +910,60 @@ mcpServer.tool(
 
             const hint = queryLanguage ? await buildLanguageHint(queryLanguage) : null;
 
+            // Two-tier response. Summary mode is the default — it caps
+            // payload size at ~2KB so AI agents don't burn their context
+            // window on a recall call. Full mode returns the rich shape
+            // for human-facing CLI use, kept verbatim for back-compat.
+            if (responseMode === 'summary') {
+                const SUMMARY_MAX_HITS = 10;
+                const SNIPPET_LEN = 120;
+                const trimmedHits = recalledNodes.slice(0, SUMMARY_MAX_HITS);
+                const projectsSeen = new Set<string>();
+                for (const item of recalledNodes) {
+                    if (item.node.project) projectsSeen.add(item.node.project);
+                }
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            topic,
+                            mode: 'summary',
+                            searchMode: verbatimCount > 0 ? 'semantic' : 'keyword',
+                            scope: { project: projectScope, ecosystem: ecosystemScope },
+                            crossProject: useCrossProject,
+                            totalRecalled: recalledNodes.length,
+                            shown: trimmedHits.length,
+                            projectsSeen: Array.from(projectsSeen),
+                            hits: trimmedHits.map((item) => ({
+                                id: item.node.id,
+                                type: item.node.type,
+                                label: item.node.label,
+                                project: item.node.project,
+                                tags: item.node.tags,
+                                snippet: typeof item.node.content === 'string'
+                                    ? (item.node.content.length > SNIPPET_LEN
+                                        ? item.node.content.slice(0, SNIPPET_LEN).replace(/\s+/g, ' ').trim() + '…'
+                                        : item.node.content.replace(/\s+/g, ' ').trim())
+                                    : null,
+                                source: item.source,
+                            })),
+                            tip: 'Call get_full({id}) to fetch the full body of any hit. Pass mode:"full" to recall for the rich JSON.',
+                            ...(deferredMatches.length > 0 ? { deferred: deferredMatches.map(d => ({ id: d.id, label: d.label })) } : {}),
+                            ...(hint ? { hint } : {}),
+                        }, null, 2),
+                    }],
+                };
+            }
+
             return {
                 content: [{
                     type: 'text' as const,
                     text: JSON.stringify({
                         topic,
+                        mode: 'full',
                         searchMode: verbatimCount > 0 ? 'semantic' : 'keyword',
-                        scope: { project: detectedScope.project, ecosystem: detectedScope.ecosystem },
+                        scope: { project: projectScope, ecosystem: ecosystemScope },
+                        crossProject: useCrossProject,
                         totalRecalled: recalledNodes.length,
                         directMatches: searchResults.length,
                         connectedMatches: recalledNodes.length - searchResults.length,
@@ -921,6 +975,121 @@ mcpServer.tool(
                         })),
                         ...(deferredMatches.length > 0 ? { deferred: deferredMatches } : {}),
                         ...(hint ? { hint } : {}),
+                    }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: lore_status ───────────────────────────────────────── */
+//
+// One-shot reachability check for AI agents and humans alike. Returns
+// the daemon's deployment mode, the project Lore thinks the current
+// CWD belongs to, the count of nodes/verbatim docs in the graph, and
+// flags for each of the new "Lore actually gets used" fixes (compact
+// recall, cross-project recall, get_full, the auto-recall hook).
+//
+// Use this from the MCP client of your IDE or from a fresh Claude
+// Code session to confirm the new tools are reachable before running
+// real work. Example MCP call: `mcp__groundfloor-lore__lore_status({})`.
+
+mcpServer.tool(
+    'lore_status',
+    'One-shot health and capability check. Returns Lore daemon state, project scope detected for the current workspace, graph + verbatim counts, and a feature flag map confirming which Phase-1-fixes (compact recall, cross-project recall, get_full, auto-recall hook) are wired up. Call this once per session to confirm Lore is reachable.',
+    {},
+    async () => {
+        try {
+            const stats = await (graph as LocalGraph).getStats();
+            const verbatimCount = await verbatimStore.count();
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        daemon: 'ok',
+                        deploymentMode,
+                        scope: { project: detectedScope.project, ecosystem: detectedScope.ecosystem },
+                        graph: {
+                            nodes: stats.nodeCount,
+                            edges: stats.edgeCount,
+                            verbatimDocs: verbatimCount,
+                            engine: graph instanceof LocalGraph ? 'kùzu + lancedb (local)' : 'dataplane (cloud)',
+                        },
+                        capabilities: {
+                            compactRecall: true,
+                            crossProjectRecall: true,
+                            getFull: true,
+                            httpRecallEndpoint: '/api/recall',
+                            httpGetFullEndpoint: '/api/node-full',
+                            renamedTools: ['code_flow_search', 'code_full_context', 'code_impact', 'code_cypher'],
+                        },
+                        tip: 'Call recall({topic}) (compact mode, default) or recall({topic, crossProject:true}) for cross-repo. Use get_full({id}) to fetch one body in detail.',
+                    }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: get_full ──────────────────────────────────────────── */
+//
+// Two-tier companion to `recall`. Recall's default summary mode emits
+// short hits to keep the AI's context window cheap; when the agent
+// has narrowed in on one specific node and wants the full body, it
+// calls get_full({ id }). One verb that works for any node — lore
+// notes, plugin-contributed nodes, deferred items — so callers don't
+// need to know what type they're fetching.
+//
+// Lookup is cross-project by id (ids are globally unique). The
+// `lore:` prefix used inside the verbatim store is stripped here,
+// matching the behavior of /api/node and the recall traversal.
+
+mcpServer.tool(
+    'get_full',
+    'Fetch the full body of a single Lore node by id. Use this after `recall` (summary mode) when you have narrowed in on the one or two hits whose full content you actually need. Lookup is cross-project — ids are globally unique.',
+    {
+        id: z.string().describe('Node id from a prior recall/search hit (e.g. "def-storage-on-dataplane-not-surrealdb-2026-04")'),
+    },
+    async ({ id }) => {
+        try {
+            const stripped = id.startsWith('lore:') ? id.slice(5) : id;
+            const node = await graph.getNode(stripped);
+            if (!node) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            id,
+                            found: false,
+                            message: `No node found with id '${id}'. Check the id from a recall hit, or call recall again with crossProject:true if you think it lives in a sibling project.`,
+                        }, null, 2),
+                    }],
+                    isError: true,
+                };
+            }
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        id: node.id,
+                        found: true,
+                        type: node.type,
+                        label: node.label,
+                        project: node.project,
+                        tags: node.tags,
+                        content: node.content,
+                        language: node.language ?? null,
+                        metadata: node.metadata ?? null,
                     }, null, 2),
                 }],
             };
@@ -2050,7 +2219,7 @@ async function main(): Promise<void> {
             // V2.1: Node detail for the UI drawer. Returns the node itself,
             // plus its immediate neighbors and the edges connecting them.
             // Consumed by the node-click drawer + "Ask about this" chat flow.
-            if (url.startsWith('/api/node') && req.method === 'GET') {
+            if (pathname === '/api/node' && req.method === 'GET') {
                 try {
                     const id = new URL(url, 'http://localhost').searchParams.get('id') ?? '';
                     if (!id) {
@@ -2115,6 +2284,126 @@ async function main(): Promise<void> {
             }
 
             // Save / create a node from the UI dashboard
+            // Compact recall over HTTP. Same shape as the MCP recall
+            // tool's summary mode. Used by `lore recall` CLI and the
+            // UserPromptSubmit hook so they don't have to open Kùzu
+            // (which would clash with the daemon's exclusive lock).
+            // GET-style with query params for trivial shell invocation.
+            if (pathname === '/api/recall' && req.method === 'GET') {
+                try {
+                    const recallParams = new URL(url, 'http://localhost').searchParams;
+                    const topic = recallParams.get('topic') ?? '';
+                    if (!topic) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: '`topic` query param is required' }));
+                        return;
+                    }
+                    const crossProject = recallParams.get('crossProject') === 'true';
+                    const max = parseInt(recallParams.get('max') ?? '8', 10);
+                    const projectScope = crossProject ? '*' : detectedScope.project;
+                    const ecosystemScope = crossProject ? '*' : detectedScope.ecosystem;
+
+                    const verbatimCount = await verbatimStore.count();
+                    // Dedupe by node id — both the verbatim seed loop
+                    // and the graph keyword fallback can surface the
+                    // same logical node (verbatim ids carry a `lore:`
+                    // prefix that strips to the same key as the graph
+                    // result). Map-by-id is the simplest fix.
+                    const seenIds = new Set<string>();
+                    const hits: LoreNode[] = [];
+                    if (verbatimCount > 0) {
+                        const seeds = await verbatimStore.search(topic, max);
+                        for (const seed of seeds) {
+                            const stripped = seed.id.startsWith('lore:') ? seed.id.slice(5) : seed.id;
+                            if (seenIds.has(stripped)) continue;
+                            const n = await graph.getNode(stripped);
+                            if (n) {
+                                hits.push(n);
+                                seenIds.add(n.id);
+                            }
+                        }
+                    }
+                    if (hits.length === 0) {
+                        const fallback = await graph.search(topic, max, projectScope, ecosystemScope);
+                        for (const n of fallback) {
+                            if (seenIds.has(n.id)) continue;
+                            hits.push(n);
+                            seenIds.add(n.id);
+                        }
+                    }
+
+                    const SNIPPET_LEN = 120;
+                    const projectsSeen = new Set<string>();
+                    for (const n of hits) projectsSeen.add(n.project ?? '*');
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        topic,
+                        crossProject,
+                        scope: { project: projectScope, ecosystem: ecosystemScope },
+                        hits: hits.length,
+                        projects: Array.from(projectsSeen),
+                        results: hits.map((n) => ({
+                            id: n.id,
+                            type: n.type,
+                            label: n.label,
+                            project: n.project,
+                            tags: n.tags,
+                            snippet: typeof n.content === 'string'
+                                ? (n.content.length > SNIPPET_LEN
+                                    ? n.content.slice(0, SNIPPET_LEN).replace(/\s+/g, ' ').trim() + '…'
+                                    : n.content.replace(/\s+/g, ' ').trim())
+                                : null,
+                        })),
+                    }));
+                } catch (recallErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (recallErr as Error).message }));
+                }
+                return;
+            }
+
+            // Fetch the full body of a single node by id. Companion to
+            // /api/recall — the CLI's `lore get-full <id>` calls this
+            // when the daemon is up so it doesn't fight Kùzu's lock.
+            // Path is `/api/node-full` (not `/api/node/full`) to avoid
+            // the existing `/api/node` startsWith match above, which is
+            // auth-gated and returns a different shape (node + neighbors).
+            if (pathname === '/api/node-full' && req.method === 'GET') {
+                try {
+                    const fullParams = new URL(url, 'http://localhost').searchParams;
+                    const nodeId = fullParams.get('id') ?? '';
+                    if (!nodeId) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: '`id` query param is required' }));
+                        return;
+                    }
+                    const stripped = nodeId.startsWith('lore:') ? nodeId.slice(5) : nodeId;
+                    const node = await graph.getNode(stripped);
+                    if (!node) {
+                        res.writeHead(404, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ found: false, id: nodeId }));
+                        return;
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        found: true,
+                        id: node.id,
+                        type: node.type,
+                        label: node.label,
+                        project: node.project,
+                        tags: node.tags,
+                        content: node.content,
+                        language: node.language ?? null,
+                        metadata: node.metadata ?? null,
+                    }));
+                } catch (getFullErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (getFullErr as Error).message }));
+                }
+                return;
+            }
+
             if (pathname === '/api/node' && req.method === 'POST') {
                 let body = '';
                 req.on('data', (chunk: Buffer) => { body += chunk.toString(); });

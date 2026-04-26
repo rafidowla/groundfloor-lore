@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, setupCommand, joinCommand, lintCommand, auditCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand, modelsCommand, scaffoldPluginCommand, resolveDeferredCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, setupCommand, joinCommand, lintCommand, auditCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand, modelsCommand, scaffoldPluginCommand, resolveDeferredCommand, recallCommand, getFullCommand } from './commands.js';
 import { ConfigManager } from '../config/configManager.js';
 import { PluginRegistry } from '../plugins/registry.js';
 import path from 'path';
@@ -174,6 +174,12 @@ async function main(): Promise<void> {
             break;
         case 'resolve-deferred':
             await resolveDeferredCommand(commandArgs);
+            break;
+        case 'recall':
+            await recallCommand(commandArgs);
+            break;
+        case 'get-full':
+            await getFullCommand(commandArgs);
             break;
         default: {
             // Dispatch to plugin-contributed commands if any match.

@@ -87,7 +87,7 @@ function execGitNexus(args: string[]): ProxyResult {
     if (!isGitNexusAvailable()) {
         return {
             success: false,
-            text: 'GitNexus is not installed. Install with: npm install -g gitnexus',
+            text: 'Lore code indexer is not set up. Install with: npm install -g gitnexus (or run "lore setup")',
         };
     }
 
@@ -118,7 +118,7 @@ function execGitNexus(args: string[]): ProxyResult {
     } catch (execError) {
         return {
             success: false,
-            text: `GitNexus command failed: ${(execError as Error).message.slice(0, 300)}`,
+            text: `Code indexer command failed: ${(execError as Error).message.slice(0, 300)}`,
         };
     } finally {
         try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }

@@ -377,7 +377,7 @@ export async function importFromGitNexus(
             relationsImported: 0,
             symbolsCleared: 0,
             durationMs: Date.now() - startTime,
-            errors: ['GitNexus CLI not found. Install with: npm install -g gitnexus'],
+            errors: ['Code indexer CLI not found. Install with: npm install -g gitnexus (or run "lore setup")'],
         };
     }
 
@@ -492,7 +492,7 @@ export async function indexAllRepos(api: DeveloperApi): Promise<IndexResult[]> {
             relationsImported: 0,
             symbolsCleared: 0,
             durationMs: 0,
-            errors: ['No GitNexus-indexed repos found. Run "gitnexus analyze <path>" first.'],
+            errors: ['No indexed repos found. Run "gitnexus analyze <path>" first to build the code index.'],
         }];
     }
 

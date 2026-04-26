@@ -690,13 +690,13 @@ export const developerPlugin: ILorePlugin = {
             return [{
                 label: 'developer plugin',
                 ok: true,
-                message: `GitNexus CLI available: ${repos.length} repo(s) indexed`,
+                message: `Code indexer available: ${repos.length} repo(s) indexed`,
             }];
         }
         return [{
             label: 'developer plugin',
             ok: false,
-            message: 'GitNexus CLI not found — install with: npm install -g gitnexus',
+            message: 'Code indexer not set up — install with: npm install -g gitnexus (or run "lore setup")',
         }];
         void ctx;
     },

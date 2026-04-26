@@ -71,7 +71,7 @@ export async function indexCommand(args: string[]): Promise<void> {
     if (specificRepo) {
         const repoEntry = devApi.getGitNexusRepo(specificRepo);
         if (!repoEntry) {
-            console.error(`❌ Repository '${specificRepo}' not found in GitNexus registry.`);
+            console.error(`❌ Repository '${specificRepo}' not found in the code-index registry.`);
             console.error('  Available repos:');
             for (const repo of devApi.listGitNexusRepos()) {
                 console.error(`    - ${repo.name} (${repo.stats.nodes} symbols)`);
@@ -79,21 +79,21 @@ export async function indexCommand(args: string[]): Promise<void> {
             await close();
             process.exit(1);
         }
-        console.log(`→ Indexing '${specificRepo}' from GitNexus...`);
+        console.log(`→ Indexing '${specificRepo}' from the code index...`);
         const result = await devApi.importFromGitNexus(repoEntry);
         printIndexResult(result);
     } else {
         const repos = devApi.listGitNexusRepos();
         if (repos.length === 0) {
-            console.error('❌ No GitNexus-indexed repos found.');
-            console.error('  Run "gitnexus analyze <path>" to index a repo first.');
+            console.error('❌ No indexed repos found.');
+            console.error('  Run "gitnexus analyze <path>" to build the code index for a repo first.');
             await close();
             process.exit(1);
         }
-        console.log(`→ Indexing ${repos.length} repo(s) from GitNexus...`);
+        console.log(`→ Indexing ${repos.length} repo(s) from the code index...`);
         console.log('');
         for (const repo of repos) {
-            console.log(`  ─── ${repo.name} (${repo.stats.nodes} GitNexus symbols) ───`);
+            console.log(`  ─── ${repo.name} (${repo.stats.nodes} indexed symbols) ───`);
             const result = await devApi.importFromGitNexus(repo);
             printIndexResult(result);
             console.log('');
