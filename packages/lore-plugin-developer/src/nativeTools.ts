@@ -463,7 +463,7 @@ export function listRepos(): RepoInfo[] {
  */
 export function formatReposMarkdown(repos: RepoInfo[]): string {
     if (repos.length === 0) {
-        return 'No repositories indexed. Run `gitnexus analyze <path>` to index a repository.';
+        return 'No repositories indexed. Run `lore analyze <path>` to index a repository.';
     }
 
     const lines: string[] = [

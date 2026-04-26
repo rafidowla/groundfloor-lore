@@ -991,6 +991,7 @@ ${protocolContent}
         console.log('');
         console.log('  Next steps:');
         console.log('    lore --help                               # See plugin commands');
+        console.log('    lore analyze <path>                       # Index a code repo (plugin)');
         console.log('    lore join gf://host:port/ns?token=...     # Join a team (optional)');
     } else {
         console.log(`  ⚠ Setup completed with ${issues} issue(s). Run 'lore doctor' for details.`);

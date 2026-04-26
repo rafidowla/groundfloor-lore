@@ -87,7 +87,7 @@ function execGitNexus(args: string[]): ProxyResult {
     if (!isGitNexusAvailable()) {
         return {
             success: false,
-            text: 'Lore code indexer is not set up. Install with: npm install -g gitnexus (or run "lore setup")',
+            text: 'Lore code indexer is not set up. Run `lore setup` to install it.',
         };
     }
 

@@ -46,7 +46,7 @@ import {
 import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology, recalibrateDeveloperNode } from './reconnect.js';
 import { buildDeveloperApi, bindApiSelfReference, type DeveloperApi } from './api.js';
 import { registerDeveloperTools } from './tools.js';
-import { indexCommand as devIndexCommand, ingestFilesCommand as devIngestFilesCommand } from './cli.js';
+import { indexCommand as devIndexCommand, ingestFilesCommand as devIngestFilesCommand, analyzeCommand as devAnalyzeCommand } from './cli.js';
 
 const TOOL_NAMES = [
     'code_query',
@@ -660,8 +660,12 @@ export const developerPlugin: ILorePlugin = {
      */
     registerCliCommands() {
         return {
+            analyze: {
+                help: 'Build the code index for a repository (auto-installs the indexer on first run)',
+                handler: devAnalyzeCommand,
+            },
             index: {
-                help: 'Import code symbols from GitNexus into unified graph',
+                help: 'Import code symbols from the code index into the unified knowledge graph',
                 handler: devIndexCommand,
             },
             'ingest-files': {
@@ -696,7 +700,7 @@ export const developerPlugin: ILorePlugin = {
         return [{
             label: 'developer plugin',
             ok: false,
-            message: 'Code indexer not set up — install with: npm install -g gitnexus (or run "lore setup")',
+            message: 'Code indexer not set up — run `lore setup` to install it.',
         }];
         void ctx;
     },

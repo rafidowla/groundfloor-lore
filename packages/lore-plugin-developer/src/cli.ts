@@ -15,6 +15,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { execSync } from 'child_process';
 import { LocalGraph } from '@lore-core/engines/localGraph.js';
 import { ConfigManager } from '@lore-core/config/configManager.js';
 import { PluginRegistry } from '@lore-core/plugins/registry.js';
@@ -86,7 +87,7 @@ export async function indexCommand(args: string[]): Promise<void> {
         const repos = devApi.listGitNexusRepos();
         if (repos.length === 0) {
             console.error('❌ No indexed repos found.');
-            console.error('  Run "gitnexus analyze <path>" to build the code index for a repo first.');
+            console.error('  Run `lore analyze <path>` to build the code index for a repo first.');
             await close();
             process.exit(1);
         }
@@ -109,6 +110,82 @@ export async function indexCommand(args: string[]): Promise<void> {
     console.log('═══════════════════════════════════════════════════════════');
 
     await close();
+}
+
+/**
+ * analyzeCommand — `lore analyze <path> [extra args...]`
+ *
+ * Thin wrapper around the underlying code indexer. Lets users build
+ * the code index using only Lore commands, without ever having to
+ * learn or type the indexer's name. Streams the indexer's output
+ * directly so progress and errors stay visible. Auto-installs the
+ * indexer on first run if it's missing.
+ *
+ * Forwards extra args after <path> to the indexer (e.g.
+ * `--embeddings`, `--no-cache`). Exits with the indexer's exit code.
+ *
+ * Daemon-aware? No — the indexer writes to its own files; Lore reads
+ * from there via `lore index` afterwards.
+ *
+ * Plugin boundary: this command lives in the developer plugin
+ * because the indexer (gitnexus) is plugin-owned vocabulary. Core's
+ * cli/index.ts dispatches to it via registerCliCommands.
+ */
+function findIndexerBin(): string | null {
+    const candidates = [
+        '/opt/homebrew/bin/gitnexus',
+        '/usr/local/bin/gitnexus',
+        path.join(os.homedir(), '.nvm/versions/node', process.version, 'bin/gitnexus'),
+    ];
+    for (const c of candidates) {
+        if (fs.existsSync(c)) return c;
+    }
+    return null;
+}
+
+export async function analyzeCommand(args: string[]): Promise<void> {
+    if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
+        console.log('Usage: lore analyze <path> [--embeddings] [--no-cache] [...]');
+        console.log('');
+        console.log('  Builds the code index for a repository so Lore\'s code_*');
+        console.log('  MCP tools (code_query, code_full_context, code_impact, etc.)');
+        console.log('  can see the symbols. After analyze finishes, run `lore index`');
+        console.log('  to import the symbols into the unified knowledge graph.');
+        console.log('');
+        console.log('  Extra flags are forwarded to the underlying indexer.');
+        console.log('  The indexer is auto-installed on first run if missing.');
+        process.exit(args.length === 0 ? 1 : 0);
+    }
+
+    let indexerBin = findIndexerBin();
+    if (!indexerBin) {
+        console.log('  · Code indexer not found. Installing (this may take a minute)...');
+        try {
+            execSync('npm install -g gitnexus', { stdio: 'inherit' });
+        } catch (installError) {
+            console.error('');
+            console.error(`  ✗ Code indexer install failed: ${(installError as Error).message}`);
+            console.error('    You can retry manually: npm install -g gitnexus');
+            process.exit(1);
+        }
+        indexerBin = findIndexerBin();
+        if (!indexerBin) {
+            console.error('');
+            console.error('  ✗ Code indexer install reported success but binary still not on PATH.');
+            console.error('    Check your npm global bin directory.');
+            process.exit(1);
+        }
+        console.log('  ✓ Code indexer installed.');
+        console.log('');
+    }
+
+    try {
+        const escaped = args.map((a) => `"${a.replace(/"/g, '\\"')}"`).join(' ');
+        execSync(`${indexerBin} analyze ${escaped}`, { stdio: 'inherit' });
+    } catch (analyzeError) {
+        const exitCode = (analyzeError as { status?: number }).status ?? 1;
+        process.exit(exitCode);
+    }
 }
 
 export async function ingestFilesCommand(_args: string[]): Promise<void> {
