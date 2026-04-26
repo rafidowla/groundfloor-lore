@@ -16,10 +16,21 @@
 LORE_PORT="${LORE_PORT:-3847}"
 LORE_DAEMON="http://127.0.0.1:${LORE_PORT}"
 
-# Run GitNexus analysis in background (non-blocking)
+# Run GitNexus analysis in background (non-blocking).
+#
+# 2026-04-25: dropped the `--quiet` flag — it was removed from the
+# gitnexus CLI in a recent release and was causing every commit to
+# print "Code graph update failed (non-blocking)" with the actual
+# stderr ("unknown option '--quiet'") swallowed by 2>/dev/null. We
+# now redirect stderr to a log file instead of /dev/null so future
+# CLI changes surface in `~/.groundfloor/logs/post-commit-gitnexus.log`
+# where operators can find them.
 if command -v npx &> /dev/null; then
     echo "[lore] Re-indexing code graph..."
-    npx gitnexus analyze . --quiet 2>/dev/null &
+    LOG_DIR="${HOME}/.groundfloor/logs"
+    mkdir -p "$LOG_DIR" 2>/dev/null
+    LOG_FILE="${LOG_DIR}/post-commit-gitnexus.log"
+    npx gitnexus analyze . > "$LOG_FILE" 2>&1 &
     GITNEXUS_PID=$!
 
     # Wait up to 30s, then detach if still running
@@ -33,7 +44,7 @@ if command -v npx &> /dev/null; then
     if [ $EXIT_CODE -eq 0 ]; then
         echo "[lore] ✓ Code graph updated"
     else
-        echo "[lore] ⚠ Code graph update failed (non-blocking)"
+        echo "[lore] ⚠ Code graph update failed (non-blocking) — see $LOG_FILE"
     fi
 else
     echo "[lore] ⚠ npx not found — skipping code graph update"
