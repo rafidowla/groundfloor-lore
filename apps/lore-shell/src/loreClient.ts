@@ -170,6 +170,56 @@ export function describeLaunchdState(s: LaunchdState): string {
 }
 
 // ────────────────────────────────────────────────────────────────────────
+// Phase 6 — DEF runtime discovery (launchd-only, no HTTP probe).
+// ────────────────────────────────────────────────────────────────────────
+
+/**
+ * Wire shape of the `discover_def` Tauri command. Mirrors
+ * `DiscoverReport` for symmetry, but DEF has no HTTP probe — DEF is an
+ * MCP CLIENT (talks to Lore via Lore's MCP), not a server, so there's
+ * no port to ping. Visibility is launchd state only. See
+ * `apps/lore-shell/src-tauri/src/def_discovery.rs` and
+ * `docs/DEF_LOCAL_FIRST.md` for the rationale.
+ */
+export interface DiscoverDefReport {
+    platform: 'macos' | 'linux' | 'windows' | 'other';
+    launchd: LaunchdState;
+    /** Echoed for the UI tooltip (e.g. "com.groundfloor.def"). */
+    label: string;
+    /** Echoed for `launchctl load` hints (e.g. "com.groundfloor.def.plist"). */
+    plist_filename: string;
+}
+
+export async function discoverDef(): Promise<DiscoverDefReport> {
+    return await invoke<DiscoverDefReport>('discover_def');
+}
+
+/**
+ * DEF-aware variant of `describeLaunchdState`. The Lore-daemon version
+ * mentions `com.groundfloor.lore.plist` in its hints; this one mentions
+ * the DEF plist instead so operators get a copy-pasteable command for
+ * the right job. The two-primitives architecture keeps the strings
+ * separate on purpose — confusing "your daemon is offline" between
+ * Lore and DEF would be the worst kind of error message.
+ */
+export function describeDefLaunchdState(s: LaunchdState): string {
+    switch (s.kind) {
+        case 'NotApplicable':
+            return 'launchd is macOS-only. On this platform DEF must be started by another mechanism (systemd / sc.exe / manual).';
+        case 'PlistMissing':
+            return 'No com.groundfloor.def.plist found in standard LaunchAgents paths. DEF is not installed on this machine. Lore continues to work without DEF — agents and scheduled tasks just have no runtime to execute on.';
+        case 'NotLoaded':
+            return `DEF plist exists at ${s.plist_path} but is not loaded. Run \`launchctl load ${s.plist_path}\` to start the DEF runtime.`;
+        case 'Running':
+            return `DEF runtime running under launchd · PID ${s.pid} · plist ${s.plist_path}`;
+        case 'LoadedNotRunning':
+            return `DEF job loaded (plist ${s.plist_path}) but no PID — between respawns or KeepAlive=false.`;
+        case 'UnknownError':
+            return `launchctl error: ${s.message}`;
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Error helpers
 // ────────────────────────────────────────────────────────────────────────
 

@@ -183,3 +183,34 @@ Related decisions:
 - Phase 7 (external reference plugins) does not block on this; those
   plugins can declare `def.*` contributions today, and they'll
   activate once DEF's local-first runtime ships.
+
+## Phase 6 — Shell-side discovery (shipped 2026-04-25)
+
+DEF Phase 5b shipped `DEF_STORAGE=lore`, unblocking shell-side
+integration. The Lore shell now treats DEF as **primitive #2**
+alongside the Lore daemon:
+
+- New IPC command `discover_def` (Tauri Rust) reads the
+  `com.groundfloor.def` launchd job state. Read-only, same contract
+  as `discover_daemon` — the shell never starts/stops/signals DEF.
+- New "DEF runtime" pill in the status panel renders alongside the
+  Lore-daemon and Dataplane pills. States: `running · PID N` (green)
+  / `loaded · no PID` (orange) / `not loaded` (grey, with the exact
+  `launchctl load` command in the tooltip) / `not installed ·
+  optional` (grey-italic — most workspaces don't run DEF) /
+  `error` (red).
+- Manifest-aware warning: when a loaded plugin manifest declares
+  `def.required: true` and the DEF runtime isn't running, the DEF
+  contributions section shows a red warning that agents and
+  scheduled tasks won't execute.
+- **No HTTP probe.** Per this document, DEF is an MCP *client*
+  (talks to Lore via Lore's MCP), not an HTTP server — so there's
+  no port for the shell to ping. Visibility is launchd state only.
+  When DEF eventually exposes a control port the shell can extend
+  `DiscoverDefReport` with a health field.
+
+The shell-side architecture mirrors the daemon side (sibling launchd
+services, neither shell-spawned, see `docs/SHELL_LIFECYCLE.md`). The
+launchd-state lookup in `discovery.rs` was refactored into a
+parameterised helper so DEF and Lore share one launchctl-output
+parser instead of duplicating it.

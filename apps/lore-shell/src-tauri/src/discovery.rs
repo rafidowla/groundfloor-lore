@@ -44,6 +44,13 @@ const DAEMON_PLIST_FILENAME: &str = "com.groundfloor.lore.plist";
 
 /// Read-only view of launchd state for the daemon job. Mapped from
 /// `launchctl list <label>` output — the macOS-stable contract.
+///
+/// Generic over which job we're inspecting. Phase 3d uses this for the
+/// Lore daemon (`com.groundfloor.lore`); Phase 6 reuses it for the DEF
+/// runtime (`com.groundfloor.def`) via `def_discovery.rs`. The variants
+/// are job-agnostic by design — "plist missing", "loaded not running",
+/// "running with PID" mean the same thing for any launchd-managed
+/// service.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind")]
 pub enum LaunchdState {
@@ -121,7 +128,7 @@ fn detect_platform() -> String {
     }
 }
 
-/// Locate `com.groundfloor.lore.plist` in the standard LaunchAgents paths.
+/// Locate a `<filename>.plist` in the standard LaunchAgents paths.
 /// Returns the first hit. Order (highest priority first):
 ///   1. `$HOME/Library/LaunchAgents/`           — per-user (most common)
 ///   2. `/Library/LaunchAgents/`                — system-wide, all users
@@ -129,30 +136,57 @@ fn detect_platform() -> String {
 ///
 /// Anywhere else (custom GUIs, dev installs) is out of scope; the user
 /// can launchctl-load it manually and the HTTP probe will still find it.
-fn find_plist() -> Option<PathBuf> {
+///
+/// Phase 6 generalises this from a single hard-coded filename
+/// (com.groundfloor.lore.plist) to any job — DEF reuses it through
+/// `def_discovery::find_def_plist()` without copy-paste.
+pub(crate) fn find_plist_by_name(filename: &str) -> Option<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
         candidates.push(
             PathBuf::from(home)
                 .join("Library/LaunchAgents")
-                .join(DAEMON_PLIST_FILENAME),
+                .join(filename),
         );
     }
-    candidates.push(PathBuf::from("/Library/LaunchAgents").join(DAEMON_PLIST_FILENAME));
-    candidates.push(PathBuf::from("/Library/LaunchDaemons").join(DAEMON_PLIST_FILENAME));
+    candidates.push(PathBuf::from("/Library/LaunchAgents").join(filename));
+    candidates.push(PathBuf::from("/Library/LaunchDaemons").join(filename));
     candidates.into_iter().find(|p| p.exists())
+}
+
+/// Generic launchd-state lookup for any job. Used by both the Lore
+/// daemon's `discover()` and DEF's `discover_def()` to avoid duplicating
+/// the launchctl-output parsing.
+///
+/// On non-macOS platforms returns `LaunchdState::NotApplicable` (other
+/// service-manager integrations will replace this in future).
+pub(crate) fn lookup_launchd_state(label: &str, plist_filename: &str) -> LaunchdState {
+    #[cfg(target_os = "macos")]
+    {
+        macos_launchd_state_for(label, plist_filename)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (label, plist_filename);
+        LaunchdState::NotApplicable
+    }
 }
 
 #[cfg(target_os = "macos")]
 fn macos_launchd_state() -> LaunchdState {
-    let plist_path_opt = find_plist();
+    macos_launchd_state_for(DAEMON_LAUNCHD_LABEL, DAEMON_PLIST_FILENAME)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_launchd_state_for(label: &str, plist_filename: &str) -> LaunchdState {
+    let plist_path_opt = find_plist_by_name(plist_filename);
     let plist_path_str = plist_path_opt
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
 
     // Ask launchctl whether the job is loaded.
     let output = Command::new("launchctl")
-        .args(["list", DAEMON_LAUNCHD_LABEL])
+        .args(["list", label])
         .output();
 
     match output {

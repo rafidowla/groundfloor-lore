@@ -14,13 +14,17 @@ import {
 import { TableInspector } from './TableInspector';
 import {
     discoverDaemon,
+    discoverDef,
     parseDaemonError,
     describeDaemonError,
     describeLaunchdState,
+    describeDefLaunchdState,
     describeDataplaneState,
     type DiscoverReport,
+    type DiscoverDefReport,
     type HealthReport,
     type DataplaneState,
+    type LaunchdState,
 } from './loreClient';
 
 interface ShellInfo {
@@ -32,6 +36,18 @@ type DiscoverState =
     | { kind: 'idle' }
     | { kind: 'discovering' }
     | { kind: 'ok'; report: DiscoverReport }
+    | { kind: 'error'; message: string };
+
+/**
+ * Phase 6 — DEF discovery state. Mirrors `DiscoverState` but for the
+ * DEF launchd job. Separate state so a slow DEF probe never blocks the
+ * Lore-daemon panel — Lore is the primary primitive and the panel
+ * should always render even if DEF is missing.
+ */
+type DiscoverDefState =
+    | { kind: 'idle' }
+    | { kind: 'discovering' }
+    | { kind: 'ok'; report: DiscoverDefReport }
     | { kind: 'error'; message: string };
 
 /**
@@ -56,6 +72,7 @@ export function App() {
     const [loading, setLoading] = useState(false);
 
     const [probe, setProbe] = useState<DiscoverState>({ kind: 'idle' });
+    const [defProbe, setDefProbe] = useState<DiscoverDefState>({ kind: 'idle' });
 
     useEffect(() => {
         invoke<ShellInfo>('shell_info')
@@ -63,6 +80,11 @@ export function App() {
             .catch((e) => setInfoError(String(e)));
         // Run discovery on boot — no manual button needed in 3d.
         runDiscovery();
+        // Phase 6 — also probe the DEF runtime. Independent IPC call so
+        // a slow / hanging DEF launchctl never blocks the Lore-daemon
+        // panel. Both probes fire on boot and can be re-triggered
+        // independently.
+        runDefDiscovery();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -74,6 +96,26 @@ export function App() {
         } catch (e) {
             const parsed = parseDaemonError(e);
             setProbe({
+                kind: 'error',
+                message:
+                    parsed.kind === 'Unknown'
+                        ? `Unexpected error: ${parsed.detail.message}`
+                        : describeDaemonError(parsed),
+            });
+        }
+    }
+
+    async function runDefDiscovery() {
+        setDefProbe({ kind: 'discovering' });
+        try {
+            const report = await discoverDef();
+            setDefProbe({ kind: 'ok', report });
+        } catch (e) {
+            // DEF discovery uses the same DaemonError surface today
+            // (Tauri's invoke serialises any thrown error). Reuse the
+            // Lore-side parser so the message is at least informative.
+            const parsed = parseDaemonError(e);
+            setDefProbe({
                 kind: 'error',
                 message:
                     parsed.kind === 'Unknown'
@@ -108,7 +150,7 @@ export function App() {
         <main className="shell-root">
             <header>
                 <h1>Lore</h1>
-                <span className="tag">Phase 8 — Dataplane sync visibility</span>
+                <span className="tag">Phase 6 — Lore + DEF, two primitives</span>
             </header>
 
             <section className="status">
@@ -138,8 +180,23 @@ export function App() {
                                 </dd>
                             </>
                         )}
+                        <dt>DEF runtime</dt>
+                        <dd className="daemon-cell">
+                            <DefRuntimePill probe={defProbe} />
+                            <button
+                                type="button"
+                                className="probe"
+                                onClick={runDefDiscovery}
+                                disabled={defProbe.kind === 'discovering'}
+                            >
+                                {defProbe.kind === 'discovering' ? 'Discovering…' : 'Re-probe'}
+                            </button>
+                        </dd>
                         {probe.kind === 'ok' && (
                             <DiscoveryDetail report={probe.report} />
+                        )}
+                        {defProbe.kind === 'ok' && (
+                            <DefDiscoveryDetail report={defProbe.report} />
                         )}
                     </dl>
                 ) : (
@@ -164,6 +221,10 @@ export function App() {
                         loaded={loaded}
                         daemonReachable={
                             probe.kind === 'ok' && probe.report.http_health != null
+                        }
+                        defReachable={
+                            defProbe.kind === 'ok' &&
+                            defProbe.report.launchd.kind === 'Running'
                         }
                     />
                 )}
@@ -360,11 +421,23 @@ function DiscoveryDetail({ report }: { report: DiscoverReport }) {
 function ManifestView({
     loaded,
     daemonReachable,
+    defReachable,
 }: {
     loaded: LoadedManifest;
     daemonReachable: boolean;
+    /**
+     * Phase 6 — true when the DEF launchd job reports
+     * `LaunchdState::Running`. Used to warn when a manifest declares
+     * `def.required: true` but the DEF runtime is missing or down —
+     * the agents/scheduledTasks rendered below won't actually execute
+     * until the operator brings DEF online.
+     */
+    defReachable: boolean;
 }) {
     const m = loaded.manifest;
+    const defNeeded = Boolean(m.def);
+    const defRequired = Boolean(m.def?.required);
+    const defMissing = defNeeded && !defReachable;
     const inspectors = m.lore?.inspectors ?? [];
     const tableInspectors = inspectors.filter(
         (i): i is TableInspectorConfig => i.kind === 'table',
@@ -426,6 +499,13 @@ function ManifestView({
                             <span className="badge badge-required">required</span>
                         )}
                     </h3>
+                    {defMissing && (
+                        <p className={`hint ${defRequired ? 'error' : ''}`}>
+                            {defRequired
+                                ? 'DEF is required by this manifest but not running. Agents and scheduled tasks will not execute until the DEF runtime is started.'
+                                : 'DEF runtime not running. Agents and scheduled tasks below will be inert until DEF is started — load the launchd plist (status panel above) to enable.'}
+                        </p>
+                    )}
                     {m.def.agents && m.def.agents.length > 0 && (
                         <>
                             <h4>Agents</h4>
@@ -521,5 +601,121 @@ function InspectorSummary({ inspector }: { inspector: InspectorPanel }) {
                 </span>
             )}
         </li>
+    );
+}
+
+/**
+ * Phase 6 — DEF runtime status pill.
+ *
+ * Mirrors `DaemonStatusPill` for the Lore daemon but reads launchd
+ * state only — DEF has no HTTP probe (it's an MCP client, not a
+ * server, per `docs/DEF_LOCAL_FIRST.md`). Variants:
+ *
+ *   Running           → green; "running · PID …"
+ *   LoadedNotRunning  → orange warning; "between respawns"
+ *   NotLoaded         → grey; tooltip shows the `launchctl load`
+ *                       command needed to bring it up
+ *   PlistMissing      → grey-italic "not installed" — most operators
+ *                       use Lore without DEF, so this is the
+ *                       "neutral" state, not an error
+ *   NotApplicable     → grey-italic "n/a" (non-macOS for now)
+ *   UnknownError      → red
+ *
+ * The label/styling diverges from the Lore-daemon pill on the
+ * "missing" case: a missing Lore daemon means Lore is dead; a missing
+ * DEF means the user simply hasn't installed DEF yet, and that's
+ * fine.
+ */
+function DefRuntimePill({ probe }: { probe: DiscoverDefState }) {
+    if (probe.kind === 'discovering') {
+        return <span className="daemon daemon-unknown">discovering…</span>;
+    }
+    if (probe.kind === 'error') {
+        return (
+            <span className="daemon daemon-absent" title={probe.message}>
+                error
+            </span>
+        );
+    }
+    if (probe.kind === 'idle') {
+        return <span className="daemon daemon-unknown">idle</span>;
+    }
+    const s: LaunchdState = probe.report.launchd;
+    const tooltip = describeDefLaunchdState(s);
+    switch (s.kind) {
+        case 'Running':
+            return (
+                <span className="daemon daemon-running" title={tooltip}>
+                    running · PID {s.pid}
+                </span>
+            );
+        case 'LoadedNotRunning':
+            return (
+                <span className="daemon daemon-warning" title={tooltip}>
+                    loaded · no PID
+                </span>
+            );
+        case 'NotLoaded':
+            return (
+                <span className="daemon daemon-unknown" title={tooltip}>
+                    not loaded
+                </span>
+            );
+        case 'PlistMissing':
+            return (
+                <span className="daemon daemon-unknown" title={tooltip}>
+                    not installed
+                    <span className="dim"> · optional</span>
+                </span>
+            );
+        case 'NotApplicable':
+            return (
+                <span className="daemon daemon-unknown" title={tooltip}>
+                    n/a
+                    <span className="dim"> · {probe.report.platform}</span>
+                </span>
+            );
+        case 'UnknownError':
+            return (
+                <span className="daemon daemon-absent" title={tooltip}>
+                    error
+                </span>
+            );
+    }
+}
+
+/**
+ * Phase 6 — DEF discovery detail rows. Mirrors `DiscoveryDetail` for
+ * the Lore daemon. Renders inside the same `<dl>` as the rest of the
+ * status panel.
+ */
+function DefDiscoveryDetail({ report }: { report: DiscoverDefReport }) {
+    return (
+        <>
+            <dt>DEF launchd</dt>
+            <dd>
+                <code>{report.launchd.kind}</code>
+                <span className="dim">
+                    {' '}
+                    · {describeDefLaunchdState(report.launchd)}
+                </span>
+            </dd>
+            {report.launchd.kind === 'NotLoaded' && (
+                <dd className="hint">
+                    Run in a Terminal:{' '}
+                    <code>launchctl load {report.launchd.plist_path}</code>
+                </dd>
+            )}
+            {report.launchd.kind === 'PlistMissing' && (
+                <dd className="hint dim">
+                    DEF is the second primitive (alongside Lore). Most
+                    workspaces don't need it; install only when you
+                    want the agent runtime to host{' '}
+                    <code>def.agents</code> and{' '}
+                    <code>def.scheduledTasks</code> from plugin
+                    manifests.
+                </dd>
+            )}
+        </>
     );
 }

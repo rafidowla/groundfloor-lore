@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 mod daemon;
+mod def_discovery;
 mod discovery;
 mod manifest;
 
@@ -87,6 +88,19 @@ async fn discover_daemon() -> discovery::DiscoverReport {
     discovery::discover().await
 }
 
+/// Phase 6 — read-only DEF runtime discovery. Mirrors `discover_daemon`
+/// but for the DEF launchd job (`com.groundfloor.def`). DEF is an MCP
+/// CLIENT, not a server, so there is no HTTP probe — visibility is
+/// launchd state only (loaded / running / PID). The two-primitives-
+/// one-shell architecture (see `docs/DEF_LOCAL_FIRST.md` and the
+/// `two-primitives-one-shell-architecture` Lore decision) makes the
+/// shell host both Lore and DEF as siblings; both daemons are launchd-
+/// managed, neither is shell-spawned. See `def_discovery.rs`.
+#[tauri::command]
+async fn discover_def() -> def_discovery::DiscoverDefReport {
+    def_discovery::discover_def().await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -98,7 +112,8 @@ pub fn run() {
             load_manifest,
             daemon_health,
             daemon_topology,
-            discover_daemon
+            discover_daemon,
+            discover_def
         ])
         .run(tauri::generate_context!())
         .expect("error while running lore-shell tauri application");
