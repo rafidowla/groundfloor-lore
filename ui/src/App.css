@@ -65,12 +65,31 @@
 }
 
 .sidebar-header {
-  height: 60px;
+  /* Two-row header: top row holds the brand + workspace picker + a
+     hide-chat button on the right; bottom row is the action toolbar.
+     Keeping everything on one row spilled past the 380px sidebar
+     width once we had 5+ buttons. */
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.sidebar-header-row {
   display: flex;
   align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.sidebar-header-row.brand-row {
   justify-content: space-between;
-  padding: 0 1rem;
-  border-bottom: 1px solid var(--color-border);
+}
+
+.sidebar-header-row.toolbar-row {
+  justify-content: flex-start;
+  flex-wrap: wrap;
 }
 
 .logo-area {

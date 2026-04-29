@@ -1419,16 +1419,19 @@ function App() {
         onDrop={(e) => void onDrop(e)}
       >
         <header className="sidebar-header">
-          <div className="logo-area" title="Groundfloor Lore — local-first knowledge graph">
-            <img src="/favicon.svg" alt="" width="22" height="22" className="brand-mark" />
-            <span className="brand-wordmark">Lore</span>
+          {/* Row 1: brand + workspace + hide-chat (the only "always-visible" controls). */}
+          <div className="sidebar-header-row brand-row">
+            <div className="logo-area" title="Groundfloor Lore — local-first knowledge graph">
+              <img src="/favicon.svg" alt="" width="22" height="22" className="brand-mark" />
+              <span className="brand-wordmark">Lore</span>
+            </div>
+            <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
+            <button className="icon-button" onClick={() => setSidebarOpen(false)} title="Hide chat panel">
+              <PanelLeft size={18} />
+            </button>
           </div>
-          <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
-          {/* Toolbar — grouped with separators to give cramped icons room.
-              Group 1: Knowledge surfaces (projects, find duplicates).
-              Group 2: Plugins (single dropdown — wizard / inspectors / settings).
-              Group 3: App (settings, hide chat). */}
-          <div style={{ display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
+          {/* Row 2: action toolbar — knowledge surfaces, plugins dropdown, settings. */}
+          <div className="sidebar-header-row toolbar-row">
             <button
               className="icon-button"
               onClick={() => {
@@ -1481,9 +1484,6 @@ function App() {
               title="Settings"
             >
               <Settings size={20} />
-            </button>
-            <button className="icon-button" onClick={() => setSidebarOpen(false)} title="Hide chat panel">
-              <PanelLeft size={18} />
             </button>
           </div>
         </header>
