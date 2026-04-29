@@ -1,8 +1,16 @@
 # Plan: Replace GitNexus inside the Developer Plugin
 
-> **Status:** Draft v1, 2026-04-29.
+> **Status:** **Locked v1, 2026-04-29.**
 > **Owner:** Lore developer plugin. **Author:** Rafi + Claude session.
 > **Goal:** Retire the GitNexus dependency entirely. Build a tree-sitter-based parser, cross-file resolver, architectural analytics, and git-signal layer **inside `packages/lore-plugin-developer/`**, exposing the same MCP tool surface (and more) the developer plugin offers today.
+>
+> **Lock-in deltas from Draft v1 (this revision):**
+> - **Languages expanded** from 5 to **8 in v1**: TS/JS, Python, Go, Rust, Java, C#, C/C++, Ruby.
+> - **Stack Graphs (Apache 2.0)** is now a **required** Phase 2 dependency for cross-file resolution.
+> - **`code_tectonic_map`** promoted from "Maybe" to an explicit Phase 4 deliverable — on par with jcodemunch's analytics surface.
+> - **`code_search_ast`** (AST pattern matching) added as a Phase 6 deliverable.
+> - **Phase 5 git signals** clarified as **host-agnostic** — works for GitHub, Bitbucket, GitLab, self-hosted git equally. Host-specific PR-API integration parked as a Phase 9+ extension.
+> - **Total estimate:** 36 → **41 working days (~8 weeks)** for one engineer focused.
 
 ---
 
@@ -152,16 +160,20 @@ Run gitnexus once, capture:
 
 These are the floor for the new implementation's acceptance.
 
-### 1.4 Decisions to lock in Phase 0
+### 1.4 Decisions locked
 
-| Decision | Default | Open if you disagree |
+| Decision | Locked value | Rationale |
 |---|---|---|
-| Languages in v1 | TypeScript, JavaScript, Python, Go, Rust | which to add/drop |
-| tree-sitter native vs WASM | WASM (`web-tree-sitter`) | native (faster but more install pain) |
-| Graph library | `graphology` + `graphology-pagerank` (both MIT) | other |
-| Git invocations | `simple-git` or raw `child_process` | other |
-| Backward-compat aliases | Keep `gitnexus_*` tool names as aliases for one release | drop immediately |
-| Dataplane sync | unchanged — schema stays the same | new fields require schema migration |
+| Languages in v1 | **TypeScript, JavaScript, Python, Go, Rust, Java, C#, C/C++, Ruby** (8 languages — TS+JS share grammar) | Common-language coverage matching what GitNexus reaches for typical enterprise codebases. Each adds ~1 day of walker work. |
+| Cross-file resolver | **Stack Graphs** ([github/stack-graphs](https://github.com/github/stack-graphs), Apache 2.0) as the foundation, plus our own resolver shims for languages without a Stack Graphs spec | Solves the hardest part of cross-file name resolution (esp. method dispatch) once instead of per-language. |
+| tree-sitter native vs WASM | **WASM** (`web-tree-sitter`) | No native compile dependency; ships the same on macOS / Linux / Windows. |
+| Graph library | `graphology` + `graphology-pagerank` + `graphology-components` (all MIT) | Battle-tested; PageRank + Tarjan SCC out of the box. |
+| Git invocations | Raw `child_process` against `git` binary (no extra dep) | Host-agnostic — works for GitHub, Bitbucket, GitLab, self-hosted equally. |
+| Backward-compat aliases | Keep `gitnexus_*` tool names as aliases for **one release**; drop in the release after Phase 8 | Lets in-flight CLAUDE.md / AGENTS.md instructions keep working through one upgrade cycle. |
+| Dataplane sync | **Unchanged** — schema stays additive only | New fields default to null; existing sync continues working. |
+| AST pattern matching | **Included** in Phase 6 as `code_search_ast` | Tree-sitter's query language gives this nearly for free. |
+| Tectonic map / module topology | **Included** in Phase 4 as `code_tectonic_map` | On par with jcodemunch's distinctive analytics view. |
+| Host-specific PR API integration (GitHub PRs, Bitbucket PRs, GitLab MRs) | **Parked** for a future Phase 9+ | Phase 5 git data uses local `git log` / `git blame` / `git diff` — works for all hosts. PR-state integration is a separate axis (per-host adapter, OAuth, rate-limit handling). Defer until a customer asks. |
 
 ---
 
@@ -289,8 +301,9 @@ Each phase is **independently shippable** and **independently revertible**. Comm
 - Decisions in 1.4 confirmed.
 - Add to `packages/lore-plugin-developer/package.json`:
   - `web-tree-sitter` (^0.22)
-  - tree-sitter grammar WASM files (TS, JS, Python, Go, Rust) — committed under `packages/lore-plugin-developer/grammars/` since they're small WASM blobs (<1MB each).
-  - `graphology`, `graphology-pagerank` (both MIT)
+  - tree-sitter grammar WASM files for **all 8 v1 languages**: TypeScript, JavaScript, Python, Go, Rust, Java, C#, C, C++, Ruby — committed under `packages/lore-plugin-developer/grammars/` since they're small WASM blobs (<1MB each).
+  - `graphology`, `graphology-pagerank`, `graphology-components` (all MIT).
+  - **Stack Graphs** runtime (Apache 2.0) — pick the JS/WASM binding once we audit availability; fall back to invoking a small Rust binary if no usable JS binding exists yet.
 - Stub directory structure with empty `index.ts` files exporting `// TODO Phase N`.
 - Empty test files mirroring source structure.
 
@@ -303,7 +316,7 @@ Each phase is **independently shippable** and **independently revertible**. Comm
 
 ---
 
-### Phase 1 — Parser foundation (5 days)
+### Phase 1 — Parser foundation (8 days, +3 vs draft for the extra languages)
 
 **Files:** `parser/`, `parser/walkers/`.
 
@@ -312,9 +325,10 @@ Each phase is **independently shippable** and **independently revertible**. Comm
   - `parseFile(path: string): Promise<ParsedFile>`
   - `parseRepo(rootPath: string, ignore?: string[]): Promise<ParsedFile[]>`
   - `getLanguageFor(path: string): Language | null`
-- Per-language walker for TS/JS, Python, Go, Rust:
-  - Extract: function decls, class decls, method decls, exported names, decorators, signatures, byte ranges, parent module path.
+- Per-language walker for **all 8 v1 languages**: TS/JS (shared grammar), Python, Go, Rust, Java, C#, C/C++, Ruby:
+  - Extract: function decls, class decls, method decls, exported names, decorators / annotations, signatures, byte ranges, parent module path.
   - Compute cyclomatic complexity (count branches in body).
+  - Each walker is ~1 day of focused work; common utilities in `walkers/_base.ts` keep duplication down.
 - `types.ts` defines:
   - `ParsedSymbol` (id, kind, name, qualifiedName, file, byteRange, signature, complexity, parentSymbolId)
   - `ParsedFile` (path, language, symbols[], imports[])
@@ -322,46 +336,57 @@ Each phase is **independently shippable** and **independently revertible**. Comm
 - WASM grammars loaded once at process start and reused (singleton).
 
 **Tests:**
-- `test/parser/walker-typescript.test.ts` — synthetic TS file, assert symbol list.
-- `test/parser/walker-python.test.ts` — same for Python.
-- (one test file per language)
+- One test file per language under `test/parser/walker-<lang>.test.ts` — synthetic source, assert symbol list.
 - `test/parser/parse-file.test.ts` — round-trip on a known sample.
-- Performance baseline: parse `packages/lore/src/mcp/server.ts` (large file) — <500ms target.
+- Performance baseline: parse `packages/lore/src/mcp/server.ts` (large TS file) — <500ms target.
 
 **Acceptance:**
-- All 5 walker tests pass.
+- All 8 walker tests pass.
 - Parsing `packages/lore/src/mcp/server.ts` returns symbol count within 5% of GitNexus's count for that file (use audit baseline).
+- A representative repo per language (Java, C#, Ruby, etc.) parses without crash.
 - No native binaries loaded; only WASM.
 
 ---
 
-### Phase 2 — Cross-file resolution (5 days)
+### Phase 2 — Cross-file resolution with Stack Graphs (6 days, +1 vs draft for Stack Graphs integration)
 
 **Files:** `resolver/`.
 
+**Strategy:** use **Stack Graphs** ([github/stack-graphs](https://github.com/github/stack-graphs), Apache 2.0) as the primary cross-file resolver. Stack Graphs solves jump-to-definition / cross-file name resolution as a unified problem instead of language-by-language. Languages with a Stack Graphs `.tsg` definition (TS/JS, Python, Java; community work on others) get high-quality resolution. Languages without one fall back to our own resolver shims (call graph + import graph) — same shape as the original draft.
+
 **Deliverables:**
-- `symbolTable.ts` — per-file map of `name → ParsedSymbol[]`. Workspace-wide map of `qualifiedName → ParsedSymbol[]`.
-- `importGraph.ts` — resolve `import` statements to file paths. Handles:
-  - Relative imports (`./foo`, `../bar`).
-  - Workspace aliases (`@lore-core/...`) — read from `tsconfig.json` `paths`.
-  - Node module imports (skipped — not part of repo graph).
-- `callGraph.ts` — for each function body, walk identifier references and resolve to a symbol. Handles:
-  - Same-file calls (direct match).
-  - Imported-function calls (use import graph).
-  - Method calls on objects (best-effort: type inference is out of scope; use heuristic — match method name against known classes).
-  - Dynamic / computed calls — log as unresolved, don't fail.
-- `inheritance.ts` — `extends Foo`, `implements Bar`, `class Baz(Quux):` (Python).
+- `resolver/stackGraphs.ts` — adapter wrapping Stack Graphs runtime. Builds a stack graph from each `ParsedFile`, runs name resolution to produce typed `CodeRelation` edges.
+- `resolver/symbolTable.ts` — fallback per-file → workspace-wide symbol table for languages without Stack Graphs coverage. Per-file map of `name → ParsedSymbol[]`. Workspace-wide map of `qualifiedName → ParsedSymbol[]`.
+- `resolver/importGraph.ts` — fallback resolver for `import` statements when Stack Graphs isn't available. Handles relative imports, workspace aliases (`@lore-core/...` from `tsconfig.json` `paths`), skips node modules.
+- `resolver/callGraph.ts` — fallback for languages without Stack Graphs `.tsg` files. Same-file calls (direct match), imported-function calls (via import graph), method calls (heuristic match against known classes), dynamic calls (logged unresolved).
+- `resolver/inheritance.ts` — `extends Foo`, `implements Bar`, `class Baz(Quux):` (Python), Java/C# class hierarchies.
+- `resolver/index.ts` — orchestrator: routes each file to Stack Graphs or fallback resolver based on language coverage; merges results into a single edge stream for `operations.ts`.
+
+**Per-language coverage at v1:**
+| Language | Stack Graphs `.tsg`? | Resolver path |
+|---|---|---|
+| TypeScript | Yes (mature) | Stack Graphs |
+| JavaScript | Yes (shared with TS) | Stack Graphs |
+| Python | Yes (mature) | Stack Graphs |
+| Java | Yes | Stack Graphs |
+| Go | Partial (community); use fallback if quality issues | Fallback or Stack Graphs |
+| Rust | Partial; use fallback | Fallback |
+| C# | Community; use fallback | Fallback |
+| C/C++ | Limited; use fallback | Fallback |
+| Ruby | Partial; use fallback | Fallback |
 
 **Tests:**
-- Synthetic two-file repo: file A calls function in file B. Assert edge created.
-- Real lore repo subset: known cross-file calls (e.g., `pluginRegistry.active()` from `server.ts`).
+- Synthetic two-file repo per language: file A calls function in file B. Assert edge created.
+- Real lore repo subset: known cross-file calls (e.g., `pluginRegistry.active()` from `server.ts`) — verifies Stack Graphs path on TS.
+- Real Java sample repo: cross-file method dispatch resolves correctly — verifies Stack Graphs path on Java.
 - Module aliases: `@lore-core/foo` resolves to `packages/lore/src/foo.ts`.
 - Edge-count parity: cross-file edges within 10% of GitNexus baseline on lore repo.
 
 **Acceptance:**
-- `getCallers(symbolId)` and `getCallees(symbolId)` return correct results on synthetic + lore repo.
-- Cross-file edge count within 10% of baseline.
-- Unresolved-reference rate logged (target: <15% of calls).
+- `getCallers(symbolId)` and `getCallees(symbolId)` return correct results on synthetic + real repos for all 8 languages.
+- Cross-file edge count within 10% of baseline on lore repo.
+- Stack Graphs path active for at least 4 languages (TS/JS, Python, Java); fallback resolver path active for the rest.
+- Unresolved-reference rate logged (target: <15% of calls on Stack-Graphs-covered languages, <25% on fallback).
 
 ---
 
@@ -389,7 +414,7 @@ Each phase is **independently shippable** and **independently revertible**. Comm
 
 ---
 
-### Phase 4 — Architectural analytics (8 days)
+### Phase 4 — Architectural analytics (9 days, +1 vs draft for tectonic map)
 
 **Files:** `analytics/`.
 
@@ -397,19 +422,26 @@ Each phase is **independently shippable** and **independently revertible**. Comm
 - `blastRadius.ts` — `blastRadius(symbolId, direction: 'upstream' | 'downstream', maxDepth = 3) → { d1: SymbolRef[], d2: SymbolRef[], d3: SymbolRef[] }`.
 - `pagerank.ts` — `pagerank(graph: GraphologyGraph) → Map<symbolId, score>`. Cache on `CodeSymbol.pagerank` field.
 - `coupling.ts` — `coupling(modulePath) → { afferent, efferent, instability }`.
-- `cycles.ts` — `cycles(graph) → SCC[]` via `graphology` package's Tarjan.
+- `cycles.ts` — `cycles(graph) → SCC[]` via `graphology-components` Tarjan.
 - `deadCode.ts` — `deadCode(graph, options) → SymbolRef[]`. Filter out exports and entry points.
 - `hotspots.ts` — `hotspots(graph) → ranked SymbolRef[]`. Combines complexity × churn (depends on Phase 5 for churn — guard with feature flag if Phase 5 not done yet).
 - `layerViolations.ts` — `layerViolations(graph, layerSpec: LayerSpec) → Violation[]`. `layerSpec` is user-declared (e.g., `{ ui: ['ui/**'], core: ['packages/lore/**'], plugins: ['packages/lore-plugin-*/**'] }` with rules `ui → core OK, ui ⇏ plugins`).
+- **`tectonicMap.ts` — `tectonicMap(graph) → ModuleTopology`** (NEW, on par with jcodemunch's `get_tectonic_map`):
+  - Aggregates symbols into modules (using directory boundaries + import-graph clustering).
+  - Returns: list of modules with size, instability score, dominant inbound/outbound dependencies, cycle membership.
+  - Output shape designed for visualisation: each module a node, each strong cross-module dependency an edge with weight.
+  - Reuses outputs from `coupling`, `cycles`, and the import graph rather than recomputing — fast.
 
 **Tests:**
 - Each analytic on synthetic graphs with known answers.
 - Run on lore repo, spot-check a few results manually (e.g., blast radius of `pluginRegistry.active`).
+- Tectonic map on lore repo: spot-check known module structure (`packages/lore`, `packages/lore-plugin-developer`, `ui/`).
 - Performance: <2s for any single analytic on a 10k-symbol graph.
 
 **Acceptance:**
-- All 7 analytics expose typed functions.
+- All 8 analytics expose typed functions.
 - All have MCP tool handlers in Phase 6.
+- `code_tectonic_map` returns a usable module topology for the lore repo.
 
 ---
 
@@ -417,51 +449,65 @@ Each phase is **independently shippable** and **independently revertible**. Comm
 
 **Files:** `git/`.
 
+**All git data is host-agnostic.** Phase 5 reads local git history via the `git` binary (`git log`, `git blame`, `git diff`). It works identically for repos hosted on GitHub, Bitbucket, GitLab, self-hosted git, or Gitea — the daemon never talks to the host's web API.
+
+> **Per-host PR / MR / review-data integration is parked for a Phase 9+ extension.** That's a different axis: each host has its own API shape (GitHub PRs, Bitbucket pull requests, GitLab merge requests), each needs OAuth, each has rate limits. We'll add per-host adapters when a customer wants reviewer-attention or CI-status signals folded into PR risk. Phase 5 ships without that.
+
 **Deliverables:**
-- `churn.ts` — `churn(file, sinceDays = 30) → { commits, additions, deletions }`. Uses `git log --since=… --numstat -- <file>`.
-- `lineage.ts` — `lineage(symbol) → BlameLine[]`. Uses `git blame -L <startLine>,<endLine> -- <file>` over symbol byte ranges.
-- `prRisk.ts` — `prRisk(commitRange) → { score, factors }`. Combines blast radius × churn × complexity for changed symbols.
-- `detectChanges.ts` — `detectChanges(scope: 'staged' | 'unstaged' | 'compare', baseRef?) → AffectedSymbol[]`. Uses `git diff` to find changed line ranges, maps to symbols by byte-range overlap.
+- `churn.ts` — `churn(file, sinceDays = 30) → { commits, additions, deletions }`. Uses `git log --since=… --numstat -- <file>`. **Host-agnostic.**
+- `lineage.ts` — `lineage(symbol) → BlameLine[]`. Uses `git blame -L <startLine>,<endLine> -- <file>` over symbol byte ranges. **Host-agnostic.**
+- `prRisk.ts` — `prRisk(commitRange) → { score, factors }`. Combines blast radius × churn × complexity for changed symbols. **v1: pure local git** — `git log <baseRef>..HEAD` to enumerate commits + changed symbols. PR-state signals (reviewers, CI status, comment count) are Phase 9+ via host adapters.
+- `detectChanges.ts` — `detectChanges(scope: 'staged' | 'unstaged' | 'compare', baseRef?) → AffectedSymbol[]`. Uses `git diff` to find changed line ranges, maps to symbols by byte-range overlap. **Host-agnostic.**
 
 **Tests:**
 - Mock git output, verify parsing.
-- Run on lore repo, validate churn against `git log` manually.
+- Run on lore repo (GitHub) and a Bitbucket-hosted repo, verify identical behaviour — same `git` binary, same output.
 - detect_changes: stage a known edit, assert affected symbol set.
 
 **Acceptance:**
-- Churn data for every file.
+- Churn data for every file in the developer workspace.
 - `code_detect_changes` tool works pre-commit.
+- Verified working on at least one repo per host (GitHub + Bitbucket) — same output shape.
 
 ---
 
-### Phase 6 — MCP tool surface (3 days)
+### Phase 6 — MCP tool surface (4 days, +1 vs draft for `code_search_ast` + `code_tectonic_map`)
 
 **Files:** `mcp/tools.ts`, `mcp/handlers.ts`, `mcp/aliases.ts`, `tools.ts` (plugin entry).
 
 **Deliverables:**
 
-Tools defined (matching what `CLAUDE.md` references today, plus the new analytics/git surface):
+Tools defined (replacing every GitNexus tool we use today + adding the analytics/git/AST surface):
 
 | New tool | Replaces | Phase |
 |---|---|---|
-| `code_query(query, limit?)` | `gitnexus_query` | 4+6 (uses semantic search via Lore's existing Xenova embeddings + graph context) |
-| `code_context(name, depth?)` | `gitnexus_context` | 2+6 |
+| `code_query(query, limit?, mode?)` | `gitnexus_query` | 4+6 (uses semantic search via Lore's existing Xenova embeddings + graph context) |
+| `code_context(name, depth?, mode?)` | `gitnexus_context` | 2+6 |
 | `code_impact(target, direction)` | `gitnexus_impact` | 4+6 |
 | `code_detect_changes(scope, baseRef?)` | `gitnexus_detect_changes` | 5+6 |
 | `code_rename(symbol, newName, dryRun)` | `gitnexus_rename` | 6 (already half-built in `nativeTools.ts`) |
 | `code_cypher(query)` | `gitnexus_cypher` | 6 (uses Kùzu directly) |
-| `code_blast_radius(symbol, direction, depth?)` | new | 4+6 |
-| `code_pagerank(limit?)` | new | 4+6 |
-| `code_coupling(module)` | new | 4+6 |
-| `code_cycles()` | new | 4+6 |
-| `code_dead_code(filter?)` | new | 4+6 |
-| `code_hotspots(repo, limit?)` | new | 4+6 |
-| `code_layer_violations(layerSpec)` | new | 4+6 |
-| `code_churn(file, sinceDays?)` | new | 5+6 |
-| `code_lineage(symbol)` | new | 5+6 |
-| `code_pr_risk(commitRange)` | new | 5+6 |
+| **`code_search_ast(pattern, language?)`** | NEW (matches jcodemunch's `search_ast`) | 6 (uses tree-sitter's query language) |
+| `code_blast_radius(symbol, direction, depth?)` | NEW | 4+6 |
+| `code_pagerank(limit?)` | NEW | 4+6 |
+| `code_coupling(module)` | NEW | 4+6 |
+| `code_cycles()` | NEW | 4+6 |
+| `code_dead_code(filter?)` | NEW | 4+6 |
+| `code_hotspots(repo, limit?)` | NEW | 4+6 |
+| `code_layer_violations(layerSpec)` | NEW | 4+6 |
+| **`code_tectonic_map()`** | NEW (matches jcodemunch's `get_tectonic_map`) | 4+6 |
+| `code_churn(file, sinceDays?)` | NEW | 5+6 |
+| `code_lineage(symbol)` | NEW | 5+6 |
+| `code_pr_risk(commitRange)` | NEW | 5+6 |
 
-Plus aliases for back-compat (Phase 6 adds, Phase 7 retires):
+**Total: 18 tools** (16 from draft plus `code_search_ast` and `code_tectonic_map`).
+
+Every tool that returns a list accepts a `mode: 'thin' | 'standard' | 'full'` parameter — implements the **two-tier principle** for token efficiency:
+- `thin` — id + label + 1-line snippet (default for list-y responses)
+- `standard` — id + label + signature + file:line + short context (default for single-symbol responses)
+- `full` — full body, all neighbours, all metadata
+
+Plus aliases for back-compat (Phase 6 adds, **drops in the release after Phase 8 per the locked decision**):
 - `gitnexus_query` → `code_query`
 - `gitnexus_context` → `code_context`
 - `gitnexus_impact` → `code_impact`
@@ -600,37 +646,45 @@ Cutover sequence (single maintenance window, ~minutes of downtime):
 
 ## 7. Total estimate
 
-| Phase | Days |
-|---|---|
-| 0 — pre-work | 3 |
-| 1 — parser | 5 |
-| 2 — resolver | 5 |
-| 3 — graph integration | 3 |
-| 4 — analytics | 8 |
-| 5 — git | 3 |
-| 6 — MCP tools | 3 |
-| 7 — retirement | 3 |
-| 8 — docs | 3 |
-| **Total** | **36 working days ≈ 7 weeks** for one engineer focused. |
+| Phase | Days | Δ vs draft |
+|---|---|---|
+| 0 — pre-work | 3 | — |
+| 1 — parser (8 languages) | 8 | +3 |
+| 2 — resolver (Stack Graphs + fallbacks) | 6 | +1 |
+| 3 — graph integration | 3 | — |
+| 4 — analytics (incl. tectonic map) | 9 | +1 |
+| 5 — git | 3 | — |
+| 6 — MCP tools (incl. AST search + tectonic map) | 4 | +1 |
+| 7 — retirement (incl. cutover playbook) | 3 | — |
+| 8 — docs | 3 | — |
+| **Total** | **42 working days ≈ 8.4 weeks** | **+6 days** |
 
-Each phase commits in 1–2-day chunks. Rough commit count: 25–35 commits total.
+Each phase commits in 1–2-day chunks. Rough commit count: 30–40 commits total.
 
 ---
 
 ## 8. Per-language coverage matrix (v1)
 
-| Language | Phase 1 walker | Phase 2 resolver | v1 priority |
-|---|---|---|---|
-| TypeScript | Required | Required | P0 (Lore primary) |
-| JavaScript | Required (shared TS grammar) | Required | P0 |
-| Python | Required | Required | P0 (DEF + scripts) |
-| Go | Required | Required | P1 (customer projects) |
-| Rust | Required | Required | P1 (customer projects) |
-| Java/Kotlin | Optional | Optional | P2 (post-v1 if customer demand) |
-| C/C++ | Optional | Optional | P2 |
-| 60+ other tree-sitter languages | Future | Future | P3 (add walkers on demand) |
+| Language | Phase 1 walker | Phase 2 resolver | v1 priority | Notes |
+|---|---|---|---|---|
+| TypeScript | Required | Stack Graphs | P0 | Lore primary |
+| JavaScript | Required (shared TS grammar) | Stack Graphs | P0 | |
+| Python | Required | Stack Graphs | P0 | DEF + scripts + many customer repos |
+| Java | Required | Stack Graphs | P0 | Enterprise default; Stack Graphs has good `.tsg` |
+| Go | Required | Fallback (Stack Graphs partial) | P1 | Customer projects |
+| Rust | Required | Fallback | P1 | Customer projects |
+| C# | Required | Fallback | P1 | Enterprise default |
+| C / C++ | Required | Fallback | P1 | Systems projects |
+| Ruby | Required | Fallback | P1 | Common in older startups + Rails shops |
+| Kotlin | Future | Future | P2 | Add post-v1 if Android customers ask |
+| Swift | Future | Future | P2 | Add post-v1 if iOS customers ask |
+| Scala | Future | Future | P2 | Common in data engineering |
+| PHP | Future | Future | P2 | Wordpress + legacy systems |
+| 60+ other tree-sitter languages | Future | Future | P3 | Add walkers on demand |
 
-Adding a new language post-v1 = ~1 day per language: install grammar WASM, write walker, write tests.
+**v1 ships 8 languages** (TS+JS share grammar but count as one walker = 8 walkers across 9 file extensions).
+
+Adding a language post-v1 = ~1 day: install grammar WASM, write walker, write tests, optionally add Stack Graphs `.tsg` if available.
 
 ---
 
@@ -638,18 +692,24 @@ Adding a new language post-v1 = ~1 day per language: install grammar WASM, write
 
 | Dependency | License | Purpose | Phase added |
 |---|---|---|---|
-| `web-tree-sitter` | MIT | parser runtime | 0 |
+| `web-tree-sitter` | MIT | parser runtime (WASM) | 0 |
 | `tree-sitter-typescript` (WASM) | MIT | TS/TSX grammar | 0 |
 | `tree-sitter-javascript` (WASM) | MIT | JS/JSX grammar | 0 |
 | `tree-sitter-python` (WASM) | MIT | Python grammar | 0 |
 | `tree-sitter-go` (WASM) | MIT | Go grammar | 0 |
 | `tree-sitter-rust` (WASM) | MIT | Rust grammar | 0 |
+| `tree-sitter-java` (WASM) | MIT | Java grammar | 0 |
+| `tree-sitter-c-sharp` (WASM) | MIT | C# grammar | 0 |
+| `tree-sitter-c` (WASM) | MIT | C grammar | 0 |
+| `tree-sitter-cpp` (WASM) | MIT | C++ grammar | 0 |
+| `tree-sitter-ruby` (WASM) | MIT | Ruby grammar | 0 |
+| **Stack Graphs** runtime | Apache 2.0 | cross-file name resolution | 2 |
 | `graphology` | MIT | graph data structure | 4 |
 | `graphology-pagerank` | MIT | pagerank algorithm | 4 |
 | `graphology-components` | MIT | Tarjan SCC for cycles | 4 |
-| Native `child_process` | (built-in) | git command execution | 5 |
+| Native `child_process` | (built-in Node) | git command execution | 5 |
 
-No commercial-licensed dependencies. No code copied from GitNexus or jcodemunch.
+**All MIT or Apache 2.0** — fully compatible with Lore's proprietary commercial license. No code copied from GitNexus or jcodemunch.
 
 ---
 
@@ -681,16 +741,30 @@ No commercial-licensed dependencies. No code copied from GitNexus or jcodemunch.
 
 ---
 
-## 12. Open questions to confirm before Phase 1 (Phase 0 outputs)
+## 12. Open questions
 
-1. **Languages:** TS/JS, Python, Go, Rust for v1 — confirmed?
-2. **WASM vs native tree-sitter:** WASM default — confirmed?
-3. **Backward-compat aliases:** keep `gitnexus_*` → `code_*` for one release? Or drop immediately?
-4. **`.gitnexus/` user data:** leave alone, or migrate to `<workspace>/.lore/code/`?
-5. **Customer repo for end-to-end smoke test in Phase 8:** which one?
-6. **Layer-violation policy:** ship a default `LayerSpec` for Lore's own architecture in Phase 4? Or expect users to configure?
-7. **Embeddings model for `code_query`:** reuse Lore's Xenova embedding pipeline, or generate code-specific embeddings (e.g., comments + signatures concatenated)?
-8. **Single-engineer work policy:** confirmed one person runs the work, with a second engineer doing license-compliance review at each phase boundary?
+**Resolved (locked in this revision):**
+
+| # | Question | Locked answer |
+|---|---|---|
+| 1 | Languages for v1 | **8 languages**: TS/JS, Python, Go, Rust, Java, C#, C/C++, Ruby |
+| 2 | WASM vs native tree-sitter | **WASM** (`web-tree-sitter`) |
+| 3 | Backward-compat aliases | **Keep `gitnexus_*` → `code_*` for one release**, drop in the release after Phase 8 |
+| 7 | Embeddings model for `code_query` | **Reuse Lore's existing Xenova pipeline** (multilingual-e5-small, dim=384). Code-specific embeddings revisited only if benchmarks show measurable regression |
+| 9 | Cross-file resolver | **Stack Graphs as primary; per-language fallback shims** for languages without `.tsg` coverage |
+| 10 | AST pattern matching | **Included** as `code_search_ast` in Phase 6 |
+| 11 | Tectonic map | **Included** as `code_tectonic_map` in Phase 4 |
+| 12 | ID strategy at cutover | **Option B**: clean new ID format + one-time `oldId → newId` mapping table at cutover |
+| 13 | Per-host PR API integration (GitHub / Bitbucket / GitLab) | **Parked for Phase 9+**. Phase 5 git data is host-agnostic via local `git` binary; PR-state signals (reviewer attention, CI status) are a separate axis |
+
+**Still open — to confirm in Phase 0:**
+
+| # | Question | Default I'd pick |
+|---|---|---|
+| 4 | `~/.gitnexus/` user data on existing installs | **Leave alone**; documented as safe-to-`rm` in CHANGELOG once user confirms cutover |
+| 5 | Customer repo for end-to-end smoke test in Phase 8 | **CRE-IAM example** at `examples/plugin-manifests/cre-iam/` plus the lore monorepo itself |
+| 6 | Default `LayerSpec` for Lore's architecture | **Ship one** — pre-configured `{ ui: ['ui/**'], core: ['packages/lore/**'], plugins: ['packages/lore-plugin-*/**'] }` with rules `ui → core OK, ui ⇏ plugins, plugins → core OK`. Users can override per workspace. |
+| 8 | Single-engineer work policy | **Yes** — one engineer reads originals, one-day cooldown, implements; second engineer does license-compliance review at each phase boundary |
 
 ---
 
