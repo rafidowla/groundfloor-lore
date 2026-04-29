@@ -19,6 +19,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { X } from 'lucide-react';
 import { authFetch } from '../lib/authFetch';
 
 // ── Types echoing the manifest spec inline (same convention as PluginWizard) ──
@@ -285,7 +286,9 @@ function Wrapper({ children, onClose }: { children: React.ReactNode; onClose: ()
             >
                 <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                     <h2 style={{ margin: 0, fontSize: '1.2rem' }}>Plugin inspectors</h2>
-                    <button onClick={onClose} style={miniBtn}>Close</button>
+                    <button onClick={onClose} className="icon-button" title="Close">
+                        <X size={18} />
+                    </button>
                 </header>
                 {children}
             </div>

@@ -10,6 +10,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { X } from 'lucide-react';
 import { authFetch } from '../lib/authFetch';
 
 interface SettingsField {
@@ -199,7 +200,9 @@ function Wrapper({ children, onClose }: { children: React.ReactNode; onClose: ()
             >
                 <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
                     <h2 style={{ margin: 0, fontSize: '1.2rem' }}>Plugin settings</h2>
-                    <button onClick={onClose} style={miniBtn}>Close</button>
+                    <button onClick={onClose} className="icon-button" title="Close">
+                        <X size={18} />
+                    </button>
                 </header>
                 {children}
             </div>
