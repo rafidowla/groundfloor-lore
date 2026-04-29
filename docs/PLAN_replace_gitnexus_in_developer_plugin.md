@@ -1,0 +1,587 @@
+# Plan: Replace GitNexus inside the Developer Plugin
+
+> **Status:** Draft v1, 2026-04-29.
+> **Owner:** Lore developer plugin. **Author:** Rafi + Claude session.
+> **Goal:** Retire the GitNexus dependency entirely. Build a tree-sitter-based parser, cross-file resolver, architectural analytics, and git-signal layer **inside `packages/lore-plugin-developer/`**, exposing the same MCP tool surface (and more) the developer plugin offers today.
+
+---
+
+## 0. Boundary contract (non-negotiable)
+
+This work happens **entirely inside `packages/lore-plugin-developer/`**. Core Lore must remain plugin-agnostic. Specifically:
+
+- No imports from outside the plugin into `src/engines/`, `src/mcp/`, `src/cli/` (except plugin-specific subdirectories), `src/providers/`, or any other core path.
+- No new core API created exclusively for this plugin's needs. If something is genuinely shared (e.g., generic graph traversal helpers), it goes through `ILorePlugin` hooks and a typed `plugin.api` surface, not via core imports.
+- Core knows nothing about: code, ASTs, parsers, languages, blast radius, churn, layer violations, etc. The "gitnexus" / "GitNexus" / `CodeSymbol` / `CodeFile` / `CodeRelation` vocabulary stays plugin-local.
+
+**Test for every change:** *"Would this make sense in a family or finance workspace?"* If no → plugin. If yes → core. The current proposal answers no on every line, so it all goes in `packages/lore-plugin-developer/`.
+
+**Enforcement:** `npm run test:arch` must stay clean throughout. Any new violation requires explicit `.arch-baseline.json` justification.
+
+---
+
+## 1. Discovery & Audit (Phase 0 prerequisite — Day 1–2)
+
+Before touching code, produce these artefacts and check them in:
+
+### 1.1 GitNexus reference catalog
+- All source files referencing `gitnexus`, `GitNexus`, `.gitnexus`, or the binary path.
+- Subprocess invocations (`spawn`, `execSync`, `npx gitnexus`).
+- Binary-discovery search paths (`/opt/homebrew/bin/gitnexus`, `~/.nvm/versions/node/.../bin/gitnexus`, etc.).
+- Configuration files: `~/.gitnexus/registry.json`, in-repo `.gitnexus/`, post-commit hooks.
+- Documentation references: `README.md`, `CLAUDE.md`, `AGENTS.md`, `docs/`.
+- npm scripts in `package.json` (root + plugin).
+- Environment variables.
+
+Output: `docs/internal/gitnexus_audit.md` checked into the repo.
+
+### 1.2 Used-MCP-tool catalog
+Every MCP tool the developer plugin currently delegates to GitNexus, mapped to its replacement.
+
+| GitNexus tool | Used by Lore? | Replacement |
+|---|---|---|
+| `gitnexus_query` | yes | `code_query` (semantic + graph) |
+| `gitnexus_context` | yes | `code_context` |
+| `gitnexus_impact` | yes | `code_impact` |
+| `gitnexus_detect_changes` | yes | `code_detect_changes` |
+| `gitnexus_rename` | yes | `code_rename` (already partially native) |
+| `gitnexus_cypher` | yes | `code_cypher` |
+| `gitnexus_analyze` (CLI) | yes | `lore code analyze` (new sub-command in plugin's CLI) |
+| Resources (`gitnexus://...`) | yes | `lore-code://...` URIs |
+
+### 1.3 Baseline benchmarks
+Run gitnexus once, capture:
+- Symbol count per repo (lore + 2 customer-shaped repos)
+- Edge count per relation kind
+- Process / execution-flow count
+- Index build time
+- Index size on disk
+
+These are the floor for the new implementation's acceptance.
+
+### 1.4 Decisions to lock in Phase 0
+
+| Decision | Default | Open if you disagree |
+|---|---|---|
+| Languages in v1 | TypeScript, JavaScript, Python, Go, Rust | which to add/drop |
+| tree-sitter native vs WASM | WASM (`web-tree-sitter`) | native (faster but more install pain) |
+| Graph library | `graphology` + `graphology-pagerank` (both MIT) | other |
+| Git invocations | `simple-git` or raw `child_process` | other |
+| Backward-compat aliases | Keep `gitnexus_*` tool names as aliases for one release | drop immediately |
+| Dataplane sync | unchanged — schema stays the same | new fields require schema migration |
+
+---
+
+## 2. Architecture
+
+### 2.1 New plugin internal structure
+
+```
+packages/lore-plugin-developer/src/
+├── parser/                      # NEW — tree-sitter wrapper
+│   ├── index.ts                 # public API: parseFile, parseRepo
+│   ├── grammars.ts              # per-language grammar registration
+│   ├── walkers/                 # per-language AST walkers
+│   │   ├── typescript.ts        # also handles .tsx, .jsx, .js
+│   │   ├── python.ts
+│   │   ├── go.ts
+│   │   ├── rust.ts
+│   │   └── _base.ts             # shared walker utilities
+│   └── types.ts                 # ParsedSymbol, ParsedFile, ParsedRelation
+├── resolver/                    # NEW — cross-file name resolution
+│   ├── index.ts
+│   ├── symbolTable.ts           # per-file → workspace symbol table
+│   ├── callGraph.ts             # resolve callee references
+│   ├── importGraph.ts           # resolve imports to files
+│   └── inheritance.ts           # extends / implements / mixin
+├── analytics/                   # NEW — architectural metrics
+│   ├── index.ts
+│   ├── blastRadius.ts           # depth-tiered impact (d1/d2/d3)
+│   ├── pagerank.ts              # symbol importance
+│   ├── coupling.ts              # afferent / efferent per module
+│   ├── cycles.ts                # Tarjan SCC
+│   ├── deadCode.ts              # zero-inbound symbols
+│   ├── hotspots.ts              # complexity × churn
+│   └── layerViolations.ts       # user-declared layer rules
+├── git/                         # NEW — git-derived signals
+│   ├── index.ts
+│   ├── churn.ts                 # `git log --numstat` parsed
+│   ├── lineage.ts               # `git blame` at symbol byte range
+│   ├── prRisk.ts                # blast × churn × complexity
+│   └── detectChanges.ts         # staged / compare scope
+├── mcp/                         # NEW — MCP tool surface
+│   ├── tools.ts                 # tool definitions (schemas)
+│   ├── handlers.ts              # tool handlers
+│   └── aliases.ts               # gitnexus_* → code_* compat
+├── codeIndexer.ts               # MODIFIED — drives parser → resolver → operations
+├── operations.ts                # KEEP — graph upserts on CodeSymbol/CodeFile/CodeRelation
+├── reconnect.ts                 # KEEP — Lore knowledge ↔ code links
+├── similarity.ts                # KEEP — semantic similarity helpers
+├── tools.ts                     # MODIFIED — register new MCP tools via plugin hook
+├── api.ts                       # KEEP/EXTEND — typed plugin.api surface
+├── cli.ts                       # MODIFIED — `lore analyze` runs the new pipeline
+├── index.ts                     # MODIFIED — wire new modules into ILorePlugin hooks
+├── repoOps.ts                   # MODIFIED — drop gitnexus binary discovery
+├── nativeTools.ts               # MERGE — fold into mcp/handlers.ts
+├── schema.ts                    # MAYBE EXTEND — new optional fields on CodeSymbol
+└── DELETE: gitnexusProxy.ts
+```
+
+### 2.2 Data flow
+
+```
+[git repo files]
+     │  filesystem walk + .gitignore
+     ▼
+[parser/walkers] (tree-sitter AST)
+     │  ParsedSymbol[], ParsedFile[], ParsedRelation[]
+     ▼
+[resolver]  cross-file symbol resolution
+     │  resolved CodeSymbol[], CodeRelation[] (Lore-native shape)
+     ▼
+[operations.ts]  graph.upsertCodeSymbol / upsertCodeRelation
+     │
+     ▼
+[Kùzu graph]   (already owned by core; plugin schema layered on top)
+
+[Lore graph]
+     │
+     ▼
+[analytics + git]   read graph + run algorithms; cache results as node properties
+     │
+     ▼
+[mcp/handlers]   exposed via MCP server through ILorePlugin.registerTools
+```
+
+### 2.3 Schema
+
+Existing tables (`CodeSymbol`, `CodeFile`, `CodeRelation`, `LoreAppliesToCode`, `LoreTouchesFile`, `FileContains`) stay. Optional new fields on `CodeSymbol`, populated by analytics:
+
+| Field | Type | Source | Phase |
+|---|---|---|---|
+| `complexity` | int | parser (cyclomatic estimate) | 1 |
+| `byteRange` | string | parser (`{start,end}` JSON) | 1 |
+| `signature` | string | parser | 1 |
+| `language` | string | parser | 1 |
+| `churn30d` | int | git/churn | 5 |
+| `pagerank` | float | analytics/pagerank | 4 |
+| `inboundCount` | int | resolver (cached) | 2 |
+
+Schema additions go through `ILorePlugin.registerSchema` — never touched by core.
+
+### 2.4 Plugin manifest hooks used
+
+- `registerSchema` — add new optional CodeSymbol fields.
+- `registerTools` — register all new MCP tools.
+- `contributeReconnectNodes` — re-link Lore knowledge nodes to code symbols (already used).
+- `routeReconnectEdge` — already used.
+- `pruneInferredEdges` — when a file is deleted, drop its CodeSymbols + related edges.
+- `getTelemetryPayload` — index size, parse time, etc.
+- `api` — typed surface for cross-plugin RPC.
+
+No new hooks needed. **The boundary already supports everything we need.**
+
+---
+
+## 3. Phased delivery
+
+Each phase is **independently shippable** and **independently revertible**. Commit cadence: 1–2 commits per day per phase.
+
+### Phase 0 — Pre-work (3 days)
+
+**Files:** `docs/internal/gitnexus_audit.md`, `package.json`, new directory stubs.
+
+**Deliverables:**
+- Audit catalog (Section 1.1, 1.2, 1.3) checked in.
+- Decisions in 1.4 confirmed.
+- Add to `packages/lore-plugin-developer/package.json`:
+  - `web-tree-sitter` (^0.22)
+  - tree-sitter grammar WASM files (TS, JS, Python, Go, Rust) — committed under `packages/lore-plugin-developer/grammars/` since they're small WASM blobs (<1MB each).
+  - `graphology`, `graphology-pagerank` (both MIT)
+- Stub directory structure with empty `index.ts` files exporting `// TODO Phase N`.
+- Empty test files mirroring source structure.
+
+**Acceptance:**
+- `npm install` clean.
+- `npm run test:arch` clean.
+- New directories present.
+- Existing tests still pass.
+- No code behaviour change.
+
+---
+
+### Phase 1 — Parser foundation (5 days)
+
+**Files:** `parser/`, `parser/walkers/`.
+
+**Deliverables:**
+- `parser/index.ts` exports:
+  - `parseFile(path: string): Promise<ParsedFile>`
+  - `parseRepo(rootPath: string, ignore?: string[]): Promise<ParsedFile[]>`
+  - `getLanguageFor(path: string): Language | null`
+- Per-language walker for TS/JS, Python, Go, Rust:
+  - Extract: function decls, class decls, method decls, exported names, decorators, signatures, byte ranges, parent module path.
+  - Compute cyclomatic complexity (count branches in body).
+- `types.ts` defines:
+  - `ParsedSymbol` (id, kind, name, qualifiedName, file, byteRange, signature, complexity, parentSymbolId)
+  - `ParsedFile` (path, language, symbols[], imports[])
+  - `ParsedRelation` (sourceId, targetId, kind: 'calls' | 'imports' | 'extends' | 'implements')
+- WASM grammars loaded once at process start and reused (singleton).
+
+**Tests:**
+- `test/parser/walker-typescript.test.ts` — synthetic TS file, assert symbol list.
+- `test/parser/walker-python.test.ts` — same for Python.
+- (one test file per language)
+- `test/parser/parse-file.test.ts` — round-trip on a known sample.
+- Performance baseline: parse `packages/lore/src/mcp/server.ts` (large file) — <500ms target.
+
+**Acceptance:**
+- All 5 walker tests pass.
+- Parsing `packages/lore/src/mcp/server.ts` returns symbol count within 5% of GitNexus's count for that file (use audit baseline).
+- No native binaries loaded; only WASM.
+
+---
+
+### Phase 2 — Cross-file resolution (5 days)
+
+**Files:** `resolver/`.
+
+**Deliverables:**
+- `symbolTable.ts` — per-file map of `name → ParsedSymbol[]`. Workspace-wide map of `qualifiedName → ParsedSymbol[]`.
+- `importGraph.ts` — resolve `import` statements to file paths. Handles:
+  - Relative imports (`./foo`, `../bar`).
+  - Workspace aliases (`@lore-core/...`) — read from `tsconfig.json` `paths`.
+  - Node module imports (skipped — not part of repo graph).
+- `callGraph.ts` — for each function body, walk identifier references and resolve to a symbol. Handles:
+  - Same-file calls (direct match).
+  - Imported-function calls (use import graph).
+  - Method calls on objects (best-effort: type inference is out of scope; use heuristic — match method name against known classes).
+  - Dynamic / computed calls — log as unresolved, don't fail.
+- `inheritance.ts` — `extends Foo`, `implements Bar`, `class Baz(Quux):` (Python).
+
+**Tests:**
+- Synthetic two-file repo: file A calls function in file B. Assert edge created.
+- Real lore repo subset: known cross-file calls (e.g., `pluginRegistry.active()` from `server.ts`).
+- Module aliases: `@lore-core/foo` resolves to `packages/lore/src/foo.ts`.
+- Edge-count parity: cross-file edges within 10% of GitNexus baseline on lore repo.
+
+**Acceptance:**
+- `getCallers(symbolId)` and `getCallees(symbolId)` return correct results on synthetic + lore repo.
+- Cross-file edge count within 10% of baseline.
+- Unresolved-reference rate logged (target: <15% of calls).
+
+---
+
+### Phase 3 — Graph integration (3 days)
+
+**Files:** `codeIndexer.ts` (rewrite), `operations.ts` (no change), `index.ts` (wire), `repoOps.ts` (modify).
+
+**Deliverables:**
+- `codeIndexer.ts` rewritten:
+  - Drives `parser/parseRepo` → `resolver/...` → `operations.upsertCodeSymbol/upsertCodeRelation`.
+  - Replaces all subprocess calls to `gitnexus`.
+  - Incremental mode: when called with changed files only (e.g., from post-commit hook), only re-parse + re-resolve those.
+- `repoOps.ts`: drop the gitnexus-binary search logic. Keep repo discovery (workspace folders).
+- `index.ts`: keep the `ILorePlugin` registration; add the new tools.
+- Decision: feature flag `LORE_DEV_USE_NEW_PARSER=1` to opt in. Both paths coexist for Phases 3–6.
+
+**Tests:**
+- Index a small repo end-to-end → assert correct CodeSymbol / CodeRelation counts.
+- Edit one file → re-index incrementally → only that file's symbols change.
+- Performance: <30s for a 5,000-file repo on M-series Mac (parse + resolve + upsert).
+
+**Acceptance:**
+- `lore analyze` (with the new flag on) produces a graph indistinguishable from gitnexus's output (within 5–10% tolerance per Phase 1/2 baselines).
+- Zero subprocess calls to `gitnexus` when flag is on.
+
+---
+
+### Phase 4 — Architectural analytics (8 days)
+
+**Files:** `analytics/`.
+
+**Deliverables (one file each):**
+- `blastRadius.ts` — `blastRadius(symbolId, direction: 'upstream' | 'downstream', maxDepth = 3) → { d1: SymbolRef[], d2: SymbolRef[], d3: SymbolRef[] }`.
+- `pagerank.ts` — `pagerank(graph: GraphologyGraph) → Map<symbolId, score>`. Cache on `CodeSymbol.pagerank` field.
+- `coupling.ts` — `coupling(modulePath) → { afferent, efferent, instability }`.
+- `cycles.ts` — `cycles(graph) → SCC[]` via `graphology` package's Tarjan.
+- `deadCode.ts` — `deadCode(graph, options) → SymbolRef[]`. Filter out exports and entry points.
+- `hotspots.ts` — `hotspots(graph) → ranked SymbolRef[]`. Combines complexity × churn (depends on Phase 5 for churn — guard with feature flag if Phase 5 not done yet).
+- `layerViolations.ts` — `layerViolations(graph, layerSpec: LayerSpec) → Violation[]`. `layerSpec` is user-declared (e.g., `{ ui: ['ui/**'], core: ['packages/lore/**'], plugins: ['packages/lore-plugin-*/**'] }` with rules `ui → core OK, ui ⇏ plugins`).
+
+**Tests:**
+- Each analytic on synthetic graphs with known answers.
+- Run on lore repo, spot-check a few results manually (e.g., blast radius of `pluginRegistry.active`).
+- Performance: <2s for any single analytic on a 10k-symbol graph.
+
+**Acceptance:**
+- All 7 analytics expose typed functions.
+- All have MCP tool handlers in Phase 6.
+
+---
+
+### Phase 5 — Git integration (3 days)
+
+**Files:** `git/`.
+
+**Deliverables:**
+- `churn.ts` — `churn(file, sinceDays = 30) → { commits, additions, deletions }`. Uses `git log --since=… --numstat -- <file>`.
+- `lineage.ts` — `lineage(symbol) → BlameLine[]`. Uses `git blame -L <startLine>,<endLine> -- <file>` over symbol byte ranges.
+- `prRisk.ts` — `prRisk(commitRange) → { score, factors }`. Combines blast radius × churn × complexity for changed symbols.
+- `detectChanges.ts` — `detectChanges(scope: 'staged' | 'unstaged' | 'compare', baseRef?) → AffectedSymbol[]`. Uses `git diff` to find changed line ranges, maps to symbols by byte-range overlap.
+
+**Tests:**
+- Mock git output, verify parsing.
+- Run on lore repo, validate churn against `git log` manually.
+- detect_changes: stage a known edit, assert affected symbol set.
+
+**Acceptance:**
+- Churn data for every file.
+- `code_detect_changes` tool works pre-commit.
+
+---
+
+### Phase 6 — MCP tool surface (3 days)
+
+**Files:** `mcp/tools.ts`, `mcp/handlers.ts`, `mcp/aliases.ts`, `tools.ts` (plugin entry).
+
+**Deliverables:**
+
+Tools defined (matching what `CLAUDE.md` references today, plus the new analytics/git surface):
+
+| New tool | Replaces | Phase |
+|---|---|---|
+| `code_query(query, limit?)` | `gitnexus_query` | 4+6 (uses semantic search via Lore's existing Xenova embeddings + graph context) |
+| `code_context(name, depth?)` | `gitnexus_context` | 2+6 |
+| `code_impact(target, direction)` | `gitnexus_impact` | 4+6 |
+| `code_detect_changes(scope, baseRef?)` | `gitnexus_detect_changes` | 5+6 |
+| `code_rename(symbol, newName, dryRun)` | `gitnexus_rename` | 6 (already half-built in `nativeTools.ts`) |
+| `code_cypher(query)` | `gitnexus_cypher` | 6 (uses Kùzu directly) |
+| `code_blast_radius(symbol, direction, depth?)` | new | 4+6 |
+| `code_pagerank(limit?)` | new | 4+6 |
+| `code_coupling(module)` | new | 4+6 |
+| `code_cycles()` | new | 4+6 |
+| `code_dead_code(filter?)` | new | 4+6 |
+| `code_hotspots(repo, limit?)` | new | 4+6 |
+| `code_layer_violations(layerSpec)` | new | 4+6 |
+| `code_churn(file, sinceDays?)` | new | 5+6 |
+| `code_lineage(symbol)` | new | 5+6 |
+| `code_pr_risk(commitRange)` | new | 5+6 |
+
+Plus aliases for back-compat (Phase 6 adds, Phase 7 retires):
+- `gitnexus_query` → `code_query`
+- `gitnexus_context` → `code_context`
+- `gitnexus_impact` → `code_impact`
+- `gitnexus_detect_changes` → `code_detect_changes`
+- `gitnexus_rename` → `code_rename`
+- `gitnexus_cypher` → `code_cypher`
+
+**Tests:**
+- Each MCP tool has a spec test (input shape, response shape).
+- E2E: spawn Lore daemon, call each tool, verify response.
+- Aliases: call `gitnexus_query` → assert it routes to `code_query` handler.
+
+**Acceptance:**
+- All gitnexus_* aliases still work.
+- All new analytics/git tools callable.
+- `CLAUDE.md` / `AGENTS.md` references resolve.
+
+---
+
+### Phase 7 — Retirement of GitNexus (3 days)
+
+**Files:** many — guided by Phase 0 audit.
+
+**Deliverables:**
+- Delete `gitnexusProxy.ts`.
+- Remove gitnexus binary search from `repoOps.ts`.
+- Remove `~/.gitnexus/registry.json` reads (replace with native `lore code list-repos` if needed).
+- Remove `.claude/hooks/post-commit-gitnexus.log` rotation entries.
+- Remove post-commit hook script that runs `npx gitnexus analyze` (replace with `lore code analyze --incremental`).
+- Remove gitnexus from `package.json` deps (root + plugin) and any `npm install -g gitnexus` instructions.
+- Remove gitnexus references from `CLAUDE.md`, `AGENTS.md`, `docs/`.
+- Migrate any user-facing `~/.gitnexus/` paths to `<workspace>/.lore/code/` or similar (audit during Phase 0).
+- Drop the `gitnexus_*` aliases (or mark deprecated with one-release grace period — decided in Phase 0).
+
+**Tests:**
+- Lore boots without gitnexus binary present (`which gitnexus` returns nothing).
+- No subprocess calls to gitnexus in any code path.
+- `npm run test:arch` clean — no plugin boundary leaks.
+- Grep `gitnexus` across the repo — only matches in CHANGELOG / historical docs / migration notes.
+
+**Acceptance:**
+- Fresh install of Lore with zero gitnexus presence works end-to-end.
+- All MCP tools the developer plugin exposes still function.
+- All AI agent instructions in `CLAUDE.md` / `AGENTS.md` reference only `code_*` tools.
+
+---
+
+### Phase 8 — Documentation, dogfooding, follow-up (3 days)
+
+**Files:** `CLAUDE.md`, `AGENTS.md`, `docs/architecture.md`, `docs/V2_implementation_plan.md`, plugin's own `README.md`, `CHANGELOG.md`, internal Lore memory nodes.
+
+**Deliverables:**
+- Update `CLAUDE.md` to drop gitnexus references entirely; rename "GitNexus tools" section → "Code intelligence tools" (developer plugin).
+- Update `AGENTS.md` likewise.
+- Update `docs/architecture.md` with the new internal layout.
+- Update `docs/V2_implementation_plan.md` to reflect parser ownership inside the plugin.
+- Update post-commit hook script to call the new `lore code analyze --incremental`.
+- Write a `CHANGELOG.md` entry summarising the migration.
+- Store a Lore knowledge node `developer-plugin-gitnexus-replacement-2026-XX` capturing the design decision + migration outcome (use `store_node` MCP tool).
+- Onboard a small customer-shaped repo through the new pipeline as a smoke test (the CRE-IAM example, or one customer repo).
+
+**Acceptance:**
+- All docs consistent.
+- New developer onboarding works without any gitnexus knowledge.
+- Memory node stored.
+
+---
+
+## 4. Risk Register
+
+| Risk | Severity | Mitigation |
+|---|---|---|
+| tree-sitter grammar quality varies per language | Medium | Test corpus per language; document gaps; add walker tests |
+| Cross-file resolution misses dynamic imports / decorators | High | Heuristics + log unresolved refs; not all need to resolve perfectly. Track unresolved-rate; aim <15%. |
+| Performance regression on large repos | High | Benchmark each phase; cache parsed ASTs by file hash; incremental indexing in Phase 3. |
+| AI-agent CLAUDE.md instructions mention `gitnexus_*` | Medium | Keep aliases through Phase 7's grace period; deprecation warning in tool description. |
+| Plugin boundary leak | Critical | `npm run test:arch` on every commit; PR review for any new core import in plugin. |
+| License contamination | Critical | Single-engineer pattern; documented design notes; no copy-paste from GitNexus or jcodemunch source; commits show original authorship. |
+| Embeddings semantic search regression vs `gitnexus_query` | Medium | Use Lore's existing Xenova embedding pipeline + LanceDB vector search; benchmark against gitnexus on lore repo. |
+| Dataplane sync compatibility | Low | Schema unchanged for existing fields; new fields optional; sync should "just work." |
+| Customers with `~/.gitnexus/` data | Low | Phase 7 leaves user-side `.gitnexus/` directories alone; documented "safe to rm" in CHANGELOG. |
+| Tree-sitter WASM cold-start latency | Low | Load grammars once at process start; reuse across calls. |
+| Memory blow-up from large ASTs | Medium | Don't keep ASTs in memory; serialize to ParsedSymbol/ParsedRelation immediately. |
+
+---
+
+## 5. Test strategy
+
+- **Unit tests** per module (~200 new tests across all phases).
+- **Integration tests** per phase (e.g., parse → resolve → graph upsert end-to-end).
+- **E2E test:** index lore repo, validate against GitNexus baseline counts (Phase 0 audit).
+- **Performance benchmarks:** parse-time, resolve-time, query-time, memory.
+- **`npm run test:arch`** on every commit; CI fails on any new boundary violation.
+- **Backward-compat test:** existing CodeSymbol nodes in graphs from before the migration survive (no schema break).
+- **Cross-language fixture:** small mixed-language repo (TS + Python + Go) to exercise the polyglot path.
+
+---
+
+## 6. Rollback plan
+
+- Phases 1–6 keep the old gitnexus path coexisting (gated by `LORE_DEV_USE_NEW_PARSER`).
+- Phase 7 removes the old path. Rollback = `git revert` Phase 7 commits.
+- Existing graphs use unchanged schema → no DB migration needed.
+- Worst case: revert to commit before Phase 7; re-enable gitnexus dependency; old code paths still in tree until that commit.
+
+---
+
+## 7. Total estimate
+
+| Phase | Days |
+|---|---|
+| 0 — pre-work | 3 |
+| 1 — parser | 5 |
+| 2 — resolver | 5 |
+| 3 — graph integration | 3 |
+| 4 — analytics | 8 |
+| 5 — git | 3 |
+| 6 — MCP tools | 3 |
+| 7 — retirement | 3 |
+| 8 — docs | 3 |
+| **Total** | **36 working days ≈ 7 weeks** for one engineer focused. |
+
+Each phase commits in 1–2-day chunks. Rough commit count: 25–35 commits total.
+
+---
+
+## 8. Per-language coverage matrix (v1)
+
+| Language | Phase 1 walker | Phase 2 resolver | v1 priority |
+|---|---|---|---|
+| TypeScript | Required | Required | P0 (Lore primary) |
+| JavaScript | Required (shared TS grammar) | Required | P0 |
+| Python | Required | Required | P0 (DEF + scripts) |
+| Go | Required | Required | P1 (customer projects) |
+| Rust | Required | Required | P1 (customer projects) |
+| Java/Kotlin | Optional | Optional | P2 (post-v1 if customer demand) |
+| C/C++ | Optional | Optional | P2 |
+| 60+ other tree-sitter languages | Future | Future | P3 (add walkers on demand) |
+
+Adding a new language post-v1 = ~1 day per language: install grammar WASM, write walker, write tests.
+
+---
+
+## 9. Tooling / dependency choices
+
+| Dependency | License | Purpose | Phase added |
+|---|---|---|---|
+| `web-tree-sitter` | MIT | parser runtime | 0 |
+| `tree-sitter-typescript` (WASM) | MIT | TS/TSX grammar | 0 |
+| `tree-sitter-javascript` (WASM) | MIT | JS/JSX grammar | 0 |
+| `tree-sitter-python` (WASM) | MIT | Python grammar | 0 |
+| `tree-sitter-go` (WASM) | MIT | Go grammar | 0 |
+| `tree-sitter-rust` (WASM) | MIT | Rust grammar | 0 |
+| `graphology` | MIT | graph data structure | 4 |
+| `graphology-pagerank` | MIT | pagerank algorithm | 4 |
+| `graphology-components` | MIT | Tarjan SCC for cycles | 4 |
+| Native `child_process` | (built-in) | git command execution | 5 |
+
+No commercial-licensed dependencies. No code copied from GitNexus or jcodemunch.
+
+---
+
+## 10. License compliance steps
+
+- Single engineer reads GitNexus / jcodemunch source for **understanding** (algorithms, schemas, patterns).
+- Same engineer takes a clean break (a day at minimum) before implementing.
+- Implementation done from notes / memory / general knowledge of compiler theory + AST traversal patterns.
+- No file-by-file translation. No structural mirroring of source code.
+- Each new file has independent authorship.
+- Code review by a second engineer specifically checks for inadvertent similarity to GitNexus/jcodemunch.
+- AUTHORS.md or CHANGELOG note: *"Architectural patterns informed by reading GitNexus and jcodemunch-mcp; implementation is original."*
+- No use of GitNexus's distinctive tool names (we already rename `gitnexus_*` → `code_*`).
+- No use of jcodemunch's distinctive tool names (`get_tectonic_map`, `winnow_symbols`, etc.).
+
+---
+
+## 11. Acceptance summary (one line per phase)
+
+- **Phase 0 done:** audit checked in, decisions locked, deps installed, stubs present, `test:arch` clean.
+- **Phase 1 done:** all 5 language walkers produce ParsedSymbol/ParsedFile arrays with within-5% counts vs GitNexus baseline.
+- **Phase 2 done:** cross-file `getCallers` / `getCallees` correct on synthetic + lore repo; cross-file edge count within 10% of baseline.
+- **Phase 3 done:** `lore analyze --new-parser` produces graph indistinguishable from GitNexus output (within tolerance); zero gitnexus subprocesses.
+- **Phase 4 done:** all 7 analytics functions typed, callable, perform <2s on 10k-symbol graphs.
+- **Phase 5 done:** churn / lineage / pr-risk / detect-changes work on the lore repo.
+- **Phase 6 done:** all 16 new MCP tools registered + tested; aliases route correctly.
+- **Phase 7 done:** `which gitnexus` returns nothing, Lore works end-to-end; `npm run test:arch` clean; no `gitnexus` strings in source (only in CHANGELOG / migration notes).
+- **Phase 8 done:** all docs updated; CHANGELOG entry; memory node stored; one customer-shape repo onboarded through the new pipeline.
+
+---
+
+## 12. Open questions to confirm before Phase 1 (Phase 0 outputs)
+
+1. **Languages:** TS/JS, Python, Go, Rust for v1 — confirmed?
+2. **WASM vs native tree-sitter:** WASM default — confirmed?
+3. **Backward-compat aliases:** keep `gitnexus_*` → `code_*` for one release? Or drop immediately?
+4. **`.gitnexus/` user data:** leave alone, or migrate to `<workspace>/.lore/code/`?
+5. **Customer repo for end-to-end smoke test in Phase 8:** which one?
+6. **Layer-violation policy:** ship a default `LayerSpec` for Lore's own architecture in Phase 4? Or expect users to configure?
+7. **Embeddings model for `code_query`:** reuse Lore's Xenova embedding pipeline, or generate code-specific embeddings (e.g., comments + signatures concatenated)?
+8. **Single-engineer work policy:** confirmed one person runs the work, with a second engineer doing license-compliance review at each phase boundary?
+
+---
+
+## 13. Spawning the work
+
+This document is the spec. Recommended way to execute:
+
+- Confirm Section 12 answers (Phase 0 decisions).
+- Spin up a fresh worktree for the work.
+- Each phase = its own git branch off main, merged after acceptance.
+- Spawn a dedicated session for Phase 0 to produce the audit + decision lock.
+- Subsequent phases each spawn fresh sessions, fed this document + the audit output.
+
+---
+
+*End of plan v1.*
