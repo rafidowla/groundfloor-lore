@@ -20,6 +20,7 @@ const SigmaCanvas = lazy(() => import('./components/SigmaCanvas'));
 const PluginWizard = lazy(() => import('./components/PluginWizard'));
 const PluginInspectors = lazy(() => import('./components/PluginInspectors'));
 const PluginSettingsPanel = lazy(() => import('./components/PluginSettingsPanel'));
+const ProjectTagManagerModal = lazy(() => import('./components/ProjectTagManagerModal'));
 
 function CanvasLoadingFallback() {
   return (
@@ -545,12 +546,19 @@ function App() {
   useEffect(() => {
     try { if (tagFilter) localStorage.setItem('lore.tagFilter', tagFilter); else localStorage.removeItem('lore.tagFilter'); } catch { /* ignore */ }
   }, [tagFilter]);
-  useEffect(() => {
+  // 2026-04-29 — refetch hook for /api/repos/tags so the project-tag
+  // manager modal can refresh the list after PATCHing a project's tags.
+  const refreshAvailableTags = useCallback(() => {
     void authFetch(`${API_BASE}/api/repos/tags`)
       .then((r) => r.json() as Promise<{ tags: Array<{ tag: string; repos: string[] }> }>)
       .then((d) => setAvailableTags(d.tags ?? []))
       .catch(() => setAvailableTags([]));
   }, []);
+  useEffect(() => {
+    refreshAvailableTags();
+  }, [refreshAvailableTags]);
+  // 2026-04-29 — gear icon next to the Projects header opens this.
+  const [showProjectTagManager, setShowProjectTagManager] = useState<boolean>(false);
 
   // 2026-04-27 multi-project drill: workspace-wide project list, fetched
   // once. The right-panel uses this so every project stays visible after
@@ -1499,6 +1507,18 @@ function App() {
         {showPluginSettings && (
           <Suspense fallback={null}>
             <PluginSettingsPanel onClose={() => setShowPluginSettings(false)} />
+          </Suspense>
+        )}
+
+        {showProjectTagManager && (
+          <Suspense fallback={null}>
+            <ProjectTagManagerModal
+              apiBase={API_BASE}
+              allProjects={workspaceProjects ?? []}
+              availableTags={availableTags}
+              onClose={() => setShowProjectTagManager(false)}
+              onMutate={refreshAvailableTags}
+            />
           </Suspense>
         )}
 
@@ -2657,6 +2677,7 @@ function App() {
             setShowSuperseded={setShowSuperseded}
             allProjects={workspaceProjects}
             availableTags={availableTags}
+            onManageProjects={() => setShowProjectTagManager(true)}
           />
         </aside>
       ) : null}

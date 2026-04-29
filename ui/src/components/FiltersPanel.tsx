@@ -52,6 +52,10 @@ interface FiltersPanelProps {
      *  Projects section that renders the list under collapsible tag
      *  headers instead of the flat sorted list. */
     availableTags?: Array<{ tag: string; repos: string[] }>;
+    /** 2026-04-29 — opens the project/tag manager modal. Optional;
+     *  when omitted, the gear icon next to the Projects header
+     *  isn't rendered. */
+    onManageProjects?: () => void;
 }
 
 interface Bucket {
@@ -77,6 +81,7 @@ function FilterGroup({
     onChange,
     onToggleGrouping,
     isGrouped,
+    onManage,
 }: {
     title: string;
     buckets: Bucket[];
@@ -88,6 +93,9 @@ function FilterGroup({
     /** Whether the parent is currently in grouped mode. Used to label the
      *  toggle button correctly. */
     isGrouped?: boolean;
+    /** Optional click handler for a gear icon next to the section header
+     *  that opens a management modal. Currently only Projects uses it. */
+    onManage?: () => void;
 }): React.ReactElement | null {
     const [expanded, setExpanded] = useState(false);
     const [search, setSearch] = useState('');
@@ -118,6 +126,15 @@ function FilterGroup({
             <div className="filter-group-header">
                 <label>{title}</label>
                 <div className="filter-actions">
+                    {onManage ? (
+                        <a
+                            onClick={onManage}
+                            title="Manage projects & tags"
+                            style={{ marginRight: '0.4rem' }}
+                        >
+                            ⚙
+                        </a>
+                    ) : null}
                     {onToggleGrouping ? (
                         <a
                             onClick={onToggleGrouping}
@@ -172,12 +189,14 @@ function TagGroupedProjects({
     active,
     onChange,
     onToggleGrouping,
+    onManage,
 }: {
     tagGroups: Array<{ tag: string; projects: Bucket[]; isUntagged?: boolean }>;
     projectTagMap: Map<string, string[]>;
     active: Set<string>;
     onChange: (next: Set<string>) => void;
     onToggleGrouping: () => void;
+    onManage?: () => void;
 }): React.ReactElement | null {
     const [collapsed, setCollapsed] = useState<Set<string>>(() => {
         try {
@@ -229,6 +248,11 @@ function TagGroupedProjects({
             <div className="filter-group-header">
                 <label>Projects</label>
                 <div className="filter-actions">
+                    {onManage ? (
+                        <a onClick={onManage} title="Manage projects & tags" style={{ marginRight: '0.4rem' }}>
+                            ⚙
+                        </a>
+                    ) : null}
                     <a onClick={onToggleGrouping} title="Switch to flat list" style={{ marginRight: '0.4rem' }}>
                         Flat
                     </a>
@@ -327,6 +351,7 @@ export default function FiltersPanel({
     setShowSuperseded,
     allProjects,
     availableTags,
+    onManageProjects,
 }: FiltersPanelProps): React.ReactElement {
     const typeBuckets = useMemo(() => buildBuckets((topology?.nodes ?? []).map((n) => n.type)), [topology]);
     // Project buckets source: workspace-wide overview if provided
@@ -460,6 +485,7 @@ export default function FiltersPanel({
                     active={activeProjects}
                     onChange={setActiveProjects}
                     onToggleGrouping={() => setGroupByTagPersisted(false)}
+                    onManage={onManageProjects}
                 />
             ) : (
                 <FilterGroup
@@ -469,6 +495,7 @@ export default function FiltersPanel({
                     onChange={setActiveProjects}
                     onToggleGrouping={hasTags ? () => setGroupByTagPersisted(true) : undefined}
                     isGrouped={false}
+                    onManage={onManageProjects}
                 />
             )}
             {!topology || (topology.nodes?.length ?? 0) === 0 ? (
