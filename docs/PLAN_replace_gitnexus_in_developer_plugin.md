@@ -485,7 +485,7 @@ Plus aliases for back-compat (Phase 6 adds, Phase 7 retires):
 
 **Files:** many — guided by Phase 0 audit.
 
-**Deliverables:**
+**Deliverables (code retirement):**
 - Delete `gitnexusProxy.ts`.
 - Remove gitnexus binary search from `repoOps.ts`.
 - Remove `~/.gitnexus/registry.json` reads (replace with native `lore code list-repos` if needed).
@@ -495,6 +495,35 @@ Plus aliases for back-compat (Phase 6 adds, Phase 7 retires):
 - Remove gitnexus references from `CLAUDE.md`, `AGENTS.md`, `docs/`.
 - Migrate any user-facing `~/.gitnexus/` paths to `<workspace>/.lore/code/` or similar (audit during Phase 0).
 - Drop the `gitnexus_*` aliases (or mark deprecated with one-release grace period — decided in Phase 0).
+
+**Deliverables (data cutover playbook):**
+
+The migration is non-trivial because the live Kùzu graph has three categories of data, each handled differently:
+
+| Category | Examples | What happens |
+|---|---|---|
+| User knowledge | decision, convention, bug_pattern, architecture, troubleshooting, note, file_ref, schema | **Untouched.** Different tables; the cutover doesn't read or write them. |
+| Reconnect edges | LoreAppliesToCode, LoreTouchesFile, FileContains | **Rewritten** via a one-time `oldId → newId` mapping table built at cutover. |
+| Code-derived nodes | CodeSymbol, CodeFile, CodeRelation | **Dropped and regenerated** by the new tree-sitter parser. |
+
+ID-strategy decision (locked in Phase 0): **Option B — new clean ID format + one-time mapping table.** The mapping is throwaway after cutover.
+
+Cutover sequence (single maintenance window, ~minutes of downtime):
+
+1. **Pre-flight (dry run, daemon still up).** Run new parser in shadow mode → emit a JSON manifest of new IDs. Build mapping `oldId → newId` by matching on `(filePath, symbolName, kind)`. Report unmapped symbols (the ones whose LoreAppliesToCode/LoreTouchesFile edges will need re-linking).
+2. **Stop daemon + backup.** `launchctl bootout`, then `cp graph graph.pre-gitnexus-migration`. This is the rollback point.
+3. **Migrate edges in one transaction.** For each LoreAppliesToCode / LoreTouchesFile / FileContains edge, rewrite target id using the mapping table. Delete edges to unmapped symbols (logged for later reconnect).
+4. **Drop old code-derived rows.** `DELETE FROM CodeSymbol, CodeFile, CodeRelation`. User knowledge tables UNTOUCHED.
+5. **Re-index with new parser.** `lore code analyze` on the developer workspace; populates fresh CodeSymbol/CodeFile/CodeRelation rows.
+6. **Reconnect-pass for unmapped knowledge.** Use the developer plugin's existing `reconnect.ts` heuristics (label substring + content references) to re-link knowledge nodes that lost their LoreAppliesToCode edges. User reviews suggestions in the UI.
+7. **Verify.** Symbol/edge counts within Phase-0-baseline tolerance (5-10%). Run a few recalls — should feel identical. If anything looks off → restore from `graph.pre-gitnexus-migration`.
+8. **Clean up.** Once user confirms, delete `graph.pre-gitnexus-migration`. Leave `~/.gitnexus/` directories alone (user choice; documented as safe-to-rm in CHANGELOG).
+
+**Acceptance addendum:**
+- Cutover playbook executed end-to-end on the developer workspace.
+- Recall against pre-cutover knowledge nodes returns the same answers (knowledge unchanged).
+- Reconnect edges either survive (mapping table hit) or are flagged for user review (mapping miss).
+- `graph.pre-gitnexus-migration` exists as rollback for at least one week post-cutover.
 
 **Tests:**
 - Lore boots without gitnexus binary present (`which gitnexus` returns nothing).
