@@ -1057,10 +1057,27 @@
 .nudge-banner {
   border-color: #f59e0b !important;
   background: rgba(245, 158, 11, 0.08) !important;
+  /* Force readable body-text color regardless of theme — yellow-on-yellow
+     was unreadable in light mode. amber-900 / amber-100 give 4.5:1+ both ways. */
+  color: #78350f !important;
+}
+
+.nudge-banner p {
+  color: inherit;
 }
 
 .nudge-banner strong {
-  color: #f59e0b;
+  /* amber-800 reads cleanly on the amber-50 tint above */
+  color: #92400e;
+}
+
+@media (prefers-color-scheme: dark) {
+  .nudge-banner {
+    color: #fde68a !important;
+  }
+  .nudge-banner strong {
+    color: #fbbf24;
+  }
 }
 
 /* V2.1: Qwen first-run download progress */

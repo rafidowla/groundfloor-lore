@@ -174,6 +174,10 @@ export default function SupersessionCandidatesModal({ apiBase, project, projectO
                     </button>
                 </header>
 
+                <div style={{ padding: '0.5rem 1.25rem 0.75rem', borderBottom: '1px solid var(--color-border)', fontSize: '0.85rem', color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+                    Lore looks for nodes that appear to be newer versions of older ones — same topic, similar wording, different content. Pick a project, set a confidence threshold, and accept pairs to mark the older one superseded by the newer. Higher confidence = more conservative.
+                </div>
+
                 <div style={{ padding: '0.75rem 1.25rem', borderBottom: '1px solid var(--color-border)', display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
                     {/* Project picker: required because workspace-wide
                         scans take >60s on real graphs. We surface the

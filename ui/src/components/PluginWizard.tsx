@@ -278,21 +278,27 @@ export default function PluginWizard({ onClose }: PluginWizardProps) {
     }, [state, update]);
 
     return (
-        <div style={{
-            position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            zIndex: 1000,
-        }}>
-            <div style={{
-                background: 'var(--color-surface, #1a1a1a)',
-                color: 'var(--color-text, #e5e5e5)',
-                borderRadius: 8,
-                width: 'min(900px, 90vw)',
-                maxHeight: '90vh',
-                overflow: 'auto',
-                padding: 24,
-                boxShadow: '0 12px 48px rgba(0,0,0,0.4)',
-            }}>
+        <div
+            style={{
+                position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                zIndex: 1000,
+            }}
+            onClick={onClose}
+        >
+            <div
+                style={{
+                    background: 'var(--color-surface, #1a1a1a)',
+                    color: 'var(--color-text, #e5e5e5)',
+                    borderRadius: 8,
+                    width: 'min(900px, 90vw)',
+                    maxHeight: '90vh',
+                    overflow: 'auto',
+                    padding: 24,
+                    boxShadow: '0 12px 48px rgba(0,0,0,0.4)',
+                }}
+                onClick={(e) => e.stopPropagation()}
+            >
                 <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
                     <h2 style={{ margin: 0, fontSize: '1.4rem' }}>Create plugin (Tier 1)</h2>
                     {onClose && (

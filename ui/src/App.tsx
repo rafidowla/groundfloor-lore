@@ -1728,9 +1728,30 @@ function App() {
           <Suspense fallback={<CanvasLoadingFallback />}>
             {graphViz !== 'network' ? (
               (() => {
-                const filter = tagFilter
+                // Compose the chord/sunburst project filter from both:
+                // (a) the tag filter (if a tag is selected), and
+                // (b) the per-project checkbox state (activeProjects).
+                // SigmaCanvas already honours activeProjects via nodeReducer;
+                // before this fix the chord/sunburst views ignored it, so the
+                // checkboxes appeared dead for those views.
+                //
+                // Semantics (match SigmaCanvas):
+                //   activeProjects === null  → no checkbox filter (show all)
+                //   activeProjects.size === 0 → user explicitly selected none → empty
+                //   activeProjects.size > 0  → restrict to those
+                const tagProjects: string[] | null = tagFilter
                   ? (availableTags.find((t) => t.tag === tagFilter)?.repos ?? [])
                   : null;
+                let filter: string[] | null;
+                if (activeProjects === null) {
+                  filter = tagProjects;
+                } else if (activeProjects.size === 0) {
+                  filter = [];
+                } else if (tagProjects) {
+                  filter = tagProjects.filter((p) => activeProjects.has(p));
+                } else {
+                  filter = Array.from(activeProjects);
+                }
                 const common = {
                   apiBase: API_BASE,
                   onProjectClick: handleChordProjectClick,
