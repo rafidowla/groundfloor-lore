@@ -150,6 +150,21 @@ function scanAll() {
             if (importedPath.endsWith('plugins/types.js') || importedPath.endsWith('plugins/types')) continue;
             if (importedPath.endsWith('plugins/registry.js') || importedPath.endsWith('plugins/registry')) continue;
             if (importedPath.endsWith('plugins/storage.js') || importedPath.endsWith('plugins/storage')) continue;
+            // Manifest loader/validator/adapter — core utilities that
+            // turn a `plugin.json` / `plugin.yaml` bundle into a typed
+            // value or a synthesised ILorePlugin. Same architectural
+            // status as types/registry/storage above: pure interface
+            // and pure tooling, no plugin-owned vocabulary.
+            if (importedPath.endsWith('plugins/manifest/index.js') ||
+                importedPath.endsWith('plugins/manifest/index') ||
+                importedPath.endsWith('plugins/manifest.js') ||
+                importedPath.endsWith('plugins/manifest')) continue;
+            // Sibling manifest utilities (hot-reload watcher, LLM refine
+            // helpers). Same status as the index barrel above.
+            if (importedPath.endsWith('plugins/manifest/hotReload.js') ||
+                importedPath.endsWith('plugins/manifest/hotReload') ||
+                importedPath.endsWith('plugins/manifest/llmRefine.js') ||
+                importedPath.endsWith('plugins/manifest/llmRefine')) continue;
             if (/plugins\/[^/]+\/api(\.js)?$/.test(importedPath)) continue;
             // Path-alias imports (V2.1 workspace split): @lore-plugin-<name>/api.js
             // is the sanctioned way to reach a plugin's public surface.

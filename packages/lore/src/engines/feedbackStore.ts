@@ -23,6 +23,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { loreHome, loreHomePath } from '../config/loreHome.js';
 
 export type Rating = 'up' | 'down';
 
@@ -48,7 +49,7 @@ export interface FeedbackAggregate {
     recentEntries: FeedbackEntry[];
 }
 
-const DEFAULT_PATH = path.join(os.homedir(), '.groundfloor', 'feedback.jsonl');
+const DEFAULT_PATH = loreHomePath('feedback.jsonl');
 
 export class FeedbackStore {
     private readonly filePath: string;

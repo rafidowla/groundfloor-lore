@@ -20,11 +20,12 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, setupCommand, joinCommand, lintCommand, auditCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand, modelsCommand, scaffoldPluginCommand, resolveDeferredCommand, recallCommand, getFullCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, setupCommand, joinCommand, lintCommand, auditCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand, modelsCommand, scaffoldPluginCommand, resolveDeferredCommand, recallCommand, getFullCommand, supersedeCommand } from './commands.js';
 import { ConfigManager } from '../config/configManager.js';
 import { PluginRegistry } from '../plugins/registry.js';
 import path from 'path';
 import os from 'os';
+import { loreHome, loreHomePath } from '../config/loreHome.js';
 
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -38,7 +39,7 @@ const command = args[0];
  */
 function loadPluginCliCommands(): Record<string, { plugin: string; help: string; handler: (args: string[]) => Promise<void> }> {
     try {
-        const basePath = path.join(os.homedir(), '.groundfloor');
+        const basePath = loreHome();
         const loreDir = path.join(basePath, '.lore');
         const registry = new PluginRegistry(new ConfigManager(loreDir));
         registry.boot();
@@ -180,6 +181,9 @@ async function main(): Promise<void> {
             break;
         case 'get-full':
             await getFullCommand(commandArgs);
+            break;
+        case 'supersede':
+            await supersedeCommand(commandArgs);
             break;
         default: {
             // Dispatch to plugin-contributed commands if any match.

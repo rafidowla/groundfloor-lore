@@ -37,6 +37,16 @@ interface FiltersPanelProps {
     /** C1 — confidence filter toggle. */
     showInferred?: boolean;
     setShowInferred?: (next: boolean) => void;
+    /** Soft-supersession toggle. Default off → superseded nodes hidden
+     *  from the network view. On → superseded nodes render dimmed with
+     *  a virtual edge to their replacement. */
+    showSuperseded?: boolean;
+    setShowSuperseded?: (next: boolean) => void;
+    /** 2026-04-27 multi-project drill: workspace-wide project list with
+     *  per-project node counts. Sourced from /api/topology/overview so
+     *  it stays stable when the network view drills into one project.
+     *  When provided, it replaces the topology-derived project buckets. */
+    allProjects?: Array<{ project: string; nodeCount: number }> | null;
 }
 
 interface Bucket {
@@ -138,9 +148,21 @@ export default function FiltersPanel({
     setActiveProjects,
     showInferred,
     setShowInferred,
+    showSuperseded,
+    setShowSuperseded,
+    allProjects,
 }: FiltersPanelProps): React.ReactElement {
     const typeBuckets = useMemo(() => buildBuckets((topology?.nodes ?? []).map((n) => n.type)), [topology]);
-    const projectBuckets = useMemo(() => buildBuckets((topology?.nodes ?? []).map((n) => n.project)), [topology]);
+    // Project buckets source: workspace-wide overview if provided
+    // (so drill-in still shows every project), else the current
+    // topology slice. Falls back gracefully when overview hasn't
+    // loaded yet.
+    const projectBuckets = useMemo(() => {
+        if (allProjects && allProjects.length > 0) {
+            return allProjects.map((p) => ({ key: p.project, count: p.nodeCount }));
+        }
+        return buildBuckets((topology?.nodes ?? []).map((n) => n.project));
+    }, [allProjects, topology]);
 
     return (
         <aside className="filters-panel">
@@ -164,6 +186,21 @@ export default function FiltersPanel({
                     <p className="help-text" style={{ fontSize: '0.7rem', margin: '0.3rem 0 0' }}>
                         Off: only user-asserted relationships are shown.
                     </p>
+                    {typeof showSuperseded === 'boolean' && setShowSuperseded ? (
+                        <>
+                            <label className="filter-checkbox" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.6rem' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={showSuperseded}
+                                    onChange={(e) => setShowSuperseded(e.target.checked)}
+                                />
+                                <span>Show superseded nodes</span>
+                            </label>
+                            <p className="help-text" style={{ fontSize: '0.7rem', margin: '0.3rem 0 0' }}>
+                                On: faded historical decisions appear with an arrow to their replacement.
+                            </p>
+                        </>
+                    ) : null}
                 </div>
             ) : null}
             <FilterGroup title="Types" buckets={typeBuckets} active={activeTypes} onChange={setActiveTypes} />

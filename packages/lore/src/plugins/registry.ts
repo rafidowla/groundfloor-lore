@@ -55,11 +55,44 @@ export interface OrphanState {
 export class PluginRegistry {
     private readonly loaded = new Map<string, ILorePlugin>();
     private orphanState: OrphanState = { orphans: [], blocking: false };
+    /**
+     * Synthetic plugins added via `registerSyntheticPlugin` — typically
+     * Tier 1 plugins built from a manifest (see
+     * `packages/lore/src/plugins/manifest/adapter.ts`). They go through
+     * the same collision check and lifecycle hooks as built-in plugins,
+     * but are activated unconditionally rather than gated by
+     * `config.plugins[]` (Tier 1 plugins are pure schema; "having them
+     * loaded" is the only meaningful state).
+     */
+    private readonly syntheticPlugins = new Map<string, ILorePlugin>();
 
     constructor(
         private readonly configManager: ConfigManager,
         private readonly knownPlugins: Record<string, ILorePlugin> = BUILTIN_PLUGINS,
     ) {}
+
+    /**
+     * Add a pre-instantiated plugin (typically synthesised from a Tier 1
+     * manifest via `manifestToPlugin`). Must be called before `boot()`
+     * so collision detection runs against the full active set.
+     *
+     * Throws if a plugin with the same name has already been registered
+     * (either as a built-in or another synthetic) — name collisions are
+     * a hard error rather than a silent overwrite.
+     */
+    registerSyntheticPlugin(plugin: ILorePlugin): void {
+        if (this.syntheticPlugins.has(plugin.name)) {
+            throw new Error(
+                `[PluginRegistry] synthetic plugin "${plugin.name}" already registered`,
+            );
+        }
+        if (Object.prototype.hasOwnProperty.call(this.knownPlugins, plugin.name)) {
+            throw new Error(
+                `[PluginRegistry] synthetic plugin name "${plugin.name}" collides with a built-in plugin`,
+            );
+        }
+        this.syntheticPlugins.set(plugin.name, plugin);
+    }
 
     /**
      * boot — Run collision checks, orphan detection, and load the active set.
@@ -98,6 +131,19 @@ export class PluginRegistry {
             const plugin = this.knownPlugins[name];
             if (!plugin) {
                 throw new Error(`Unknown plugin "${name}". Available: ${Object.keys(this.knownPlugins).join(', ')}`);
+            }
+            this.loaded.set(name, plugin);
+        }
+
+        // Synthetic (Tier 1 manifest-derived) plugins are always loaded
+        // when registered. They aren't gated by config.plugins[] because
+        // their on/off state is captured by whether they're registered
+        // at all — there's no separate "module file" to swap in/out.
+        for (const [name, plugin] of this.syntheticPlugins) {
+            if (this.loaded.has(name)) {
+                throw new Error(
+                    `[PluginRegistry] synthetic plugin "${name}" collides with an active built-in plugin of the same name`,
+                );
             }
             this.loaded.set(name, plugin);
         }
@@ -226,6 +272,11 @@ export class PluginRegistry {
         return this.loaded.has(pluginName);
     }
 
+    /** Names of every plugin currently in the loaded set (boot + synthetic). */
+    activeNames(): string[] {
+        return Array.from(this.loaded.keys());
+    }
+
     /**
      * Phase 5 / C12 — collect every active plugin's retention rules,
      * tagged with the contributing plugin's name so callers (daily
@@ -246,6 +297,105 @@ export class PluginRegistry {
                 console.error(
                     `[PluginRegistry] ${plugin.name}.contributeRetentionPolicy threw: ${(err as Error).message}`,
                 );
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Phase boundary fix (2026-04-27) — fire bindRuntime on every
+     * plugin that implements it. Runs once at daemon boot before
+     * the HTTP server starts. See ILorePlugin.bindRuntime.
+     */
+    bindRuntime(ctx: PluginContext): void {
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.bindRuntime !== 'function') continue;
+            try {
+                plugin.bindRuntime(ctx);
+            } catch (err) {
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.bindRuntime threw: ${(err as Error).message}`,
+                );
+            }
+        }
+    }
+
+    /**
+     * Phase boundary cleanup (2026-04-27) — collect every active
+     * plugin's contributed node types so the store_node tool's enum
+     * is the union of (core types) ∪ (every plugin's contributions).
+     *
+     * Names must be unique across active plugins; throws on collision
+     * with the colliding plugin names in the message so operators can
+     * fix .lore/config.json.
+     *
+     * Empty array if no plugin contributes types.
+     */
+    collectNodeTypeContributions(): Array<{
+        plugin: string;
+        type: { name: string; description: string };
+    }> {
+        const out: Array<{ plugin: string; type: { name: string; description: string } }> = [];
+        const seen = new Map<string, string>(); // name -> first plugin that claimed it
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.contributeNodeTypes !== 'function') continue;
+            try {
+                const types = plugin.contributeNodeTypes();
+                if (!types || !Array.isArray(types)) continue;
+                for (const type of types) {
+                    if (!type || typeof type.name !== 'string' || !type.name.trim()) continue;
+                    const prior = seen.get(type.name);
+                    if (prior) {
+                        throw new Error(
+                            `[PluginRegistry] node type collision: '${type.name}' contributed by both '${prior}' and '${plugin.name}'`,
+                        );
+                    }
+                    seen.set(type.name, plugin.name);
+                    out.push({ plugin: plugin.name, type });
+                }
+            } catch (err) {
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.contributeNodeTypes threw: ${(err as Error).message}`,
+                );
+                throw err; // type collisions and similar are fatal
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Phase boundary cleanup (2026-04-27) — collect every active
+     * plugin's contributed edge relations. Same shape as
+     * collectNodeTypeContributions; merged into store_edge's enum at
+     * boot. Throws on name collision.
+     */
+    collectEdgeRelationContributions(): Array<{
+        plugin: string;
+        relation: { name: string; description: string };
+    }> {
+        const out: Array<{ plugin: string; relation: { name: string; description: string } }> = [];
+        const seen = new Map<string, string>();
+        for (const plugin of this.loaded.values()) {
+            if (typeof plugin.contributeEdgeRelations !== 'function') continue;
+            try {
+                const relations = plugin.contributeEdgeRelations();
+                if (!relations || !Array.isArray(relations)) continue;
+                for (const relation of relations) {
+                    if (!relation || typeof relation.name !== 'string' || !relation.name.trim()) continue;
+                    const prior = seen.get(relation.name);
+                    if (prior) {
+                        throw new Error(
+                            `[PluginRegistry] edge relation collision: '${relation.name}' contributed by both '${prior}' and '${plugin.name}'`,
+                        );
+                    }
+                    seen.set(relation.name, plugin.name);
+                    out.push({ plugin: plugin.name, relation });
+                }
+            } catch (err) {
+                console.error(
+                    `[PluginRegistry] ${plugin.name}.contributeEdgeRelations threw: ${(err as Error).message}`,
+                );
+                throw err;
             }
         }
         return out;

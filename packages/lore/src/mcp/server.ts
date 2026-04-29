@@ -50,18 +50,30 @@ import { ConfigManager, resolveDeploymentMode } from '../config/configManager.js
 import { setApiKey, getApiKey, hasApiKey, deleteApiKey } from '../config/keychain.js';
 import {
     loadWorkspaces,
+    renameWorkspace,
     getActiveWorkspacePath,
     getActiveWorkspaceName,
     createWorkspace,
     switchWorkspace,
     deleteWorkspace,
     kebabCase,
+    getWorkspaceRetention,
+    setWorkspaceRetention,
 } from '../config/workspaces.js';
 import { stream as llmStream, getCapability, setEmbeddedModelKeepHot, type LlmProvider } from '../providers/llmDispatch.js';
 import { decide as decideExtraction, type ExtractPayload } from '../providers/extractRouter.js';
 import { reconnectGraph, reconnectOneNode } from '../engines/reconnect.js';
 import { readCursor, writeCursor } from '../engines/reconnectCursor.js';
 import { PluginRegistry } from '../plugins/registry.js';
+import {
+    loadManifestFromBundle,
+    isTierOneManifest,
+    manifestToPlugin,
+    runIngest,
+    type IngestNodeWrite,
+} from '../plugins/manifest/index.js';
+import { ManifestHotReloader } from '../plugins/manifest/hotReload.js';
+import { buildPluginWizardLlmPrompt, extractFirstJsonObject } from '../plugins/manifest/llmRefine.js';
 import { lockDownDataDir } from '../security/permissions.js';
 import { ensureAuthToken, getAuthTokenPath } from '../security/authToken.js';
 import { validateRequest, writeAuthFailure } from '../security/httpAuth.js';
@@ -90,6 +102,7 @@ import {
     hardenedSystemPrefix,
     buildInjectionWarning,
 } from '../security/promptGuard.js';
+import { loreHome, loreHomePath } from '../config/loreHome.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
@@ -127,7 +140,7 @@ interface ResolvedScope {
  * Error Behavior: Returns empty registry on file not found or parse error.
  */
 function loadProjectRegistry(): ProjectRegistry {
-    const registryPath = path.join(os.homedir(), '.groundfloor', 'projects.json');
+    const registryPath = loreHomePath('projects.json');
     try {
         const rawContent = fs.readFileSync(registryPath, 'utf-8');
         return JSON.parse(rawContent) as ProjectRegistry;
@@ -171,7 +184,7 @@ function resolveGraphPath(): string {
         return getActiveWorkspacePath();
     } catch (err) {
         console.error(`[Lore MCP] Workspace resolve failed (${(err as Error).message}); falling back to ~/.groundfloor`);
-        return path.join(os.homedir(), '.groundfloor');
+        return loreHome();
     }
 }
 
@@ -182,8 +195,10 @@ const graphBasePath = resolveGraphPath();
 
 const schemaLoader = new SchemaLoader(graphBasePath);
 const domainSchema = schemaLoader.get();
-const nodeTypesEnum = z.enum(domainSchema.nodeTypes as [string, ...string[]]);
-const edgeRelationsEnum = z.enum(domainSchema.edgeRelations as [string, ...string[]]);
+// nodeTypesEnum and edgeRelationsEnum are both built after
+// pluginRegistry.boot() below so they can merge in each active
+// plug-in's contributeNodeTypes() / contributeEdgeRelations() — keeps
+// Core's enums workspace-agnostic.
 
 // Settings are read BEFORE graph construction so Q1.3 cache knobs
 // (enabled / ttlSeconds / maxEntries) flow into the ReadCache at
@@ -364,8 +379,88 @@ const verbatimStore: LoreVectorStore = createVectorStore();
 const verbatimProvider: VectorProvider = verbatimStore;
 void verbatimProvider; // reserved for future cloud-only callers
 const pluginRegistry = new PluginRegistry(configManager);
+
+// Tier 1 (manifest-only, no TypeScript) plugins are discovered under
+// `<LORE_HOME>/manifests/<bundle>/plugin.{yaml,yml,json}`. Each bundle
+// directory holding a Tier 1 manifest is synthesised into an
+// `ILorePlugin` via the manifest adapter and registered before
+// `boot()` so collision detection sees the full active set. Bundles
+// whose manifest declares a `lore.module` (i.e. a TypeScript plugin)
+// are skipped — those need to be registered as built-ins instead.
+//
+// Discovery failures (parse / validation / IO) log a one-line warning
+// and continue; one bad manifest in a sibling bundle should not
+// prevent the daemon from booting.
+{
+    const manifestsDir = loreHomePath('manifests');
+    let entries: string[] = [];
+    try {
+        entries = fs.readdirSync(manifestsDir);
+    } catch {
+        // Directory does not exist → no Tier 1 plugins. Normal.
+        entries = [];
+    }
+    for (const entry of entries) {
+        const bundleDir = path.join(manifestsDir, entry);
+        let stat: fs.Stats;
+        try {
+            stat = fs.statSync(bundleDir);
+        } catch {
+            continue;
+        }
+        if (!stat.isDirectory()) continue;
+        try {
+            const { manifest, filePath } = await loadManifestFromBundle(bundleDir);
+            if (!isTierOneManifest(manifest)) {
+                console.error(
+                    `[Lore MCP] Skipping ${filePath} — has \`lore.module\`, register as a built-in plugin instead.`,
+                );
+                continue;
+            }
+            const plugin = manifestToPlugin(manifest);
+            pluginRegistry.registerSyntheticPlugin(plugin);
+            console.error(`[Lore MCP] Tier 1 manifest plugin registered: ${plugin.name} (${filePath})`);
+        } catch (err) {
+            console.error(
+                `[Lore MCP] Skipping bundle ${bundleDir} — ${(err as Error).message}`,
+            );
+        }
+    }
+}
+
 pluginRegistry.boot();
 console.error(`[Lore MCP] Plugins active: ${configManager.read().plugins.join(', ') || '(none)'}`);
+
+// Snapshot which plugin names were loaded at boot so the hot-reloader
+// can distinguish "this was here all along" (don't touch) from "this
+// is new this session" (hot-load).
+const bootRegisteredPluginNames = pluginRegistry.activeNames();
+const manifestHotReloader = new ManifestHotReloader(loreHomePath('manifests'), pluginRegistry);
+manifestHotReloader.start(bootRegisteredPluginNames);
+
+// Boundary cleanup (2026-04-27) — merge plug-in-contributed node types
+// and edge relations into store_node / store_edge enums. Core ships
+// only generic vocabulary (decision/convention/note ; decided_for /
+// caused_by / applies_to / supersedes / related_to / depends_on);
+// domain words come from active plugins via contributeNodeTypes() and
+// contributeEdgeRelations(). Computed after boot, before tool reg.
+const pluginNodeTypeContribs = pluginRegistry.collectNodeTypeContributions();
+const mergedNodeTypes: string[] = [
+    ...domainSchema.nodeTypes,
+    ...pluginNodeTypeContribs.map((c) => c.type.name),
+];
+const nodeTypesEnum = z.enum(mergedNodeTypes as [string, ...string[]]);
+const nodeTypesDescription = mergedNodeTypes.join(', ');
+console.error(`[Lore MCP] Node types: ${nodeTypesDescription}`);
+
+const pluginEdgeRelationContribs = pluginRegistry.collectEdgeRelationContributions();
+const mergedEdgeRelations: string[] = [
+    ...domainSchema.edgeRelations,
+    ...pluginEdgeRelationContribs.map((c) => c.relation.name),
+];
+const edgeRelationsEnum = z.enum(mergedEdgeRelations as [string, ...string[]]);
+const edgeRelationsDescription = mergedEdgeRelations.join(', ');
+console.error(`[Lore MCP] Edge relations: ${edgeRelationsDescription}`);
 
 // Q2.2 slice 4 — Attach plugin cloud-schema hooks to DataplaneGraph.
 // LocalGraph doesn't need this: its schema push runs via the Kùzu-oriented
@@ -541,6 +636,40 @@ function getDataplaneState(): DataplaneState {
     return dataplaneState;
 }
 
+/**
+ * readJsonBody — Promisified JSON body reader for HTTP POST handlers.
+ *
+ * The legacy pattern in this file uses `req.on('data')` / `req.on('end')`
+ * inline per route. New endpoints (plugin wizard, etc.) use this awaited
+ * helper instead so the route bodies stay flat. Bounded at 10 MB to
+ * keep a misbehaving client from exhausting daemon memory.
+ */
+async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+    const MAX_BYTES = 10 * 1024 * 1024;
+    return new Promise((resolve, reject) => {
+        let bytes = 0;
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => {
+            bytes += chunk.length;
+            if (bytes > MAX_BYTES) {
+                reject(new Error(`request body exceeded ${MAX_BYTES} bytes`));
+                req.destroy();
+                return;
+            }
+            chunks.push(chunk);
+        });
+        req.on('end', () => {
+            try {
+                const text = Buffer.concat(chunks).toString('utf8');
+                resolve(text ? JSON.parse(text) : {});
+            } catch (err) {
+                reject(new Error(`invalid JSON body: ${(err as Error).message}`));
+            }
+        });
+        req.on('error', reject);
+    });
+}
+
 // Q1.1 — DO NOT fire the ping here. This module-scope call predates
 // keychain-upgrade (S9) and fires before main() replaces `adapter`
 // with the keychain-sourced instance, which hard-wires dataplaneState
@@ -575,7 +704,7 @@ mcpServer.tool(
     `Create or update a knowledge node within the ${domainSchema.domain} domain`,
     {
         id: z.string().describe('Unique identifier (e.g., "baas-body-stream-fix")'),
-        type: nodeTypesEnum.describe(`Node type (options: ${domainSchema.nodeTypes.join(', ')})`),
+        type: nodeTypesEnum.describe(`Node type (options: ${nodeTypesDescription})`),
         label: z.string().describe('Human-readable title'),
         content: z.string().optional().describe('Full text content'),
         tags: z.string().optional().describe('Comma-separated tags (e.g., "platform,baasclient,error-handling")'),
@@ -604,8 +733,13 @@ mcpServer.tool(
             // Buffer write to WAL for async sync
             wal.append('upsert_node', { ...node });
 
+            // Verbatim is keyed by `lore:<id>` everywhere else (reconnect,
+            // delete_node tombstone, get_full lookups). Use the same
+            // canonical prefix here so a single node has exactly one
+            // verbatim row across the ingest, reconnect, and delete paths
+            // — not two rows under raw and prefixed ids racing each other.
             verbatimStore.store({
-                id,
+                id: `lore:${id}`,
                 text: buildVerbatimText(label, content ?? '', tags ?? ''),
                 metadata: { type, label, tags: tags ?? '', project: scopedProject, ecosystem: scopedEcosystem, updatedAt: node.updatedAt }
             }).catch((err) => console.error(`[Lore MCP] VerbatimStore write failed for ${redactId(id)}: ${redactError(err)}`));
@@ -643,6 +777,106 @@ mcpServer.tool(
                         success: true,
                         node: { id: node.id, type: node.type, label: node.label, project: scopedProject, ecosystem: scopedEcosystem },
                         message: `Node '${id}' stored successfully (project: ${scopedProject}, ecosystem: ${scopedEcosystem}).`,
+                    }, null, 2),
+                }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: lore_plugin_ingest ────────────────────────────────── */
+/*
+ * Run the declarative ingest specs in a Tier 1 manifest plugin.
+ *
+ * Lookup: <LORE_HOME>/manifests/<plugin>/plugin.{yaml,yml,json}.
+ * The manifest is reloaded fresh on every call (not cached at boot)
+ * so the user can edit YAML and re-trigger without restarting the
+ * daemon — important for iterating on a new plugin.
+ *
+ * Each spec's writer calls `graph.upsertNode` directly (the same
+ * substrate `store_node` uses) and bypasses the auto-link reconnect
+ * hook that store_node fires per node — bulk ingest reconnects are
+ * a separate concern (planned: post-ingest sweep). This keeps a
+ * 100k-row ingest from queuing 100k reconnect jobs.
+ */
+mcpServer.tool(
+    'lore_plugin_ingest',
+    'Run the declarative ingest specs declared in a Tier 1 manifest plugin. Reads the manifest fresh, runs each spec, returns counts + per-row errors.',
+    {
+        plugin: z.string().describe('The plugin name (matches the bundle directory under <LORE_HOME>/manifests/).'),
+        ingestId: z.string().optional().describe('When the manifest declares multiple ingest entries, run only the one with this id. Omit to run all.'),
+    },
+    async ({ plugin, ingestId }) => {
+        try {
+            const bundleDir = path.join(loreHomePath('manifests'), plugin);
+            const { manifest, filePath } = await loadManifestFromBundle(bundleDir);
+            if (!isTierOneManifest(manifest)) {
+                throw new Error(`plugin "${plugin}" is not a Tier 1 manifest plugin (it has \`lore.module\`); use the plugin's own ingest mechanism instead`);
+            }
+            const specs = manifest.lore?.ingest ?? [];
+            if (specs.length === 0) {
+                throw new Error(`plugin "${plugin}" declares no \`lore.ingest\` specs in ${filePath}`);
+            }
+            const targetSpecs = ingestId !== undefined
+                ? specs.filter((s, i) => (s.id ?? String(i)) === ingestId)
+                : specs;
+            if (targetSpecs.length === 0) {
+                throw new Error(`no ingest spec with id="${ingestId}" in plugin "${plugin}"`);
+            }
+
+            const writer = async (node: IngestNodeWrite): Promise<void> => {
+                const tagsCsv = node.tags.join(',');
+                const project = node.project ?? detectedScope.project;
+                const ecosystem = node.ecosystem ?? detectedScope.ecosystem;
+                const stored = await graph.upsertNode({
+                    id: node.id,
+                    type: node.type,
+                    label: node.label,
+                    content: node.content,
+                    tags: tagsCsv,
+                    project,
+                    ecosystem,
+                    metadata: JSON.stringify(node.metadata),
+                    language: node.language ?? null,
+                });
+                wal.append('upsert_node', { ...stored });
+                // Verbatim: same canonical-prefix convention as store_node.
+                verbatimStore.store({
+                    id: `lore:${node.id}`,
+                    text: buildVerbatimText(node.label, node.content, tagsCsv),
+                    metadata: { type: node.type, label: node.label, tags: tagsCsv, project, ecosystem, updatedAt: stored.updatedAt },
+                }).catch((err) => console.error(`[Lore MCP] VerbatimStore write failed for ingest ${redactId(node.id)}: ${redactError(err)}`));
+            };
+
+            const reports: unknown[] = [];
+            for (const spec of targetSpecs) {
+                const r = await runIngest(spec, bundleDir, writer, {
+                    credentialResolver: async (key: string) => await getApiKey(key),
+                });
+                reports.push({
+                    ingestId: spec.id ?? null,
+                    sourcePath: r.sourcePath,
+                    totalRows: r.totalRows,
+                    ingested: r.ingested,
+                    skipped: r.skipped,
+                    errors: r.errors,
+                    elapsedMs: r.elapsedMs,
+                });
+            }
+
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify({
+                        success: true,
+                        plugin,
+                        manifest: filePath,
+                        runs: reports,
                     }, null, 2),
                 }],
             };
@@ -813,8 +1047,9 @@ mcpServer.tool(
         filePaths: z.array(z.string()).optional().describe('Q1.7: file paths from the current work context (e.g. from a PostToolUse edit hook). Any deferred-* node whose stored file list overlaps these paths is auto-surfaced in the `deferred` sidecar field, even if it doesn\'t match the topic text.'),
         mode: z.enum(['summary', 'full']).optional().describe('Response shape. "summary" (default) returns top hits with label + 1-line snippet only — meant for AI agents. "full" returns the rich JSON with full node bodies — meant for the human-facing CLI.'),
         crossProject: z.boolean().optional().describe('When true, ignores the current project scope and searches every project. Each hit is tagged with its project. Use this when looking for prior work that may have happened in a sibling repo (e.g. DEF, dataplane, managrid).'),
+        includeSuperseded: z.boolean().optional().describe('When true, also returns nodes that have been soft-superseded by a newer version. Default false — the typical recall flow wants the current state of knowledge, not the history. Pass true when reviewing how a decision evolved.'),
     },
-    async ({ topic, depth, queryLanguage, filePaths, mode, crossProject }) => {
+    async ({ topic, depth, queryLanguage, filePaths, mode, crossProject, includeSuperseded }) => {
         try {
             const responseMode = mode ?? 'summary';
             const useCrossProject = crossProject ?? false;
@@ -848,6 +1083,15 @@ mcpServer.tool(
                     const node = await graph.getNode(stripped);
                     if (node) searchResults.push(node);
                 }
+            }
+
+            // Soft-supersession filter (2026-04-28). Drop nodes whose
+            // supersededAt is non-null unless the caller explicitly asks
+            // to see history. Applied to seed hits AND to traversal
+            // expansions so a fresh decision's neighbours don't drag in
+            // its predecessors as "related".
+            if (!includeSuperseded) {
+                searchResults = searchResults.filter((n) => !n.supersededAt);
             }
 
             // Q1.7 — deferred-Lore surfacing. Run alongside the search
@@ -885,6 +1129,8 @@ mcpServer.tool(
             for (const searchNode of searchResults) {
                 const connected = await graph.traverse(searchNode.id, traversalDepth);
                 for (const item of connected) {
+                    // Same supersession filter on traversal expansions.
+                    if (!includeSuperseded && item.node.supersededAt) continue;
                     if (!allNodes.has(item.node.id)) {
                         allNodes.set(item.node.id, {
                             node: item.node,
@@ -1386,8 +1632,18 @@ mcpServer.tool(
             // bug noted in commit 5849140. Now cleared for any
             // future delete call.
             if (deleted) {
-                verbatimStore.delete(`lore:${id}`).catch((err) =>
-                    console.error(`[Lore MCP] VerbatimStore delete failed for ${redactId(id)}: ${redactError(err)}`),
+                // Verbatim is append-only memory: the LanceDB row is
+                // tombstoned (kept + marked superseded) rather than
+                // erased, so the prior content stays recallable for
+                // history / audit / undo. Cloud-mode (DataplaneVectorStore)
+                // doesn't support tombstone yet — fall back to the legacy
+                // delete path on that store.
+                const store = verbatimStore as unknown as { tombstone?: (id: string, reason: string) => Promise<void> };
+                const op = typeof store.tombstone === 'function'
+                    ? store.tombstone(`lore:${id}`, 'graph node deleted via MCP delete_node')
+                    : verbatimStore.delete(`lore:${id}`);
+                op.catch((err: unknown) =>
+                    console.error(`[Lore MCP] Verbatim tombstone failed for ${redactId(id)}: ${redactError(err)}`),
                 );
             }
             return {
@@ -1399,6 +1655,50 @@ mcpServer.tool(
                         message: deleted ? `Node '${id}' deleted.` : `Node '${id}' not found.`,
                     }, null, 2),
                 }],
+            };
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Error: ${(error as Error).message}` }],
+                isError: true,
+            };
+        }
+    },
+);
+
+/* ─── Tool: supersede_node ────────────────────────────────────── */
+
+mcpServer.tool(
+    'supersede_node',
+    'Soft-supersede an old knowledge node with a newer one. The old node stays in the graph (all edges preserved) but is hidden from default recall and faded in the network view. Use when a new decision/architecture/convention replaces an older one and you want a clear record of "this was the call before, this is the call now". Reversible via clearing the supersededAt field.',
+    {
+        old_id: z.string().describe('ID of the node being superseded (no longer authoritative)'),
+        new_id: z.string().describe('ID of the new node that replaces it'),
+        reason: z.string().optional().describe('Optional free-form note explaining why the supersession happened'),
+    },
+    async ({ old_id, new_id, reason }) => {
+        const startedAt = Date.now();
+        try {
+            const localGraph = graph as LocalGraph;
+            const result = await localGraph.supersedeNode(old_id, new_id, reason);
+            auditLog.log({
+                toolName: 'supersede_node',
+                args: { old_id, new_id, reason: reason ?? null },
+                result: result.ok ? 'success' : 'error',
+                resultDetail: result.ok ? undefined : `${result.reason}`,
+                durationMs: Date.now() - startedAt,
+            });
+            return {
+                content: [{
+                    type: 'text' as const,
+                    text: JSON.stringify(
+                        result.ok
+                            ? { success: true, oldId: old_id, newId: new_id, message: `Marked '${old_id}' as superseded by '${new_id}'.` }
+                            : { success: false, reason: result.reason, message: `Could not supersede: ${result.reason}` },
+                        null,
+                        2,
+                    ),
+                }],
+                isError: !result.ok,
             };
         } catch (error) {
             return {
@@ -1456,7 +1756,7 @@ mcpServer.tool(
     },
     async ({ name, ecosystem, paths: pathFragments }) => {
         try {
-            const registryPath = path.join(os.homedir(), '.groundfloor', 'projects.json');
+            const registryPath = loreHomePath('projects.json');
             let registry: ProjectRegistry;
 
             try {
@@ -1709,7 +2009,7 @@ mcpServer.tool(
         try {
             resolvedPath = assertPathAllowed(filePath, {
                 workspaceRoot: graphBasePath,
-                extraRoots: loadExtraIngestionRoots(path.join(os.homedir(), '.groundfloor')),
+                extraRoots: loadExtraIngestionRoots(loreHome()),
             });
         } catch (err) {
             if (err instanceof PathAllowlistError) {
@@ -1875,6 +2175,83 @@ const archiveSink = new LocalFileSink();
 // scheduled sweep is a no-op against Dataplane (slice-3 follow-up).
 const retentionSweeper = new RetentionSweeper(graph as LocalGraph, pluginRegistry, auditLog);
 
+// Supersession-candidates cache (10 min TTL). Scan is embed-heavy
+// (30-60s on ~150 nodes) so we cache results and let the UI bust the
+// cache after a successful supersede via ?fresh=true.
+const supersessionCandidatesCache = new Map<string, { payload: unknown; savedAt: number }>();
+
+/**
+ * runRetentionSweep — Walk every superseded node in the active workspace.
+ * For each one whose supersededAt is older than the configured threshold,
+ * tombstone its verbatim row (preserves content + history; just makes it
+ * non-retrievable via default search). The graph node is left alone so
+ * lineage queries still work.
+ *
+ * Returns counts so the caller (UI button or daily timer) can report.
+ * Skips silently when autoArchiveSupersededAfterDays is null/0/<0.
+ */
+async function runRetentionSweep(dryRun: boolean): Promise<{
+    policy: { autoArchiveSupersededAfterDays: number | null };
+    eligible: number;
+    archived: number;
+    sample: Array<{ id: string; supersededAt: string }>;
+    dryRun: boolean;
+}> {
+    const policy = getWorkspaceRetention(getActiveWorkspaceName());
+    const threshold = policy.autoArchiveSupersededAfterDays ?? 0;
+    if (threshold <= 0) {
+        return { policy: { autoArchiveSupersededAfterDays: null }, eligible: 0, archived: 0, sample: [], dryRun };
+    }
+    const cutoff = Date.now() - threshold * 24 * 60 * 60 * 1000;
+    const localGraph = graph as LocalGraph;
+    const all = await localGraph.listNodes();
+    const eligible = all.filter((n) => {
+        if (!n.supersededAt) return false;
+        const t = Date.parse(n.supersededAt);
+        return Number.isFinite(t) && t < cutoff;
+    });
+    const sample = eligible.slice(0, 10).map((n) => ({ id: n.id, supersededAt: n.supersededAt ?? '' }));
+    let archived = 0;
+    if (!dryRun) {
+        const store = verbatimStore as unknown as { tombstone?: (id: string, reason: string) => Promise<void> };
+        if (typeof store.tombstone === 'function') {
+            for (const n of eligible) {
+                await store.tombstone(`lore:${n.id}`, `auto-archived per workspace policy (>${threshold}d superseded)`);
+                archived++;
+            }
+        }
+        auditLog.log({
+            toolName: 'workspace.retention.sweep',
+            args: { threshold, eligible: eligible.length },
+            result: 'success',
+            resultDetail: `archived=${archived}`,
+            durationMs: 0,
+        });
+    }
+    return {
+        policy: { autoArchiveSupersededAfterDays: threshold },
+        eligible: eligible.length,
+        archived,
+        sample,
+        dryRun,
+    };
+}
+
+// Daily auto-sweep. Fires every 24h; first fire is 1 minute after boot
+// so the daemon doesn't block startup on it. Idempotent — running it
+// twice in the same day on the same eligible nodes is fine because
+// tombstone is also idempotent (re-tombstoning is a no-op write).
+setTimeout(() => {
+    void runRetentionSweep(false).catch((err) => {
+        console.error('[retention] daily sweep failed:', (err as Error).message);
+    });
+    setInterval(() => {
+        void runRetentionSweep(false).catch((err) => {
+            console.error('[retention] daily sweep failed:', (err as Error).message);
+        });
+    }, 24 * 60 * 60 * 1000);
+}, 60 * 1000);
+
 /**
  * C6b (Phase 4) — MCP client runtime. Connects outward to external
  * MCP servers configured in ~/.groundfloor/mcp-servers.json. Empty
@@ -1922,7 +2299,7 @@ async function main(): Promise<void> {
     // it differs (custom workspace paths can live anywhere). Must run
     // before graph.initialize() so Kùzu files inherit the 0700 parent dir.
     try {
-        const dataHome = path.join(os.homedir(), '.groundfloor');
+        const dataHome = loreHome();
         const lockedPaths = new Set<string>([dataHome]);
         if (graphBasePath !== dataHome) lockedPaths.add(graphBasePath);
         for (const root of lockedPaths) {
@@ -1995,7 +2372,7 @@ async function main(): Promise<void> {
     // volume for this session. Non-fatal — rotation failures log to
     // stderr and daemon proceeds.
     try {
-        const _dataHomeForRotation = path.join(os.homedir(), '.groundfloor');
+        const _dataHomeForRotation = loreHome();
         const results = rotateStandardLogs(_dataHomeForRotation);
         for (const r of results) {
             if (r.result.rotated) {
@@ -2014,7 +2391,7 @@ async function main(): Promise<void> {
     // After this line, every /api/* handler (except the public allowlist)
     // requires Authorization: Bearer <token>. UI bootstraps via
     // /api/auth/bootstrap (Host+Origin gated).
-    const dataHome = path.join(os.homedir(), '.groundfloor');
+    const dataHome = loreHome();
     authToken = ensureAuthToken(dataHome);
     console.error(`[Lore MCP] Auth token at ${getAuthTokenPath(dataHome)} (0600)`);
 
@@ -2034,16 +2411,32 @@ async function main(): Promise<void> {
 
     await verbatimStore.initialize();
 
-    // Attempt SurrealDB connection if adapter is configured
+    // Phase boundary fix (2026-04-27) — fire bindRuntime on plugins so
+    // they have access to PluginContext (verbatimStore, syncEngine, etc.)
+    // BEFORE the HTTP server starts. createMcpServer's registerTools call
+    // only fires per-MCP-session in HTTP mode, which is too late for
+    // daemon-level HTTP routes (e.g. /api/code-similar) that call into
+    // plugin APIs directly.
+    pluginRegistry.bindRuntime({
+        graph,
+        verbatimStore,
+        syncEngine,
+        syncAdapter: adapter,
+        schemaLoader,
+        scope: detectedScope,
+        loreDir,
+    });
+
+    // Attempt Dataplane connection if adapter is configured
     if (adapter) {
         try {
             await adapter.connect();
-            console.error(`[Lore MCP] Sync: ONLINE — connected to SurrealDB`);
+            console.error(`[Lore MCP] Sync: ONLINE — connected to Dataplane`);
         } catch (syncConnError) {
-            console.error(`[Lore MCP] Sync: OFFLINE — SurrealDB unreachable (${(syncConnError as Error).message})`);
+            console.error(`[Lore MCP] Sync: OFFLINE — Dataplane unreachable (${(syncConnError as Error).message})`);
         }
     } else {
-        console.error(`[Lore MCP] Sync: OFFLINE — no SurrealDB credentials configured`);
+        console.error(`[Lore MCP] Sync: OFFLINE — no Dataplane credentials configured`);
     }
 
     const useHttp = process.argv.includes('--http');
@@ -2299,6 +2692,8 @@ async function main(): Promise<void> {
                         return;
                     }
                     const crossProject = recallParams.get('crossProject') === 'true';
+                    const includeSuperseded = recallParams.get('include_superseded') === 'true'
+                        || recallParams.get('includeSuperseded') === 'true';
                     const max = parseInt(recallParams.get('max') ?? '8', 10);
                     const projectScope = crossProject ? '*' : detectedScope.project;
                     const ecosystemScope = crossProject ? '*' : detectedScope.ecosystem;
@@ -2318,6 +2713,10 @@ async function main(): Promise<void> {
                             if (seenIds.has(stripped)) continue;
                             const n = await graph.getNode(stripped);
                             if (n) {
+                                // Drop superseded nodes from default
+                                // recall (mirrors the MCP recall tool's
+                                // soft-supersession filter).
+                                if (!includeSuperseded && n.supersededAt) continue;
                                 hits.push(n);
                                 seenIds.add(n.id);
                             }
@@ -2327,6 +2726,7 @@ async function main(): Promise<void> {
                         const fallback = await graph.search(topic, max, projectScope, ecosystemScope);
                         for (const n of fallback) {
                             if (seenIds.has(n.id)) continue;
+                            if (!includeSuperseded && n.supersededAt) continue;
                             hits.push(n);
                             seenIds.add(n.id);
                         }
@@ -2369,6 +2769,476 @@ async function main(): Promise<void> {
             // Path is `/api/node-full` (not `/api/node/full`) to avoid
             // the existing `/api/node` startsWith match above, which is
             // auth-gated and returns a different shape (node + neighbors).
+            // Reap orphaned verbatim rows (rows whose graph node no
+            // longer exists). Same logic as the `lore verbatim reap`
+            // CLI but lives in the daemon so it doesn't fight Kùzu's
+            // single-writer lock. Tombstones rather than deletes —
+            // verbatim is append-only memory.
+            //   POST /api/verbatim/reap { apply?: boolean, prefix?: string }
+            //   default prefix = "lore:" (covers the canonical Lore namespace).
+            if (pathname === '/api/verbatim/reap' && req.method === 'POST') {
+                try {
+                    const body = await new Promise<string>((resolve) => {
+                        let data = '';
+                        req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+                        req.on('end', () => resolve(data));
+                    });
+                    const parsed = JSON.parse(body || '{}') as { apply?: boolean; prefix?: string };
+                    const prefix = parsed.prefix ?? 'lore:';
+                    const apply = parsed.apply === true;
+                    const store = verbatimStore as unknown as {
+                        listIds?: (p?: string) => Promise<string[]>;
+                        tombstone?: (id: string, reason: string) => Promise<void>;
+                    };
+                    if (typeof store.listIds !== 'function' || typeof store.tombstone !== 'function') {
+                        res.writeHead(501, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'reap not supported by current vector store backend' }));
+                        return;
+                    }
+                    const allIds = await store.listIds(prefix);
+                    const orphans: string[] = [];
+                    let alive = 0;
+                    for (const vid of allIds) {
+                        // Skip history snapshots — only the canonical
+                        // row presence determines whether the node has
+                        // a live counterpart in the graph.
+                        if (vid.includes('#rev')) continue;
+                        // Derive the graph node id: always strip the
+                        // canonical `lore:` prefix when present (graph
+                        // nodes are stored by raw id). Plugin-prefixed
+                        // ids (e.g. `symbol:`, `file:`) are not graph
+                        // nodes — skip them so they aren't flagged as
+                        // orphans.
+                        const isLore = vid.startsWith('lore:');
+                        const isPluginPrefixed = !isLore && /^[a-z_]+:/.test(vid);
+                        if (isPluginPrefixed) {
+                            // Plugin verbatim rows use their own id space
+                            // (symbol:<uid>, file:<path>). Liveness checks
+                            // for those belong to the owning plugin.
+                            alive++;
+                            continue;
+                        }
+                        const nid = isLore ? vid.slice('lore:'.length) : vid;
+                        const node = await graph.getNode(nid);
+                        if (node == null) orphans.push(vid);
+                        else alive++;
+                    }
+                    let tombstoned = 0;
+                    if (apply) {
+                        for (const id of orphans) {
+                            await store.tombstone(id, 'graph node missing — discovered via /api/verbatim/reap');
+                            tombstoned++;
+                        }
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        prefix,
+                        apply,
+                        inspected: allIds.length,
+                        alive,
+                        orphans: orphans.length,
+                        tombstoned,
+                        sample: orphans.slice(0, 20),
+                    }));
+                } catch (reapErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (reapErr as Error).message }));
+                }
+                return;
+            }
+
+            // Soft-supersede a node. POST body: { oldId, newId, reason? }.
+            // Mirror of the supersede_node MCP tool for HTTP / CLI clients.
+            if (pathname === '/api/node/supersede' && req.method === 'POST') {
+                try {
+                    const body = await new Promise<string>((resolve) => {
+                        let data = '';
+                        req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+                        req.on('end', () => resolve(data));
+                    });
+                    const parsed = JSON.parse(body || '{}') as { oldId?: string; newId?: string; reason?: string };
+                    if (!parsed.oldId || !parsed.newId) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: '`oldId` and `newId` are required in POST body' }));
+                        return;
+                    }
+                    const localGraph = graph as LocalGraph;
+                    const result = await localGraph.supersedeNode(parsed.oldId, parsed.newId, parsed.reason);
+                    auditLog.log({
+                        toolName: 'supersede_node',
+                        args: { oldId: parsed.oldId, newId: parsed.newId, reason: parsed.reason ?? null, surface: 'http' },
+                        result: result.ok ? 'success' : 'error',
+                        resultDetail: result.ok ? undefined : result.reason,
+                        durationMs: 0,
+                    });
+                    res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(result));
+                } catch (supErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (supErr as Error).message }));
+                }
+                return;
+            }
+
+            // Workspace retention policy. GET returns the current
+            // policy for the active workspace; PUT updates it.
+            if (pathname === '/api/workspace/retention' && req.method === 'GET') {
+                try {
+                    const policy = getWorkspaceRetention(getActiveWorkspaceName());
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(policy));
+                } catch (rErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (rErr as Error).message }));
+                }
+                return;
+            }
+
+            if (pathname === '/api/workspace/retention' && req.method === 'PUT') {
+                try {
+                    const body = await new Promise<string>((resolve) => {
+                        let data = '';
+                        req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+                        req.on('end', () => resolve(data));
+                    });
+                    const patch = JSON.parse(body || '{}') as Partial<{
+                        hideSupersededInRecall: boolean;
+                        hideSupersededInGraph: boolean;
+                        autoArchiveSupersededAfterDays: number | null;
+                    }>;
+                    const updated = setWorkspaceRetention(getActiveWorkspaceName(), patch);
+                    auditLog.log({
+                        toolName: 'workspace.retention.update',
+                        args: { patch },
+                        result: 'success',
+                        durationMs: 0,
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(updated));
+                } catch (rErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (rErr as Error).message }));
+                }
+                return;
+            }
+
+            // Manually run the auto-archive sweep. Useful for testing
+            // policies and for "do it now" UX. POST body optional:
+            // { dryRun?: boolean } — when true, returns counts without
+            // actually tombstoning.
+            if (pathname === '/api/workspace/retention/sweep' && req.method === 'POST') {
+                try {
+                    const body = await new Promise<string>((resolve) => {
+                        let data = '';
+                        req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+                        req.on('end', () => resolve(data));
+                    });
+                    const opts = JSON.parse(body || '{}') as { dryRun?: boolean };
+                    const result = await runRetentionSweep(opts.dryRun === true);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(result));
+                } catch (sErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (sErr as Error).message }));
+                }
+                return;
+            }
+
+            // Reverse a supersession. POST body: { id }.
+            if (pathname === '/api/node/unsupersede' && req.method === 'POST') {
+                try {
+                    const body = await new Promise<string>((resolve) => {
+                        let data = '';
+                        req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+                        req.on('end', () => resolve(data));
+                    });
+                    const parsed = JSON.parse(body || '{}') as { id?: string };
+                    if (!parsed.id) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: '`id` is required in POST body' }));
+                        return;
+                    }
+                    const localGraph = graph as LocalGraph;
+                    const ok = await localGraph.unsupersedeNode(parsed.id);
+                    auditLog.log({
+                        toolName: 'unsupersede_node',
+                        args: { id: parsed.id, surface: 'http' },
+                        result: ok ? 'success' : 'error',
+                        resultDetail: ok ? undefined : 'not-found',
+                        durationMs: 0,
+                    });
+                    res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok }));
+                } catch (unsupErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (unsupErr as Error).message }));
+                }
+                return;
+            }
+
+            // Manually tombstone a verbatim row. Used by admin / cleanup
+            // flows that need to mark content superseded without going
+            // through the graph delete_node path. POST body: { id, reason }.
+            if (pathname === '/api/verbatim/tombstone' && req.method === 'POST') {
+                try {
+                    const body = await new Promise<string>((resolve) => {
+                        let data = '';
+                        req.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+                        req.on('end', () => resolve(data));
+                    });
+                    const parsed = JSON.parse(body || '{}') as { id?: string; reason?: string };
+                    if (!parsed.id) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: '`id` is required in POST body' }));
+                        return;
+                    }
+                    const store = verbatimStore as unknown as { tombstone?: (id: string, reason: string) => Promise<void> };
+                    if (typeof store.tombstone !== 'function') {
+                        res.writeHead(501, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'tombstone not supported by current vector store backend' }));
+                        return;
+                    }
+                    await store.tombstone(parsed.id, parsed.reason ?? 'manual tombstone via /api/verbatim/tombstone');
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ ok: true, id: parsed.id }));
+                } catch (tsErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (tsErr as Error).message }));
+                }
+                return;
+            }
+
+            // Verbatim revision history. Returns the canonical row
+            // (current/tombstone) plus every prior `<id>#rev*` snapshot,
+            // newest first. Used by the UI history panel and by audit
+            // / "what changed and why" lookups.
+            //   GET /api/verbatim/history?id=<canonicalId>
+            if (pathname === '/api/verbatim/history' && req.method === 'GET') {
+                try {
+                    const histParams = new URL(url, 'http://localhost').searchParams;
+                    const histId = histParams.get('id') ?? '';
+                    if (!histId) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: '`id` query param is required (canonical verbatim id, e.g. lore:my-decision)' }));
+                        return;
+                    }
+                    const store = verbatimStore as unknown as VerbatimStore;
+                    if (typeof store.getHistory !== 'function') {
+                        res.writeHead(501, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'history not supported by current vector store backend' }));
+                        return;
+                    }
+                    const revisions = await store.getHistory(histId);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ id: histId, revisions, count: revisions.length }));
+                } catch (histErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (histErr as Error).message }));
+                }
+                return;
+            }
+
+            // Find supersession candidates. For each non-superseded node
+            // of the requested types, runs vector search of its verbatim
+            // text against its siblings (same project) and returns pairs
+            // above the similarity threshold. The UI presents these as
+            // "did you mean to supersede X with Y?" cards.
+            //   GET /api/node/supersession-candidates?project=...&minScore=0.7&fresh=true
+            //
+            // Result is cached for 10 min per (project, minScore) tuple
+            // because the embed-heavy scan takes 30-60s on a real graph.
+            // Pass `fresh=true` to bust the cache after running supersede.
+            if (pathname === '/api/node/supersession-candidates' && req.method === 'GET') {
+                try {
+                    const cp = new URL(url, 'http://localhost').searchParams;
+                    const projectFilter = cp.get('project') ?? undefined;
+                    const minScore = parseFloat(cp.get('minScore') ?? '0.78');
+                    const typesParam = cp.get('types') ?? 'decision,architecture,convention,bug_pattern';
+                    const allowedTypes = new Set(typesParam.split(',').map((t) => t.trim()).filter(Boolean));
+                    const fresh = cp.get('fresh') === 'true';
+
+                    // 10-min in-memory cache per (project, minScore, types) tuple.
+                    const cacheKey = `${projectFilter ?? '*'}::${minScore}::${typesParam}`;
+                    if (!fresh) {
+                        const cached = supersessionCandidatesCache.get(cacheKey);
+                        if (cached && Date.now() - cached.savedAt < 10 * 60 * 1000) {
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ ...(cached.payload as Record<string, unknown>), cached: true, cachedAgeMs: Date.now() - cached.savedAt }));
+                            return;
+                        }
+                    }
+
+                    const localGraph = graph as LocalGraph;
+                    // Pull all candidate nodes (current + same project + matching types).
+                    const allNodes = await localGraph.listNodes(undefined, undefined, projectFilter ?? '*');
+                    const candidates = allNodes.filter((n) =>
+                        allowedTypes.has(n.type)
+                        && !n.supersededAt,
+                    );
+
+                    type Pair = {
+                        oldId: string;
+                        oldLabel: string;
+                        oldContent: string;
+                        oldCreatedAt: string;
+                        newId: string;
+                        newLabel: string;
+                        newContent: string;
+                        newCreatedAt: string;
+                        score: number;
+                        project: string;
+                    };
+                    const pairs: Pair[] = [];
+                    const seenPairs = new Set<string>();
+                    const candidateById = new Map(candidates.map((c) => [c.id, c]));
+
+                    // Parallel batched search: 8 in flight at a time
+                    // bounds memory for the embedder while still ~5x
+                    // faster than sequential. Hard cap on candidates
+                    // (200) keeps unscoped scans bounded.
+                    const SCAN_CAP = 200;
+                    const BATCH_SIZE = 8;
+                    const toScan = candidates.slice(0, SCAN_CAP);
+                    for (let i = 0; i < toScan.length; i += BATCH_SIZE) {
+                        const batch = toScan.slice(i, i + BATCH_SIZE);
+                        // Embed query = label only (much shorter than full
+                        // content; gives near-identical similarity signal
+                        // for decision/architecture nodes which are
+                        // primarily named by their label).
+                        const batchResults = await Promise.all(batch.map(async (n) => {
+                            const q = (n.label ?? '').trim() || (n.content ?? '').slice(0, 200);
+                            if (!q) return { node: n, hits: [] as Array<{ id: string; score: number }> };
+                            try {
+                                const hits = await verbatimStore.search(q, 5);
+                                return { node: n, hits };
+                            } catch {
+                                return { node: n, hits: [] as Array<{ id: string; score: number }> };
+                            }
+                        }));
+                        for (const { node: n, hits } of batchResults) {
+                            for (const hit of hits) {
+                                const stripped = hit.id.startsWith('lore:') ? hit.id.slice(5) : hit.id;
+                                if (stripped === n.id) continue;
+                                if (hit.score < minScore) continue;
+                                const key = stripped < n.id ? `${stripped}||${n.id}` : `${n.id}||${stripped}`;
+                                if (seenPairs.has(key)) continue;
+                                const partner = candidateById.get(stripped);
+                                if (!partner) continue;
+                                const aDate = n.createdAt || '';
+                                const bDate = partner.createdAt || '';
+                                const isANewer = aDate > bDate;
+                                const newer = isANewer ? n : partner;
+                                const older = isANewer ? partner : n;
+                                pairs.push({
+                                    oldId: older.id,
+                                    oldLabel: older.label,
+                                    oldContent: (older.content ?? '').slice(0, 240),
+                                    oldCreatedAt: older.createdAt ?? '',
+                                    newId: newer.id,
+                                    newLabel: newer.label,
+                                    newContent: (newer.content ?? '').slice(0, 240),
+                                    newCreatedAt: newer.createdAt ?? '',
+                                    score: hit.score,
+                                    project: n.project ?? '*',
+                                });
+                                seenPairs.add(key);
+                            }
+                        }
+                    }
+
+                    // Sort highest confidence first.
+                    pairs.sort((a, b) => b.score - a.score);
+                    const payload = {
+                        scope: { project: projectFilter ?? null, minScore, types: Array.from(allowedTypes) },
+                        candidatesScanned: candidates.length,
+                        pairs,
+                    };
+                    supersessionCandidatesCache.set(cacheKey, { payload, savedAt: Date.now() });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(payload));
+                } catch (cErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (cErr as Error).message }));
+                }
+                return;
+            }
+
+            // Soft-supersession lineage. Returns the full chain for a
+            // node: every prior version (walk supersededBy backwards)
+            // plus every successor (find nodes whose supersededBy points
+            // here, recursively forward). Ordered oldest → newest.
+            //   GET /api/node/lineage?id=<nodeId>
+            if (pathname === '/api/node/lineage' && req.method === 'GET') {
+                try {
+                    const lp = new URL(url, 'http://localhost').searchParams;
+                    const startId = lp.get('id') ?? '';
+                    if (!startId) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: '`id` query param is required' }));
+                        return;
+                    }
+                    const localGraph = graph as LocalGraph;
+                    const visited = new Set<string>();
+                    const stripped = startId.startsWith('lore:') ? startId.slice(5) : startId;
+
+                    // Walk forward (this node's supersededBy chain).
+                    const forward: LoreNode[] = [];
+                    let cursor: string | null = stripped;
+                    while (cursor && !visited.has(cursor)) {
+                        visited.add(cursor);
+                        const n = await localGraph.getNode(cursor);
+                        if (!n) break;
+                        forward.push(n);
+                        cursor = n.supersededBy ?? null;
+                    }
+
+                    // Walk backward (find nodes that point to this one).
+                    // O(N) per step against the full LoreNode set — fine
+                    // because chains in practice are short (1-3 deep).
+                    const backward: LoreNode[] = [];
+                    let backCursor: string | null = stripped;
+                    while (backCursor) {
+                        // Find a node whose supersededBy === backCursor
+                        const stmt = await localGraph['connection'].prepare(
+                            `MATCH (n:LoreNode) WHERE n.supersededBy = $by RETURN n.id AS id LIMIT 1`,
+                        );
+                        const result = await localGraph['connection'].execute(stmt, { by: backCursor });
+                        const rows = await result.getAll();
+                        if (rows.length === 0) break;
+                        const predId = String(rows[0].id ?? '');
+                        if (!predId || visited.has(predId)) break;
+                        visited.add(predId);
+                        const predNode = await localGraph.getNode(predId);
+                        if (!predNode) break;
+                        backward.unshift(predNode); // oldest first
+                        backCursor = predId;
+                    }
+
+                    // Compose: backward (oldest predecessors first) → forward (this node + its successors).
+                    const chain = [...backward, ...forward];
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        startId,
+                        chain: chain.map((n) => ({
+                            id: n.id,
+                            label: n.label,
+                            type: n.type,
+                            project: n.project,
+                            content: n.content,
+                            supersededBy: n.supersededBy ?? null,
+                            supersededAt: n.supersededAt ?? null,
+                            supersededReason: n.supersededReason ?? null,
+                            createdAt: n.createdAt,
+                            updatedAt: n.updatedAt,
+                        })),
+                    }));
+                } catch (linErr) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (linErr as Error).message }));
+                }
+                return;
+            }
+
             if (pathname === '/api/node-full' && req.method === 'GET') {
                 try {
                     const fullParams = new URL(url, 'http://localhost').searchParams;
@@ -2420,8 +3290,12 @@ async function main(): Promise<void> {
                         // verbatim write so semantic search stays in sync
                         // regardless of ingest surface. Fire-and-forget
                         // (the HTTP response shouldn't block on embedding).
+                        // Same canonical-id consolidation as the MCP
+                        // store_node path: write at `lore:<id>` so all
+                        // surfaces (ingest / reconnect / tombstone /
+                        // recall) hit the same row.
                         verbatimStore.store({
-                            id: nodeData.id,
+                            id: `lore:${nodeData.id}`,
                             text: buildVerbatimText(
                                 nodeData.label,
                                 nodeData.content ?? '',
@@ -2542,14 +3416,44 @@ async function main(): Promise<void> {
                     const requested = Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : TOPOLOGY_DEFAULT;
                     const limit = Math.min(Math.max(requested, TOPOLOGY_MIN), TOPOLOGY_HARD_CAP);
 
-                    const topology = await graph.getTopology(limit);
+                    // 2026-04-27 multi-project: accept either
+                    //   ?project=foo            (single, back-compat)
+                    //   ?projects=foo,bar,baz   (multi)
+                    // Both flow through to getTopology + plugin contributions
+                    // as a string[].
+                    const singleProject = urlObj.searchParams.get('project');
+                    const multiProjects = urlObj.searchParams.get('projects');
+                    let projectFilter: string[] | undefined = undefined;
+                    if (multiProjects) {
+                        const parts = multiProjects.split(',').map((p) => p.trim()).filter(Boolean);
+                        if (parts.length > 0) projectFilter = parts;
+                    } else if (singleProject) {
+                        projectFilter = [singleProject];
+                    }
+
+                    // Tags filter (?tags=foo,bar) — resolves to a set of
+                    // repo names via the developer plug-in. With multi-
+                    // project support (2026-04-27), tag→multiple-repos
+                    // now flows through cleanly via the array filter.
+                    const tagsParam = urlObj.searchParams.get('tags');
+                    if (tagsParam && !projectFilter) {
+                        const tags = tagsParam.split(',').map((t) => t.trim()).filter(Boolean);
+                        const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                        const devApi = devPlugin?.api as { reposForTags: (t: string[]) => string[] } | undefined;
+                        if (devApi && tags.length > 0) {
+                            const matched = devApi.reposForTags(tags);
+                            if (matched.length > 0) projectFilter = matched;
+                        }
+                    }
+
+                    const topology = await graph.getTopology(limit, projectFilter);
                     const stats = await graph.getStats();
                     let pluginTruncated = false;
                     const pluginCtx = graph.createPluginGraphContext();
                     for (const plugin of pluginRegistry.active()) {
                         if (typeof plugin.contributeTopology !== 'function') continue;
                         try {
-                            const slice = await plugin.contributeTopology(pluginCtx, limit);
+                            const slice = await plugin.contributeTopology(pluginCtx, limit, projectFilter);
                             topology.nodes.push(...slice.nodes);
                             topology.edges.push(...slice.edges);
                             if (slice.nodes.length >= limit) pluginTruncated = true;
@@ -2601,10 +3505,386 @@ async function main(): Promise<void> {
                         return;
                     }
                     const overview = await graph.getTopologyOverview();
+
+                    // 2026-04-27: enrich aggregateEdges with code-symbol
+                    // cross-project edges from the developer plug-in. Was:
+                    // LoreNode-only edges (~50 ribbons under-reporting
+                    // real coupling). Now: ribbons reflect both knowledge
+                    // AND code coupling.
+                    try {
+                        const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                        const devApi = devPlugin?.api as { getCrossProjectCodeEdgeCounts: () => Promise<Array<{ fromProject: string; toProject: string; count: number }>> } | undefined;
+                        if (devApi) {
+                            const codeEdges = await devApi.getCrossProjectCodeEdgeCounts();
+                            // Merge: same (from, to) pair → sum counts.
+                            const merged = new Map<string, { fromProject: string; toProject: string; count: number }>();
+                            for (const e of overview.aggregateEdges) {
+                                merged.set(`${e.fromProject}||${e.toProject}`, { ...e });
+                            }
+                            for (const e of codeEdges) {
+                                const k = `${e.fromProject}||${e.toProject}`;
+                                const existing = merged.get(k);
+                                if (existing) existing.count += e.count;
+                                else merged.set(k, { ...e });
+                            }
+                            overview.aggregateEdges = Array.from(merged.values());
+                        }
+                    } catch (enrichErr) {
+                        console.error('[/api/topology/overview] code-edge enrichment failed:', (enrichErr as Error).message);
+                    }
+
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ ...overview, groupBy }));
                 } catch (err) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // GET /api/nodes — type-filtered list of LoreNode rows for the
+            // shell's inspector renderers. Thin wrapper around
+            // LocalGraph.listNodes; sliced client-side to the caller's
+            // limit (engine has no server-side limit).
+            //
+            // Query params: type (required), tag (optional), limit (default 100, max 1000).
+            if (pathname === '/api/nodes' && req.method === 'GET') {
+                try {
+                    const urlObj = new URL(req.url ?? '/api/nodes', 'http://local');
+                    const type = urlObj.searchParams.get('type') ?? undefined;
+                    const tag = urlObj.searchParams.get('tag') ?? undefined;
+                    const limitParam = Number(urlObj.searchParams.get('limit'));
+                    const limit = Math.min(Number.isFinite(limitParam) && limitParam > 0 ? limitParam : 100, 1000);
+                    if (!type) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'type is a required query parameter' }));
+                        return;
+                    }
+                    const all = await (graph as LocalGraph).listNodes(type, tag);
+                    const sliced = all.slice(0, limit);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ count: sliced.length, totalMatching: all.length, nodes: sliced }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // GET /api/plugins/permissions — summary of declared permissions
+            // per active manifest plugin. Used by the shell at install
+            // time and the Settings panel for ongoing visibility.
+            if (pathname === '/api/plugins/permissions' && req.method === 'GET') {
+                try {
+                    const manifestsDir = loreHomePath('manifests');
+                    const out: Array<{ plugin: string; lorePermissions: string[]; defPermissions: string[] }> = [];
+                    let entries: string[] = [];
+                    try { entries = fs.readdirSync(manifestsDir); } catch { entries = []; }
+                    for (const entry of entries) {
+                        const bundleDir = path.join(manifestsDir, entry);
+                        try {
+                            const stat = fs.statSync(bundleDir);
+                            if (!stat.isDirectory()) continue;
+                            const { manifest } = await loadManifestFromBundle(bundleDir);
+                            out.push({
+                                plugin: manifest.name,
+                                lorePermissions: manifest.lore?.permissions ?? [],
+                                defPermissions: manifest.def?.permissions ?? [],
+                            });
+                        } catch { continue; }
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ permissions: out }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // GET /api/plugins/<name>/settings — return declared settings
+            // schema + current values. Secret values are returned as
+            // { set: true } only (never the actual secret).
+            // PUT same path — update one or more settings.
+            const settingsMatch = pathname.match(/^\/api\/plugins\/([a-z][a-z0-9-]*)\/settings$/);
+            if (settingsMatch && (req.method === 'GET' || req.method === 'PUT')) {
+                const pluginName = settingsMatch[1]!;
+                try {
+                    const bundleDir = path.join(loreHomePath('manifests'), pluginName);
+                    const { manifest } = await loadManifestFromBundle(bundleDir);
+                    const fields = manifest.lore?.settings ?? [];
+                    const settingsFile = path.join(bundleDir, 'settings.json');
+
+                    let stored: Record<string, unknown> = {};
+                    try { stored = JSON.parse(await fs.promises.readFile(settingsFile, 'utf8')); } catch { stored = {}; }
+
+                    if (req.method === 'GET') {
+                        const values: Record<string, unknown> = {};
+                        for (const f of fields) {
+                            if (f.type === 'secret') {
+                                const has = await hasApiKey(`plugin:${pluginName}:${f.name}`);
+                                values[f.name] = { set: has };
+                            } else {
+                                values[f.name] = stored[f.name] ?? f.default ?? null;
+                            }
+                        }
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ plugin: pluginName, fields, values }));
+                        return;
+                    }
+
+                    // PUT
+                    const body = await readJsonBody(req) as Record<string, unknown>;
+                    const next = { ...stored };
+                    const errs: string[] = [];
+                    for (const f of fields) {
+                        if (!(f.name in body)) continue;
+                        const v = body[f.name];
+                        if (f.type === 'secret') {
+                            if (typeof v !== 'string') { errs.push(`${f.name}: secret must be a string`); continue; }
+                            await setApiKey(`plugin:${pluginName}:${f.name}`, v);
+                            // Don't store the secret in settings.json; keychain only.
+                        } else if (f.type === 'string') {
+                            if (typeof v !== 'string') { errs.push(`${f.name}: expected string`); continue; }
+                            next[f.name] = v;
+                        } else if (f.type === 'number') {
+                            if (typeof v !== 'number') { errs.push(`${f.name}: expected number`); continue; }
+                            next[f.name] = v;
+                        } else if (f.type === 'boolean') {
+                            if (typeof v !== 'boolean') { errs.push(`${f.name}: expected boolean`); continue; }
+                            next[f.name] = v;
+                        }
+                    }
+                    if (errs.length > 0) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'validation failed', details: errs }));
+                        return;
+                    }
+                    await fs.promises.writeFile(settingsFile, JSON.stringify(next, null, 2));
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ saved: true, plugin: pluginName }));
+                } catch (err) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // GET /api/plugins/manifests — list active manifest plugins
+            // and their declarative inspectors. Used by the shell's
+            // PluginInspectors view to render manifest-declared tabs.
+            if (pathname === '/api/plugins/manifests' && req.method === 'GET') {
+                try {
+                    const manifestsDir = loreHomePath('manifests');
+                    const out: Array<{ name: string; description: string; inspectors: unknown[] }> = [];
+                    let entries: string[] = [];
+                    try { entries = fs.readdirSync(manifestsDir); } catch { entries = []; }
+                    for (const entry of entries) {
+                        const bundleDir = path.join(manifestsDir, entry);
+                        try {
+                            const stat = fs.statSync(bundleDir);
+                            if (!stat.isDirectory()) continue;
+                            const { manifest } = await loadManifestFromBundle(bundleDir);
+                            out.push({
+                                name: manifest.name,
+                                description: manifest.description,
+                                inspectors: manifest.lore?.inspectors ?? [],
+                            });
+                        } catch {
+                            continue; // skip broken bundles
+                        }
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ manifests: out }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // ── Plugin Wizard endpoints (Tier 1 manifest authoring) ──
+            // Used by the in-app PluginWizard UI; called only by trusted
+            // browser clients that pass the daemon auth token. All three
+            // endpoints expect JSON bodies and return JSON responses.
+
+            // POST /api/plugin-wizard/detect — heuristic schema proposal
+            // from a CSV sample. Body: { fileName, csvText }.
+            if (pathname === '/api/plugin-wizard/detect' && req.method === 'POST') {
+                try {
+                    const body = await readJsonBody(req);
+                    const fileName = String((body as { fileName?: unknown }).fileName ?? 'sample.csv');
+                    const csvText = String((body as { csvText?: unknown }).csvText ?? '');
+                    const { parse: parseCsvSync } = await import('csv-parse/sync');
+                    const rows = parseCsvSync(csvText, {
+                        columns: true,
+                        skip_empty_lines: true,
+                        trim: true,
+                    }) as Array<Record<string, string>>;
+                    const { proposeSchema } = await import('../plugins/manifest/heuristics.js');
+                    const proposal = proposeSchema(rows, fileName);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        proposal,
+                        rowCount: rows.length,
+                        sampleRows: rows.slice(0, 5),
+                    }));
+                } catch (err) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // POST /api/plugin-wizard/dryrun — temp ingest with limit.
+            // Body: { manifestYaml, csvText, limit? }. Does NOT write to
+            // the live graph; returns what would happen.
+            if (pathname === '/api/plugin-wizard/dryrun' && req.method === 'POST') {
+                try {
+                    const body = await readJsonBody(req);
+                    const manifestYaml = String((body as { manifestYaml?: unknown }).manifestYaml ?? '');
+                    const csvText = String((body as { csvText?: unknown }).csvText ?? '');
+                    const limit = Math.min(100, Number((body as { limit?: unknown }).limit ?? 100));
+
+                    const { parseManifest, validateManifest, runIngest } =
+                        await import('../plugins/manifest/index.js');
+                    const m = validateManifest(parseManifest(manifestYaml, 'yaml'));
+                    const specs = m.lore?.ingest ?? [];
+                    if (specs.length === 0) {
+                        throw new Error('Manifest declares no ingest specs.');
+                    }
+                    const spec = specs[0]!;
+
+                    // Write CSV to a temp file the runner can read by relative path.
+                    if (!spec.file) {
+                        throw new Error('dry-run requires a CSV-source spec with a `file` field; HTTP sources do not yet support dry-run.');
+                    }
+                    const specFile: string = spec.file;
+                    const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'lore-wizard-dryrun-'));
+                    try {
+                        const csvFile = path.join(tmpDir, path.basename(specFile));
+                        await fs.promises.mkdir(path.dirname(csvFile), { recursive: true });
+                        const truncated = csvText.split('\n').slice(0, limit + 1).join('\n');
+                        await fs.promises.writeFile(csvFile, truncated);
+                        const dryWrites: Array<{ id: string; type: string; label: string; tags: string[] }> = [];
+                        const dryRunSpec = { ...spec, file: path.basename(specFile) };
+                        const report = await runIngest(dryRunSpec, tmpDir, async (n) => {
+                            dryWrites.push({ id: n.id, type: n.type, label: n.label, tags: n.tags });
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            report,
+                            sampleWrites: dryWrites.slice(0, 10),
+                        }));
+                    } finally {
+                        await fs.promises.rm(tmpDir, { recursive: true, force: true });
+                    }
+                } catch (err) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // POST /api/plugin-wizard/refine-with-llm — escalate a
+            // low-confidence heuristic proposal to the user's BYOK LLM.
+            // Body: { proposal, sampleRows, sampleHeaders }.
+            // Returns { refinedProposal } when the LLM gives a usable
+            // answer; { error, code } when no provider is configured or
+            // the LLM call fails — caller should fall back to the
+            // heuristic proposal.
+            if (pathname === '/api/plugin-wizard/refine-with-llm' && req.method === 'POST') {
+                try {
+                    const body = await readJsonBody(req) as {
+                        proposal?: unknown;
+                        sampleRows?: unknown;
+                        sampleHeaders?: unknown;
+                    };
+                    const proposal = body.proposal as Record<string, unknown> | undefined;
+                    const sampleRows = (body.sampleRows ?? []) as Array<Record<string, string>>;
+                    const sampleHeaders = (body.sampleHeaders ?? []) as string[];
+                    if (!proposal) throw new Error('missing `proposal` in body');
+
+                    const cfg = configManager.read();
+                    const provider = cfg.llmProvider as LlmProvider;
+                    const apiKey = await getApiKey(provider);
+                    const needsKey = provider !== 'embedded' && provider !== 'ollama';
+                    if (needsKey && !apiKey) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            error: `No API key configured for provider "${provider}". Add one in Settings or fall back to the heuristic proposal.`,
+                            code: 'no_api_key',
+                        }));
+                        return;
+                    }
+
+                    const prompt = buildPluginWizardLlmPrompt(proposal, sampleHeaders, sampleRows);
+                    let buffer = '';
+                    let llmError: string | null = null;
+                    for await (const chunk of llmStream(provider, prompt, apiKey ?? null, undefined)) {
+                        if (chunk.kind === 'token' && chunk.content) buffer += chunk.content;
+                        else if (chunk.kind === 'error') { llmError = chunk.message ?? 'LLM error'; break; }
+                    }
+                    if (llmError) {
+                        res.writeHead(502, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: llmError, code: 'llm_error' }));
+                        return;
+                    }
+
+                    // Extract JSON from the LLM's reply. Models often wrap in
+                    // ```json fences; tolerate that. If parse fails, return
+                    // the raw text so the user can see what came back and
+                    // fall back to the heuristic proposal.
+                    const refined = extractFirstJsonObject(buffer);
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        refinedProposal: refined,
+                        rawLlmText: buffer,
+                        provider,
+                        usable: refined !== null,
+                    }));
+                } catch (err) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // POST /api/plugin-wizard/save — persist a finished manifest
+            // bundle to <LORE_HOME>/manifests/<pluginName>/. Daemon
+            // restart required to activate (returned in `next_step`).
+            if (pathname === '/api/plugin-wizard/save' && req.method === 'POST') {
+                try {
+                    const body = await readJsonBody(req);
+                    const pluginName = String((body as { pluginName?: unknown }).pluginName ?? '');
+                    const manifestYaml = String((body as { manifestYaml?: unknown }).manifestYaml ?? '');
+                    const dataFiles = (body as { dataFiles?: Array<{ relPath: string; content: string }> }).dataFiles ?? [];
+
+                    if (!/^[a-z][a-z0-9-]*$/.test(pluginName)) {
+                        throw new Error(`pluginName must be kebab-case, got "${pluginName}"`);
+                    }
+                    // Validate manifest before writing — never persist a broken file.
+                    const { parseManifest, validateManifest } = await import('../plugins/manifest/index.js');
+                    validateManifest(parseManifest(manifestYaml, 'yaml'));
+
+                    const bundleDir = path.join(loreHomePath('manifests'), pluginName);
+                    await fs.promises.mkdir(bundleDir, { recursive: true });
+                    const manifestPath = path.join(bundleDir, 'plugin.yaml');
+                    await fs.promises.writeFile(manifestPath, manifestYaml);
+                    for (const f of dataFiles) {
+                        const dest = path.join(bundleDir, f.relPath);
+                        await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+                        await fs.promises.writeFile(dest, f.content);
+                    }
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        saved: true,
+                        bundleDir,
+                        manifestPath,
+                        next_step: 'Restart the Lore daemon to activate: launchctl kickstart -k gui/$(id -u)/com.groundfloor.lore',
+                    }));
+                } catch (err) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (err as Error).message }));
                 }
                 return;
@@ -2616,6 +3896,7 @@ async function main(): Promise<void> {
                     const cfg = configManager.read();
                     const orphanState = pluginRegistry.getOrphanState();
                     res.writeHead(200, { 'Content-Type': 'application/json' });
+                    const hot = manifestHotReloader.getStatus();
                     res.end(JSON.stringify({
                         status: orphanState.blocking ? 'orphan_decision_required' : 'ok',
                         version: '2.1.0',
@@ -2630,6 +3911,14 @@ async function main(): Promise<void> {
                         // the smoke test and Settings UI can observe it
                         // without reparsing config or env.
                         deploymentMode,
+                        // Hot-reload status so the wizard UI can show a
+                        // "restart for full type integration" banner.
+                        manifestHotReload: {
+                            addedSinceBoot: hot.addedSinceBoot,
+                            reloadedSinceBoot: hot.reloadedSinceBoot,
+                            needsRestartForCoreEnums: hot.needsRestartForCoreEnums,
+                            namesHotLoaded: hot.namesHotLoaded,
+                        },
                     }));
                 } catch (err) {
                     res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -2875,6 +4164,46 @@ async function main(): Promise<void> {
                 return;
             }
 
+            // POST /api/workspaces/rename  body: { oldName, newName }
+            // Renames a workspace's label without moving its data on disk.
+            // No daemon restart needed — workspaces.json is read fresh on each
+            // loadWorkspaces() call. Active-workspace rename is supported.
+            if (pathname === '/api/workspaces/rename' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', () => {
+                    const startMs = Date.now();
+                    try {
+                        const { oldName, newName } = JSON.parse(body || '{}') as { oldName?: string; newName?: string };
+                        if (!oldName || !newName) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'oldName and newName required' }));
+                            return;
+                        }
+                        const next = renameWorkspace(oldName, newName);
+                        auditLog.log({
+                            toolName: 'workspaces.rename',
+                            args: { oldName, newName },
+                            result: 'success',
+                            durationMs: Date.now() - startMs,
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(next));
+                    } catch (err) {
+                        auditLog.log({
+                            toolName: 'workspaces.rename',
+                            args: { rawBody: body.slice(0, 200) },
+                            result: 'error',
+                            resultDetail: (err as Error).message,
+                            durationMs: Date.now() - startMs,
+                        });
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
             if (url.startsWith('/api/workspaces/') && req.method === 'DELETE') {
                 const raw = decodeURIComponent(url.slice('/api/workspaces/'.length));
                 // C6 — workspace deletion is destructive: audit every
@@ -2902,6 +4231,318 @@ async function main(): Promise<void> {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({ error: (err as Error).message }));
                 }
+                return;
+            }
+
+            /* ─── /api/repos — Phase 1b Add-Project surface ────────── */
+            // Routes wrap the developer plug-in's repoOps surface
+            // (decision-add-project-ui-phase1-defaults-2026-04-27).
+            // Plug-in boundary preserved: core dispatches by URL only;
+            // all gitnexus / git knowledge lives in the dev plug-in's
+            // DeveloperApi (`pluginRegistry.active().find(p => p.name === 'developer').api`).
+            //
+            //   GET    /api/repos                       — list with freshness
+            //   POST   /api/repos/discover              — {parentPath, depth?, maxDepth?}
+            //   POST   /api/repos                       — {path, installHook?, force?}
+            //   POST   /api/repos/batch                 — {paths[], installHook?}
+            //   GET    /api/repos/:name/freshness       — ?staleAfterHours=N
+            //   DELETE /api/repos/:name                 — drop from registry + clear symbols
+            //
+            // Long-running ops (add, batch) respond synchronously today;
+            // SSE progress channel deferred to a follow-up slice.
+            if (pathname === '/api/repos' && req.method === 'GET') {
+                try {
+                    const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                    const devApi = devPlugin?.api as {
+                        listGitNexusRepos: () => Array<{ name: string; path: string; indexedAt: string; lastCommit?: string; stats?: Record<string, number> }>;
+                        getRepoFreshness: (name: string, h?: number) => unknown;
+                        getRepoTags: (name: string) => string[];
+                    } | undefined;
+                    if (!devApi) {
+                        res.writeHead(503, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'developer plug-in not active' }));
+                        return;
+                    }
+                    const repos = devApi.listGitNexusRepos();
+                    const enriched = repos.map((r) => ({
+                        ...r,
+                        freshness: devApi.getRepoFreshness(r.name, 24),
+                        tags: devApi.getRepoTags(r.name),
+                    }));
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ count: enriched.length, repos: enriched }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // GET /api/repos/tags  →  list of all tags + their repos
+            if (pathname === '/api/repos/tags' && req.method === 'GET') {
+                try {
+                    const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                    const devApi = devPlugin?.api as { listAllRepoTags: () => Array<{ tag: string; repos: string[] }> } | undefined;
+                    if (!devApi) {
+                        res.writeHead(503, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: 'developer plug-in not active' }));
+                        return;
+                    }
+                    const tags = devApi.listAllRepoTags();
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ count: tags.length, tags }));
+                } catch (err) {
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ error: (err as Error).message }));
+                }
+                return;
+            }
+
+            // PATCH /api/repos/:name/tags  body: { tags: string[] }
+            if (url.startsWith('/api/repos/') && url.endsWith('/tags') && req.method === 'PATCH') {
+                const tail = url.slice('/api/repos/'.length);
+                const name = decodeURIComponent(tail.slice(0, -('/tags'.length)));
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', () => {
+                    try {
+                        const { tags } = JSON.parse(body || '{}') as { tags?: string[] };
+                        if (!Array.isArray(tags)) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'tags array required' }));
+                            return;
+                        }
+                        const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                        const devApi = devPlugin?.api as { setRepoTags: (n: string, t: string[]) => string[] } | undefined;
+                        if (!devApi) {
+                            res.writeHead(503, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'developer plug-in not active' }));
+                            return;
+                        }
+                        const normalized = devApi.setRepoTags(name, tags);
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ name, tags: normalized }));
+                    } catch (err) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            if (pathname === '/api/repos/discover' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', () => {
+                    try {
+                        const { parentPath, depth, maxDepth } = JSON.parse(body || '{}') as { parentPath?: string; depth?: 'shallow' | 'deep'; maxDepth?: number };
+                        if (!parentPath) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'parentPath required' }));
+                            return;
+                        }
+                        const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                        const devApi = devPlugin?.api as { discoverRepos: (p: string, o?: { depth?: 'shallow' | 'deep'; maxDepth?: number }) => unknown[] } | undefined;
+                        if (!devApi) {
+                            res.writeHead(503, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'developer plug-in not active' }));
+                            return;
+                        }
+                        const found = devApi.discoverRepos(parentPath, { depth, maxDepth });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ count: found.length, found }));
+                    } catch (err) {
+                        res.writeHead(400, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            if (pathname === '/api/repos' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const { path: repoPath, installHook, force } = JSON.parse(body || '{}') as { path?: string; installHook?: boolean; force?: boolean };
+                        if (!repoPath) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'path required' }));
+                            return;
+                        }
+                        const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                        const devApi = devPlugin?.api as { addRepo: (p: string, o?: { installHook?: boolean; force?: boolean }) => Promise<unknown> } | undefined;
+                        if (!devApi) {
+                            res.writeHead(503, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'developer plug-in not active' }));
+                            return;
+                        }
+                        const result = await devApi.addRepo(repoPath, { installHook, force });
+                        res.writeHead(201, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(result));
+                    } catch (err) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            if (pathname === '/api/repos/batch' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const { paths, installHook } = JSON.parse(body || '{}') as { paths?: string[]; installHook?: boolean };
+                        if (!Array.isArray(paths) || paths.length === 0) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'paths[] required (non-empty)' }));
+                            return;
+                        }
+                        const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                        const devApi = devPlugin?.api as { addRepo: (p: string, o?: { installHook?: boolean }) => Promise<{ name: string; symbolCount?: number; hookInstalled?: boolean }> } | undefined;
+                        if (!devApi) {
+                            res.writeHead(503, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'developer plug-in not active' }));
+                            return;
+                        }
+                        const results: Array<{ path: string; ok: boolean; result?: unknown; error?: string }> = [];
+                        for (const p of paths) {
+                            try {
+                                const result = await devApi.addRepo(p, { installHook });
+                                results.push({ path: p, ok: true, result });
+                            } catch (e) {
+                                results.push({ path: p, ok: false, error: (e as Error).message });
+                            }
+                        }
+                        const okCount = results.filter((r) => r.ok).length;
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ total: results.length, ok: okCount, failed: results.length - okCount, results }));
+                    } catch (err) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
+            // /api/repos/:name/freshness  AND  DELETE /api/repos/:name
+            if (url.startsWith('/api/repos/') && (req.method === 'GET' || req.method === 'DELETE')) {
+                const tail = url.slice('/api/repos/'.length);
+                const [rawName, queryStr] = tail.split('?');
+                const name = decodeURIComponent(rawName.split('/')[0]);
+                const subpath = rawName.includes('/') ? rawName.slice(name.length + 1) : '';
+
+                if (req.method === 'GET' && subpath === 'freshness') {
+                    try {
+                        const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                        const devApi = devPlugin?.api as { getRepoFreshness: (n: string, h?: number) => unknown } | undefined;
+                        if (!devApi) {
+                            res.writeHead(503, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'developer plug-in not active' }));
+                            return;
+                        }
+                        const params = new URLSearchParams(queryStr ?? '');
+                        const staleAfterHours = Number(params.get('staleAfterHours') ?? 24);
+                        const fresh = devApi.getRepoFreshness(name, staleAfterHours);
+                        if (!fresh) {
+                            res.writeHead(404, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: `repo not found: ${name}` }));
+                            return;
+                        }
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(fresh));
+                    } catch (err) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                    return;
+                }
+
+                if (req.method === 'DELETE' && !subpath) {
+                    try {
+                        const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                        const devApi = devPlugin?.api as { removeRepo: (n: string) => Promise<unknown> } | undefined;
+                        if (!devApi) {
+                            res.writeHead(503, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'developer plug-in not active' }));
+                            return;
+                        }
+                        const result = await devApi.removeRepo(name);
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify(result));
+                    } catch (err) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                    return;
+                }
+                // Otherwise fall through.
+            }
+
+            /* ─── /api/code-similar — Phase 2 Pre-write check ─────── */
+            // Wraps the developer plug-in's evaluatePreWrite (same engine
+            // as the `code_similar` MCP tool). Hook adapters (Claude
+            // Code PreToolUse, Cursor preToolUse) POST here to get a
+            // structured decision before the agent's Write/Edit lands.
+            //
+            //   POST /api/code-similar
+            //   body: { content, language?, repo?, k?, warn_threshold? }
+            //   200: { decision: 'allow'|'warn', recommendation, top_match, matches[], strong_match }
+            if (pathname === '/api/code-similar' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const { content, language, repo, k, warn_threshold } = JSON.parse(body || '{}') as {
+                            content?: string; language?: string; repo?: string; k?: number; warn_threshold?: number;
+                        };
+                        if (!content || typeof content !== 'string') {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'content (string) required' }));
+                            return;
+                        }
+                        const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                        const devApi = devPlugin?.api as {
+                            evaluatePreWrite: (c: string, o?: { language?: string; repo?: string; k?: number; warnThreshold?: number }) => Promise<{
+                                decision: 'allow' | 'warn';
+                                recommendation: string;
+                                topMatch: unknown;
+                                matches: Array<{ name: string; kind: string; filePath: string; startLine?: number; repo: string; score: number; loreNodeId: string }>;
+                                strongMatch: boolean;
+                            }>;
+                        } | undefined;
+                        if (!devApi) {
+                            res.writeHead(503, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'developer plug-in not active' }));
+                            return;
+                        }
+                        const decision = await devApi.evaluatePreWrite(content, {
+                            language,
+                            repo,
+                            k: k ?? 5,
+                            warnThreshold: warn_threshold,
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            decision: decision.decision,
+                            recommendation: decision.recommendation,
+                            strong_match: decision.strongMatch,
+                            top_match: decision.topMatch,
+                            matches: decision.matches.map((m) => ({
+                                name: m.name,
+                                kind: m.kind,
+                                file: `${m.filePath}${m.startLine ? ':' + m.startLine : ''}`,
+                                repo: m.repo,
+                                similarity: Number(m.score.toFixed(3)),
+                                lore_node_id: m.loreNodeId,
+                            })),
+                        }));
+                    } catch (err) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
                 return;
             }
 
@@ -3895,7 +5536,7 @@ async function main(): Promise<void> {
             // panel can show usage + budget state without a second hop.
             if (pathname === '/api/storage' && req.method === 'GET') {
                 try {
-                    const dataHome = path.join(os.homedir(), '.groundfloor');
+                    const dataHome = loreHome();
                     const workspaces = inspectAllWorkspaces(dataHome);
                     const home = inspectDataHome(dataHome);
                     res.writeHead(200, { 'Content-Type': 'application/json' });

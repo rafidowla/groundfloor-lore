@@ -1,0 +1,4 @@
+id,name,message,tag_list
+g001,Hello Sarah,"Hi Sarah, welcome aboard.","onboarding,welcome"
+g002,Hello Tom,"Hey Tom — happy Monday.","casual,monday"
+g003,Standup reminder,"Daily standup at 9am.","reminder,team"

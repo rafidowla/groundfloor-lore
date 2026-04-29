@@ -30,6 +30,17 @@ interface NodeDetail {
     }>;
 }
 
+interface LineageEntry {
+    id: string;
+    label: string;
+    type: string;
+    project?: string;
+    supersededBy: string | null;
+    supersededAt: string | null;
+    supersededReason: string | null;
+    createdAt?: string;
+}
+
 interface NodeDetailDrawerProps {
     apiBase: string;
     selectedNodeId: string | null;
@@ -58,6 +69,7 @@ export default function NodeDetailDrawer({
     const [detail, setDetail] = useState<NodeDetail | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState<boolean>(() => isCore);
+    const [lineage, setLineage] = useState<LineageEntry[]>([]);
 
     useEffect(() => {
         if (!selectedNodeId || !isCore) return;
@@ -70,6 +82,21 @@ export default function NodeDetailDrawer({
             .then((d) => { if (!cancelled) setDetail(d); })
             .catch((e: Error) => { if (!cancelled) setError(e.message); })
             .finally(() => { if (!cancelled) setLoading(false); });
+        return () => { cancelled = true; };
+    }, [apiBase, selectedNodeId, isCore]);
+
+    // Fetch supersession lineage in parallel with the detail fetch.
+    // Empty chain or one-element chain → no Lineage section rendered.
+    useEffect(() => {
+        if (!selectedNodeId || !isCore) return;
+        let cancelled = false;
+        void authFetch(`${apiBase}/api/node/lineage?id=${encodeURIComponent(selectedNodeId)}`)
+            .then(async (r) => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json() as Promise<{ chain: LineageEntry[] }>;
+            })
+            .then((d) => { if (!cancelled) setLineage(d.chain ?? []); })
+            .catch(() => { if (!cancelled) setLineage([]); });
         return () => { cancelled = true; };
     }, [apiBase, selectedNodeId, isCore]);
 
@@ -148,6 +175,63 @@ export default function NodeDetailDrawer({
                         <section>
                             <h4>Content</h4>
                             <p className="node-drawer-content">{displayDetail.node.content}</p>
+                        </section>
+                    ) : null}
+
+                    {/* Soft-supersession lineage — hidden when the node
+                        is the only entry in its chain (i.e. not part of
+                        any supersession). When present, oldest version
+                        sits at top, current at bottom; the entry that
+                        matches displayDetail.node.id is highlighted. */}
+                    {lineage.length > 1 ? (
+                        <section>
+                            <h4>Lineage ({lineage.length} versions)</h4>
+                            <ol style={{
+                                listStyle: 'none',
+                                padding: 0,
+                                margin: '0.5rem 0 0',
+                                display: 'flex',
+                                flexDirection: 'column',
+                                gap: '6px',
+                            }}>
+                                {lineage.map((entry, i) => {
+                                    const isCurrent = entry.id === displayDetail.node.id;
+                                    const isTombstoned = !!entry.supersededAt;
+                                    return (
+                                        <li
+                                            key={entry.id}
+                                            style={{
+                                                padding: '8px 10px',
+                                                borderRadius: 6,
+                                                border: isCurrent
+                                                    ? '2px solid var(--color-accent, #14B8A6)'
+                                                    : '1px solid var(--color-border)',
+                                                background: isCurrent ? 'var(--color-accent-bg, rgba(20,184,166,0.08))' : 'transparent',
+                                                opacity: isTombstoned && !isCurrent ? 0.65 : 1,
+                                            }}
+                                        >
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.78rem' }}>
+                                                <span style={{ color: 'var(--color-text-muted)' }}>v{i + 1}</span>
+                                                <span className={`node-type-badge type-${entry.type}`}>{entry.type}</span>
+                                                <strong style={{ flex: 1 }}>{entry.label}</strong>
+                                                {isCurrent ? (
+                                                    <span style={{ fontSize: '0.65rem', color: 'var(--color-accent, #14B8A6)', fontWeight: 600 }}>YOU ARE HERE</span>
+                                                ) : null}
+                                            </div>
+                                            <div style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '2px' }}>
+                                                <code style={{ fontSize: '0.7rem' }}>{entry.id}</code>
+                                                {entry.createdAt ? <span style={{ marginLeft: '0.5rem' }}>created {new Date(entry.createdAt).toLocaleDateString()}</span> : null}
+                                            </div>
+                                            {isTombstoned ? (
+                                                <div style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', marginTop: '2px', fontStyle: 'italic' }}>
+                                                    superseded {new Date(entry.supersededAt!).toLocaleDateString()}
+                                                    {entry.supersededReason ? ` — ${entry.supersededReason}` : ''}
+                                                </div>
+                                            ) : null}
+                                        </li>
+                                    );
+                                })}
+                            </ol>
                         </section>
                     ) : null}
 

@@ -147,7 +147,9 @@ export async function reconnectGraph(
                 continue;
             }
         }
-        try { await verbatim.delete(prefixedId); } catch { /* ignore */ }
+        // Verbatim is append-only: store() auto-snapshots the previous
+        // canonical row as <id>#rev<ts> before overwriting. No delete
+        // needed; the prior content stays recoverable via getHistory().
         await verbatim.store({
             id: prefixedId,
             text,
@@ -188,7 +190,7 @@ export async function reconnectGraph(
                 continue;
             }
         }
-        try { await verbatim.delete(ebn.id); } catch { /* ignore */ }
+        // Append-only: store() handles snapshot-then-overwrite.
         await verbatim.store({
             id: ebn.id,
             text: ebn.text,
@@ -351,7 +353,7 @@ export async function reconnectOneNode(
     if (!text.trim()) return { added: 0, confidences: [] };
 
     const prefixedId = PREFIX_LORE + node.id;
-    try { await verbatim.delete(prefixedId); } catch { /* ignore */ }
+    // Append-only: store() auto-snapshots the previous revision.
     await verbatim.store({
         id: prefixedId,
         text,

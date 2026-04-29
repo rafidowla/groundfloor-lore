@@ -1,0 +1,5 @@
+id,name,description,department,seniority
+r001,Leasing Analyst,Analyses lease pipeline; needs deal-flow + CRM access.,Brokerage,junior
+r002,Senior Broker,Closes deals; full pipeline + finance read access.,Brokerage,senior
+r003,Operations Manager,Manages day-to-day operations across portfolios.,Operations,senior
+r004,Financial Analyst,Builds financial models; needs Argus + QuickBooks.,Finance,junior

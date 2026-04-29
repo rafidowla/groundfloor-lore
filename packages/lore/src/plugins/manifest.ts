@@ -75,12 +75,30 @@ export interface LoreContribution {
      * export is an `ILorePlugin` instance. The Lore daemon dynamically
      * imports this when the plugin is activated.
      *
+     * Optional as of Task-2 (Tier 1 plugins): a manifest may omit
+     * `module` and declare a `schema` block instead, in which case the
+     * daemon synthesises a no-code `ILorePlugin` from the manifest.
+     * Existing TypeScript plugins still set `module` and ignore
+     * `schema`. A manifest must declare at least one of `module` or
+     * `schema`.
+     *
      * All existing `ILorePlugin` hooks (registerTools, registerSchema,
-     * contributeReconnectNodes, etc.) work unchanged. Existing plugins
-     * become valid Phase-1 manifests by adding `plugin.json` referencing
-     * their current `dist/index.js` here — no code changes needed.
+     * contributeReconnectNodes, etc.) work unchanged for plugins that
+     * use the `module` path.
      */
-    module: string;
+    module?: string;
+
+    /**
+     * Declarative schema contribution — Tier 1 plugins (no TypeScript)
+     * declare node types and edge relations here. The daemon merges
+     * these into core's `store_node` / `store_edge` enums via the
+     * existing `contributeNodeTypes` / `contributeEdgeRelations` hooks.
+     *
+     * Tier 1 scope: type *names + descriptions* only. Typed tables with
+     * field schemas are a Tier 2 extension that pairs with auto-generated
+     * MCP tools (planned).
+     */
+    schema?: LoreSchema;
 
     /**
      * Declarative inspector panels the shell renders as tabs under this
@@ -90,6 +108,267 @@ export interface LoreContribution {
 
     /** Host capabilities the Lore-side parts require. */
     permissions?: Permission[];
+
+    /**
+     * Tier 1 declarative ingestion. Each entry describes a tabular
+     * source file (CSV or JSON array) and how its rows map to nodes
+     * in core's `LoreNode` table via `store_node`. The daemon does NOT
+     * auto-run these on boot; a Tier 1 plugin's ingest is on-demand
+     * (via the `lore_plugin_ingest` MCP tool or future CLI).
+     *
+     * Multiple ingest entries are run in declaration order. Each entry
+     * is independent; failures in one don't block others.
+     */
+    ingest?: IngestSpec[];
+
+    /**
+     * Tier 1 named query templates. Each entry declares a parameterised
+     * Cypher query that the daemon registers as an MCP tool named
+     * `<plugin>_<queryId>` (plugin-prefixed because query ids don't
+     * have a global-uniqueness guarantee).
+     *
+     * Local-mode only today: queries hit Kùzu via the (deprecated)
+     * raw-Cypher path on PluginGraphContext. Cloud-mode AQL templates
+     * are a separate slice when the use case shows up.
+     */
+    queries?: QuerySpec[];
+
+    /**
+     * Tier 3 declarative settings — fields the plugin needs the user to
+     * configure (API endpoints, cron schedules, feature toggles). The
+     * shell auto-renders a settings panel from this declaration; values
+     * are persisted to `<LORE_HOME>/manifests/<plugin>/settings.json`.
+     *
+     * Plugins read their settings via the `/api/plugins/<name>/settings`
+     * endpoint (GET → current values, PUT → update). MCP tools running
+     * in the daemon can also read them via the same endpoint.
+     */
+    settings?: SettingsField[];
+}
+
+/**
+ * A single user-configurable setting. The shell renders an input
+ * appropriate to the type; the value gets persisted as JSON.
+ */
+export interface SettingsField {
+    /** Stable id within this plugin. Sent to the API as the property key. */
+    name: string;
+    /** Human-readable label shown in the settings panel. */
+    label: string;
+    /** Input type. */
+    type: 'string' | 'number' | 'boolean' | 'secret';
+    /** One-line description shown beneath the input. */
+    description: string;
+    /** Initial value when no override is present. */
+    default?: string | number | boolean;
+    /** When true, the field cannot be empty. */
+    required?: boolean;
+    /** When type='secret', the value is stored in the keychain (never in
+     *  settings.json) and the API only ever returns a "set" indicator. */
+}
+
+/**
+ * Tier 1 named-query spec.
+ *
+ * Two shapes accepted:
+ *
+ *   1. Raw cypher form: `{ id, description, cypher, parameters }` — plugin
+ *      author writes the Cypher body. Parameters bind via Kùzu's `$param`
+ *      parameterised query syntax — never string-interpolated.
+ *
+ *   2. Stock-pattern form: `{ id, description, pattern, bindNodeType, parameters }` —
+ *      plugin author references a named pattern from the stock catalog
+ *      (e.g. `find_by_field`). The daemon expands the pattern with the
+ *      plugin's node type at boot. Cypher is never written by the plugin.
+ *
+ * Both forms produce the same registered MCP tool: `<plugin>_<id>`.
+ *
+ * Discriminated by the presence/absence of `cypher` vs `pattern`:
+ *   - `cypher` set, no `pattern`     → raw form
+ *   - `pattern` + `bindNodeType` set → stock form
+ *   - both set or neither set        → invalid (validator rejects)
+ */
+export type QuerySpec = RawCypherQuerySpec | PatternQuerySpec;
+
+export interface RawCypherQuerySpec {
+    /** Stable id within this plugin. The MCP tool name is `<plugin>_<id>`. */
+    id: string;
+    /** One-line human description; surfaces in the MCP tool's help text. */
+    description: string;
+    /** Cypher query body. Reference parameters as `$name` (matching `parameters[].name`). */
+    cypher: string;
+    /** Declared parameters. The daemon validates the caller's args against this list. */
+    parameters?: QueryParameter[];
+}
+
+export interface PatternQuerySpec {
+    /** Stable id within this plugin. The MCP tool name is `<plugin>_<id>`. */
+    id: string;
+    /** One-line human description; surfaces in the MCP tool's help text. */
+    description: string;
+    /** Stock-pattern name from the catalog (find_by_field, count_by_field, …). */
+    pattern: string;
+    /** The plugin's node type to bind to the pattern. Must match a declared
+     *  `lore.schema.nodeTypes[*].name`. */
+    bindNodeType: string;
+    /** Declared parameters. Must satisfy the pattern's required parameter shape. */
+    parameters?: QueryParameter[];
+}
+
+export interface QueryParameter {
+    /** Parameter name. Matches `$name` in the cypher body. */
+    name: string;
+    /** Scalar type the daemon coerces the caller's arg to. */
+    type: 'string' | 'number' | 'boolean';
+    /** One-line description shown in MCP tool help. */
+    description: string;
+    /** When true, MCP rejects calls that omit this arg. Defaults to true. */
+    required?: boolean;
+}
+
+/**
+ * Tier 1/2 ingest spec.
+ *
+ * Tier 1 (file source): `source: 'csv' | 'json'` + `file:` reads a local
+ * tabular file relative to the manifest bundle.
+ *
+ * Tier 2 (HTTP source): `source: 'http'` + `url:` + optional `auth:` /
+ * `pagination:` / `responsePath:` declaratively fetches from any REST
+ * API and treats the response as rows. No code required.
+ *
+ * Both forms produce the same `store_node` calls via the same runner.
+ */
+export interface IngestSpec {
+    /** Stable id within this plugin (used by the trigger tool to address one
+     *  spec when a plugin declares many). Defaults to the index when omitted. */
+    id?: string;
+    /** Source type. csv/json read a file; http calls a REST API. */
+    source: 'csv' | 'json' | 'http';
+
+    /** File-source only: path to the source file. Relative paths resolve
+     *  against the manifest's bundle dir; absolute paths used as-is. */
+    file?: string;
+
+    /** HTTP-source only: URL template. `{{var}}` placeholders interpolate
+     *  from the caller's `vars` arg at call time (e.g. `{{since}}` for a
+     *  cursor). Any `{{var}}` not referenced in the manifest's `vars[]`
+     *  declarations fails validation. */
+    url?: string;
+    /** HTTP-source only: declared variables the caller may pass to fill
+     *  URL placeholders. Same shape as query parameters. */
+    vars?: QueryParameter[];
+    /** HTTP-source only: HTTP method. Defaults to GET. */
+    method?: 'GET' | 'POST';
+    /** HTTP-source only: declarative auth shape. Stored credential is
+     *  resolved from the daemon's keychain by key name. */
+    auth?: IngestAuth;
+    /** HTTP-source only: extra HTTP request headers. */
+    headers?: Record<string, string>;
+    /** HTTP-source only: dot-path into the JSON response that holds the
+     *  row array. Defaults to the response root if it's already an array.
+     *  Examples: `data`, `result.items`, `data.users`. */
+    responsePath?: string;
+    /** HTTP-source only: pagination strategy. */
+    pagination?: IngestPagination;
+
+    /** Which node-type each row becomes. MUST be one of the node types
+     *  declared in this plugin's `lore.schema.nodeTypes`. */
+    mapTo: string;
+    /** How to derive the node id from each row (drives idempotency on re-run). */
+    idStrategy: IngestIdStrategy;
+    /** CSV column / JSON key / response-row key → LoreNode field mapping.
+     *  Source column names are the values; LoreNode field names are the keys. */
+    fields: IngestFieldMap;
+    /** CSV-only: delimiter character. Defaults to ",". */
+    delimiter?: string;
+    /** CSV-only: when a tags column maps to LoreNode.tags, split on this. Defaults to ",". */
+    tagDelimiter?: string;
+}
+
+/**
+ * Declarative auth for an HTTP ingest source. The daemon resolves the
+ * key from its keychain (the same store the LLM provider's API key
+ * lives in). Supported shapes:
+ *
+ *   - `{ kind: 'bearer', credentialKey: '<key>' }` → `Authorization: Bearer <secret>`
+ *   - `{ kind: 'header', headerName: 'X-API-Key', credentialKey: '<key>' }` → custom header
+ *   - `{ kind: 'basic', credentialKey: '<key>' }` → secret stored as `<user>:<pass>`, sent base64
+ *   - `{ kind: 'none' }` → no auth header
+ */
+export type IngestAuth =
+    | { kind: 'none' }
+    | { kind: 'bearer'; credentialKey: string }
+    | { kind: 'header'; headerName: string; credentialKey: string }
+    | { kind: 'basic'; credentialKey: string };
+
+/**
+ * Pagination strategy for HTTP ingest. Three patterns cover most APIs:
+ *
+ *   - `{ kind: 'none' }` → single request only.
+ *   - `{ kind: 'page', pageParam: 'page', sizeParam?: 'per_page', pageSize?: 100, maxPages?: 10 }`
+ *     → numeric page increment until empty response or maxPages.
+ *   - `{ kind: 'cursor', cursorPathInResponse: 'meta.next_cursor', cursorParam: 'cursor', maxRequests?: 10 }`
+ *     → follow opaque cursor token from the response.
+ */
+export type IngestPagination =
+    | { kind: 'none' }
+    | { kind: 'page'; pageParam: string; sizeParam?: string; pageSize?: number; maxPages?: number }
+    | { kind: 'cursor'; cursorPathInResponse: string; cursorParam: string; maxRequests?: number };
+
+export type IngestIdStrategy =
+    | { kind: 'column'; column: string }                // use a single source column
+    | { kind: 'hash'; columns: string[]; algo?: 'sha1' };// hash 1+ columns for a stable id
+
+/**
+ * Source-key → LoreNode-field map. The keys are LoreNode field names;
+ * the values are source column names (CSV header / JSON object key).
+ *
+ * Recognised LoreNode fields:
+ *   - label, content, project, ecosystem, language : string
+ *   - tags                                        : string[] (CSV: split by tagDelimiter; JSON: array or string)
+ *
+ * Any field not listed here is ignored — the manifest doesn't capture
+ * full LoreNode shape, just the human-relevant subset.
+ */
+export interface IngestFieldMap {
+    label?: string;
+    content?: string;
+    project?: string;
+    ecosystem?: string;
+    language?: string;
+    tags?: string;
+}
+
+/**
+ * Tier 1 schema declaration — pure-data, no TypeScript needed.
+ *
+ * Names and descriptions become entries in core's `store_node` /
+ * `store_edge` enums when the plugin is active. The daemon synthesises
+ * a minimal `ILorePlugin` with `contributeNodeTypes()` and
+ * `contributeEdgeRelations()` returning these arrays.
+ *
+ * Names must be globally unique across active plugins (collision throws
+ * at boot — same rule as TypeScript plugin contributions).
+ */
+export interface LoreSchema {
+    /** Domain-specific node types this plugin introduces. */
+    nodeTypes?: SchemaNodeType[];
+    /** Domain-specific edge relations this plugin introduces. */
+    edgeRelations?: SchemaEdgeRelation[];
+}
+
+export interface SchemaNodeType {
+    /** kebab_or_snake_case identifier; merged into store_node's type enum. */
+    name: string;
+    /** One-line human description shown in tool help and discovery. */
+    description: string;
+}
+
+export interface SchemaEdgeRelation {
+    /** kebab_or_snake_case identifier; merged into store_edge's relation enum. */
+    name: string;
+    /** One-line human description. */
+    description: string;
 }
 
 // ────────────────────────────────────────────────────────────────────────

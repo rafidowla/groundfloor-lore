@@ -1,0 +1,69 @@
+# hello-plugin — the smallest possible Tier 1 plugin.
+#
+# Pure declarative. No TypeScript module. The manifest below is the
+# entire plugin: it contributes one node type and one edge relation
+# that core's `store_node` and `store_edge` tools accept once the
+# plugin is active in a workspace.
+#
+# This is the worked example for the "first Tier 1 plugin with zero
+# code" milestone. If you can clone this manifest, change the names,
+# and have it work — the platform is doing its job.
+
+manifestVersion: 1
+name: hello
+version: 0.1.0
+description: A minimal Tier 1 example — declares a Greeting node type, no code.
+author: Groundfloor
+license: MIT
+
+lore:
+  schema:
+    nodeTypes:
+      - name: greeting
+        description: A friendly hello message captured by the hello plugin.
+    edgeRelations:
+      - name: greets
+        description: Connects a greeting to whoever it was directed at.
+  ingest:
+    - id: sample
+      source: csv
+      file: data/greetings.csv
+      mapTo: greeting
+      idStrategy: { kind: column, column: id }
+      fields:
+        label: name
+        content: message
+        tags: tag_list
+  queries:
+    - id: find_with_tag
+      description: Find greetings whose tags contain a substring (case-insensitive).
+      cypher: |
+        MATCH (n:LoreNode)
+        WHERE n.type = 'greeting' AND lower(n.tags) CONTAINS lower($tag)
+        RETURN n.id AS id, n.label AS label, n.tags AS tags
+        ORDER BY n.updatedAt DESC
+        LIMIT 50
+      parameters:
+        - { name: tag, type: string, required: true, description: Substring to match in tags. }
+    - id: count_by_tag_substring
+      description: Count greetings whose tags contain the given substring.
+      cypher: |
+        MATCH (n:LoreNode)
+        WHERE n.type = 'greeting' AND lower(n.tags) CONTAINS lower($tag)
+        RETURN count(n) AS hits
+      parameters:
+        - { name: tag, type: string, required: true, description: Substring to count. }
+    # Stock-pattern form — no Cypher written by the plugin author.
+    - id: find_by_field
+      description: Find greetings by exact match on a field.
+      pattern: find_by_field
+      bindNodeType: greeting
+      parameters:
+        - { name: field, type: string, required: true, description: 'Which field (label, content, project, ecosystem, language, id).' }
+        - { name: value, type: string, required: true, description: Exact value to match. }
+    - id: list_recent
+      description: Most-recently-updated greetings.
+      pattern: list_recent
+      bindNodeType: greeting
+      parameters:
+        - { name: limit, type: number, required: true, description: Max rows to return (1-1000). }

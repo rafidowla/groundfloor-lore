@@ -47,6 +47,7 @@ import * as path from 'path';
 import * as os from 'os';
 import type { LoreUser } from './identity.js';
 import { currentUser } from './identity.js';
+import { loreHome, loreHomePath } from '../config/loreHome.js';
 
 export type AuditResult = 'success' | 'denied-by-policy' | 'denied-by-user' | 'error';
 
@@ -88,7 +89,7 @@ export class AuditLog {
     private readonly includePrefixes: string[];
 
     constructor(options: AuditLogOptions = {}) {
-        this.filePath = options.path ?? path.join(os.homedir(), '.groundfloor', 'audit.jsonl');
+        this.filePath = options.path ?? loreHomePath('audit.jsonl');
         this.includePrefixes = options.includePrefixes ?? [];
 
         // Ensure the file exists with 0600 perms so tools relying on

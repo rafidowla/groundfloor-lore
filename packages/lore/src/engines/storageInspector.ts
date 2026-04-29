@@ -22,6 +22,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { loreHome, loreHomePath } from '../config/loreHome.js';
 
 export interface StorageBreakdown {
     /** Absolute bytes used by the Kùzu graph file(s). */
@@ -157,7 +158,7 @@ function walk(root: string, visit: (file: string, size: number) => void): void {
  * array if the registry doesn't exist (first-run).
  */
 export function inspectAllWorkspaces(dataHome?: string): WorkspaceStorageReport[] {
-    const home = dataHome ?? path.join(os.homedir(), '.groundfloor');
+    const home = dataHome ?? loreHome();
     const registryPath = path.join(home, 'workspaces.json');
     if (!fs.existsSync(registryPath)) return [];
 

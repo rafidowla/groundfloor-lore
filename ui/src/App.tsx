@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react';
-import { Settings, MessageSquare, Moon, Sun, PanelLeft, PanelRight } from 'lucide-react';
+import { Settings, MessageSquare, Moon, Sun, PanelLeft, PanelRight, FolderGit2, GitBranchPlus, Boxes, Table, SlidersHorizontal } from 'lucide-react';
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import WorkspacePicker from './components/WorkspacePicker';
 import NodeDetailDrawer from './components/NodeDetailDrawer';
+import ProjectsPanel from './components/ProjectsPanel';
+import ChordDiagram from './components/ChordDiagram';
+import SunburstDiagram from './components/SunburstDiagram';
+import SupersessionCandidatesModal from './components/SupersessionCandidatesModal';
 import { ChatMarkdown } from './components/ChatMarkdown';
 import { A2uiRenderer } from './components/A2uiRenderer';
 import { authFetch } from './lib/authFetch';
@@ -13,6 +17,9 @@ import './App.css';
 // gzipped; lazy-loading keeps the initial app bundle small. The Suspense
 // fallback shows a brief "Loading canvas…" while the chunk arrives.
 const SigmaCanvas = lazy(() => import('./components/SigmaCanvas'));
+const PluginWizard = lazy(() => import('./components/PluginWizard'));
+const PluginInspectors = lazy(() => import('./components/PluginInspectors'));
+const PluginSettingsPanel = lazy(() => import('./components/PluginSettingsPanel'));
 
 function CanvasLoadingFallback() {
   return (
@@ -48,20 +55,19 @@ const API_BASE = (import.meta as unknown as { env?: { VITE_LORE_API?: string } }
 // and navigator.deviceMemory is Chrome/Edge only. The goal is a sane
 // first-paint default, not a perfect benchmark; users can move the
 // slider if the default is wrong for their machine.
-const GRAPH_SIZE_OPTIONS = [5000, 10000, 20000] as const;
+// 2026-04-27: added 2000 + 3000 as smaller options after observing
+// /api/topology takes 28s for 15k+ node payloads (server-side N+1 in
+// contributeDeveloperTopology). Until that's fixed, smaller defaults
+// keep the app feeling responsive.
+const GRAPH_SIZE_OPTIONS = [2000, 3000, 5000, 10000, 20000] as const;
 type GraphSize = typeof GRAPH_SIZE_OPTIONS[number];
 const GRAPH_SIZE_STORAGE_KEY = 'lore.graphSizeLimit';
 
 function detectDefaultGraphSize(): GraphSize {
-  const cores = typeof navigator !== 'undefined' ? (navigator.hardwareConcurrency ?? 4) : 4;
-  // Apple Silicon reports as arm64 in UA platform hint; treat as the
-  // upper tier since even M1 handles 20k comfortably.
-  const ua = typeof navigator !== 'undefined' ? navigator.userAgent : '';
-  const isAppleSilicon = /Mac/i.test(ua) && /arm|Apple/i.test(ua);
-  if (isAppleSilicon) return 20000;
-  if (cores >= 8) return 20000;
-  if (cores >= 4) return 10000;
-  return 5000;
+  // Lowered defaults 2026-04-27. Pre-fix, even Apple Silicon defaulted to
+  // 20k → 28s topology fetches. 3k loads in ~6s and is enough for the
+  // overview + drill-in flow. Users can opt up via Settings.
+  return 3000;
 }
 
 function loadGraphSizeLimit(): GraphSize {
@@ -82,6 +88,12 @@ interface HealthResponse {
   workspace: string;
   dataplane: 'bound' | 'offline';
   orphans?: string[];
+  manifestHotReload?: {
+    addedSinceBoot: number;
+    reloadedSinceBoot: number;
+    needsRestartForCoreEnums: boolean;
+    namesHotLoaded: string[];
+  };
 }
 
 type OrphanDecision = 'keep' | 'drop' | 'reenable';
@@ -176,6 +188,79 @@ function readFileAsBase64(file: File): Promise<string> {
 function App() {
   const [theme, setTheme] = useState<'corporate' | 'midnight'>('corporate');
   const [showSettings, setShowSettings] = useState(false);
+  const [showPluginWizard, setShowPluginWizard] = useState(false);
+  const [showPluginInspectors, setShowPluginInspectors] = useState(false);
+  const [showPluginSettings, setShowPluginSettings] = useState(false);
+  const [showProjects, setShowProjects] = useState(false);
+  const [showSupersedeCandidates, setShowSupersedeCandidates] = useState(false);
+  // 2026-04-27 v2: chord = overview (default landing); network = drill-in.
+  // Click an arc in chord → switches to network filtered to that project.
+  // Network "back" → returns to chord. (User feedback: "is that better UX?
+  // Yes.")
+  type GraphViz = 'network' | 'chord' | 'sunburst';
+  type OverviewViz = 'chord' | 'sunburst';
+  const [graphViz, setGraphViz] = useState<GraphViz>(() => {
+    try { return (localStorage.getItem('lore.graphViz') as GraphViz) ?? 'chord'; } catch { return 'chord'; }
+  });
+  // When set, network view is forced into project mode for this repo.
+  // null means user is in either chord (overview) or network's own
+  // top-level (full / Sigma's overview).
+  const [drilledProject, setDrilledProject] = useState<string | null>(null);
+  useEffect(() => {
+    try { localStorage.setItem('lore.graphViz', graphViz); } catch { /* ignore */ }
+  }, [graphViz]);
+  // 2026-04-27 regression auto-recover: if user has stale graphViz='network'
+  // in localStorage but isn't drilled into a project, the network top-level
+  // view is no longer reachable in the new UX (chord = overview). Force
+  // back to chord so they don't get stuck.
+  useEffect(() => {
+    if (graphViz === 'network' && !drilledProject) {
+      // No drilled project but network mode → fall back to last overview
+      // viz (chord by default).
+      let last: OverviewViz = 'chord';
+      try {
+        const saved = localStorage.getItem('lore.overviewViz') as OverviewViz | null;
+        if (saved && ['chord', 'sunburst'].includes(saved)) last = saved;
+      } catch { /* ignore */ }
+      setGraphViz(last);
+    }
+    // Only run on mount + when drilledProject changes; avoid infinite loop
+    // by not depending on graphViz here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drilledProject]);
+  const handleChordProjectClick = useCallback((project: string, type?: string) => {
+    setDrilledProject(project);
+    setGraphViz('network');
+    // Optional type narrowing: when the user clicks an outer (type)
+    // slice in the sunburst, set activeTypes to just that one. Other
+    // type checkboxes appear unchecked but can be re-enabled in the
+    // right panel. When type is omitted (chord arc, inner sunburst
+    // ring), clear activeTypes so all types render.
+    if (type) {
+      setActiveTypes(new Set([type]));
+    } else {
+      setActiveTypes(null);
+    }
+    // 2026-04-27 multi-project drill: check ONLY the drilled project
+    // initially. The right panel still lists every project (its source
+    // is `topology`, not `activeProjects`), so the user can toggle
+    // others on to expand the network into a multi-project view. The
+    // server-side ?projects=a,b,c flow then fetches the union.
+    setActiveProjects(new Set([project]));
+  }, []);
+  const handleExitProjectMode = useCallback(() => {
+    setDrilledProject(null);
+    // Restore the user's last overview viz (chord / sunburst / pack / tree).
+    let last: OverviewViz = 'chord';
+    try {
+      const saved = localStorage.getItem('lore.overviewViz') as OverviewViz | null;
+      if (saved && ['chord', 'sunburst'].includes(saved)) last = saved;
+    } catch { /* ignore */ }
+    setGraphViz(last);
+    // Reset the panel selection to "all projects" so the next drill-in
+    // starts from a clean slate.
+    setActiveProjects(null);
+  }, []);
 
   // Config state (Phase 0 wiring)
   const [llmProvider, setLlmProvider] = useState<LlmProvider>('embedded');
@@ -261,6 +346,10 @@ function App() {
   // reconnect-heavy workspace; toggle them off for a "known facts only"
   // view. Default on so first paint matches what the user had before.
   const [showInferred, setShowInferred] = useState<boolean>(true);
+  // Soft-supersession: hide superseded nodes from the network view by
+  // default. Toggle in the right panel surfaces them faded with a
+  // virtual arrow to their replacement.
+  const [showSuperseded, setShowSuperseded] = useState<boolean>(false);
   const [activeProjects, setActiveProjects] = useState<Set<string> | null>(null);
   const [focusNodeId, setFocusNodeId] = useState<string | null>(null);
   const focusCoalesceRef = useRef<number | null>(null);
@@ -271,6 +360,86 @@ function App() {
   // useEffect dep array watches graphSizeLimit, so changes refetch
   // automatically — no imperative reload needed.
   const [graphSizeLimit, setGraphSizeLimit] = useState<GraphSize>(() => loadGraphSizeLimit());
+
+  // Retention policy state. Lazy-loaded when settings open.
+  type RetentionPolicy = {
+    hideSupersededInRecall: boolean;
+    hideSupersededInGraph: boolean;
+    autoArchiveSupersededAfterDays: number | null;
+  };
+  const [retentionPolicy, setRetentionPolicy] = useState<RetentionPolicy | null>(null);
+  const [retentionSaving, setRetentionSaving] = useState(false);
+  const [retentionSweepResult, setRetentionSweepResult] = useState<{ eligible: number; archived: number } | null>(null);
+  const fetchRetention = useCallback(async () => {
+    try {
+      const r = await authFetch(`${API_BASE}/api/workspace/retention`);
+      if (!r.ok) return;
+      const d = await r.json() as RetentionPolicy;
+      setRetentionPolicy(d);
+    } catch { /* ignore */ }
+  }, []);
+  const updateRetention = useCallback(async (patch: Partial<RetentionPolicy>) => {
+    setRetentionSaving(true);
+    try {
+      const r = await authFetch(`${API_BASE}/api/workspace/retention`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json() as RetentionPolicy;
+      setRetentionPolicy(d);
+    } finally {
+      setRetentionSaving(false);
+    }
+  }, []);
+  const runRetentionSweepNow = useCallback(async (dryRun: boolean) => {
+    setRetentionSaving(true);
+    try {
+      const r = await authFetch(`${API_BASE}/api/workspace/retention/sweep`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dryRun }),
+      });
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const d = await r.json() as { eligible: number; archived: number };
+      setRetentionSweepResult({ eligible: d.eligible, archived: d.archived });
+    } finally {
+      setRetentionSaving(false);
+    }
+  }, []);
+  useEffect(() => {
+    if (showSettings && !retentionPolicy) void fetchRetention();
+  }, [showSettings, retentionPolicy, fetchRetention]);
+  // Tag filter: when non-null, /api/topology fetches only repos with this tag.
+  // List of available tags loaded from /api/repos/tags on mount + after edits.
+  const [tagFilter, setTagFilter] = useState<string | null>(() => {
+    try { return localStorage.getItem('lore.tagFilter'); } catch { return null; }
+  });
+  const [availableTags, setAvailableTags] = useState<Array<{ tag: string; repos: string[] }>>([]);
+  useEffect(() => {
+    try { if (tagFilter) localStorage.setItem('lore.tagFilter', tagFilter); else localStorage.removeItem('lore.tagFilter'); } catch { /* ignore */ }
+  }, [tagFilter]);
+  useEffect(() => {
+    void authFetch(`${API_BASE}/api/repos/tags`)
+      .then((r) => r.json() as Promise<{ tags: Array<{ tag: string; repos: string[] }> }>)
+      .then((d) => setAvailableTags(d.tags ?? []))
+      .catch(() => setAvailableTags([]));
+  }, []);
+
+  // 2026-04-27 multi-project drill: workspace-wide project list, fetched
+  // once. The right-panel uses this so every project stays visible after
+  // drill-in (otherwise the panel collapses to just the drilled project
+  // since /api/topology only returns its slice).
+  const [workspaceProjects, setWorkspaceProjects] = useState<
+    Array<{ project: string; nodeCount: number }> | null
+  >(null);
+  useEffect(() => {
+    void authFetch(`${API_BASE}/api/topology/overview?groupBy=project`)
+      .then((r) => r.json() as Promise<{ blobs: Array<{ project: string; nodeCount: number }> }>)
+      .then((d) => setWorkspaceProjects(d.blobs ?? []))
+      .catch(() => setWorkspaceProjects(null));
+  }, []);
 
   // Q1.6 — A2UI view-stack. Canvas defaults to the graph; a {{render:
   // component|json}} token from the LLM swaps it to an overlaid
@@ -1081,6 +1250,33 @@ function App() {
 
   return (
     <div className="app-container">
+      {/* Hot-reload banner — shown when a Tier 1 manifest plugin was
+          loaded since boot. Its auto-tools work in new MCP sessions but
+          the new types are not yet valid for the core store_node enum
+          until daemon restart. */}
+      {health?.manifestHotReload?.needsRestartForCoreEnums && (
+        <div style={{
+          background: 'rgba(74,144,226,0.15)',
+          border: '1px solid #4a90e2',
+          color: 'var(--color-text, #e5e5e5)',
+          padding: '8px 16px',
+          fontSize: 13,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
+        }}>
+          <div>
+            <strong>{health.manifestHotReload.namesHotLoaded.length} new plugin{health.manifestHotReload.namesHotLoaded.length === 1 ? '' : 's'} loaded</strong>
+            {' '}without restart: <code>{health.manifestHotReload.namesHotLoaded.join(', ')}</code>.
+            {' '}Their typed tools work now, but the new types aren't valid for <code>store_node</code> / <code>store_edge</code> until you restart the daemon.
+          </div>
+          <code style={{ fontSize: 11, padding: '4px 8px', background: 'var(--color-surface-alt, #2a2a2a)', borderRadius: 3, whiteSpace: 'nowrap' }}>
+            launchctl kickstart -k gui/$(id -u)/com.groundfloor.lore
+          </code>
+        </div>
+      )}
+
       {/* Left Panel: Navigation & Chat */}
       {sidebarOpen ? (
       <aside
@@ -1097,6 +1293,54 @@ function App() {
           <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
           <div style={{ display: 'flex', gap: '0.25rem' }}>
             <button
+              className="icon-button"
+              onClick={() => {
+                const next = !showProjects;
+                setShowProjects(next);
+                // Don't close the chat sidebar when opening the projects
+                // panel — earlier behaviour collapsed the left rail and
+                // made it look like the only thing that happened was
+                // "the side nav disappeared." Settings + node detail
+                // sit in the same right-corner real estate as projects,
+                // so those still close to avoid stacking overlays.
+                if (next) {
+                    setShowSettings(false);
+                    setSelectedNodeId(null);
+                }
+              }}
+              title="Projects — manage indexed code repositories"
+            >
+              <FolderGit2 size={20} />
+            </button>
+            <button
+              className="icon-button"
+              onClick={() => setShowSupersedeCandidates(true)}
+              title="Find supersession candidates — scans your knowledge for likely duplicate decisions and lets you mark older versions as superseded"
+            >
+              <GitBranchPlus size={20} />
+            </button>
+            <button
+              className="icon-button"
+              onClick={() => setShowPluginInspectors(true)}
+              title="Plugin inspectors (manifest-declared tabs)"
+            >
+              <Table size={20} />
+            </button>
+            <button
+              className="icon-button"
+              onClick={() => setShowPluginSettings(true)}
+              title="Plugin settings (manifest-declared config fields)"
+            >
+              <SlidersHorizontal size={20} />
+            </button>
+            <button
+              className="icon-button"
+              onClick={() => setShowPluginWizard(true)}
+              title="Create plugin (Tier 1 wizard)"
+            >
+              <Boxes size={20} />
+            </button>
+            <button
               ref={settingsButtonRef}
               className="icon-button"
               onClick={() => {
@@ -1105,7 +1349,7 @@ function App() {
                 // other. Opening Settings closes the drawer.
                 const next = !showSettings;
                 setShowSettings(next);
-                if (next) setSelectedNodeId(null);
+                if (next) { setSelectedNodeId(null); setShowProjects(false); }
               }}
               title="Settings"
             >
@@ -1116,6 +1360,46 @@ function App() {
             </button>
           </div>
         </header>
+
+        {showProjects && (
+          <ProjectsPanel apiBase={API_BASE} onClose={() => setShowProjects(false)} />
+        )}
+
+        {showPluginWizard && (
+          <Suspense fallback={null}>
+            <PluginWizard onClose={() => setShowPluginWizard(false)} />
+          </Suspense>
+        )}
+
+        {showPluginInspectors && (
+          <Suspense fallback={null}>
+            <PluginInspectors onClose={() => setShowPluginInspectors(false)} />
+          </Suspense>
+        )}
+
+        {showPluginSettings && (
+          <Suspense fallback={null}>
+            <PluginSettingsPanel onClose={() => setShowPluginSettings(false)} />
+          </Suspense>
+        )}
+
+        {showSupersedeCandidates && (
+          <SupersessionCandidatesModal
+            apiBase={API_BASE}
+            project={drilledProject ?? null}
+            projectOptions={workspaceProjects}
+            onClose={() => setShowSupersedeCandidates(false)}
+            onAcceptedAny={() => {
+              // Bump the topology so the network view drops the
+              // newly-superseded nodes (or fades them if the toggle is
+              // on). Cheapest refresh: re-fetch overview.
+              void authFetch(`${API_BASE}/api/topology/overview?groupBy=project`)
+                .then((r) => r.json() as Promise<{ blobs: Array<{ project: string; nodeCount: number }> }>)
+                .then((d) => setWorkspaceProjects(d.blobs ?? []))
+                .catch(() => { /* ignore */ });
+            }}
+          />
+        )}
 
         <div className="chat-container">
           <div className="chat-history">
@@ -1442,15 +1726,144 @@ function App() {
           }}
         >
           <Suspense fallback={<CanvasLoadingFallback />}>
-            <SigmaCanvas
-              activeTypes={activeTypes}
-              activeProjects={activeProjects}
-              focusNodeId={focusNodeId}
-              onTopologyReady={handleTopologyReady}
-              onNodeClick={handleNodeClick}
-              showInferred={showInferred}
-              graphSizeLimit={graphSizeLimit}
-            />
+            {graphViz !== 'network' ? (
+              (() => {
+                const filter = tagFilter
+                  ? (availableTags.find((t) => t.tag === tagFilter)?.repos ?? [])
+                  : null;
+                const common = {
+                  apiBase: API_BASE,
+                  onProjectClick: handleChordProjectClick,
+                  projectFilter: filter,
+                };
+                if (graphViz === 'chord') return <ChordDiagram {...common} />;
+                if (graphViz === 'sunburst') return <SunburstDiagram {...common} />;
+                return null;
+              })()
+            ) : (
+              <SigmaCanvas
+                activeTypes={activeTypes}
+                activeProjects={activeProjects}
+                focusNodeId={focusNodeId}
+                onTopologyReady={handleTopologyReady}
+                onNodeClick={handleNodeClick}
+                showInferred={showInferred}
+                showSuperseded={showSuperseded}
+                graphSizeLimit={graphSizeLimit}
+                tagFilter={tagFilter}
+                forcedProjectMode={drilledProject}
+                onExitProjectMode={handleExitProjectMode}
+              />
+            )}
+            {/* 2026-04-27 fix #2: removed the [network|chord] toggle.
+                Chord is the only entry point; click an arc → drill into
+                network for that project. The breadcrumb back-button
+                returns to chord. Toggle suggested two equivalent views;
+                wrong mental model. */}
+            {/* 2026-04-27: tag dropdown only shown on chord view (overview).
+                In drill-in mode, the user is already focused on one
+                project, so the tag filter is irrelevant. To edit tags,
+                they go through the ProjectsPanel (FolderGit2 icon). */}
+            {availableTags.length > 0 && (graphViz === 'chord' || graphViz === 'sunburst') && !drilledProject && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 12,
+                  left: 12,
+                  zIndex: 12,
+                  padding: '5px 10px',
+                  fontSize: '0.78rem',
+                  color: 'var(--color-text)',
+                  background: 'var(--glass-bg)',
+                  backdropFilter: 'blur(8px)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 6,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
+              >
+                <span style={{ color: 'var(--color-text-muted)' }}>Tag:</span>
+                <select
+                  value={tagFilter ?? ''}
+                  onChange={(e) => setTagFilter(e.target.value || null)}
+                  style={{
+                    background: 'transparent',
+                    color: 'inherit',
+                    border: 'none',
+                    fontSize: 'inherit',
+                    cursor: 'pointer',
+                    outline: 'none',
+                  }}
+                >
+                  <option value="">All projects</option>
+                  {availableTags.map((t) => (
+                    <option key={t.tag} value={t.tag}>{t.tag} ({t.repos.length})</option>
+                  ))}
+                </select>
+                <span style={{ color: 'var(--color-border)' }}>·</span>
+                <button
+                  type="button"
+                  onClick={() => setShowProjects(true)}
+                  title="Add projects, edit tags"
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--color-accent, #14B8A6)',
+                    cursor: 'pointer',
+                    fontSize: 'inherit',
+                    padding: 0,
+                    textDecoration: 'underline',
+                  }}
+                >
+                  Manage
+                </button>
+              </div>
+            )}
+            {/* Overview viz switcher: chord | sunburst | pack | tree.
+                Only shown in overview modes (not network drill-in). */}
+            {!drilledProject && (graphViz === 'chord' || graphViz === 'sunburst') && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 12,
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  zIndex: 12,
+                  padding: 4,
+                  background: 'var(--glass-bg)',
+                  backdropFilter: 'blur(8px)',
+                  border: '1px solid var(--color-border)',
+                  borderRadius: 8,
+                  display: 'flex',
+                  gap: 2,
+                }}
+              >
+                {(['chord', 'sunburst'] as const).map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    onClick={() => {
+                      setGraphViz(v);
+                      try { localStorage.setItem('lore.overviewViz', v); } catch { /* ignore */ }
+                    }}
+                    style={{
+                      background: graphViz === v ? 'var(--color-accent, #14B8A6)' : 'transparent',
+                      color: graphViz === v ? '#fff' : 'var(--color-text)',
+                      border: 'none',
+                      borderRadius: 6,
+                      padding: '4px 12px',
+                      fontSize: '0.75rem',
+                      fontWeight: 500,
+                      cursor: 'pointer',
+                      textTransform: 'capitalize',
+                    }}
+                  >
+                    {v}
+                  </button>
+                ))}
+              </div>
+            )}
           </Suspense>
         </div>
         {canvasView !== 'graph' ? (
@@ -1612,6 +2025,99 @@ function App() {
                 20k is the firm ceiling — the server won't return more
                 even if asked. Default auto-detected from your CPU.
               </p>
+            </div>
+
+            {/* 2026-04-28 — soft-supersession retention policy. Per
+                workspace; the daemon also auto-runs the sweep daily. */}
+            <div className="setting-group">
+              <label>Retention (superseded nodes)</label>
+              {retentionPolicy === null ? (
+                <p className="help-text" style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>Loading…</p>
+              ) : (
+                <>
+                  <label className="filter-checkbox" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '0.4rem' }}>
+                    <input
+                      type="checkbox"
+                      checked={retentionPolicy.hideSupersededInRecall}
+                      disabled={retentionSaving}
+                      onChange={(e) => void updateRetention({ hideSupersededInRecall: e.target.checked })}
+                    />
+                    <span style={{ fontSize: '0.85rem' }}>Hide superseded nodes from recall + search</span>
+                  </label>
+                  <p className="help-text" style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', margin: '0.2rem 0 0.6rem' }}>
+                    Default on. Off lets stale decisions compete against current ones in semantic results.
+                  </p>
+
+                  <label style={{ fontSize: '0.85rem', display: 'block', marginTop: '0.6rem' }}>
+                    Auto-archive after (days)
+                    <input
+                      type="number"
+                      min={0}
+                      step={1}
+                      value={retentionPolicy.autoArchiveSupersededAfterDays ?? ''}
+                      placeholder="never"
+                      disabled={retentionSaving}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        const v = raw === '' ? null : Math.max(0, parseInt(raw, 10) || 0);
+                        void updateRetention({ autoArchiveSupersededAfterDays: v });
+                      }}
+                      style={{
+                        marginLeft: '0.5rem',
+                        width: '5rem',
+                        padding: '2px 6px',
+                        background: 'transparent',
+                        color: 'inherit',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 4,
+                      }}
+                    />
+                  </label>
+                  <p className="help-text" style={{ fontSize: '0.7rem', color: 'var(--color-text-muted)', margin: '0.2rem 0 0.4rem' }}>
+                    A daily background sweep tombstones the verbatim memory of any node that has been superseded for longer than this. Graph node + edges + lineage are preserved. Empty / 0 disables the sweep.
+                  </p>
+
+                  <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.6rem', alignItems: 'center' }}>
+                    <button
+                      type="button"
+                      disabled={retentionSaving}
+                      onClick={() => void runRetentionSweepNow(true)}
+                      style={{
+                        background: 'transparent',
+                        color: 'var(--color-text)',
+                        border: '1px solid var(--color-border)',
+                        borderRadius: 4,
+                        padding: '4px 10px',
+                        fontSize: '0.78rem',
+                        cursor: retentionSaving ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      Dry-run sweep
+                    </button>
+                    <button
+                      type="button"
+                      disabled={retentionSaving}
+                      onClick={() => void runRetentionSweepNow(false)}
+                      style={{
+                        background: 'var(--color-accent, #14B8A6)',
+                        color: '#fff',
+                        border: 'none',
+                        borderRadius: 4,
+                        padding: '4px 10px',
+                        fontSize: '0.78rem',
+                        cursor: retentionSaving ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      Run sweep now
+                    </button>
+                    {retentionSweepResult ? (
+                      <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>
+                        {retentionSweepResult.eligible} eligible · {retentionSweepResult.archived} archived
+                      </span>
+                    ) : null}
+                  </div>
+                </>
+              )}
             </div>
 
             <div className="setting-group">
@@ -2007,6 +2513,9 @@ function App() {
             setActiveProjects={(next) => setActiveProjects(next)}
             showInferred={showInferred}
             setShowInferred={setShowInferred}
+            showSuperseded={showSuperseded}
+            setShowSuperseded={setShowSuperseded}
+            allProjects={workspaceProjects}
           />
         </aside>
       ) : null}

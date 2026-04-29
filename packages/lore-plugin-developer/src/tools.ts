@@ -266,6 +266,50 @@ export function registerDeveloperTools(
         },
     );
 
+    /* ─── code_similar (Phase 2) ───────────────────────────────── */
+    server.tool(
+        'code_similar',
+        'Find existing code symbols semantically similar to a proposed snippet. Use BEFORE writing new functions/classes to avoid duplicating something that already exists. Returns top matches with similarity scores and recommended action.',
+        {
+            content: z.string().describe('The proposed code snippet (function body, class declaration, etc.) you are about to write'),
+            language: z.string().optional().describe('Optional language hint (e.g. "typescript", "python") — used as embedding context'),
+            repo: z.string().optional().describe('Optional: restrict search to a single repository'),
+            k: z.number().optional().describe('Max matches to return (default: 5)'),
+            warn_threshold: z.number().optional().describe('Cosine similarity threshold above which a "warn" decision fires (default: 0.78). Higher = stricter; lower = more warnings.'),
+        },
+        async ({ content, language, repo, k, warn_threshold }) => {
+            try {
+                const decision = await api.evaluatePreWrite(content, {
+                    language,
+                    repo,
+                    k: k ?? 5,
+                    warnThreshold: warn_threshold,
+                });
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            decision: decision.decision,
+                            recommendation: decision.recommendation,
+                            strong_match: decision.strongMatch,
+                            top_match: decision.topMatch,
+                            matches: decision.matches.map((m) => ({
+                                name: m.name,
+                                kind: m.kind,
+                                file: `${m.filePath}${m.startLine ? ':' + m.startLine : ''}`,
+                                repo: m.repo,
+                                similarity: Number(m.score.toFixed(3)),
+                                lore_node_id: m.loreNodeId,
+                            })),
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return { content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }], isError: true };
+            }
+        },
+    );
+
     /* ─── list_repos ───────────────────────────────────────────── */
     server.tool(
         'list_repos',

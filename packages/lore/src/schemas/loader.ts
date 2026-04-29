@@ -9,16 +9,25 @@ export interface LoreSchema {
     systemPrompt: string;
 }
 
+// Core node types are workspace-agnostic — a hypothetical family or
+// finance workspace would use these too. Domain-specific types
+// (bug_pattern, architecture, troubleshooting, file_ref, schema) live
+// in the plug-in that owns them and are merged in at boot via
+// ILorePlugin.contributeNodeTypes() — see PluginRegistry.collectNodeTypeContributions
+// and the merge in mcp/server.ts.
 const DEFAULT_SCHEMA: LoreSchema = {
     domain: "Software Engineering",
     description: "Default domain for Groundfloor-Lore code intelligence.",
     nodeTypes: [
-        "decision", "convention", "bug_pattern", "file_ref", 
-        "architecture", "troubleshooting", "note", "schema"
+        "decision", "convention", "note"
     ],
+    // Core edge relations are workspace-agnostic. 'fixed_by' (dev-coded —
+    // implies bugs) lives in the developer plugin via
+    // contributeEdgeRelations(). 'depends_on' kept in core because it's
+    // genuinely generic ("school choice depends_on the move").
     edgeRelations: [
-        "decided_for", "caused_by", "applies_to", 
-        "fixed_by", "supersedes", "related_to", "depends_on"
+        "decided_for", "caused_by", "applies_to",
+        "supersedes", "related_to", "depends_on"
     ],
     systemPrompt: "You are a senior developer operating within the groundfloor-lore ecosystem."
 };

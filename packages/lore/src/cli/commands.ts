@@ -18,6 +18,7 @@ import http from 'http';
 import { LocalGraph } from '../engines/localGraph.js';
 import { SyncEngine } from '../engines/syncEngine.js';
 import { ConfigManager } from '../config/configManager.js';
+import { loreHome, loreHomePath } from '../config/loreHome.js';
 
 /* ─── Shared Helpers ──────────────────────────────────────────── */
 
@@ -43,7 +44,7 @@ function findRepoRoot(): string {
  * Always uses ~/.groundfloor for consistency across CLI, MCP, and IDEs.
  */
 function resolveGraphBasePath(): string {
-    return path.join(os.homedir(), '.groundfloor');
+    return loreHome();
 }
 
 /* ─── Command: init ───────────────────────────────────────────── */
@@ -94,7 +95,7 @@ export async function initCommand(args: string[]): Promise<void> {
 
     // Register project
     const projectName = path.basename(basePath);
-    const registryPath = path.join(os.homedir(), '.groundfloor', 'projects.json');
+    const registryPath = loreHomePath('projects.json');
     let registry: { projects: Record<string, { ecosystem: string; paths: string[] }> };
 
     try {
@@ -277,7 +278,7 @@ export async function statusCommand(_args: string[]): Promise<void> {
     const syncStatus = syncEngine.getStatus();
 
     // Load project registry
-    const registryPath = path.join(os.homedir(), '.groundfloor', 'projects.json');
+    const registryPath = loreHomePath('projects.json');
     let projectName = '*';
     let ecosystem = '*';
     try {
@@ -379,7 +380,7 @@ export async function doctorCommand(_args: string[]): Promise<void> {
     // also gives us disk-usage free). If the daemon is down, open the
     // DB directly as before.
     if (fs.existsSync(loreDir)) {
-        const tokenPath = path.join(os.homedir(), '.groundfloor', 'auth.token');
+        const tokenPath = loreHomePath('auth.token');
         const daemonUp = (await probeHttp('/api/health', null)) === 200;
         if (daemonUp && fs.existsSync(tokenPath)) {
             try {
@@ -408,7 +409,7 @@ export async function doctorCommand(_args: string[]): Promise<void> {
     }
 
     // Check 4: Project registry
-    const registryPath = path.join(os.homedir(), '.groundfloor', 'projects.json');
+    const registryPath = loreHomePath('projects.json');
     if (fs.existsSync(registryPath)) {
         try {
             const registry = JSON.parse(fs.readFileSync(registryPath, 'utf-8'));
@@ -515,7 +516,7 @@ export async function doctorCommand(_args: string[]): Promise<void> {
     console.log('');
     console.log('  Security posture');
     console.log('  ─────────────────────────────────────');
-    const dataHome = path.join(os.homedir(), '.groundfloor');
+    const dataHome = loreHome();
 
     // S1 — filesystem permissions
     try {
@@ -1366,7 +1367,7 @@ export async function reconnectCommand(args: string[]): Promise<void> {
     const k = kIndex >= 0 ? parseInt(args[kIndex + 1], 10) : 5;
     const threshold = tIndex >= 0 ? parseFloat(args[tIndex + 1]) : 0.65;
 
-    const basePath = path.join(os.homedir(), '.groundfloor');
+    const basePath = loreHome();
     const loreDir = path.join(basePath, '.lore');
     const graph = new LocalGraph(basePath);
     const verbatim = new VerbatimStore(basePath);
@@ -1416,7 +1417,7 @@ import { inspectAllWorkspaces, inspectDataHome, formatBytes } from '../engines/s
  */
 export async function storageCommand(args: string[]): Promise<void> {
     const json = args.includes('--json');
-    const dataHome = path.join(os.homedir(), '.groundfloor');
+    const dataHome = loreHome();
 
     const homeBreakdown = inspectDataHome(dataHome);
     const workspaces = inspectAllWorkspaces(dataHome);
@@ -1503,7 +1504,7 @@ export async function reportCommand(args: string[]): Promise<void> {
     }
 
     if (md == null) {
-        const basePath = path.join(os.homedir(), '.groundfloor');
+        const basePath = loreHome();
         const graph = new LocalGraph(basePath);
         await graph.initialize();
         md = await writeGraphReport(graph, { project, topN });
@@ -1534,6 +1535,65 @@ export async function reportCommand(args: string[]): Promise<void> {
  * thing still exists. Out of scope for the MVP; users can pass
  * --prefix explicitly if they know what they're doing.
  */
+/**
+ * Hit the daemon's /api/verbatim/reap endpoint. Returns the JSON
+ * response, or null if the daemon isn't reachable / responds non-200.
+ *
+ * Bearer-token auth: read from ~/.groundfloor/auth.token (the file the
+ * daemon writes on first boot). If the file is missing, the daemon
+ * isn't bootstrapped and we fall through to the direct path.
+ */
+interface ReapResponse {
+    prefix: string;
+    apply: boolean;
+    inspected: number;
+    alive: number;
+    orphans: number;
+    tombstoned: number;
+    sample: string[];
+}
+
+async function tryHttpReap(prefix: string, apply: boolean): Promise<ReapResponse | null> {
+    let token: string | null = null;
+    try {
+        token = fs.readFileSync(loreHomePath('auth.token'), 'utf-8').trim();
+    } catch {
+        return null;
+    }
+    if (!token) return null;
+    return new Promise((resolve) => {
+        const payload = JSON.stringify({ apply, prefix });
+        const req = http.request(
+            'http://127.0.0.1:3847/api/verbatim/reap',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(payload).toString(),
+                    'Authorization': `Bearer ${token}`,
+                },
+                timeout: 30_000, // tombstoning many rows takes time
+            },
+            (res) => {
+                if (res.statusCode !== 200) {
+                    res.resume();
+                    resolve(null);
+                    return;
+                }
+                let body = '';
+                res.on('data', (chunk) => { body += chunk; });
+                res.on('end', () => {
+                    try { resolve(JSON.parse(body) as ReapResponse); } catch { resolve(null); }
+                });
+            },
+        );
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.write(payload);
+        req.end();
+    });
+}
+
 export async function verbatimCommand(args: string[]): Promise<void> {
     const sub = args[0];
     if (sub !== 'reap') {
@@ -1545,7 +1605,46 @@ export async function verbatimCommand(args: string[]): Promise<void> {
     const prefixIdx = args.indexOf('--prefix');
     const prefix = prefixIdx >= 0 ? args[prefixIdx + 1] : 'lore:';
 
-    const basePath = path.join(os.homedir(), '.groundfloor');
+    console.log('');
+    console.log(`Verbatim reaper`);
+    console.log(`  Prefix:   ${prefix}`);
+    console.log(`  Mode:     ${apply ? 'APPLY' : 'DRY-RUN (use --apply to tombstone)'}`);
+    console.log('');
+
+    // Daemon-aware: when the local Lore daemon is up on 127.0.0.1:3847,
+    // route through HTTP so we don't fight Kùzu's exclusive writer
+    // lock. Falls back to a direct LocalGraph open when the daemon is
+    // unreachable (scripted scenarios, CI, or daemon stopped).
+    const httpResult = await tryHttpReap(prefix, apply);
+    if (httpResult) {
+        console.log(`Inspected ${httpResult.inspected} verbatim records with prefix "${prefix}"...`);
+        console.log('');
+        console.log(`  Alive:   ${httpResult.alive} verbatim records have a matching Kùzu node`);
+        console.log(`  Orphan:  ${httpResult.orphans} verbatim records with NO matching node`);
+        console.log('');
+        if (httpResult.orphans > 0) {
+            console.log('Orphan samples (first 20):');
+            for (const o of httpResult.sample) console.log(`  - ${o}`);
+            if (httpResult.orphans > httpResult.sample.length) {
+                console.log(`  ... and ${httpResult.orphans - httpResult.sample.length} more`);
+            }
+            console.log('');
+        }
+        if (apply && httpResult.tombstoned > 0) {
+            console.log(`Done. ${httpResult.tombstoned} orphan embeddings tombstoned (content preserved, marked superseded).`);
+        } else if (!apply && httpResult.orphans > 0) {
+            console.log('Dry-run complete. Re-run with --apply to tombstone these rows (content preserved).');
+        } else {
+            console.log('No action needed.');
+        }
+        console.log('');
+        console.log('(Routed through the running Lore daemon at 127.0.0.1:3847.)');
+        return;
+    }
+
+    // Daemon unreachable — direct path. Will fail with an exclusive-
+    // lock error if the daemon is up but we couldn't auth or reach it.
+    const basePath = loreHome();
     const graph = new LocalGraph(basePath);
     const { VerbatimStore } = await import('../engines/verbatimStore.js');
     const verbatim = new VerbatimStore(basePath);
@@ -1553,26 +1652,20 @@ export async function verbatimCommand(args: string[]): Promise<void> {
     await graph.initialize();
     await verbatim.initialize();
 
-    console.log('');
-    console.log(`Verbatim reaper`);
-    console.log(`  Prefix:   ${prefix}`);
-    console.log(`  Mode:     ${apply ? 'APPLY' : 'DRY-RUN (use --apply to delete)'}`);
-    console.log('');
-
     const allIds = await verbatim.listIds(prefix);
     console.log(`Inspecting ${allIds.length} verbatim records with prefix "${prefix}"...`);
 
     const orphans: string[] = [];
     let alive = 0;
     for (const verbatimId of allIds) {
-        // Strip the prefix to get the graph node id
-        const nodeId = verbatimId.startsWith(prefix) ? verbatimId.slice(prefix.length) : verbatimId;
+        if (verbatimId.includes('#rev')) continue; // history snapshots aren't orphan candidates
+        const isLore = verbatimId.startsWith('lore:');
+        const isPluginPrefixed = !isLore && /^[a-z_]+:/.test(verbatimId);
+        if (isPluginPrefixed) { alive++; continue; } // plugin namespace, skip
+        const nodeId = isLore ? verbatimId.slice('lore:'.length) : verbatimId;
         const node = await graph.getNode(nodeId);
-        if (node == null) {
-            orphans.push(verbatimId);
-        } else {
-            alive++;
-        }
+        if (node == null) orphans.push(verbatimId);
+        else alive++;
     }
 
     console.log('');
@@ -1588,15 +1681,15 @@ export async function verbatimCommand(args: string[]): Promise<void> {
     }
 
     if (apply && orphans.length > 0) {
-        console.log(`Reaping ${orphans.length} orphan embedding(s)...`);
-        let reaped = 0;
+        console.log(`Tombstoning ${orphans.length} orphan embedding(s)...`);
+        let tombstoned = 0;
         for (const id of orphans) {
-            await verbatim.delete(id);
-            reaped++;
+            await verbatim.tombstone(id, 'graph node missing — discovered via verbatim reap');
+            tombstoned++;
         }
-        console.log(`Done. ${reaped} orphan embeddings removed.`);
+        console.log(`Done. ${tombstoned} orphan embeddings tombstoned (content preserved, marked superseded).`);
     } else if (!apply && orphans.length > 0) {
-        console.log('Dry-run complete. Re-run with --apply to actually delete.');
+        console.log('Dry-run complete. Re-run with --apply to tombstone these rows (content preserved).');
     } else {
         console.log('No action needed.');
     }
@@ -1627,6 +1720,98 @@ export async function verbatimCommand(args: string[]): Promise<void> {
  *   <org>/<model-name>/   (e.g. Xenova/Qwen1.5-0.5B-Chat/,
  *                              onnx-community/gemma-3-1b-it-ONNX/)
  */
+/* ─── lore supersede <oldId> <newId> [--reason "..."] ─────────── */
+
+/**
+ * supersedeCommand — Mark `oldId` as soft-superseded by `newId`. Same
+ * semantics as the supersede_node MCP tool: old node stays in the graph
+ * (edges intact), gets hidden from default recall, faded in the network
+ * view. Reversible by clearing supersededAt (no CLI surface for that
+ * yet — call /api/node/unsupersede directly if needed).
+ *
+ * Daemon-aware: routes through /api/node/supersede when the local Lore
+ * daemon is up. Falls back to a direct LocalGraph open when the daemon
+ * is unreachable.
+ */
+async function tryHttpSupersede(oldId: string, newId: string, reason: string | undefined): Promise<{ ok: boolean; reason?: string } | null> {
+    let token: string | null = null;
+    try {
+        token = fs.readFileSync(loreHomePath('auth.token'), 'utf-8').trim();
+    } catch {
+        return null;
+    }
+    if (!token) return null;
+    return new Promise((resolve) => {
+        const payload = JSON.stringify({ oldId, newId, reason });
+        const req = http.request(
+            'http://127.0.0.1:3847/api/node/supersede',
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(payload).toString(),
+                    'Authorization': `Bearer ${token}`,
+                },
+                timeout: 5000,
+            },
+            (res) => {
+                let body = '';
+                res.on('data', (chunk) => { body += chunk; });
+                res.on('end', () => {
+                    try { resolve(JSON.parse(body) as { ok: boolean; reason?: string }); } catch { resolve(null); }
+                });
+            },
+        );
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+        req.write(payload);
+        req.end();
+    });
+}
+
+export async function supersedeCommand(args: string[]): Promise<void> {
+    const positional = args.filter((a) => !a.startsWith('--'));
+    const oldId = positional[0];
+    const newId = positional[1];
+    if (!oldId || !newId) {
+        console.error('usage: lore supersede <oldId> <newId> [--reason "free-form note"]');
+        process.exit(1);
+    }
+    const reasonIdx = args.indexOf('--reason');
+    const reason = reasonIdx >= 0 ? args[reasonIdx + 1] : undefined;
+
+    console.log('');
+    console.log(`Supersede: ${oldId}  →  ${newId}`);
+    if (reason) console.log(`  Reason:  ${reason}`);
+    console.log('');
+
+    const httpResult = await tryHttpSupersede(oldId, newId, reason);
+    if (httpResult) {
+        if (httpResult.ok) {
+            console.log(`✓ Marked '${oldId}' as superseded by '${newId}'.`);
+            console.log('');
+            console.log('(Routed through the running Lore daemon at 127.0.0.1:3847.)');
+            return;
+        }
+        console.error(`✗ Could not supersede: ${httpResult.reason ?? 'unknown'}`);
+        console.error('  Common causes: oldId or newId not found, or oldId === newId.');
+        process.exit(1);
+    }
+
+    // Daemon unreachable — direct path.
+    const basePath = loreHome();
+    const graph = new LocalGraph(basePath);
+    await graph.initialize();
+    const result = await graph.supersedeNode(oldId, newId, reason);
+    await graph.close();
+    if (result.ok) {
+        console.log(`✓ Marked '${oldId}' as superseded by '${newId}'.`);
+    } else {
+        console.error(`✗ Could not supersede: ${result.reason}`);
+        process.exit(1);
+    }
+}
+
 export async function modelsCommand(args: string[]): Promise<void> {
     const sub = args[0];
     if (sub !== 'prune') {
@@ -1652,7 +1837,7 @@ export async function modelsCommand(args: string[]): Promise<void> {
     // conservative: if config is missing or malformed, treat the
     // pre-V2.2 + V2.2 defaults as always-keep. Better to leave a
     // model on disk than to delete the one the user is about to use.
-    const basePath = path.join(os.homedir(), '.groundfloor');
+    const basePath = loreHome();
     const configManager = new ConfigManager(path.join(basePath, '.lore'));
     let activeModel = 'onnx-community/gemma-3-1b-it-ONNX';
     try {
@@ -1855,14 +2040,14 @@ export async function migrateCommand(args: string[]): Promise<void> {
     const apply = rest.includes('--apply');
     const archive = rest.includes('--archive');
 
-    const sqlitePath = pathArg ?? path.join(os.homedir(), '.groundfloor', 'knowledge.db');
+    const sqlitePath = pathArg ?? loreHomePath('knowledge.db');
 
     if (!fs.existsSync(sqlitePath)) {
         console.error(`No SQLite database at ${sqlitePath}`);
         process.exit(1);
     }
 
-    const basePath = path.join(os.homedir(), '.groundfloor');
+    const basePath = loreHome();
     const loreDir = path.join(basePath, '.lore');
     const graph = new LocalGraph(basePath);
 
@@ -2111,7 +2296,7 @@ export async function exportCommand(args: string[]): Promise<void> {
         // Daemon down — open DB directly.
     }
     if (html == null) {
-        const basePath = path.join(os.homedir(), '.groundfloor');
+        const basePath = loreHome();
         const graph = new LocalGraph(basePath);
         await graph.initialize();
         html = await exportGraphAsHtml(graph, { project, maxNodes, title });
@@ -2123,7 +2308,7 @@ export async function exportCommand(args: string[]): Promise<void> {
 }
 
 async function fetchHtmlExportViaDaemon(opts: { project?: string; maxNodes?: number; title?: string }): Promise<string> {
-    const tokenPath = path.join(os.homedir(), '.groundfloor', 'auth.token');
+    const tokenPath = loreHomePath('auth.token');
     if (!fs.existsSync(tokenPath)) throw new Error('no daemon');
     const token = fs.readFileSync(tokenPath, 'utf-8').trim();
     const qs = new URLSearchParams();
@@ -2151,7 +2336,7 @@ async function fetchHtmlExportViaDaemon(opts: { project?: string; maxNodes?: num
 }
 
 async function fetchReportViaDaemon(project?: string, topN?: number): Promise<string> {
-    const tokenPath = path.join(os.homedir(), '.groundfloor', 'auth.token');
+    const tokenPath = loreHomePath('auth.token');
     if (!fs.existsSync(tokenPath)) {
         throw new Error('no auth token — daemon not initialized');
     }
@@ -2599,7 +2784,7 @@ export async function migrateEmbeddingModelCommand(args: string[]): Promise<void
         process.exit(1);
     }
 
-    const basePath = path.join(os.homedir(), '.groundfloor');
+    const basePath = loreHome();
     const loreDir = path.join(basePath, '.lore');
 
     const { LocalGraph } = await import('../engines/localGraph.js');
@@ -2839,7 +3024,7 @@ export async function recallCommand(args: string[]): Promise<void> {
     const graph = new LocalGraph(basePath);
     try {
         // Resolve project scope from registry (mirrors mcp/server.ts:resolveProjectScope)
-        const registryPath = path.join(os.homedir(), '.groundfloor', 'projects.json');
+        const registryPath = loreHomePath('projects.json');
         let projectName = '*';
         let ecosystem = '*';
         if (!crossProject) {

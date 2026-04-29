@@ -584,6 +584,36 @@ function inferLanguage(filePath: string): string {
     return map[ext] ?? 'Unknown';
 }
 
+/* ─── Cross-project code-edge counts (for chord overview) ────── */
+
+/**
+ * 2026-04-27: counts CodeRelation edges where source.repo ≠ target.repo,
+ * grouped by (fromProject, toProject). Feeds the chord diagram so
+ * ribbon thickness reflects real code coupling, not just LoreNode
+ * cross-project edges.
+ *
+ * Implementation: single Cypher query, fast even at 15k+ symbols.
+ */
+export async function getCrossProjectCodeEdgeCounts(
+    ctx: PluginGraphContext,
+): Promise<Array<{ fromProject: string; toProject: string; count: number }>> {
+    try {
+        const rows = await ctx.queryRows(
+            `MATCH (n:CodeSymbol)-[r:CodeRelation]->(m:CodeSymbol)
+             WHERE n.repo <> m.repo AND n.repo IS NOT NULL AND m.repo IS NOT NULL
+             RETURN n.repo AS fromProject, m.repo AS toProject, count(r) AS count`,
+        );
+        return rows.map((r) => ({
+            fromProject: String(r['fromProject']),
+            toProject: String(r['toProject']),
+            count: Number(r['count']) || 0,
+        }));
+    } catch (err) {
+        console.error(`[getCrossProjectCodeEdgeCounts] failed: ${(err as Error).message}`);
+        return [];
+    }
+}
+
 /* ─── Prune own inferred edges ────────────────────────────────── */
 
 export async function pruneInferredDeveloperEdges(

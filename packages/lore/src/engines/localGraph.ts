@@ -235,6 +235,9 @@ export class LocalGraph implements GraphProvider {
                     security_scopes STRING[],
                     legalHold BOOLEAN DEFAULT FALSE,
                     language STRING DEFAULT '',
+                    supersededBy STRING DEFAULT '',
+                    supersededAt STRING DEFAULT '',
+                    supersededReason STRING DEFAULT '',
                     PRIMARY KEY (id)
                 )
             `);
@@ -281,6 +284,14 @@ export class LocalGraph implements GraphProvider {
                 // as English / default downstream. See
                 // docs/LANGUAGE_DETECTION.md.
                 `ALTER TABLE LoreNode ADD language STRING DEFAULT ''`,
+                // 2026-04-28 — soft supersession. A node marked superseded
+                // stays in the graph (keeps all its edges) but is hidden
+                // from default recall and faded in the network view. The
+                // three fields are nullable / empty-default so existing
+                // nodes remain "not superseded" without a backfill pass.
+                `ALTER TABLE LoreNode ADD supersededBy STRING DEFAULT ''`,
+                `ALTER TABLE LoreNode ADD supersededAt STRING DEFAULT ''`,
+                `ALTER TABLE LoreNode ADD supersededReason STRING DEFAULT ''`,
             ];
             for (const migration of migrations) {
                 try {
@@ -826,31 +837,72 @@ export class LocalGraph implements GraphProvider {
      * @param ecosystem - Optional ecosystem filter ('*' for all).
      * @returns Array of matching nodes.
      */
-    async getTopology(limit: number = 300): Promise<{ nodes: any[]; edges: any[] }> {
+    async getTopology(limit: number = 300, projects?: string[] | string): Promise<{ nodes: any[]; edges: any[] }> {
         await this.initialize();
 
         try {
             const nodes: any[] = [];
             const edges: any[] = [];
 
-            // LoreNode (knowledge) — core memory primitive. Plugins contribute
-            // their own topology slices via ILorePlugin.contributeTopology
-            // (invoked by callers that have access to the plugin registry;
-            // LocalGraph stays plugin-agnostic).
-            const loreNodesResult = await this.connection.query(`MATCH (n:LoreNode) RETURN n LIMIT ${limit}`) as any;
+            // 2026-04-27 multi-project: accept either a single string
+            // (back-compat) or an array. Filter to nodes whose project
+            // is IN the set. Cross-project edges where BOTH endpoints
+            // are in the set still render (intra-set coupling).
+            const projectsList = Array.isArray(projects)
+                ? projects.filter((p) => p && p.trim().length > 0)
+                : (projects && projects.trim().length > 0 ? [projects] : []);
+            const hasProjects = projectsList.length > 0;
+
+            let loreNodesResult: any;
+            if (hasProjects) {
+                const stmt = await this.connection.prepare(
+                    `MATCH (n:LoreNode) WHERE n.project IN $projects RETURN n LIMIT ${limit}`,
+                );
+                loreNodesResult = await this.connection.execute(stmt, { projects: projectsList });
+            } else {
+                loreNodesResult = await this.connection.query(`MATCH (n:LoreNode) RETURN n LIMIT ${limit}`);
+            }
             for (const row of await loreNodesResult.getAll()) {
                 const n: any = row['n'];
-                nodes.push({ id: n.id, label: n.label, type: n.type, project: n.project, group: n.type });
+                nodes.push({
+                    id: n.id,
+                    label: n.label,
+                    type: n.type,
+                    project: n.project,
+                    group: n.type,
+                    // Soft supersession: surface as null when empty so
+                    // the UI can branch on truthiness. UI hides
+                    // superseded nodes by default and renders the
+                    // virtual SUPERSEDED_BY edge from `supersededBy`.
+                    supersededBy: (n.supersededBy && String(n.supersededBy).length > 0) ? n.supersededBy : null,
+                    supersededAt: (n.supersededAt && String(n.supersededAt).length > 0) ? n.supersededAt : null,
+                    supersededReason: (n.supersededReason && String(n.supersededReason).length > 0) ? n.supersededReason : null,
+                });
             }
-            const loreEdgesResult = await this.connection.query(
-                `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode)
-                 RETURN n.id AS source,
-                        e.relation AS relation,
-                        e.confidence AS confidence,
-                        e.confidenceScore AS confidenceScore,
-                        m.id AS target
-                 LIMIT ${limit}`,
-            ) as any;
+            let loreEdgesResult: any;
+            if (hasProjects) {
+                const stmt = await this.connection.prepare(
+                    `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode)
+                     WHERE n.project IN $projects AND m.project IN $projects
+                     RETURN n.id AS source,
+                            e.relation AS relation,
+                            e.confidence AS confidence,
+                            e.confidenceScore AS confidenceScore,
+                            m.id AS target
+                     LIMIT ${limit}`,
+                );
+                loreEdgesResult = await this.connection.execute(stmt, { projects: projectsList });
+            } else {
+                loreEdgesResult = await this.connection.query(
+                    `MATCH (n:LoreNode)-[e:LoreEdge]->(m:LoreNode)
+                     RETURN n.id AS source,
+                            e.relation AS relation,
+                            e.confidence AS confidence,
+                            e.confidenceScore AS confidenceScore,
+                            m.id AS target
+                     LIMIT ${limit}`,
+                );
+            }
             for (const row of await loreEdgesResult.getAll()) {
                 edges.push({
                     from: row['source'],
@@ -897,7 +949,7 @@ export class LocalGraph implements GraphProvider {
      * overview's goal of "how do my memory clusters connect".
      */
     async getTopologyOverview(): Promise<{
-        blobs: Array<{ project: string; nodeCount: number }>;
+        blobs: Array<{ project: string; nodeCount: number; types: Array<{ type: string; count: number }> }>;
         aggregateEdges: Array<{ fromProject: string; toProject: string; count: number }>;
         totalNodes: number;
     }> {
@@ -927,8 +979,36 @@ export class LocalGraph implements GraphProvider {
                 blobMap.set(key, (blobMap.get(key) ?? 0) + count);
                 totalNodes += count;
             }
+            // Per-(project, type) counts so the sunburst / circle-pack
+            // can render a real two-level hierarchy without a follow-up
+            // round-trip per project.
+            const typeResult = await this.connection.query(
+                `MATCH (n:LoreNode)
+                 RETURN n.project AS project, n.type AS type, count(*) AS cnt`,
+            ) as QueryResult;
+            const typeRows = await typeResult.getAll();
+            const typesByProject = new Map<string, Map<string, number>>();
+            for (const row of typeRows as Array<Record<string, unknown>>) {
+                const rawProject = row['project'];
+                const project =
+                    typeof rawProject === 'string' && rawProject.length > 0
+                        ? rawProject
+                        : GLOBAL;
+                const type = String(row['type'] ?? 'unknown');
+                const count = Number(row['cnt'] ?? 0);
+                if (!typesByProject.has(project)) typesByProject.set(project, new Map());
+                const inner = typesByProject.get(project)!;
+                inner.set(type, (inner.get(type) ?? 0) + count);
+            }
+
             const blobs = Array.from(blobMap.entries())
-                .map(([project, nodeCount]) => ({ project, nodeCount }))
+                .map(([project, nodeCount]) => ({
+                    project,
+                    nodeCount,
+                    types: Array.from(typesByProject.get(project) ?? new Map()).map(
+                        ([type, count]) => ({ type, count }),
+                    ).sort((a, b) => b.count - a.count),
+                }))
                 .sort((a, b) => b.nodeCount - a.nodeCount);
 
             // Cross-project aggregate edges. Pull (fromProject,
@@ -1079,6 +1159,78 @@ export class LocalGraph implements GraphProvider {
             throw new LoreGraphError(
                 `Failed to delete node '${id}'`,
                 'deleteNode',
+                error,
+            );
+        }
+    }
+
+    /**
+     * supersedeNode — Mark `oldId` as superseded by `newId`. The node
+     * stays in the graph (all edges intact); recall and the network
+     * view filter it out by default. Idempotent — calling twice with
+     * the same pair re-stamps the timestamp but is otherwise a no-op.
+     *
+     * Returns:
+     *   { ok: true } on success
+     *   { ok: false, reason: 'old-not-found' | 'new-not-found' | 'self' }
+     *
+     * Side Effects: Writes to Kùzu, bumps the read cache epoch so
+     *               recall results pick up the change immediately.
+     */
+    async supersedeNode(oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }> {
+        await this.initialize();
+        if (oldId === newId) return { ok: false, reason: 'self' };
+        const oldNode = await this.getNode(oldId);
+        if (!oldNode) return { ok: false, reason: 'old-not-found' };
+        const newNode = await this.getNode(newId);
+        if (!newNode) return { ok: false, reason: 'new-not-found' };
+        try {
+            const ts = new Date().toISOString();
+            const stmt = await this.connection.prepare(
+                `MATCH (n:LoreNode {id: $id})
+                 SET n.supersededBy = $by,
+                     n.supersededAt = $at,
+                     n.supersededReason = $reason`,
+            );
+            await this.connection.execute(stmt, {
+                id: oldId,
+                by: newId,
+                at: ts,
+                reason: reason ?? '',
+            });
+            this.readCache.bumpEpoch();
+            return { ok: true };
+        } catch (error) {
+            throw new LoreGraphError(
+                `Failed to supersede node '${oldId}' with '${newId}'`,
+                'supersedeNode',
+                error,
+            );
+        }
+    }
+
+    /**
+     * unsupersedeNode — Reverse a prior supersession. Clears the three
+     * fields back to empty strings (the schema default).
+     */
+    async unsupersedeNode(id: string): Promise<boolean> {
+        await this.initialize();
+        const node = await this.getNode(id);
+        if (!node) return false;
+        try {
+            const stmt = await this.connection.prepare(
+                `MATCH (n:LoreNode {id: $id})
+                 SET n.supersededBy = '',
+                     n.supersededAt = '',
+                     n.supersededReason = ''`,
+            );
+            await this.connection.execute(stmt, { id });
+            this.readCache.bumpEpoch();
+            return true;
+        } catch (error) {
+            throw new LoreGraphError(
+                `Failed to un-supersede node '${id}'`,
+                'unsupersedeNode',
                 error,
             );
         }
@@ -1361,6 +1513,13 @@ export class LocalGraph implements GraphProvider {
         const rawLang = (getValue('language') as string) ?? '';
         const language = rawLang.length > 0 ? rawLang : null;
 
+        // Soft supersession: empty strings in Kùzu mean "not superseded".
+        // Surface as null at the API boundary so callers can branch on
+        // truthiness (typical pattern: `if (node.supersededAt) { ... }`).
+        const sBy = (getValue('supersededBy') as string) ?? '';
+        const sAt = (getValue('supersededAt') as string) ?? '';
+        const sReason = (getValue('supersededReason') as string) ?? '';
+
         return {
             id: (getValue('id') as string) ?? '',
             type: (getValue('type') as LoreNode['type']) ?? 'note',
@@ -1375,6 +1534,9 @@ export class LocalGraph implements GraphProvider {
             syncedAt: (getValue('syncedAt') as string) || null,
             security_scopes: (getValue('security_scopes') as string[]) ?? [],
             language,
+            supersededBy: sBy.length > 0 ? sBy : null,
+            supersededAt: sAt.length > 0 ? sAt : null,
+            supersededReason: sReason.length > 0 ? sReason : null,
         };
     }
 

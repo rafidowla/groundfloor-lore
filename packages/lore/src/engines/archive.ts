@@ -41,6 +41,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { createHash } from 'node:crypto';
+import { loreHome, loreHomePath } from '../config/loreHome.js';
 
 /**
  * sourceRef — opaque pointer to archived content.
@@ -119,7 +120,7 @@ export class LocalFileSink implements IArchiveSink {
     constructor(root?: string) {
         this.location = root
             ?? process.env['LORE_ARCHIVE_DIR']
-            ?? path.join(os.homedir(), '.groundfloor', 'archive');
+            ?? loreHomePath('archive');
     }
 
     async isReady(): Promise<boolean> {

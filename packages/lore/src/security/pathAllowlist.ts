@@ -40,6 +40,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { loreHome, loreHomePath } from '../config/loreHome.js';
 
 export const MAX_INGESTION_BYTES = 50 * 1024 * 1024; // 50 MB
 
@@ -58,7 +59,7 @@ function defaultBlockedRoots(): string[] {
         path.join(home, '.aws'),
         path.join(home, '.gnupg'),
         path.join(home, '.kube'),
-        path.join(home, '.groundfloor'),
+        loreHome(),
         path.join(home, 'Library', 'Keychains'),
         path.join(home, 'Library', 'Application Support', 'Google', 'Chrome', 'Default', 'Login Data'),
     ];
@@ -74,7 +75,7 @@ function defaultAllowedRoots(cfg: AllowlistConfig): string[] {
     ];
     // Workspace root is allowed IFF it isn't ~/.groundfloor (that's the
     // Lore data dir — always blocklisted).
-    if (cfg.workspaceRoot && cfg.workspaceRoot !== path.join(home, '.groundfloor')) {
+    if (cfg.workspaceRoot && cfg.workspaceRoot !== loreHome()) {
         roots.push(cfg.workspaceRoot);
     }
     for (const r of cfg.extraRoots ?? []) {

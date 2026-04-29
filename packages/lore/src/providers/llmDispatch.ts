@@ -22,6 +22,8 @@
  * Determinism: Non-deterministic (LLM output).
  */
 
+import { loreHomePath } from '../config/loreHome.js';
+
 export type LlmProvider = 'embedded' | 'anthropic' | 'openai' | 'ollama' | string;
 
 export interface LlmChunk {
@@ -361,7 +363,7 @@ async function* streamEmbedded(message: string, model: string): AsyncGenerator<L
             };
             const os = await import('node:os');
             const path = await import('node:path');
-            env.cacheDir = path.join(os.homedir(), '.groundfloor', 'models');
+            env.cacheDir = loreHomePath('models');
             env.allowRemoteModels = true;
 
             // Load-and-cache the pipeline once per daemon (or once per

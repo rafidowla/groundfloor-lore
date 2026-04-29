@@ -22,6 +22,15 @@ export interface LoreNode {
      * tag stay null and are treated as English / default downstream.
      */
     language?: string | null;
+    /**
+     * Soft supersession (2026-04-28). When set, this node has been
+     * replaced by `supersededBy` and is hidden from default recall +
+     * faded in the network view. Edges remain intact — supersession
+     * is metadata, not deletion. Empty string / null = "current".
+     */
+    supersededBy?: string | null;
+    supersededAt?: string | null;
+    supersededReason?: string | null;
 }
 
 /**

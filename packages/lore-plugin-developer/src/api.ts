@@ -10,7 +10,20 @@ import type { PluginGraphContext } from '@lore-core/plugins/types.js';
 import type { CodeSymbol, CodeRelationEdge, DevActivity } from './types.js';
 import * as ops from './operations.js';
 import * as indexer from './codeIndexer.js';
+import * as repoOps from './repoOps.js';
+import * as similarity from './similarity.js';
 export type { GitNexusRepoEntry, IndexResult } from './codeIndexer.js';
+export type {
+    DiscoveredRepo,
+    RepoFreshness,
+    AddRepoResult,
+    RemoveRepoResult,
+} from './repoOps.js';
+export type {
+    SimilarSymbolHit,
+    PreWriteDecision,
+    FindSimilarOptions,
+} from './similarity.js';
 
 export interface DeveloperApi {
     readonly name: 'developer';
@@ -52,6 +65,34 @@ export interface DeveloperApi {
     getGitNexusRepo: (name: string) => indexer.GitNexusRepoEntry | null;
     importFromGitNexus: (repo: indexer.GitNexusRepoEntry) => Promise<indexer.IndexResult>;
     indexAllRepos: () => Promise<indexer.IndexResult[]>;
+
+    // Phase-1 Add-Project surface (decision-add-project-ui-phase1-defaults-2026-04-27).
+    // Core calls these via DeveloperApi to keep gitnexus vocabulary out of core.
+    discoverRepos: (parentPath: string, opts?: { depth?: 'shallow' | 'deep'; maxDepth?: number }) => repoOps.DiscoveredRepo[];
+    getRepoFreshness: (name: string, staleAfterHours?: number) => repoOps.RepoFreshness | null;
+    addRepo: (repoPath: string, opts?: { installHook?: boolean; force?: boolean }) => Promise<repoOps.AddRepoResult>;
+    removeRepo: (name: string) => Promise<repoOps.RemoveRepoResult>;
+    installPostCommitHook: (repoPath: string, opts?: { force?: boolean }) => { installed: boolean; reason?: string };
+
+    // Repo tags — see repoOps.ts. Tags live in ~/.groundfloor/.lore/repo-tags.json
+    // (separate from gitnexus registry to avoid stepping on its file).
+    getRepoTags: (repoName: string) => string[];
+    setRepoTags: (repoName: string, tags: string[]) => string[];
+    listAllRepoTags: () => Array<{ tag: string; repos: string[] }>;
+    reposForTags: (tags: string[]) => string[];
+
+    // 2026-04-27: cross-project code-symbol edge counts. Used by
+    // /api/topology/overview to enrich chord-diagram ribbons with
+    // actual code coupling (was: LoreNode-edges only, drastically
+    // under-reported real project relationships).
+    getCrossProjectCodeEdgeCounts: () => Promise<Array<{ fromProject: string; toProject: string; count: number }>>;
+
+    // Phase 2 — Pre-write similarity surface (decision-phase2-cloud-policy-auth-design-2026-04-27).
+    // Engine in dev plug-in, NOT core. DATA contract (findSimilarSymbols) for the MCP tool path;
+    // POLICY contract (evaluatePreWrite) for hook adapters.
+    findSimilarSymbols: (content: string, opts?: similarity.FindSimilarOptions) => Promise<similarity.SimilarSymbolHit[]>;
+    evaluatePreWrite: (content: string, opts?: similarity.FindSimilarOptions & { warnThreshold?: number }) => Promise<similarity.PreWriteDecision>;
+    embedSymbol: (symbol: { uid: string; name: string; kind: string; filePath: string; content: string; repo: string }) => Promise<void>;
 }
 
 export function buildDeveloperApi(ctx: PluginGraphContext): DeveloperApi {
@@ -97,7 +138,35 @@ export function buildDeveloperApi(ctx: PluginGraphContext): DeveloperApi {
         getGitNexusRepo: (name) => indexer.getGitNexusRepo(name),
         importFromGitNexus: (repo) => indexer.importFromGitNexus(repo, _apiSelf),
         indexAllRepos: () => indexer.indexAllRepos(_apiSelf),
+
+        // Phase-1 Add-Project surface — see repoOps.ts and the locked
+        // decision node for the contract.
+        discoverRepos: (parentPath, opts) => repoOps.discoverRepos(parentPath, opts),
+        getRepoFreshness: (name, staleAfterHours) => repoOps.getRepoFreshness(name, staleAfterHours),
+        addRepo: (repoPath, opts) => repoOps.addRepo(repoPath, _apiSelf, opts),
+        removeRepo: (name) => repoOps.removeRepo(name, _apiSelf),
+        installPostCommitHook: (repoPath, opts) => repoOps.installPostCommitHook(repoPath, opts),
+        getRepoTags: (repoName) => repoOps.getRepoTags(repoName),
+        setRepoTags: (repoName, tags) => repoOps.setRepoTags(repoName, tags),
+        listAllRepoTags: () => repoOps.listAllRepoTags(),
+        reposForTags: (tags) => repoOps.reposForTags(tags),
+        getCrossProjectCodeEdgeCounts: async () => ops.getCrossProjectCodeEdgeCounts(ctx),
+
+        // Phase-2 similarity surface — engine + dual-contract per the
+        // locked Phase-2 design. Stashed pluginContext is rebound at
+        // boot via bindPluginContext (see index.ts registerSchema).
+        findSimilarSymbols: (content, opts) => similarity.findSimilarSymbols(_pluginCtxSelf, content, opts),
+        evaluatePreWrite: (content, opts) => similarity.evaluatePreWrite(_pluginCtxSelf, content, opts),
+        embedSymbol: (symbol) => similarity.embedSymbol(_pluginCtxSelf, symbol),
     };
+}
+
+// Forward-declared PluginContext for similarity functions that need
+// verbatimStore (lives on PluginContext, not PluginGraphContext).
+// Rebound at registerSchema time — see bindPluginContext below.
+let _pluginCtxSelf: import('@lore-core/plugins/types.js').PluginContext = null as unknown as import('@lore-core/plugins/types.js').PluginContext;
+export function bindPluginContext(ctx: import('@lore-core/plugins/types.js').PluginContext): void {
+    _pluginCtxSelf = ctx;
 }
 
 // Forward-declared self-reference so the indexer callbacks close over

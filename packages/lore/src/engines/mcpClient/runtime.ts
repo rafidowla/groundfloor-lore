@@ -28,8 +28,9 @@ import type {
     McpClientSnapshot,
     McpClientStatus,
 } from './types.js';
+import { loreHome, loreHomePath } from '../../config/loreHome.js';
 
-const CONFIG_PATH = path.join(os.homedir(), '.groundfloor', 'mcp-servers.json');
+const CONFIG_PATH = loreHomePath('mcp-servers.json');
 
 interface LiveClient {
     config: McpServerConfig;

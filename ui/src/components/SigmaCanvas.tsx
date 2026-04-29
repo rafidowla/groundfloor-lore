@@ -4,7 +4,7 @@ import '@react-sigma/core/lib/style.css';
 import Graph from 'graphology';
 import type { Attributes } from 'graphology-types';
 import forceAtlas2 from 'graphology-layout-forceatlas2';
-import { ZoomIn, ZoomOut, RotateCcw, ChevronLeft } from 'lucide-react';
+import { ZoomIn, ZoomOut, RotateCcw, ChevronLeft, Maximize2 } from 'lucide-react';
 import type { NodeDisplayData } from 'sigma/types';
 import type { NodeLabelDrawingFunction, NodeHoverDrawingFunction } from 'sigma/rendering';
 import { authFetch } from '../lib/authFetch';
@@ -28,6 +28,12 @@ interface LoreNode {
     label: string;
     project?: string;
     content?: string;
+    /** Soft supersession (2026-04-28). Set when this node has been
+     *  replaced by a newer one. Used to dim and to draw the virtual
+     *  SUPERSEDED_BY edge to its replacement. */
+    supersededBy?: string | null;
+    supersededAt?: string | null;
+    supersededReason?: string | null;
 }
 
 interface LoreEdge {
@@ -69,7 +75,12 @@ const MAX_NODE_SIZE = 28;
  * behavior). At or above, we auto-switch to the project-blob overview
  * unless the caller pins a mode. Lives at 1000 per the Q1.9 plan.
  */
-const SEMANTIC_ZOOM_THRESHOLD = 1000;
+// Lowered 2026-04-27 from 1000 → 50. The overview endpoint only counts
+// LoreNodes (knowledge bubbles), not plugin-contributed code symbols.
+// At 346 LoreNodes and 15k+ code symbols, the old threshold left users
+// stuck on the 28-second full topology fetch by default. With 50, any
+// non-trivial graph defaults to the fast overview at first paint.
+const SEMANTIC_ZOOM_THRESHOLD = 50;
 
 const OVERVIEW_MIN_BLOB_SIZE = 12;
 const OVERVIEW_MAX_BLOB_SIZE = 48;
@@ -222,6 +233,258 @@ const drawHover: NodeHoverDrawingFunction<LoreNodeAttrs> = (context, data, setti
     }
 }
 
+/* ─── Project-cluster pre-layout ───────────────────────────────── */
+
+/**
+ * placeNodesByCluster — assign final x,y so each project's nodes form
+ * a visible isolated globe. Within each cluster, runs a SHORT local FA2
+ * pass (200 iterations on the sub-graph) so edges within the cluster
+ * lay out nicely. Globes are placed on a wide circle so cluster spheres
+ * don't overlap.
+ *
+ * Result: clean spatial separation by project. Cross-project edges
+ * draw as long spans between globes — that's informative, not noise.
+ *
+ * Reads `clusterLabel` (already set per node from the data load).
+ * Mutates the graph in place.
+ */
+function placeNodesByCluster(graph: Graph, clusterAttr: string = 'clusterLabel'): void {
+    const clusters = new Map<string, string[]>();
+    graph.forEachNode((nodeId, attrs) => {
+        const key = (attrs[clusterAttr] as string) ?? 'Global';
+        if (!clusters.has(key)) clusters.set(key, []);
+        clusters.get(key)!.push(nodeId);
+    });
+
+    if (clusters.size <= 1) return;
+
+    const sortedClusters = Array.from(clusters.entries()).sort((a, b) => b[1].length - a[1].length);
+    const N = sortedClusters.length;
+    const radiusFor = (size: number) => Math.max(40, Math.sqrt(size) * 6);
+    const localRadii = sortedClusters.map(([, ids]) => radiusFor(ids.length));
+
+    // 2026-04-27 v6: deterministic ring layout for low-N (≤6 clusters).
+    // FA2 on tiny meta-graphs over-converges (one cross-project edge
+    // collapses two project anchors to the same point), producing the
+    // "second project overlays on top" bug. The ring guarantees a
+    // visible gap between every project disc. For 7+ clusters fall
+    // back to FA2 meta-graph proximity (which still reads cleanly when
+    // there are enough projects to spread out).
+    const anchors = new Map<string, { x: number; y: number }>();
+    const useRing = N <= 6;
+
+    if (useRing) {
+        // Greedy circle-packing: place biggest cluster at origin, then
+        // each subsequent cluster at the closest non-overlapping spot.
+        // This keeps small clusters snug against the big one instead of
+        // marooning them on a wide ring sized for the dominant globe.
+        const gap = 24;
+        const placed: Array<{ name: string; x: number; y: number; r: number }> = [];
+        sortedClusters.forEach(([name], i) => {
+            const r = localRadii[i];
+            if (i === 0) {
+                placed.push({ name, x: 0, y: 0, r });
+                anchors.set(name, { x: 0, y: 0 });
+                return;
+            }
+            // Try angles around each already-placed cluster, pick the
+            // candidate position closest to the centroid of placed
+            // clusters (so the packing stays roughly circular, not
+            // a long chain).
+            let best: { x: number; y: number; dist: number } | null = null;
+            const cx = placed.reduce((s, p) => s + p.x, 0) / placed.length;
+            const cy = placed.reduce((s, p) => s + p.y, 0) / placed.length;
+            for (const anchor of placed) {
+                const sep = anchor.r + r + gap;
+                for (let step = 0; step < 36; step++) {
+                    const a = (step * 2 * Math.PI) / 36;
+                    const x = anchor.x + Math.cos(a) * sep;
+                    const y = anchor.y + Math.sin(a) * sep;
+                    const overlaps = placed.some(
+                        (p) => Math.hypot(x - p.x, y - p.y) < p.r + r + gap - 1,
+                    );
+                    if (overlaps) continue;
+                    const distToCenter = Math.hypot(x - cx, y - cy);
+                    if (!best || distToCenter < best.dist) {
+                        best = { x, y, dist: distToCenter };
+                    }
+                }
+            }
+            if (best) {
+                placed.push({ name, x: best.x, y: best.y, r });
+                anchors.set(name, { x: best.x, y: best.y });
+            } else {
+                // Fallback: fan out on a wide ring (shouldn't trigger
+                // for ≤6 clusters but kept defensive).
+                const angle = (2 * Math.PI * i) / N;
+                const fallbackR = (Math.max(...localRadii) + r) * 2.5;
+                anchors.set(name, {
+                    x: Math.cos(angle) * fallbackR,
+                    y: Math.sin(angle) * fallbackR,
+                });
+            }
+        });
+        // Recenter so the packed group sits at origin.
+        const allX = Array.from(anchors.values()).map((p) => p.x);
+        const allY = Array.from(anchors.values()).map((p) => p.y);
+        const offX = (Math.min(...allX) + Math.max(...allX)) / 2;
+        const offY = (Math.min(...allY) + Math.max(...allY)) / 2;
+        for (const [name, pos] of anchors) {
+            anchors.set(name, { x: pos.x - offX, y: pos.y - offY });
+        }
+    } else {
+        // FA2 meta-graph (proximity-aware) for many clusters.
+        const metaGraph = new Graph();
+        const metaEdgeCounts = new Map<string, number>();
+        const nodeProject = new Map<string, string>();
+        for (const [name, nodeIds] of sortedClusters) {
+            for (const nid of nodeIds) nodeProject.set(nid, name);
+        }
+        graph.forEachEdge((_eid, _attrs, source, target) => {
+            const sp = nodeProject.get(source);
+            const tp = nodeProject.get(target);
+            if (!sp || !tp || sp === tp) return;
+            const key = sp < tp ? `${sp}||${tp}` : `${tp}||${sp}`;
+            metaEdgeCounts.set(key, (metaEdgeCounts.get(key) ?? 0) + 1);
+        });
+        for (const [name, nodeIds] of sortedClusters) {
+            const a = Math.random() * Math.PI * 2;
+            const r = 200 + Math.random() * 100;
+            metaGraph.addNode(name, {
+                x: Math.cos(a) * r,
+                y: Math.sin(a) * r,
+                size: Math.max(5, Math.sqrt(nodeIds.length) * 2),
+            });
+        }
+        for (const [key, count] of metaEdgeCounts) {
+            const [a, b] = key.split('||');
+            if (metaGraph.hasNode(a) && metaGraph.hasNode(b) && !metaGraph.hasEdge(a, b)) {
+                metaGraph.addEdge(a, b, { weight: 1 + Math.log(1 + count) });
+            }
+        }
+        if (metaGraph.size > 0) {
+            const settings = forceAtlas2.inferSettings(metaGraph);
+            forceAtlas2.assign(metaGraph, {
+                iterations: 1000,
+                settings: {
+                    ...settings,
+                    gravity: 0.05,
+                    scalingRatio: 600,
+                    edgeWeightInfluence: 1.5,
+                    barnesHutOptimize: false,
+                },
+            });
+        }
+        for (const [name] of sortedClusters) {
+            const m = metaGraph.hasNode(name)
+                ? (metaGraph.getNodeAttributes(name) as { x: number; y: number })
+                : { x: 0, y: 0 };
+            anchors.set(name, { x: m.x, y: m.y });
+        }
+    }
+
+    // Place each cluster's nodes around its anchor + add a labeled
+    // centroid marker so each globe carries its project name.
+    sortedClusters.forEach(([clusterName, nodeIds], i) => {
+        const a = anchors.get(clusterName) ?? { x: 0, y: 0 };
+        const localRadius = localRadii[i];
+        for (const nodeId of nodeIds) {
+            const r = Math.sqrt(Math.random()) * localRadius;
+            const angle = Math.random() * Math.PI * 2;
+            graph.setNodeAttribute(nodeId, 'x', a.x + Math.cos(angle) * r);
+            graph.setNodeAttribute(nodeId, 'y', a.y + Math.sin(angle) * r);
+        }
+        const labelId = `__cluster_label__:${clusterName}`;
+        if (!graph.hasNode(labelId)) {
+            graph.addNode(labelId, {
+                x: a.x,
+                y: a.y - localRadius - 24,
+                size: 8,
+                label: `${clusterName} · ${nodeIds.length}`,
+                color: '#14B8A6',
+                tag: 'cluster_label',
+                clusterLabel: clusterName,
+                forceLabel: true,
+            });
+        }
+    });
+}
+
+/* ─── Layout cache (localStorage) ──────────────────────────────── */
+
+/**
+ * Cached node positions keyed by node id. Saved to localStorage after
+ * every successful ForceAtlas2 layout; applied on subsequent loads to
+ * skip the 3-second layout cost when most nodes haven't changed.
+ *
+ * Cache invalidation strategy: stored alongside `nodeCount` and
+ * `savedAt`. We trust the cache if at least 80% of current nodes have
+ * matching positions; otherwise fall back to a full layout pass.
+ */
+interface LayoutCache {
+    /** ISO timestamp when this cache was saved. */
+    savedAt: string;
+    /** Node count at save time — coarse invalidation signal. */
+    nodeCount: number;
+    /** Position per node id. */
+    positions: Record<string, { x: number; y: number }>;
+}
+
+function loadLayoutCache(key: string): LayoutCache | null {
+    try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as LayoutCache;
+        if (!parsed.positions || typeof parsed.positions !== 'object') return null;
+        return parsed;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Apply cached positions to nodes that match. Returns the number of
+ * nodes that received a cached position (used to compute cache coverage
+ * and decide whether to skip the heavy layout).
+ */
+function applyCachedPositions(
+    graph: Graph,
+    positions: LayoutCache['positions'],
+): number {
+    let hits = 0;
+    graph.forEachNode((nodeId) => {
+        const pos = positions[nodeId];
+        if (pos && Number.isFinite(pos.x) && Number.isFinite(pos.y)) {
+            graph.setNodeAttribute(nodeId, 'x', pos.x);
+            graph.setNodeAttribute(nodeId, 'y', pos.y);
+            hits++;
+        }
+    });
+    return hits;
+}
+
+function saveLayoutCache(key: string, graph: Graph): void {
+    try {
+        const positions: LayoutCache['positions'] = {};
+        graph.forEachNode((nodeId, attrs) => {
+            const x = attrs['x'];
+            const y = attrs['y'];
+            if (typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y)) {
+                positions[nodeId] = { x, y };
+            }
+        });
+        const payload: LayoutCache = {
+            savedAt: new Date().toISOString(),
+            nodeCount: graph.order,
+            positions,
+        };
+        localStorage.setItem(key, JSON.stringify(payload));
+    } catch {
+        // localStorage quota exceeded or other failure — safe to ignore;
+        // next load just falls back to full layout.
+    }
+}
+
 /* ─── Graph Loader: fetch data, build graphology, run FA2 ──────── */
 
 interface GraphLoaderProps {
@@ -236,24 +499,53 @@ interface GraphLoaderProps {
      *  Omit to let the server apply its default (10k). Server clamps to
      *  [1000, 20000] regardless — UI slider enforces the same range. */
     graphSizeLimit?: number;
+    tagFilter?: string | null;
     /** Q1.9 — When set, filter the rendered subgraph to nodes whose
      *  `project` matches this value. Used for drill-in from the
-     *  overview mode. */
-    projectFilter?: string | null;
+     *  overview mode. Pass an array to fetch a multi-project union
+     *  (right-panel checkbox additions on top of the drilled project). */
+    projectFilter?: string | string[] | null;
+    /** Soft supersession: when false (default), drop superseded nodes
+     *  from the graph entirely. When true, render them at lower opacity
+     *  with a virtual SUPERSEDED_BY edge to their replacement. */
+    showSuperseded?: boolean;
 }
 
-const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit, projectFilter }: GraphLoaderProps) => {
+const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit, projectFilter, tagFilter, showSuperseded }: GraphLoaderProps) => {
     const loadGraph = useLoadGraph();
     const sigma = useSigma();
+
+    // Normalize projectFilter to a sorted, deduped string[] (or null).
+    // Sorted so the cache key is stable across set-iteration orders.
+    const projectList = useMemo<string[] | null>(() => {
+        if (!projectFilter) return null;
+        const arr = Array.isArray(projectFilter) ? projectFilter : [projectFilter];
+        const cleaned = Array.from(new Set(arr.filter((p) => typeof p === 'string' && p.length > 0))).sort();
+        return cleaned.length > 0 ? cleaned : null;
+    }, [projectFilter]);
 
     useEffect(() => {
         let active = true;
 
         const fetchGraph = async () => {
             try {
-                const url = typeof graphSizeLimit === 'number'
-                    ? `/api/topology?limit=${graphSizeLimit}`
-                    : '/api/topology';
+                // 2026-04-27: pass projectFilter as URL param so server
+                // returns ONLY that project's nodes (was: client-side
+                // filter after fetching all 15k+ — caused 28s drill-ins).
+                const params = new URLSearchParams();
+                if (typeof graphSizeLimit === 'number') params.set('limit', String(graphSizeLimit));
+                if (projectList) {
+                    if (projectList.length === 1) {
+                        params.set('project', projectList[0]);
+                    } else {
+                        params.set('projects', projectList.join(','));
+                    }
+                }
+                if (typeof tagFilter === 'string' && tagFilter.length > 0 && !projectList) {
+                    params.set('tags', tagFilter);
+                }
+                const qs = params.toString();
+                const url = qs ? `/api/topology?${qs}` : '/api/topology';
                 const response = await authFetch(url);
                 const data = await response.json();
                 if (!active) return;
@@ -267,17 +559,24 @@ const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit, projectFil
                 const graph = new Graph();
 
                 // Q1.9 — project drill-in filter. When a projectFilter
-                // is active we only load nodes in that project plus
+                // is active we only load nodes in those projects plus
                 // their direct neighbors (so intra-project edges render
                 // while cross-project noise stays in the overview).
-                const filterActive =
-                    typeof projectFilter === 'string' && projectFilter.length > 0;
+                // Multi-project drill: union of the selected projects.
+                const filterActive = projectList !== null;
+                const projectSet = projectList ? new Set(projectList) : null;
                 const inProject = (p: string | undefined | null) =>
-                    !filterActive || (p ?? 'Global') === projectFilter;
+                    !filterActive || projectSet!.has(p ?? 'Global');
 
                 // ── Add nodes ──
+                // Soft supersession: if showSuperseded is false, drop
+                // superseded nodes entirely (no render). When true, add
+                // them with the supersession metadata so the reducer
+                // and the virtual edge synthesis below can find them.
                 (data.nodes as LoreNode[]).forEach((n) => {
                     if (filterActive && !inProject(n.project)) return;
+                    const isSuperseded = !!n.supersededAt;
+                    if (isSuperseded && !showSuperseded) return;
                     if (!graph.hasNode(n.id)) {
                         graph.addNode(n.id, {
                             x: Math.random() * 100,
@@ -288,6 +587,10 @@ const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit, projectFil
                             // Extra attributes for hover card rendering
                             tag: n.type,
                             clusterLabel: n.project || 'Global',
+                            superseded: isSuperseded,
+                            supersededBy: n.supersededBy ?? null,
+                            supersededAt: n.supersededAt ?? null,
+                            supersededReason: n.supersededReason ?? null,
                         });
                     }
                 });
@@ -326,6 +629,35 @@ const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit, projectFil
                     }
                 });
 
+                // Virtual SUPERSEDED_BY edges. Synthesized from the
+                // `supersededBy` field on each node — no Kùzu edge table
+                // is added; the relationship lives entirely in the
+                // metadata column. Only drawn when the user has opted to
+                // see superseded nodes (otherwise the source node isn't
+                // even in the graph).
+                if (showSuperseded) {
+                    (data.nodes as LoreNode[]).forEach((n) => {
+                        if (!n.supersededAt || !n.supersededBy) return;
+                        if (!graph.hasNode(n.id)) return;
+                        if (!graph.hasNode(n.supersededBy)) return;
+                        const eid = `__supersededby__:${n.id}`;
+                        if (graph.hasEdge(eid)) return;
+                        try {
+                            graph.addEdgeWithKey(eid, n.id, n.supersededBy, {
+                                label: 'superseded by',
+                                type: 'arrow',
+                                size: 1.2,
+                                // Solid teal so the supersession arrow
+                                // pops above the grey relationship edges.
+                                color: '#14B8A6CC',
+                                isSupersededBy: true,
+                            });
+                        } catch {
+                            // Skip duplicates / dangling
+                        }
+                    });
+                }
+
                 // ── Degree-based node sizing ──
                 // Same approach as the Wikipedia cartography: node size is
                 // proportional to its degree (number of connections).
@@ -341,24 +673,99 @@ const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit, projectFil
                     graph.setNodeAttribute(nodeId, 'size', nodeSize);
                 });
 
-                // ── ForceAtlas2 layout — capped at 2000 iterations OR 3s ──
-                // Phase 3 performance ceiling (docs/V2_implementation_plan.md).
-                // forceAtlas2.assign() is synchronous; we approximate the
-                // 3s wall-clock cap by chunking into slices of 100 iterations
-                // and breaking early when the clock runs out.
-                const fa2Settings = forceAtlas2.inferSettings(graph);
-                const settings = {
-                    ...fa2Settings,
-                    gravity: 0.05,
-                    scalingRatio: 8,
-                    barnesHutOptimize: true,
-                } as const;
-                const deadline = Date.now() + 3000;
-                let iterationsDone = 0;
-                while (iterationsDone < 2000 && Date.now() < deadline) {
-                    forceAtlas2.assign(graph, { iterations: 100, settings });
-                    iterationsDone += 100;
+                // ── Layout: cluster-globes (v3) ──
+                // After the v2 attempt where ForceAtlas2 fought my cluster
+                // anchors and re-mashed everything, v3 takes a stronger
+                // approach: pre-position globes far apart (ring radius ≥
+                // 5× max cluster radius) and SKIP global FA2 entirely.
+                // Cross-project edges still render as long spans between
+                // globes — informative, not noisy.
+                //
+                // Cache version bumped to v3 to invalidate the broken v2.
+                // 2026-04-27 fix: cache key per cluster strategy AND per
+                // project scope. Without this, v4 cache (project-clustered
+                // positions) was loading on top of type-clustered drill-in
+                // requests, overriding the new layout. Bumped to v5 too
+                // (FA2 retuned for sharper visual separation).
+                // Layout strategy:
+                //   • Single-project drill (projectList.length === 1) →
+                //     single cohesive globe via global FA2. Type clusters
+                //     emerge naturally from edges; small types like
+                //     code_file or troubleshooting (1-15 nodes) no longer
+                //     get pushed to a fixed ring position outside the
+                //     main globe. Color encodes type.
+                //   • Multi-project drill or full overview → ring layout
+                //     by project, so each project reads as a distinct
+                //     labeled globe (the v6 separation fix).
+                const singleProjectDrill = projectList !== null && projectList.length === 1;
+                const scopeKey = projectList ? `proj:${projectList.join('+')}` : 'all';
+                const cacheKey = singleProjectDrill
+                    ? `lore.graph.layout.v8.singleproj.${scopeKey}`
+                    : `lore.graph.layout.v9.byproject.${scopeKey}`;
+                const cached = loadLayoutCache(cacheKey);
+                const cacheHitCount = cached
+                    ? applyCachedPositions(graph, cached.positions)
+                    : 0;
+                const cacheCoverage = graph.order > 0 ? cacheHitCount / graph.order : 0;
+
+                if (cacheCoverage < 0.80) {
+                    if (singleProjectDrill) {
+                        // Type-centroid seed: each node gets pre-positioned
+                        // in a small disc around its type's centroid. The
+                        // centroids are arranged on an inner ring so types
+                        // start visually grouped. Then a short FA2 pass
+                        // lets edges pull related nodes across types
+                        // without scattering same-type clusters.
+                        const typeNodes = new Map<string, string[]>();
+                        graph.forEachNode((nid, attrs) => {
+                            const t = (attrs.tag as string) ?? 'unknown';
+                            if (!typeNodes.has(t)) typeNodes.set(t, []);
+                            typeNodes.get(t)!.push(nid);
+                        });
+                        const sortedTypes = Array.from(typeNodes.entries())
+                            .sort((a, b) => b[1].length - a[1].length);
+                        const Nt = sortedTypes.length;
+                        // Globe size derived from total node count.
+                        const globeRadius = Math.max(120, Math.sqrt(graph.order) * 8);
+                        const centroidRing = globeRadius * 0.45;
+                        sortedTypes.forEach(([type, nids], i) => {
+                            const angle = (2 * Math.PI * i) / Math.max(1, Nt) - Math.PI / 2;
+                            const cx = Nt === 1 ? 0 : Math.cos(angle) * centroidRing;
+                            const cy = Nt === 1 ? 0 : Math.sin(angle) * centroidRing;
+                            // Local disc proportional to count, capped so
+                            // dominant types don't blanket the globe.
+                            const localR = Math.min(globeRadius * 0.55, Math.max(20, Math.sqrt(nids.length) * 7));
+                            for (const nid of nids) {
+                                const r = Math.sqrt(Math.random()) * localR;
+                                const a = Math.random() * Math.PI * 2;
+                                graph.setNodeAttribute(nid, 'x', cx + Math.cos(a) * r);
+                                graph.setNodeAttribute(nid, 'y', cy + Math.sin(a) * r);
+                            }
+                            void type;
+                        });
+                        // Short FA2 pass to honor edges. Low scaling so
+                        // type clusters stay coherent; gravity pulls the
+                        // whole thing toward center.
+                        const settings = forceAtlas2.inferSettings(graph);
+                        forceAtlas2.assign(graph, {
+                            iterations: 80,
+                            settings: {
+                                ...settings,
+                                gravity: 2,
+                                scalingRatio: 4,
+                                strongGravityMode: true,
+                                barnesHutOptimize: graph.order > 500,
+                            },
+                        });
+                    } else {
+                        placeNodesByCluster(graph, 'clusterLabel');
+                    }
                 }
+                // Cache hit path: positions already applied above; no
+                // further layout needed.
+
+                // Save final positions for next load.
+                saveLayoutCache(cacheKey, graph);
 
                 loadGraph(graph);
 
@@ -390,7 +797,7 @@ const GraphLoader = ({ onStatsReady, onTopologyReady, graphSizeLimit, projectFil
         fetchGraph();
 
         return () => { active = false; };
-    }, [loadGraph, sigma, onStatsReady, onTopologyReady, graphSizeLimit, projectFilter]);
+    }, [loadGraph, sigma, onStatsReady, onTopologyReady, graphSizeLimit, projectList, tagFilter]);
 
     return null;
 };
@@ -573,6 +980,13 @@ interface ViewStateEffectProps {
      * render matches pre-C1 behavior.
      */
     showInferred: boolean;
+    /**
+     * Soft supersession: when true, superseded nodes are present in
+     * the graph and rendered at reduced opacity by the nodeReducer.
+     * When false, GraphLoader has already excluded them at the data
+     * layer — the reducer never sees them.
+     */
+    showSuperseded: boolean;
 }
 
 /**
@@ -588,7 +1002,7 @@ interface ViewStateEffectProps {
  * which re-invokes the same composed reducer. The reducer layers
  * filter dim under hover dim so both states stay consistent.
  */
-const ViewStateEffect = ({ activeTypes, activeProjects, showInferred }: ViewStateEffectProps) => {
+const ViewStateEffect = ({ activeTypes, activeProjects, showInferred, showSuperseded }: ViewStateEffectProps) => {
     const sigma = useSigma();
     const registerEvents = useRegisterEvents();
     const hoverNeighborsRef = useRef<Set<string> | null>(null);
@@ -621,6 +1035,10 @@ const ViewStateEffect = ({ activeTypes, activeProjects, showInferred }: ViewStat
             const dimType = activeTypes !== null && !activeTypes.has(t);
             const dimProj = activeProjects !== null && !activeProjects.has(c);
             const filteredOut = dimType || dimProj;
+            // Superseded nodes that the user has chosen to show: render
+            // at reduced opacity, label appended with " (superseded)" so
+            // the user can tell at a glance even without hover.
+            const superseded = !!data.superseded;
 
             const neighbours = hoverNeighborsRef.current;
             if (neighbours) {
@@ -632,11 +1050,18 @@ const ViewStateEffect = ({ activeTypes, activeProjects, showInferred }: ViewStat
                 if (filteredOut) {
                     return { ...data, color: '#cbd5e188', label: '', zIndex: 0 };
                 }
+                if (superseded) {
+                    return { ...data, color: data.color + '66', label: `${data.label} (superseded)`, zIndex: 1 };
+                }
                 return { ...data, zIndex: 1 };
             }
 
             if (filteredOut) {
                 return { ...data, color: '#cbd5e188', label: '', zIndex: 0 };
+            }
+            if (superseded) {
+                // 0x66 = ~40% alpha — visibly faded but still recognisable.
+                return { ...data, color: String(data.color) + '66', label: `${data.label} (superseded)`, zIndex: 0 };
             }
             return data;
         });
@@ -661,7 +1086,7 @@ const ViewStateEffect = ({ activeTypes, activeProjects, showInferred }: ViewStat
         });
 
         sigma.refresh();
-    }, [sigma, activeTypes, activeProjects, showInferred]);
+    }, [sigma, activeTypes, activeProjects, showInferred, showSuperseded]);
 
     return null;
 };
@@ -898,9 +1323,22 @@ interface SigmaCanvasProps {
     onNodeClick?: (nodeId: string) => void;
     /** C1: when false, inferred-confidence edges are hidden. Default true. */
     showInferred?: boolean;
+    /** Soft supersession: when false, superseded nodes are hidden from
+     *  the graph entirely. When true, they render dimmed at ~35% opacity
+     *  with a virtual dashed arrow to their replacement. Default false. */
+    showSuperseded?: boolean;
     /** Phase 3: user-configured graph size limit. Forwarded to /api/topology
      *  as ?limit=N. Server clamps to [1000, 20000]; UI slider enforces same. */
     graphSizeLimit?: number;
+    tagFilter?: string | null;
+    /** 2026-04-27: when set, network forces project drill-in mode for
+     *  this repo on mount (bypasses overview/full auto-pick). Used by
+     *  the chord-as-overview UX: click chord arc → drill into project. */
+    forcedProjectMode?: string | null;
+    /** 2026-04-27: when provided, the project-mode "back" breadcrumb
+     *  calls this instead of returning to Sigma's internal overview.
+     *  Lets App.tsx route the back-button to the chord overview. */
+    onExitProjectMode?: () => void;
     /** Q1.9 — Threshold (total node count) above which the canvas
      *  auto-picks overview mode on first load. Default 1000. Set to
      *  Infinity to pin full-globe regardless of size (bypass). */
@@ -930,7 +1368,11 @@ export default function SigmaCanvas({
     onTopologyReady,
     onNodeClick,
     showInferred = true,
+    showSuperseded = false,
     graphSizeLimit,
+    tagFilter = null,
+    forcedProjectMode = null,
+    onExitProjectMode,
     semanticZoomThreshold = SEMANTIC_ZOOM_THRESHOLD,
 }: SigmaCanvasProps) {
     const [stats, setStats] = useState<{ nodes: number; edges: number } | null>(null);
@@ -938,7 +1380,19 @@ export default function SigmaCanvas({
     // Q1.9 — view-mode state. Starts as null (unknown) until the first
     // overview fetch resolves; then we pick 'overview' or 'full' based
     // on totalNodes vs the configured threshold.
-    const [viewMode, setViewMode] = useState<TopologyViewMode | null>(null);
+    // 2026-04-27: when forcedProjectMode is set (chord-as-overview UX),
+    // we skip the auto-pick and pin to project mode.
+    const [viewMode, setViewMode] = useState<TopologyViewMode | null>(
+        forcedProjectMode ? { kind: 'project', project: forcedProjectMode } : null,
+    );
+
+    // Sync external forcedProjectMode → internal viewMode (e.g. user
+    // clicks a different chord arc while still in network drill-in).
+    useEffect(() => {
+        if (forcedProjectMode) {
+            setViewMode({ kind: 'project', project: forcedProjectMode });
+        }
+    }, [forcedProjectMode]);
     const [overview, setOverview] = useState<OverviewPayload | null>(null);
     const [overviewError, setOverviewError] = useState<string | null>(null);
     const [aggregateEdgeInspector, setAggregateEdgeInspector] = useState<
@@ -991,7 +1445,19 @@ export default function SigmaCanvas({
     const mode: TopologyViewMode = viewMode ?? { kind: 'full' };
 
     const isOverview = mode.kind === 'overview';
-    const projectFilter = mode.kind === 'project' ? mode.project : null;
+    // Multi-project drill: when the user has additional projects checked
+    // in the right panel beyond the drilled project, fetch all of them
+    // as a union (?projects=a,b,c). The drilled project is always
+    // included so toggling it off in the panel doesn't blank the view.
+    const projectFilter = useMemo<string | string[] | null>(() => {
+        if (mode.kind !== 'project') return null;
+        const drilled = mode.project;
+        if (!activeProjects || activeProjects.size === 0) return drilled;
+        const union = new Set(activeProjects);
+        union.add(drilled);
+        if (union.size <= 1) return drilled;
+        return Array.from(union);
+    }, [mode, activeProjects]);
 
     // In overview mode we own the click semantics (blob drill-in),
     // so the parent's onNodeClick is suppressed there — a click on a
@@ -1022,6 +1488,19 @@ export default function SigmaCanvas({
 
     return (
         <div style={{ position: 'relative', width: '100%', height: '100%', outline: 'none' }}>
+            {/* 2026-04-27 fix #3: circular vignette overlay — gives the
+                graph a globe feel without clipping content. Pure CSS
+                radial gradient that fades the corners; nodes near the
+                edges fade out softly rather than getting clipped. */}
+            <div
+                style={{
+                    position: 'absolute',
+                    inset: 0,
+                    pointerEvents: 'none',
+                    zIndex: 11,
+                    background: 'radial-gradient(circle at center, transparent 55%, var(--color-bg, #0b0d12) 100%)',
+                }}
+            />
             <SigmaContainer
                 key={sigmaKey}
                 style={{ height: '100%', width: '100%', background: 'transparent' }}
@@ -1057,6 +1536,8 @@ export default function SigmaCanvas({
                         onTopologyReady={onTopologyReady}
                         graphSizeLimit={graphSizeLimit}
                         projectFilter={projectFilter}
+                        tagFilter={tagFilter}
+                        showSuperseded={showSuperseded}
                     />
                 )}
                 <DragEvents />
@@ -1065,6 +1546,7 @@ export default function SigmaCanvas({
                     activeTypes={effectiveActiveTypes}
                     activeProjects={effectiveActiveProjects}
                     showInferred={showInferred}
+                    showSuperseded={showSuperseded}
                 />
                 <CameraEffect focusNodeId={isOverview ? null : focusNodeId} />
                 <CustomZoomControls />
@@ -1100,7 +1582,17 @@ export default function SigmaCanvas({
                     {mode.kind === 'project' ? (
                         <button
                             type="button"
-                            onClick={() => setViewMode({ kind: 'overview' })}
+                            onClick={() => {
+                                // 2026-04-27: if App provided an exit handler
+                                // (chord-as-overview UX), use it — returns to
+                                // chord. Otherwise fall back to internal
+                                // overview (legacy behavior).
+                                if (onExitProjectMode) {
+                                    onExitProjectMode();
+                                } else {
+                                    setViewMode({ kind: 'overview' });
+                                }
+                            }}
                             title="Back to overview"
                             aria-label="Back to overview"
                             style={{
@@ -1120,6 +1612,30 @@ export default function SigmaCanvas({
                             <span>Overview</span>
                             <span style={{ color: 'var(--color-text-secondary)' }}>›</span>
                             <span>{mode.project}</span>
+                        </button>
+                    ) : mode.kind === 'overview' ? (
+                        <button
+                            type="button"
+                            onClick={() => setViewMode({ kind: 'full' })}
+                            title="Expand to full graph (all nodes)"
+                            aria-label="Expand to full graph"
+                            style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                border: 'none',
+                                background: 'transparent',
+                                padding: 0,
+                                color: 'inherit',
+                                cursor: 'pointer',
+                                fontSize: 'inherit',
+                                fontWeight: 'inherit',
+                            }}
+                        >
+                            <span>{breadcrumb}</span>
+                            <span style={{ color: 'var(--color-text-secondary)' }}>›</span>
+                            <Maximize2 size={12} />
+                            <span>Full graph</span>
                         </button>
                     ) : (
                         <span>{breadcrumb}</span>

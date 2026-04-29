@@ -505,7 +505,7 @@ export interface ILorePlugin {
      * default; plugins add their own with prefixed ids (e.g. file:,
      * symbol:) and any cross-pillar edges they track.
      */
-    contributeTopology?(ctx: PluginGraphContext, limit: number): Promise<{
+    contributeTopology?(ctx: PluginGraphContext, limit: number, projects?: string[] | string): Promise<{
         nodes: Array<{ id: string; label: string; type: string; project?: string; group?: string }>;
         edges: Array<{ from: string; to: string; label: string }>;
     }>;
@@ -563,6 +563,70 @@ export interface ILorePlugin {
      * this plugin's nodes.
      */
     contributeRetentionPolicy?(): RetentionRule[] | null;
+
+    /**
+     * Phase boundary cleanup (2026-04-27) — node-type vocabulary owned by
+     * this plugin. Merged into the `store_node` MCP tool's type enum at
+     * boot. Lets each plugin contribute its own domain types
+     * (bug_pattern, architecture, schema for Developer; Memory, Person
+     * for Personal; …) without leaking them into Core's hard-coded
+     * default schema.
+     *
+     * Returning null or [] = the plugin uses only the core types
+     * (decision, convention, note).
+     *
+     * Example (Developer plugin):
+     *   [
+     *     { name: 'bug_pattern',     description: 'Recurring code bug + fix' },
+     *     { name: 'architecture',    description: 'High-level code structure' },
+     *     { name: 'troubleshooting', description: 'Step-by-step recovery' },
+     *     { name: 'file_ref',        description: 'Pointer to a code file' },
+     *     { name: 'schema',          description: 'Data schema or table' },
+     *   ]
+     *
+     * Names must be unique across all active plugins. Collisions throw
+     * at boot so the operator gets a clean diagnostic.
+     */
+    contributeNodeTypes?(): Array<{ name: string; description: string }> | null;
+
+    /**
+     * Phase boundary fix (2026-04-27) — bind runtime services for use
+     * outside MCP sessions. Called once at daemon boot, AFTER boot() and
+     * BEFORE the HTTP server starts handling requests.
+     *
+     * Why this exists: registerTools is called inside createMcpServer(),
+     * which in HTTP daemon mode only fires when an MCP session connects.
+     * Plugins that expose surfaces beyond MCP (e.g. HTTP routes that
+     * core wires up to plugin APIs like /api/code-similar → evaluatePreWrite)
+     * need access to PluginContext (verbatimStore, syncEngine, etc.)
+     * BEFORE any MCP session might exist. bindRuntime gives them that.
+     *
+     * Implementation: stash ctx in a module-private variable; the api
+     * object's methods reference it. See lore-plugin-developer/src/api.ts
+     * bindPluginContext for the canonical pattern.
+     */
+    bindRuntime?(ctx: PluginContext): void;
+
+    /**
+     * Phase boundary cleanup (2026-04-27) — edge-relation vocabulary
+     * owned by this plugin. Same pattern as contributeNodeTypes:
+     * merged into store_edge's enum at boot so each plugin can declare
+     * its own relation labels without polluting Core's hardcoded list.
+     *
+     * Returning null or [] = the plugin uses only the core relations
+     * (decided_for, caused_by, applies_to, supersedes, related_to,
+     * depends_on). The dev-leaning 'fixed_by' is contributed by the
+     * developer plugin.
+     *
+     * Future plugins:
+     *   Personal: { name: 'lives_with', description: 'household member' }
+     *   Finance:  { name: 'paid_by', description: 'transaction payer' }
+     *   Legal:    { name: 'governed_by', description: 'contract clause' }
+     *
+     * Names must be unique across active plugins. Collisions throw
+     * at boot.
+     */
+    contributeEdgeRelations?(): Array<{ name: string; description: string }> | null;
 
     /**
      * Phase 1 / C2 — contribute domain-specific instructions to the

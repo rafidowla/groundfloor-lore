@@ -1,0 +1,6 @@
+id,name,email,department,tags
+e001,Sarah Lee,sarah.lee@example.com,Brokerage,"new-hire,fulltime"
+e002,Tom Park,tom.park@example.com,Operations,"fulltime"
+e003,Maria Gonzalez,maria.g@example.com,Brokerage,"fulltime,manager"
+e004,James Chen,james.c@example.com,Finance,"fulltime"
+e005,Priya Patel,priya.patel@example.com,Brokerage,"new-hire,fulltime"

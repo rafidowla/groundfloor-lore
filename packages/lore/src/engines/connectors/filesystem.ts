@@ -38,6 +38,7 @@ import {
     loadExtraIngestionRoots,
     PathAllowlistError,
 } from '../../security/pathAllowlist.js';
+import { loreHome, loreHomePath } from '../../config/loreHome.js';
 
 export interface FilesystemConnectorOptions {
     /** Additional roots beyond ~/Documents/Downloads/Desktop defaults. */
@@ -65,7 +66,7 @@ export class FilesystemConnector implements IConnector {
     async *sync(opts: SyncOptions = {}): AsyncIterable<ConnectorItem> {
         const registry = this.opts.extractorRegistry;
         const workspaceRoot = this.opts.workspaceRoot;
-        const dataHome = path.join(os.homedir(), '.groundfloor');
+        const dataHome = loreHome();
 
         // Resolve the root set. Priority: explicit opts.roots > config-file
         // extras > defaults (~/Documents etc. via the allowlist). We yield

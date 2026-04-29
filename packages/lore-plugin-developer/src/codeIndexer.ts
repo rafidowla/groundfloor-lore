@@ -159,7 +159,10 @@ function resolveGitNexusBin(): string {
 export function isGitNexusAvailable(): boolean {
     const bin = resolveGitNexusBin();
     try {
-        execSync(`"${bin}" --version`, { encoding: 'utf-8', timeout: 5000, stdio: 'pipe' });
+        // Invoke node explicitly — same reason as runCypher above.
+        // The launchd daemon's PATH lacks node, so the gitnexus shebang
+        // (`#!/usr/bin/env node`) fails. Calling node directly bypasses it.
+        execSync(`"${process.execPath}" "${bin}" --version`, { encoding: 'utf-8', timeout: 5000, stdio: 'pipe' });
         return true;
     } catch {
         return false;
@@ -214,9 +217,14 @@ function runCypher(repoName: string, query: string): CypherRow[] {
     const tmpFile = path.join(os.tmpdir(), `lore-cypher-${crypto.randomBytes(6).toString('hex')}.json`);
 
     try {
-        // Redirect stdout to temp file to bypass pipe buffer limits
+        // Invoke node explicitly via process.execPath. The launchd-managed
+        // daemon's PATH is `/usr/bin:/bin:/usr/sbin:/sbin` — no nvm, no node —
+        // so `#!/usr/bin/env node` in the gitnexus shebang fails silently
+        // (cypher returns empty, importFromGitNexus imports 0 symbols).
+        // Found 2026-04-27 — root cause of the long-standing 60x symbol
+        // gap between gitnexus stats and Lore's plugin storage.
         execSync(
-            `"${bin}" cypher -r "${repoName}" "${query.replace(/"/g, '\\"')}" > "${tmpFile}" 2>/dev/null`,
+            `"${process.execPath}" "${bin}" cypher -r "${repoName}" "${query.replace(/"/g, '\\"')}" > "${tmpFile}" 2>/dev/null`,
             { timeout: 60000, maxBuffer: 100 * 1024 * 1024 },
         );
 

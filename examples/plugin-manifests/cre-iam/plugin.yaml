@@ -1,0 +1,165 @@
+# cre-iam — Commercial Real Estate IT identity-and-access example.
+#
+# This is the worked example for the customer use case:
+#   "Given a role in a department, what applications does this new hire
+#    get access to, and at what permission level?"
+#
+# Pure declarative. Zero TypeScript. Demonstrates Tasks 1–6 working
+# together:
+#   - Schema (Task 2): three node types, three edge relations
+#   - Ingest (Task 3): three CSV files, one ingest spec per file
+#   - Auto-tools (Task 4): store_/list_/connect_ for every type & relation
+#   - Raw Cypher (Task 5): a multi-hop query — role+department → apps
+#   - Stock patterns (Task 6): find_by_field + list_recent + count
+#
+# Install:
+#   cp -r examples/plugin-manifests/cre-iam <LORE_HOME>/manifests/
+#   launchctl kickstart -k gui/$(id -u)/com.groundfloor.lore
+#
+# Then via MCP:
+#   lore_plugin_ingest({plugin: "cre-iam"})         # bulk-load all 3 CSVs
+#   cre-iam_apps_for_role({role: "...", dept: "..."})  # the headline query
+
+manifestVersion: 1
+name: cre-iam
+version: 0.1.0
+description: CRE IT identity + access — employees, applications, roles, and what permissions each role grants.
+author: Groundfloor
+license: MIT
+
+lore:
+  # Tier 1 inspector renderers — declarative tabs the shell renders.
+  inspectors:
+    - id: employees
+      label: Employees
+      icon: users
+      kind: table
+      entity: employee
+      columns:
+        - { field: id, label: ID, width: 80 }
+        - { field: label, label: Name, flex: 2 }
+        - { field: project, label: Department, width: 140 }
+        - { field: tags, label: Tags, type: tags, flex: 2 }
+        - { field: updatedAt, label: Updated, type: date, width: 180 }
+      sort: { field: updatedAt, order: desc }
+    - id: applications
+      label: Applications
+      icon: box
+      kind: table
+      entity: application
+      columns:
+        - { field: id, label: ID, width: 80 }
+        - { field: label, label: Name, flex: 2 }
+        - { field: tags, label: Criticality, type: tags, width: 140 }
+        - { field: updatedAt, label: Updated, type: date, width: 180 }
+      sort: { field: label, order: asc }
+
+  # Tier 1 permissions — surfaced at install time + in /api/plugins/permissions.
+  # Local-only plugin so this short list is honest; an HTTP-source variant
+  # would also need `net:api.example.com:443`.
+  permissions:
+    - 'fs:read:~/Downloads/AiDev/BitBucket/lore-workspace/manifests/cre-iam/data'
+
+  # Tier 3 plugin settings — auto-rendered in the shell's settings panel.
+  # The user-supplied values are persisted to settings.json next to the
+  # manifest; secret values go to the keychain.
+  settings:
+    - name: defaultDepartment
+      label: Default department
+      type: string
+      description: Department to assume for employees that don't declare one in the CSV.
+      default: Brokerage
+    - name: alertOnCriticalAccess
+      label: Alert on critical-app access grants
+      type: boolean
+      description: When enabled, role → app edges to critical-tagged applications log to audit.
+      default: false
+
+  schema:
+    nodeTypes:
+      - name: employee
+        description: A staff member at the company.
+      - name: application
+        description: A SaaS app or system the company uses.
+      - name: role
+        description: A named job role that grants access to specific apps.
+    edgeRelations:
+      - name: has_role
+        description: An employee holds a role.
+      - name: grants_access_to
+        description: A role grants access to an application.
+      - name: belongs_to
+        description: An employee belongs to a department.
+
+  ingest:
+    - id: employees
+      source: csv
+      file: data/employees.csv
+      mapTo: employee
+      idStrategy: { kind: column, column: id }
+      fields:
+        label: name
+        content: email
+        project: department      # Reusing project field to carry dept (Tier 1 limitation; Tier 2 will give us typed fields)
+        tags: tags
+    - id: applications
+      source: csv
+      file: data/applications.csv
+      mapTo: application
+      idStrategy: { kind: column, column: id }
+      fields:
+        label: name
+        content: vendor
+        tags: criticality
+    - id: roles
+      source: csv
+      file: data/roles.csv
+      mapTo: role
+      idStrategy: { kind: column, column: id }
+      fields:
+        label: name
+        content: description
+        project: department      # Roles can be scoped to a department.
+        tags: seniority
+
+  queries:
+    # Stock-pattern queries — no Cypher written by the plugin author.
+    - id: find_employee_by_dept
+      description: List employees in a given department.
+      pattern: find_by_field
+      bindNodeType: employee
+      parameters:
+        - { name: field, type: string, required: true, description: 'Should be "project" (department is stored there).' }
+        - { name: value, type: string, required: true, description: Department name. }
+    - id: count_apps_by_criticality
+      description: Count applications tagged with a given criticality (e.g., "critical", "high").
+      pattern: count_by_field
+      bindNodeType: application
+      parameters:
+        - { name: field, type: string, required: true, description: Field to match (use "tags" to count by criticality). }
+        - { name: value, type: string, required: true, description: Value to match. }
+    - id: recent_apps
+      description: Most-recently-added applications.
+      pattern: list_recent
+      bindNodeType: application
+      parameters:
+        - { name: limit, type: number, required: true, description: Max rows. }
+
+    # Raw-Cypher query — the multi-hop "headline" question.
+    - id: apps_for_role
+      description: |
+        Given a role name and a department, return the applications that role
+        grants access to. The flagship query that demonstrates onboarding
+        provisioning: "what apps should this new Leasing Analyst in Brokerage get?"
+      cypher: |
+        MATCH (r:LoreNode)
+        WHERE r.type = 'role'
+          AND r.label = $role
+          AND r.project = $dept
+        MATCH (r)-[e:LoreEdge {relation: 'grants_access_to'}]->(a:LoreNode)
+        WHERE a.type = 'application'
+        RETURN a.id AS app_id, a.label AS app_name, a.content AS vendor, a.tags AS criticality
+        ORDER BY a.label
+      parameters:
+        - { name: role, type: string, required: true, description: 'Role name, e.g. "Leasing Analyst".' }
+        - { name: dept, type: string, required: true, description: 'Department, e.g. "Brokerage".' }

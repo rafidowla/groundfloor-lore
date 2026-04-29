@@ -179,6 +179,7 @@ function strip(prefixedId: string): string {
 export async function contributeDeveloperTopology(
     ctx: PluginGraphContext,
     limit: number = 300,
+    projects?: string[] | string,
 ): Promise<{
     nodes: Array<{ id: string; label: string; type: string; project?: string; group?: string }>;
     edges: Array<{ from: string; to: string; label: string }>;
@@ -186,19 +187,44 @@ export async function contributeDeveloperTopology(
     const nodes: Array<{ id: string; label: string; type: string; project?: string; group?: string }> = [];
     const edges: Array<{ from: string; to: string; label: string }> = [];
 
-    // PluginStorage doesn't enumerate edges without an anchor. We emit
-    // edges per-anchor: traverse outgoing FileContains from each
-    // CodeFile (gets every FileContains edge), incoming
-    // LoreTouchesFile from each CodeFile (gets every such edge),
-    // outgoing CodeRelation from each CodeSymbol (gets every code-call
-    // edge), and incoming LoreAppliesToCode from each CodeSymbol
-    // (gets every cross-pillar applies-to edge). The traversal
-    // pattern is uniform across substrates.
+    // 2026-04-27 multi-project: accept array or string.
+    const projectsList = Array.isArray(projects)
+        ? projects.filter((p) => p && p.trim().length > 0)
+        : (projects && projects.trim().length > 0 ? [projects] : []);
+    const hasProjects = projectsList.length > 0;
+    // Single project keeps the old code path (uses storage.find with eq).
+    // Multi-project switches to raw Cypher with IN clause via queryRows.
+    const project = projectsList.length === 1 ? projectsList[0] : undefined;
+    const fileFilter = project ? { eq: { repo: project } } : {};
+
+    // 2026-04-27 perf rewrite: replaced N+1 per-anchor traverse loops
+    // with single-shot bulk Cypher queries. Was 60k+ DB calls for a
+    // 15k-symbol corpus; now 4 queries total (one per edge table).
+    //
+    // Why raw Cypher in plug-in code: PluginStorage's `traverse` API
+    // is anchor-bound (one anchor per call) and `find` works on node
+    // tables only. Bulk edge enumeration is the missing primitive.
+    // Per the plug-in convention, raw Cypher via ctx.executeQuery is
+    // acceptable on the plug-in side as long as it's the plug-in's
+    // own tables. TODO: when cloud-mode op routing lands (Q2.2 follow-
+    // up), replace with a substrate-portable PluginStorage.findEdges
+    // API so this runs in cloud mode too.
+    // Build WHERE clauses for single-project (=) or multi-project (IN).
+    // hasProjects covers both: a single project OR multiple. params is
+    // the same shape either way (Kùzu supports IN with array param).
+    const buildWhere = (alias: string): string => {
+        if (!hasProjects) return '';
+        return `WHERE ${alias}.repo IN $projects`;
+    };
+    const projectClause = buildWhere('n');
+    const projectClauseFor = (alias: string) => buildWhere(alias);
+    const params: Record<string, unknown> | undefined = hasProjects ? { projects: projectsList } : undefined;
+
+    // Files (filtered by project list if requested)
     try {
-        const fileRows = await ctx.storage.find<Record<string, unknown>>(
-            CODE_FILE_COLL,
-            {},
-            { limit },
+        const fileRows = await ctx.queryRows(
+            `MATCH (n:CodeFile) ${projectClause} RETURN n.path AS path, n.repo AS repo LIMIT ${limit}`,
+            params,
         );
         for (const f of fileRows) {
             const pathStr = String(f['path'] ?? '');
@@ -211,50 +237,49 @@ export async function contributeDeveloperTopology(
             });
         }
 
-        let fcBudget = limit * 4;
-        for (const f of fileRows) {
-            const pathStr = String(f['path'] ?? '');
-            if (!pathStr || fcBudget <= 0) break;
-            const fcEdges = await ctx.storage.traverse(
-                FILE_CONTAINS_COLL,
-                pathStr,
-                'out',
-                { limit: fcBudget },
-            );
-            for (const e of fcEdges) {
-                edges.push({ from: `file:${e.sourceId}`, to: `symbol:${e.targetId}`, label: 'contains' });
-                fcBudget--;
-                if (fcBudget <= 0) break;
-            }
+        // FileContains: bulk fetch (single query). Filter to files in
+        // the current project so we don't pull cross-project edges
+        // when drilled in.
+        const fcRows = await ctx.queryRows(
+            `MATCH (n:CodeFile)-[:FileContains]->(s:CodeSymbol)
+             ${buildWhere('n')}
+             RETURN n.path AS srcPath, s.uid AS dstUid
+             LIMIT ${limit * 4}`,
+            params,
+        );
+        for (const e of fcRows) {
+            edges.push({
+                from: `file:${e['srcPath']}`,
+                to: `symbol:${e['dstUid']}`,
+                label: 'contains',
+            });
         }
 
-        let ltBudget = limit;
-        for (const f of fileRows) {
-            const pathStr = String(f['path'] ?? '');
-            if (!pathStr || ltBudget <= 0) break;
-            const ltEdges = await ctx.storage.traverse<{ relation?: string }>(
-                LORE_TOUCHES_FILE_COLL,
-                pathStr,
-                'in',
-                { limit: ltBudget },
-            );
-            for (const e of ltEdges) {
-                edges.push({
-                    from: e.sourceId,
-                    to: `file:${e.targetId}`,
-                    label: e.edgeProps.relation ?? 'touches',
-                });
-                ltBudget--;
-                if (ltBudget <= 0) break;
-            }
+        // LoreTouchesFile: single bulk query.
+        const ltRows = await ctx.queryRows(
+            `MATCH (l:LoreNode)-[r:LoreTouchesFile]->(f:CodeFile)
+             ${buildWhere('f')}
+             RETURN l.id AS srcId, f.path AS dstPath, r.relation AS relation
+             LIMIT ${limit}`,
+            params,
+        );
+        for (const e of ltRows) {
+            edges.push({
+                from: String(e['srcId']),
+                to: `file:${e['dstPath']}`,
+                label: (e['relation'] as string | undefined) ?? 'touches',
+            });
         }
-    } catch { /* tables may be missing on older graphs */ }
+    } catch (err) {
+        // Tables may be missing on older graphs.
+        console.error(`[contributeDeveloperTopology] file/edge bulk fetch failed: ${(err as Error).message}`);
+    }
 
+    // Symbols + their edges
     try {
-        const symRows = await ctx.storage.find<Record<string, unknown>>(
-            CODE_SYMBOL_COLL,
-            {},
-            { limit: limit * 4 },
+        const symRows = await ctx.queryRows(
+            `MATCH (n:CodeSymbol) ${projectClauseFor('n')} RETURN n.uid AS uid, n.name AS name, n.repo AS repo LIMIT ${limit * 4}`,
+            params,
         );
         for (const s of symRows) {
             const uid = String(s['uid'] ?? '');
@@ -267,48 +292,41 @@ export async function contributeDeveloperTopology(
             });
         }
 
-        let crBudget = limit * 4;
-        for (const s of symRows) {
-            const uid = String(s['uid'] ?? '');
-            if (!uid || crBudget <= 0) break;
-            const crEdges = await ctx.storage.traverse<{ type?: string }>(
-                CODE_RELATION_COLL,
-                uid,
-                'out',
-                { limit: crBudget },
-            );
-            for (const e of crEdges) {
-                edges.push({
-                    from: `symbol:${e.sourceId}`,
-                    to: `symbol:${e.targetId}`,
-                    label: e.edgeProps.type ?? '',
-                });
-                crBudget--;
-                if (crBudget <= 0) break;
-            }
+        // CodeRelation: bulk fetch. Filter source-side to project so
+        // drill-in only sees within-project call edges.
+        const crRows = await ctx.queryRows(
+            `MATCH (n:CodeSymbol)-[r:CodeRelation]->(m:CodeSymbol)
+             ${buildWhere('n')}
+             RETURN n.uid AS srcUid, m.uid AS dstUid, r.type AS type
+             LIMIT ${limit * 4}`,
+            params,
+        );
+        for (const e of crRows) {
+            edges.push({
+                from: `symbol:${e['srcUid']}`,
+                to: `symbol:${e['dstUid']}`,
+                label: (e['type'] as string | undefined) ?? '',
+            });
         }
 
-        let laBudget = limit;
-        for (const s of symRows) {
-            const uid = String(s['uid'] ?? '');
-            if (!uid || laBudget <= 0) break;
-            const laEdges = await ctx.storage.traverse<{ relation?: string }>(
-                LORE_APPLIES_TO_CODE_COLL,
-                uid,
-                'in',
-                { limit: laBudget },
-            );
-            for (const e of laEdges) {
-                edges.push({
-                    from: e.sourceId,
-                    to: `symbol:${e.targetId}`,
-                    label: e.edgeProps.relation ?? 'applies_to',
-                });
-                laBudget--;
-                if (laBudget <= 0) break;
-            }
+        // LoreAppliesToCode: bulk fetch.
+        const laRows = await ctx.queryRows(
+            `MATCH (l:LoreNode)-[r:LoreAppliesToCode]->(s:CodeSymbol)
+             ${buildWhere('s')}
+             RETURN l.id AS srcId, s.uid AS dstUid, r.relation AS relation
+             LIMIT ${limit}`,
+            params,
+        );
+        for (const e of laRows) {
+            edges.push({
+                from: String(e['srcId']),
+                to: `symbol:${e['dstUid']}`,
+                label: (e['relation'] as string | undefined) ?? 'applies_to',
+            });
         }
-    } catch { /* ignore */ }
+    } catch (err) {
+        console.error(`[contributeDeveloperTopology] symbol/edge bulk fetch failed: ${(err as Error).message}`);
+    }
 
     return { nodes, edges };
 }
@@ -395,7 +413,7 @@ export async function recalibrateDeveloperNode(
     const embeddable = await buildSingleEmbeddable(markerId, graphCtx);
     if (!embeddable) return null;
 
-    try { await verbatim.delete(embeddable.id); } catch { /* ignore */ }
+    // Append-only: store() handles snapshot-then-overwrite.
     await verbatim.store({
         id: embeddable.id,
         text: embeddable.text,

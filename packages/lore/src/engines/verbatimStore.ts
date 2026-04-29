@@ -137,10 +137,131 @@ export class VerbatimStore implements VectorProvider {
         }
     }
 
+    /**
+     * Verbatim is the institutional memory — it is never destructively
+     * deleted. When a canonical id is overwritten, the previous row is
+     * snapshotted as `<id>#rev<timestamp>` so the full revision history
+     * is recoverable. When a node "goes away", call `tombstone(id, reason)`
+     * which preserves the last-known content and marks the canonical row
+     * as superseded. Snapshot rows are filtered out of `search()` by
+     * default; pass `{ includeHistory: true }` to surface them.
+     *
+     * History row id format: `<canonicalId>#rev<unix-millis-iso>`.
+     * Tombstone reason recorded in the canonical text prefix.
+     */
+    private isHistoryId(id: string): boolean {
+        return id.includes('#rev');
+    }
+
+    /**
+     * Coerce a LanceDB-returned vector field into a plain number[].
+     * Reads come back as Arrow Float32Array-backed structures; writing
+     * those back as-is fails with "Found field not in schema: vector.isValid"
+     * because Arrow's nullable-sentinel slots leak through. Iterating
+     * by index produces a plain JS array LanceDB will accept.
+     */
+    private toPlainVector(v: unknown): number[] {
+        if (!v) return [];
+        if (Array.isArray(v)) {
+            // Already a plain array, but Arrow may have leaked a single
+            // FixedSizeList element (a nested array) — flatten one level
+            // if so. Otherwise just coerce to numbers.
+            if (v.length === 1 && Array.isArray((v as unknown[])[0])) {
+                return ((v as unknown[])[0] as unknown[]).map((x) => Number(x));
+            }
+            return v.map((x) => Number(x));
+        }
+        // Arrow Vector — has .toArray() that yields the underlying TypedArray.
+        const arrowLike = v as { toArray?: () => unknown };
+        if (typeof arrowLike.toArray === 'function') {
+            const inner = arrowLike.toArray();
+            if (Array.isArray(inner)) {
+                if (inner.length === 1 && Array.isArray(inner[0])) {
+                    return (inner[0] as unknown[]).map((x) => Number(x));
+                }
+                return inner.map((x) => Number(x));
+            }
+            // toArray() can return a Float32Array directly.
+            const ta = inner as { length?: number; [k: number]: number };
+            if (typeof ta?.length === 'number') {
+                const out: number[] = new Array(ta.length);
+                for (let i = 0; i < ta.length; i++) out[i] = Number(ta[i]);
+                return out;
+            }
+        }
+        // Last-ditch: index access (Float32Array / TypedArray case).
+        const indexed = v as { length?: number; [k: number]: number };
+        if (typeof indexed.length === 'number') {
+            const out: number[] = new Array(indexed.length);
+            for (let i = 0; i < indexed.length; i++) out[i] = Number(indexed[i]);
+            return out;
+        }
+        return [];
+    }
+
+    /** Same Arrow-sentinel coercion for List<Utf8> fields. */
+    private toPlainStringList(v: unknown): string[] {
+        if (!v) return [];
+        if (Array.isArray(v)) return v.map((x) => String(x));
+        const indexed = v as { length?: number; [k: number]: unknown };
+        if (typeof indexed.length === 'number') {
+            const out: string[] = new Array(indexed.length);
+            for (let i = 0; i < indexed.length; i++) out[i] = String(indexed[i]);
+            return out;
+        }
+        return [];
+    }
+
+    private async snapshotForRev(canonicalId: string): Promise<void> {
+        if (!this.initialized || !this.table) return;
+        if (this.isHistoryId(canonicalId)) return; // never snapshot a snapshot
+        try {
+            const safe = canonicalId.replace(/'/g, "''");
+            const rows = await this.table
+                .query()
+                .where(`id = '${safe}'`)
+                .limit(1)
+                .toArray();
+            if (rows.length === 0) return;
+            const r = rows[0] as Record<string, unknown>;
+            const ts = new Date().toISOString();
+            const snapshotRow = {
+                vector: this.toPlainVector(r.vector),
+                id: `${canonicalId}#rev${ts}`,
+                text: r.text ?? '',
+                type: r.type ?? '',
+                label: r.label ?? '',
+                tags: r.tags ?? '',
+                project: r.project ?? '',
+                ecosystem: r.ecosystem ?? '',
+                updatedAt: r.updatedAt ?? '',
+                security_scopes: this.toPlainStringList(r.security_scopes),
+                contentHash: r.contentHash ?? '',
+            };
+            await this.table.add([snapshotRow]);
+        } catch (err) {
+            console.error(`[VerbatimStore] snapshotForRev failed for ${canonicalId}: ${(err as Error).message}`);
+        }
+    }
+
     async store(doc: VerbatimDocument): Promise<void> {
         try {
             if (!this.initialized || !this.db) {
                 throw new Error('Store not initialized');
+            }
+
+            // Auto-snapshot the existing canonical row before we
+            // overwrite it. History rows (id contains `#rev`) bypass
+            // this — they're already snapshots.
+            if (!this.isHistoryId(doc.id)) {
+                await this.snapshotForRev(doc.id);
+                // Remove the live canonical row so the subsequent .add()
+                // doesn't create a duplicate (LanceDB has no upsert).
+                if (this.table) {
+                    try {
+                        await this.table.delete(`id = '${doc.id.replace(/'/g, "''")}'`);
+                    } catch { /* ignore */ }
+                }
             }
 
             // Asymmetric models (e5 family) expect documents to be
@@ -185,7 +306,12 @@ export class VerbatimStore implements VectorProvider {
         }
     }
 
-    async search(query: string, limit: number = 10, filter?: Partial<VerbatimDocument['metadata']>): Promise<VerbatimSearchResult[]> {
+    async search(
+        query: string,
+        limit: number = 10,
+        filter?: Partial<VerbatimDocument['metadata']>,
+        opts?: { includeHistory?: boolean },
+    ): Promise<VerbatimSearchResult[]> {
         try {
             if (!this.initialized || !this.table) {
                 return [];
@@ -195,16 +321,25 @@ export class VerbatimStore implements VectorProvider {
             const vector = await this.embeddingProvider.embedQuery(query);
 
             let queryBuilder = this.table.vectorSearch(vector as number[]).limit(limit);
+            const conditions: string[] = [];
+            // Hide history snapshot rows AND tombstoned canonical rows
+            // by default. Verbatim is append-only, so without these
+            // filters search results would mix superseded content with
+            // current authoritative content. Pass `{ includeHistory: true }`
+            // to surface them (e.g. for an "audit / changelog" UI).
+            if (!opts?.includeHistory) {
+                conditions.push("id NOT LIKE '%#rev%'");
+                conditions.push("text NOT LIKE '[TOMBSTONED%'");
+            }
             if (filter) {
-                const conditions: string[] = [];
                 for (const [key, value] of Object.entries(filter)) {
                     if (value) {
-                         conditions.push(`${key} = '${value}'`);
+                        conditions.push(`${key} = '${value}'`);
                     }
                 }
-                if (conditions.length > 0) {
-                    queryBuilder = queryBuilder.filter(conditions.join(' AND '));
-                }
+            }
+            if (conditions.length > 0) {
+                queryBuilder = queryBuilder.filter(conditions.join(' AND '));
             }
 
             const results = await queryBuilder.toArray();
@@ -277,12 +412,122 @@ export class VerbatimStore implements VectorProvider {
         }
     }
 
+    /**
+     * @deprecated Verbatim is now append-only memory. Calls to this
+     * method are routed to `tombstone()` so the prior content is
+     * preserved with a "legacy delete" reason. Existing call sites
+     * that were paired with a follow-up `store()` (i.e. update flows)
+     * should drop the delete entirely — `store()` auto-snapshots.
+     */
     async delete(id: string): Promise<void> {
+        await this.tombstone(id, 'legacy verbatim.delete() call (no reason supplied)');
+    }
+
+    /**
+     * Mark the canonical row at `id` as superseded without losing its
+     * content. Snapshots the previous content as `<id>#rev<ts>` and
+     * rewrites the canonical row with a tombstone prefix that records
+     * who/why. The row remains queryable (e.g. via `getById`) but is
+     * filtered out of vector `search()` since its content is no longer
+     * authoritative.
+     *
+     * History queries (`getHistory(id)`) include the tombstone
+     * canonical row plus every preceding `#rev` snapshot.
+     */
+    async tombstone(id: string, reason: string): Promise<void> {
         try {
             if (!this.initialized || !this.table) return;
-            await this.table.delete(`id = '${id}'`);
-        } catch (error: any) {
-            // silent no-op on error
+            if (this.isHistoryId(id)) return; // never tombstone a snapshot
+            const safe = id.replace(/'/g, "''");
+            const rows = await this.table.query().where(`id = '${safe}'`).limit(1).toArray();
+            if (rows.length === 0) return;
+            const r = rows[0] as Record<string, unknown>;
+            const ts = new Date().toISOString();
+            // Snapshot the previous content under a #rev id (explicit
+            // field copy — see snapshotForRev for why spread is unsafe
+            // against Arrow-backed rows).
+            const snapshotRow = {
+                vector: this.toPlainVector(r.vector),
+                id: `${id}#rev${ts}`,
+                text: r.text ?? '',
+                type: r.type ?? '',
+                label: r.label ?? '',
+                tags: r.tags ?? '',
+                project: r.project ?? '',
+                ecosystem: r.ecosystem ?? '',
+                updatedAt: r.updatedAt ?? '',
+                security_scopes: this.toPlainStringList(r.security_scopes),
+                contentHash: r.contentHash ?? '',
+            };
+            await this.table.add([snapshotRow]);
+            // Build the tombstone canonical content. Keep the original
+            // text accessible after a "TOMBSTONED" marker so a human
+            // (or recall) can still read what used to be there.
+            const originalText = String(r.text ?? '');
+            const tombstoneText = `[TOMBSTONED ${ts} reason: ${reason}]\n\n${originalText}`;
+            const newVector = await this.embeddingProvider.embedDocument(tombstoneText);
+            // Remove old canonical, then add the tombstone canonical.
+            await this.table.delete(`id = '${safe}'`);
+            await this.table.add([{
+                vector: newVector,
+                id,
+                text: tombstoneText,
+                type: r.type ?? '',
+                label: r.label ?? '',
+                tags: r.tags ?? '',
+                project: r.project ?? '',
+                ecosystem: r.ecosystem ?? '',
+                updatedAt: ts,
+                security_scopes: this.toPlainStringList(r.security_scopes),
+                contentHash: r.contentHash ?? '',
+            }]);
+        } catch {
+            // best-effort; never throw out of a deletion path
+        }
+    }
+
+    /**
+     * Return every revision row for `id`: the canonical row (current,
+     * possibly tombstoned) plus every `<id>#rev*` snapshot, ordered
+     * newest first. Empty array if nothing has ever been stored at
+     * this id.
+     */
+    async getHistory(id: string): Promise<Array<{
+        id: string;
+        text: string;
+        updatedAt: string;
+        isTombstone: boolean;
+        isCanonical: boolean;
+    }>> {
+        try {
+            if (!this.initialized || !this.table) return [];
+            const safe = id.replace(/'/g, "''");
+            const rows = await this.table
+                .query()
+                .where(`id = '${safe}' OR id LIKE '${safe}#rev%'`)
+                .toArray();
+            const out = rows.map((raw) => {
+                const r = raw as Record<string, unknown>;
+                const rid = String(r.id ?? '');
+                const text = String(r.text ?? '');
+                return {
+                    id: rid,
+                    text,
+                    updatedAt: String(r.updatedAt ?? ''),
+                    isTombstone: text.startsWith('[TOMBSTONED'),
+                    isCanonical: rid === id,
+                };
+            });
+            // Newest first: canonical first if it exists, then snapshots
+            // sorted by the embedded timestamp (which is also lex-sortable).
+            out.sort((a, b) => {
+                if (a.isCanonical) return -1;
+                if (b.isCanonical) return 1;
+                return b.id.localeCompare(a.id);
+            });
+            return out;
+        } catch {
+            return [];
         }
     }
 

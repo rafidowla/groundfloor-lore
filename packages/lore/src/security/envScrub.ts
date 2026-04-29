@@ -46,6 +46,7 @@ const ALLOWED_VARS: readonly string[] = [
     // Lore config
     'LORE_PORT',
     'LORE_LOG_LEVEL',
+    'LORE_HOME',                                // 2026-04-28 relocate the entire data tree (default ~/.groundfloor)
     'LORE_WORKSPACE',                           // forces a specific active workspace
     'LORE_DEPLOYMENT_MODE',                     // Q2.1 — pin mode to 'local' or 'cloud'
     'LORE_CACHE_DISABLED',                      // Q1.3 operator killswitch for the read cache

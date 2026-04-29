@@ -1,0 +1,9 @@
+id,name,vendor,criticality
+a001,Argus,Altus Group,critical
+a002,Yardi Voyager,Yardi Systems,critical
+a003,Salesforce,Salesforce,high
+a004,Slack,Salesforce,medium
+a005,Microsoft 365,Microsoft,critical
+a006,Okta,Okta,critical
+a007,DocuSign,DocuSign,high
+a008,QuickBooks,Intuit,high

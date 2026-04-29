@@ -44,9 +44,9 @@ import {
     developerCollectionDecls,
 } from './collections.js';
 import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology, recalibrateDeveloperNode } from './reconnect.js';
-import { buildDeveloperApi, bindApiSelfReference, type DeveloperApi } from './api.js';
+import { buildDeveloperApi, bindApiSelfReference, bindPluginContext, type DeveloperApi } from './api.js';
 import { registerDeveloperTools } from './tools.js';
-import { indexCommand as devIndexCommand, ingestFilesCommand as devIngestFilesCommand, analyzeCommand as devAnalyzeCommand } from './cli.js';
+import { indexCommand as devIndexCommand, ingestFilesCommand as devIngestFilesCommand, analyzeCommand as devAnalyzeCommand, reposCommand as devReposCommand } from './cli.js';
 
 const TOOL_NAMES = [
     'code_query',
@@ -110,7 +110,21 @@ export const developerPlugin: ILorePlugin = {
      * V2.1 cleanup: register the 10 developer MCP tools through the
      * plugin's own module. server.ts has no knowledge of these tools.
      */
+    /**
+     * Phase boundary fix (2026-04-27) — bindRuntime fires once at daemon
+     * boot (BEFORE HTTP server starts) so daemon-level HTTP routes that
+     * call into devApi (e.g. /api/code-similar) can reach verbatimStore
+     * even when no MCP session is active. registerTools binds the same
+     * thing per-MCP-session as a backstop.
+     */
+    bindRuntime(ctx: PluginContext): void {
+        bindPluginContext(ctx);
+    },
+
     registerTools(server: McpServer, ctx: PluginContext): void {
+        // Re-bind on every MCP session in case bindRuntime was skipped
+        // (e.g. plugin loaded mid-session). Idempotent.
+        bindPluginContext(ctx);
         const api = (developerPlugin as ILorePlugin & { api?: DeveloperApi }).api;
         if (!api) {
             console.error('[developer plugin] registerTools called before registerSchema attached the api — skipping.');
@@ -198,8 +212,8 @@ export const developerPlugin: ILorePlugin = {
         return stats.touchesFile + stats.appliesToCode;
     },
 
-    async contributeTopology(ctx: PluginGraphContext, limit: number) {
-        return await contributeDeveloperTopology(ctx, limit);
+    async contributeTopology(ctx: PluginGraphContext, limit: number, projects?: string[] | string) {
+        return await contributeDeveloperTopology(ctx, limit, projects);
     },
 
     /**
@@ -439,6 +453,33 @@ export const developerPlugin: ILorePlugin = {
     },
 
     /**
+     * Boundary cleanup (2026-04-27) — domain node types owned by this
+     * plugin. Core ships only generic types (decision/convention/note);
+     * dev concepts that fail the family-workspace test live here so a
+     * non-dev workspace doesn't see them in store_node.
+     */
+    contributeNodeTypes() {
+        return [
+            { name: 'bug_pattern',     description: 'Recurring code bug + root cause + fix' },
+            { name: 'architecture',    description: 'High-level code structure or design' },
+            { name: 'troubleshooting', description: 'Step-by-step recovery steps for a known failure' },
+            { name: 'file_ref',        description: 'Pointer to a code file, for cross-referencing' },
+            { name: 'schema',          description: 'Data schema or table definition' },
+        ];
+    },
+
+    /**
+     * Boundary cleanup (2026-04-27) — edge relations owned by this
+     * plugin. 'fixed_by' implies bugs (a code concept); kept here so a
+     * non-dev workspace doesn't see it in store_edge.
+     */
+    contributeEdgeRelations() {
+        return [
+            { name: 'fixed_by', description: 'Bug or issue resolved by a specific commit, PR, or change' },
+        ];
+    },
+
+    /**
      * Q1.5 — developer analytical projections.
      *
      * Three projections targeting the "shape of my code" questions
@@ -671,6 +712,10 @@ export const developerPlugin: ILorePlugin = {
             'ingest-files': {
                 help: 'Synthesize CodeFile nodes + FileContains edges from existing CodeSymbols',
                 handler: devIngestFilesCommand,
+            },
+            repos: {
+                help: 'Manage indexed code repositories (list / add / batch / remove / freshness / install-hook)',
+                handler: devReposCommand,
             },
         };
     },

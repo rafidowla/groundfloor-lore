@@ -40,11 +40,35 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { loreHome, loreHomePath } from './loreHome.js';
+
+/**
+ * Per-workspace retention policy (2026-04-28). Soft-supersession is the
+ * mechanism; this is the policy on top.
+ *
+ * - hideSupersededInRecall: when true (default), recall + search results
+ *     drop nodes whose supersededAt is non-null. Off lets stale decisions
+ *     compete against current ones in semantic results.
+ * - hideSupersededInGraph: when true, the network view hides superseded
+ *     nodes server-side regardless of the per-session "Show superseded"
+ *     toggle. Default false — UI toggle is the authoritative control.
+ * - autoArchiveSupersededAfterDays: when a positive integer, a daily
+ *     sweep tombstones the verbatim row (preserves the graph node + its
+ *     edges) for any superseded node older than this threshold. null /
+ *     0 disables the sweep. Reversible via the verbatim history endpoint
+ *     since tombstone snapshots the content.
+ */
+export interface WorkspaceRetentionPolicy {
+    hideSupersededInRecall?: boolean;
+    hideSupersededInGraph?: boolean;
+    autoArchiveSupersededAfterDays?: number | null;
+}
 
 export interface WorkspaceEntry {
     name: string;
     path: string;
     createdAt: string;
+    retention?: WorkspaceRetentionPolicy;
 }
 
 export interface WorkspacesFile {
@@ -52,7 +76,7 @@ export interface WorkspacesFile {
     workspaces: WorkspaceEntry[];
 }
 
-const HOME_GROUNDFLOOR = path.join(os.homedir(), '.groundfloor');
+const HOME_GROUNDFLOOR = loreHome();
 const CONTROL_FILE = path.join(HOME_GROUNDFLOOR, 'workspaces.json');
 const WORKSPACES_DIR = path.join(HOME_GROUNDFLOOR, 'workspaces');
 
@@ -154,17 +178,80 @@ export function switchWorkspace(name: string): WorkspacesFile {
 /**
  * deleteWorkspace — Remove a workspace from the registry. Does NOT touch
  * its on-disk data — user must rm -rf manually to irrevocably lose data.
- * Cannot delete the "default" workspace or the currently-active one.
+ * Cannot delete the legacy/bootstrap workspace (the one anchored at
+ * HOME_GROUNDFLOOR rather than under workspaces/) or the active one.
  */
 export function deleteWorkspace(name: string): WorkspacesFile {
-    if (name === 'default') throw new Error('Cannot delete the default workspace');
     const file = loadWorkspaces();
+    const entry = file.workspaces.find((w) => w.name === name);
+    if (!entry) throw new Error(`Unknown workspace "${name}"`);
+    if (entry.path === HOME_GROUNDFLOOR) {
+        throw new Error('Cannot delete the legacy/bootstrap workspace (path is the Lore home)');
+    }
     if (file.active === name) throw new Error('Cannot delete the active workspace');
     file.workspaces = file.workspaces.filter((w) => w.name !== name);
     writeControl(file);
     return file;
 }
 
+/**
+ * renameWorkspace — Change a workspace's name without moving its data on
+ * disk. The path stays put; only the label/identity changes. Use this to
+ * give workspaces meaningful names ("default" → "developer") after the
+ * fact.
+ *
+ * Updates `active` if the renamed workspace was active. Rejects collisions
+ * with existing names. The legacy "default" entry is renameable — its
+ * path stays anchored at HOME_GROUNDFLOOR; only the label moves.
+ */
+export function renameWorkspace(oldName: string, rawNewName: string): WorkspacesFile {
+    const newName = kebabCase(rawNewName);
+    if (oldName === newName) return loadWorkspaces();
+    const file = loadWorkspaces();
+    if (!file.workspaces.some((w) => w.name === oldName)) {
+        throw new Error(`Unknown workspace "${oldName}"`);
+    }
+    if (file.workspaces.some((w) => w.name === newName)) {
+        throw new Error(`Workspace "${newName}" already exists`);
+    }
+    file.workspaces = file.workspaces.map((w) =>
+        w.name === oldName ? { ...w, name: newName } : w,
+    );
+    if (file.active === oldName) file.active = newName;
+    writeControl(file);
+    return file;
+}
+
 function writeControl(file: WorkspacesFile): void {
     fs.writeFileSync(CONTROL_FILE, JSON.stringify(file, null, 2), 'utf8');
+}
+
+/**
+ * Read the retention policy for a workspace by name. Falls back to
+ * sensible defaults when the workspace has no `retention` block (older
+ * workspaces.json files predate the field).
+ */
+export function getWorkspaceRetention(name: string): WorkspaceRetentionPolicy {
+    const file = loadWorkspaces();
+    const entry = file.workspaces.find((w) => w.name === name);
+    return {
+        hideSupersededInRecall: entry?.retention?.hideSupersededInRecall ?? true,
+        hideSupersededInGraph: entry?.retention?.hideSupersededInGraph ?? false,
+        autoArchiveSupersededAfterDays: entry?.retention?.autoArchiveSupersededAfterDays ?? null,
+    };
+}
+
+/**
+ * Update the retention policy for a workspace by name. Merges with any
+ * existing block — partial updates allowed (e.g. just toggle one field).
+ */
+export function setWorkspaceRetention(name: string, patch: Partial<WorkspaceRetentionPolicy>): WorkspaceRetentionPolicy {
+    const file = loadWorkspaces();
+    const entry = file.workspaces.find((w) => w.name === name);
+    if (!entry) throw new Error(`Unknown workspace "${name}"`);
+    const current = entry.retention ?? {};
+    const merged: WorkspaceRetentionPolicy = { ...current, ...patch };
+    entry.retention = merged;
+    writeControl(file);
+    return merged;
 }

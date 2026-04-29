@@ -6,6 +6,12 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "ui", "--", "--host", "127.0.0.1", "--port", "5180", "--strictPort"],
       "port": 5180
+    },
+    {
+      "name": "lore-ui-preview",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "ui", "--", "--host", "127.0.0.1", "--port", "5181", "--strictPort"],
+      "port": 5181
     }
   ]
 }

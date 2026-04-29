@@ -19,10 +19,11 @@ import { execSync } from 'child_process';
 import { LocalGraph } from '@lore-core/engines/localGraph.js';
 import { ConfigManager } from '@lore-core/config/configManager.js';
 import { PluginRegistry } from '@lore-core/plugins/registry.js';
+import { loreHome } from '@lore-core/config/loreHome.js';
 import type { DeveloperApi, IndexResult } from './api.js';
 
 function resolveGraphBasePath(): string {
-    return path.join(os.homedir(), '.groundfloor');
+    return loreHome();
 }
 
 async function bootForCli(): Promise<{ graph: LocalGraph; devApi: DeveloperApi | undefined; close: () => Promise<void> }> {
@@ -203,4 +204,286 @@ export async function ingestFilesCommand(_args: string[]): Promise<void> {
     await close();
     console.log('');
     console.log('  Next: `lore reconnect` to link LoreNode knowledge to these files via semantic similarity.');
+}
+
+/* ─── lore repos — Phase 1a Add-Project CLI ────────────────────── */
+
+const REPOS_HELP = `Usage: lore repos <subcommand> [args]
+
+Subcommands:
+  list                                  Show all indexed repositories with freshness
+  add <path> [--install-hook] [--force] Analyze + import a single repo
+  batch <parent> [opts]                 Discover git repos under <parent> and add them
+                                          --depth shallow|deep   (default: shallow)
+                                          --install-hook         Install post-commit hook in each
+                                          --dry-run              Preview only — list, do not add
+                                          --yes                  Skip the confirmation prompt
+  remove <name>                         Drop the repo from Lore's graph and registry
+  freshness <name> [--stale-after-h N]  Show whether the index is up-to-date (default 24h threshold)
+  install-hook <path> [--force]         Install the post-commit auto-refresh hook only
+
+Examples:
+  lore repos list
+  lore repos add /Users/me/code/my-app --install-hook
+  lore repos batch /Users/me/code/v3 --install-hook
+  lore repos batch /Users/me/code --depth deep --dry-run
+  lore repos remove old-repo
+`;
+
+export async function reposCommand(args: string[]): Promise<void> {
+    const sub = args[0];
+    if (!sub || sub === '--help' || sub === '-h') {
+        console.log(REPOS_HELP);
+        process.exit(sub ? 0 : 1);
+    }
+    const subArgs = args.slice(1);
+
+    switch (sub) {
+        case 'list':
+            return reposList();
+        case 'add':
+            return reposAdd(subArgs);
+        case 'batch':
+            return reposBatch(subArgs);
+        case 'remove':
+            return reposRemove(subArgs);
+        case 'freshness':
+            return reposFreshness(subArgs);
+        case 'install-hook':
+            return reposInstallHook(subArgs);
+        default:
+            console.error(`Unknown subcommand: ${sub}`);
+            console.error('');
+            console.log(REPOS_HELP);
+            process.exit(1);
+    }
+}
+
+async function reposList(): Promise<void> {
+    const { devApi, close } = await bootForCli();
+    if (!devApi) {
+        console.error('  ✗ repos requires the "developer" plugin. Add "developer" to .lore/config.json plugins[].');
+        await close();
+        process.exit(1);
+    }
+    const repos = devApi.listGitNexusRepos();
+    if (repos.length === 0) {
+        console.log('No repos indexed yet. Use `lore repos add <path>` to add one.');
+        await close();
+        return;
+    }
+    console.log('');
+    console.log(`Indexed repositories (${repos.length}):`);
+    console.log('');
+    for (const repo of repos) {
+        const fresh = devApi.getRepoFreshness(repo.name, 24);
+        const status = fresh
+            ? (fresh.status === 'fresh' ? '✓ fresh'
+                : fresh.status === 'stale' ? `⚠ stale (${fresh.reason})`
+                : '✗ never indexed')
+            : '?';
+        console.log(`  ${repo.name.padEnd(30)} ${status}`);
+        console.log(`    path:        ${repo.path}`);
+        console.log(`    indexed at:  ${repo.indexedAt}`);
+        if (repo.stats) {
+            console.log(`    stats:       ${repo.stats.nodes} symbols, ${repo.stats.edges} relations, ${repo.stats.embeddings ?? 0} embeddings`);
+        }
+        console.log('');
+    }
+    await close();
+}
+
+async function reposAdd(args: string[]): Promise<void> {
+    const repoPath = args.find((a) => !a.startsWith('--'));
+    if (!repoPath) {
+        console.error('Usage: lore repos add <path> [--install-hook] [--force]');
+        process.exit(1);
+    }
+    const installHook = args.includes('--install-hook');
+    const force = args.includes('--force');
+
+    const { devApi, close } = await bootForCli();
+    if (!devApi) {
+        console.error('  ✗ repos add requires the "developer" plugin.');
+        await close();
+        process.exit(1);
+    }
+    console.log('');
+    console.log(`  Adding ${repoPath}…`);
+    if (force) console.log('  (--force: re-running analyze even if HEAD is current)');
+    if (installHook) console.log('  (--install-hook: will install .git/hooks/post-commit if absent)');
+    console.log('');
+    try {
+        const result = await devApi.addRepo(repoPath, { installHook, force });
+        console.log(`  ✓ ${result.name}: ${result.imported ? 'imported' : 'skipped'}, ${result.symbolCount ?? 0} symbols`);
+        if (result.analyzed) console.log('  ✓ Analyze run');
+        if (result.hookInstalled) console.log('  ✓ Post-commit hook installed');
+        if (result.warnings && result.warnings.length > 0) {
+            for (const w of result.warnings) console.log(`  ⚠ ${w}`);
+        }
+    } catch (e) {
+        console.error(`  ✗ ${(e as Error).message}`);
+        await close();
+        process.exit(1);
+    }
+    await close();
+}
+
+async function reposBatch(args: string[]): Promise<void> {
+    const parent = args.find((a) => !a.startsWith('--'));
+    if (!parent) {
+        console.error('Usage: lore repos batch <parent> [--depth shallow|deep] [--install-hook] [--dry-run] [--yes]');
+        process.exit(1);
+    }
+    const depthIdx = args.indexOf('--depth');
+    const depth = (depthIdx >= 0 ? args[depthIdx + 1] : 'shallow') as 'shallow' | 'deep';
+    if (depth !== 'shallow' && depth !== 'deep') {
+        console.error(`Invalid --depth: ${depth}. Must be 'shallow' or 'deep'.`);
+        process.exit(1);
+    }
+    const installHook = args.includes('--install-hook');
+    const dryRun = args.includes('--dry-run');
+    const yes = args.includes('--yes');
+
+    const { devApi, close } = await bootForCli();
+    if (!devApi) {
+        console.error('  ✗ repos batch requires the "developer" plugin.');
+        await close();
+        process.exit(1);
+    }
+
+    console.log('');
+    console.log(`  Discovering git repos under ${parent} (depth: ${depth})…`);
+    const found = devApi.discoverRepos(parent, { depth });
+    if (found.length === 0) {
+        console.log('  No git repositories found.');
+        await close();
+        return;
+    }
+    console.log('');
+    console.log(`  Found ${found.length} repos:`);
+    for (const r of found) {
+        const tag = r.alreadyIndexed ? '(already indexed)' : '(new)';
+        console.log(`    ${r.name.padEnd(30)} ${tag}  ${r.path}`);
+    }
+    const toAdd = found.filter((r) => !r.alreadyIndexed);
+    console.log('');
+    console.log(`  ${toAdd.length} new repo(s) would be added.`);
+    if (dryRun) {
+        console.log('  --dry-run: stopping. Re-run without --dry-run to add.');
+        await close();
+        return;
+    }
+    if (toAdd.length === 0) {
+        await close();
+        return;
+    }
+    if (!yes) {
+        console.log('');
+        console.log('  Re-run with --yes to confirm and start indexing.');
+        await close();
+        return;
+    }
+
+    console.log('');
+    console.log('  Adding repos sequentially (this may take a few minutes)…');
+    let okCount = 0;
+    let failCount = 0;
+    for (const r of toAdd) {
+        process.stdout.write(`  • ${r.name}… `);
+        try {
+            const res = await devApi.addRepo(r.path, { installHook });
+            console.log(`✓ ${res.symbolCount ?? 0} symbols${res.hookInstalled ? ' (+ hook)' : ''}`);
+            okCount++;
+        } catch (e) {
+            console.log(`✗ ${(e as Error).message}`);
+            failCount++;
+        }
+    }
+    console.log('');
+    console.log(`  Done. ${okCount} added, ${failCount} failed.`);
+    await close();
+}
+
+async function reposRemove(args: string[]): Promise<void> {
+    const name = args[0];
+    if (!name) {
+        console.error('Usage: lore repos remove <name>');
+        process.exit(1);
+    }
+    const { devApi, close } = await bootForCli();
+    if (!devApi) {
+        console.error('  ✗ repos remove requires the "developer" plugin.');
+        await close();
+        process.exit(1);
+    }
+    try {
+        const result = await devApi.removeRepo(name);
+        console.log(`  ✓ Removed ${result.name}: ${result.symbolsCleared} symbols cleared, registry updated: ${result.registryUpdated}`);
+    } catch (e) {
+        console.error(`  ✗ ${(e as Error).message}`);
+        await close();
+        process.exit(1);
+    }
+    await close();
+}
+
+async function reposFreshness(args: string[]): Promise<void> {
+    const name = args.find((a) => !a.startsWith('--'));
+    if (!name) {
+        console.error('Usage: lore repos freshness <name> [--stale-after-h N]');
+        process.exit(1);
+    }
+    const staleIdx = args.indexOf('--stale-after-h');
+    const staleAfter = staleIdx >= 0 ? Number(args[staleIdx + 1]) : 24;
+
+    const { devApi, close } = await bootForCli();
+    if (!devApi) {
+        console.error('  ✗ repos freshness requires the "developer" plugin.');
+        await close();
+        process.exit(1);
+    }
+    const fresh = devApi.getRepoFreshness(name, staleAfter);
+    if (!fresh) {
+        console.error(`  ✗ Repo not found: ${name}`);
+        await close();
+        process.exit(1);
+    }
+    console.log('');
+    console.log(`  Repo:                 ${fresh.name}`);
+    console.log(`  Status:               ${fresh.status}${fresh.reason ? ' — ' + fresh.reason : ''}`);
+    console.log(`  Indexed at:           ${fresh.indexedAt}`);
+    console.log(`  Hours since index:    ${Math.round(fresh.hoursSinceIndex)}h`);
+    console.log(`  Last indexed commit:  ${fresh.lastIndexedCommit || '(none)'}`);
+    console.log(`  Current HEAD commit:  ${fresh.currentHeadCommit ?? '(unknown)'}`);
+    console.log(`  Behind HEAD:          ${fresh.behindHead}`);
+    await close();
+}
+
+async function reposInstallHook(args: string[]): Promise<void> {
+    const repoPath = args.find((a) => !a.startsWith('--'));
+    if (!repoPath) {
+        console.error('Usage: lore repos install-hook <path> [--force]');
+        process.exit(1);
+    }
+    const force = args.includes('--force');
+    const { devApi, close } = await bootForCli();
+    if (!devApi) {
+        console.error('  ✗ install-hook requires the "developer" plugin.');
+        await close();
+        process.exit(1);
+    }
+    try {
+        const result = devApi.installPostCommitHook(repoPath, { force });
+        if (result.installed) {
+            console.log(`  ✓ Post-commit hook installed in ${repoPath}/.git/hooks/post-commit`);
+        } else {
+            console.log(`  · ${result.reason ?? 'not installed'} (use --force to overwrite)`);
+        }
+    } catch (e) {
+        console.error(`  ✗ ${(e as Error).message}`);
+        await close();
+        process.exit(1);
+    }
+    await close();
 }

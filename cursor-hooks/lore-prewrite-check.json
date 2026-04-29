@@ -1,0 +1,22 @@
+{
+  "$schema": "https://cursor.sh/schemas/hooks.json",
+  "version": "1.0.0",
+  "_comment": "Lore pre-write duplicate check for Cursor. Reuses the same shell script as the Claude Code adapter. Install instructions in cursor-hooks/README.md.",
+  "hooks": {
+    "preToolUse": [
+      {
+        "match": {
+          "tool": ["Write", "Edit", "MultiEdit"]
+        },
+        "command": {
+          "executable": "bash",
+          "args": [
+            "/Users/rdowla/Downloads/AiDev/BitBucket/groundfloor-lore/.claude/hooks/lore-prewrite-check.sh"
+          ]
+        },
+        "timeoutMs": 2500,
+        "decision": "warn"
+      }
+    ]
+  }
+}
