@@ -2656,6 +2656,7 @@ function App() {
             showSuperseded={showSuperseded}
             setShowSuperseded={setShowSuperseded}
             allProjects={workspaceProjects}
+            availableTags={availableTags}
           />
         </aside>
       ) : null}
