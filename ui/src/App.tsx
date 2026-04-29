@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react';
-import { Settings, MessageSquare, Moon, Sun, PanelLeft, PanelRight, FolderGit2, GitBranchPlus, Boxes, Table, SlidersHorizontal } from 'lucide-react';
+import { Settings, MessageSquare, Moon, Sun, PanelLeft, PanelRight, FolderGit2, GitBranchPlus, Boxes, Table, SlidersHorizontal, ChevronDown } from 'lucide-react';
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import WorkspacePicker from './components/WorkspacePicker';
 import NodeDetailDrawer from './components/NodeDetailDrawer';
@@ -183,6 +183,131 @@ function readFileAsBase64(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error('FileReader error'));
     reader.readAsDataURL(file);
   });
+}
+
+// ─── Plugins dropdown ─────────────────────────────────────────────────────
+// Groups the three plugin-related toolbar buttons (Create, Inspectors,
+// Settings) into a single dropdown. Reduces horizontal cramping in the
+// sidebar header and gives the section room to grow as more plugin
+// surfaces appear (HTTP fetcher status, manifest hot-reload, etc.).
+//
+// Closes on: clicking a menu item, clicking outside, or pressing Escape.
+function PluginsMenu({
+  onOpenWizard,
+  onOpenInspectors,
+  onOpenSettings,
+}: {
+  onOpenWizard: () => void;
+  onOpenInspectors: () => void;
+  onOpenSettings: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const choose = (fn: () => void) => {
+    setOpen(false);
+    fn();
+  };
+
+  return (
+    <div ref={wrapperRef} style={{ position: 'relative' }}>
+      <button
+        className="icon-button"
+        onClick={() => setOpen((v) => !v)}
+        title="Plugins — create, inspect, configure"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        style={{ display: 'flex', alignItems: 'center', gap: 2 }}
+      >
+        <Boxes size={18} />
+        <ChevronDown size={14} style={{ opacity: 0.7 }} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            right: 0,
+            minWidth: 200,
+            background: 'var(--color-surface, #1f1f1f)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 6,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+            zIndex: 50,
+            padding: 4,
+          }}
+        >
+          <PluginsMenuItem icon={<Boxes size={16} />} label="Create plugin (Tier 1)" onClick={() => choose(onOpenWizard)} />
+          <PluginsMenuItem icon={<Table size={16} />} label="Inspectors" onClick={() => choose(onOpenInspectors)} />
+          <PluginsMenuItem icon={<SlidersHorizontal size={16} />} label="Settings" onClick={() => choose(onOpenSettings)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PluginsMenuItem({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      role="menuitem"
+      onClick={onClick}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        width: '100%',
+        padding: '8px 10px',
+        background: 'transparent',
+        border: 'none',
+        borderRadius: 4,
+        color: 'var(--color-text)',
+        fontSize: 13,
+        textAlign: 'left',
+        cursor: 'pointer',
+      }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--color-border)'; }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+// Vertical separator between toolbar groups.
+function ToolbarDivider() {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        display: 'inline-block',
+        width: 1,
+        height: 18,
+        background: 'var(--color-border)',
+        margin: '0 4px',
+        opacity: 0.6,
+      }}
+    />
+  );
 }
 
 function App() {
@@ -1291,7 +1416,11 @@ function App() {
             <span className="brand-wordmark">Lore</span>
           </div>
           <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
-          <div style={{ display: 'flex', gap: '0.25rem' }}>
+          {/* Toolbar — grouped with separators to give cramped icons room.
+              Group 1: Knowledge surfaces (projects, find duplicates).
+              Group 2: Plugins (single dropdown — wizard / inspectors / settings).
+              Group 3: App (settings, hide chat). */}
+          <div style={{ display: 'flex', gap: '0.2rem', alignItems: 'center' }}>
             <button
               className="icon-button"
               onClick={() => {
@@ -1319,27 +1448,17 @@ function App() {
             >
               <GitBranchPlus size={20} />
             </button>
-            <button
-              className="icon-button"
-              onClick={() => setShowPluginInspectors(true)}
-              title="Plugin inspectors (manifest-declared tabs)"
-            >
-              <Table size={20} />
-            </button>
-            <button
-              className="icon-button"
-              onClick={() => setShowPluginSettings(true)}
-              title="Plugin settings (manifest-declared config fields)"
-            >
-              <SlidersHorizontal size={20} />
-            </button>
-            <button
-              className="icon-button"
-              onClick={() => setShowPluginWizard(true)}
-              title="Create plugin (Tier 1 wizard)"
-            >
-              <Boxes size={20} />
-            </button>
+
+            <ToolbarDivider />
+
+            <PluginsMenu
+              onOpenWizard={() => setShowPluginWizard(true)}
+              onOpenInspectors={() => setShowPluginInspectors(true)}
+              onOpenSettings={() => setShowPluginSettings(true)}
+            />
+
+            <ToolbarDivider />
+
             <button
               ref={settingsButtonRef}
               className="icon-button"
