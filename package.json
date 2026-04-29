@@ -1,8 +1,10 @@
 {
     "name": "@groundfloor/lore",
     "version": "0.1.0",
-    "description": "Unified code intelligence + institutional knowledge MCP server. Local-first Kùzu graph with SurrealDB team sync.",
+    "description": "Unified code intelligence + institutional knowledge MCP server. Local-first Kùzu graph with Dataplane team sync.",
     "type": "module",
+    "license": "SEE LICENSE IN LICENSE",
+    "private": true,
     "main": "dist/lore/src/mcp/server.js",
     "bin": {
         "lore": "dist/lore/src/cli/index.js"

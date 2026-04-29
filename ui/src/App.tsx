@@ -233,9 +233,10 @@ function PluginsMenu({
       <button
         className="icon-button"
         onClick={() => setOpen((v) => !v)}
-        title="Plugins — create, inspect, configure"
+        aria-label="Plugins — create, inspect, configure"
         aria-haspopup="menu"
         aria-expanded={open}
+        data-tooltip="Plugins — create, inspect, configure"
         style={{ display: 'flex', alignItems: 'center', gap: 2 }}
       >
         <Boxes size={18} />
@@ -247,7 +248,10 @@ function PluginsMenu({
           style={{
             position: 'absolute',
             top: 'calc(100% + 4px)',
-            right: 0,
+            // Anchor LEFT edge to the trigger so the menu opens toward
+            // the canvas. Earlier `right: 0` made it open off the left
+            // edge of the sidebar, getting clipped by the browser frame.
+            left: 0,
             minWidth: 200,
             background: 'var(--color-surface, #1f1f1f)',
             border: '1px solid var(--color-border)',
@@ -1426,7 +1430,13 @@ function App() {
               <span className="brand-wordmark">Lore</span>
             </div>
             <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
-            <button className="icon-button" onClick={() => setSidebarOpen(false)} title="Hide chat panel">
+            <button
+              className="icon-button"
+              onClick={() => setSidebarOpen(false)}
+              aria-label="Hide chat panel"
+              data-tooltip="Hide chat panel"
+              data-tooltip-side="left"
+            >
               <PanelLeft size={18} />
             </button>
           </div>
@@ -1448,14 +1458,16 @@ function App() {
                     setSelectedNodeId(null);
                 }
               }}
-              title="Projects — manage indexed code repositories"
+              aria-label="Projects — manage indexed code repositories"
+              data-tooltip="Projects — indexed code repositories"
             >
               <FolderGit2 size={20} />
             </button>
             <button
               className="icon-button"
               onClick={() => setShowSupersedeCandidates(true)}
-              title="Find supersession candidates — scans your knowledge for likely duplicate decisions and lets you mark older versions as superseded"
+              aria-label="Find supersession candidates — scans your knowledge for likely duplicate decisions and lets you mark older versions as superseded"
+              data-tooltip="Find supersession candidates"
             >
               <GitBranchPlus size={20} />
             </button>
@@ -1481,7 +1493,8 @@ function App() {
                 setShowSettings(next);
                 if (next) { setSelectedNodeId(null); setShowProjects(false); }
               }}
-              title="Settings"
+              aria-label="Settings"
+              data-tooltip="App settings"
             >
               <Settings size={20} />
             </button>

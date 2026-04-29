@@ -125,11 +125,90 @@
   align-items: center;
   justify-content: center;
   transition: background-color 0.2s, color 0.2s;
+  position: relative;
 }
 
 .icon-button:hover {
   background-color: var(--color-border);
   color: var(--color-text-primary);
+}
+
+/* Fast custom tooltips. Browser-default `title` waits ~1.5s before
+   appearing; for an icon-heavy toolbar that hurts discoverability.
+   Use `data-tooltip` instead — same content, ~0.4s delay, readable
+   styling on a dark chip. Also drives an off-screen accessible
+   label via aria-label on the same button. */
+.icon-button[data-tooltip]::after {
+  content: attr(data-tooltip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 5px 9px;
+  background: rgba(15, 23, 42, 0.95);
+  color: #fafafa;
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: 0.01em;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  /* Tooltip stays hidden until hover — no transition on idle state */
+  visibility: hidden;
+  transition: opacity 0.12s ease;
+}
+
+.icon-button[data-tooltip]:hover::after,
+.icon-button[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  /* Brief delay so quick mouse passes don't flash tooltips */
+  transition-delay: 0.35s;
+}
+
+/* Tooltip arrow */
+.icon-button[data-tooltip]::before {
+  content: '';
+  position: absolute;
+  top: calc(100% + 1px);
+  left: 50%;
+  transform: translateX(-50%);
+  border: 5px solid transparent;
+  border-bottom-color: rgba(15, 23, 42, 0.95);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  z-index: 100;
+  transition: opacity 0.12s ease;
+}
+
+.icon-button[data-tooltip]:hover::before,
+.icon-button[data-tooltip]:focus-visible::before {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0.35s;
+}
+
+/* When the button sits in the brand-row (top right of sidebar) the
+   tooltip would clip against the sidebar's left edge if it opened
+   below-and-centered. Override per-button via data-tooltip-side. */
+.icon-button[data-tooltip][data-tooltip-side="left"]::after {
+  top: 50%;
+  left: auto;
+  right: calc(100% + 8px);
+  transform: translateY(-50%);
+}
+.icon-button[data-tooltip][data-tooltip-side="left"]::before {
+  top: 50%;
+  left: auto;
+  right: calc(100% - 4px);
+  transform: translateY(-50%);
+  border: 5px solid transparent;
+  border-left-color: rgba(15, 23, 42, 0.95);
 }
 
 /* Chat Area */
