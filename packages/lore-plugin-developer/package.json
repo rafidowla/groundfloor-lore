@@ -1,0 +1,53 @@
+{
+    "name": "@groundfloor/lore-plugin-developer",
+    "version": "2.0.0",
+    "description": "Developer-workspace plugin for Lore. Tier 3 TypeScript. Owns the code-intelligence layer (parser, resolver, analytics, git signals) — internal codename Atlas. Declared deps here for documentation; root package.json is the canonical install target until npm workspaces are wired in.",
+    "private": true,
+    "license": "SEE LICENSE IN ../../LICENSE",
+    "type": "module",
+    "main": "../../dist/lore-plugin-developer/src/index.js",
+    "dependencies": {
+        "web-tree-sitter": "^0.22.6",
+        "tree-sitter-typescript": "^0.23.2",
+        "tree-sitter-javascript": "^0.23.1",
+        "tree-sitter-python": "^0.23.6",
+        "tree-sitter-go": "^0.23.4",
+        "tree-sitter-rust": "^0.23.2",
+        "tree-sitter-java": "^0.23.5",
+        "tree-sitter-c-sharp": "^0.23.1",
+        "tree-sitter-c": "^0.23.5",
+        "tree-sitter-cpp": "^0.23.4",
+        "tree-sitter-ruby": "^0.23.1",
+        "graphology": "^0.26.0",
+        "graphology-pagerank": "^1.1.0",
+        "graphology-components": "^1.5.4"
+    },
+    "atlas": {
+        "phase": 0,
+        "stackGraphs": {
+            "binding": "deferred",
+            "defaultPlan": "Rust sidecar built from upstream `stack-graphs` + per-language tree-sitter-stack-graphs adapters. Confirm at Phase 2 kickoff. See docs/internal/gitnexus_audit.md §2."
+        },
+        "grammars": {
+            "format": "wasm",
+            "loader": "web-tree-sitter",
+            "languages": [
+                "typescript",
+                "javascript",
+                "python",
+                "go",
+                "rust",
+                "java",
+                "c-sharp",
+                "c",
+                "cpp",
+                "ruby"
+            ],
+            "wasmDir": "grammars/",
+            "note": "WASM blobs land under packages/lore-plugin-developer/grammars/ once Phase 1 runs `npm install` — kept out of this Phase 0 commit. See PHASE_0_OUTPUT.md."
+        }
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    }
+}
