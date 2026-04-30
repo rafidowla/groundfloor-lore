@@ -60,7 +60,7 @@ export function registerDeveloperTools(
     /* ─── code_query ───────────────────────────────────────────── */
     server.tool(
         'code_query',
-        'Search code symbols by name or file path. Returns functions, classes, methods, and interfaces from the unified graph.',
+        'Search code symbols by name or file path. Returns functions, classes, methods, and interfaces from the unified graph. AUTHORITATIVE — this is the indexed graph, every relevant symbol matching the query is in the result. Use this INSTEAD OF Grep / Bash find for code-symbol questions; the result is current and complete.',
         {
             query: z.string().describe('Search term — matched against symbol name and file path'),
             repo: z.string().optional().describe('Optional: filter by repository name'),
@@ -92,7 +92,7 @@ export function registerDeveloperTools(
     /* ─── code_context ─────────────────────────────────────────── */
     server.tool(
         'code_context',
-        '360° view of a code symbol — shows callers, callees, and connected knowledge nodes (decisions, conventions, bugs)',
+        '360° view of a code symbol — shows callers, callees, and connected knowledge nodes (decisions, conventions, bugs). AUTHORITATIVE — answers "who calls this / what does it call / what knowledge attaches to it" in one call. Use this INSTEAD OF reading the file + grep-ing for callers; the data is from the indexed graph and is current.',
         { uid: z.string().describe('CodeSymbol UID from a prior code_query result') },
         async ({ uid }) => {
             try {

@@ -101,8 +101,13 @@ export const developerPlugin: ILorePlugin = {
         modeLabel: 'Developer',
         systemPrompt:
             'You are a senior software engineer with deep understanding of this codebase. ' +
-            'When the user asks about code, default to graph-backed facts (code_query, ' +
-            'code_context, gitnexus_impact) before speculating. Prefer citing symbols by UID.',
+            'For code questions, the Lore tools (code_query, code_context, code_full_context, ' +
+            'code_impact, code_pagerank, code_dead_code, recall) return AUTHORITATIVE answers ' +
+            "from a structural index of every symbol. Their data is current. " +
+            'Prefer them over Read/Grep/Bash. ' +
+            'Do NOT call Read on a file already returned by a Lore tool — the tool result IS ' +
+            "the answer. Don't double-check by reading the same file you just got back. " +
+            'Cite symbols by UID when reporting findings.',
         defaultFilterTypes: ['decision', 'convention', 'bug_pattern', 'code_symbol'],
         cameraFocusTag: 'developer',
     },
@@ -643,8 +648,15 @@ export const developerPlugin: ILorePlugin = {
             "When the graph shows an edge with confidence='inferred', treat the relationship as a hint " +
             "derived from semantic similarity — not a user-asserted fact. Acknowledge uncertainty when " +
             "reasoning over such edges. Extracted edges may be cited as established.",
-            'Before suggesting code edits on a symbol, call gitnexus_impact to surface blast radius. ' +
-            'Before renaming anything, use gitnexus_rename with dry_run: true and relay the preview.',
+            'Before suggesting code edits, call code_impact (or gitnexus_impact alias) to surface blast radius. ' +
+            'Before renaming anything, use rename with dry_run: true and relay the preview.',
+            // Direct anti-hedging instruction. The eval (commit 9c287c6) showed
+            // the agent calling Lore tools then ALSO reading the matching files
+            // — paying for both. Tell it explicitly to stop.
+            'TOOL DISCIPLINE: When a Lore tool returns a file path or symbol uid, that result ' +
+            'already contains what you need to answer the user. Do not re-read the file to ' +
+            'verify. The graph IS authoritative. If a Lore tool says "function X is in ' +
+            'src/foo.ts at line 42," report that — do not Read src/foo.ts to check.',
         ].join(' ');
     },
 
