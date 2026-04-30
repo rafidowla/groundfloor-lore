@@ -62,6 +62,30 @@ export interface OpenAICompatEmbeddingProviderOptions {
     fetchImpl?: typeof fetch;
 }
 
+/**
+ * Truncate input text to fit within the smallest commonly-used
+ * embedder context window. Ollama's `all-minilm` has a 256-token
+ * context (~1000 chars); OpenAI / nomic-embed-text accept much more.
+ * 1000 chars works for every embedder we ship by default — for
+ * retrieval purposes the head of a doc carries most of the semantic
+ * signal, and an HTTP 400 from the embedder is much worse than
+ * slight truncation.
+ *
+ * Override via LORE_EMBEDDER_CHAR_LIMIT for operators using a
+ * specific large-context model (e.g. nomic-embed-text supports 8192
+ * tokens ≈ 32000 chars).
+ */
+// 500 chars ≈ 125 BPE tokens, safe for all-minilm (256-token context).
+// Operators using larger-context models (nomic-embed-text 8192,
+// text-embedding-3-small 8191) should bump LORE_EMBEDDER_CHAR_LIMIT
+// up to capture more of each doc.
+const DEFAULT_EMBED_CHAR_LIMIT = 500;
+function truncateForEmbedder(text: string): string {
+    const limit = Number(process.env.LORE_EMBEDDER_CHAR_LIMIT) || DEFAULT_EMBED_CHAR_LIMIT;
+    if (text.length <= limit) return text;
+    return text.slice(0, limit);
+}
+
 export class OpenAICompatEmbeddingProviderError extends Error {
     constructor(message: string, public readonly cause?: unknown) {
         super(`[OpenAICompatEmbeddingProvider] ${message}`);
@@ -142,9 +166,82 @@ export class OpenAICompatEmbeddingProvider implements EmbeddingProvider {
         return this.embed(text);
     }
 
+    /**
+     * Layer 2 (reconnect-fix, 2026-04-30) — batch document embedding.
+     * The OpenAI /v1/embeddings endpoint natively accepts `input` as
+     * an array. Ollama, vLLM, HF TEI, and lore-cloud all honour this.
+     * Sends all texts in one HTTP round-trip; server-side batching is
+     * massively faster than sequential calls (e.g. Ollama on Apple
+     * Silicon: ~1000 embeds/sec batched vs ~50/sec sequential).
+     */
+    async embedDocumentBatch(texts: string[]): Promise<number[][]> {
+        if (texts.length === 0) return [];
+        const body = JSON.stringify({ input: texts.map(truncateForEmbedder), model: this.modelId });
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+        let response: Response;
+        try {
+            response = await this.fetchImpl(this.endpoint, {
+                method: 'POST',
+                headers: this.headers,
+                body,
+                signal: controller.signal,
+            });
+        } catch (err) {
+            clearTimeout(timer);
+            const reason = (err as Error)?.name === 'AbortError'
+                ? `timeout after ${this.timeoutMs}ms`
+                : (err as Error)?.message ?? String(err);
+            throw new OpenAICompatEmbeddingProviderError(
+                `embedDocumentBatch() request to ${this.endpoint} failed: ${reason}`,
+                err,
+            );
+        }
+        clearTimeout(timer);
+
+        if (!response.ok) {
+            let bodyText = '';
+            try { bodyText = await response.text(); } catch { /* ignore */ }
+            throw new OpenAICompatEmbeddingProviderError(
+                `embedDocumentBatch() got HTTP ${response.status} from ${this.endpoint}: ${bodyText.slice(0, 500)}`
+            );
+        }
+
+        let parsed: EmbeddingsResponse;
+        try {
+            parsed = await response.json() as EmbeddingsResponse;
+        } catch (err) {
+            throw new OpenAICompatEmbeddingProviderError(
+                `embedDocumentBatch() response was not JSON: ${(err as Error)?.message ?? err}`,
+                err,
+            );
+        }
+
+        if (!parsed?.data || !Array.isArray(parsed.data) || parsed.data.length !== texts.length) {
+            throw new OpenAICompatEmbeddingProviderError(
+                `embedDocumentBatch() expected ${texts.length} embeddings, got ${parsed?.data?.length ?? 0}`
+            );
+        }
+
+        const vectors = parsed.data.map((row) => row.embedding);
+        for (const v of vectors) {
+            if (!Array.isArray(v)) {
+                throw new OpenAICompatEmbeddingProviderError('embedDocumentBatch() returned a non-array embedding');
+            }
+            if (v.length !== this.dimension) {
+                throw new OpenAICompatEmbeddingProviderError(
+                    `dimension mismatch in batch: configured ${this.dimension}, server returned ${v.length}`
+                );
+            }
+        }
+        return vectors;
+    }
+
     async embed(text: string): Promise<number[]> {
         const body = JSON.stringify({
-            input: [text],
+            input: [truncateForEmbedder(text)],
             model: this.modelId,
         });
 

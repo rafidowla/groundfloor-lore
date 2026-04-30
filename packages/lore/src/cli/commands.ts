@@ -1386,7 +1386,14 @@ export async function reconnectCommand(args: string[]): Promise<void> {
     }
 
     const graph = new LocalGraph(basePath);
-    const verbatim = new VerbatimStore(basePath);
+
+    // 2026-04-30 — auto-detect best embedder. Reconnect CLI used to
+    // default to LocalEmbeddingProvider (Xenova-Wasm). On a host with
+    // Ollama running, that's ~50× slower than necessary.
+    const { pickEmbeddingProvider } = await import('../providers/pickEmbeddingProvider.js');
+    const picked = await pickEmbeddingProvider(basePath);
+    console.log(picked.banner);
+    const verbatim = new VerbatimStore(basePath, picked.provider);
     const registry = new PluginRegistry(new ConfigManager(loreDir));
     registry.boot();
     await graph.initialize();

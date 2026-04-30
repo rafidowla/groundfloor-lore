@@ -472,8 +472,14 @@ export class VerbatimStore implements VectorProvider {
         }
 
         // Phase 3: append all rows to LanceDB in one .add() call.
+        // Normalise vector to plain number[] — Arrow's schema inference
+        // gets confused if some rows have Float32Array (from cache lookup
+        // that read LanceDB's stored TypedArray) and others have number[]
+        // (from a fresh embed call). Mixing produces "Found field not in
+        // schema: vector.isValid" because Arrow tries to serialise the
+        // TypedArray's null-bitmap as a separate column.
         const rows = resolved.map(({ doc, vector }) => ({
-            vector: vector ?? [],
+            vector: this.toPlainVector(vector ?? []),
             id: doc.id,
             text: doc.text,
             type: doc.metadata?.type || '',

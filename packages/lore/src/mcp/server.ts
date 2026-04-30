@@ -305,8 +305,29 @@ let graph: LoreGraph = createGraph();
 //
 // The vector stores below stay untouched regardless of which branch
 // fires.
-function createEmbeddingProvider(): EmbeddingProvider {
+async function createEmbeddingProvider(): Promise<EmbeddingProvider> {
     const providerKind = (process.env['LORE_EMBEDDING_PROVIDER'] ?? '').trim().toLowerCase();
+
+    // 2026-04-30 — auto-detect Ollama running locally before falling back
+    // to Xenova-Wasm. Ollama-on-Apple-Silicon is ~50-100x faster (Metal
+    // GPU + Neural Engine) than the Wasm-CPU default. Skipped when an
+    // explicit override is set or when LORE_DISABLE_AUTO_DETECT_EMBEDDER=1.
+    if (!providerKind && process.env['LORE_DISABLE_AUTO_DETECT_EMBEDDER'] !== '1') {
+        try {
+            const { pickEmbeddingProvider } = await import('../providers/pickEmbeddingProvider.js');
+            const picked = await pickEmbeddingProvider(graphBasePath);
+            if (!picked.isFallback) {
+                console.error(picked.banner);
+                return picked.provider;
+            }
+            // isFallback === true means pickEmbeddingProvider already
+            // ended up at LocalEmbeddingProvider; fall through to the
+            // existing local path below so we don't double-print.
+        } catch (err) {
+            console.error(`[Lore MCP] embedder auto-detect failed (non-fatal): ${(err as Error).message}`);
+        }
+    }
+
     if (providerKind === 'openai_compat' || providerKind === 'compat' || providerKind === 'remote') {
         const baseUrl = process.env['LORE_EMBEDDING_BASE_URL'] ?? '';
         const modelId = process.env['LORE_EMBEDDING_MODEL'] ?? '';
@@ -351,7 +372,7 @@ function createEmbeddingProvider(): EmbeddingProvider {
     );
     return provider;
 }
-const embeddingProvider: EmbeddingProvider = createEmbeddingProvider();
+const embeddingProvider: EmbeddingProvider = await createEmbeddingProvider();
 
 type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
 function createVectorStore(): LoreVectorStore {
