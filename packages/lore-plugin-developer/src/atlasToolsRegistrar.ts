@@ -111,7 +111,25 @@ export interface AtlasToolsContext {
 }
 
 export function registerAtlasTools(server: McpServer, atlasCtx: AtlasToolsContext): void {
-    /* ──────────── Analytics tools (8) ──────────── */
+    // 2026-04-30 — eval-headline fix: register only the ESSENTIAL Atlas
+    // tools by default. Every registered tool inflates the system prompt
+    // (~150-300 tokens of name + JSON schema + description per tool).
+    // With 12 tools registered, that's ~3k tokens of overhead PER TURN
+    // in every session, regardless of whether the user asks anything
+    // analytics-related. The eval (commit 9c287c6) revealed this as a
+    // significant drag on the headline.
+    //
+    // Default set (4 tools): the ones used most frequently in real
+    // developer sessions per the eval. Power users opt into the rest
+    // via LORE_ATLAS_REGISTER_ALL_TOOLS=1.
+    //
+    // Phase: this is the policy side of the "default vs opt-in tool
+    // registration" pattern. The matching mechanism in core (an
+    // ILorePlugin field that lets ANY plugin tier its tools) is a
+    // separate v1.1 cleanup commit.
+    const registerAll = process.env.LORE_ATLAS_REGISTER_ALL_TOOLS === '1';
+
+    /* ──────────── Default tools (always registered) ──────────── */
 
     server.tool(
         'code_blast_radius',
@@ -141,31 +159,35 @@ export function registerAtlasTools(server: McpServer, atlasCtx: AtlasToolsContex
             }),
     );
 
-    server.tool(
-        'code_coupling',
-        'Per-module afferent / efferent / instability metrics. Identifies stable hubs (high Ca, low I) and volatile leaves (high Ce, I = 1.0).',
-        {
-            module: z.string().optional().describe('Optional — filter to a single module path. Omit for full ranking.'),
-        },
-        async ({ module: moduleFilter }) =>
-            wrap('code_coupling', async () => {
-                const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
-                return handleCoupling(ctx, { module: moduleFilter });
-            }),
-    );
+    /* ──────────── Opt-in tools (gated) ──────────── */
 
-    server.tool(
-        'code_cycles',
-        'Find dependency cycles (strongly-connected components via Tarjan). Returns members of each cycle with size 2+.',
-        {
-            minSize: z.number().optional().describe('Minimum cycle size (default: 2)'),
-        },
-        async ({ minSize }) =>
-            wrap('code_cycles', async () => {
-                const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
-                return handleCycles(ctx, { minSize });
-            }),
-    );
+    if (registerAll) {
+        server.tool(
+            'code_coupling',
+            'Per-module afferent / efferent / instability metrics. Identifies stable hubs (high Ca, low I) and volatile leaves (high Ce, I = 1.0).',
+            {
+                module: z.string().optional().describe('Optional — filter to a single module path. Omit for full ranking.'),
+            },
+            async ({ module: moduleFilter }) =>
+                wrap('code_coupling', async () => {
+                    const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
+                    return handleCoupling(ctx, { module: moduleFilter });
+                }),
+        );
+
+        server.tool(
+            'code_cycles',
+            'Find dependency cycles (strongly-connected components via Tarjan). Returns members of each cycle with size 2+.',
+            {
+                minSize: z.number().optional().describe('Minimum cycle size (default: 2)'),
+            },
+            async ({ minSize }) =>
+                wrap('code_cycles', async () => {
+                    const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
+                    return handleCycles(ctx, { minSize });
+                }),
+        );
+    }
 
     server.tool(
         'code_dead_code',
@@ -181,73 +203,75 @@ export function registerAtlasTools(server: McpServer, atlasCtx: AtlasToolsContex
             }),
     );
 
-    server.tool(
-        'code_hotspots',
-        'Complexity × churn ranking. Identifies risky surfaces — high cyclomatic complexity that ALSO changes a lot. Defaults to 30-day churn lookback.',
-        {
-            limit: z.number().optional().describe('Top-N (default: 50)'),
-            minComplexity: z.number().optional().describe('Filter floor (default: 2)'),
-            churnSinceDays: z.number().optional().describe('Churn lookback in days (default: 30)'),
-        },
-        async ({ limit, minComplexity, churnSinceDays }) =>
-            wrap('code_hotspots', async () => {
-                const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
-                return handleHotspots(ctx, { limit, minComplexity, churnSinceDays });
-            }),
-    );
+    if (registerAll) {
+        server.tool(
+            'code_hotspots',
+            'Complexity × churn ranking. Identifies risky surfaces — high cyclomatic complexity that ALSO changes a lot. Defaults to 30-day churn lookback.',
+            {
+                limit: z.number().optional().describe('Top-N (default: 50)'),
+                minComplexity: z.number().optional().describe('Filter floor (default: 2)'),
+                churnSinceDays: z.number().optional().describe('Churn lookback in days (default: 30)'),
+            },
+            async ({ limit, minComplexity, churnSinceDays }) =>
+                wrap('code_hotspots', async () => {
+                    const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
+                    return handleHotspots(ctx, { limit, minComplexity, churnSinceDays });
+                }),
+        );
 
-    server.tool(
-        'code_layer_violations',
-        'Edges that violate user-declared LayerSpec rules. Default LayerSpec: ui→core OK, ui⇏plugins, core⇏plugins.',
-        {
-            layerSpec: z.record(z.string(), z.unknown()).optional().describe('Optional override of the default LayerSpec'),
-        },
-        async ({ layerSpec }) =>
-            wrap('code_layer_violations', async () => {
-                const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
-                return handleLayerViolations(ctx, { layerSpec: layerSpec as never });
-            }),
-    );
+        server.tool(
+            'code_layer_violations',
+            'Edges that violate user-declared LayerSpec rules. Default LayerSpec: ui→core OK, ui⇏plugins, core⇏plugins.',
+            {
+                layerSpec: z.record(z.string(), z.unknown()).optional().describe('Optional override of the default LayerSpec'),
+            },
+            async ({ layerSpec }) =>
+                wrap('code_layer_violations', async () => {
+                    const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
+                    return handleLayerViolations(ctx, { layerSpec: layerSpec as never });
+                }),
+        );
 
-    server.tool(
-        'code_tectonic_map',
-        'Module topology — modules as nodes, cross-module edges with per-kind weights, cyclic-module flags. Suitable for visualisation.',
-        {},
-        async () =>
-            wrap('code_tectonic_map', async () => {
-                const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
-                return handleTectonicMap(ctx);
-            }),
-    );
+        server.tool(
+            'code_tectonic_map',
+            'Module topology — modules as nodes, cross-module edges with per-kind weights, cyclic-module flags. Suitable for visualisation.',
+            {},
+            async () =>
+                wrap('code_tectonic_map', async () => {
+                    const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
+                    return handleTectonicMap(ctx);
+                }),
+        );
 
-    /* ──────────── Git-signal tools (4) ──────────── */
+        /* ──────────── Opt-in git-signal tools ──────────── */
 
-    server.tool(
-        'code_churn',
-        'Recent change activity per file (commits + additions + deletions over the lookback window). Reads `git log --since=N days ago --numstat`. AUTHORITATIVE — do not run git log yourself; this tool already did.',
-        {
-            file: z.string().optional().describe('Optional repo-relative path. Omit for whole-repo churn.'),
-            sinceDays: z.number().optional().describe('Lookback in days (default: 30)'),
-        },
-        async ({ file, sinceDays }) =>
-            wrap('code_churn', async () => {
-                const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
-                return handleChurn(ctx, { file, sinceDays });
-            }),
-    );
+        server.tool(
+            'code_churn',
+            'Recent change activity per file (commits + additions + deletions over the lookback window). Reads `git log --since=N days ago --numstat`. AUTHORITATIVE — do not run git log yourself; this tool already did.',
+            {
+                file: z.string().optional().describe('Optional repo-relative path. Omit for whole-repo churn.'),
+                sinceDays: z.number().optional().describe('Lookback in days (default: 30)'),
+            },
+            async ({ file, sinceDays }) =>
+                wrap('code_churn', async () => {
+                    const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
+                    return handleChurn(ctx, { file, sinceDays });
+                }),
+        );
 
-    server.tool(
-        'code_lineage',
-        'Per-line authorship history of a symbol. Output of git blame --line-porcelain over the symbol\'s byte range, plus distinct-author roll-up.',
-        {
-            symbol: z.string().describe('Symbol id, name, or qualified name'),
-        },
-        async ({ symbol }) =>
-            wrap('code_lineage', async () => {
-                const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
-                return handleLineage(ctx, { symbol });
-            }),
-    );
+        server.tool(
+            'code_lineage',
+            'Per-line authorship history of a symbol. Output of git blame --line-porcelain over the symbol\'s byte range, plus distinct-author roll-up.',
+            {
+                symbol: z.string().describe('Symbol id, name, or qualified name'),
+            },
+            async ({ symbol }) =>
+                wrap('code_lineage', async () => {
+                    const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
+                    return handleLineage(ctx, { symbol });
+                }),
+        );
+    }
 
     server.tool(
         'code_pr_risk',
@@ -264,17 +288,25 @@ export function registerAtlasTools(server: McpServer, atlasCtx: AtlasToolsContex
             }),
     );
 
-    server.tool(
-        'code_detect_changes',
-        'Map git diff to affected symbols (Atlas-native variant of detect_changes). Use scope=staged before commit; scope=compare with baseRef for branch-vs-base.',
-        {
-            scope: z.enum(['staged', 'unstaged', 'compare']).optional().describe('Default: staged'),
-            baseRef: z.string().optional().describe('Required when scope=compare'),
-        },
-        async ({ scope, baseRef }) =>
-            wrap('code_detect_changes', async () => {
-                const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
-                return handleDetectChanges(ctx, { scope, baseRef });
-            }),
-    );
+    if (registerAll) {
+        server.tool(
+            'code_detect_changes',
+            'Map git diff to affected symbols (Atlas-native variant of detect_changes). Use scope=staged before commit; scope=compare with baseRef for branch-vs-base.',
+            {
+                scope: z.enum(['staged', 'unstaged', 'compare']).optional().describe('Default: staged'),
+                baseRef: z.string().optional().describe('Required when scope=compare'),
+            },
+            async ({ scope, baseRef }) =>
+                wrap('code_detect_changes', async () => {
+                    const ctx = await getOrBuildAtlasContext(atlasCtx.repoRoot);
+                    return handleDetectChanges(ctx, { scope, baseRef });
+                }),
+        );
+    }
+
+    if (!registerAll) {
+        console.error('[atlas-tools] registered 4 default tools (code_blast_radius, code_pagerank, code_dead_code, code_pr_risk). Set LORE_ATLAS_REGISTER_ALL_TOOLS=1 to enable the other 8 (code_coupling, code_cycles, code_hotspots, code_layer_violations, code_tectonic_map, code_churn, code_lineage, code_detect_changes).');
+    } else {
+        console.error('[atlas-tools] registered all 12 tools (LORE_ATLAS_REGISTER_ALL_TOOLS=1)');
+    }
 }

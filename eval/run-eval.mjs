@@ -39,6 +39,12 @@ const MODE = process.env.LORE_EVAL_MODE ?? 'both';
 const TASKS_FILE = process.env.LORE_EVAL_TASKS ?? path.join(EVAL_ROOT, 'tasks/v1-developer-tasks.json');
 const RESULTS_DIR = path.join(EVAL_ROOT, 'results');
 const TIMEOUT_MS = Number(process.env.LORE_EVAL_TIMEOUT_MS ?? 180_000);
+// Multi-run averaging: run each (task × mode) cell N times and take the
+// median. Single-sample runs showed 3-10× swings between iterations on
+// the same code (claude's exploration path is non-deterministic), so
+// per-fix signal can't be measured at N=1. Default to 1 to keep quick
+// runs fast; bump to 3 for the median, 5 for tight confidence intervals.
+const ITERATIONS = Number(process.env.LORE_EVAL_ITERATIONS ?? 1);
 
 async function findClaudeBinary() {
     const base = path.join(os.homedir(), 'Library/Application Support/Claude/claude-code');
@@ -233,16 +239,48 @@ async function main() {
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 
     const allResults = [];
+    console.error(`[eval] iterations per cell: ${ITERATIONS}`);
     for (const task of tasks) {
         for (const mode of modes) {
-            console.error(`[eval] running ${task.id} (${mode})...`);
-            const t0 = Date.now();
-            const result = await runCell(claudeBin, task, mode);
-            const dt = ((Date.now() - t0) / 1000).toFixed(1);
-            console.error(`[eval]   ${task.id} ${mode}: tokens=${result.totalTokens ?? '?'}, score=${result.score?.toFixed(2) ?? '?'}, ${dt}s`);
-            const outPath = path.join(RESULTS_DIR, `${task.id}-${mode}-${stamp}.json`);
-            await fs.writeFile(outPath, JSON.stringify(result, null, 2));
-            allResults.push(result);
+            const cellRuns = [];
+            for (let iter = 1; iter <= ITERATIONS; iter++) {
+                console.error(`[eval] running ${task.id} (${mode}) iter ${iter}/${ITERATIONS}...`);
+                const t0 = Date.now();
+                const result = await runCell(claudeBin, task, mode);
+                const dt = ((Date.now() - t0) / 1000).toFixed(1);
+                console.error(`[eval]   ${task.id} ${mode} iter ${iter}: tokens=${result.totalTokens ?? '?'}, score=${result.score?.toFixed(2) ?? '?'}, ${dt}s`);
+                result.iteration = iter;
+                cellRuns.push(result);
+                const outPath = path.join(RESULTS_DIR, `${task.id}-${mode}-iter${iter}-${stamp}.json`);
+                await fs.writeFile(outPath, JSON.stringify(result, null, 2));
+            }
+
+            // Compute median + min/max for the cell.
+            if (ITERATIONS > 1) {
+                const tokens = cellRuns.map((r) => r.totalTokens).filter((n) => n != null).sort((a, b) => a - b);
+                const costs = cellRuns.map((r) => r.totalCostUsd).filter((n) => n != null).sort((a, b) => a - b);
+                const scores = cellRuns.map((r) => r.score).filter((n) => n != null).sort((a, b) => a - b);
+                const median = (arr) => arr.length === 0 ? null : arr[Math.floor(arr.length / 2)];
+                const aggregated = {
+                    ...cellRuns[0],
+                    iteration: 'median',
+                    iterations: cellRuns.length,
+                    totalTokens: median(tokens),
+                    totalCostUsd: median(costs),
+                    score: median(scores),
+                    allRuns: cellRuns.map((r) => ({
+                        iter: r.iteration,
+                        totalTokens: r.totalTokens,
+                        totalCostUsd: r.totalCostUsd,
+                        score: r.score,
+                        elapsedMs: r.elapsedMs,
+                    })),
+                };
+                console.error(`[eval]   ${task.id} ${mode} MEDIAN: tokens=${median(tokens)}, score=${median(scores)?.toFixed(2)}`);
+                allResults.push(aggregated);
+            } else {
+                allResults.push(cellRuns[0]);
+            }
         }
     }
 
