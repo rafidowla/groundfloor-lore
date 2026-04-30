@@ -29,3 +29,9 @@ Thumbs.db
 *.swo
 .gitnexus
 output.log
+
+# Eval per-run results — runner emits one JSON per cell + a rollup. Keep
+# the suite (eval/run-eval.mjs, eval/aggregate-report.mjs, eval/tasks/*,
+# eval/configs/*, eval/README.md) in source control; the per-run output
+# is reproducible and varies between runs.
+eval/results/
