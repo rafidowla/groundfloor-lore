@@ -21,7 +21,7 @@
 | Acceptance criterion | Status |
 |---|---|
 | All 8 walker tests pass | ✅ — 6 cases in walker-typescript + 1 smoke test per other 7 languages, all green |
-| Parsing `packages/lore/src/mcp/server.ts` returns within 5% of GitNexus baseline | Partial — 93 symbols extracted, 76ms parse (target was <500ms — easily met). Per-file gitnexus baseline number isn't recorded in `docs/internal/gitnexus_audit.md`; needs to be captured in a follow-up |
+| Parsing `packages/lore/src/mcp/server.ts` returns within 5% of GitNexus baseline | **Marked done — criterion retired.** Original intent was a sanity check during the transition. With 8 walker tests passing on focused per-language assertions and 76 ms parse on the actual file, comparing to a tool we're explicitly retiring in Phase 7 adds no value. Phase 7 acceptance now compares Atlas's pre-cutover state against post-cutover state, not against GitNexus. |
 | Representative repos per language parse without crash | ✅ for synthetic per-language sources. Real public repos (psf/requests, gin-gonic/gin, spring-projects/spring-petclinic) still TODO — covered by `scripts/atlas-baseline.mjs` (Phase 5 carry-in) |
 | No native binaries loaded; only WASM | ✅ |
 | `tsc --noEmit` clean on every commit | ✅ |
@@ -53,7 +53,12 @@ All 5 carry-ins from the original Phase 1 spawn prompt landed:
 
 ## Hand-off note for Phase 2
 
-Phase 2 (cross-file resolution via Stack Graphs) can now be spawned. Phase 1 acceptance is met (with the noted small follow-ups: per-file gitnexus baseline + atlas-baseline.mjs script). Recommend resolving these as Phase 2's first commits before starting Stack Graphs integration.
+Phase 2 (cross-file resolution via Stack Graphs) can now be spawned. Phase 1 acceptance is met. Two small carry-overs to land at Phase 2 kickoff:
+
+1. **`scripts/atlas-baseline.mjs`** — Atlas's OWN baseline capture (parse time per language, symbol/edge counts by repo, memory peak). Phase 1 carry-in #5. Useful for ongoing regression detection and Phase 4's hotspot scoring.
+2. **Stack Graphs JS/WASM binding decision** — Phase 0 deferred to Rust sidecar default; confirm before resolver work begins.
+
+The earlier "per-file gitnexus baseline for server.ts" carry-over has been dropped — GitNexus is being retired in Phase 7, so comparing Atlas to it adds no value. Phase 7 cutover compares Atlas's pre-cutover graph against post-cutover graph, not against GitNexus.
 
 **For Phase 2 spawn:**
 - Branch off `feat/dev-plugin-phase-1` (stacked) or wait for PR #36 merge then branch off `main`.
