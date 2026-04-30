@@ -244,6 +244,51 @@ export class VerbatimStore implements VectorProvider {
         }
     }
 
+    /**
+     * Reconnect-fix Layer 1+3 (2026-04-30): in-memory contentHash → vector
+     * cache populated lazily from LanceDB. Survives reconnect's full pass
+     * by avoiding re-embedding any text whose contentHash already lives
+     * in the table under any id (covers the Phase 7 cutover case where
+     * every CodeSymbol got a new uid but the embed text is unchanged).
+     *
+     * Embedder-version safety: the existing embeddingFingerprint mechanism
+     * rebuilds the entire table on model change, so any contentHash sitting
+     * in LanceDB is guaranteed to match the current embedder. No version
+     * suffix needed in the cache key.
+     *
+     * Process-lifetime only — the vectors live in LanceDB durably; this
+     * Map is just a fast-path that avoids round-tripping through LanceDB
+     * for repeated-content lookups during a single process run.
+     */
+    private hashCache: Map<string, Float32Array | number[]> = new Map();
+
+    /**
+     * Lookup a vector by contentHash. First tries the in-memory hashCache,
+     * then queries LanceDB. Returns null on miss. Used by store() to
+     * skip the expensive embed call.
+     */
+    private async lookupByContentHash(contentHash: string): Promise<Float32Array | number[] | null> {
+        if (!contentHash) return null;
+        const cached = this.hashCache.get(contentHash);
+        if (cached) return cached;
+        if (!this.table) return null;
+        try {
+            const safe = contentHash.replace(/'/g, "''");
+            const rows = await this.table
+                .query()
+                .where(`contentHash = '${safe}'`)
+                .limit(1)
+                .toArray();
+            if (rows.length === 0) return null;
+            const vec = (rows[0] as { vector?: Float32Array | number[] }).vector;
+            if (!vec) return null;
+            this.hashCache.set(contentHash, vec);
+            return vec;
+        } catch {
+            return null;
+        }
+    }
+
     async store(doc: VerbatimDocument): Promise<void> {
         try {
             if (!this.initialized || !this.db) {
@@ -264,11 +309,25 @@ export class VerbatimStore implements VectorProvider {
                 }
             }
 
+            // Layer 1+3 — contentHash cache lookup.
+            //
+            // If the text is already embedded under any id (same
+            // contentHash), reuse the vector instead of re-embedding.
+            // This is the architectural fix that closes the
+            // "post-cutover reconnect re-embeds everything" gap.
+            //
             // Asymmetric models (e5 family) expect documents to be
             // prefixed "passage: " before tokenization. embedDocument
             // adds the prefix when the provider needs it; for
             // symmetric models (MiniLM, BGE-M3) it's a passthrough.
-            const vector = await this.embeddingProvider.embedDocument(doc.text);
+            const incomingHash = (doc.metadata as { contentHash?: string })?.contentHash ?? '';
+            let vector = incomingHash
+                ? await this.lookupByContentHash(incomingHash)
+                : null;
+            if (!vector) {
+                vector = await this.embeddingProvider.embedDocument(doc.text);
+                if (incomingHash) this.hashCache.set(incomingHash, vector);
+            }
 
             const row = {
                 vector,
@@ -303,6 +362,143 @@ export class VerbatimStore implements VectorProvider {
             }
         } catch (error: any) {
             throw new VerbatimStoreError('store', error.message);
+        }
+    }
+
+    /**
+     * Layer 2 (reconnect-fix, 2026-04-30) — batch store. For each input
+     * doc:
+     *   1. Look up by contentHash. If hit (same text already embedded),
+     *      reuse the cached vector — no model call.
+     *   2. Collect cache misses into a single batch.
+     *   3. One embedDocumentBatch call for all misses.
+     *   4. Append all rows to LanceDB.
+     *
+     * Falls back to per-item store() loop if the embedding provider
+     * doesn't implement embedDocumentBatch (e.g. older OpenAI-compat
+     * provider). Batch size capped at 32 to keep memory bounded —
+     * Xenova's typical CPU batch sweet-spot is 16-64; on a 384-dim
+     * model 32 fits in <1MB working memory.
+     */
+    async storeBatch(docs: VerbatimDocument[]): Promise<void> {
+        if (!this.initialized || !this.db) {
+            throw new Error('Store not initialized');
+        }
+        if (docs.length === 0) return;
+
+        // Layer 2 preflight (2026-04-30): instead of N round-trips (one
+        // delete + one snapshot per doc), do ONE bulk query for the set
+        // of canonical ids that already exist, write history snapshots
+        // in one .add(), then ONE delete with id IN (...). Net: 3 ops
+        // instead of 2N. The first per-item-loop implementation hung
+        // for 25min on a 16k-doc batch because each LanceDB delete is
+        // a small but non-trivial round-trip.
+        if (this.table) {
+            const targetIds = docs
+                .filter((d) => !this.isHistoryId(d.id))
+                .map((d) => d.id);
+            if (targetIds.length > 0) {
+                try {
+                    // 1. Bulk query existing canonical rows.
+                    const escIds = targetIds.map((id) => `'${id.replace(/'/g, "''")}'`).join(',');
+                    const existing = await this.table
+                        .query()
+                        .where(`id IN (${escIds})`)
+                        .toArray();
+
+                    // 2. Bulk-add them as <id>#rev<ts> snapshots.
+                    if (existing.length > 0) {
+                        const ts = new Date().toISOString();
+                        const snapshotRows = existing.map((r) => {
+                            const rec = r as Record<string, unknown>;
+                            return {
+                                vector: this.toPlainVector(rec.vector),
+                                id: `${String(rec.id ?? '')}#rev${ts}`,
+                                text: rec.text ?? '',
+                                type: rec.type ?? '',
+                                label: rec.label ?? '',
+                                tags: rec.tags ?? '',
+                                project: rec.project ?? '',
+                                ecosystem: rec.ecosystem ?? '',
+                                updatedAt: rec.updatedAt ?? '',
+                                security_scopes: this.toPlainStringList(rec.security_scopes),
+                                contentHash: rec.contentHash ?? '',
+                            };
+                        });
+                        await this.table.add(snapshotRows);
+
+                        // 3. Bulk delete the canonical rows so the
+                        //    upcoming bulk-add doesn't duplicate them.
+                        await this.table.delete(`id IN (${escIds})`);
+                    }
+                } catch (err) {
+                    console.error(`[VerbatimStore] storeBatch preflight failed: ${(err as Error).message}`);
+                }
+            }
+        }
+
+        // Phase 1: cache lookup — fill what we can without embedding.
+        type Resolved = { doc: VerbatimDocument; vector: Float32Array | number[] | null; hash: string };
+        const resolved: Resolved[] = [];
+        for (const doc of docs) {
+            const hash = (doc.metadata as { contentHash?: string })?.contentHash ?? '';
+            const cached = hash ? await this.lookupByContentHash(hash) : null;
+            resolved.push({ doc, vector: cached, hash });
+        }
+
+        // Phase 2: batch-embed the misses.
+        const missIndices = resolved
+            .map((r, i) => (r.vector === null ? i : -1))
+            .filter((i) => i >= 0);
+        if (missIndices.length > 0 && this.embeddingProvider.embedDocumentBatch) {
+            const BATCH_SIZE = 32;
+            for (let i = 0; i < missIndices.length; i += BATCH_SIZE) {
+                const slice = missIndices.slice(i, i + BATCH_SIZE);
+                const texts = slice.map((idx) => resolved[idx].doc.text);
+                const vectors = await this.embeddingProvider.embedDocumentBatch(texts);
+                for (let j = 0; j < slice.length; j++) {
+                    const idx = slice[j];
+                    resolved[idx].vector = vectors[j];
+                    if (resolved[idx].hash) this.hashCache.set(resolved[idx].hash, vectors[j]);
+                }
+            }
+        } else if (missIndices.length > 0) {
+            // Fallback: per-item embed (older provider with no batch support).
+            for (const idx of missIndices) {
+                const v = await this.embeddingProvider.embedDocument(resolved[idx].doc.text);
+                resolved[idx].vector = v;
+                if (resolved[idx].hash) this.hashCache.set(resolved[idx].hash, v);
+            }
+        }
+
+        // Phase 3: append all rows to LanceDB in one .add() call.
+        const rows = resolved.map(({ doc, vector }) => ({
+            vector: vector ?? [],
+            id: doc.id,
+            text: doc.text,
+            type: doc.metadata?.type || '',
+            label: doc.metadata?.label || '',
+            tags: doc.metadata?.tags || '',
+            project: doc.metadata?.project || '',
+            ecosystem: doc.metadata?.ecosystem || '',
+            updatedAt: doc.metadata?.updatedAt || '',
+            security_scopes: doc.metadata?.security_scopes || [],
+            contentHash: (doc.metadata as { contentHash?: string })?.contentHash || '',
+        }));
+
+        if (!this.table) {
+            this.table = await this.db.createEmptyTable('lore_verbatim', this.verbatimSchema);
+            await this.table.add(rows);
+            try {
+                writeFingerprint(this.basePath, {
+                    modelId: this.embeddingProvider.modelId,
+                    dimension: this.embeddingProvider.dimension,
+                });
+            } catch (err) {
+                console.error(`[VerbatimStore] could not write fingerprint on table create: ${(err as Error).message}`);
+            }
+        } else {
+            await this.table.add(rows);
         }
     }
 

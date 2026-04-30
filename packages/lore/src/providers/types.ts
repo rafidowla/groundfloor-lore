@@ -214,6 +214,14 @@ export interface EmbeddingProvider {
      * in the storage layer, so storage stays model-agnostic.
      */
     embedDocument(text: string): Promise<number[]>;
+    /**
+     * Layer 2 (reconnect-fix, 2026-04-30) — batch document embedding.
+     * Bulk-embeds N texts in one model call instead of N sequential
+     * calls. Optional on the interface (fallback to per-item embedDocument
+     * if a provider doesn't override). Significant CPU speedup on local
+     * Xenova where pipeline accepts arrays natively.
+     */
+    embedDocumentBatch?(texts: string[]): Promise<number[][]>;
 }
 
 /**

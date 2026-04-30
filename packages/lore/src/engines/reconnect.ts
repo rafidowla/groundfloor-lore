@@ -120,6 +120,9 @@ export async function reconnectGraph(
     //    C6.5 incremental: when `since` is set, filter to nodes whose
     //    updatedAt is strictly after the cursor. Nodes that haven't
     //    changed since the last sweep skip the embed AND the search.
+    //    Layer 2 (2026-04-30): collect docs needing embedding into a
+    //    single batch, then call verbatim.storeBatch once. The store
+    //    handles cache lookup + batch embed + bulk insert internally.
     let loreNodes: LoreNode[] = await graph.listNodes();
     if (since) {
         const cutoffMs = Date.parse(since);
@@ -135,6 +138,7 @@ export async function reconnectGraph(
     let embeddingsAdded = 0;
     let embeddingsSkipped = 0;
     const force = opts.force ?? false;
+    const docsToEmbed: import('./verbatimStore.js').VerbatimDocument[] = [];
     for (const n of loreNodes) {
         const text = buildVerbatimText(n.label ?? '', n.content ?? '', n.tags ?? '');
         if (!text.trim()) continue;
@@ -147,10 +151,7 @@ export async function reconnectGraph(
                 continue;
             }
         }
-        // Verbatim is append-only: store() auto-snapshots the previous
-        // canonical row as <id>#rev<ts> before overwriting. No delete
-        // needed; the prior content stays recoverable via getHistory().
-        await verbatim.store({
+        docsToEmbed.push({
             id: prefixedId,
             text,
             metadata: {
@@ -166,7 +167,6 @@ export async function reconnectGraph(
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } as any,
         });
-        embeddingsAdded++;
     }
 
     // 2. Ask each active plugin for its embeddable contributions.
@@ -190,14 +190,21 @@ export async function reconnectGraph(
                 continue;
             }
         }
-        // Append-only: store() handles snapshot-then-overwrite.
-        await verbatim.store({
+        docsToEmbed.push({
             id: ebn.id,
             text: ebn.text,
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             metadata: { ...ebn.metadata, contentHash: hash } as any,
         });
-        embeddingsAdded++;
+    }
+
+    // Layer 2 — single bulk call. storeBatch internally does:
+    //   (a) per-doc contentHash lookup against the in-memory + LanceDB cache
+    //   (b) batched embedDocumentBatch for cache-miss texts only
+    //   (c) bulk LanceDB .add() for all rows
+    if (docsToEmbed.length > 0) {
+        await verbatim.storeBatch(docsToEmbed);
+        embeddingsAdded += docsToEmbed.length;
     }
 
     const totalNodes = loreNodes.length + pluginNodes.length;
@@ -205,37 +212,60 @@ export async function reconnectGraph(
     // 3. Stratified top-K: for each LoreNode, pull k*8 hits and allow at
     //    most ceil(k/2) from each "pillar" (lore vs non-lore). Prevents
     //    highly-similar sibling LoreNodes from crowding out cross-pillar.
+    //
+    // Layer 5 — parallel top-K search. The previous serial loop did
+    //   for (n of loreNodes) { await verbatim.search(text, k*8) }
+    // Each search calls embedQuery (Xenova on CPU) + LanceDB k-NN.
+    // ONNX runtime parallelism inside a single embed call is ~3-4 threads;
+    // running multiple embeds concurrently saturates the model worker
+    // pool with much less idle time between tokenizations. Concurrency
+    // capped at 4 to avoid head-of-line blocking on slow searches.
     const WIDE_FACTOR = 8;
     const perKindK = Math.max(2, Math.ceil(k / 2));
     const seenPair = new Set<string>();
     const proposedEdges: ReconnectProposal[] = [];
     const dist: Record<string, number> = {};
+    const SEARCH_CONCURRENCY = 4;
 
+    // Pre-compute per-node text + skip empty.
+    const searchInputs: Array<{ fromId: string; text: string }> = [];
     for (const n of loreNodes) {
         const text = buildVerbatimText(n.label ?? '', n.content ?? '', n.tags ?? '');
         if (!text.trim()) continue;
-        const hits = await verbatim.search(text, k * WIDE_FACTOR);
-        const fromId = PREFIX_LORE + n.id;
+        searchInputs.push({ fromId: PREFIX_LORE + n.id, text });
+    }
 
-        const buckets: Record<'lore' | 'other', typeof hits> = { lore: [], other: [] };
-        for (const hit of hits) {
-            if (hit.id === fromId) continue;
-            const pillar = classifyPrefix(hit.id);
-            const sim = hit.score ?? 0;
-            const bucket = `${Math.floor(sim * 20) / 20}`;
-            dist[bucket] = (dist[bucket] ?? 0) + 1;
-            if (sim < minSim) continue;
-            if (buckets[pillar].length < perKindK) buckets[pillar].push(hit);
-        }
+    // Run searches in chunks of SEARCH_CONCURRENCY in parallel; preserve
+    // input order so per-pair dedup (seenPair) is deterministic.
+    for (let i = 0; i < searchInputs.length; i += SEARCH_CONCURRENCY) {
+        const chunk = searchInputs.slice(i, i + SEARCH_CONCURRENCY);
+        const results = await Promise.all(chunk.map(async (input) => ({
+            fromId: input.fromId,
+            hits: await verbatim.search(input.text, k * WIDE_FACTOR),
+        })));
 
-        for (const bucketName of ['lore', 'other'] as const) {
-            for (const hit of buckets[bucketName]) {
+        // Sequential post-processing (uses shared seenPair + dist + proposedEdges).
+        for (const { fromId, hits } of results) {
+            const buckets: Record<'lore' | 'other', typeof hits> = { lore: [], other: [] };
+            for (const hit of hits) {
+                if (hit.id === fromId) continue;
+                const pillar = classifyPrefix(hit.id);
                 const sim = hit.score ?? 0;
-                const [lo, hi] = fromId < hit.id ? [fromId, hit.id] : [hit.id, fromId];
-                const pairKey = `${lo}::${hi}`;
-                if (seenPair.has(pairKey)) continue;
-                seenPair.add(pairKey);
-                proposedEdges.push({ from: fromId, to: hit.id, confidence: Number(sim.toFixed(3)) });
+                const bucket = `${Math.floor(sim * 20) / 20}`;
+                dist[bucket] = (dist[bucket] ?? 0) + 1;
+                if (sim < minSim) continue;
+                if (buckets[pillar].length < perKindK) buckets[pillar].push(hit);
+            }
+
+            for (const bucketName of ['lore', 'other'] as const) {
+                for (const hit of buckets[bucketName]) {
+                    const sim = hit.score ?? 0;
+                    const [lo, hi] = fromId < hit.id ? [fromId, hit.id] : [hit.id, fromId];
+                    const pairKey = `${lo}::${hi}`;
+                    if (seenPair.has(pairKey)) continue;
+                    seenPair.add(pairKey);
+                    proposedEdges.push({ from: fromId, to: hit.id, confidence: Number(sim.toFixed(3)) });
+                }
             }
         }
     }

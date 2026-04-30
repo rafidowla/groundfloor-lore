@@ -173,6 +173,32 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         return this.runEmbed(text);
     }
 
+    /**
+     * Layer 2 (reconnect-fix, 2026-04-30) — batch document embedding.
+     * Calls the HF pipeline once with an array; tokenizer + ONNX session
+     * batch internally. ~3-5x throughput vs one-at-a-time on CPU.
+     *
+     * For asymmetric (e5) models we prepend "passage: " to each text
+     * before batching.
+     */
+    async embedDocumentBatch(texts: string[]): Promise<number[][]> {
+        if (texts.length === 0) return [];
+        const embedder = await loadPipeline(this.modelId);
+        const inputs = this.asymmetric
+            ? texts.map((t) => `passage: ${t}`)
+            : texts;
+        // pipeline returns a Tensor with `.data` (Float32Array of length
+        // N*dim) and `.dims` ([N, dim]). Slice it into N row-vectors.
+        const output = await embedder(inputs, { pooling: 'mean', normalize: true });
+        const flat = output.data as Float32Array;
+        const dim = output.dims?.[1] ?? this.dimension;
+        const rows: number[][] = [];
+        for (let i = 0; i < texts.length; i++) {
+            rows.push(Array.from(flat.subarray(i * dim, (i + 1) * dim)));
+        }
+        return rows;
+    }
+
     /** Inner: tokenize, mean-pool, L2-normalize. */
     private async runEmbed(text: string): Promise<number[]> {
         const embedder = await loadPipeline(this.modelId);
