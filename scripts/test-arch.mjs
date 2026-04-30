@@ -95,6 +95,9 @@ const ALLOWED_IN_CORE = [
     // gitnexus token in comments and snapshot filenames (e.g.
     // `graph.pre-gitnexus-migration`). Deletes once Phase 7 retires.
     'scripts/atlas-cutover-dryrun.mjs',
+    // Phase 7 cutover execute (prepare-and-validate) — same status as
+    // the dry-run script. Deletes once Phase 7 retires.
+    'scripts/atlas-cutover-execute.mjs',
 ];
 
 // Anything under packages/lore-plugin-* is plugin-local and allowed to
