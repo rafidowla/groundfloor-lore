@@ -46,6 +46,7 @@ import {
 import { contributeDeveloperReconnectNodes, routeDeveloperReconnectEdge, contributeDeveloperTopology, recalibrateDeveloperNode } from './reconnect.js';
 import { buildDeveloperApi, bindApiSelfReference, bindPluginContext, type DeveloperApi } from './api.js';
 import { registerDeveloperTools } from './tools.js';
+import { registerAtlasTools } from './atlasToolsRegistrar.js';
 import { indexCommand as devIndexCommand, ingestFilesCommand as devIngestFilesCommand, analyzeCommand as devAnalyzeCommand, reposCommand as devReposCommand } from './cli.js';
 
 const TOOL_NAMES = [
@@ -131,6 +132,20 @@ export const developerPlugin: ILorePlugin = {
             return;
         }
         registerDeveloperTools(server, api, ctx);
+
+        // Phase 6.1 wiring — register the 12 NEW Atlas analytics + git-signal
+        // tools alongside the legacy developer tools. The AtlasContext is
+        // built lazily on first call and cached for the daemon's lifetime.
+        // v1: AtlasContext scoped to a single repoRoot (process.cwd by
+        // default, OR LORE_ATLAS_REPO_ROOT env override). Multi-repo
+        // support is the next iteration — would parse all registered
+        // repos and union the resolved graph.
+        const atlasRepoRoot = process.env.LORE_ATLAS_REPO_ROOT ?? process.cwd();
+        try {
+            registerAtlasTools(server, { repoRoot: atlasRepoRoot });
+        } catch (err) {
+            console.error(`[developer plugin] registerAtlasTools failed (non-fatal): ${(err as Error).message}`);
+        }
     },
 
     /**

@@ -82,29 +82,28 @@ export function getLanguageFor(filePath: string): Language | null {
  */
 function grammarPath(language: Language): string {
     const here = path.dirname(fileURLToPath(import.meta.url));
-    // src/parser/grammars.ts → ../../grammars/<file>
-    // dist/lore-plugin-developer/src/parser/grammars.js → ../../../../packages/lore-plugin-developer/grammars/<file>
-    // We resolve via the package root (parent of `src`), which works in both layouts.
+    // Layouts:
+    //   src layout (tsx):  <root>/packages/lore-plugin-developer/src/parser/grammars.ts
+    //                      grammars at <root>/packages/lore-plugin-developer/grammars/
+    //   dist layout:       <root>/dist/lore-plugin-developer/src/parser/grammars.js
+    //                      grammars STILL at <root>/packages/lore-plugin-developer/grammars/
+    //                      (build does NOT copy WASM into dist — they're vendored
+    //                       in source; we resolve absolute every time).
+    //
+    // Strategy: walk up looking for the project root (a dir whose name
+    // is `groundfloor-lore`, OR a dir containing both `packages/` and
+    // either `dist/` or `node_modules/`). From there, join
+    // `packages/lore-plugin-developer/grammars/<file>`.
     let dir = here;
     while (dir !== path.dirname(dir)) {
-        const candidate = path.join(dir, 'packages', 'lore-plugin-developer', 'grammars');
-        // Cheap existence check via path traversal; the actual file
-        // existence check happens when web-tree-sitter tries to read it.
-        if (path.basename(dir) === 'groundfloor-lore' || path.basename(path.dirname(dir)) === 'groundfloor-lore') {
-            return path.join(candidate, GRAMMAR_FILES[language]);
-        }
-        // Walk up looking for a `grammars` directory we can match.
-        const localGrammars = path.join(dir, '..', 'grammars', GRAMMAR_FILES[language]);
-        const fromPlugin = path.join(dir, '..', '..', 'grammars', GRAMMAR_FILES[language]);
-        if (path.basename(path.dirname(dir)) === 'lore-plugin-developer') {
-            return localGrammars;
-        }
-        if (path.basename(path.dirname(path.dirname(dir))) === 'lore-plugin-developer') {
-            return fromPlugin;
+        // Direct match: this dir IS the project root.
+        if (path.basename(dir) === 'groundfloor-lore') {
+            return path.join(dir, 'packages', 'lore-plugin-developer', 'grammars', GRAMMAR_FILES[language]);
         }
         dir = path.dirname(dir);
     }
-    // Last-resort default: relative to the file's grandparent grandparent.
+    // Fallback: relative resolution from src layout (tsx run from a
+    // worktree where the project-root name differs).
     return path.join(here, '..', '..', 'grammars', GRAMMAR_FILES[language]);
 }
 
