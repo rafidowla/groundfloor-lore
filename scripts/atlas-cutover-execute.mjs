@@ -95,7 +95,12 @@ async function readWorkspacesJson() {
 
 async function isDaemonAlive() {
     try {
-        const r = await fetch(`${LORE_BASE}/healthz`, { signal: AbortSignal.timeout(1500) });
+        // Daemon serves /health (returns {status,version,sessions}). /healthz
+        // is NOT a registered route — using it returns 404 which our older
+        // code mis-read as "daemon stopped". Fix locked in 2026-04-30 after
+        // first cutover-execute prep run on the lore monorepo surfaced the
+        // misdetection.
+        const r = await fetch(`${LORE_BASE}/health`, { signal: AbortSignal.timeout(1500) });
         return r.ok;
     } catch {
         return false;

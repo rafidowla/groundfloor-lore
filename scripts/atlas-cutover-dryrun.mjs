@@ -64,6 +64,8 @@ async function fetchExistingCodeSymbols(token) {
     // tool via MCP; that requires Phase 6.1's handlers to be live.
     //
     // Until then, we approximate via the workspace topology endpoint.
+    // Daemon's actual liveness route is /health (not /healthz — fix
+    // tracked in scripts/atlas-cutover-execute.mjs::isDaemonAlive).
     const r = await fetch(`${LORE_BASE}/api/topology/overview?groupBy=project`, {
         headers: { Authorization: `Bearer ${token}` },
     });
