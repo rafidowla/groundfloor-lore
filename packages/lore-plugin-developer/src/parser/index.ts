@@ -42,26 +42,34 @@ import type {
 import { getLanguageFor as detectLanguage, getParser } from './grammars.js';
 import { countLoc, type WalkerFn } from './walkers/_base.js';
 import { walk as walkTypeScript } from './walkers/typescript.js';
+import { walk as walkPython } from './walkers/python.js';
+import { walk as walkGo } from './walkers/go.js';
+import { walk as walkRust } from './walkers/rust.js';
+import { walk as walkJava } from './walkers/java.js';
+import { walk as walkCSharp } from './walkers/csharp.js';
+import { walk as walkCpp } from './walkers/cpp.js';
+import { walk as walkRuby } from './walkers/ruby.js';
 
 /** Re-export so callers don't need to know the grammar module. */
 export { detectLanguage as getLanguageFor };
 export * from './types.js';
 
 /**
- * Walker registry. Each language whose walker is implemented in
- * Phase 1 maps to its WalkerFn. Languages without a walker yet are
- * skipped at parseFile time with a "walker not implemented" diagnostic.
- *
- * As Phase 1 progresses (and follow-up Phase 1 sessions extend coverage),
- * more entries land here. The list is intentionally short for the
- * initial commit so we can validate the end-to-end pipeline against
- * the lore monorepo before broadening.
+ * Walker registry. All 8 v1 languages mapped (TS+TSX+JS share one
+ * walker; C+CPP share one walker).
  */
 const WALKERS: Partial<Record<Language, WalkerFn>> = {
     typescript: walkTypeScript,
     tsx: walkTypeScript,
     javascript: walkTypeScript,
-    // python, go, rust, java, csharp, c, cpp, ruby — Phase 1 follow-ups.
+    python: walkPython,
+    go: walkGo,
+    rust: walkRust,
+    java: walkJava,
+    csharp: walkCSharp,
+    c: walkCpp,
+    cpp: walkCpp,
+    ruby: walkRuby,
 };
 
 /** Cap on per-file size we'll attempt to parse (bytes). Prevents OOM on weird repos. */

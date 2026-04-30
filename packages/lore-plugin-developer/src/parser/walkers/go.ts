@@ -10,7 +10,188 @@
  * section 10 for the license-compliance protocol enforced by
  * `scripts/atlas-license-check.mjs`.
  *
- * Phase: 1 (stub — populated in Phase 1).
+ * Phase: 1 (parser foundation).
+ *
+ * Extracts: function declarations, method declarations (with receiver
+ * type as parent), type declarations (struct / interface / alias),
+ * const declarations, var declarations, and import declarations.
  */
 
-export const TODO_PHASE_1 = true;
+import type Parser from 'web-tree-sitter';
+import type { ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
+import {
+    buildSignature,
+    byteRangeFromNode,
+    cyclomaticComplexity,
+    makeParsedSymbol,
+    type WalkerFn,
+} from './_base.js';
+
+const GO_DECISION_TYPES: ReadonlySet<string> = new Set([
+    'if_statement',
+    'for_statement',
+    'expression_switch_statement',
+    'type_switch_statement',
+    'select_statement',
+    'expression_case',
+    'default_case',
+    'type_case',
+    'communication_case',
+    'binary_expression',  // includes && and || — overcounts but acceptable for v1
+]);
+
+function nameOf(node: Parser.SyntaxNode): string | null {
+    const name = node.childForFieldName('name');
+    return name ? name.text : null;
+}
+
+/** Resolve receiver type name from a method_declaration's receiver field. */
+function receiverTypeName(node: Parser.SyntaxNode): string | null {
+    const receiver = node.childForFieldName('receiver');
+    if (!receiver) return null;
+    // receiver is a parameter_list; find the type identifier.
+    let typeName: string | null = null;
+    for (let i = 0; i < receiver.namedChildCount; i++) {
+        const param = receiver.namedChild(i);
+        if (!param) continue;
+        // Look for type_identifier or pointer_type → type_identifier.
+        const typeNode = param.childForFieldName('type');
+        if (!typeNode) continue;
+        if (typeNode.type === 'type_identifier') {
+            typeName = typeNode.text;
+        } else if (typeNode.type === 'pointer_type') {
+            const inner = typeNode.namedChild(0);
+            if (inner && inner.type === 'type_identifier') {
+                typeName = inner.text;
+            }
+        }
+        if (typeName) break;
+    }
+    return typeName;
+}
+
+function extractImports(rootNode: Parser.SyntaxNode): ParsedImport[] {
+    const out: ParsedImport[] = [];
+    for (let i = 0; i < rootNode.namedChildCount; i++) {
+        const child = rootNode.namedChild(i);
+        if (!child) continue;
+        if (child.type !== 'import_declaration') continue;
+
+        // import_spec children — single or list.
+        for (let j = 0; j < child.namedChildCount; j++) {
+            const spec = child.namedChild(j);
+            if (!spec) continue;
+            if (spec.type === 'import_spec') {
+                const path = spec.childForFieldName('path');
+                if (path) {
+                    out.push({
+                        moduleSpecifier: path.text.replace(/^"|"$/g, ''),
+                        names: [],
+                        byteRange: byteRangeFromNode(spec),
+                    });
+                }
+            } else if (spec.type === 'import_spec_list') {
+                for (let k = 0; k < spec.namedChildCount; k++) {
+                    const inner = spec.namedChild(k);
+                    if (!inner || inner.type !== 'import_spec') continue;
+                    const path = inner.childForFieldName('path');
+                    if (path) {
+                        out.push({
+                            moduleSpecifier: path.text.replace(/^"|"$/g, ''),
+                            names: [],
+                            byteRange: byteRangeFromNode(inner),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    return out;
+}
+
+export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
+    const symbols: ParsedSymbol[] = [];
+    for (let i = 0; i < rootNode.namedChildCount; i++) {
+        const child = rootNode.namedChild(i);
+        if (!child) continue;
+
+        if (child.type === 'function_declaration') {
+            const name = nameOf(child);
+            if (!name) continue;
+            symbols.push(makeParsedSymbol({
+                name,
+                qualifiedName: name,
+                kind: 'function',
+                file,
+                byteRange: byteRangeFromNode(child),
+                signature: buildSignature(sourceUtf8, child),
+                complexity: cyclomaticComplexity(child, GO_DECISION_TYPES),
+                parentSymbolId: null,
+            }));
+        } else if (child.type === 'method_declaration') {
+            const name = nameOf(child);
+            if (!name) continue;
+            const receiver = receiverTypeName(child);
+            const qname = receiver ? `${receiver}.${name}` : name;
+            symbols.push(makeParsedSymbol({
+                name,
+                qualifiedName: qname,
+                kind: 'method',
+                file,
+                byteRange: byteRangeFromNode(child),
+                signature: buildSignature(sourceUtf8, child),
+                complexity: cyclomaticComplexity(child, GO_DECISION_TYPES),
+                parentSymbolId: null, // receiver type sits in qualifiedName; cross-file resolver fills the edge in Phase 2
+            }));
+        } else if (child.type === 'type_declaration') {
+            // type_declaration wraps type_spec children.
+            for (let j = 0; j < child.namedChildCount; j++) {
+                const spec = child.namedChild(j);
+                if (!spec) continue;
+                if (spec.type !== 'type_spec' && spec.type !== 'type_alias') continue;
+                const name = nameOf(spec);
+                if (!name) continue;
+                const inner = spec.childForFieldName('type');
+                let kind: SymbolKind = 'type';
+                if (inner) {
+                    if (inner.type === 'struct_type') kind = 'class';
+                    else if (inner.type === 'interface_type') kind = 'interface';
+                }
+                symbols.push(makeParsedSymbol({
+                    name,
+                    qualifiedName: name,
+                    kind,
+                    file,
+                    byteRange: byteRangeFromNode(spec),
+                    signature: buildSignature(sourceUtf8, spec),
+                    complexity: 1,
+                    parentSymbolId: null,
+                }));
+            }
+        } else if (child.type === 'const_declaration' || child.type === 'var_declaration') {
+            const declKind: SymbolKind = child.type === 'const_declaration' ? 'constant' : 'variable';
+            for (let j = 0; j < child.namedChildCount; j++) {
+                const spec = child.namedChild(j);
+                if (!spec) continue;
+                if (spec.type !== 'const_spec' && spec.type !== 'var_spec') continue;
+                // Each spec may declare multiple names.
+                for (let k = 0; k < spec.namedChildCount; k++) {
+                    const id = spec.namedChild(k);
+                    if (!id || id.type !== 'identifier') continue;
+                    const name = id.text;
+                    symbols.push(makeParsedSymbol({
+                        name,
+                        qualifiedName: name,
+                        kind: declKind,
+                        file,
+                        byteRange: byteRangeFromNode(spec),
+                        signature: buildSignature(sourceUtf8, spec),
+                        complexity: 1,
+                        parentSymbolId: null,
+                    }));
+                }
+            }
+        }
+    }
+    return { symbols, imports: extractImports(rootNode) };
+};
