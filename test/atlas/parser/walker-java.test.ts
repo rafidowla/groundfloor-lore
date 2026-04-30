@@ -79,7 +79,14 @@ async function main() {
         const javaUtilImport = result.imports.find((i) => i.moduleSpecifier === 'java.util.List');
         assert.ok(javaUtilImport, 'expected java.util.List import');
 
-        console.log('✓ java walker smoke test');
+        // Phase 2.1 — call extraction.
+        // greet body:  name.isEmpty()  → method_invocation, callee=isEmpty
+        // create body: new HelloGreeter(p) → object_creation_expression
+        const callees = result.calls.map((c) => c.calleeName).sort();
+        assert.ok(callees.includes('isEmpty'), `expected isEmpty; got ${callees.join(',')}`);
+        assert.ok(callees.includes('HelloGreeter'), `expected HelloGreeter constructor call; got ${callees.join(',')}`);
+
+        console.log(`✓ java walker smoke test (${result.calls.length} calls)`);
     } finally {
         await fs.rm(dir, { recursive: true, force: true });
     }

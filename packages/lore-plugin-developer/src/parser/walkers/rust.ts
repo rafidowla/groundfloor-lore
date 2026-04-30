@@ -18,12 +18,14 @@
  */
 
 import type Parser from 'web-tree-sitter';
-import type { ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
+import type { ParsedCall, ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
 import {
     buildSignature,
     byteRangeFromNode,
     cyclomaticComplexity,
+    extractCallsInBody,
     makeParsedSymbol,
+    walkSubtree,
     type WalkerFn,
 } from './_base.js';
 
@@ -176,6 +178,57 @@ function extractInBody(
 export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
     const symbols: ParsedSymbol[] = [];
     extractInBody(rootNode, sourceUtf8, file, null, null, false, symbols);
-    // Phase 2.1: call extraction TBD per Phase 2.1 follow-up.
-    return { symbols, imports: extractImports(rootNode), calls: [] };
+
+    // Phase 2.1: extract calls per function-item body. Rust has two call shapes:
+    //   - call_expression  → free function or method-style on path: foo() or Foo::bar()
+    //   - method_call_expression  → instance method: x.foo()
+    // Macros (println!) appear as macro_invocation; skipped — not real call edges.
+    const calls: ParsedCall[] = [];
+    walkSubtree(rootNode, (node) => {
+        if (node.type !== 'function_item') return;
+        const body = node.childForFieldName('body');
+        if (!body) return;
+        const owner = symbols.find((s) =>
+            s.byteRange.start <= node.startIndex && s.byteRange.end >= node.endIndex
+            && (s.kind === 'function' || s.kind === 'method'));
+        if (!owner) return;
+        calls.push(...extractCallsInBody(body, owner.id, RUST_CALL_NODE_TYPES, extractRustCallee));
+    });
+
+    return { symbols, imports: extractImports(rootNode), calls };
 };
+
+const RUST_CALL_NODE_TYPES: ReadonlySet<string> = new Set([
+    'call_expression',
+    'method_call_expression',
+]);
+
+function extractRustCallee(node: Parser.SyntaxNode): { name: string; isMethod: boolean; receiver: string | null } | null {
+    if (node.type === 'method_call_expression') {
+        const receiver = node.childForFieldName('value');
+        const method = node.childForFieldName('method');
+        if (method) {
+            return { name: method.text, isMethod: true, receiver: receiver?.text ?? null };
+        }
+        return null;
+    }
+    // call_expression
+    const fn = node.childForFieldName('function');
+    if (!fn) return null;
+    if (fn.type === 'identifier') {
+        return { name: fn.text, isMethod: false, receiver: null };
+    }
+    if (fn.type === 'scoped_identifier' || fn.type === 'field_expression') {
+        // Foo::bar()  or  obj.field()  → extract trailing identifier
+        const last = fn.namedChild(fn.namedChildCount - 1);
+        if (last && (last.type === 'identifier' || last.type === 'field_identifier')) {
+            const head = fn.namedChild(0);
+            return {
+                name: last.text,
+                isMethod: fn.type === 'field_expression',
+                receiver: head?.text ?? null,
+            };
+        }
+    }
+    return null;
+}

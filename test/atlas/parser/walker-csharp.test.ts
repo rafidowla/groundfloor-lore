@@ -81,7 +81,14 @@ async function main() {
         const usingSystem = result.imports.find((i) => i.moduleSpecifier === 'System');
         assert.ok(usingSystem, `expected using System. Got: ${result.imports.map((i) => i.moduleSpecifier).join(', ')}`);
 
-        console.log('✓ csharp walker smoke test');
+        // Phase 2.1 — call extraction.
+        // Greet body:  string.IsNullOrEmpty(name)  → invocation_expression on member_access
+        // Create body: new HelloGreeter(p)  → object_creation_expression
+        const callees = result.calls.map((c) => c.calleeName).sort();
+        assert.ok(callees.includes('IsNullOrEmpty'), `expected IsNullOrEmpty; got ${callees.join(',')}`);
+        assert.ok(callees.includes('HelloGreeter'), `expected HelloGreeter constructor call; got ${callees.join(',')}`);
+
+        console.log(`✓ csharp walker smoke test (${result.calls.length} calls)`);
     } finally {
         await fs.rm(dir, { recursive: true, force: true });
     }

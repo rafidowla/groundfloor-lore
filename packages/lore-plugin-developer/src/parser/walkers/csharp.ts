@@ -19,12 +19,14 @@
  */
 
 import type Parser from 'web-tree-sitter';
-import type { ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
+import type { ParsedCall, ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
 import {
     buildSignature,
     byteRangeFromNode,
     cyclomaticComplexity,
+    extractCallsInBody,
     makeParsedSymbol,
+    walkSubtree,
     type WalkerFn,
 } from './_base.js';
 
@@ -161,6 +163,48 @@ function extractInBody(
 export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
     const symbols: ParsedSymbol[] = [];
     extractInBody(rootNode, sourceUtf8, file, null, null, symbols);
-    // Phase 2.1: call extraction TBD per Phase 2.1 follow-up.
-    return { symbols, imports: extractImports(rootNode), calls: [] };
+
+    // Phase 2.1: extract calls per method/constructor body. C# call shapes:
+    //   - invocation_expression  → foo() / obj.foo() / Class.foo()
+    //   - object_creation_expression  → new Foo()
+    const calls: ParsedCall[] = [];
+    walkSubtree(rootNode, (node) => {
+        if (node.type !== 'method_declaration' && node.type !== 'constructor_declaration') return;
+        const body = node.childForFieldName('body');
+        if (!body) return;
+        const owner = symbols.find((s) =>
+            s.byteRange.start <= node.startIndex && s.byteRange.end >= node.endIndex
+            && s.kind === 'method');
+        if (!owner) return;
+        calls.push(...extractCallsInBody(body, owner.id, CS_CALL_NODE_TYPES, extractCsCallee));
+    });
+
+    return { symbols, imports: extractImports(rootNode), calls };
 };
+
+const CS_CALL_NODE_TYPES: ReadonlySet<string> = new Set([
+    'invocation_expression',
+    'object_creation_expression',
+]);
+
+function extractCsCallee(node: Parser.SyntaxNode): { name: string; isMethod: boolean; receiver: string | null } | null {
+    if (node.type === 'object_creation_expression') {
+        const type = node.childForFieldName('type');
+        if (type) return { name: type.text, isMethod: false, receiver: null };
+        return null;
+    }
+    // invocation_expression: function field is identifier OR member_access_expression
+    const fn = node.childForFieldName('function');
+    if (!fn) return null;
+    if (fn.type === 'identifier') {
+        return { name: fn.text, isMethod: false, receiver: null };
+    }
+    if (fn.type === 'member_access_expression') {
+        const expr = fn.childForFieldName('expression');
+        const member = fn.childForFieldName('name');
+        if (member) {
+            return { name: member.text, isMethod: true, receiver: expr?.text ?? null };
+        }
+    }
+    return null;
+}

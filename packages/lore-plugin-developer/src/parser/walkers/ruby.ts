@@ -18,11 +18,12 @@
  */
 
 import type Parser from 'web-tree-sitter';
-import type { ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
+import type { ParsedCall, ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
 import {
     buildSignature,
     byteRangeFromNode,
     cyclomaticComplexity,
+    extractCallsInBody,
     makeParsedSymbol,
     walkSubtree,
     type WalkerFn,
@@ -153,6 +154,43 @@ function extractInBody(
 export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
     const symbols: ParsedSymbol[] = [];
     extractInBody(rootNode, sourceUtf8, file, null, null, null, symbols);
-    // Phase 2.1: call extraction TBD per Phase 2.1 follow-up.
-    return { symbols, imports: extractImports(rootNode), calls: [] };
+
+    // Phase 2.1: extract calls per method body. Ruby has many call shapes; we
+    // handle the dominant ones:
+    //   - call  → x.foo or x.foo(args)  (method or qualified-name call)
+    //   - identifier as method (bare name without parens) is parsed as
+    //     identifier; we don't catch it here without scope analysis.
+    // require / require_relative / autoload calls are filtered — they're
+    // imports, not call edges. (Already extracted as ParsedImports above.)
+    const calls: ParsedCall[] = [];
+    walkSubtree(rootNode, (node) => {
+        if (node.type !== 'method' && node.type !== 'singleton_method') return;
+        const body = node.childForFieldName('body');
+        if (!body) return;
+        const owner = symbols.find((s) =>
+            s.byteRange.start <= node.startIndex && s.byteRange.end >= node.endIndex
+            && (s.kind === 'method' || s.kind === 'function'));
+        if (!owner) return;
+        calls.push(...extractCallsInBody(body, owner.id, RUBY_CALL_NODE_TYPES, extractRubyCallee));
+    });
+
+    return { symbols, imports: extractImports(rootNode), calls };
 };
+
+const RUBY_CALL_NODE_TYPES: ReadonlySet<string> = new Set(['call']);
+
+const RUBY_IMPORT_METHODS = new Set(['require', 'require_relative', 'autoload']);
+
+function extractRubyCallee(node: Parser.SyntaxNode): { name: string; isMethod: boolean; receiver: string | null } | null {
+    const method = node.childForFieldName('method');
+    if (!method) return null;
+    const methodName = method.text;
+    // Filter out require/require_relative/autoload — already captured as imports.
+    if (RUBY_IMPORT_METHODS.has(methodName)) return null;
+    const receiver = node.childForFieldName('receiver');
+    return {
+        name: methodName,
+        isMethod: !!receiver,
+        receiver: receiver?.text ?? null,
+    };
+}

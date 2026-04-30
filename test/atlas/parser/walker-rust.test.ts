@@ -87,7 +87,21 @@ async function main() {
         const useImport = result.imports.find((i) => i.moduleSpecifier.includes('std::collections'));
         assert.ok(useImport, 'expected use std::collections::HashMap');
 
-        console.log('✓ rust walker smoke test');
+        // Phase 2.1 — call extraction.
+        // main() body has: Greeter::new (call_expression on scoped_identifier),
+        // "hello".to_string() (method_call_expression), and println!(g.greet(...))
+        // — but macro contents are opaque token trees in tree-sitter-rust,
+        // so g.greet() inside println! is NOT extracted (known limitation,
+        // same as gitnexus). What we DO extract from this fixture:
+        //   Greeter::greet body: name.is_empty(), self.prefix.clone()
+        //   main body:           Greeter::new, "hello".to_string()
+        const callees = result.calls.map((c) => c.calleeName).sort();
+        assert.ok(callees.includes('new'), `expected Greeter::new call; got ${callees.join(',')}`);
+        assert.ok(callees.includes('to_string'), `expected to_string call; got ${callees.join(',')}`);
+        assert.ok(callees.includes('is_empty'), `expected is_empty call; got ${callees.join(',')}`);
+        assert.ok(callees.includes('clone'), `expected clone call; got ${callees.join(',')}`);
+
+        console.log(`✓ rust walker smoke test (${result.calls.length} calls)`);
     } finally {
         await fs.rm(dir, { recursive: true, force: true });
     }
