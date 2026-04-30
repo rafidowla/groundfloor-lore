@@ -111,23 +111,24 @@ export interface AtlasToolsContext {
 }
 
 export function registerAtlasTools(server: McpServer, atlasCtx: AtlasToolsContext): void {
-    // 2026-04-30 — eval-headline fix: register only the ESSENTIAL Atlas
-    // tools by default. Every registered tool inflates the system prompt
-    // (~150-300 tokens of name + JSON schema + description per tool).
-    // With 12 tools registered, that's ~3k tokens of overhead PER TURN
-    // in every session, regardless of whether the user asks anything
-    // analytics-related. The eval (commit 9c287c6) revealed this as a
-    // significant drag on the headline.
+    // 2026-04-30 — REVERTED the catalogue trim. The 3-iteration eval
+    // showed the trim hurt answer quality (0.93 → 0.88) more than it
+    // helped tokens. Coverage matters more than per-turn overhead at
+    // this stage; some questions need tools the agent can't reach
+    // without the full catalogue.
     //
-    // Default set (4 tools): the ones used most frequently in real
-    // developer sessions per the eval. Power users opt into the rest
-    // via LORE_ATLAS_REGISTER_ALL_TOOLS=1.
+    // Default flipped: ALL 12 tools register. Operators who explicitly
+    // want a slim surface (e.g. on devices with tight context budgets)
+    // set LORE_ATLAS_SLIM_TOOLS=1. The 4-tool slim set is preserved
+    // as an opt-out, not the default.
     //
-    // Phase: this is the policy side of the "default vs opt-in tool
-    // registration" pattern. The matching mechanism in core (an
-    // ILorePlugin field that lets ANY plugin tier its tools) is a
-    // separate v1.1 cleanup commit.
-    const registerAll = process.env.LORE_ATLAS_REGISTER_ALL_TOOLS === '1';
+    // The honest takeaway from the eval: token-savings as a primary
+    // pitch isn't Lore's strongest story on single-shot questions.
+    // Lore's value is in cross-session memory, structural recall, and
+    // institutional knowledge — none of which 10-task one-shot benchmarks
+    // capture.
+    const slim = process.env.LORE_ATLAS_SLIM_TOOLS === '1';
+    const registerAll = !slim;
 
     /* ──────────── Default tools (always registered) ──────────── */
 
@@ -304,9 +305,9 @@ export function registerAtlasTools(server: McpServer, atlasCtx: AtlasToolsContex
         );
     }
 
-    if (!registerAll) {
-        console.error('[atlas-tools] registered 4 default tools (code_blast_radius, code_pagerank, code_dead_code, code_pr_risk). Set LORE_ATLAS_REGISTER_ALL_TOOLS=1 to enable the other 8 (code_coupling, code_cycles, code_hotspots, code_layer_violations, code_tectonic_map, code_churn, code_lineage, code_detect_changes).');
+    if (slim) {
+        console.error('[atlas-tools] LORE_ATLAS_SLIM_TOOLS=1 — registered 4 essential tools only (code_blast_radius, code_pagerank, code_dead_code, code_pr_risk). Unset to register all 12.');
     } else {
-        console.error('[atlas-tools] registered all 12 tools (LORE_ATLAS_REGISTER_ALL_TOOLS=1)');
+        console.error('[atlas-tools] registered all 12 tools (default). Set LORE_ATLAS_SLIM_TOOLS=1 to register 4 essentials only.');
     }
 }
