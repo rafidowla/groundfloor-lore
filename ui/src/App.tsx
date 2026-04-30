@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, lazy, Suspense } from 'react';
-import { Settings, MessageSquare, Moon, Sun, PanelLeft, PanelRight, FolderGit2, GitBranchPlus, Boxes, Table, SlidersHorizontal } from 'lucide-react';
+import { Settings, MessageSquare, Moon, Sun, PanelLeft, PanelRight, FolderGit2, GitBranchPlus, Boxes, Table, SlidersHorizontal, ChevronDown } from 'lucide-react';
 import FiltersPanel, { type TopologyLike } from './components/FiltersPanel';
 import WorkspacePicker from './components/WorkspacePicker';
 import NodeDetailDrawer from './components/NodeDetailDrawer';
@@ -20,6 +20,7 @@ const SigmaCanvas = lazy(() => import('./components/SigmaCanvas'));
 const PluginWizard = lazy(() => import('./components/PluginWizard'));
 const PluginInspectors = lazy(() => import('./components/PluginInspectors'));
 const PluginSettingsPanel = lazy(() => import('./components/PluginSettingsPanel'));
+const ProjectTagManagerModal = lazy(() => import('./components/ProjectTagManagerModal'));
 
 function CanvasLoadingFallback() {
   return (
@@ -183,6 +184,135 @@ function readFileAsBase64(file: File): Promise<string> {
     reader.onerror = () => reject(reader.error ?? new Error('FileReader error'));
     reader.readAsDataURL(file);
   });
+}
+
+// ─── Plugins dropdown ─────────────────────────────────────────────────────
+// Groups the three plugin-related toolbar buttons (Create, Inspectors,
+// Settings) into a single dropdown. Reduces horizontal cramping in the
+// sidebar header and gives the section room to grow as more plugin
+// surfaces appear (HTTP fetcher status, manifest hot-reload, etc.).
+//
+// Closes on: clicking a menu item, clicking outside, or pressing Escape.
+function PluginsMenu({
+  onOpenWizard,
+  onOpenInspectors,
+  onOpenSettings,
+}: {
+  onOpenWizard: () => void;
+  onOpenInspectors: () => void;
+  onOpenSettings: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDocClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const choose = (fn: () => void) => {
+    setOpen(false);
+    fn();
+  };
+
+  return (
+    <div ref={wrapperRef} style={{ position: 'relative' }}>
+      <button
+        className="icon-button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label="Plugins — create, inspect, configure"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-tooltip="Plugins — create, inspect, configure"
+        style={{ display: 'flex', alignItems: 'center', gap: 2 }}
+      >
+        <Boxes size={18} />
+        <ChevronDown size={14} style={{ opacity: 0.7 }} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 4px)',
+            // Anchor LEFT edge to the trigger so the menu opens toward
+            // the canvas. Earlier `right: 0` made it open off the left
+            // edge of the sidebar, getting clipped by the browser frame.
+            left: 0,
+            minWidth: 200,
+            background: 'var(--color-surface, #1f1f1f)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 6,
+            boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+            zIndex: 50,
+            padding: 4,
+          }}
+        >
+          <PluginsMenuItem icon={<Boxes size={16} />} label="Create plugin (Tier 1)" onClick={() => choose(onOpenWizard)} />
+          <PluginsMenuItem icon={<Table size={16} />} label="Inspectors" onClick={() => choose(onOpenInspectors)} />
+          <PluginsMenuItem icon={<SlidersHorizontal size={16} />} label="Settings" onClick={() => choose(onOpenSettings)} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PluginsMenuItem({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      role="menuitem"
+      onClick={onClick}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        width: '100%',
+        padding: '8px 10px',
+        background: 'transparent',
+        border: 'none',
+        borderRadius: 4,
+        color: 'var(--color-text)',
+        fontSize: 13,
+        textAlign: 'left',
+        cursor: 'pointer',
+      }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'var(--color-border)'; }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent'; }}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+// Vertical separator between toolbar groups.
+function ToolbarDivider() {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        display: 'inline-block',
+        width: 1,
+        height: 18,
+        background: 'var(--color-border)',
+        margin: '0 4px',
+        opacity: 0.6,
+      }}
+    />
+  );
 }
 
 function App() {
@@ -420,12 +550,19 @@ function App() {
   useEffect(() => {
     try { if (tagFilter) localStorage.setItem('lore.tagFilter', tagFilter); else localStorage.removeItem('lore.tagFilter'); } catch { /* ignore */ }
   }, [tagFilter]);
-  useEffect(() => {
+  // 2026-04-29 — refetch hook for /api/repos/tags so the project-tag
+  // manager modal can refresh the list after PATCHing a project's tags.
+  const refreshAvailableTags = useCallback(() => {
     void authFetch(`${API_BASE}/api/repos/tags`)
       .then((r) => r.json() as Promise<{ tags: Array<{ tag: string; repos: string[] }> }>)
       .then((d) => setAvailableTags(d.tags ?? []))
       .catch(() => setAvailableTags([]));
   }, []);
+  useEffect(() => {
+    refreshAvailableTags();
+  }, [refreshAvailableTags]);
+  // 2026-04-29 — gear icon next to the Projects header opens this.
+  const [showProjectTagManager, setShowProjectTagManager] = useState<boolean>(false);
 
   // 2026-04-27 multi-project drill: workspace-wide project list, fetched
   // once. The right-panel uses this so every project stays visible after
@@ -1286,12 +1423,25 @@ function App() {
         onDrop={(e) => void onDrop(e)}
       >
         <header className="sidebar-header">
-          <div className="logo-area" title="Groundfloor Lore — local-first knowledge graph">
-            <img src="/favicon.svg" alt="" width="22" height="22" className="brand-mark" />
-            <span className="brand-wordmark">Lore</span>
+          {/* Row 1: brand + workspace + hide-chat (the only "always-visible" controls). */}
+          <div className="sidebar-header-row brand-row">
+            <div className="logo-area" title="Groundfloor Lore — local-first knowledge graph">
+              <img src="/favicon.svg" alt="" width="22" height="22" className="brand-mark" />
+              <span className="brand-wordmark">Lore</span>
+            </div>
+            <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
+            <button
+              className="icon-button"
+              onClick={() => setSidebarOpen(false)}
+              aria-label="Hide chat panel"
+              data-tooltip="Hide chat panel"
+              data-tooltip-side="left"
+            >
+              <PanelLeft size={18} />
+            </button>
           </div>
-          <WorkspacePicker apiBase={API_BASE} onSwitchStarted={onWorkspaceSwitchStarted} />
-          <div style={{ display: 'flex', gap: '0.25rem' }}>
+          {/* Row 2: action toolbar — knowledge surfaces, plugins dropdown, settings. */}
+          <div className="sidebar-header-row toolbar-row">
             <button
               className="icon-button"
               onClick={() => {
@@ -1308,38 +1458,30 @@ function App() {
                     setSelectedNodeId(null);
                 }
               }}
-              title="Projects — manage indexed code repositories"
+              aria-label="Projects — manage indexed code repositories"
+              data-tooltip="Projects — indexed code repositories"
             >
               <FolderGit2 size={20} />
             </button>
             <button
               className="icon-button"
               onClick={() => setShowSupersedeCandidates(true)}
-              title="Find supersession candidates — scans your knowledge for likely duplicate decisions and lets you mark older versions as superseded"
+              aria-label="Find supersession candidates — scans your knowledge for likely duplicate decisions and lets you mark older versions as superseded"
+              data-tooltip="Find supersession candidates"
             >
               <GitBranchPlus size={20} />
             </button>
-            <button
-              className="icon-button"
-              onClick={() => setShowPluginInspectors(true)}
-              title="Plugin inspectors (manifest-declared tabs)"
-            >
-              <Table size={20} />
-            </button>
-            <button
-              className="icon-button"
-              onClick={() => setShowPluginSettings(true)}
-              title="Plugin settings (manifest-declared config fields)"
-            >
-              <SlidersHorizontal size={20} />
-            </button>
-            <button
-              className="icon-button"
-              onClick={() => setShowPluginWizard(true)}
-              title="Create plugin (Tier 1 wizard)"
-            >
-              <Boxes size={20} />
-            </button>
+
+            <ToolbarDivider />
+
+            <PluginsMenu
+              onOpenWizard={() => setShowPluginWizard(true)}
+              onOpenInspectors={() => setShowPluginInspectors(true)}
+              onOpenSettings={() => setShowPluginSettings(true)}
+            />
+
+            <ToolbarDivider />
+
             <button
               ref={settingsButtonRef}
               className="icon-button"
@@ -1351,12 +1493,10 @@ function App() {
                 setShowSettings(next);
                 if (next) { setSelectedNodeId(null); setShowProjects(false); }
               }}
-              title="Settings"
+              aria-label="Settings"
+              data-tooltip="App settings"
             >
               <Settings size={20} />
-            </button>
-            <button className="icon-button" onClick={() => setSidebarOpen(false)} title="Hide chat panel">
-              <PanelLeft size={18} />
             </button>
           </div>
         </header>
@@ -1380,6 +1520,18 @@ function App() {
         {showPluginSettings && (
           <Suspense fallback={null}>
             <PluginSettingsPanel onClose={() => setShowPluginSettings(false)} />
+          </Suspense>
+        )}
+
+        {showProjectTagManager && (
+          <Suspense fallback={null}>
+            <ProjectTagManagerModal
+              apiBase={API_BASE}
+              allProjects={workspaceProjects ?? []}
+              availableTags={availableTags}
+              onClose={() => setShowProjectTagManager(false)}
+              onMutate={refreshAvailableTags}
+            />
           </Suspense>
         )}
 
@@ -1728,9 +1880,30 @@ function App() {
           <Suspense fallback={<CanvasLoadingFallback />}>
             {graphViz !== 'network' ? (
               (() => {
-                const filter = tagFilter
+                // Compose the chord/sunburst project filter from both:
+                // (a) the tag filter (if a tag is selected), and
+                // (b) the per-project checkbox state (activeProjects).
+                // SigmaCanvas already honours activeProjects via nodeReducer;
+                // before this fix the chord/sunburst views ignored it, so the
+                // checkboxes appeared dead for those views.
+                //
+                // Semantics (match SigmaCanvas):
+                //   activeProjects === null  → no checkbox filter (show all)
+                //   activeProjects.size === 0 → user explicitly selected none → empty
+                //   activeProjects.size > 0  → restrict to those
+                const tagProjects: string[] | null = tagFilter
                   ? (availableTags.find((t) => t.tag === tagFilter)?.repos ?? [])
                   : null;
+                let filter: string[] | null;
+                if (activeProjects === null) {
+                  filter = tagProjects;
+                } else if (activeProjects.size === 0) {
+                  filter = [];
+                } else if (tagProjects) {
+                  filter = tagProjects.filter((p) => activeProjects.has(p));
+                } else {
+                  filter = Array.from(activeProjects);
+                }
                 const common = {
                   apiBase: API_BASE,
                   onProjectClick: handleChordProjectClick,
@@ -2516,6 +2689,8 @@ function App() {
             showSuperseded={showSuperseded}
             setShowSuperseded={setShowSuperseded}
             allProjects={workspaceProjects}
+            availableTags={availableTags}
+            onManageProjects={() => setShowProjectTagManager(true)}
           />
         </aside>
       ) : null}

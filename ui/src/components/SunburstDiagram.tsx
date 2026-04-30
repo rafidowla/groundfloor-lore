@@ -96,7 +96,23 @@ export default function SunburstDiagram({
         );
     }
 
-    const allowSet = projectFilter && projectFilter.length > 0 ? new Set(projectFilter) : null;
+    // Filter semantics: null = show all, [] = show none explicitly,
+    // [a,b] = restrict. Same as ChordDiagram. Earlier the empty-array
+    // case was mis-handled as "no filter".
+    const filterMode: 'all' | 'none' | 'restrict' =
+        projectFilter === null || projectFilter === undefined
+            ? 'all'
+            : projectFilter.length === 0
+                ? 'none'
+                : 'restrict';
+    if (filterMode === 'none') {
+        return (
+            <div style={{ padding: 20, color: 'var(--color-text-muted)' }}>
+                No projects selected. Check at least one project in the right panel.
+            </div>
+        );
+    }
+    const allowSet = filterMode === 'restrict' && projectFilter ? new Set(projectFilter) : null;
     const blobs = (allowSet ? payload.blobs.filter((b) => allowSet.has(b.project)) : payload.blobs)
         .filter((b) => b.nodeCount > 0);
 

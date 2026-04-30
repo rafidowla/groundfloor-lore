@@ -96,9 +96,30 @@ export default function ChordDiagram({ apiBase, onProjectClick, projectFilter }:
         );
     }
 
-    // Tag filter: narrow blobs to a project whitelist if provided.
-    // Aggregate edges where either endpoint is filtered out are dropped.
-    const allowSet = projectFilter && projectFilter.length > 0 ? new Set(projectFilter) : null;
+    // Tag/checkbox filter semantics:
+    //   projectFilter === null      → no filter, show every project
+    //   projectFilter === []        → user explicitly selected NONE
+    //   projectFilter === [a, b]    → restrict to those projects
+    //
+    // Earlier the empty-array case was lumped into "no filter" via
+    // `length > 0` — which made "Select none" or all-checkboxes-off
+    // behave like "show all". The active-projects checkbox state in the
+    // right panel uses the same null/empty/set semantics, so this
+    // distinction is load-bearing for the panel→chord wire to work.
+    const filterMode: 'all' | 'none' | 'restrict' =
+        projectFilter === null || projectFilter === undefined
+            ? 'all'
+            : projectFilter.length === 0
+                ? 'none'
+                : 'restrict';
+    if (filterMode === 'none') {
+        return (
+            <div style={{ padding: 20, color: 'var(--color-text-muted)' }}>
+                No projects selected. Check at least one project in the right panel.
+            </div>
+        );
+    }
+    const allowSet = filterMode === 'restrict' && projectFilter ? new Set(projectFilter) : null;
     const filteredBlobs = allowSet
         ? payload.blobs.filter((b) => allowSet.has(b.project))
         : payload.blobs;

@@ -86,6 +86,10 @@ const ALLOWED_IN_CORE = [
     // Registry's BUILTIN_PLUGINS map is the one place core knows plugin
     // names by reference. Structurally legal (registry is the bridge).
     'packages/lore/src/plugins/registry.ts',
+    // Atlas license-check script — its job is to forbid GitNexus/jcodemunch
+    // identifiers in plugin source, so it has to mention the token names
+    // in its FORBIDDEN_FINGERPRINTS list. Same status as test-arch.mjs.
+    'scripts/atlas-license-check.mjs',
 ];
 
 // Anything under packages/lore-plugin-* is plugin-local and allowed to

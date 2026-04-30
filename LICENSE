@@ -1,21 +1,45 @@
-MIT License
+PROPRIETARY SOFTWARE LICENSE — ALL RIGHTS RESERVED
 
-Copyright (c) 2026 Rafi Ud Dowla
+Copyright (c) 2026 Rafi Ud Dowla. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+This software, including all source code, documentation, build artefacts,
+schemas, configuration, prompt templates, and accompanying assets in this
+repository (collectively, the "Software"), is proprietary and confidential.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+NO LICENSE GRANTED.
+
+The Software is made available solely for review by individuals expressly
+authorised by the copyright holder. No license — express or implied — is
+granted to any other party, by any means, for any purpose, including but
+not limited to the rights to:
+
+  - copy, redistribute, or sublicense any portion of the Software;
+  - use the Software in any commercial or non-commercial product or service;
+  - modify, adapt, translate, or create derivative works;
+  - reverse engineer or decompile any portion;
+  - publish, host, or deploy the Software in any environment;
+  - train, fine-tune, or evaluate machine-learning models on the Software's
+    source code, comments, or documentation;
+  - incorporate the Software, in whole or in part, into another product
+    whether for sale, licence, or free distribution.
+
+COMMERCIAL LICENSING.
+
+Commercial licenses, evaluation arrangements, partnership terms, and
+custom-deployment terms are available. To inquire, contact:
+
+  Rafi Ud Dowla
+  rafi@premisesaas.com
+
+DISCLAIMER.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF,
+OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+By accessing this repository, you acknowledge that you have read these
+terms and agree to be bound by them.
