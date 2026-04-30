@@ -133,9 +133,9 @@ Atlas builds **the data and tools**. The separate **Trustworthiness Plan** (lock
 
 Practically: Atlas Phase 6 must expose its query tools as stable, well-typed MCP endpoints. The Trustworthiness Plan's pre-write hook calls them. If we change a tool signature, the pre-write hook is the canary.
 
-### 0.2 Out of scope for Atlas
+### 0.2 Out of scope for Atlas v1 (in scope for Atlas Phase 9 or beyond)
 
-- **SQL.** SQL is in the most-popular-languages list, but it's a query language, not a structural one. Functions / methods / call graphs / cyclomatic complexity / blast radius don't map cleanly onto SQL. SQL belongs in a future separate plugin (`lore-plugin-sql` or similar) with its own vocabulary: tables, columns, foreign keys, queries, view dependencies. **Do not bolt SQL into Atlas.**
+- **SQL / AQL / other query languages — moved to Phase 9, NOT a separate plugin.** Earlier draft of this plan said SQL belongs in a separate `lore-plugin-sql`. That framing was wrong. SQL isn't a call-graph thing on its own — but it IS a **data referent** that code points at. The interesting graph is *function executes Query, Query reads/writes Table.column*. That bridges code ↔ data and is exactly what makes Atlas distinctively differentiated vs. GitNexus and jcodemunch (neither does this). It belongs in the developer plugin alongside the code graph, but added AFTER Phase 7 cutover lands so it doesn't delay GitNexus retirement. See §3 Phase 9 below.
 - **R.** Niche audience for code intelligence. Add on customer demand (probably never, given our target market).
 
 ### 0.3 v1.1 fast-follow: PHP, Swift, Kotlin
@@ -634,6 +634,60 @@ Cutover sequence (single maintenance window, ~minutes of downtime):
 
 ---
 
+### Phase 9 — Data Layer: SQL / AQL / ORM-aware code↔data bridge (post-cutover, ~2-3 weeks)
+
+> **Status:** planned. Lands AFTER Phase 7 (GitNexus retirement) and Phase 8 (docs) so it doesn't delay the user-visible cutover. Belongs inside `packages/lore-plugin-developer/` — same plugin owns code intelligence + data-structure intelligence; the value is precisely in joining them.
+>
+> **Why this matters:** the interesting graph is *function executes Query, Query reads/writes Table.column*. That bridges code ↔ data and is what makes Atlas distinctively differentiated vs. GitNexus and jcodemunch (neither does this). Customers asking "if I rename this table, what breaks?" or "this migration drops a column — what code reads it?" get real answers.
+
+**New schema** (additive only; through `ILorePlugin.registerSchema`):
+
+| Node table | Fields |
+|---|---|
+| `SqlTable` | uid, name, schema, file (if defined inline), kind ('table' / 'view' / 'index'), repo |
+| `SqlColumn` | uid, name, table_uid, type, nullable |
+| `Query` | uid, file, byte_range, kind ('select' / 'insert' / 'update' / 'delete'), sql_dialect, raw_text |
+| `AqlQuery` | (same shape as Query, dialect: 'aql') |
+
+| Edge table | From → To | Meaning |
+|---|---|---|
+| `Executes` | CodeSymbol → Query | function runs this query |
+| `ReadsCol` | Query → SqlColumn | SELECT clause + WHERE / JOIN / GROUP BY refs |
+| `WritesCol` | Query → SqlColumn | INSERT / UPDATE / DELETE column targets |
+| `RefsTable` | Query → SqlTable | mentioned in any clause |
+| `HasColumn` | SqlTable → SqlColumn | structural |
+
+**New walkers / extractors:**
+
+1. **`walkers/sql.ts`** — uses `tree-sitter-sql` (already in tree-sitter-wasms). Walks `.sql` files (migrations, schema files, stored procs). Emits `SqlTable` + `SqlColumn` from `CREATE TABLE` / `CREATE VIEW`; emits `Query` from `SELECT` / `INSERT` / `UPDATE` / `DELETE`.
+2. **`walkers/embedded-sql.ts`** — finds SQL strings inside other source files. Two paths:
+   - **String-pattern detection:** template literals or string concats matching `/^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP)/i`. Lower confidence; works for any language.
+   - **ORM call patterns:** recognise `prisma.user.findMany`, `db.query()`, `connection.execute()`, SQLAlchemy `session.query(User)`, Hibernate `entityManager.createQuery`, etc. Higher confidence; per-ORM knowledge.
+3. **`walkers/aql.ts`** — for ArangoDB. Vendor `tree-sitter-aql` (community grammar). Same shape as SQL walker.
+
+**New MCP tools:**
+
+- `code_table_dependencies(tableName)` → all CodeSymbols that touch this table
+- `code_query_blast_radius(symbolName)` → all tables/columns the function transitively touches
+- `code_unused_columns(tableName)` → columns no Query references
+- `code_migration_impact(migrationFile)` → CodeSymbols affected by a migration's table/column changes
+- `code_orm_summary(orm?)` → which ORM is each query tied to; useful for ORM-migration projects
+
+**Tests:**
+
+- Synthetic schema files + queries — verify table/column extraction.
+- Synthetic ORM patterns per ORM — verify code↔Query edge attachment.
+- Real lore monorepo: spot-check that the few SQL strings and migrations in lore are extracted correctly.
+
+**Acceptance:**
+
+- `code_table_dependencies('users')` returns the right CodeSymbol set on a synthetic test repo.
+- `code_migration_impact()` flags affected functions for a synthetic ALTER TABLE migration.
+- ORM detection covers at minimum: Prisma, TypeORM, SQLAlchemy, Hibernate, Sequelize. Per-customer-demand additions later.
+- ~2-3 weeks of focused work; NOT blocking Phase 7 retirement.
+
+---
+
 ## 4. Risk Register
 
 | Risk | Severity | Mitigation |
@@ -675,20 +729,24 @@ Cutover sequence (single maintenance window, ~minutes of downtime):
 
 ## 7. Total estimate
 
-| Phase | Days | Δ vs draft |
+| Phase | Days | Notes |
 |---|---|---|
-| 0 — pre-work | 3 | — |
-| 1 — parser (8 languages) | 8 | +3 |
-| 2 — resolver (Stack Graphs + fallbacks) | 6 | +1 |
-| 3 — graph integration | 3 | — |
-| 4 — analytics (incl. tectonic map) | 9 | +1 |
-| 5 — git | 3 | — |
-| 6 — MCP tools (incl. AST search + tectonic map) | 4 | +1 |
-| 7 — retirement (incl. cutover playbook) | 3 | — |
-| 8 — docs | 3 | — |
-| **Total** | **42 working days ≈ 8.4 weeks** | **+6 days** |
+| 0 — pre-work | 3 | |
+| 1 — parser (8 languages) | 8 | |
+| 2 — resolver (Stack Graphs + fallbacks) | 6 | |
+| 3 — graph integration | 3 | |
+| 4 — analytics (incl. tectonic map) | 9 | |
+| 5 — git | 3 | |
+| 6 — MCP tools (incl. AST search + tectonic map) | 4 | |
+| 7 — retirement (incl. cutover playbook) | 3 | |
+| 8 — docs | 3 | |
+| **Atlas v1 subtotal** | **42 working days ≈ 8.4 weeks** | **GitNexus retired; user-visible cutover complete** |
+| 9 — Data Layer (SQL / AQL / ORM bridge) | 10-15 | Post-cutover; additive; distinctively differentiated vs. GitNexus + jcodemunch |
+| **Atlas v1 + v9 total** | **~52-57 working days ≈ 10-11 weeks** | |
 
-Each phase commits in 1–2-day chunks. Rough commit count: 30–40 commits total.
+v1.1 fast-follow (PHP / Swift / Kotlin walkers, ~3 days) is independent and can land before or after Phase 9.
+
+Each phase commits in 1–2-day chunks. Rough commit count: 35–45 commits total across all phases.
 
 ---
 
