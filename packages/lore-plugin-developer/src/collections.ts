@@ -27,6 +27,24 @@ export const CODE_RELATION_COLL = 'CodeRelation';
 export const FILE_CONTAINS_COLL = 'FileContains';
 export const LORE_APPLIES_TO_CODE_COLL = 'LoreAppliesToCode';
 export const LORE_TOUCHES_FILE_COLL = 'LoreTouchesFile';
+
+/* ─── Phase 9 — Data layer (SQL / AQL) ─────────────────────────── */
+//
+// Code↔data graph schema, additive only. Walkers + extractors live in
+// packages/lore-plugin-developer/src/data-layer/. These names will be
+// referenced by ops + walker code once Phase 9 implementation lands;
+// for now they're declared up-front so the schema can be created
+// idempotently without further migrations.
+
+export const SQL_TABLE_COLL = 'SqlTable';
+export const SQL_COLUMN_COLL = 'SqlColumn';
+export const QUERY_COLL = 'Query';
+export const AQL_QUERY_COLL = 'AqlQuery';
+export const EXECUTES_COLL = 'Executes';        // CodeSymbol → Query
+export const READS_COL_COLL = 'ReadsCol';       // Query → SqlColumn
+export const WRITES_COL_COLL = 'WritesCol';     // Query → SqlColumn
+export const REFS_TABLE_COLL = 'RefsTable';     // Query → SqlTable
+export const HAS_COLUMN_COLL = 'HasColumn';     // SqlTable → SqlColumn
 /**
  * Cross-pillar reads on the core lore_node collection. The developer
  * plugin reads it from a few legacy surfaces (resolveChatContext etc.).
@@ -93,5 +111,66 @@ export const developerCollectionDecls: CollectionDecl[] = [
         source: LORE_NODE_COLL,
         target: CODE_FILE_COLL,
         cloudCollection: 'developer_lore_touches_file',
+    },
+
+    /* ─── Phase 9 — Data layer (SQL / AQL) ─────────────────────── */
+    {
+        kind: 'node',
+        name: SQL_TABLE_COLL,
+        primaryKey: 'uid',
+        cloudCollection: 'developer_sql_table',
+    },
+    {
+        kind: 'node',
+        name: SQL_COLUMN_COLL,
+        primaryKey: 'uid',
+        cloudCollection: 'developer_sql_column',
+    },
+    {
+        kind: 'node',
+        name: QUERY_COLL,
+        primaryKey: 'uid',
+        cloudCollection: 'developer_query',
+    },
+    {
+        kind: 'node',
+        name: AQL_QUERY_COLL,
+        primaryKey: 'uid',
+        cloudCollection: 'developer_aql_query',
+    },
+    {
+        kind: 'edge',
+        name: EXECUTES_COLL,
+        source: CODE_SYMBOL_COLL,
+        target: QUERY_COLL,
+        cloudCollection: 'developer_executes',
+    },
+    {
+        kind: 'edge',
+        name: READS_COL_COLL,
+        source: QUERY_COLL,
+        target: SQL_COLUMN_COLL,
+        cloudCollection: 'developer_reads_col',
+    },
+    {
+        kind: 'edge',
+        name: WRITES_COL_COLL,
+        source: QUERY_COLL,
+        target: SQL_COLUMN_COLL,
+        cloudCollection: 'developer_writes_col',
+    },
+    {
+        kind: 'edge',
+        name: REFS_TABLE_COLL,
+        source: QUERY_COLL,
+        target: SQL_TABLE_COLL,
+        cloudCollection: 'developer_refs_table',
+    },
+    {
+        kind: 'edge',
+        name: HAS_COLUMN_COLL,
+        source: SQL_TABLE_COLL,
+        target: SQL_COLUMN_COLL,
+        cloudCollection: 'developer_has_column',
     },
 ];

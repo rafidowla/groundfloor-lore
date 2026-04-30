@@ -91,4 +91,86 @@ export async function registerDeveloperSchema(ctx: PluginGraphContext): Promise<
             tool STRING
         )
     `);
+
+    /* ─── Phase 9 — Data layer (SQL / AQL) ─────────────────────── */
+    //
+    // Additive only. Lands the schema up-front so when Phase 9 walker
+    // code starts populating these tables, no further migration is
+    // required. Empty until walkers/sql.ts + walkers/embedded-sql.ts +
+    // walkers/aql.ts ship.
+    await ctx.executeQuery(`
+        CREATE NODE TABLE IF NOT EXISTS SqlTable (
+            uid STRING,
+            name STRING,
+            schemaName STRING,
+            file STRING,
+            kind STRING,
+            repo STRING,
+            PRIMARY KEY (uid)
+        )
+    `);
+    await ctx.executeQuery(`
+        CREATE NODE TABLE IF NOT EXISTS SqlColumn (
+            uid STRING,
+            name STRING,
+            tableUid STRING,
+            type STRING,
+            nullable BOOLEAN,
+            PRIMARY KEY (uid)
+        )
+    `);
+    await ctx.executeQuery(`
+        CREATE NODE TABLE IF NOT EXISTS Query (
+            uid STRING,
+            file STRING,
+            startByte INT64,
+            endByte INT64,
+            kind STRING,
+            sqlDialect STRING,
+            rawText STRING,
+            repo STRING,
+            PRIMARY KEY (uid)
+        )
+    `);
+    await ctx.executeQuery(`
+        CREATE NODE TABLE IF NOT EXISTS AqlQuery (
+            uid STRING,
+            file STRING,
+            startByte INT64,
+            endByte INT64,
+            kind STRING,
+            rawText STRING,
+            repo STRING,
+            PRIMARY KEY (uid)
+        )
+    `);
+    await ctx.executeQuery(`
+        CREATE REL TABLE IF NOT EXISTS Executes (
+            FROM CodeSymbol TO Query,
+            confidence DOUBLE,
+            reason STRING
+        )
+    `);
+    await ctx.executeQuery(`
+        CREATE REL TABLE IF NOT EXISTS ReadsCol (
+            FROM Query TO SqlColumn,
+            clause STRING
+        )
+    `);
+    await ctx.executeQuery(`
+        CREATE REL TABLE IF NOT EXISTS WritesCol (
+            FROM Query TO SqlColumn,
+            clause STRING
+        )
+    `);
+    await ctx.executeQuery(`
+        CREATE REL TABLE IF NOT EXISTS RefsTable (
+            FROM Query TO SqlTable
+        )
+    `);
+    await ctx.executeQuery(`
+        CREATE REL TABLE IF NOT EXISTS HasColumn (
+            FROM SqlTable TO SqlColumn
+        )
+    `);
 }

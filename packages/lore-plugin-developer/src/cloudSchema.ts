@@ -126,6 +126,81 @@ export async function registerDeveloperCloudSchema(ctx: PluginCloudSchemaContext
             { name: 'org_id', field_type: 'string', indexed: true, required: true },
         ],
     });
+
+    /* ─── Phase 9 — Data layer (SQL / AQL) cloud parity ─────────── */
+    //
+    // Mirrors schema.ts Phase 9 tables one-to-one. Empty until walker
+    // code lands. Schema parity ensures cloud-mode tenants don't need
+    // a separate provisioning pass when Phase 9 ships.
+    await ctx.ensureCollection({
+        name: 'developer_sql_table',
+        fields: [
+            { name: 'uid', field_type: 'string', primary_key: true, required: true },
+            { name: 'name', field_type: 'string', indexed: true },
+            { name: 'schemaName', field_type: 'string', indexed: true },
+            { name: 'file', field_type: 'string' },
+            { name: 'kind', field_type: 'string', indexed: true },
+            { name: 'repo', field_type: 'string', indexed: true },
+            { name: 'org_id', field_type: 'string', indexed: true, required: true },
+        ],
+    });
+    await ctx.ensureCollection({
+        name: 'developer_sql_column',
+        fields: [
+            { name: 'uid', field_type: 'string', primary_key: true, required: true },
+            { name: 'name', field_type: 'string', indexed: true },
+            { name: 'tableUid', field_type: 'string', indexed: true },
+            { name: 'type', field_type: 'string' },
+            { name: 'nullable', field_type: 'bool' },
+            { name: 'org_id', field_type: 'string', indexed: true, required: true },
+        ],
+    });
+    await ctx.ensureCollection({
+        name: 'developer_query',
+        fields: [
+            { name: 'uid', field_type: 'string', primary_key: true, required: true },
+            { name: 'file', field_type: 'string', indexed: true },
+            { name: 'startByte', field_type: 'int' },
+            { name: 'endByte', field_type: 'int' },
+            { name: 'kind', field_type: 'string', indexed: true },
+            { name: 'sqlDialect', field_type: 'string' },
+            { name: 'rawText', field_type: 'string' },
+            { name: 'repo', field_type: 'string', indexed: true },
+            { name: 'org_id', field_type: 'string', indexed: true, required: true },
+        ],
+    });
+    await ctx.ensureCollection({
+        name: 'developer_aql_query',
+        fields: [
+            { name: 'uid', field_type: 'string', primary_key: true, required: true },
+            { name: 'file', field_type: 'string', indexed: true },
+            { name: 'startByte', field_type: 'int' },
+            { name: 'endByte', field_type: 'int' },
+            { name: 'kind', field_type: 'string', indexed: true },
+            { name: 'rawText', field_type: 'string' },
+            { name: 'repo', field_type: 'string', indexed: true },
+            { name: 'org_id', field_type: 'string', indexed: true, required: true },
+        ],
+    });
+    for (const edgeCollection of [
+        ['developer_executes', { name: 'confidence', field_type: 'float' }, { name: 'reason', field_type: 'string' }],
+        ['developer_reads_col', { name: 'clause', field_type: 'string' }],
+        ['developer_writes_col', { name: 'clause', field_type: 'string' }],
+        ['developer_refs_table'],
+        ['developer_has_column'],
+    ] as const) {
+        const [name, ...extraFields] = edgeCollection;
+        await ctx.ensureCollection({
+            name,
+            fields: [
+                { name: 'id', field_type: 'string', primary_key: true, required: true },
+                { name: 'source_id', field_type: 'string', required: true, indexed: true },
+                { name: 'target_id', field_type: 'string', required: true, indexed: true },
+                ...(extraFields as Array<{ name: string; field_type: 'string' | 'int' | 'float' | 'bool' }>),
+                { name: 'org_id', field_type: 'string', indexed: true, required: true },
+            ],
+        });
+    }
 }
 
 /** Exported for tests + the orphan-detection path (knows which cloud
@@ -138,4 +213,14 @@ export const DEVELOPER_CLOUD_COLLECTIONS: ReadonlyArray<string> = [
     'developer_file_contains',
     'developer_lore_applies_to_code',
     'developer_lore_touches_file',
+    // Phase 9 — data layer
+    'developer_sql_table',
+    'developer_sql_column',
+    'developer_query',
+    'developer_aql_query',
+    'developer_executes',
+    'developer_reads_col',
+    'developer_writes_col',
+    'developer_refs_table',
+    'developer_has_column',
 ];
