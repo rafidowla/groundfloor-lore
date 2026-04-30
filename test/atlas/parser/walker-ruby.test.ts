@@ -74,7 +74,19 @@ async function main() {
         const jsonImp = result.imports.find((i) => i.moduleSpecifier === 'json');
         assert.ok(jsonImp, 'expected require json import');
 
-        console.log('✓ ruby walker smoke test');
+        // Phase 2.1 — call extraction.
+        // greet body:  name.nil?, name.empty?  → both via `call` node
+        // create body: Greeter.new(p)  → call (qualified)
+        // require/require_relative are filtered (already imports).
+        const callees = result.calls.map((c) => c.calleeName).sort();
+        assert.ok(callees.includes('nil?'), `expected nil? call; got ${callees.join(',')}`);
+        assert.ok(callees.includes('empty?'), `expected empty? call; got ${callees.join(',')}`);
+        assert.ok(callees.includes('new'), `expected Greeter.new call; got ${callees.join(',')}`);
+        // Ensure require/require_relative were NOT included as call edges.
+        assert.ok(!callees.includes('require'), `require should be filtered; got ${callees.join(',')}`);
+        assert.ok(!callees.includes('require_relative'), `require_relative should be filtered; got ${callees.join(',')}`);
+
+        console.log(`✓ ruby walker smoke test (${result.calls.length} calls)`);
     } finally {
         await fs.rm(dir, { recursive: true, force: true });
     }

@@ -19,11 +19,12 @@
  */
 
 import type Parser from 'web-tree-sitter';
-import type { ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
+import type { ParsedCall, ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
 import {
     buildSignature,
     byteRangeFromNode,
     cyclomaticComplexity,
+    extractCallsInBody,
     makeParsedSymbol,
     walkSubtree,
     type WalkerFn,
@@ -182,6 +183,50 @@ function extractInBody(
 export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
     const symbols: ParsedSymbol[] = [];
     extractInBody(rootNode, sourceUtf8, file, null, null, symbols);
-    // Phase 2.1: call extraction TBD per Phase 2.1 follow-up.
-    return { symbols, imports: extractImports(rootNode), calls: [] };
+
+    // Phase 2.1: extract calls per function-definition body.
+    // C/C++ call_expression has function child:
+    //   - identifier  → free function: foo()
+    //   - field_expression  → method: x.foo() or x->foo()
+    //   - qualified_identifier (C++)  → ns::foo() or Class::foo()
+    // Function-pointer calls and template-instantiated calls are best-effort.
+    const calls: ParsedCall[] = [];
+    walkSubtree(rootNode, (node) => {
+        if (node.type !== 'function_definition') return;
+        const body = node.childForFieldName('body');
+        if (!body) return;
+        const owner = symbols.find((s) =>
+            s.byteRange.start <= node.startIndex && s.byteRange.end >= node.endIndex
+            && (s.kind === 'function' || s.kind === 'method'));
+        if (!owner) return;
+        calls.push(...extractCallsInBody(body, owner.id, C_CALL_NODE_TYPES, extractCCallee));
+    });
+
+    return { symbols, imports: extractImports(rootNode), calls };
 };
+
+const C_CALL_NODE_TYPES: ReadonlySet<string> = new Set(['call_expression']);
+
+function extractCCallee(node: Parser.SyntaxNode): { name: string; isMethod: boolean; receiver: string | null } | null {
+    const fn = node.childForFieldName('function');
+    if (!fn) return null;
+    if (fn.type === 'identifier') {
+        return { name: fn.text, isMethod: false, receiver: null };
+    }
+    if (fn.type === 'field_expression') {
+        const argument = fn.childForFieldName('argument');
+        const field = fn.childForFieldName('field');
+        if (field) {
+            return { name: field.text, isMethod: true, receiver: argument?.text ?? null };
+        }
+    }
+    if (fn.type === 'qualified_identifier') {
+        // C++ ns::foo or Class::foo. Extract trailing identifier.
+        const last = fn.namedChild(fn.namedChildCount - 1);
+        const head = fn.namedChild(0);
+        if (last && (last.type === 'identifier' || last.type === 'field_identifier')) {
+            return { name: last.text, isMethod: false, receiver: head?.text ?? null };
+        }
+    }
+    return null;
+}

@@ -71,7 +71,13 @@ async function main() {
         const stringInclude = result.imports.find((i) => i.moduleSpecifier === 'string');
         assert.ok(stringInclude, `expected #include <string>. Got: ${result.imports.map((i) => i.moduleSpecifier).join(', ')}`);
 
-        console.log('✓ cpp walker smoke test');
+        // Phase 2.1 — call extraction.
+        // greet body: name.empty()  → call_expression on field_expression
+        // (Greeter g("hello") in main is a declaration with init, NOT a call.)
+        const callees = result.calls.map((c) => c.calleeName).sort();
+        assert.ok(callees.includes('empty'), `expected empty call; got ${callees.join(',')}`);
+
+        console.log(`✓ cpp walker smoke test (${result.calls.length} calls)`);
     } finally {
         await fs.rm(dir, { recursive: true, force: true });
     }

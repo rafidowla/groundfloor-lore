@@ -90,6 +90,14 @@ const ALLOWED_IN_CORE = [
     // identifiers in plugin source, so it has to mention the token names
     // in its FORBIDDEN_FINGERPRINTS list. Same status as test-arch.mjs.
     'scripts/atlas-license-check.mjs',
+    // Phase 7 cutover dry-run — its purpose is documenting and reporting
+    // the gitnexus → atlas migration, so it necessarily references the
+    // gitnexus token in comments and snapshot filenames (e.g.
+    // `graph.pre-gitnexus-migration`). Deletes once Phase 7 retires.
+    'scripts/atlas-cutover-dryrun.mjs',
+    // Phase 7 cutover execute (prepare-and-validate) — same status as
+    // the dry-run script. Deletes once Phase 7 retires.
+    'scripts/atlas-cutover-execute.mjs',
 ];
 
 // Anything under packages/lore-plugin-* is plugin-local and allowed to

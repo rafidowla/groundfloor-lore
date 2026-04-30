@@ -81,7 +81,16 @@ async function main() {
         const fmtImp = result.imports.find((i) => i.moduleSpecifier === 'fmt');
         assert.ok(fmtImp, 'expected fmt import');
 
-        console.log('✓ go walker smoke test');
+        // Phase 2.1 — call extraction.
+        // main() body calls fmt.Println, New, Greet → at least 3 calls in main.
+        // Greeter.Greet calls strings.Join → 1 call.
+        const callsByCallee = result.calls.map((c) => c.calleeName).sort();
+        assert.ok(callsByCallee.includes('Println'), `expected fmt.Println call; got ${callsByCallee.join(',')}`);
+        assert.ok(callsByCallee.includes('New'), `expected New call; got ${callsByCallee.join(',')}`);
+        assert.ok(callsByCallee.includes('Greet'), `expected Greet call; got ${callsByCallee.join(',')}`);
+        assert.ok(callsByCallee.includes('Join'), `expected strings.Join call; got ${callsByCallee.join(',')}`);
+
+        console.log(`✓ go walker smoke test (${result.calls.length} calls)`);
     } finally {
         await fs.rm(dir, { recursive: true, force: true });
     }

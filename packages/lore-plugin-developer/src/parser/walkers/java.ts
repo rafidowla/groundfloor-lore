@@ -18,12 +18,14 @@
  */
 
 import type Parser from 'web-tree-sitter';
-import type { ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
+import type { ParsedCall, ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
 import {
     buildSignature,
     byteRangeFromNode,
     cyclomaticComplexity,
+    extractCallsInBody,
     makeParsedSymbol,
+    walkSubtree,
     type WalkerFn,
 } from './_base.js';
 
@@ -137,6 +139,53 @@ function extractInBody(
 export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
     const symbols: ParsedSymbol[] = [];
     extractInBody(rootNode, sourceUtf8, file, null, null, symbols);
-    // Phase 2.1: call extraction TBD per Phase 2.1 follow-up.
-    return { symbols, imports: extractImports(rootNode), calls: [] };
+
+    // Phase 2.1: extract calls per method/constructor body. Java call shapes:
+    //   - method_invocation  → foo() or obj.foo() or Class.foo()
+    //   - object_creation_expression  → new Foo()
+    //   - explicit_constructor_invocation  → super(...) / this(...)
+    const calls: ParsedCall[] = [];
+    walkSubtree(rootNode, (node) => {
+        if (node.type !== 'method_declaration' && node.type !== 'constructor_declaration') return;
+        const body = node.childForFieldName('body');
+        if (!body) return;
+        const owner = symbols.find((s) =>
+            s.byteRange.start <= node.startIndex && s.byteRange.end >= node.endIndex
+            && s.kind === 'method');
+        if (!owner) return;
+        calls.push(...extractCallsInBody(body, owner.id, JAVA_CALL_NODE_TYPES, extractJavaCallee));
+    });
+
+    return { symbols, imports: extractImports(rootNode), calls };
 };
+
+const JAVA_CALL_NODE_TYPES: ReadonlySet<string> = new Set([
+    'method_invocation',
+    'object_creation_expression',
+    'explicit_constructor_invocation',
+]);
+
+function extractJavaCallee(node: Parser.SyntaxNode): { name: string; isMethod: boolean; receiver: string | null } | null {
+    if (node.type === 'object_creation_expression') {
+        const type = node.childForFieldName('type');
+        if (type) return { name: type.text, isMethod: false, receiver: null };
+        return null;
+    }
+    if (node.type === 'explicit_constructor_invocation') {
+        // super(...) / this(...). The first child is the keyword.
+        const head = node.namedChild(0);
+        if (head && (head.text === 'super' || head.text === 'this')) {
+            return { name: head.text, isMethod: true, receiver: null };
+        }
+        return null;
+    }
+    // method_invocation: object?.name(args)
+    const name = node.childForFieldName('name');
+    if (!name) return null;
+    const obj = node.childForFieldName('object');
+    return {
+        name: name.text,
+        isMethod: !!obj,
+        receiver: obj?.text ?? null,
+    };
+}

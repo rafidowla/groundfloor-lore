@@ -18,12 +18,14 @@
  */
 
 import type Parser from 'web-tree-sitter';
-import type { ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
+import type { ParsedCall, ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
 import {
     buildSignature,
     byteRangeFromNode,
     cyclomaticComplexity,
+    extractCallsInBody,
     makeParsedSymbol,
+    walkSubtree,
     type WalkerFn,
 } from './_base.js';
 
@@ -193,7 +195,40 @@ export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
             }
         }
     }
-    // Phase 2.1: call extraction TBD per Phase 2.1 follow-up. Empty list keeps
-    // WalkerOutput type-clean; resolver/callGraph.ts processes whatever is provided.
-    return { symbols, imports: extractImports(rootNode), calls: [] };
+    // Phase 2.1: extract calls per function/method body.
+    // Go call_expression has function child:
+    //   - identifier  → free function call: foo()
+    //   - selector_expression  → method/qualified call: x.Foo() or pkg.Foo()
+    //   - func_literal-then-call shapes → dynamic, skipped
+    const calls: ParsedCall[] = [];
+    walkSubtree(rootNode, (node) => {
+        if (node.type !== 'function_declaration' && node.type !== 'method_declaration') return;
+        const body = node.childForFieldName('body');
+        if (!body) return;
+        const owner = symbols.find((s) =>
+            s.byteRange.start <= node.startIndex && s.byteRange.end >= node.endIndex
+            && (s.kind === 'function' || s.kind === 'method'));
+        if (!owner) return;
+        calls.push(...extractCallsInBody(body, owner.id, GO_CALL_NODE_TYPES, extractGoCallee));
+    });
+
+    return { symbols, imports: extractImports(rootNode), calls };
 };
+
+const GO_CALL_NODE_TYPES: ReadonlySet<string> = new Set(['call_expression']);
+
+function extractGoCallee(node: Parser.SyntaxNode): { name: string; isMethod: boolean; receiver: string | null } | null {
+    const fn = node.childForFieldName('function');
+    if (!fn) return null;
+    if (fn.type === 'identifier') {
+        return { name: fn.text, isMethod: false, receiver: null };
+    }
+    if (fn.type === 'selector_expression') {
+        const operand = fn.childForFieldName('operand');
+        const field = fn.childForFieldName('field');
+        if (field) {
+            return { name: field.text, isMethod: true, receiver: operand?.text ?? null };
+        }
+    }
+    return null;
+}
