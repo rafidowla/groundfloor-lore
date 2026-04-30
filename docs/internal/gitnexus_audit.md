@@ -1,0 +1,285 @@
+# GitNexus Audit (Phase 0 — "Atlas")
+
+> **Status:** Phase 0 deliverable. Catalogues every place GitNexus touches
+> the source repo today, the MCP-tool surface that needs replacing, the
+> baseline performance/size numbers we have to match, and the locked
+> Section 1.4 decisions from `docs/PLAN_replace_gitnexus_in_developer_plugin.md`.
+>
+> **Author:** Rafi Dowla. **Date:** 2026-04-29.
+> **Capability codename:** **Atlas** (internal only — tool names stay `code_*`,
+> plugin name stays `developer`).
+
+---
+
+## 1.1 GitNexus reference catalog
+
+Total references found across source / docs / configs (excluding `node_modules/`,
+`dist/`, `package-lock.json`, `lore-workspace/`, this audit doc, and the
+locked plan doc): **448 occurrences across 41 files.**
+
+### Source code (TypeScript)
+
+| File | Line(s) | Surface |
+|---|---|---|
+| `packages/lore-plugin-developer/src/gitnexusProxy.ts` | whole file | CLI bridge to `gitnexus query / context / impact / cypher / detect_changes / rename`. Uses `child_process.execSync`, temp-file redirect to dodge pipe-buffer truncation. **Will be deleted in Phase 7.** |
+| `packages/lore-plugin-developer/src/codeIndexer.ts` | many | `isGitNexusAvailable()`, binary discovery, `npx gitnexus analyze` invocation, parses gitnexus JSON output, upserts into `CodeSymbol/CodeFile/CodeRelation`. **Will be rewritten in Phase 3 to drive the new parser/resolver.** |
+| `packages/lore-plugin-developer/src/nativeTools.ts` | 14, 416, 427 | Reads `~/.gitnexus/registry.json` for `list_repos`. **Replace with native `lore code list-repos` reading from workspace state.** |
+| `packages/lore-plugin-developer/src/cli.ts` | 132–169 | Hardcoded binary search paths (`/opt/homebrew/bin/gitnexus`, `/usr/local/bin/gitnexus`, `~/.nvm/versions/node/.../bin/gitnexus`); `npm install -g gitnexus` fallback. **Drop in Phase 7.** |
+| `packages/lore-plugin-developer/src/repoOps.ts` | (binary discovery) | Same hardcoded search paths. **Drop in Phase 7.** |
+| `packages/lore-plugin-developer/src/api.ts` | 70, 78 | Comment references — `// gitnexus vocabulary`, `// separate from gitnexus registry`. **Update in Phase 7 docs sweep.** |
+| `packages/lore-plugin-developer/src/tools.ts` | 9–10, 216–258 | Registers `code_*` tools AND `gitnexus_*` deprecated aliases (`gitnexus_query`, `gitnexus_context`, `gitnexus_impact`, `gitnexus_cypher`). **Aliases stay through one-release grace period per locked decision.** |
+| `packages/lore-plugin-developer/src/index.ts` | 6–7, 52–58, 103–104, 631–632 | Tool list + system-prompt copy mentioning `gitnexus_*`. **Rewrite copy in Phase 8.** |
+| `packages/lore-plugin-personal/src/tools.ts` | 29 | Comment cross-references `code_query`, `gitnexus_impact`. **Rewrite comment in Phase 8.** |
+| `packages/lore/src/plugins/types.ts` | 644 | Doc-comment example mentioning `gitnexus_impact`. **Rewrite in Phase 8.** Allowed in core only because it's the one canonical interface contract. |
+| `packages/lore/src/mcp/server.ts` | 1275, 4241 | `renamedTools` array (`code_flow_search`, `code_full_context`, `code_impact`, `code_cypher`); plain comment "all gitnexus / git knowledge lives in the dev plug-in." **Comment cleanup in Phase 8; renamedTools array stays as transitional metadata until Phase 7 alias drop.** |
+| `packages/lore/src/engines/localGraph.ts` | (legacy) | Listed in `.arch-baseline.json`-tracked debt; mentions `gitnexus`/plugin vocabulary in legacy paths. **Already tracked as V2.1 debt — fold into Phase 7 cleanup.** |
+| `packages/lore/src/engines/reconnect.ts` | (legacy) | Same — legacy V2.1 debt entry. |
+| `packages/lore/src/security/envScrub.ts` | 58–59 | Allowlists `GITNEXUS_HOME` env var when scrubbing subprocess env. **Drop in Phase 7.** |
+| `scripts/test-arch.mjs` | 13, 48 | Includes `gitnexus` in `PLUGIN_SCOPED_TOKENS` enforcement list. **Keep — this guardrail is correct; but drop the literal token from the list once Phase 7 lands and no plugin code references the old name.** |
+
+### Configuration files
+
+| File | Line(s) | Surface |
+|---|---|---|
+| `package.json` | 48 | `"gitnexus": "1.4.10"` runtime dep. **Remove in Phase 7.** |
+| `packages/lore-plugin-developer/plugin.json` | 5 | `description` references "Bridges the Lore memory graph to a project's code via GitNexus". **Rewrite in Phase 7 (no GitNexus name).** |
+| `.claude/settings.json` | 7 | Permission allowlist `Bash(npx gitnexus impact *)`. **Drop in Phase 7.** |
+
+### Hooks
+
+| File | Surface |
+|---|---|
+| `scripts/hooks/post-commit` | Runs `npx gitnexus analyze .` in background after each commit. Logs to `~/.groundfloor/logs/post-commit-gitnexus.log`. **Replace in Phase 7 with `lore code analyze --incremental`; rename log file.** |
+| `scripts/hooks/pre-push.sample` | Sample only — verify whether it references gitnexus. (Spot-check; ship-or-skip in Phase 7.) |
+
+### Documentation
+
+| File | Surface |
+|---|---|
+| `AGENTS.md` | Wrapped in `<!-- gitnexus:start -->` / `<!-- gitnexus:end -->` block — auto-regenerated by gitnexus CLI on `analyze`. Mentions `gitnexus_query`, `gitnexus_context`, `gitnexus_impact`, `gitnexus_detect_changes`, `gitnexus_rename`, `gitnexus_cypher`, `gitnexus://` resource URIs. **Phase 8: rewrite generator template OR auto-regenerate via the new `lore code analyze` step.** |
+| `CLAUDE.md` (project) | "GitNexus — Code Intelligence" section; lists `gitnexus_*` tools and resource URIs; PostToolUse-hook mention. The "Where things live" header references `(replacing GitNexus)` once. **Rewrite section in Phase 8 — keep the "replacing GitNexus" historical note in the architectural overview only.** |
+| `README.md` | Brief mention. **Rewrite in Phase 8.** |
+| `docs/architecture.md` | Multiple references — listed as P1 ("✅ Built" code graph), design decisions log, query examples. **Phase 8 docs sweep.** |
+| `docs/V2_implementation_plan.md` | References to "Developer/GitNexus" detachment work. **Update in Phase 8.** |
+| `docs/V2_tasks.md` | Single reference in completed-task line. **Update in Phase 8.** |
+| `docs/V2.1_status.md` | Multiple historical references to gitnexus integration shape. **Leave as-is — historical record.** |
+| `docs/lore_v2_architecture_decision.md` | Historical decisions log mentioning GitNexus as the developer-tools backbone. **Leave — historical.** |
+| `docs/GETTING_STARTED.md` | `gitnexus analyze .` quickstart line; `lore index [repo]` description. **Rewrite in Phase 8.** |
+| `docs/PLAN_replace_gitnexus_in_developer_plugin.md` | The plan document. **Source of truth — leave.** |
+| `packages/lore-plugin-developer/README.md` | Plugin readme references GitNexus. **Rewrite in Phase 8.** |
+
+### Skills
+
+| Path | Surface |
+|---|---|
+| `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` | 6 GitNexus skills. **Phase 8: replace with `.claude/skills/code-intelligence/` skills authored against the new `code_*` tool surface.** |
+| `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` | (same) |
+| `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` | (same) |
+| `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` | (same) |
+| `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` | (same) |
+| `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` | (same) |
+
+### Environment variables
+
+| Name | Source | Surface |
+|---|---|---|
+| `GITNEXUS_HOME` | `packages/lore/src/security/envScrub.ts:59` | Allowlisted as a passthrough env var for the gitnexus subprocess. **Drop in Phase 7.** |
+
+### User-side data directories (NOT in source repo)
+
+| Path | Status | Action |
+|---|---|---|
+| `~/.gitnexus/registry.json` | Present on this machine — 6 indexed repos | **Phase 7 cutover playbook**: read once during dry-run to seed the new `lore code` registry, then leave the directory in place; documented as safe-to-`rm` in CHANGELOG. |
+| `<repo>/.gitnexus/` | Present in indexed repos (e.g. `groundfloor-lore/.gitnexus/` = 80MB on this machine) | **Phase 7 cutover playbook**: drop & regenerate `CodeSymbol/CodeFile/CodeRelation` rows in the new pipeline; the per-repo `.gitnexus/` directory itself is left alone; documented safe-to-`rm`. |
+
+### npm / package metadata
+
+| Surface | Detail |
+|---|---|
+| `package.json` `dependencies.gitnexus` | `"1.4.10"` — pinned. Removed in Phase 7. |
+| `package-lock.json` | Lockfile entries for `gitnexus` and its deps. Regenerated when Phase 7 removes the dep. |
+| `npm install -g gitnexus` | Fallback in `packages/lore-plugin-developer/src/cli.ts:165`. Removed in Phase 7. |
+
+### Side effects observed during baseline run
+
+When `gitnexus analyze` ran on the three public baseline repos (see §1.3
+below), the binary **wrote files into each cloned repo** without prompting:
+
+- `AGENTS.md` (created)
+- `CLAUDE.md` (created)
+- `.claude/skills/gitnexus/` (6 skill files)
+
+This is expected behaviour for the gitnexus CLI but is worth flagging:
+the new `lore code analyze` pipeline must **NOT** mutate the indexed
+repo's source tree as a side effect of indexing. Index/cache writes
+belong under the workspace's `.lore/` directory only.
+
+---
+
+## 1.2 Used-MCP-tool catalog (gitnexus → Atlas)
+
+| Today's tool | Used by Lore? | Where | Replacement | Replacement phase |
+|---|---|---|---|---|
+| `gitnexus_query` | yes (alias) | `tools.ts:216`; consumed by AGENTS.md instructions | `code_query(query, limit?, mode?)` | 4+6 |
+| `gitnexus_context` | yes (alias) | `tools.ts:230` | `code_context(name, depth?, mode?)` | 2+6 |
+| `gitnexus_impact` | yes (alias) | `tools.ts:243` | `code_impact(target, direction)` | 4+6 |
+| `gitnexus_detect_changes` | yes (proxied via CLI) | `gitnexusProxy.ts`, `nativeTools.ts` (already partially native) | `code_detect_changes(scope, baseRef?)` | 5+6 |
+| `gitnexus_rename` | yes (proxied) | `nativeTools.ts` (already partially native) | `code_rename(symbol, newName, dryRun)` | 6 |
+| `gitnexus_cypher` | yes (alias) | `tools.ts:257` | `code_cypher(query)` | 6 |
+| `gitnexus_analyze` (CLI) | yes (subprocess from `codeIndexer.ts` + `scripts/hooks/post-commit`) | binary search + `child_process` | `lore code analyze` (new sub-command in plugin's CLI) | 3+7 |
+| `gitnexus://repo/<n>/context` | yes (referenced in AGENTS.md, consumed by agents) | resource URI scheme | `lore-code://repo/<n>/context` | 6+8 (URI rename + handler) |
+| `gitnexus://repo/<n>/clusters` | yes | resource URI | `lore-code://repo/<n>/clusters` | 6+8 |
+| `gitnexus://repo/<n>/processes` | yes | resource URI | `lore-code://repo/<n>/processes` | 6+8 |
+| `gitnexus://repo/<n>/process/<name>` | yes | resource URI | `lore-code://repo/<n>/process/<name>` | 6+8 |
+
+### Net-new tools added by Atlas (no GitNexus equivalent)
+
+| New tool | Purpose | Phase |
+|---|---|---|
+| `code_blast_radius(symbol, direction, depth?)` | Tiered (d1/d2/d3) reachability | 4+6 |
+| `code_pagerank(limit?)` | Symbol importance ranking | 4+6 |
+| `code_coupling(module)` | Afferent/efferent/instability per module | 4+6 |
+| `code_cycles()` | SCC enumeration | 4+6 |
+| `code_dead_code(filter?)` | Zero-inbound symbols | 4+6 |
+| `code_hotspots(repo, limit?)` | Complexity × churn | 4+6 |
+| `code_layer_violations(layerSpec)` | Architecture rule check | 4+6 |
+| `code_tectonic_map()` | Module topology view | 4+6 |
+| `code_search_ast(pattern, language?)` | Tree-sitter query AST search | 6 |
+| `code_churn(file, sinceDays?)` | `git log --numstat` per file | 5+6 |
+| `code_lineage(symbol)` | `git blame` per symbol | 5+6 |
+| `code_pr_risk(commitRange)` | Blast × churn × complexity per commit range | 5+6 |
+
+**Total final surface:** 18 `code_*` tools (6 replacing gitnexus + 12 net-new),
+plus 6 deprecated `gitnexus_*` aliases held for one release per locked decision.
+
+---
+
+## 1.3 Baseline benchmarks
+
+Run with `npx gitnexus analyze .` on a clean clone (no `.gitnexus/` present),
+gitnexus CLI version `1.4.8`, on Apple Silicon (Darwin 25.4.0), 2026-04-29.
+Build time measured as wall-clock seconds (low resolution — Phase 1 will
+re-measure with millisecond precision).
+
+| Repo | Commit | Tracked files | Files indexed | Symbols (nodes) | Edges | Communities | Processes | Build time | Index size |
+|---|---|---|---|---|---|---|---|---|---|
+| **groundfloor-lore** (TS, primary) | `29942fe2aa3da8efe58a62bb5702d8b7a21ef236` | n/a (already indexed) | 227 | 2,565 | 6,397 | 165 | 213 | (cached) | 80 MB |
+| **psf/requests** (Python) | `6ec76b4a36fba4a32fb72f5f9ba04e632635e477` | 126 | 86 | 973 | 2,964 | 75 | 81 | ~3 s | 39 MB |
+| **gin-gonic/gin** (Go) | `d3ffc9985281dcf4d3bef604cce4e662b1a327a6` | 130 | 111 | 2,390 | 7,456 | 171 | 207 | ~4 s | 58 MB |
+| **spring-projects/spring-petclinic** (Java) | `c7ee170434ec3e369fdc9201290ba2ea4c92b557` | 127 | 101 | 479 | 1,149 | 21 | 16 | ~3 s | 43 MB |
+
+### Acceptance floors for Atlas
+
+These are the numbers Atlas Phase 1 + Phase 2 must hit on the same repos
+at the same commits:
+
+- **Symbol count** within ±5 % of the baseline per repo (Phase 1 acceptance).
+- **Cross-file edge count** within ±10 % of the baseline per repo (Phase 2 acceptance).
+- **Index build time** ≤ 2× baseline at Phase 3 cutover; aim for ≤ baseline by Phase 4.
+- **Index size on disk** no harder constraint — different storage shape (Kùzu + LanceDB rather than gitnexus's LadybugDB), so size will diverge; just track it.
+
+> Phase 1 will re-record these with millisecond timing once `parser/index.ts`
+> exposes `parseRepo()`. The numbers in the table above are the Phase 0
+> floor, not the Phase 1 acceptance grid.
+
+### Indexed-file gap
+
+In all three public baselines, gitnexus indexed only ~80 % of `git ls-files`
+output (e.g. requests: 86/126 = 68 %, gin: 111/130 = 85 %, spring-petclinic:
+101/127 = 80 %). Reason: gitnexus skips test fixtures, generated code,
+binary blobs, and files in `.gitignore`. Atlas should match the same
+filtering (or document a deliberate difference) — track in Phase 1.
+
+---
+
+## 1.4 Locked decisions (all confirmed)
+
+> Confirms the Section 1.4 table from `docs/PLAN_replace_gitnexus_in_developer_plugin.md`
+> with no open items. Anything ambiguous is noted under "Carryover" below.
+
+| # | Decision | Locked value | Notes |
+|---|---|---|---|
+| 1 | Languages in v1 | TypeScript, JavaScript, Python, Go, Rust, Java, C#, C/C++, Ruby (8 languages — TS+JS share grammar = 8 walkers, 9 file extensions) | Confirmed. |
+| 2 | Cross-file resolver | Stack Graphs (Apache 2.0) primary + per-language fallback shims for languages without `.tsg` coverage | Confirmed. JS/WASM-binding availability audited in §2 below. |
+| 3 | tree-sitter native vs WASM | WASM (`web-tree-sitter` ^0.22) | Confirmed — same shape on macOS/Linux/Windows. |
+| 4 | Graph library | `graphology` + `graphology-pagerank` + `graphology-components` (all MIT) | Confirmed. |
+| 5 | Git invocations | Raw `child_process` against the `git` binary (no extra dep). Host-agnostic — works for GitHub, Bitbucket, GitLab, self-hosted. | Confirmed. Per-host PR-API integration parked for Phase 9+. |
+| 6 | Backward-compat aliases | Keep `gitnexus_*` tool names as aliases for **one release**, then drop in the release after Phase 8 | Confirmed. Aliases already exist in `tools.ts` today. |
+| 7 | Dataplane sync | Unchanged — schema additive only; new fields nullable | Confirmed. |
+| 8 | AST pattern matching | Included in Phase 6 as `code_search_ast` | Confirmed. |
+| 9 | Tectonic map / module topology | Included in Phase 4 as `code_tectonic_map` | Confirmed. |
+| 10 | Per-host PR/MR API integration | Parked for Phase 9+ | Confirmed. |
+| 11 | LayerSpec defaults | Ship pre-configured: `{ ui: ['ui/**'], core: ['packages/lore/**'], plugins: ['packages/lore-plugin-*/**'] }` with rules `ui → core OK, ui ⇏ plugins, plugins → core OK` | Confirmed. Users override per workspace. |
+| 12 | Phase 7 data cutover | **Full cutover** — drop & regenerate `CodeSymbol/CodeFile/CodeRelation` rows; rewrite `LoreAppliesToCode/LoreTouchesFile/FileContains` edges via one-time `oldId → newId` mapping; user knowledge tables untouched; `~/.gitnexus/` and per-repo `.gitnexus/` directories left alone (safe-to-rm in CHANGELOG) | Confirmed. Playbook in plan §3 Phase 7. |
+| 13 | ID strategy | **Option B** — clean new ID format + one-time mapping table (throwaway after cutover) | Confirmed. |
+| 14 | Smoke-test repos | lore monorepo (primary) + 3 public repos: `psf/requests` (Python), `gin-gonic/gin` (Go), `spring-projects/spring-petclinic` (Java) | Confirmed. Commit hashes recorded in §1.3 above. |
+| 15 | License-compliance check | **Automated** — Phase 0 ships `scripts/atlas-license-check.mjs`, hooked into `npm run test:arch` | Confirmed. Implemented this phase. |
+| 16 | Working name | **"Atlas"** — used in code comments, READMEs, and plugin internal docs. Tool names stay `code_*`. Plugin name stays `developer`. Soft brand only — never user-facing. | Confirmed. |
+| 17 | Embeddings model for `code_query` | Reuse Lore's existing Xenova pipeline (multilingual-e5-small, dim=384). Code-specific embeddings revisited only if benchmarks show measurable regression. | Confirmed (carried from plan §12). |
+
+### Carryover (still open after Phase 0)
+
+| # | Question | Default chosen | Phase to revisit |
+|---|---|---|---|
+| C1 | Stack Graphs JS/WASM binding availability | **Deferred** — see §2 below. If no usable JS binding by Phase 2 start, fall back to a small Rust sidecar built from upstream `stack-graphs`. | Phase 2 |
+| C2 | Smoke-test customer-shape repo for Phase 8 | `examples/plugin-manifests/cre-iam/` plus the lore monorepo itself | Phase 8 |
+| C3 | Single-engineer license-compliance policy | Yes — one engineer reads originals, ≥ 1-day cooldown, then implements; second engineer reviews each phase boundary. (Automated check already enforces no string-fragment overlap.) | Every phase |
+
+---
+
+## 2. Stack Graphs JS/WASM-binding audit
+
+Decision required by Phase 2. This audit is preliminary; the firm pick
+happens at Phase 2 kickoff.
+
+**Upstream:** [`github/stack-graphs`](https://github.com/github/stack-graphs)
+— Rust crates `stack-graphs` (core) + per-language `tree-sitter-stack-graphs-*`
+(grammar adapters). Apache 2.0.
+
+**Available bindings (as of 2026-04-29):**
+
+| Binding | License | Status | Suitability |
+|---|---|---|---|
+| Rust crate (`stack-graphs`) | Apache 2.0 | Mature, actively maintained by GitHub | First-class. Used as the runtime if we go via sidecar. |
+| Python (`stack_graphs` PyO3) | Apache 2.0 | Maintained | N/A — wrong runtime. |
+| Node-API (N-API) JS binding | — | **Not shipped by upstream.** Community attempts exist but none are first-class. | If we ship N-API we maintain a Rust→JS shim ourselves. Risks N-API conflicts with Kùzu. |
+| WASM build of the Rust core | Apache 2.0 | **Not shipped by upstream.** Stack Graphs uses `tree-sitter` Rust which WASM-compiles in principle but has not been packaged for end-user consumption. | Tractable but Phase 2 effort. |
+
+**Conclusion (Phase 0 default — to revisit at Phase 2 kickoff):**
+
+> No production-ready first-party JS or WASM binding exists today.
+> Plan-of-record is to **ship a small Rust sidecar binary** built from
+> `stack-graphs` + the `tree-sitter-stack-graphs-typescript` /
+> `-python` / `-java` adapters, invoked by the JS resolver via
+> `child_process` over a JSON-line protocol.
+>
+> The sidecar is single-purpose, stateless, and bundled per platform
+> (macOS arm64 / x64, Linux x64, Windows x64). Bundle size budget:
+> < 20 MB per platform.
+>
+> If a usable JS or WASM binding lands before Phase 2 starts, we adopt
+> it and drop the sidecar plan. Decision deferred — record in
+> `PHASE_0_OUTPUT.md` as Phase 2 carry-in.
+
+---
+
+## 3. Decision lock-in summary
+
+All 17 decisions in §1.4 are **confirmed** with no open questions blocking
+Phase 1 start. Two carryovers (C1 Stack Graphs binding, C2 smoke-test repo)
+are scheduled to be resolved at the start of their respective phases — not
+blockers for Phase 1.
+
+License-compliance automation (decision 15) is implemented in this phase
+as `scripts/atlas-license-check.mjs` and hooked into `npm run test:arch`.
+
+---
+
+## 4. References
+
+- Plan: [`docs/PLAN_replace_gitnexus_in_developer_plugin.md`](../PLAN_replace_gitnexus_in_developer_plugin.md) (Locked v1, commit `29942fe`)
+- Memory node: `lore-gitnexus-replacement-locked-v1-2026-04-29` (project `groundfloor-lore`)
+- Architecture overview: top of [`CLAUDE.md`](../../CLAUDE.md), section "Where things live"
+- Plugin boundary contract: [`CLAUDE.md`](../../CLAUDE.md), section "Plugin Boundary (MANDATORY)"
+
+*End of audit.*
