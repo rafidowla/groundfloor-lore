@@ -15,7 +15,7 @@
         "dev": "tsx packages/lore/src/mcp/server.ts",
         "cli": "tsx packages/lore/src/cli/index.ts",
         "test:http": "tsx test/http-test.ts",
-        "test:arch": "node scripts/test-arch.mjs",
+        "test:arch": "node scripts/test-arch.mjs && node scripts/atlas-license-check.mjs",
         "test:cache": "tsx test/cache-unit.ts",
         "test:unit:dataplane-graph": "tsx test/dataplane-graph-unit.ts",
         "test:unit:dataplane-vector": "tsx test/dataplane-vector-store-unit.ts",
