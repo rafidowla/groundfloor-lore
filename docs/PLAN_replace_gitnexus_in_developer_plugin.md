@@ -119,6 +119,35 @@ This work happens **entirely inside `packages/lore-plugin-developer/`**. Core Lo
 
 **Enforcement:** `npm run test:arch` must stay clean throughout. Any new violation requires explicit `.arch-baseline.json` justification.
 
+### 0.1 Cross-reference: Atlas ↔ Developer Plug-in Trustworthiness Plan
+
+Atlas builds **the data and tools**. The separate **Trustworthiness Plan** (locked 2026-04-27, knowledge node `plan-developer-plugin-trustworthiness-2026-04-27`) builds **the workflow that uses them** to keep engineers from reinventing things. The two compose; they don't overlap.
+
+| Concern | Owned by |
+|---|---|
+| Extract CodeSymbol / CodeFile / CodeRelation from source | Atlas (this plan) |
+| Idempotent table creation | Atlas (already idempotent via `IF NOT EXISTS`) |
+| "Does a function called `X` already exist before I write a new one?" | Trustworthiness Phase 2 — calls Atlas's `code_query`, `code_context`, `code_search_ast` |
+| "Does a Kùzu / Dataplane table called `Y` already exist before someone tries to register it?" | Trustworthiness Phase 4 — schema-awareness layer that reads `pluginRegistry.active()` |
+| Hook into Claude Code's pre-write so writes get gated | Trustworthiness Phase 2 (partial — `.claude/hooks/lore-prewrite-check.sh` already exists) |
+
+Practically: Atlas Phase 6 must expose its query tools as stable, well-typed MCP endpoints. The Trustworthiness Plan's pre-write hook calls them. If we change a tool signature, the pre-write hook is the canary.
+
+### 0.2 Out of scope for Atlas
+
+- **SQL.** SQL is in the most-popular-languages list, but it's a query language, not a structural one. Functions / methods / call graphs / cyclomatic complexity / blast radius don't map cleanly onto SQL. SQL belongs in a future separate plugin (`lore-plugin-sql` or similar) with its own vocabulary: tables, columns, foreign keys, queries, view dependencies. **Do not bolt SQL into Atlas.**
+- **R.** Niche audience for code intelligence. Add on customer demand (probably never, given our target market).
+
+### 0.3 v1.1 fast-follow: PHP, Swift, Kotlin
+
+After v1's 8 walkers (TS+JS, Python, Go, Rust, Java, C#, C+CPP, Ruby) merge, a small fast-follow lands three more walkers in one PR:
+
+- **PHP** — WordPress + Laravel + Drupal user base.
+- **Swift** — iOS development.
+- **Kotlin** — Android + JVM backends.
+
+Each walker is ~1 day plus a smoke test, so the fast-follow is ~3 days total. Vendor 3 more grammar WASM files. After v1.1, Atlas covers **11 walkers across 13–14 file extensions** (TS+TSX+JS+JSX+MJS+CJS share 1 walker; C+CPP+H+HPP share 1; everything else 1 walker per language).
+
 ---
 
 ## 1. Discovery & Audit (Phase 0 prerequisite — Day 1–2)
@@ -409,7 +438,7 @@ Each phase is **independently shippable** and **independently revertible**. Comm
 - Performance: <30s for a 5,000-file repo on M-series Mac (parse + resolve + upsert).
 
 **Acceptance:**
-- `lore analyze` (with the new flag on) produces a graph indistinguishable from gitnexus's output (within 5–10% tolerance per Phase 1/2 baselines).
+- `lore analyze` (with the new flag on) produces a graph that passes Atlas's own functional tests: every walker test green, expected symbols + relationships present for the lore monorepo and the pinned public repos. (Earlier draft compared counts to GitNexus's output within 5-10%; that comparison is retired — GitNexus is going away in Phase 7, so it isn't a useful reference. Atlas validates against its own test fixtures + the pre-cutover Atlas graph during Phase 7.)
 - Zero subprocess calls to `gitnexus` when flag is on.
 
 ---
@@ -562,7 +591,7 @@ Cutover sequence (single maintenance window, ~minutes of downtime):
 4. **Drop old code-derived rows.** `DELETE FROM CodeSymbol, CodeFile, CodeRelation`. User knowledge tables UNTOUCHED.
 5. **Re-index with new parser.** `lore code analyze` on the developer workspace; populates fresh CodeSymbol/CodeFile/CodeRelation rows.
 6. **Reconnect-pass for unmapped knowledge.** Use the developer plugin's existing `reconnect.ts` heuristics (label substring + content references) to re-link knowledge nodes that lost their LoreAppliesToCode edges. User reviews suggestions in the UI.
-7. **Verify.** Symbol/edge counts within Phase-0-baseline tolerance (5-10%). Run a few recalls — should feel identical. If anything looks off → restore from `graph.pre-gitnexus-migration`.
+7. **Verify.** Symbol / edge counts within Atlas's own pre-cutover baseline ±5% (i.e. compare the post-cutover graph to the snapshot Atlas wrote BEFORE the destructive step, not to GitNexus). Run a small set of known-good recalls — same answers as before. If anything looks off → restore from `graph.pre-gitnexus-migration`.
 8. **Clean up.** Once user confirms, delete `graph.pre-gitnexus-migration`. Leave `~/.gitnexus/` directories alone (user choice; documented as safe-to-rm in CHANGELOG).
 
 **Acceptance addendum:**
