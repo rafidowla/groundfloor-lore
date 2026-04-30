@@ -21,6 +21,7 @@
  */
 
 import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, setupCommand, joinCommand, lintCommand, auditCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, verbatimCommand, modelsCommand, scaffoldPluginCommand, resolveDeferredCommand, recallCommand, getFullCommand, supersedeCommand } from './commands.js';
+import { embedderCommand } from './embedderCommands.js';
 import { ConfigManager } from '../config/configManager.js';
 import { PluginRegistry } from '../plugins/registry.js';
 import path from 'path';
@@ -166,6 +167,9 @@ async function main(): Promise<void> {
             break;
         case 'verbatim':
             await verbatimCommand(commandArgs);
+            break;
+        case 'embedder':
+            await embedderCommand(commandArgs);
             break;
         case 'models':
             await modelsCommand(commandArgs);

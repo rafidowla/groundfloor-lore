@@ -308,25 +308,17 @@ let graph: LoreGraph = createGraph();
 async function createEmbeddingProvider(): Promise<EmbeddingProvider> {
     const providerKind = (process.env['LORE_EMBEDDING_PROVIDER'] ?? '').trim().toLowerCase();
 
-    // 2026-04-30 — auto-detect Ollama running locally before falling back
-    // to Xenova-Wasm. Ollama-on-Apple-Silicon is ~50-100x faster (Metal
-    // GPU + Neural Engine) than the Wasm-CPU default. Skipped when an
-    // explicit override is set or when LORE_DISABLE_AUTO_DETECT_EMBEDDER=1.
-    if (!providerKind && process.env['LORE_DISABLE_AUTO_DETECT_EMBEDDER'] !== '1') {
-        try {
-            const { pickEmbeddingProvider } = await import('../providers/pickEmbeddingProvider.js');
-            const picked = await pickEmbeddingProvider(graphBasePath);
-            if (!picked.isFallback) {
-                console.error(picked.banner);
-                return picked.provider;
-            }
-            // isFallback === true means pickEmbeddingProvider already
-            // ended up at LocalEmbeddingProvider; fall through to the
-            // existing local path below so we don't double-print.
-        } catch (err) {
-            console.error(`[Lore MCP] embedder auto-detect failed (non-fatal): ${(err as Error).message}`);
-        }
-    }
+    // Reverted 2026-04-30 — silent auto-detect-at-boot was wrong design.
+    // It silently swapped the active embedder when Ollama appeared on
+    // a host, which produced cross-vector-space mismatches on workspaces
+    // already populated with the previous embedder. Embedder switch now
+    // belongs to a deliberate `lore embedder switch` CLI command (see
+    // commands.ts) that runs the migration as part of the swap.
+    //
+    // Daemon boot path now: read configured embedder, use exactly that.
+    // No autodetection, no surprises. Operators who want Ollama set
+    // LORE_EMBEDDING_PROVIDER=openai_compat with the appropriate base
+    // URL + model + dim env vars (the existing code path below).
 
     if (providerKind === 'openai_compat' || providerKind === 'compat' || providerKind === 'remote') {
         const baseUrl = process.env['LORE_EMBEDDING_BASE_URL'] ?? '';
@@ -373,6 +365,8 @@ async function createEmbeddingProvider(): Promise<EmbeddingProvider> {
     return provider;
 }
 const embeddingProvider: EmbeddingProvider = await createEmbeddingProvider();
+// (kept the Promise pattern in case createEmbeddingProvider grows
+// async logic later — current path is sync but the await is harmless.)
 
 type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
 function createVectorStore(): LoreVectorStore {

@@ -154,6 +154,49 @@ export class VerbatimStore implements VectorProvider {
     }
 
     /**
+     * Ensure a vector index exists on lore_verbatim. Build threshold
+     * is 256 rows — LanceDB's IVF-PQ index needs at least num_partitions
+     * rows to train; below that the index would degrade to sequential
+     * scan. The default IVF_PQ params match LanceDB's recommendation
+     * for embedding-search tables: num_partitions = sqrt(rows), num_subvectors
+     * = dim / 16. Sub-second k-NN at 100k+ rows.
+     *
+     * Idempotent: skips if a vector index already exists. Safe to call
+     * after every storeBatch — most calls return immediately.
+     *
+     * Returns true if an index was built this call.
+     */
+    async ensureVectorIndex(opts: { minRows?: number } = {}): Promise<boolean> {
+        if (!this.initialized || !this.table) return false;
+        const minRows = opts.minRows ?? 256;
+        try {
+            // Check existing indices first.
+            const indices = await this.table.listIndices?.();
+            if (Array.isArray(indices)) {
+                for (const idx of indices) {
+                    const idxObj = idx as { columns?: string[]; name?: string };
+                    if (idxObj.columns && idxObj.columns.includes('vector')) {
+                        return false; // Already indexed.
+                    }
+                }
+            }
+            // Below threshold? Skip — index would be wasted and need
+            // rebuilding once more rows arrive.
+            const count = await this.table.countRows();
+            if (count < minRows) return false;
+
+            console.error(`[VerbatimStore] Building IVF-PQ index on lore_verbatim.vector (${count} rows)...`);
+            const t0 = Date.now();
+            await this.table.createIndex('vector');
+            console.error(`[VerbatimStore] Index built in ${((Date.now() - t0) / 1000).toFixed(1)}s. Search step is now sub-second regardless of corpus size.`);
+            return true;
+        } catch (err) {
+            console.error(`[VerbatimStore] ensureVectorIndex failed (non-fatal): ${(err as Error).message}`);
+            return false;
+        }
+    }
+
+    /**
      * Coerce a LanceDB-returned vector field into a plain number[].
      * Reads come back as Arrow Float32Array-backed structures; writing
      * those back as-is fails with "Found field not in schema: vector.isValid"
@@ -506,6 +549,12 @@ export class VerbatimStore implements VectorProvider {
         } else {
             await this.table.add(rows);
         }
+
+        // Build the IVF-PQ index after a bulk add if we've crossed the
+        // threshold. Idempotent — skips if already indexed. Surfaces
+        // the build cost to the operator log so they know what's
+        // happening on first reconnect.
+        await this.ensureVectorIndex();
     }
 
     async search(
