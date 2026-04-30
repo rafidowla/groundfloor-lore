@@ -74,15 +74,42 @@ function parseArgs(argv) {
         confirmWorkspace: null,
         coverageThreshold: 0.99,
         repo: null,
+        repos: null,        // CSV of repo names; --all-repos sets this from the registry
+        allRepos: false,
     };
     for (const a of argv.slice(2)) {
         if (a === '--i-have-the-go') args.iHaveTheGo = true;
+        else if (a === '--all-repos') args.allRepos = true;
         else if (a.startsWith('--confirm-workspace=')) args.confirmWorkspace = a.slice('--confirm-workspace='.length);
         else if (a.startsWith('--coverage-threshold=')) args.coverageThreshold = parseFloat(a.slice('--coverage-threshold='.length));
         else if (a.startsWith('--repo=')) args.repo = a.slice('--repo='.length);
+        else if (a.startsWith('--repos=')) args.repos = a.slice('--repos='.length).split(',').map((s) => s.trim()).filter(Boolean);
         else throw new Error(`unknown argument: ${a}`);
     }
     return args;
+}
+
+/**
+ * Fetch the list of registered repos (name + abs path) from the live
+ * daemon. Filters out stale Claude worktrees inside groundfloor-lore
+ * (.claude/worktrees/*) — those are not real repos to cut over.
+ */
+async function fetchRegisteredRepos(token) {
+    const r = await fetch(`${LORE_BASE}/api/repos`, {
+        headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) throw new Error(`/api/repos fetch failed: HTTP ${r.status}`);
+    const data = await r.json();
+    // Filter out:
+    //   - stale Claude worktrees inside groundfloor-lore (.claude/worktrees/*)
+    //   - atlas baseline benchmark repos in /private/tmp or /tmp
+    //   - any path that doesn't currently exist on disk (registry drift)
+    return (data.repos ?? []).filter((repo) => {
+        if (!repo.path) return false;
+        if (repo.path.includes('/.claude/worktrees/')) return false;
+        if (repo.path.startsWith('/private/tmp/') || repo.path.startsWith('/tmp/')) return false;
+        return true;
+    });
 }
 
 async function loadAuthToken() {
@@ -174,6 +201,43 @@ async function buildCandidateGraph() {
 }
 
 /**
+ * Multi-repo candidate graph build. Iterates the requested repos,
+ * runs parseRepo + resolveRepo against each absolute path, returns a
+ * per-repo map of resolved graphs. The mapping table joins existing
+ * CodeSymbols WHERE repo=X against candidate.byRepo.get(X).
+ */
+async function buildCandidateGraphsByRepo(repoEntries) {
+    const { parseRepo } = await import('../packages/lore-plugin-developer/src/parser/index.js');
+    const { resolveRepo } = await import('../packages/lore-plugin-developer/src/resolver/index.js');
+
+    const byRepo = new Map();
+    let totalFiles = 0;
+    let totalSymbols = 0;
+    let totalRelations = 0;
+    const failures = [];
+
+    for (const entry of repoEntries) {
+        try {
+            console.error(`[cutover-execute] parsing ${entry.name} @ ${entry.path}...`);
+            const t0 = Date.now();
+            const parsed = await parseRepo(entry.path);
+            const resolved = await resolveRepo(entry.path, parsed.files);
+            const dt = Date.now() - t0;
+            console.error(`[cutover-execute]   ${entry.name}: ${parsed.files.length} files / ${resolved.counts.symbols} symbols / ${resolved.relations.length} relations  (${dt}ms)`);
+            byRepo.set(entry.name, { parsed, resolved, path: entry.path });
+            totalFiles += parsed.files.length;
+            totalSymbols += resolved.counts.symbols;
+            totalRelations += resolved.relations.length;
+        } catch (err) {
+            console.error(`[cutover-execute]   ${entry.name}: FAILED — ${err.message}`);
+            failures.push({ name: entry.name, path: entry.path, error: err.message });
+        }
+    }
+
+    return { byRepo, totalFiles, totalSymbols, totalRelations, failures };
+}
+
+/**
  * Map gitnexus's kind vocabulary to Atlas's. Differences:
  *   - Case: gitnexus "Function" → Atlas "function"
  *   - Rust: gitnexus "Struct" → Atlas "class"
@@ -192,15 +256,18 @@ async function buildCandidateGraph() {
 const KIND_ALIASES = new Map([
     ['function', ['function']],
     ['method', ['method']],
+    ['constructor', ['method']],    // gitnexus: separate Constructor kind → Atlas: method (named "constructor")
     ['class', ['class']],
     ['struct', ['class']],          // Rust struct → Atlas class
     ['interface', ['interface']],
     ['trait', ['interface']],       // Rust trait → Atlas interface
+    ['impl', ['class', 'method']],  // Rust impl block → Atlas: members of target class (method) or the class itself
     ['enum', ['enum']],
     ['type', ['type', 'class']],    // Go type can land as either
     ['constant', ['constant']],
     ['variable', ['variable']],
     ['module', ['module']],
+    ['namespace', ['module']],      // C++/C# namespace → Atlas module
 ]);
 
 const BY_DESIGN_UNMAPPED_KINDS = new Set(['property', 'section']);
@@ -213,6 +280,7 @@ const BY_DESIGN_UNMAPPED_KINDS = new Set(['property', 'section']);
  * for that kind (e.g. gitnexus Type tries both Atlas "type" and "class").
  */
 function buildMappingTable(existing, candidate) {
+    // Single-repo path — kept for backward compat with non-multi-repo mode.
     const candidateIndex = new Map();
     for (const sym of candidate.resolved.table.all) {
         const key = `${sym.file}\x00${sym.name}\x00${sym.kind.toLowerCase()}`;
@@ -260,6 +328,95 @@ function buildMappingTable(existing, candidate) {
         totalMappable,
         coverage,
         mappableCoverage,
+    };
+}
+
+/**
+ * Multi-repo mapping table. Joins existing CodeSymbols against the
+ * per-repo candidate graphs by (repo, file, name, kind). Reports
+ * aggregate coverage plus a per-repo breakdown so operators can spot
+ * any single repo with anomalously low coverage before cutover.
+ *
+ * Existing rows whose repo isn't in `candidatesByRepo` (e.g. parse
+ * failed, or repo was excluded from --repos) are reported as
+ * `noCandidates` rather than silently dropped.
+ */
+function buildMappingTableMulti(existing, candidatesByRepo) {
+    // Build per-repo candidate index.
+    const indexByRepo = new Map();
+    for (const [repo, c] of candidatesByRepo.entries()) {
+        const idx = new Map();
+        for (const sym of c.resolved.table.all) {
+            const key = `${sym.file}\x00${sym.name}\x00${sym.kind.toLowerCase()}`;
+            idx.set(key, sym.id);
+        }
+        indexByRepo.set(repo, idx);
+    }
+
+    const mapping = [];
+    const unmapped = [];
+    const byDesignUnmapped = [];
+    const noCandidates = [];
+    const unmappedByKind = {};
+    const byRepoStats = new Map();   // repo → { mapped, unmapped, byDesignUnmapped }
+    function bumpRepo(repo, field) {
+        const s = byRepoStats.get(repo) ?? { mapped: 0, unmapped: 0, byDesignUnmapped: 0, noCandidates: 0 };
+        s[field] = (s[field] ?? 0) + 1;
+        byRepoStats.set(repo, s);
+    }
+
+    for (const old of existing) {
+        const repo = String(old.repo ?? '');
+        const oldKindLower = String(old.kind).toLowerCase();
+
+        if (BY_DESIGN_UNMAPPED_KINDS.has(oldKindLower)) {
+            byDesignUnmapped.push(old);
+            bumpRepo(repo, 'byDesignUnmapped');
+            continue;
+        }
+
+        const idx = indexByRepo.get(repo);
+        if (!idx) {
+            noCandidates.push(old);
+            bumpRepo(repo, 'noCandidates');
+            continue;
+        }
+
+        const aliases = KIND_ALIASES.get(oldKindLower) ?? [oldKindLower];
+        let newId = null;
+        for (const atlasKind of aliases) {
+            const key = `${old.filePath}\x00${old.name}\x00${atlasKind}`;
+            const found = idx.get(key);
+            if (found) { newId = found; break; }
+        }
+
+        if (newId) {
+            mapping.push({ oldUid: old.uid, newId });
+            bumpRepo(repo, 'mapped');
+        } else {
+            unmapped.push(old);
+            bumpRepo(repo, 'unmapped');
+            const k = String(old.kind);
+            unmappedByKind[k] = (unmappedByKind[k] ?? 0) + 1;
+        }
+    }
+
+    const totalAll = mapping.length + unmapped.length + byDesignUnmapped.length + noCandidates.length;
+    const totalMappable = mapping.length + unmapped.length;
+    const coverage = totalAll === 0 ? 0 : mapping.length / totalAll;
+    const mappableCoverage = totalMappable === 0 ? 1 : mapping.length / totalMappable;
+
+    return {
+        mapping,
+        unmapped,
+        unmappedByKind,
+        byDesignUnmapped,
+        noCandidates,
+        totalAll,
+        totalMappable,
+        coverage,
+        mappableCoverage,
+        byRepoStats,
     };
 }
 
@@ -355,18 +512,62 @@ async function main() {
         existingResult = { source: 'daemon-stopped', rows: null };
     }
 
-    const candidate = await buildCandidateGraph();
+    // Decide multi-repo vs single-repo mode.
+    // Multi-repo when --all-repos OR --repos=<csv>. Otherwise single-repo
+    // (the lore monorepo via REPO_ROOT, optionally filtered by --repo=<name>
+    // on the existing-side query).
+    let candidate = null;
+    let candidatesByRepo = null;
+    let parseFailures = [];
+    let totalCandidateFiles = 0;
+    let totalCandidateSymbols = 0;
+    let totalCandidateRelations = 0;
+
+    if (args.allRepos || args.repos) {
+        if (!daemonAlive) {
+            refuse('--all-repos / --repos requires the daemon running so it can enumerate registered repos via /api/repos. Start the daemon first.');
+        }
+        let repoEntries = await fetchRegisteredRepos(token);
+        if (args.repos) {
+            const requested = new Set(args.repos);
+            repoEntries = repoEntries.filter((r) => requested.has(r.name));
+        }
+        console.error(`[cutover-execute] multi-repo mode: ${repoEntries.length} repo(s)`);
+        const result = await buildCandidateGraphsByRepo(repoEntries);
+        candidatesByRepo = result.byRepo;
+        parseFailures = result.failures;
+        totalCandidateFiles = result.totalFiles;
+        totalCandidateSymbols = result.totalSymbols;
+        totalCandidateRelations = result.totalRelations;
+        console.error(`[cutover-execute] multi-repo total: ${result.totalFiles} files / ${result.totalSymbols} symbols / ${result.totalRelations} relations across ${candidatesByRepo.size} repo(s); ${result.failures.length} parse failure(s)`);
+    } else {
+        candidate = await buildCandidateGraph();
+        totalCandidateFiles = candidate.parsed.files.length;
+        totalCandidateSymbols = candidate.resolved.counts.symbols;
+        totalCandidateRelations = candidate.resolved.relations.length;
+    }
 
     let mapping = null;
     let coverage = null;
     if (existingResult.rows) {
-        const m = buildMappingTable(existingResult.rows, candidate);
+        const m = candidatesByRepo
+            ? buildMappingTableMulti(existingResult.rows, candidatesByRepo)
+            : buildMappingTable(existingResult.rows, candidate);
         mapping = m;
         coverage = m.mappableCoverage;
-        console.error(`[cutover-execute] mapping: ${m.mapping.length} mapped + ${m.unmapped.length} unmapped + ${m.byDesignUnmapped.length} by-design-skipped (Atlas omits Property/Section)`);
+        const noCandLine = m.noCandidates ? ` + ${m.noCandidates.length} no-candidates` : '';
+        console.error(`[cutover-execute] mapping: ${m.mapping.length} mapped + ${m.unmapped.length} unmapped + ${m.byDesignUnmapped.length} by-design-skipped${noCandLine} (Atlas omits Property/Section)`);
         console.error(`[cutover-execute] coverage (mappable): ${(m.mappableCoverage * 100).toFixed(2)}%   coverage (overall): ${(m.coverage * 100).toFixed(2)}%`);
         if (Object.keys(m.unmappedByKind).length > 0) {
             console.error(`[cutover-execute] unmapped by kind: ${JSON.stringify(m.unmappedByKind)}`);
+        }
+        if (m.byRepoStats) {
+            console.error(`[cutover-execute] per-repo coverage:`);
+            for (const [repo, s] of m.byRepoStats.entries()) {
+                const total = s.mapped + s.unmapped;
+                const cov = total === 0 ? 'n/a' : `${((s.mapped / total) * 100).toFixed(1)}%`;
+                console.error(`[cutover-execute]   ${repo.padEnd(35)}  mapped=${String(s.mapped).padStart(5)}  unmapped=${String(s.unmapped).padStart(4)}  byDesign=${String(s.byDesignUnmapped).padStart(4)}${s.noCandidates ? `  noCand=${s.noCandidates}` : ''}  cov=${cov}`);
+            }
         }
         // Threshold compares against MAPPABLE coverage — by-design-skipped
         // symbols are dropped during cutover and their LoreAppliesToCode
@@ -387,13 +588,38 @@ async function main() {
         refuse(err.message);
     }
 
-    const payload = {
-        capturedAt: new Date().toISOString(),
-        loreHome: LORE_HOME,
-        workspace: args.confirmWorkspace,
-        workspacePath,
-        snapshotPath,
-        candidate: {
+    // Build candidate payload — single-repo or multi-repo shape.
+    const candidatePayload = candidatesByRepo
+        ? {
+            mode: 'multi-repo',
+            files: totalCandidateFiles,
+            symbols: totalCandidateSymbols,
+            relations: totalCandidateRelations,
+            repoCount: candidatesByRepo.size,
+            parseFailures: parseFailures,
+            byRepo: Object.fromEntries(
+                Array.from(candidatesByRepo.entries()).map(([repo, c]) => [
+                    repo,
+                    {
+                        path: c.path,
+                        files: c.parsed.files.length,
+                        symbols: c.resolved.counts.symbols,
+                        relations: c.resolved.relations.length,
+                        symbolList: c.resolved.table.all.map((s) => ({
+                            id: s.id,
+                            name: s.name,
+                            kind: s.kind,
+                            file: s.file,
+                            qualifiedName: s.qualifiedName,
+                        })),
+                        files_: c.parsed.files.map((f) => ({ path: f.path, language: f.language, loc: f.loc })),
+                        relations_: c.resolved.relations.map((r) => ({ from: r.from, to: r.to, kind: r.kind, confidence: r.confidence })),
+                    },
+                ]),
+            ),
+        }
+        : {
+            mode: 'single-repo',
             files: candidate.parsed.files.length,
             symbols: candidate.resolved.counts.symbols,
             relations: candidate.resolved.relations.length,
@@ -419,7 +645,15 @@ async function main() {
                 kind: r.kind,
                 confidence: r.confidence,
             })),
-        },
+        };
+
+    const payload = {
+        capturedAt: new Date().toISOString(),
+        loreHome: LORE_HOME,
+        workspace: args.confirmWorkspace,
+        workspacePath,
+        snapshotPath,
+        candidate: candidatePayload,
         existing: {
             source: existingResult.source,
             count: existingResult.rows?.length ?? null,
@@ -465,7 +699,10 @@ async function main() {
     console.log(`  Workspace:        ${args.confirmWorkspace}`);
     console.log(`  Workspace path:   ${workspacePath}`);
     console.log(`  Snapshot:         ${snapshotPath ?? '(skipped)'}`);
-    console.log(`  Candidate graph:  ${payload.candidate.files} files / ${payload.candidate.symbols} symbols / ${payload.candidate.relations} relations`);
+    console.log(`  Candidate graph:  ${payload.candidate.files} files / ${payload.candidate.symbols} symbols / ${payload.candidate.relations} relations${payload.candidate.mode === 'multi-repo' ? ` across ${payload.candidate.repoCount} repos` : ''}`);
+    if (payload.candidate.parseFailures && payload.candidate.parseFailures.length > 0) {
+        console.log(`  Parse failures:   ${payload.candidate.parseFailures.length} (see payload.candidate.parseFailures)`);
+    }
     console.log(`  Existing source:  ${payload.existing.source}`);
     if (mapping) {
         console.log(`  Mapping coverage: ${(mapping.mappableCoverage * 100).toFixed(2)}% mappable / ${(mapping.coverage * 100).toFixed(2)}% overall`);
