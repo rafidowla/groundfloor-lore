@@ -100,6 +100,30 @@ export interface ParsedImport {
 }
 
 /**
+ * A call site captured during parsing: a reference to another callable
+ * from inside a function/method body. Phase 2.1 — the resolver matches
+ * `calleeName` against the symbol table + import graph to produce
+ * `calls` edges.
+ *
+ * `receiverHint` captures the textual receiver for method calls (e.g.,
+ * `foo.bar()` → receiverHint = "foo"). Phase 2 doesn't do type
+ * inference, so the hint is a heuristic — Phase 9+ Stack Graphs path
+ * could turn this into a precise type binding.
+ */
+export interface ParsedCall {
+    /** ParsedSymbol.id of the enclosing function/method (or empty for module-level call sites). */
+    callerSymbolId: string;
+    /** The callee name as written in source. May be `foo`, `Foo.bar`, `obj.method`, etc. */
+    calleeName: string;
+    /** Byte range of the call expression. */
+    byteRange: ByteRange;
+    /** True for method-call shapes (`obj.foo()`); false for free-function calls (`foo()`). */
+    isMethodCall: boolean;
+    /** For method calls, the receiver text (e.g., `obj` from `obj.foo()`). null otherwise. */
+    receiverHint: string | null;
+}
+
+/**
  * The full parser output for one file.
  */
 export interface ParsedFile {
@@ -107,6 +131,8 @@ export interface ParsedFile {
     language: Language;
     symbols: ParsedSymbol[];
     imports: ParsedImport[];
+    /** Phase 2.1: call sites captured during parsing. */
+    calls: ParsedCall[];
     sizeBytes: number;
     loc: number;
     parsedAt: string;

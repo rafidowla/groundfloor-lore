@@ -187,6 +187,8 @@ export function makeParsedSymbol(args: {
 export interface WalkerOutput {
     symbols: ParsedSymbol[];
     imports: import('../types.js').ParsedImport[];
+    /** Phase 2.1: call sites extracted from function/method bodies. */
+    calls: import('../types.js').ParsedCall[];
 }
 
 export type WalkerFn = (
@@ -194,3 +196,39 @@ export type WalkerFn = (
     sourceUtf8: Uint8Array,
     file: string,
 ) => WalkerOutput;
+
+/**
+ * Phase 2.1 helper: walk every descendant of `bodyNode`, find call
+ * expressions whose `type` is in `callNodeTypes`, and emit a
+ * ParsedCall attributed to `callerSymbolId`.
+ *
+ * `extractCallee` is a per-language strategy function that, given a
+ * call-expression node, returns the callee's textual name and an
+ * optional method-receiver hint. Returns null if the call is dynamic
+ * / not extractable (anonymous arrow, `(getFn())()`, etc.).
+ *
+ * Walkers pass their own `callNodeTypes` set + `extractCallee` strategy
+ * because grammar shapes differ — TS uses `call_expression`, Java uses
+ * `method_invocation`, etc.
+ */
+export function extractCallsInBody(
+    bodyNode: Parser.SyntaxNode,
+    callerSymbolId: string,
+    callNodeTypes: ReadonlySet<string>,
+    extractCallee: (callNode: Parser.SyntaxNode) => { name: string; isMethod: boolean; receiver: string | null } | null,
+): import('../types.js').ParsedCall[] {
+    const out: import('../types.js').ParsedCall[] = [];
+    walkSubtree(bodyNode, (n) => {
+        if (!callNodeTypes.has(n.type)) return;
+        const call = extractCallee(n);
+        if (!call) return;
+        out.push({
+            callerSymbolId,
+            calleeName: call.name,
+            byteRange: byteRangeFromNode(n),
+            isMethodCall: call.isMethod,
+            receiverHint: call.receiver,
+        });
+    });
+    return out;
+}

@@ -62,6 +62,7 @@ import {
     type ResolutionContext,
 } from './importGraph.js';
 import { buildInheritanceEdges } from './inheritance.js';
+import { buildCallEdges } from './callGraph.js';
 
 export interface ResolveResult {
     table: SymbolTable;
@@ -77,6 +78,9 @@ export interface ResolveResult {
         importsUnresolved: number;
         inheritanceEdges: number;
         containsEdges: number;
+        callEdges: number;
+        callsResolved: number;
+        callsUnresolved: number;
         durationMs: number;
     };
 }
@@ -114,10 +118,14 @@ export async function resolveRepo(
         }
     }
 
+    // 6. Call edges (Phase 2.1).
+    const callResult = buildCallEdges(parsedFiles, table, context);
+
     const relations: ParsedRelation[] = [
         ...importResult.edges,
         ...inheritanceEdges,
         ...containsEdges,
+        ...callResult.edges,
     ];
 
     return {
@@ -133,6 +141,9 @@ export async function resolveRepo(
             importsUnresolved: importResult.unresolved,
             inheritanceEdges: inheritanceEdges.length,
             containsEdges: containsEdges.length,
+            callEdges: callResult.edges.length,
+            callsResolved: callResult.resolved,
+            callsUnresolved: callResult.unresolved,
             durationMs: Date.now() - startedAt,
         },
     };
@@ -144,3 +155,4 @@ export type { SymbolTable } from './symbolTable.js';
 export { buildResolutionContext, buildImportEdges, resolveImport } from './importGraph.js';
 export type { ResolutionContext } from './importGraph.js';
 export { buildInheritanceEdges } from './inheritance.js';
+export { buildCallEdges } from './callGraph.js';

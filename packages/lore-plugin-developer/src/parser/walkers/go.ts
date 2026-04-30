@@ -193,5 +193,7 @@ export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
             }
         }
     }
-    return { symbols, imports: extractImports(rootNode) };
+    // Phase 2.1: call extraction TBD per Phase 2.1 follow-up. Empty list keeps
+    // WalkerOutput type-clean; resolver/callGraph.ts processes whatever is provided.
+    return { symbols, imports: extractImports(rootNode), calls: [] };
 };

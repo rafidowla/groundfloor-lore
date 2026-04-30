@@ -113,6 +113,7 @@ export async function parseFile(
             language,
             symbols: [],
             imports: [],
+            calls: [],
             sizeBytes: buf.byteLength,
             loc: countLoc(sourceText),
             parsedAt: new Date().toISOString(),
@@ -125,13 +126,14 @@ export async function parseFile(
         if (!tree) {
             throw new Error('tree-sitter returned no tree');
         }
-        const { symbols, imports } = walker(tree.rootNode, sourceUtf8, repoRel);
+        const { symbols, imports, calls } = walker(tree.rootNode, sourceUtf8, repoRel);
         tree.delete();
         return {
             path: repoRel,
             language,
             symbols,
             imports,
+            calls,
             sizeBytes: buf.byteLength,
             loc: countLoc(sourceText),
             parsedAt: new Date().toISOString(),

@@ -137,5 +137,6 @@ function extractInBody(
 export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
     const symbols: ParsedSymbol[] = [];
     extractInBody(rootNode, sourceUtf8, file, null, null, symbols);
-    return { symbols, imports: extractImports(rootNode) };
+    // Phase 2.1: call extraction TBD per Phase 2.1 follow-up.
+    return { symbols, imports: extractImports(rootNode), calls: [] };
 };
