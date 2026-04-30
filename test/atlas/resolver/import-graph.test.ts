@@ -30,8 +30,14 @@ async function main() {
     console.log(`  import edges: ${result.counts.importEdges} (resolved: ${result.counts.importsResolved}, unresolved: ${result.counts.importsUnresolved})`);
     console.log(`  inheritance edges: ${result.counts.inheritanceEdges}`);
     console.log(`  contains edges: ${result.counts.containsEdges}`);
+    console.log(`  call edges: ${result.counts.callEdges} (resolved: ${result.counts.callsResolved}, unresolved: ${result.counts.callsUnresolved})`);
     console.log(`  total relations: ${result.relations.length}`);
     console.log(`  duration: ${result.counts.durationMs} ms`);
+
+    // Phase 2.1: call-graph extraction landed for TS+Python; should
+    // produce a meaningful number of call edges on the lore monorepo
+    // (the codebase is mostly TypeScript).
+    assert.ok(result.counts.callEdges > 1000, `expected >1000 call edges; got ${result.counts.callEdges}`);
 
     // Symbol-table sanity
     assert.ok(result.counts.symbols > 1000, `expected >1000 symbols on lore monorepo; got ${result.counts.symbols}`);

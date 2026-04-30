@@ -25,6 +25,7 @@ import {
     buildSignature,
     byteRangeFromNode,
     cyclomaticComplexity,
+    extractCallsInBody,
     makeParsedSymbol,
     walkSubtree,
     type WalkerFn,
@@ -182,9 +183,36 @@ function extractInBody(
     }
 }
 
+const PY_CALL_NODE_TYPES: ReadonlySet<string> = new Set(['call']);
+
+function extractPyCallee(node: Parser.SyntaxNode): { name: string; isMethod: boolean; receiver: string | null } | null {
+    const fn = node.childForFieldName('function');
+    if (!fn) return null;
+    if (fn.type === 'identifier') return { name: fn.text, isMethod: false, receiver: null };
+    if (fn.type === 'attribute') {
+        const obj = fn.childForFieldName('object');
+        const attr = fn.childForFieldName('attribute');
+        if (attr) return { name: attr.text, isMethod: true, receiver: obj?.text ?? null };
+    }
+    return null;
+}
+
 export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
     const symbols: ParsedSymbol[] = [];
     extractInBody(rootNode, sourceUtf8, file, null, null, null, symbols);
     const imports = extractImports(rootNode);
-    return { symbols, imports };
+
+    const calls: import('../types.js').ParsedCall[] = [];
+    walkSubtree(rootNode, (node) => {
+        if (node.type !== 'function_definition') return;
+        const body = node.childForFieldName('body');
+        if (!body) return;
+        const owner = symbols.find((s) =>
+            s.byteRange.start <= node.startIndex && s.byteRange.end >= node.endIndex
+            && (s.kind === 'function' || s.kind === 'method'));
+        if (!owner) return;
+        calls.push(...extractCallsInBody(body, owner.id, PY_CALL_NODE_TYPES, extractPyCallee));
+    });
+
+    return { symbols, imports, calls };
 };

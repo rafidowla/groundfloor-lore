@@ -29,15 +29,62 @@
  */
 
 import type Parser from 'web-tree-sitter';
-import type { ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
+import type { ParsedCall, ParsedImport, ParsedSymbol, SymbolKind } from '../types.js';
 import {
     buildSignature,
     byteRangeFromNode,
     cyclomaticComplexity,
+    extractCallsInBody,
     makeParsedSymbol,
     walkSubtree,
     type WalkerFn,
 } from './_base.js';
+
+const TS_CALL_NODE_TYPES: ReadonlySet<string> = new Set([
+    'call_expression',
+    'new_expression',
+]);
+
+/**
+ * TypeScript / JavaScript callee extraction. Handles:
+ *   - foo()  → free function call, callee = 'foo'
+ *   - obj.foo()  → method call, callee = 'foo', receiver = 'obj'
+ *   - Foo.bar()  → static / namespace, callee = 'bar', receiver = 'Foo'
+ *   - new Foo()  → constructor, callee = 'Foo', isMethod = false
+ *   - (await x)()  → dynamic; returns null
+ */
+function extractTsCallee(node: Parser.SyntaxNode): { name: string; isMethod: boolean; receiver: string | null } | null {
+    if (node.type === 'new_expression') {
+        const constructor = node.childForFieldName('constructor');
+        if (!constructor) return null;
+        if (constructor.type === 'identifier' || constructor.type === 'type_identifier') {
+            return { name: constructor.text, isMethod: false, receiver: null };
+        }
+        // member_expression — e.g. `new ns.Foo()`. Take the property as name.
+        if (constructor.type === 'member_expression') {
+            const prop = constructor.childForFieldName('property');
+            const obj = constructor.childForFieldName('object');
+            if (prop) return { name: prop.text, isMethod: false, receiver: obj?.text ?? null };
+        }
+        return null;
+    }
+
+    // call_expression
+    const fn = node.childForFieldName('function');
+    if (!fn) return null;
+
+    if (fn.type === 'identifier') {
+        return { name: fn.text, isMethod: false, receiver: null };
+    }
+    if (fn.type === 'member_expression') {
+        const prop = fn.childForFieldName('property');
+        const obj = fn.childForFieldName('object');
+        if (prop && (prop.type === 'property_identifier' || prop.type === 'identifier')) {
+            return { name: prop.text, isMethod: true, receiver: obj?.text ?? null };
+        }
+    }
+    return null; // dynamic / unhandled
+}
 
 /**
  * Tree-sitter node types that count as decision points for cyclomatic
@@ -247,5 +294,23 @@ export const walk: WalkerFn = (rootNode, sourceUtf8, file) => {
     const symbols: ParsedSymbol[] = [];
     extractSymbolsIn(rootNode, sourceUtf8, file, null, null, null, symbols);
     const imports = extractImports(rootNode);
-    return { symbols, imports };
+
+    // Phase 2.1: extract calls per function/method symbol body.
+    const calls: ParsedCall[] = [];
+    walkSubtree(rootNode, (node) => {
+        if (node.type !== 'function_declaration'
+            && node.type !== 'method_definition'
+            && node.type !== 'arrow_function'
+            && node.type !== 'function_expression') return;
+        const body = node.childForFieldName('body');
+        if (!body) return;
+        // Find the enclosing symbol id for this body.
+        const ownerSym = symbols.find((s) =>
+            s.byteRange.start <= node.startIndex && s.byteRange.end >= node.endIndex
+            && (s.kind === 'function' || s.kind === 'method'));
+        if (!ownerSym) return;
+        calls.push(...extractCallsInBody(body, ownerSym.id, TS_CALL_NODE_TYPES, extractTsCallee));
+    });
+
+    return { symbols, imports, calls };
 };
