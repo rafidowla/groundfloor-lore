@@ -125,6 +125,24 @@ export interface DeveloperApi {
         d2: CodeSymbol[];
         d3: CodeSymbol[];
     }>;
+
+    // Phase 7 — Atlas-native indexing entry point. Closes over the
+    // PluginGraphContext so callers don't need to thread it through.
+    // codeIndexer.ts's importFromGitNexus / indexAllRepos delegate
+    // through this surface post-cutover.
+    indexRepoWithAtlas: (
+        repoRoot: string,
+        opts?: { repoName?: string; clearFirst?: boolean },
+    ) => Promise<{
+        repo: string;
+        repoRoot: string;
+        filesParsed: number;
+        symbolsUpserted: number;
+        filesUpserted: number;
+        relationsInserted: number;
+        relationsByKind: Record<string, number>;
+        durationMs: number;
+    }>;
 }
 
 export function buildDeveloperApi(ctx: PluginGraphContext): DeveloperApi {
@@ -208,6 +226,15 @@ export function buildDeveloperApi(ctx: PluginGraphContext): DeveloperApi {
         // (BFS over CodeRelation edges via storage.traverse).
         computeCodeBlastRadius: (target, direction, maxDepth) =>
             ops.computeCodeBlastRadius(ctx, target, direction, maxDepth),
+
+        // Phase 7 — Atlas indexing closure. atlasIndexer.indexRepoWithAtlas
+        // takes a PluginGraphContext; this exposes the same operation
+        // through the api surface so codeIndexer.ts (and any other
+        // caller) can drive it without re-threading ctx.
+        indexRepoWithAtlas: async (repoRoot, opts) => {
+            const { indexRepoWithAtlas } = await import('./atlasIndexer.js');
+            return await indexRepoWithAtlas(ctx, repoRoot, opts);
+        },
     };
 }
 
