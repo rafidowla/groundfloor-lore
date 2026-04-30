@@ -27,7 +27,8 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PluginContext } from '@lore-core/plugins/types.js';
 import type { DeveloperApi } from './api.js';
-import { proxyQuery, proxyContext, proxyImpact, proxyCypher } from './gitnexusProxy.js';
+import { proxyQuery, proxyContext, proxyImpact } from './gitnexusProxy.js';
+import { findWriteKeyword } from './api.js';
 import { detectChanges, rename, listRepos, formatReposMarkdown } from './nativeTools.js';
 
 interface WalLike {
@@ -189,14 +190,45 @@ export function registerDeveloperTools(
 
     server.tool(
         'code_cypher',
-        'Execute a raw Cypher query against the code knowledge graph (advanced — prefer code_query / code_flow_search for normal use).',
+        'Execute a read-only Cypher query against the developer-plugin Kùzu graph (advanced — prefer code_query / code_flow_search for normal use). Mutation keywords (CREATE/DELETE/DROP/MERGE/SET/DETACH/COPY/INSTALL/LOAD) are rejected.',
         {
-            query: z.string().describe('Cypher query to execute'),
-            repo: z.string().optional().describe('Target repository name'),
+            query: z.string().describe('Cypher query to execute (read-only)'),
+            parameters: z.record(z.string(), z.unknown()).optional().describe('Optional parameter map'),
+            max_rows: z.number().optional().describe('Maximum rows returned (default: 1000)'),
         },
-        async ({ query, repo }) => {
-            const result = proxyCypher(query, repo);
-            return { content: [{ type: 'text' as const, text: result.text }], isError: !result.success };
+        async ({ query, parameters, max_rows }) => {
+            const writeKw = findWriteKeyword(query);
+            if (writeKw) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            error: 'read-only',
+                            rejectedKeyword: writeKw,
+                            note: `code_cypher is read-only. Mutation keyword "${writeKw}" detected. Use the developer plugin's typed APIs (or atlas-cutover-execute.mjs for Phase 7) for graph mutations.`,
+                        }, null, 2),
+                    }],
+                    isError: true,
+                };
+            }
+            try {
+                const result = await api.executeRawCypher(query, parameters, { maxRows: max_rows ?? 1000 });
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            count: result.rows.length,
+                            truncated: result.truncated,
+                            rows: result.rows,
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return {
+                    content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }],
+                    isError: true,
+                };
+            }
         },
     );
 
@@ -255,14 +287,44 @@ export function registerDeveloperTools(
 
     server.tool(
         'gitnexus_cypher',
-        'Deprecated alias for code_cypher — kept for back-compat with auto-generated CLAUDE.md docs. Prefer code_cypher going forward.',
+        'Deprecated alias for code_cypher — kept for back-compat with auto-generated CLAUDE.md docs. Prefer code_cypher going forward. Now executes read-only Cypher against the developer-plugin Kùzu graph (no longer the gitnexus subprocess).',
         {
-            query: z.string().describe('Cypher query to execute'),
-            repo: z.string().optional().describe('Target repository name'),
+            query: z.string().describe('Cypher query to execute (read-only)'),
+            parameters: z.record(z.string(), z.unknown()).optional().describe('Optional parameter map'),
+            max_rows: z.number().optional().describe('Maximum rows returned (default: 1000)'),
         },
-        async ({ query, repo }) => {
-            const result = proxyCypher(query, repo);
-            return { content: [{ type: 'text' as const, text: result.text }], isError: !result.success };
+        async ({ query, parameters, max_rows }) => {
+            const writeKw = findWriteKeyword(query);
+            if (writeKw) {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            error: 'read-only',
+                            rejectedKeyword: writeKw,
+                        }, null, 2),
+                    }],
+                    isError: true,
+                };
+            }
+            try {
+                const result = await api.executeRawCypher(query, parameters, { maxRows: max_rows ?? 1000 });
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            count: result.rows.length,
+                            truncated: result.truncated,
+                            rows: result.rows,
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return {
+                    content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }],
+                    isError: true,
+                };
+            }
         },
     );
 

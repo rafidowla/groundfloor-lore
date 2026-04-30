@@ -93,6 +93,22 @@ export interface DeveloperApi {
     findSimilarSymbols: (content: string, opts?: similarity.FindSimilarOptions) => Promise<similarity.SimilarSymbolHit[]>;
     evaluatePreWrite: (content: string, opts?: similarity.FindSimilarOptions & { warnThreshold?: number }) => Promise<similarity.PreWriteDecision>;
     embedSymbol: (symbol: { uid: string; name: string; kind: string; filePath: string; content: string; repo: string }) => Promise<void>;
+
+    // Phase 7 — read-only Cypher access against the developer plugin's
+    // Kùzu graph. Used by code_cypher (replaces the gitnexus CLI
+    // proxy) and by atlas-cutover-execute.mjs to enumerate existing
+    // CodeSymbol rows for the oldId → newId mapping table.
+    //
+    // Read-only enforcement: caller-side sentinel scan of CYPHER_WRITE_KEYWORDS
+    // before reaching this method. The method itself does NOT
+    // re-validate — adding a redundant scan here would diverge from the
+    // single source of truth in CYPHER_WRITE_KEYWORDS. See tools.ts
+    // and mcp/handlers-phase61.ts for the gate.
+    executeRawCypher: (
+        query: string,
+        params?: Record<string, unknown>,
+        opts?: { maxRows?: number },
+    ) => Promise<{ rows: Array<Record<string, unknown>>; truncated: boolean }>;
 }
 
 export function buildDeveloperApi(ctx: PluginGraphContext): DeveloperApi {
@@ -158,7 +174,45 @@ export function buildDeveloperApi(ctx: PluginGraphContext): DeveloperApi {
         findSimilarSymbols: (content, opts) => similarity.findSimilarSymbols(_pluginCtxSelf, content, opts),
         evaluatePreWrite: (content, opts) => similarity.evaluatePreWrite(_pluginCtxSelf, content, opts),
         embedSymbol: (symbol) => similarity.embedSymbol(_pluginCtxSelf, symbol),
+
+        // Phase 7 — read-only Cypher passthrough.
+        // Truncation default is 1000 rows; callers can override but the
+        // truncated flag MUST be respected client-side.
+        executeRawCypher: async (query, params, opts) => {
+            const maxRows = opts?.maxRows ?? 1000;
+            const rows = await ctx.queryRows(query, params);
+            const truncated = rows.length > maxRows;
+            return {
+                rows: truncated ? rows.slice(0, maxRows) : rows,
+                truncated,
+            };
+        },
     };
+}
+
+/**
+ * Sentinel keyword scan to enforce read-only Cypher across every code-side
+ * tool that exposes raw Cypher. Single source of truth — keep
+ * mcp/handlers-phase61.ts CYPHER_WRITE_KEYWORDS in sync if this list
+ * changes. Phase 6.1-2 follow-up: replace with Kùzu transaction read-only
+ * mode if/when available.
+ */
+export const CYPHER_WRITE_KEYWORDS: readonly string[] = [
+    'CREATE', 'DELETE', 'DROP', 'MERGE', 'SET', 'DETACH', 'COPY', 'INSTALL', 'LOAD',
+];
+
+/**
+ * Returns the first write-keyword found in `query`, or null if the
+ * query is read-only. Case-insensitive, word-boundary match. Used by
+ * code_cypher and gitnexus_cypher to gate the executeRawCypher call.
+ */
+export function findWriteKeyword(query: string): string | null {
+    const upper = query.toUpperCase();
+    for (const kw of CYPHER_WRITE_KEYWORDS) {
+        const re = new RegExp(`\\b${kw}\\b`);
+        if (re.test(upper)) return kw;
+    }
+    return null;
 }
 
 // Forward-declared PluginContext for similarity functions that need

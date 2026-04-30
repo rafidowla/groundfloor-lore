@@ -4546,6 +4546,82 @@ async function main(): Promise<void> {
                 return;
             }
 
+            /* ─── /api/code/cypher — Phase 7 read-only Cypher passthrough ─── */
+            //
+            // Daemon-level HTTP route that mirrors the code_cypher MCP tool.
+            // Used by atlas-cutover-execute.mjs to enumerate existing
+            // CodeSymbol rows for the oldId → newId mapping table without
+            // needing a live MCP session. Gated by the same read-only
+            // sentinel scan as the MCP path (CYPHER_WRITE_KEYWORDS).
+            //
+            //   POST /api/code/cypher
+            //   body: { query: string, parameters?: Record<string,unknown>, max_rows?: number }
+            //   200: { rows: Array<...>, truncated: boolean, count: number }
+            //   400: { error: 'read-only', rejectedKeyword: string }
+            //   503: { error: 'developer plug-in not active' }
+            if (pathname === '/api/code/cypher' && req.method === 'POST') {
+                let body = '';
+                req.on('data', (chunk: Buffer) => { body += chunk.toString(); });
+                req.on('end', async () => {
+                    try {
+                        const { query, parameters, max_rows } = JSON.parse(body || '{}') as {
+                            query?: string;
+                            parameters?: Record<string, unknown>;
+                            max_rows?: number;
+                        };
+                        if (!query || typeof query !== 'string') {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'query (string) required' }));
+                            return;
+                        }
+                        const devPlugin = pluginRegistry.active().find((p) => p.name === 'developer');
+                        const devApi = devPlugin?.api as {
+                            executeRawCypher: (
+                                q: string,
+                                params?: Record<string, unknown>,
+                                opts?: { maxRows?: number },
+                            ) => Promise<{ rows: Array<Record<string, unknown>>; truncated: boolean }>;
+                        } | undefined;
+                        if (!devApi) {
+                            res.writeHead(503, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ error: 'developer plug-in not active' }));
+                            return;
+                        }
+                        // Read-only sentinel scan (mirrors mcp/handlers-phase61
+                        // CYPHER_WRITE_KEYWORDS — single source in dev plugin's
+                        // api.ts findWriteKeyword, but we can't import it here
+                        // without crossing the plugin boundary; the same list
+                        // is duplicated below and kept in sync by hand).
+                        const WRITE_KEYWORDS = ['CREATE', 'DELETE', 'DROP', 'MERGE', 'SET', 'DETACH', 'COPY', 'INSTALL', 'LOAD'];
+                        const upper = query.toUpperCase();
+                        for (const kw of WRITE_KEYWORDS) {
+                            if (new RegExp(`\\b${kw}\\b`).test(upper)) {
+                                res.writeHead(400, { 'Content-Type': 'application/json' });
+                                res.end(JSON.stringify({
+                                    error: 'read-only',
+                                    rejectedKeyword: kw,
+                                    note: '/api/code/cypher is read-only.',
+                                }));
+                                return;
+                            }
+                        }
+                        const result = await devApi.executeRawCypher(query, parameters, {
+                            maxRows: max_rows ?? 1000,
+                        });
+                        res.writeHead(200, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({
+                            count: result.rows.length,
+                            truncated: result.truncated,
+                            rows: result.rows,
+                        }));
+                    } catch (err) {
+                        res.writeHead(500, { 'Content-Type': 'application/json' });
+                        res.end(JSON.stringify({ error: (err as Error).message }));
+                    }
+                });
+                return;
+            }
+
             // V2.1: Reconnect the knowledge graph via semantic neighbors.
             // POST body: {k?, threshold?, apply?}. Dry-run by default — returns
             // proposed edges + similarity histogram so the UI can calibrate

@@ -73,11 +73,13 @@ function parseArgs(argv) {
         iHaveTheGo: false,
         confirmWorkspace: null,
         coverageThreshold: 0.99,
+        repo: null,
     };
     for (const a of argv.slice(2)) {
         if (a === '--i-have-the-go') args.iHaveTheGo = true;
         else if (a.startsWith('--confirm-workspace=')) args.confirmWorkspace = a.slice('--confirm-workspace='.length);
         else if (a.startsWith('--coverage-threshold=')) args.coverageThreshold = parseFloat(a.slice('--coverage-threshold='.length));
+        else if (a.startsWith('--repo=')) args.repo = a.slice('--repo='.length);
         else throw new Error(`unknown argument: ${a}`);
     }
     return args;
@@ -108,31 +110,47 @@ async function isDaemonAlive() {
 }
 
 /**
- * Direct Kùzu-via-stdin enumeration is intentionally NOT in this script.
- * v1: we ask the daemon (read-only) for the existing CodeSymbol set
- * via Phase 6.1's code_cypher handler when it lands. Until then, this
- * function falls back to the topology-overview snapshot and the script
- * runs in "validate the candidate graph + plan the snapshot" mode.
+ * Read existing CodeSymbol rows from the live daemon's Kùzu graph via
+ * the daemon-level /api/code/cypher route (Phase 7 read-only Cypher
+ * passthrough; landed alongside this script).
+ *
+ * Falls back to the topology-overview snapshot only if the route is
+ * unavailable (e.g. older daemon build). With per-symbol enumeration
+ * available, the mapping table builds with real coverage numbers.
  */
-async function fetchExistingCodeSymbols(token) {
-    // Try code_cypher first (when Phase 6.1 lands).
+async function fetchExistingCodeSymbols(token, repoFilter) {
+    // Use a higher max_rows to get all symbols. The /api/code/cypher
+    // route truncates at max_rows; lore monorepo currently has ~15k
+    // CodeSymbol rows, so 50k is comfortable headroom.
+    //
+    // When repoFilter is provided, scope to that single repo. Phase 7
+    // v1 cutover is per-repo because Atlas parses one repo at a time;
+    // multi-repo cutover is a follow-up that parses each registered
+    // repo and unions the candidate graph before joining.
+    const cypher = repoFilter
+        ? 'MATCH (s:CodeSymbol) WHERE s.repo = $repo RETURN s.uid AS uid, s.name AS name, s.kind AS kind, s.filePath AS filePath, s.repo AS repo'
+        : 'MATCH (s:CodeSymbol) RETURN s.uid AS uid, s.name AS name, s.kind AS kind, s.filePath AS filePath, s.repo AS repo';
     try {
         const r = await fetch(`${LORE_BASE}/api/code/cypher`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
             body: JSON.stringify({
-                query: 'MATCH (s:CodeSymbol) RETURN s.uid AS uid, s.name AS name, s.kind AS kind, s.filePath AS filePath',
+                query: cypher,
+                parameters: repoFilter ? { repo: repoFilter } : undefined,
+                max_rows: 50000,
             }),
         });
         if (r.ok) {
             const data = await r.json();
             if (Array.isArray(data?.rows)) {
-                return { source: 'code_cypher', rows: data.rows };
+                return { source: 'code_cypher', rows: data.rows, truncated: !!data.truncated };
             }
         }
     } catch { /* fall through */ }
 
-    // Fallback: topology overview (counts only, not per-symbol).
+    // Fallback: topology overview (counts only, not per-symbol). Only
+    // used if /api/code/cypher is missing — would mean the daemon is
+    // running an older build than this script expects.
     const r = await fetch(`${LORE_BASE}/api/topology/overview?groupBy=project`, {
         headers: { Authorization: `Bearer ${token}` },
     });
@@ -155,27 +173,94 @@ async function buildCandidateGraph() {
     return { parsed, resolved };
 }
 
+/**
+ * Map gitnexus's kind vocabulary to Atlas's. Differences:
+ *   - Case: gitnexus "Function" → Atlas "function"
+ *   - Rust: gitnexus "Struct" → Atlas "class"
+ *   - Rust: gitnexus "Trait" → Atlas "interface"
+ *   - Go: gitnexus "Type" → Atlas "type" / "class" depending on shape
+ *
+ * Kinds gitnexus has but Atlas v1 deliberately doesn't model (noise
+ * for call-graph analytics):
+ *   - "Property": class/instance fields / interface property signatures
+ *   - "Section": code-region markers / TS module sections
+ *
+ * Symbols with these kinds count toward `byDesignUnmapped` so the
+ * "mappable coverage" metric reflects Atlas's intentional vocabulary
+ * choices, not a defect in the cutover.
+ */
+const KIND_ALIASES = new Map([
+    ['function', ['function']],
+    ['method', ['method']],
+    ['class', ['class']],
+    ['struct', ['class']],          // Rust struct → Atlas class
+    ['interface', ['interface']],
+    ['trait', ['interface']],       // Rust trait → Atlas interface
+    ['enum', ['enum']],
+    ['type', ['type', 'class']],    // Go type can land as either
+    ['constant', ['constant']],
+    ['variable', ['variable']],
+    ['module', ['module']],
+]);
+
+const BY_DESIGN_UNMAPPED_KINDS = new Set(['property', 'section']);
+
+/**
+ * Build oldId → newId mapping from existing CodeSymbol uids to new
+ * Atlas symbol ids. Match key: (filePath, name, atlasKind).
+ *
+ * On a miss against the primary kind alias, falls back to all aliases
+ * for that kind (e.g. gitnexus Type tries both Atlas "type" and "class").
+ */
 function buildMappingTable(existing, candidate) {
     const candidateIndex = new Map();
     for (const sym of candidate.resolved.table.all) {
-        const key = `${sym.file}\x00${sym.name}\x00${sym.kind}`;
+        const key = `${sym.file}\x00${sym.name}\x00${sym.kind.toLowerCase()}`;
         candidateIndex.set(key, sym.id);
     }
 
     const mapping = [];
     const unmapped = [];
+    const byDesignUnmapped = [];
+    const unmappedByKind = {};
     for (const old of existing) {
-        const key = `${old.filePath}\x00${old.name}\x00${old.kind}`;
-        const newId = candidateIndex.get(key);
+        const oldKindLower = String(old.kind).toLowerCase();
+
+        if (BY_DESIGN_UNMAPPED_KINDS.has(oldKindLower)) {
+            byDesignUnmapped.push(old);
+            continue;
+        }
+
+        const aliases = KIND_ALIASES.get(oldKindLower) ?? [oldKindLower];
+        let newId = null;
+        for (const atlasKind of aliases) {
+            const key = `${old.filePath}\x00${old.name}\x00${atlasKind}`;
+            const found = candidateIndex.get(key);
+            if (found) { newId = found; break; }
+        }
+
         if (newId) {
             mapping.push({ oldUid: old.uid, newId });
         } else {
             unmapped.push(old);
+            const k = String(old.kind);
+            unmappedByKind[k] = (unmappedByKind[k] ?? 0) + 1;
         }
     }
-    const total = mapping.length + unmapped.length;
-    const coverage = total === 0 ? 0 : mapping.length / total;
-    return { mapping, unmapped, total, coverage };
+    const totalAll = mapping.length + unmapped.length + byDesignUnmapped.length;
+    const totalMappable = mapping.length + unmapped.length;
+    const coverage = totalAll === 0 ? 0 : mapping.length / totalAll;
+    const mappableCoverage = totalMappable === 0 ? 1 : mapping.length / totalMappable;
+    return {
+        mapping,
+        unmapped,
+        unmappedByKind,
+        byDesignUnmapped,
+        totalAll,
+        totalMappable,
+        coverage,
+        mappableCoverage,
+    };
 }
 
 async function snapshotGraph(workspacePath) {
@@ -262,9 +347,9 @@ async function main() {
     let token = null;
     if (daemonAlive) {
         token = await loadAuthToken();
-        console.error('[cutover-execute] enumerating existing CodeSymbols via daemon...');
-        existingResult = await fetchExistingCodeSymbols(token);
-        console.error(`[cutover-execute]   source = ${existingResult.source}`);
+        console.error(`[cutover-execute] enumerating existing CodeSymbols via daemon${args.repo ? ` (filtered to repo=${args.repo})` : ''}...`);
+        existingResult = await fetchExistingCodeSymbols(token, args.repo);
+        console.error(`[cutover-execute]   source = ${existingResult.source}, rows = ${existingResult.rows?.length ?? 'n/a'}`);
     } else {
         console.error('[cutover-execute] daemon is stopped — cannot enumerate existing CodeSymbols. Falling back to candidate-graph-only validation.');
         existingResult = { source: 'daemon-stopped', rows: null };
@@ -277,10 +362,18 @@ async function main() {
     if (existingResult.rows) {
         const m = buildMappingTable(existingResult.rows, candidate);
         mapping = m;
-        coverage = m.coverage;
-        console.error(`[cutover-execute] mapping coverage = ${(coverage * 100).toFixed(2)}% (${m.mapping.length} / ${m.total})`);
-        if (coverage < args.coverageThreshold) {
-            refuse(`mapping coverage ${(coverage * 100).toFixed(2)}% is below threshold ${(args.coverageThreshold * 100).toFixed(2)}%. Inspect unmapped CodeSymbols (${m.unmapped.length}) before re-running.`);
+        coverage = m.mappableCoverage;
+        console.error(`[cutover-execute] mapping: ${m.mapping.length} mapped + ${m.unmapped.length} unmapped + ${m.byDesignUnmapped.length} by-design-skipped (Atlas omits Property/Section)`);
+        console.error(`[cutover-execute] coverage (mappable): ${(m.mappableCoverage * 100).toFixed(2)}%   coverage (overall): ${(m.coverage * 100).toFixed(2)}%`);
+        if (Object.keys(m.unmappedByKind).length > 0) {
+            console.error(`[cutover-execute] unmapped by kind: ${JSON.stringify(m.unmappedByKind)}`);
+        }
+        // Threshold compares against MAPPABLE coverage — by-design-skipped
+        // symbols are dropped during cutover and their LoreAppliesToCode
+        // edges go to reconnect for re-suggestion. That's not a coverage
+        // failure.
+        if (m.mappableCoverage < args.coverageThreshold) {
+            refuse(`mappable coverage ${(m.mappableCoverage * 100).toFixed(2)}% is below threshold ${(args.coverageThreshold * 100).toFixed(2)}%. Inspect unmapped CodeSymbols (${m.unmapped.length}) before re-running.\n  Unmapped by kind: ${JSON.stringify(m.unmappedByKind)}\n  Common cause: gitnexus extracts inner arrow handlers (e.g. const toggleTheme = () => …) but Atlas v1 deliberately skips them as analytics noise. Their LoreAppliesToCode edges will be re-suggested via reconnect after cutover.`);
         }
     } else {
         console.error('[cutover-execute] WARN: existing-graph enumeration unavailable; mapping table cannot be validated. Phase 6.1 code_cypher handler unblocks this.');
@@ -333,11 +426,15 @@ async function main() {
             summary: existingResult.summary ?? null,
         },
         mapping: mapping ? {
-            coverage,
+            coverage: mapping.coverage,
+            mappableCoverage: mapping.mappableCoverage,
             mapped: mapping.mapping.length,
             unmapped: mapping.unmapped.length,
+            byDesignUnmapped: mapping.byDesignUnmapped.length,
+            unmappedByKind: mapping.unmappedByKind,
             mappingPairs: mapping.mapping,
             unmappedSymbols: mapping.unmapped,
+            byDesignUnmappedSymbols: mapping.byDesignUnmapped,
         } : null,
         nextSteps: [
             '1. Stop the Lore daemon: launchctl bootout gui/$(id -u)/com.groundfloor.lore',
@@ -371,7 +468,8 @@ async function main() {
     console.log(`  Candidate graph:  ${payload.candidate.files} files / ${payload.candidate.symbols} symbols / ${payload.candidate.relations} relations`);
     console.log(`  Existing source:  ${payload.existing.source}`);
     if (mapping) {
-        console.log(`  Mapping coverage: ${(coverage * 100).toFixed(2)}% (${mapping.mapping.length} mapped / ${mapping.unmapped.length} unmapped)`);
+        console.log(`  Mapping coverage: ${(mapping.mappableCoverage * 100).toFixed(2)}% mappable / ${(mapping.coverage * 100).toFixed(2)}% overall`);
+        console.log(`                    ${mapping.mapping.length} mapped + ${mapping.unmapped.length} unmapped + ${mapping.byDesignUnmapped.length} by-design-skipped`);
     } else {
         console.log(`  Mapping coverage: unavailable (existing-graph enumeration deferred to Phase 6.1)`);
     }
