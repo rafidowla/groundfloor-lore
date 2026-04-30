@@ -98,6 +98,13 @@ const ALLOWED_IN_CORE = [
     // Phase 7 cutover execute (prepare-and-validate) — same status as
     // the dry-run script. Deletes once Phase 7 retires.
     'scripts/atlas-cutover-execute.mjs',
+    // Phase 7 destructive cutover step — same status. References
+    // gitnexus token in restore-procedure path names + comments.
+    // Deletes once Phase 7 retires.
+    'scripts/atlas-cutover-destructive.mjs',
+    // Phase 7 LoreAppliesToCode recovery — references
+    // graph.pre-gitnexus-migration snapshot path. Same status.
+    'scripts/atlas-cutover-recover-lac.mjs',
 ];
 
 // Anything under packages/lore-plugin-* is plugin-local and allowed to
