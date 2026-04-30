@@ -254,8 +254,15 @@ async function buildCandidateGraphsByRepo(repoEntries) {
  * choices, not a defect in the cutover.
  */
 const KIND_ALIASES = new Map([
-    ['function', ['function']],
-    ['method', ['method']],
+    // gitnexus tags all `fn` declarations as Function regardless of context.
+    // Atlas distinguishes function (top-level / module-scope) from method
+    // (inside impl/class). For a Rust impl method, gitnexus says Function,
+    // Atlas says method — same code, different vocabulary. Adding 'method'
+    // as a function fallback closes this 1000+ symbol gap on Rust-heavy
+    // repos (e.g. dataplane-oss). Same logic applies to Python methods
+    // gitnexus may classify as Function.
+    ['function', ['function', 'method']],
+    ['method', ['method', 'function']],
     ['constructor', ['method']],    // gitnexus: separate Constructor kind → Atlas: method (named "constructor")
     ['class', ['class']],
     ['struct', ['class']],          // Rust struct → Atlas class
