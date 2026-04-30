@@ -109,6 +109,22 @@ export interface DeveloperApi {
         params?: Record<string, unknown>,
         opts?: { maxRows?: number },
     ) => Promise<{ rows: Array<Record<string, unknown>>; truncated: boolean }>;
+
+    // Phase 7 — depth-tiered blast radius over CodeRelation edges.
+    // Replaces the gitnexus CLI proxy that formerly powered code_impact
+    // and gitnexus_impact. BFS in the developer plugin's Kùzu graph;
+    // truncates at 200 nodes per tier / 2000 total to keep response
+    // bounded for very-large blast zones.
+    computeCodeBlastRadius: (
+        target: string,
+        direction: 'upstream' | 'downstream',
+        maxDepth: number,
+    ) => Promise<{
+        symbol: CodeSymbol | null;
+        d1: CodeSymbol[];
+        d2: CodeSymbol[];
+        d3: CodeSymbol[];
+    }>;
 }
 
 export function buildDeveloperApi(ctx: PluginGraphContext): DeveloperApi {
@@ -187,6 +203,11 @@ export function buildDeveloperApi(ctx: PluginGraphContext): DeveloperApi {
                 truncated,
             };
         },
+
+        // Phase 7 — depth-tiered blast radius. Implementation in operations.ts
+        // (BFS over CodeRelation edges via storage.traverse).
+        computeCodeBlastRadius: (target, direction, maxDepth) =>
+            ops.computeCodeBlastRadius(ctx, target, direction, maxDepth),
     };
 }
 

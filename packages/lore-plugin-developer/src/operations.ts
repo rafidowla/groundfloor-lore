@@ -245,6 +245,87 @@ export async function getCodeRelationsTo(ctx: PluginGraphContext, targetUid: str
     }
 }
 
+/**
+ * Phase 7 — depth-tiered blast radius (d1/d2/d3) over the developer
+ * plugin's CodeRelation edges. Replaces the gitnexus CLI proxy that
+ * formerly powered `code_impact`.
+ *
+ * Lookup: accepts a CodeSymbol uid OR a bare/qualified name. If a name
+ * is supplied, picks the first match by name (callers warn the LLM via
+ * the `ambiguous` flag at the tools layer).
+ *
+ * BFS direction:
+ *   - upstream:   walk INCOMING CodeRelation edges (who calls / depends on this)
+ *   - downstream: walk OUTGOING CodeRelation edges (what this calls / depends on)
+ *
+ * Truncation: caps each tier at 200 nodes and the total visited set at
+ * 2000 to keep the surface bounded for large blast zones. Real
+ * production fan-out beyond this isn't actionable in a single
+ * code_impact call anyway — the LLM should narrow the symbol or use
+ * code_cypher for arbitrary slice-and-dice.
+ */
+export async function computeCodeBlastRadius(
+    ctx: PluginGraphContext,
+    target: string,
+    direction: 'upstream' | 'downstream',
+    maxDepth: number,
+): Promise<{
+    symbol: CodeSymbol | null;
+    d1: CodeSymbol[];
+    d2: CodeSymbol[];
+    d3: CodeSymbol[];
+}> {
+    // 1. Resolve target to a uid. uid format: <repo>::<file>::<name>::<Kind>.
+    let symbol: CodeSymbol | null = null;
+    if (target.includes('::')) {
+        symbol = await getCodeSymbolByUid(ctx, target);
+    }
+    if (!symbol) {
+        const matches = await queryCodeSymbolsByName(ctx, target);
+        if (matches.length > 0) symbol = matches[0];
+    }
+    if (!symbol) {
+        return { symbol: null, d1: [], d2: [], d3: [] };
+    }
+
+    const TIER_CAP = 200;
+    const TOTAL_CAP = 2000;
+    const tiers: CodeSymbol[][] = [[], [], []];
+    const visited = new Set<string>([symbol.uid]);
+    let frontier = new Set<string>([symbol.uid]);
+
+    const depth = Math.max(1, Math.min(maxDepth, 3));
+    for (let d = 0; d < depth; d++) {
+        const next = new Set<string>();
+        for (const uid of frontier) {
+            if (visited.size >= TOTAL_CAP) break;
+            try {
+                const edges = await ctx.storage.traverse<{ type?: string }>(
+                    CODE_RELATION_COLL,
+                    uid,
+                    direction === 'upstream' ? 'in' : 'out',
+                );
+                for (const e of edges) {
+                    const neighbor = direction === 'upstream' ? e.sourceId : e.targetId;
+                    if (!neighbor || visited.has(neighbor)) continue;
+                    visited.add(neighbor);
+                    next.add(neighbor);
+                    if (visited.size >= TOTAL_CAP) break;
+                }
+            } catch {
+                // edge fetch failed; skip this hop
+            }
+        }
+        if (next.size === 0) break;
+        const nextIds = Array.from(next).slice(0, TIER_CAP);
+        const nextRows = await ctx.storage.find<Record<string, unknown>>(CODE_SYMBOL_COLL, { in: { uid: nextIds } });
+        tiers[d] = nextRows.map(rowToCodeSymbol);
+        frontier = next;
+    }
+
+    return { symbol, d1: tiers[0], d2: tiers[1], d3: tiers[2] };
+}
+
 export async function getCrossPillarEdges(
     ctx: PluginGraphContext,
     repo: string,

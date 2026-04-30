@@ -27,7 +27,6 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { PluginContext } from '@lore-core/plugins/types.js';
 import type { DeveloperApi } from './api.js';
-import { proxyQuery, proxyContext, proxyImpact } from './gitnexusProxy.js';
 import { findWriteKeyword } from './api.js';
 import { detectChanges, rename, listRepos, formatReposMarkdown } from './nativeTools.js';
 
@@ -146,45 +145,128 @@ export function registerDeveloperTools(
         },
     );
 
-    /* ─── code intelligence (live indexer) ─────────────────────── */
+    /* ─── code intelligence (Kùzu-backed; was gitnexus-CLI proxy) ───── */
+    //
+    // 2026-04-30: code_flow_search / code_full_context / code_impact
+    // were proxies to the gitnexus CLI (subprocess + temp file + JSON
+    // parse). With Phase 7 cutover prep landed, these now read directly
+    // from the developer plugin's Kùzu graph via api.queryCodeSymbols /
+    // api.getCodeSymbolContext / api.computeCodeBlastRadius. Sub-second
+    // in-process replaces ~50–500ms subprocess. Same tool names, same
+    // shapes (back-compat), but the index they read is the same one
+    // every other Lore tool reads — single source of truth.
     server.tool(
         'code_flow_search',
-        'Search code execution flows by concept. Returns process-grouped results ranked by relevance (BM25 + semantic vector search).',
+        'Search code symbols by name or file path. Reads from the unified developer-plugin Kùzu graph (same index as code_query / code_context).',
         {
-            query: z.string().describe('Natural language or keyword search query'),
+            query: z.string().describe('Search term — matched against symbol name and file path'),
             repo: z.string().optional().describe('Target repository name'),
-            goal: z.string().optional().describe('What you want to find — helps ranking'),
+            limit: z.number().optional().describe('Maximum results (default: 20)'),
         },
-        async ({ query, repo, goal }) => {
-            const result = proxyQuery(query, repo, goal);
-            return { content: [{ type: 'text' as const, text: result.text }], isError: !result.success };
+        async ({ query, repo, limit }) => {
+            try {
+                const results = await api.queryCodeSymbols(query, repo, limit ?? 20);
+                if (results.length === 0) {
+                    return {
+                        content: [{ type: 'text' as const, text: `No code symbols found matching "${query}". Run "lore index" to import code.` }],
+                    };
+                }
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            count: results.length,
+                            symbols: results.map((s) => ({
+                                uid: s.uid,
+                                name: s.name,
+                                kind: s.kind,
+                                filePath: s.filePath,
+                                line: `${s.startLine}-${s.endLine}`,
+                                repo: s.repo,
+                            })),
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return { content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }], isError: true };
+            }
         },
     );
 
     server.tool(
         'code_full_context',
-        '360° live-indexer view of a code symbol: callers, callees, processes, imports. Deeper than code_context (which reads stored Lore data).',
+        '360° view of a code symbol from the developer-plugin Kùzu graph: symbol metadata, callers, callees, and linked knowledge nodes.',
         {
-            name: z.string().describe('Symbol name'),
-            repo: z.string().optional().describe('Target repository name'),
+            name: z.string().describe('Symbol name or qualified name'),
+            repo: z.string().optional().describe('Optional repository filter applied during the name lookup'),
         },
         async ({ name, repo }) => {
-            const result = proxyContext(name, repo);
-            return { content: [{ type: 'text' as const, text: result.text }], isError: !result.success };
+            try {
+                // Look up the uid by name first, then expand context.
+                const matches = await api.queryCodeSymbolsByName(name);
+                const filtered = repo ? matches.filter((m) => m.repo === repo) : matches;
+                if (filtered.length === 0) {
+                    return {
+                        content: [{ type: 'text' as const, text: `Symbol "${name}"${repo ? ` in repo "${repo}"` : ''} not found.` }],
+                    };
+                }
+                // If multiple matches, take the first and note the ambiguity.
+                const target = filtered[0];
+                const ctx = await api.getCodeSymbolContext(target.uid);
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            symbol: ctx.symbol,
+                            ambiguous: filtered.length > 1
+                                ? { totalMatches: filtered.length, otherMatches: filtered.slice(1).map((m) => ({ uid: m.uid, file: m.filePath, repo: m.repo })) }
+                                : undefined,
+                            callers: ctx.callers.map((c) => ({ uid: c.uid, name: c.name, kind: c.kind, file: c.filePath })),
+                            callees: ctx.callees.map((c) => ({ uid: c.uid, name: c.name, kind: c.kind, file: c.filePath })),
+                            knowledge: ctx.knowledge,
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return { content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }], isError: true };
+            }
         },
     );
 
     server.tool(
         'code_impact',
-        'Blast radius analysis: what breaks if you change a symbol. Returns direct callers, indirect dependencies, and risk level.',
+        'Blast radius analysis: depth-tiered (d1/d2/d3) reachability over CodeRelation edges. d1 = WILL BREAK; d2 = LIKELY AFFECTED; d3 = MAY NEED TESTING.',
         {
-            target: z.string().describe('Symbol or file to analyze'),
-            repo: z.string().optional().describe('Target repository name'),
-            direction: z.string().optional().describe('"upstream" (what depends on this) or "downstream"'),
+            target: z.string().describe('Symbol uid or name'),
+            direction: z.string().optional().describe('"upstream" (what depends on this) or "downstream" (what this depends on). Default: upstream.'),
+            max_depth: z.number().optional().describe('Maximum BFS depth (default: 3, max: 5)'),
         },
-        async ({ target, repo, direction }) => {
-            const result = proxyImpact(target, repo, direction);
-            return { content: [{ type: 'text' as const, text: result.text }], isError: !result.success };
+        async ({ target, direction, max_depth }) => {
+            try {
+                const dir: 'upstream' | 'downstream' = direction === 'downstream' ? 'downstream' : 'upstream';
+                const depth = Math.max(1, Math.min(5, max_depth ?? 3));
+                const result = await api.computeCodeBlastRadius(target, dir, depth);
+                if (result.symbol === null) {
+                    return {
+                        content: [{ type: 'text' as const, text: `Symbol "${target}" not found.` }],
+                    };
+                }
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            symbol: { uid: result.symbol.uid, name: result.symbol.name, file: result.symbol.filePath },
+                            direction: dir,
+                            d1: result.d1.map((s) => ({ uid: s.uid, name: s.name, file: s.filePath })),
+                            d2: result.d2.map((s) => ({ uid: s.uid, name: s.name, file: s.filePath })),
+                            d3: result.d3.map((s) => ({ uid: s.uid, name: s.name, file: s.filePath })),
+                            riskLevel: result.d1.length > 5 ? 'CRITICAL' : result.d1.length > 0 ? 'HIGH' : 'LOW',
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return { content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }], isError: true };
+            }
         },
     );
 
@@ -246,42 +328,99 @@ export function registerDeveloperTools(
 
     server.tool(
         'gitnexus_query',
-        'Deprecated alias for code_flow_search — kept for back-compat with auto-generated CLAUDE.md docs. Prefer code_flow_search going forward.',
+        'Deprecated alias for code_flow_search — kept for back-compat with auto-generated CLAUDE.md docs. Prefer code_flow_search going forward. Now reads from the developer-plugin Kùzu graph (no longer the gitnexus subprocess).',
         {
-            query: z.string().describe('Natural language or keyword search query'),
+            query: z.string().describe('Search term — matched against symbol name and file path'),
             repo: z.string().optional().describe('Target repository name'),
-            goal: z.string().optional().describe('What you want to find — helps ranking'),
+            limit: z.number().optional().describe('Maximum results (default: 20)'),
         },
-        async ({ query, repo, goal }) => {
-            const result = proxyQuery(query, repo, goal);
-            return { content: [{ type: 'text' as const, text: result.text }], isError: !result.success };
+        async ({ query, repo, limit }) => {
+            try {
+                const results = await api.queryCodeSymbols(query, repo, limit ?? 20);
+                if (results.length === 0) {
+                    return { content: [{ type: 'text' as const, text: `No code symbols found matching "${query}".` }] };
+                }
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            count: results.length,
+                            symbols: results.map((s) => ({ uid: s.uid, name: s.name, kind: s.kind, filePath: s.filePath, line: `${s.startLine}-${s.endLine}`, repo: s.repo })),
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return { content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }], isError: true };
+            }
         },
     );
 
     server.tool(
         'gitnexus_context',
-        'Deprecated alias for code_full_context — kept for back-compat with auto-generated CLAUDE.md docs. Prefer code_full_context going forward.',
+        'Deprecated alias for code_full_context — kept for back-compat with auto-generated CLAUDE.md docs. Prefer code_full_context going forward. Now reads from the developer-plugin Kùzu graph (no longer the gitnexus subprocess).',
         {
             name: z.string().describe('Symbol name'),
             repo: z.string().optional().describe('Target repository name'),
         },
         async ({ name, repo }) => {
-            const result = proxyContext(name, repo);
-            return { content: [{ type: 'text' as const, text: result.text }], isError: !result.success };
+            try {
+                const matches = await api.queryCodeSymbolsByName(name);
+                const filtered = repo ? matches.filter((m) => m.repo === repo) : matches;
+                if (filtered.length === 0) {
+                    return { content: [{ type: 'text' as const, text: `Symbol "${name}"${repo ? ` in repo "${repo}"` : ''} not found.` }] };
+                }
+                const ctx = await api.getCodeSymbolContext(filtered[0].uid);
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            symbol: ctx.symbol,
+                            ambiguous: filtered.length > 1
+                                ? { totalMatches: filtered.length, otherMatches: filtered.slice(1).map((m) => ({ uid: m.uid, file: m.filePath, repo: m.repo })) }
+                                : undefined,
+                            callers: ctx.callers.map((c) => ({ uid: c.uid, name: c.name, kind: c.kind, file: c.filePath })),
+                            callees: ctx.callees.map((c) => ({ uid: c.uid, name: c.name, kind: c.kind, file: c.filePath })),
+                            knowledge: ctx.knowledge,
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return { content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }], isError: true };
+            }
         },
     );
 
     server.tool(
         'gitnexus_impact',
-        'Deprecated alias for code_impact — kept for back-compat with auto-generated CLAUDE.md docs. Prefer code_impact going forward.',
+        'Deprecated alias for code_impact — kept for back-compat with auto-generated CLAUDE.md docs. Prefer code_impact going forward. Now BFS-traverses CodeRelation edges in the developer-plugin Kùzu graph (no longer the gitnexus subprocess).',
         {
-            target: z.string().describe('Symbol or file to analyze'),
-            repo: z.string().optional().describe('Target repository name'),
-            direction: z.string().optional().describe('"upstream" (what depends on this) or "downstream"'),
+            target: z.string().describe('Symbol uid or name'),
+            repo: z.string().optional().describe('Target repository name (used when target is a name)'),
+            direction: z.string().optional().describe('"upstream" or "downstream". Default: upstream.'),
         },
-        async ({ target, repo, direction }) => {
-            const result = proxyImpact(target, repo, direction);
-            return { content: [{ type: 'text' as const, text: result.text }], isError: !result.success };
+        async ({ target, repo: _repo, direction }) => {
+            try {
+                const dir: 'upstream' | 'downstream' = direction === 'downstream' ? 'downstream' : 'upstream';
+                const result = await api.computeCodeBlastRadius(target, dir, 3);
+                if (result.symbol === null) {
+                    return { content: [{ type: 'text' as const, text: `Symbol "${target}" not found.` }] };
+                }
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify({
+                            symbol: { uid: result.symbol.uid, name: result.symbol.name, file: result.symbol.filePath },
+                            direction: dir,
+                            d1: result.d1.map((s) => ({ uid: s.uid, name: s.name, file: s.filePath })),
+                            d2: result.d2.map((s) => ({ uid: s.uid, name: s.name, file: s.filePath })),
+                            d3: result.d3.map((s) => ({ uid: s.uid, name: s.name, file: s.filePath })),
+                            riskLevel: result.d1.length > 5 ? 'CRITICAL' : result.d1.length > 0 ? 'HIGH' : 'LOW',
+                        }, null, 2),
+                    }],
+                };
+            } catch (err) {
+                return { content: [{ type: 'text' as const, text: `Error: ${(err as Error).message}` }], isError: true };
+            }
         },
     );
 
