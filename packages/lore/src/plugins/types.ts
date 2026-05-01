@@ -608,6 +608,41 @@ export interface ILorePlugin {
     bindRuntime?(ctx: PluginContext): void;
 
     /**
+     * v1.1 file-watcher pipeline (2026-04-30): tell core which paths
+     * to watch on this plugin's behalf. Called once at daemon boot
+     * (via `bindRuntime`-equivalent timing). Each entry is an absolute
+     * directory path; chokidar is set up to watch all files under it
+     * (recursive). When a file changes, core dispatches the event to
+     * this plugin's `onFileChange` hook.
+     *
+     * Returning [] or null = no watching.
+     *
+     * The `repo` label is plugin-defined (developer plugin uses the
+     * registry name; family plugin might use "notes-folder", etc.) —
+     * core re-emits it verbatim in the FileChangeEvent.
+     */
+    contributeWatchedPaths?(ctx: PluginContext): Promise<Array<{ absPath: string; repo: string }>>;
+
+    /**
+     * v1.1 file-watcher dispatch (2026-04-30): called when a file
+     * inside one of this plugin's contributeWatchedPaths changes.
+     * Plugin handles the change however it wants (re-parse + upsert
+     * symbols, re-embed the file, refresh a cache, etc.).
+     *
+     * Errors are logged by core but don't propagate — file events
+     * are noisy by nature; one bad file shouldn't kill the watcher.
+     *
+     * Throttling note: core debounces per-path events at the
+     * FileWatcherEngine level (default 500ms) so a `git checkout`
+     * storm doesn't fire onFileChange thousands of times. Plugins
+     * see one event per affected path per debounce window.
+     */
+    onFileChange?(
+        event: { kind: 'add' | 'change' | 'unlink'; absPath: string; relPath: string; repo: string },
+        ctx: PluginGraphContext,
+    ): Promise<void>;
+
+    /**
      * Phase boundary cleanup (2026-04-27) — edge-relation vocabulary
      * owned by this plugin. Same pattern as contributeNodeTypes:
      * merged into store_edge's enum at boot so each plugin can declare

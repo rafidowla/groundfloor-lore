@@ -2432,7 +2432,7 @@ async function main(): Promise<void> {
     // only fires per-MCP-session in HTTP mode, which is too late for
     // daemon-level HTTP routes (e.g. /api/code-similar) that call into
     // plugin APIs directly.
-    pluginRegistry.bindRuntime({
+    const pluginRuntimeCtx = {
         graph,
         verbatimStore,
         syncEngine,
@@ -2440,7 +2440,29 @@ async function main(): Promise<void> {
         schemaLoader,
         scope: detectedScope,
         loreDir,
-    });
+    };
+    pluginRegistry.bindRuntime(pluginRuntimeCtx);
+
+    // v1.1 file-watcher pipeline (2026-04-30): start the watcher AFTER
+    // bindRuntime so plugins have stash'd ctx + AFTER registerSchemas
+    // so they can mutate the graph from onFileChange. Failures are
+    // non-fatal — watcher is best-effort, not part of the daemon's
+    // critical request path.
+    try {
+        const { FileWatcherEngine } = await import('../engines/fileWatcherEngine.js');
+        const watcher = new FileWatcherEngine();
+        await watcher.start(
+            pluginRegistry.active(),
+            pluginRuntimeCtx,
+            graph.createPluginGraphContext(),
+        );
+        // Stash on a module-private symbol so SIGTERM handlers below
+        // can stop it cleanly. Using `globalThis` keeps the change
+        // surgical without rewriting the daemon's lifecycle scaffolding.
+        (globalThis as unknown as { __loreFileWatcher?: unknown }).__loreFileWatcher = watcher;
+    } catch (watcherErr) {
+        console.error(`[Lore MCP] file-watcher startup failed (non-fatal): ${(watcherErr as Error).message}`);
+    }
 
     // Attempt Dataplane connection if adapter is configured
     if (adapter) {

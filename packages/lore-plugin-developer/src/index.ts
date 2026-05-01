@@ -251,6 +251,45 @@ export const developerPlugin: ILorePlugin = {
     },
 
     /**
+     * v1.1 file-watcher integration (2026-04-30): tell core which repo
+     * directories to watch. Each registered repo (from the gitnexus /
+     * Atlas registry) gets its absolute path watched. core's
+     * FileWatcherEngine wires up chokidar; we receive `onFileChange`
+     * events for any file that changes in those directories.
+     */
+    async contributeWatchedPaths(_ctx: PluginContext): Promise<Array<{ absPath: string; repo: string }>> {
+        const api = (developerPlugin as ILorePlugin & { api?: DeveloperApi }).api;
+        if (!api) return [];
+        try {
+            const repos = api.listGitNexusRepos();
+            return repos
+                .filter((r) => !!r.path && !r.path.includes('/.claude/worktrees/') && !r.path.startsWith('/private/tmp/'))
+                .map((r) => ({ absPath: r.path, repo: r.name }));
+        } catch (err) {
+            console.error(`[developer plugin] contributeWatchedPaths failed: ${(err as Error).message}`);
+            return [];
+        }
+    },
+
+    /**
+     * v1.1 file-watcher dispatch (2026-04-30): re-parse the changed
+     * file with Atlas, upsert its symbols + relations, drop stale
+     * symbols whose uid no longer matches any current symbol in the
+     * file. The graph stays current as a side-effect of code edits;
+     * users don't run reconnect manually.
+     *
+     * Errors are logged and swallowed — file events are noisy by
+     * nature, and per-file failures shouldn't kill the watcher.
+     */
+    async onFileChange(
+        event: { kind: 'add' | 'change' | 'unlink'; absPath: string; relPath: string; repo: string },
+        ctx: PluginGraphContext,
+    ): Promise<void> {
+        const { onFileChangeImpl } = await import('./fileWatcher.js');
+        await onFileChangeImpl(event, ctx);
+    },
+
+    /**
      * V2.2 — make "Ask about this" work on CodeFile / CodeSymbol nodes.
      * Before this hook existed the chat context expander only checked
      * the core LoreNode table, so asking about a `file:src/foo.ts` or
