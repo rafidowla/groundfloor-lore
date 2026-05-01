@@ -12,7 +12,7 @@ import * as ops from './operations.js';
 import * as indexer from './codeIndexer.js';
 import * as repoOps from './repoOps.js';
 import * as similarity from './similarity.js';
-export type { GitNexusRepoEntry, IndexResult } from './codeIndexer.js';
+export type { IndexedRepo, IndexResult } from './codeIndexer.js';
 export type {
     DiscoveredRepo,
     RepoFreshness,
@@ -60,9 +60,9 @@ export interface DeveloperApi {
     pruneInferredDeveloperEdges: (relationPrefix: string) => Promise<{ touchesFile: number; appliesToCode: number }>;
 
     // Code-indexing orchestration (lore index / doctor)
-    listGitNexusRepos: () => indexer.GitNexusRepoEntry[];
-    getGitNexusRepo: (name: string) => indexer.GitNexusRepoEntry | null;
-    importFromGitNexus: (repo: indexer.GitNexusRepoEntry) => Promise<indexer.IndexResult>;
+    listGitNexusRepos: () => indexer.IndexedRepo[];
+    getGitNexusRepo: (name: string) => indexer.IndexedRepo | null;
+    importFromGitNexus: (repo: indexer.IndexedRepo) => Promise<indexer.IndexResult>;
     indexAllRepos: () => Promise<indexer.IndexResult[]>;
 
     // Phase-1 Add-Project surface (decision-add-project-ui-phase1-defaults-2026-04-27).

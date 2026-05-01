@@ -41,13 +41,14 @@ import type { DeveloperApi } from './api.js';
 /* ─── Types ───────────────────────────────────────────────────── */
 
 /**
- * GitNexusRepoEntry — A repo entry from the registry file.
+ * IndexedRepo — A repo entry from the registry file. Renamed from
+ * `GitNexusRepoEntry` on 2026-04-30 (v1.1) to drop the leaked vendor
+ * name from the public type surface.
  *
- * Field name is preserved for back-compat. Post-Phase-7 the file is
- * still authoritative for repo discovery (until a native Atlas
- * registry replaces it in v1.1+).
+ * `GitNexusRepoEntry` retained as a deprecated type alias for one
+ * release window. Drop in v1.2.
  */
-export interface GitNexusRepoEntry {
+export interface IndexedRepo {
     name: string;
     path: string;
     storagePath: string;
@@ -62,6 +63,9 @@ export interface GitNexusRepoEntry {
         embeddings: number;
     };
 }
+
+/** @deprecated Renamed to `IndexedRepo` on 2026-04-30. Drop in v1.2. */
+export type GitNexusRepoEntry = IndexedRepo;
 
 /**
  * IndexResult — Summary of a code-indexing operation.
@@ -83,26 +87,58 @@ export interface IndexResult {
 /* ─── Registry ────────────────────────────────────────────────── */
 
 /**
- * Read the registry of indexed repos. Post-retirement this is still
- * `~/.gitnexus/registry.json` because no other component maintains
- * this file and rewriting registry-management is a v1.1 concern (the
- * gitnexus binary's analyze command writes this file when present;
- * Atlas's indexing path doesn't update it currently — also a v1.1
- * follow-up).
+ * Atlas registry path resolution. Native Atlas registry lives at
+ * `<LORE_HOME>/atlas-registry.json`. Falls back to the legacy
+ * `~/.gitnexus/registry.json` so users with an existing gitnexus
+ * install don't have to migrate manually — the gitnexus binary kept
+ * this file current pre-Phase-7. v1.1 adds the Atlas writer; this
+ * read path supports both files transparently.
  */
-export function listGitNexusRepos(): GitNexusRepoEntry[] {
-    const registryPath = path.join(os.homedir(), '.gitnexus', 'registry.json');
+function atlasRegistryPath(): string {
+    const loreHome = process.env['LORE_HOME'] || path.join(os.homedir(), '.groundfloor');
+    return path.join(loreHome, 'atlas-registry.json');
+}
+function legacyGitnexusRegistryPath(): string {
+    return path.join(os.homedir(), '.gitnexus', 'registry.json');
+}
+
+/**
+ * Read the registry of indexed repos. Tries the native Atlas registry
+ * first (`<LORE_HOME>/atlas-registry.json`), falls back to the legacy
+ * gitnexus registry if Atlas's hasn't been initialised yet.
+ */
+export function listGitNexusRepos(): IndexedRepo[] {
+    // Try Atlas-native first.
     try {
-        const content = fs.readFileSync(registryPath, 'utf-8');
-        return JSON.parse(content) as GitNexusRepoEntry[];
+        const content = fs.readFileSync(atlasRegistryPath(), 'utf-8');
+        return JSON.parse(content) as IndexedRepo[];
+    } catch { /* fall through to legacy */ }
+
+    // Fall back to legacy gitnexus registry.
+    try {
+        const content = fs.readFileSync(legacyGitnexusRegistryPath(), 'utf-8');
+        return JSON.parse(content) as IndexedRepo[];
     } catch {
         return [];
     }
 }
 
-export function getGitNexusRepo(repoName: string): GitNexusRepoEntry | null {
+export function getGitNexusRepo(repoName: string): IndexedRepo | null {
     const repos = listGitNexusRepos();
     return repos.find((repo) => repo.name === repoName) ?? null;
+}
+
+/**
+ * Write the Atlas registry. v1.1 entry point — `addRepo` /
+ * `removeRepo` / `indexAllRepos` should call this after their work to
+ * keep the registry current. Today nothing calls it; the gitnexus
+ * binary kept the legacy file fresh. Once v1.1 wires this in, Atlas
+ * owns its own registry end-to-end.
+ */
+export function writeAtlasRegistry(repos: IndexedRepo[]): void {
+    const p = atlasRegistryPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(repos, null, 2), 'utf-8');
 }
 
 /* ─── Indexing — Atlas-backed ─────────────────────────────────── */
@@ -117,7 +153,7 @@ export function getGitNexusRepo(repoName: string): GitNexusRepoEntry | null {
  * the api surface.
  */
 export async function importFromGitNexus(
-    repo: GitNexusRepoEntry,
+    repo: IndexedRepo,
     api: DeveloperApi,
 ): Promise<IndexResult> {
     const startedAt = Date.now();
