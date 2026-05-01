@@ -1,13 +1,19 @@
 # Research: Local 1.2 B Preprocessor via Ollama — Evaluation Plan
 
 > **Status:** Research only — no code changes proposed in this doc.
-> Frames the question, names a reference architecture, picks
-> three candidate models, and lays out a reproducible eval so we
-> can decide go / no-go without speculation.
+> Frames the question, names the reference architecture, locks the
+> chosen model, and lays out a reproducible eval so we can decide
+> go / no-go without speculation.
 >
 > **Author:** Rafi Dowla. **Date:** 2026-04-30.
 > **Companion doc:** [`research-token-efficiency-for-lore.md`](research-token-efficiency-for-lore.md) — broader research on Lore's MCP token surface. This doc is one of the deferred tracks (P4) from that doc.
 > **Triggered by:** "Can we try out a local 1.2 B preprocessor using Ollama?"
+>
+> **Locked decision (2026-04-30):** the preprocessor model is
+> **`LiquidAI/LFM2.5-1.2B-Thinking`** (Ollama tag `lfm2.5-thinking:1.2b`).
+> The other candidates listed below stay in the harness as a
+> *validation comparison set* — they exist to confirm the pick and
+> to provide a fallback if LFM2.5-Thinking misses the bar.
 
 ---
 
@@ -31,22 +37,46 @@ Three constraints push the size down:
 2. **Memory budget.** A 1.2 B Q4 model uses ~700 MB–1 GB of RAM. A 7 B model uses ~5 GB. Lore's daemon already shares the laptop with Cursor / Claude Code / a browser stack; a small model is the only one that can sit hot in memory all day.
 3. **Quality is enough.** The preprocessor's job is **summarise / extract / compress**, not reason or write code. Sub-2 B models in 2026 are competent at exactly that class of work. Cheap-and-okay beats slow-and-perfect for this workload.
 
-The "1.2 B" target the user named maps cleanly to **LFM2-1.2B** (Liquid AI's edge-optimised model series). It's available on Ollama. There are sibling options at similar sizes — Qwen2.5-1.5B, SmolLM2-1.7B, Llama-3.2-1B — that should be evaluated in the same harness.
+The "1.2 B" target the user named maps cleanly to the **LFM2.5** family (Liquid AI's edge-optimised models). After review, the **Thinking** variant — `LiquidAI/LFM2.5-1.2B-Thinking` — is the locked pick for the eval.
 
 ---
 
-## 3. Candidate models
+## 3. Models — locked primary + comparison set
+
+### 3.1 Primary (locked 2026-04-30): `LiquidAI/LFM2.5-1.2B-Thinking`
+
+| Field | Value |
+|---|---|
+| Params | 1.2 B |
+| Variant | **Thinking** — emits a chain-of-thought trace before the final answer |
+| RAM (Q4) | ~700 MB |
+| Decode (M-series, no-thinking baseline) | 80–120 tok/s |
+| Ollama tag | `lfm2.5-thinking:1.2b` |
+| Hugging Face | [`LiquidAI/LFM2.5-1.2B-Thinking`](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Thinking) |
+| Why this one | Newest LFM generation; competitive with Qwen3-1.7B at 47 % fewer params; **2× faster decode / prefill on CPU than Qwen3**; Thinking variant adds reasoning before the summary, which on extraction-style workloads should buy quality at modest latency cost. |
+
+### 3.2 Why "Thinking" not "Instruct"?
+
+The same family ships two heads: `LFM2.5-1.2B` (vanilla instruct) and `LFM2.5-1.2B-Thinking` (chain-of-thought). For a summarisation preprocessor the trade-off is:
+
+- **Thinking pros.** The model reasons about *what's important to keep* before writing the summary. On a 5 000-token tool response, that's the difference between "drop the fields whose names don't look interesting" and "keep the fields the user's question is asking about." Extraction tasks tend to benefit measurably.
+- **Thinking cons.** CoT generates extra tokens before the final answer the agent sees. On a 200-token output budget the wall-clock latency can 2–3× compared to a plain instruct call. The eval has to measure this directly rather than guess.
+
+Plan: run **both heads** in the harness on the same 30 responses and let measured faithfulness × coverage × p95-latency decide. Default expectation is that Thinking wins on quality and Instruct wins on speed; the eval picks the one that hits the bar at the right operating point.
+
+### 3.3 Comparison set (validation only)
+
+These exist to confirm the pick. If `LFM2.5-1.2B-Thinking` clears the success bar, no further work; if it misses, the comparison set tells us whether the bar is unreachable for ~1 B models or whether a different family clears it.
 
 | Model | Params | RAM (Q4) | Decode (M-series) | Notable strengths | Notable weaknesses | Ollama tag |
 |---|---|---|---|---|---|---|
-| **LFM2-1.2B** (Liquid AI) | 1.2 B | ~700 MB | 80–120 tok/s | Edge-optimised hybrid Liquid architecture; **2× faster decode/prefill on CPU than Qwen3**; competitive with Qwen3-1.7B at 47 % fewer params; agentic-tasks + RAG + extraction explicitly named as recommended use cases | Not recommended for knowledge-intensive or programming-heavy tasks (matches our use case — we don't need either) | `sam860/LFM2:1.2b`, `LiquidAI/lfm2.5-1.2b-instruct`, `lfm2.5-thinking:1.2b` |
-| **Qwen2.5-1.5B-Instruct** | 1.5 B | ~900 MB | 60–90 tok/s | Strong instruction-following; multilingual; massive ecosystem; reliable function-calling | Slightly larger than spec; older architecture | `qwen2.5:1.5b` |
-| **SmolLM2-1.7B-Instruct** | 1.7 B | ~1.0 GB | 50–80 tok/s | **Best benchmarks in class**: HellaSwag 68.7 / ARC-Avg 60.5 / PIQA 77.6, beating Llama-1B and Qwen2.5-1.5B on each; HuggingFace native; explicit summarisation + function-calling training | Largest of the candidates | `smollm2:1.7b` |
-| **Llama-3.2-1B-Instruct** | 1.2 B | ~700 MB | 90–120 tok/s | Smallest, fastest, **most fine-tunable** in benchmarks | Lowest baseline quality of the four; needs fine-tune to compete | `llama3.2:1b` |
+| LFM2.5-1.2B-Instruct (same family, no CoT) | 1.2 B | ~700 MB | 80–120 tok/s | Latency floor for the chosen family — fastest possible LFM2.5 setup | No reasoning step; quality on extraction tasks expected to lag the Thinking variant | `LiquidAI/lfm2.5-1.2b-instruct` |
+| Qwen2.5-1.5B-Instruct | 1.5 B | ~900 MB | 60–90 tok/s | Strong instruction-following; multilingual; massive ecosystem; reliable function-calling | Slightly larger than spec; older architecture | `qwen2.5:1.5b` |
+| SmolLM2-1.7B-Instruct | 1.7 B | ~1.0 GB | 50–80 tok/s | **Best benchmarks in class**: HellaSwag 68.7 / ARC-Avg 60.5 / PIQA 77.6, beating Llama-1B and Qwen2.5-1.5B on each; HuggingFace native; explicit summarisation + function-calling training | Largest of the comparison set | `smollm2:1.7b` |
+| Llama-3.2-1B-Instruct | 1.2 B | ~700 MB | 90–120 tok/s | Smallest, fastest, **most fine-tunable** in benchmarks | Lowest baseline quality of the four; needs fine-tune to compete | `llama3.2:1b` |
+| Qwen3-0.6B (floor) | 0.6 B | ~400 MB | 120–180 tok/s | Used in mcp-context-proxy's example config; the cheapest possible setup that produces structured output | Quality drops sharply on harder summaries | `qwen3:0.6b` |
 
-> **Pick for the eval:** all four. The eval below scores them against the same task set so we get a real comparison rather than a vendor-pitch summary.
-
-A **fifth candidate** worth including for the very-low-end: **Qwen3-0.6B** (used in mcp-context-proxy's example config). At 0.6 B / 250 ms / call it's the floor of what's feasible. Worth the ~30 minutes to add to the harness.
+The eval scores all six (Thinking + Instruct of LFM2.5 + four others) on the same 30-response set. Even if LFM2.5-Thinking clears the bar, the comparison numbers are recorded for future reference (model selection is a moving target — when the next quarter brings a new option we want a calibration baseline).
 
 ---
 
@@ -68,12 +98,20 @@ Three possible insertion points. Each is a different design.
 
 ### 5.1 Goal
 
-Decide go / no-go on shipping a local-preprocessor mode for Lore by the end of Q3. Concrete success criteria:
+Decide go / no-go on shipping a local-preprocessor mode for Lore by the end of Q3. Primary question now narrowed: **does `LFM2.5-1.2B-Thinking` clear the bar?**
+
+Concrete success criteria (apply to LFM2.5-Thinking; the other models are scored against the same bar for the comparison record):
 
 - **≥ 60 % byte reduction** on responses ≥ 2 000 tokens (Lore's current cliff for big `recall` and `code_query` results).
 - **No semantic regression** — the preprocessed response must let the agent reach the same conclusion the full response would have.
-- **≤ 500 ms p95 added latency** on M-series Apple Silicon.
+- **≤ 500 ms p95 added latency** on M-series Apple Silicon — note this is *with* the thinking trace; if Thinking misses on latency alone, Instruct is the fallback.
 - **≤ 1 % failure rate** (malformed output, model hallucination not caught by validators).
+
+Decision rule:
+1. If LFM2.5-Thinking clears all four bars → ship with Thinking.
+2. If LFM2.5-Thinking clears quality but misses on latency → fall back to LFM2.5-Instruct from the same family.
+3. If neither LFM2.5 head clears → consult the comparison set; pick the highest-coverage model that hits the bar.
+4. If nothing clears → "stay deterministic," revisit when the small-model frontier moves.
 
 ### 5.2 Dataset — 30 representative responses
 
@@ -113,13 +151,14 @@ No changes to Lore code. The harness lives at `experiments/preprocessor-eval/` a
 
 | Model | Compression | Faithfulness | Coverage | Latency p50 | Latency p95 | Failure % |
 |---|---|---|---|---|---|---|
-| LFM2-1.2B | ? | ? | ? | ? | ? | ? |
-| Qwen2.5-1.5B | ? | ? | ? | ? | ? | ? |
-| SmolLM2-1.7B | ? | ? | ? | ? | ? | ? |
-| Llama-3.2-1B | ? | ? | ? | ? | ? | ? |
+| **LFM2.5-1.2B-Thinking** (primary) | ? | ? | ? | ? | ? | ? |
+| LFM2.5-1.2B-Instruct (same family, latency floor) | ? | ? | ? | ? | ? | ? |
+| Qwen2.5-1.5B-Instruct | ? | ? | ? | ? | ? | ? |
+| SmolLM2-1.7B-Instruct | ? | ? | ? | ? | ? | ? |
+| Llama-3.2-1B-Instruct | ? | ? | ? | ? | ? | ? |
 | Qwen3-0.6B (floor) | ? | ? | ? | ? | ? | ? |
 
-Decision rule: pick the model with **highest coverage at ≥ 60 % compression**, tie-broken by latency. If no model clears the bar, the answer is "stay deterministic" (the P0/P1 work in the companion doc) and revisit when the small-model frontier moves.
+Decision rule: see §5.1. Primary question is "does LFM2.5-Thinking clear the bar?"; the comparison set is recorded for calibration regardless of the answer.
 
 ---
 
@@ -128,6 +167,7 @@ Decision rule: pick the model with **highest coverage at ≥ 60 % compression**,
 | Risk | Severity | Mitigation |
 |---|---|---|
 | **Hallucinated summaries** — model invents API surfaces, line numbers, function names | Critical (would be worse than no compression) | Pass through faithfulness check; require literal substring match for any cited identifier; fall back to deterministic truncation when the check fails |
+| **Thinking-trace latency** — CoT tokens generated before the visible answer can 2–3× wall-clock latency on a summarisation workload | High (specific to the LFM2.5-Thinking pick) | Measure Thinking vs Instruct head-to-head in §5.5; if Thinking misses the 500 ms p95 bar by latency alone, fall back to LFM2.5-Instruct from the same family. Consider a `<budget>` system-prompt cap to bound the thinking trace if the model honours it. |
 | **Latency cliff** on cold-start of Ollama process | Medium | Keep model loaded ("hot") via Ollama's `OLLAMA_KEEP_ALIVE` env; budget the cold-start cost separately |
 | **Ollama lifecycle** — process dies, port races, etc. | Medium | Health-check + auto-restart; fail open (return original response) if Ollama is down |
 | **Cross-model drift** — agent learns to expect specific summary shape, then we change models | Low | Pin model in workspace config; bump only on explicit user opt-in |
@@ -154,15 +194,18 @@ Decision rule: pick the model with **highest coverage at ≥ 60 % compression**,
 | Q3 | Per-workspace toggle? | Yes — developer workspace probably wants it on, family workspace probably not (responses are smaller, summarisation risk is higher) |
 | Q4 | Streaming vs batch? | Batch — simpler, and the preprocessor target is single-call summarisation, not multi-turn |
 | Q5 | Should the proxy run as a launchd service or in-process? | Launchd long-term; in-process for the eval to keep moving parts low |
+| Q6 | LFM2.5-Thinking — cap the thinking trace length? | Try the model's documented `<budget>` / max-thinking-tokens hint first; if it doesn't honour the cap reliably, eval at default and pick on measured p95 |
+| Q7 | Quantisation — Q4_K_M vs Q5_K_M vs Q6_K? | Start at Q4_K_M (Ollama default; ~3 % quality loss vs FP16); only escalate if faithfulness misses the bar |
 
 ---
 
 ## 9. Sources
 
+- [LiquidAI/LFM2.5-1.2B-Thinking on Hugging Face](https://huggingface.co/LiquidAI/LFM2.5-1.2B-Thinking) — primary
+- [Ollama — lfm2.5-thinking:1.2b](https://ollama.com/library/lfm2.5-thinking:1.2b) — primary
 - [LFM2 announcement — Liquid AI](https://www.liquid.ai/blog/liquid-foundation-models-v2-our-second-series-of-generative-ai-models)
 - [LiquidAI/LFM2-1.2B on Hugging Face](https://huggingface.co/LiquidAI/LFM2-1.2B)
 - [Ollama — sam860/LFM2:1.2b](https://ollama.com/sam860/LFM2:1.2b)
-- [Ollama — lfm2.5-thinking:1.2b](https://ollama.com/library/lfm2.5-thinking:1.2b)
 - [Ollama — LiquidAI/lfm2.5-1.2b-instruct](https://ollama.com/LiquidAI/lfm2.5-1.2b-instruct)
 - [SmolLM2 announcement — Neurohive](https://neurohive.io/en/state-of-the-art/smollm2-open-source-compact-llm-by-hugging-face-outscoring-llama-1b-and-qwen2-5-1-5b/)
 - [Qwen2.5 LLM blog](https://qwenlm.github.io/blog/qwen2.5-llm/)
