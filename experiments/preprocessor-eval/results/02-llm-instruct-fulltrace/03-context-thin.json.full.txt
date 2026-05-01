@@ -1,0 +1,1 @@
+The relevant code references the PluginRegistry in the lore/src/plugins/registry.ts file, located between lines 54 and 713. This file is part of the plugin system and is essential for managing plugin loading and registration. No noise, internal IDs, or redundant details were removed.

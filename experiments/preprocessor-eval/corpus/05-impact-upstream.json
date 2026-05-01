@@ -1,0 +1,323 @@
+{
+  "target": {
+    "id": "Class:packages/lore/src/plugins/registry.ts:PluginRegistry",
+    "name": "PluginRegistry",
+    "filePath": "packages/lore/src/plugins/registry.ts"
+  },
+  "direction": "upstream",
+  "impactedCount": 22,
+  "risk": "CRITICAL",
+  "summary": {
+    "direct": 9,
+    "processes_affected": 20,
+    "modules_affected": 4
+  },
+  "affected_processes": [
+    {
+      "name": "Main → PluginRegistry",
+      "hits": 3,
+      "step_count": 4
+    },
+    {
+      "name": "ReposCommand → ConfigManager",
+      "hits": 3,
+      "step_count": 4
+    },
+    {
+      "name": "Main → LoreHome",
+      "hits": 3,
+      "step_count": 4
+    },
+    {
+      "name": "ReposCommand → LocalGraph",
+      "hits": 3,
+      "step_count": 4
+    },
+    {
+      "name": "Main → ConfigManager",
+      "hits": 3,
+      "step_count": 4
+    },
+    {
+      "name": "ReposCommand → PluginRegistry",
+      "hits": 3,
+      "step_count": 4
+    },
+    {
+      "name": "IndexCommand → LocalGraph",
+      "hits": 2,
+      "step_count": 3
+    },
+    {
+      "name": "IndexCommand → LoreHome",
+      "hits": 2,
+      "step_count": 4
+    },
+    {
+      "name": "IndexCommand → ConfigManager",
+      "hits": 2,
+      "step_count": 3
+    },
+    {
+      "name": "ReposCommand → IsGitRepo",
+      "hits": 2,
+      "step_count": 4
+    },
+    {
+      "name": "IndexCommand → PluginRegistry",
+      "hits": 2,
+      "step_count": 3
+    },
+    {
+      "name": "MigrateCommand → LoreHome",
+      "hits": 2,
+      "step_count": 3
+    },
+    {
+      "name": "MigrateCommand → LocalGraph",
+      "hits": 2,
+      "step_count": 3
+    },
+    {
+      "name": "ReposCommand → Write",
+      "hits": 2,
+      "step_count": 3
+    },
+    {
+      "name": "ReposCommand → ListGitNexusRepos",
+      "hits": 2,
+      "step_count": 4
+    },
+    {
+      "name": "MigrateCommand → LocalEmbeddingProvider",
+      "hits": 2,
+      "step_count": 3
+    },
+    {
+      "name": "MigrateCommand → OpenAICompatEmbeddingProvider",
+      "hits": 2,
+      "step_count": 3
+    },
+    {
+      "name": "ReposCommand → ReadHeadCommit",
+      "hits": 2,
+      "step_count": 4
+    },
+    {
+      "name": "StatusCommand → LoreHome",
+      "hits": 1,
+      "step_count": 3
+    },
+    {
+      "name": "DoctorCommand → LoreHome",
+      "hits": 1,
+      "step_count": 3
+    }
+  ],
+  "affected_modules": [
+    {
+      "name": "Cluster_70",
+      "hits": 9,
+      "impact": "direct"
+    },
+    {
+      "name": "Cli",
+      "hits": 8,
+      "impact": "direct"
+    },
+    {
+      "name": "Engines",
+      "hits": 1,
+      "impact": "indirect"
+    },
+    {
+      "name": "Cluster_84",
+      "hits": 1,
+      "impact": "indirect"
+    }
+  ],
+  "byDepth": {
+    "1": [
+      {
+        "depth": 1,
+        "id": "Function:packages/lore-plugin-developer/src/cli.ts:bootForCli",
+        "name": "bootForCli",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts",
+        "relationType": "CALLS",
+        "confidence": 0.5
+      },
+      {
+        "depth": 1,
+        "id": "Function:packages/lore/src/cli/index.ts:loadPluginCliCommands",
+        "name": "loadPluginCliCommands",
+        "filePath": "packages/lore/src/cli/index.ts",
+        "relationType": "CALLS",
+        "confidence": 0.5
+      },
+      {
+        "depth": 1,
+        "id": "Function:packages/lore/src/cli/commands.ts:statusCommand",
+        "name": "statusCommand",
+        "filePath": "packages/lore/src/cli/commands.ts",
+        "relationType": "CALLS",
+        "confidence": 0.5
+      },
+      {
+        "depth": 1,
+        "id": "Function:packages/lore/src/cli/commands.ts:doctorCommand",
+        "name": "doctorCommand",
+        "filePath": "packages/lore/src/cli/commands.ts",
+        "relationType": "CALLS",
+        "confidence": 0.5
+      },
+      {
+        "depth": 1,
+        "id": "Function:packages/lore/src/cli/commands.ts:reconnectCommand",
+        "name": "reconnectCommand",
+        "filePath": "packages/lore/src/cli/commands.ts",
+        "relationType": "CALLS",
+        "confidence": 0.5
+      },
+      {
+        "depth": 1,
+        "id": "Function:packages/lore/src/cli/commands.ts:migrateCommand",
+        "name": "migrateCommand",
+        "filePath": "packages/lore/src/cli/commands.ts",
+        "relationType": "CALLS",
+        "confidence": 0.5
+      },
+      {
+        "depth": 1,
+        "id": "Function:packages/lore/src/cli/commands.ts:migrateEmbeddingModelCommand",
+        "name": "migrateEmbeddingModelCommand",
+        "filePath": "packages/lore/src/cli/commands.ts",
+        "relationType": "CALLS",
+        "confidence": 0.5
+      },
+      {
+        "depth": 1,
+        "id": "File:test/manifest-loader-unit.ts",
+        "name": "manifest-loader-unit.ts",
+        "filePath": "test/manifest-loader-unit.ts",
+        "relationType": "CALLS",
+        "confidence": 0.5
+      },
+      {
+        "depth": 1,
+        "id": "File:packages/lore/src/mcp/server.ts",
+        "name": "server.ts",
+        "filePath": "packages/lore/src/mcp/server.ts",
+        "relationType": "CALLS",
+        "confidence": 0.5
+      }
+    ],
+    "2": [
+      {
+        "depth": 2,
+        "id": "Function:packages/lore-plugin-developer/src/cli.ts:indexCommand",
+        "name": "indexCommand",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      },
+      {
+        "depth": 2,
+        "id": "Function:packages/lore-plugin-developer/src/cli.ts:ingestFilesCommand",
+        "name": "ingestFilesCommand",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      },
+      {
+        "depth": 2,
+        "id": "Function:packages/lore-plugin-developer/src/cli.ts:reposList",
+        "name": "reposList",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      },
+      {
+        "depth": 2,
+        "id": "Function:packages/lore-plugin-developer/src/cli.ts:reposAdd",
+        "name": "reposAdd",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      },
+      {
+        "depth": 2,
+        "id": "Function:packages/lore-plugin-developer/src/cli.ts:reposBatch",
+        "name": "reposBatch",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      },
+      {
+        "depth": 2,
+        "id": "Function:packages/lore-plugin-developer/src/cli.ts:reposRemove",
+        "name": "reposRemove",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      },
+      {
+        "depth": 2,
+        "id": "Function:packages/lore-plugin-developer/src/cli.ts:reposFreshness",
+        "name": "reposFreshness",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      },
+      {
+        "depth": 2,
+        "id": "Function:packages/lore-plugin-developer/src/cli.ts:reposInstallHook",
+        "name": "reposInstallHook",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      },
+      {
+        "depth": 2,
+        "id": "Function:packages/lore/src/cli/index.ts:renderHelp",
+        "name": "renderHelp",
+        "filePath": "packages/lore/src/cli/index.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      },
+      {
+        "depth": 2,
+        "id": "Function:packages/lore/src/cli/index.ts:main",
+        "name": "main",
+        "filePath": "packages/lore/src/cli/index.ts",
+        "relationType": "CALLS",
+        "confidence": 0.5
+      },
+      {
+        "depth": 2,
+        "id": "Function:packages/lore/src/cli/commands.ts:reconsumeCommand",
+        "name": "reconsumeCommand",
+        "filePath": "packages/lore/src/cli/commands.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      }
+    ],
+    "3": [
+      {
+        "depth": 3,
+        "id": "Function:packages/lore-plugin-developer/src/cli.ts:reposCommand",
+        "name": "reposCommand",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      },
+      {
+        "depth": 3,
+        "id": "File:packages/lore/src/cli/index.ts",
+        "name": "index.ts",
+        "filePath": "packages/lore/src/cli/index.ts",
+        "relationType": "CALLS",
+        "confidence": 0.95
+      }
+    ]
+  }
+}

@@ -1,0 +1,1 @@
+The migration process involves several key steps updating embedding providers. The main actions include switching from OpenAICompatEmbeddingProvider to LocalEmbeddingProvider and updating fingerprint paths. Multiple processes handle these changes, with priority steps listed. No scores or internal IDs were needed.

@@ -1,0 +1,12 @@
+file,rawBytes,answerBytes,thinkingBytes,rawTokens,answerTokens,reductionPct,latencyMs,doneReason,fakeIds,failed
+01-query-thin.json,6981,264,0,1745,66,96.2,8253,stop,15,0
+02-query-content.json,115936,360,0,28984,90,99.7,836,stop,6,0
+03-context-thin.json,8284,284,0,2071,71,96.6,673,stop,13,0
+04-context-content.json,13447,366,0,3362,92,97.3,815,stop,17,0
+05-impact-upstream.json,8549,357,0,2137,89,95.8,761,stop,11,0
+06-impact-registertools.json,418,196,0,105,49,53.1,215,stop,9,0
+07-query-embed.json,6814,314,0,1704,79,95.4,575,stop,14,0
+08-context-registertools.json,1166,423,0,292,106,63.7,359,stop,17,0
+09-file-registry.ts,30519,414,0,7630,104,98.6,778,stop,14,0
+10-doc-architecture.md,20409,511,0,5102,128,97.5,881,stop,9,0
+TOTAL,212523,3489,0,53131,872,98.4,p50=778|p95=8253,,125,0

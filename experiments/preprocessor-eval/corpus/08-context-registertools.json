@@ -1,0 +1,36 @@
+{
+  "status": "ambiguous",
+  "message": "Found 5 symbols matching 'registerTools'. Use uid or file_path to disambiguate.",
+  "candidates": [
+    {
+      "uid": "Method:packages/lore-plugin-personal/src/index.ts:registerTools",
+      "name": "registerTools",
+      "filePath": "packages/lore-plugin-personal/src/index.ts",
+      "line": 84
+    },
+    {
+      "uid": "Method:packages/lore-plugin-legal/src/index.ts:registerTools",
+      "name": "registerTools",
+      "filePath": "packages/lore-plugin-legal/src/index.ts",
+      "line": 66
+    },
+    {
+      "uid": "Method:packages/lore-plugin-developer/src/index.ts:registerTools",
+      "name": "registerTools",
+      "filePath": "packages/lore-plugin-developer/src/index.ts",
+      "line": 123
+    },
+    {
+      "uid": "Method:packages/lore/src/plugins/registry.ts:registerTools",
+      "name": "registerTools",
+      "filePath": "packages/lore/src/plugins/registry.ts",
+      "line": 179
+    },
+    {
+      "uid": "Method:packages/lore/src/plugins/manifest/adapter.ts:registerTools",
+      "name": "registerTools",
+      "filePath": "packages/lore/src/plugins/manifest/adapter.ts",
+      "line": 121
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "target": {
+    "id": "Method:packages/lore-plugin-personal/src/index.ts:registerTools",
+    "name": "registerTools",
+    "filePath": "packages/lore-plugin-personal/src/index.ts"
+  },
+  "direction": "upstream",
+  "impactedCount": 0,
+  "risk": "LOW",
+  "summary": {
+    "direct": 0,
+    "processes_affected": 0,
+    "modules_affected": 0
+  },
+  "affected_processes": [],
+  "affected_modules": [],
+  "byDepth": {}
+}

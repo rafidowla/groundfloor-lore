@@ -1,0 +1,1 @@
+The unified MCP integrates code and knowledge, preserving identifiers and enabling local sync with Kùzu and SurrealDB. Key components include GitNexus, GitLore, and team sync. Adjustments ensure minimal overhead.

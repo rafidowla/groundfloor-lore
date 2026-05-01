@@ -1,0 +1,1 @@
+The system manages plugin registration and loading, handling both built-in and synthetic plugins. It tracks loaded plugins, checks for name collisions, and resolves conflicts during boot. Processes include registry setup, plugin loading, and collision detection. Key files and steps involve `PluginRegistry`, plugin registration, and handling plugin conflicts.

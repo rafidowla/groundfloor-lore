@@ -1,0 +1,16 @@
+{
+  "target": {
+    "id": "Method:packages/lore-plugin-personal/src/index.ts:registerTools",
+    "name": "registerTools",
+    "filePath": "packages/lore-plugin-personal/src/index.ts"
+  },
+  "direction": "upstream",
+  "negative_evidence": {
+    "searched": "upstream + downstream",
+    "found": 0,
+    "hint": "No callers found at any depth — symbol may be entry point or unused."
+  },
+  "_meta": {
+    "confidence": 0.7
+  }
+}

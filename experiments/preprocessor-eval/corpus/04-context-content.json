@@ -1,0 +1,236 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Class:packages/lore/src/plugins/registry.ts:PluginRegistry",
+    "name": "PluginRegistry",
+    "filePath": "packages/lore/src/plugins/registry.ts",
+    "startLine": 54,
+    "endLine": 713,
+    "content": "}\n\nexport class PluginRegistry {\n    private readonly loaded = new Map<string, ILorePlugin>();\n    private orphanState: OrphanState = { orphans: [], blocking: false };\n    /**\n     * Synthetic plugins added via `registerSyntheticPlugin` — typically\n     * Tier 1 plugins built from a manifest (see\n     * `packages/lore/src/plugins/manifest/adapter.ts`). They go through\n     * the same collision check and lifecycle hooks as built-in plugins,\n     * but are activated unconditionally rather than gated by\n     * `config.plugins[]` (Tier 1 plugins are pure schema; \"having them\n     * loaded\" is the only meaningful state).\n     */\n    private readonly syntheticPlugins = new Map<string, ILorePlugin>();\n\n    constructor(\n        private readonly configManager: ConfigManager,\n        private readonly knownPlugins: Record<string, ILorePlugin> = BUILTIN_PLUGINS,\n    ) {}\n\n    /**\n     * Add a pre-instantiated plugin (typically synthesised from a Tier 1\n     * manifest via `manifestToPlugin`). Must be called before `boot()`\n     * so collision detection runs against the full active set.\n     *\n     * Throws if a plugin with the same name has already been registered\n     * (either as a built-in or another synthetic) — name collisions are\n     * a hard error rather than a silent overwrite.\n     */\n    registerSyntheticPlugin(plugin: ILorePlugin): void {\n        if (this.syntheticPlugins.has(plugin.name)) {\n            throw new Error(\n                `[PluginRegistry] synthetic plugin \"${plugin.name}\" already registered`,\n            );\n        }\n        if (Object.prototype.hasOwnProperty.call(this.knownPlugins, plugin.name)) {\n            throw new Error(\n                `[PluginRegistry] synthetic plugin name \"${plugin.name}\" collides with a built-in plugin`,\n            );\n        }\n        this.syntheticPlugins.set(plugin.name, plugin);\n    }\n\n    /**\n     * boot — Run collision checks, orphan detection, and load the active set.\n     * Returns the loaded plugins in activation order.\n     *\n     * Throws on collision; collision is a hard boot error (core can't safely\n     * run with two plugins fighting over the same table).\n     */\n    boot(): ILorePlugin[] {\n        const config = this.configManager.read();\n        const prevPlugins = new Set(config.plugins_last_boot ?? []);\n        const currentPlugins = new Set(config.plugins);\n        const history = config.plugin_history ?? [];\n\n        // Latest decision per plugin (used to suppress re-prompts after\n        // the user already chose Keep/Drop/Reenable).\n        const latestDecision = new Map<string, PluginHistoryEntry['decision']>();\n        for (const entry of history) latestDecision.set(entry.plugin, entry.decision);\n\n        // Orphan = plugin loaded last boot that isn't active this boot, and\n        // doesn't already have a resolved history entry for this removal.\n        // 'dropped' and 'kept' both silence the prompt — user already chose.\n        // 'reenabled' doesn't silence: reenable followed by another removal\n        // is a fresh orphan event.\n        const orphans: string[] = [];\n        for (const plugin of prevPlugins) {\n            if (currentPlugins.has(plugin)) continue;\n            const decision = latestDecision.get(plugin);\n            if (decision === 'dropped' || decision === 'kept') continue;\n            orphans.push(plugin);\n        }\n        this.orphanState = { orphans, blocking: orphans.length > 0 };\n\n        // Load all active plugins\n        for (const name of config.plugins) {\n            const plugin = this.knownPlugins[name];\n            if (!plugin) {\n                throw new Error(`Unknown plugin \"${name}\". Available: ${Object.keys(this.knownPlugins).join(', ')}`);\n            }\n            this.loaded.set(name, plugin);\n        }\n\n        // Synthetic (Tier 1 manifest-derived) plugins are always loaded\n        // when registered. They aren't gated by config.plugins[] because\n        // their on/off state is captured by whether they're registered\n        // at all — there's no separate \"module file\" to swap in/out.\n        for (const [name, plugin] of this.syntheticPlugins) {\n            if (this.loaded.has(name)) {\n                throw new Error(\n                    `[PluginRegistry] synthetic plugin \"${name}\" collides with an active built-in plugin of the same name`,\n                );\n            }\n            this.loaded.set(name, plugin);\n        }\n\n        this.assertNoTableCollisions();\n\n        // Persist the loaded set as \"last boot\" so the next startup can\n        // compare. Skip when blocking on an orphan decision — don't overwrite\n        // the history until the user has resolved.\n        if (!this.orphanState.blocking) {\n            this.configManager.patch({ plugins_last_boot: config.plugins });\n        }\n\n        return Array.from(this.loaded.values());\n    }\n\n    /**\n     * registerTools — Invoke each active plugin's registrar against the\n     * given McpServer instance. Called per-session in HTTP mode.\n  \n... [truncated]"
+  },
+  "incoming": {
+    "calls": [
+      {
+        "uid": "Function:packages/lore-plugin-developer/src/cli.ts:bootForCli",
+        "name": "bootForCli",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/index.ts:loadPluginCliCommands",
+        "name": "loadPluginCliCommands",
+        "filePath": "packages/lore/src/cli/index.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/commands.ts:statusCommand",
+        "name": "statusCommand",
+        "filePath": "packages/lore/src/cli/commands.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/commands.ts:doctorCommand",
+        "name": "doctorCommand",
+        "filePath": "packages/lore/src/cli/commands.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/commands.ts:reconnectCommand",
+        "name": "reconnectCommand",
+        "filePath": "packages/lore/src/cli/commands.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/commands.ts:migrateCommand",
+        "name": "migrateCommand",
+        "filePath": "packages/lore/src/cli/commands.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/commands.ts:migrateEmbeddingModelCommand",
+        "name": "migrateEmbeddingModelCommand",
+        "filePath": "packages/lore/src/cli/commands.ts"
+      },
+      {
+        "uid": "File:test/manifest-loader-unit.ts",
+        "name": "manifest-loader-unit.ts",
+        "filePath": "test/manifest-loader-unit.ts"
+      },
+      {
+        "uid": "File:packages/lore/src/mcp/server.ts",
+        "name": "server.ts",
+        "filePath": "packages/lore/src/mcp/server.ts"
+      }
+    ]
+  },
+  "outgoing": {
+    "has_property": [
+      {
+        "uid": "Property:packages/lore/src/plugins/registry.ts:loaded",
+        "name": "loaded",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Property:packages/lore/src/plugins/registry.ts:orphanState",
+        "name": "orphanState",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Property:packages/lore/src/plugins/registry.ts:syntheticPlugins",
+        "name": "syntheticPlugins",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      }
+    ],
+    "has_method": [
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:constructor",
+        "name": "constructor",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:registerSyntheticPlugin",
+        "name": "registerSyntheticPlugin",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:boot",
+        "name": "boot",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:registerTools",
+        "name": "registerTools",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:registerSchemas",
+        "name": "registerSchemas",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:applyCollectionDecls",
+        "name": "applyCollectionDecls",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectCloudSchemaHooks",
+        "name": "collectCloudSchemaHooks",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:isActive",
+        "name": "isActive",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:activeNames",
+        "name": "activeNames",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectRetentionPolicies",
+        "name": "collectRetentionPolicies",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:bindRuntime",
+        "name": "bindRuntime",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectNodeTypeContributions",
+        "name": "collectNodeTypeContributions",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectEdgeRelationContributions",
+        "name": "collectEdgeRelationContributions",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:getSystemPromptContributions",
+        "name": "getSystemPromptContributions",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:active",
+        "name": "active",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectIR",
+        "name": "collectIR",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectAnalyticalProjections",
+        "name": "collectAnalyticalProjections",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:runAnalyticalProjection",
+        "name": "runAnalyticalProjection",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectNodeTypes",
+        "name": "collectNodeTypes",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectEdgeRelations",
+        "name": "collectEdgeRelations",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:getOrphanState",
+        "name": "getOrphanState",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:resolveOrphan",
+        "name": "resolveOrphan",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectPluginStats",
+        "name": "collectPluginStats",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectValidations",
+        "name": "collectValidations",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectCliCommands",
+        "name": "collectCliCommands",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectDoctorChecks",
+        "name": "collectDoctorChecks",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:assertNoTableCollisions",
+        "name": "assertNoTableCollisions",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "proc_88_main",
+      "name": "Main → PluginRegistry",
+      "step_index": 4,
+      "step_count": 4
+    },
+    {
+      "id": "proc_92_reposcommand",
+      "name": "ReposCommand → PluginRegistry",
+      "step_index": 4,
+      "step_count": 4
+    },
+    {
+      "id": "proc_192_indexcommand",
+      "name": "IndexCommand → PluginRegistry",
+      "step_index": 3,
+      "step_count": 3
+    }
+  ]
+}

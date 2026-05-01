@@ -1,0 +1,1 @@
+The PluginRegistry update affects 22 modules, with key processes like Main → PluginRegistry, ReposCommand → ConfigManager, and IndexCommand → LocalGraph being impacted. Critical changes occur in plugins, repositories, and CLI commands, impacting 20 processes across 4 modules. Modules affected include Cluster_70, Cli, Engines, and others. No results found.

@@ -1,0 +1,1 @@
+Main processes involve several plugins and registry systems. Key steps include plugin registration, indexing, and handling repositories. The workflow centers on managing plugin registrations and interactions with repositories. No scores or internal IDs were found.

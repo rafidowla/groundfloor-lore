@@ -1,0 +1,230 @@
+{
+  "processes": [
+    {
+      "id": "proc_88_main",
+      "summary": "Main → PluginRegistry",
+      "priority": 0.099,
+      "symbol_count": 3,
+      "process_type": "cross_community",
+      "step_count": 4
+    },
+    {
+      "id": "proc_92_reposcommand",
+      "summary": "ReposCommand → PluginRegistry",
+      "priority": 0.098,
+      "symbol_count": 2,
+      "process_type": "cross_community",
+      "step_count": 4
+    },
+    {
+      "id": "proc_192_indexcommand",
+      "summary": "IndexCommand → PluginRegistry",
+      "priority": 0.098,
+      "symbol_count": 2,
+      "process_type": "cross_community",
+      "step_count": 3
+    },
+    {
+      "id": "proc_111_indexcommand",
+      "summary": "IndexCommand → LoreHome",
+      "priority": 0.095,
+      "symbol_count": 2,
+      "process_type": "cross_community",
+      "step_count": 4
+    },
+    {
+      "id": "proc_32_registertools",
+      "summary": "RegisterTools → ResolveGitNexusBin",
+      "priority": 0.094,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 6
+    }
+  ],
+  "process_symbols": [
+    {
+      "id": "Class:packages/lore/src/plugins/registry.ts:PluginRegistry",
+      "name": "PluginRegistry",
+      "filePath": "packages/lore/src/plugins/registry.ts",
+      "startLine": 54,
+      "endLine": 713,
+      "module": "Cli",
+      "process_id": "proc_88_main",
+      "step_index": 4
+    },
+    {
+      "id": "Function:packages/lore/src/cli/index.ts:loadPluginCliCommands",
+      "name": "loadPluginCliCommands",
+      "filePath": "packages/lore/src/cli/index.ts",
+      "startLine": 39,
+      "endLine": 51,
+      "module": "Cli",
+      "process_id": "proc_88_main",
+      "step_index": 3
+    },
+    {
+      "id": "Function:packages/lore/src/cli/index.ts:renderHelp",
+      "name": "renderHelp",
+      "filePath": "packages/lore/src/cli/index.ts",
+      "startLine": 90,
+      "endLine": 99,
+      "module": "Cli",
+      "process_id": "proc_88_main",
+      "step_index": 2
+    },
+    {
+      "id": "Function:packages/lore-plugin-developer/src/cli.ts:bootForCli",
+      "name": "bootForCli",
+      "filePath": "packages/lore-plugin-developer/src/cli.ts",
+      "startLine": 28,
+      "endLine": 43,
+      "module": "Cluster_70",
+      "process_id": "proc_92_reposcommand",
+      "step_index": 3
+    },
+    {
+      "id": "Function:packages/lore-plugin-developer/src/cli.ts:resolveGraphBasePath",
+      "name": "resolveGraphBasePath",
+      "filePath": "packages/lore-plugin-developer/src/cli.ts",
+      "startLine": 24,
+      "endLine": 26,
+      "module": "Cluster_70",
+      "process_id": "proc_111_indexcommand",
+      "step_index": 3
+    },
+    {
+      "id": "Method:packages/lore-plugin-developer/src/index.ts:registerTools",
+      "name": "registerTools",
+      "filePath": "packages/lore-plugin-developer/src/index.ts",
+      "startLine": 123,
+      "endLine": 133,
+      "module": "Cluster_66",
+      "process_id": "proc_32_registertools",
+      "step_index": 1
+    }
+  ],
+  "definitions": [
+    {
+      "id": "Interface:packages/lore/src/plugins/registry.ts:OrphanState",
+      "name": "OrphanState",
+      "filePath": "packages/lore/src/plugins/registry.ts",
+      "startLine": 48,
+      "endLine": 52
+    },
+    {
+      "id": "File:packages/lore/src/plugins/registry.ts",
+      "name": "registry.ts",
+      "filePath": "packages/lore/src/plugins/registry.ts"
+    },
+    {
+      "id": "Interface:packages/lore/src/cli/commands.ts:ReapResponse",
+      "name": "ReapResponse",
+      "filePath": "packages/lore/src/cli/commands.ts",
+      "startLine": 1545,
+      "endLine": 1553
+    },
+    {
+      "id": "Interface:packages/lore/src/cli/commands.ts:HttpRecallResult",
+      "name": "HttpRecallResult",
+      "filePath": "packages/lore/src/cli/commands.ts",
+      "startLine": 2963,
+      "endLine": 2969
+    },
+    {
+      "id": "File:packages/lore/src/cli/commands.ts",
+      "name": "commands.ts",
+      "filePath": "packages/lore/src/cli/commands.ts"
+    },
+    {
+      "id": "File:packages/lore/src/plugins/manifest/hotReload.ts",
+      "name": "hotReload.ts",
+      "filePath": "packages/lore/src/plugins/manifest/hotReload.ts"
+    },
+    {
+      "id": "Class:packages/lore/src/plugins/manifest/hotReload.ts:ManifestHotReloader",
+      "name": "ManifestHotReloader",
+      "filePath": "packages/lore/src/plugins/manifest/hotReload.ts",
+      "startLine": 57,
+      "endLine": 184
+    },
+    {
+      "id": "Method:packages/lore/src/plugins/manifest/hotReload.ts:constructor",
+      "name": "constructor",
+      "filePath": "packages/lore/src/plugins/manifest/hotReload.ts",
+      "startLine": 68,
+      "endLine": 71
+    },
+    {
+      "id": "File:packages/lore/src/plugins/manifest.ts",
+      "name": "manifest.ts",
+      "filePath": "packages/lore/src/plugins/manifest.ts"
+    },
+    {
+      "id": "Interface:packages/lore/src/plugins/manifest.ts:PluginManifest",
+      "name": "PluginManifest",
+      "filePath": "packages/lore/src/plugins/manifest.ts",
+      "startLine": 32,
+      "endLine": 58
+    },
+    {
+      "id": "Interface:packages/lore/src/plugins/manifest.ts:EngineRequirements",
+      "name": "EngineRequirements",
+      "filePath": "packages/lore/src/plugins/manifest.ts",
+      "startLine": 60,
+      "endLine": 65
+    },
+    {
+      "id": "File:packages/lore/src/plugins/types.ts",
+      "name": "types.ts",
+      "filePath": "packages/lore/src/plugins/types.ts"
+    },
+    {
+      "id": "Interface:packages/lore/src/plugins/types.ts:PluginGraphContext",
+      "name": "PluginGraphContext",
+      "filePath": "packages/lore/src/plugins/types.ts",
+      "startLine": 43,
+      "endLine": 87
+    },
+    {
+      "id": "Interface:packages/lore/src/plugins/types.ts:PluginCloudSchemaContext",
+      "name": "PluginCloudSchemaContext",
+      "filePath": "packages/lore/src/plugins/types.ts",
+      "startLine": 112,
+      "endLine": 126
+    },
+    {
+      "id": "File:packages/lore-plugin-developer/src/cli.ts",
+      "name": "cli.ts",
+      "filePath": "packages/lore-plugin-developer/src/cli.ts"
+    },
+    {
+      "id": "Interface:packages/lore-plugin-developer/src/repoOps.ts:DiscoveredRepo",
+      "name": "DiscoveredRepo",
+      "filePath": "packages/lore-plugin-developer/src/repoOps.ts",
+      "startLine": 122,
+      "endLine": 133
+    },
+    {
+      "id": "Interface:packages/lore-plugin-developer/src/repoOps.ts:RepoFreshness",
+      "name": "RepoFreshness",
+      "filePath": "packages/lore-plugin-developer/src/repoOps.ts",
+      "startLine": 135,
+      "endLine": 151
+    },
+    {
+      "id": "File:packages/lore-plugin-developer/src/repoOps.ts",
+      "name": "repoOps.ts",
+      "filePath": "packages/lore-plugin-developer/src/repoOps.ts"
+    },
+    {
+      "id": "File:packages/lore/src/cli/index.ts",
+      "name": "index.ts",
+      "filePath": "packages/lore/src/cli/index.ts"
+    },
+    {
+      "id": "File:packages/lore/src/mcp/server.ts",
+      "name": "server.ts",
+      "filePath": "packages/lore/src/mcp/server.ts"
+    }
+  ]
+}

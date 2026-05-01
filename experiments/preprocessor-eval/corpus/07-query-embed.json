@@ -1,0 +1,214 @@
+{
+  "processes": [
+    {
+      "id": "proc_178_migratecommand",
+      "summary": "MigrateCommand → OpenAICompatEmbeddingProvider",
+      "priority": 0.104,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 3
+    },
+    {
+      "id": "proc_179_migratecommand",
+      "summary": "MigrateCommand → LocalEmbeddingProvider",
+      "priority": 0.102,
+      "symbol_count": 1,
+      "process_type": "cross_community",
+      "step_count": 3
+    },
+    {
+      "id": "proc_53_migrateembeddingmode",
+      "summary": "MigrateEmbeddingModel → FingerprintPath",
+      "priority": 0.092,
+      "symbol_count": 2,
+      "process_type": "intra_community",
+      "step_count": 5
+    },
+    {
+      "id": "proc_114_reconnectgraph",
+      "summary": "ReconnectGraph → FingerprintPath",
+      "priority": 0.092,
+      "symbol_count": 2,
+      "process_type": "cross_community",
+      "step_count": 4
+    },
+    {
+      "id": "proc_141_reconnectonenode",
+      "summary": "ReconnectOneNode → FingerprintPath",
+      "priority": 0.092,
+      "symbol_count": 2,
+      "process_type": "cross_community",
+      "step_count": 4
+    }
+  ],
+  "process_symbols": [
+    {
+      "id": "Class:packages/lore/src/providers/openAICompatEmbeddingProvider.ts:OpenAICompatEmbeddingProvider",
+      "name": "OpenAICompatEmbeddingProvider",
+      "filePath": "packages/lore/src/providers/openAICompatEmbeddingProvider.ts",
+      "startLine": 71,
+      "endLine": 213,
+      "module": "Providers",
+      "process_id": "proc_178_migratecommand",
+      "step_index": 3
+    },
+    {
+      "id": "Class:packages/lore/src/providers/localEmbeddingProvider.ts:LocalEmbeddingProvider",
+      "name": "LocalEmbeddingProvider",
+      "filePath": "packages/lore/src/providers/localEmbeddingProvider.ts",
+      "startLine": 137,
+      "endLine": 181,
+      "module": "Providers",
+      "process_id": "proc_179_migratecommand",
+      "step_index": 3
+    },
+    {
+      "id": "Function:packages/lore/src/engines/embeddingFingerprint.ts:fingerprintPath",
+      "name": "fingerprintPath",
+      "filePath": "packages/lore/src/engines/embeddingFingerprint.ts",
+      "startLine": 60,
+      "endLine": 62,
+      "module": "Engines",
+      "process_id": "proc_53_migrateembeddingmode",
+      "step_index": 5
+    },
+    {
+      "id": "Function:packages/lore/src/engines/embeddingFingerprint.ts:readFingerprint",
+      "name": "readFingerprint",
+      "filePath": "packages/lore/src/engines/embeddingFingerprint.ts",
+      "startLine": 70,
+      "endLine": 99,
+      "module": "Engines",
+      "process_id": "proc_53_migrateembeddingmode",
+      "step_index": 4
+    }
+  ],
+  "definitions": [
+    {
+      "id": "File:packages/lore/src/cli/commands.ts",
+      "name": "commands.ts",
+      "filePath": "packages/lore/src/cli/commands.ts"
+    },
+    {
+      "id": "Function:packages/lore/src/cli/commands.ts:findRepoRoot",
+      "name": "findRepoRoot",
+      "filePath": "packages/lore/src/cli/commands.ts",
+      "startLine": 29,
+      "endLine": 38,
+      "module": "Engines"
+    },
+    {
+      "id": "File:packages/lore/src/providers/llmDispatch.ts",
+      "name": "llmDispatch.ts",
+      "filePath": "packages/lore/src/providers/llmDispatch.ts"
+    },
+    {
+      "id": "Interface:packages/lore/src/providers/llmDispatch.ts:LlmChunk",
+      "name": "LlmChunk",
+      "filePath": "packages/lore/src/providers/llmDispatch.ts",
+      "startLine": 28,
+      "endLine": 38
+    },
+    {
+      "id": "Interface:packages/lore/src/providers/llmDispatch.ts:LlmCapability",
+      "name": "LlmCapability",
+      "filePath": "packages/lore/src/providers/llmDispatch.ts",
+      "startLine": 66,
+      "endLine": 73
+    },
+    {
+      "id": "File:packages/lore/src/providers/openAICompatEmbeddingProvider.ts",
+      "name": "openAICompatEmbeddingProvider.ts",
+      "filePath": "packages/lore/src/providers/openAICompatEmbeddingProvider.ts"
+    },
+    {
+      "id": "Class:packages/lore/src/providers/openAICompatEmbeddingProvider.ts:OpenAICompatEmbeddingProviderError",
+      "name": "OpenAICompatEmbeddingProviderError",
+      "filePath": "packages/lore/src/providers/openAICompatEmbeddingProvider.ts",
+      "startLine": 64,
+      "endLine": 69,
+      "module": "Providers"
+    },
+    {
+      "id": "File:packages/lore/src/engines/verbatimStore.ts",
+      "name": "verbatimStore.ts",
+      "filePath": "packages/lore/src/engines/verbatimStore.ts"
+    },
+    {
+      "id": "Class:packages/lore/src/engines/verbatimStore.ts:VerbatimStoreError",
+      "name": "VerbatimStoreError",
+      "filePath": "packages/lore/src/engines/verbatimStore.ts",
+      "startLine": 10,
+      "endLine": 17,
+      "module": "Engines"
+    },
+    {
+      "id": "Class:packages/lore/src/engines/verbatimStore.ts:VerbatimStore",
+      "name": "VerbatimStore",
+      "filePath": "packages/lore/src/engines/verbatimStore.ts",
+      "startLine": 58,
+      "endLine": 551,
+      "module": "Cli"
+    },
+    {
+      "id": "File:packages/lore/src/engines/embeddingFingerprint.ts",
+      "name": "embeddingFingerprint.ts",
+      "filePath": "packages/lore/src/engines/embeddingFingerprint.ts"
+    },
+    {
+      "id": "File:ui/src/App.tsx",
+      "name": "App.tsx",
+      "filePath": "ui/src/App.tsx"
+    },
+    {
+      "id": "Interface:ui/src/App.tsx:HealthResponse",
+      "name": "HealthResponse",
+      "filePath": "ui/src/App.tsx",
+      "startLine": 83,
+      "endLine": 97
+    },
+    {
+      "id": "Interface:ui/src/App.tsx:ConfigResponse",
+      "name": "ConfigResponse",
+      "filePath": "ui/src/App.tsx",
+      "startLine": 101,
+      "endLine": 121
+    },
+    {
+      "id": "Interface:packages/lore/src/providers/localEmbeddingProvider.ts:LocalEmbeddingProviderOptions",
+      "name": "LocalEmbeddingProviderOptions",
+      "filePath": "packages/lore/src/providers/localEmbeddingProvider.ts",
+      "startLine": 109,
+      "endLine": 114
+    },
+    {
+      "id": "File:packages/lore/src/providers/localEmbeddingProvider.ts",
+      "name": "localEmbeddingProvider.ts",
+      "filePath": "packages/lore/src/providers/localEmbeddingProvider.ts"
+    },
+    {
+      "id": "File:packages/lore/src/providers/types.ts",
+      "name": "types.ts",
+      "filePath": "packages/lore/src/providers/types.ts"
+    },
+    {
+      "id": "Interface:packages/lore/src/providers/types.ts:LoreNode",
+      "name": "LoreNode",
+      "filePath": "packages/lore/src/providers/types.ts",
+      "startLine": 3,
+      "endLine": 33
+    },
+    {
+      "id": "Interface:packages/lore/src/providers/types.ts:LoreEdge",
+      "name": "LoreEdge",
+      "filePath": "packages/lore/src/providers/types.ts",
+      "startLine": 51,
+      "endLine": 66
+    },
+    {
+      "id": "File:packages/lore/src/mcp/server.ts",
+      "name": "server.ts",
+      "filePath": "packages/lore/src/mcp/server.ts"
+    }
+  ]
+}

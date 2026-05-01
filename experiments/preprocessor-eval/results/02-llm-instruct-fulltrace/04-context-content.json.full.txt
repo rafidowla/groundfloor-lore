@@ -1,0 +1,1 @@
+The PluginRegistry class manages plugin registration, handling both built-in and synthetic plugins. It ensures no name or file conflicts, loads plugins, and resolves orphan states during boot. Key actions include checking for name collisions, loading active plugins, and managing plugin states. The system supports registry updates and maintains active plugin lists.

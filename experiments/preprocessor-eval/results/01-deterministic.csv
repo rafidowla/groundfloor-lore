@@ -1,0 +1,12 @@
+file,rawBytes,thinBytes,rawTokens,thinTokens,reductionPct
+01-query-thin.json,6981,555,1745,139,92.0
+02-query-content.json,115936,555,28984,139,99.5
+03-context-thin.json,8284,216,2071,54,97.4
+04-context-content.json,13447,216,3362,54,98.4
+05-impact-upstream.json,8549,759,2137,190,91.1
+06-impact-registertools.json,418,425,105,106,-1.7
+07-query-embed.json,6814,636,1704,159,90.7
+08-context-registertools.json,1166,1165,292,291,0.1
+09-file-registry.ts,30519,5185,7630,1296,83.0
+10-doc-architecture.md,20409,1993,5102,498,90.2
+TOTAL,212523,11705,53131,2926,94.5

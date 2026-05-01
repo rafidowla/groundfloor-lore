@@ -1,0 +1,28 @@
+{
+  "processes": [
+    {
+      "id": "proc_178_migratecommand",
+      "summary": "MigrateCommand → OpenAICompatEmbeddingProvider"
+    },
+    {
+      "id": "proc_179_migratecommand",
+      "summary": "MigrateCommand → LocalEmbeddingProvider"
+    },
+    {
+      "id": "proc_53_migrateembeddingmode",
+      "summary": "MigrateEmbeddingModel → FingerprintPath"
+    },
+    {
+      "id": "proc_114_reconnectgraph",
+      "summary": "ReconnectGraph → FingerprintPath"
+    },
+    {
+      "id": "proc_141_reconnectonenode",
+      "summary": "ReconnectOneNode → FingerprintPath"
+    }
+  ],
+  "_meta": {
+    "confidence": 0.9,
+    "count": 5
+  }
+}

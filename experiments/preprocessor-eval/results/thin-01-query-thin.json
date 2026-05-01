@@ -1,0 +1,28 @@
+{
+  "processes": [
+    {
+      "id": "proc_88_main",
+      "summary": "Main → PluginRegistry"
+    },
+    {
+      "id": "proc_92_reposcommand",
+      "summary": "ReposCommand → PluginRegistry"
+    },
+    {
+      "id": "proc_192_indexcommand",
+      "summary": "IndexCommand → PluginRegistry"
+    },
+    {
+      "id": "proc_111_indexcommand",
+      "summary": "IndexCommand → LoreHome"
+    },
+    {
+      "id": "proc_32_registertools",
+      "summary": "RegisterTools → ResolveGitNexusBin"
+    }
+  ],
+  "_meta": {
+    "confidence": 0.9,
+    "count": 5
+  }
+}

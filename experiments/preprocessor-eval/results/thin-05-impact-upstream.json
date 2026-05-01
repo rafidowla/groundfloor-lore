@@ -1,0 +1,40 @@
+{
+  "target": {
+    "id": "Class:packages/lore/src/plugins/registry.ts:PluginRegistry",
+    "name": "PluginRegistry",
+    "filePath": "packages/lore/src/plugins/registry.ts"
+  },
+  "direction": "upstream",
+  "risk": "CRITICAL",
+  "summary": {
+    "direct": 9,
+    "processes_affected": 20,
+    "modules_affected": 4
+  },
+  "affected_processes": [
+    {
+      "name": "Main → PluginRegistry",
+      "hits": 3
+    },
+    {
+      "name": "ReposCommand → ConfigManager",
+      "hits": 3
+    },
+    {
+      "name": "Main → LoreHome",
+      "hits": 3
+    },
+    {
+      "name": "ReposCommand → LocalGraph",
+      "hits": 3
+    },
+    {
+      "name": "Main → ConfigManager",
+      "hits": 3
+    }
+  ],
+  "_meta": {
+    "confidence": 0.95,
+    "truncated_to": 5
+  }
+}

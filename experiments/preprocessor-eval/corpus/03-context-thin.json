@@ -1,0 +1,235 @@
+{
+  "status": "found",
+  "symbol": {
+    "uid": "Class:packages/lore/src/plugins/registry.ts:PluginRegistry",
+    "name": "PluginRegistry",
+    "filePath": "packages/lore/src/plugins/registry.ts",
+    "startLine": 54,
+    "endLine": 713
+  },
+  "incoming": {
+    "calls": [
+      {
+        "uid": "Function:packages/lore-plugin-developer/src/cli.ts:bootForCli",
+        "name": "bootForCli",
+        "filePath": "packages/lore-plugin-developer/src/cli.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/index.ts:loadPluginCliCommands",
+        "name": "loadPluginCliCommands",
+        "filePath": "packages/lore/src/cli/index.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/commands.ts:statusCommand",
+        "name": "statusCommand",
+        "filePath": "packages/lore/src/cli/commands.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/commands.ts:doctorCommand",
+        "name": "doctorCommand",
+        "filePath": "packages/lore/src/cli/commands.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/commands.ts:reconnectCommand",
+        "name": "reconnectCommand",
+        "filePath": "packages/lore/src/cli/commands.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/commands.ts:migrateCommand",
+        "name": "migrateCommand",
+        "filePath": "packages/lore/src/cli/commands.ts"
+      },
+      {
+        "uid": "Function:packages/lore/src/cli/commands.ts:migrateEmbeddingModelCommand",
+        "name": "migrateEmbeddingModelCommand",
+        "filePath": "packages/lore/src/cli/commands.ts"
+      },
+      {
+        "uid": "File:test/manifest-loader-unit.ts",
+        "name": "manifest-loader-unit.ts",
+        "filePath": "test/manifest-loader-unit.ts"
+      },
+      {
+        "uid": "File:packages/lore/src/mcp/server.ts",
+        "name": "server.ts",
+        "filePath": "packages/lore/src/mcp/server.ts"
+      }
+    ]
+  },
+  "outgoing": {
+    "has_property": [
+      {
+        "uid": "Property:packages/lore/src/plugins/registry.ts:loaded",
+        "name": "loaded",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Property:packages/lore/src/plugins/registry.ts:orphanState",
+        "name": "orphanState",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Property:packages/lore/src/plugins/registry.ts:syntheticPlugins",
+        "name": "syntheticPlugins",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      }
+    ],
+    "has_method": [
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:constructor",
+        "name": "constructor",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:registerSyntheticPlugin",
+        "name": "registerSyntheticPlugin",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:boot",
+        "name": "boot",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:registerTools",
+        "name": "registerTools",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:registerSchemas",
+        "name": "registerSchemas",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:applyCollectionDecls",
+        "name": "applyCollectionDecls",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectCloudSchemaHooks",
+        "name": "collectCloudSchemaHooks",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:isActive",
+        "name": "isActive",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:activeNames",
+        "name": "activeNames",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectRetentionPolicies",
+        "name": "collectRetentionPolicies",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:bindRuntime",
+        "name": "bindRuntime",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectNodeTypeContributions",
+        "name": "collectNodeTypeContributions",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectEdgeRelationContributions",
+        "name": "collectEdgeRelationContributions",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:getSystemPromptContributions",
+        "name": "getSystemPromptContributions",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:active",
+        "name": "active",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectIR",
+        "name": "collectIR",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectAnalyticalProjections",
+        "name": "collectAnalyticalProjections",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:runAnalyticalProjection",
+        "name": "runAnalyticalProjection",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectNodeTypes",
+        "name": "collectNodeTypes",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectEdgeRelations",
+        "name": "collectEdgeRelations",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:getOrphanState",
+        "name": "getOrphanState",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:resolveOrphan",
+        "name": "resolveOrphan",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectPluginStats",
+        "name": "collectPluginStats",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectValidations",
+        "name": "collectValidations",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectCliCommands",
+        "name": "collectCliCommands",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:collectDoctorChecks",
+        "name": "collectDoctorChecks",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      },
+      {
+        "uid": "Method:packages/lore/src/plugins/registry.ts:assertNoTableCollisions",
+        "name": "assertNoTableCollisions",
+        "filePath": "packages/lore/src/plugins/registry.ts"
+      }
+    ]
+  },
+  "processes": [
+    {
+      "id": "proc_88_main",
+      "name": "Main → PluginRegistry",
+      "step_index": 4,
+      "step_count": 4
+    },
+    {
+      "id": "proc_92_reposcommand",
+      "name": "ReposCommand → PluginRegistry",
+      "step_index": 4,
+      "step_count": 4
+    },
+    {
+      "id": "proc_192_indexcommand",
+      "name": "IndexCommand → PluginRegistry",
+      "step_index": 3,
+      "step_count": 3
+    }
+  ]
+}
