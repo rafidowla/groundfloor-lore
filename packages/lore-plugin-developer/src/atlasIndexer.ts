@@ -204,11 +204,6 @@ export async function indexRepoWithAtlas(
     };
 }
 
-/**
- * Feature-flag check: caller code (e.g., a refactored codeIndexer.ts
- * or a CLI wrapper) decides which path to take.
- */
-export function isAtlasIndexerEnabled(): boolean {
-    return process.env['LORE_DEV_USE_NEW_PARSER'] === '1'
-        || process.env['LORE_DEV_USE_NEW_PARSER']?.toLowerCase() === 'true';
-}
+// Phase 7 cutover landed 2026-04-30; the LORE_DEV_USE_NEW_PARSER
+// coexistence flag and the isAtlasIndexerEnabled() check are gone.
+// Atlas is the only indexer now.

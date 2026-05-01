@@ -124,10 +124,61 @@ export async function contributeDeveloperReconnectNodes(
         });
     }
 
-    // CodeSymbols — slice the file body between startLine / endLine when
-    // the graph only stored structural fields (GitNexus usually leaves
-    // signature + content empty).
-    const symbols = await listCodeSymbols(ctx, 2000);
+    // CodeSymbols — importance-weighted contribution (v1.1, 2026-04-30).
+    //
+    // Old behaviour: take first 2000 symbols by enumeration order.
+    // Problem: most code in any real repo is helpers / generated /
+    // tests / type aliases. Embedding all of them costs CPU + cache
+    // space without improving search quality, and the 2000 cap drops
+    // unimportant tail with no preference for what stays.
+    //
+    // New behaviour: rank symbols by importance, embed top N. Three signals:
+    //   1. Knowledge-linked  (most important: someone explicitly attached
+    //      a LoreNode to this symbol — clear signal of operator interest)
+    //   2. Inbound edge count (proxy for pagerank — symbols called by many
+    //      others matter more than orphans)
+    //   3. Recently-changed  (TODO when v1.1 file-watcher lands; today
+    //      we don't track per-symbol updatedAt)
+    //
+    // Tiers within the cap:
+    //   - All knowledge-linked symbols (typically <100)
+    //   - Top callees by inbound count (fills remainder up to cap)
+    const SYMBOL_CONTRIBUTION_CAP = 2000;
+    const knowledgeLinkedUids = new Set<string>();
+    try {
+        const rows = await ctx.queryRows(
+            `MATCH (n:LoreNode)-[:LoreAppliesToCode]->(s:CodeSymbol)
+             RETURN s.uid AS uid, count(n) AS knowledgeLinks
+             ORDER BY knowledgeLinks DESC`,
+        );
+        for (const r of rows) {
+            if (typeof r['uid'] === 'string') knowledgeLinkedUids.add(r['uid']);
+        }
+    } catch {
+        // Cypher unavailable (cloud mode etc.) — graceful fallback to flat list.
+    }
+    const allSymbols = await listCodeSymbols(ctx, SYMBOL_CONTRIBUTION_CAP * 4);
+    // Inbound-edge counts via one query.
+    const inboundByUid = new Map<string, number>();
+    try {
+        const rows = await ctx.queryRows(
+            `MATCH (a:CodeSymbol)-[r:CodeRelation]->(b:CodeSymbol)
+             RETURN b.uid AS uid, count(r) AS inbound`,
+        );
+        for (const r of rows) {
+            const uid = r['uid'];
+            if (typeof uid === 'string') inboundByUid.set(uid, Number(r['inbound']) || 0);
+        }
+    } catch { /* best-effort */ }
+
+    // Score: 1000 if knowledge-linked, plus inbound count.
+    const scored = allSymbols.map((s) => ({
+        sym: s,
+        score: (knowledgeLinkedUids.has(s.uid) ? 1000 : 0) + (inboundByUid.get(s.uid) ?? 0),
+    }));
+    scored.sort((a, b) => b.score - a.score);
+    const symbols = scored.slice(0, SYMBOL_CONTRIBUTION_CAP).map((x) => x.sym);
+
     for (const s of symbols) {
         let bodyText = [s.signature ?? '', (s.content ?? '').slice(0, 1024)]
             .filter((p) => p.trim())

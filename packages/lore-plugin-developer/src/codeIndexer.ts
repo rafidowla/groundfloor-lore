@@ -105,26 +105,6 @@ export function getGitNexusRepo(repoName: string): GitNexusRepoEntry | null {
     return repos.find((repo) => repo.name === repoName) ?? null;
 }
 
-/**
- * @deprecated Phase 7 retirement — Atlas runs in-process and does not
- * shell out to the gitnexus binary. Always returns true so existing
- * `if (api.isGitNexusAvailable())` guards still pass. Drop the
- * guards (and this function) in v1.1.
- */
-export function isGitNexusAvailable(): boolean {
-    return true;
-}
-
-/**
- * @deprecated Phase 7 — gitnexus uid format `<repo>::<file>::<name>::<Kind>`
- * is no longer the canonical Atlas uid format (which is
- * `<file>:<qualifiedName>:<kind>`). Kept exported for any caller
- * holding old uids in transit; drop in v1.1.
- */
-export function generateSymbolUid(repo: string, filePath: string, name: string, kind: string): string {
-    return `${repo}::${filePath}::${name}::${kind}`;
-}
-
 /* ─── Indexing — Atlas-backed ─────────────────────────────────── */
 
 /**

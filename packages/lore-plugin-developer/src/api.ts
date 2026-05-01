@@ -60,7 +60,6 @@ export interface DeveloperApi {
     pruneInferredDeveloperEdges: (relationPrefix: string) => Promise<{ touchesFile: number; appliesToCode: number }>;
 
     // Code-indexing orchestration (lore index / doctor)
-    isGitNexusAvailable: () => boolean;
     listGitNexusRepos: () => indexer.GitNexusRepoEntry[];
     getGitNexusRepo: (name: string) => indexer.GitNexusRepoEntry | null;
     importFromGitNexus: (repo: indexer.GitNexusRepoEntry) => Promise<indexer.IndexResult>;
@@ -183,7 +182,6 @@ export function buildDeveloperApi(ctx: PluginGraphContext): DeveloperApi {
         // upsertCodeSymbol / addCodeRelation / linkKnowledgeToCode /
         // clearCodeSymbols / getCrossPillarEdges; we bind it to this same
         // api instance so callers get a single, consistent surface.
-        isGitNexusAvailable: () => indexer.isGitNexusAvailable(),
         listGitNexusRepos: () => indexer.listGitNexusRepos(),
         getGitNexusRepo: (name) => indexer.getGitNexusRepo(name),
         importFromGitNexus: (repo) => indexer.importFromGitNexus(repo, _apiSelf),

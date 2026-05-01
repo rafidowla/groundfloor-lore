@@ -761,18 +761,13 @@ export const developerPlugin: ILorePlugin = {
                 message: 'developer plugin api unavailable — registerSchema did not run.',
             }];
         }
-        if (api.isGitNexusAvailable()) {
-            const repos = api.listGitNexusRepos();
-            return [{
-                label: 'developer plugin',
-                ok: true,
-                message: `Code indexer available: ${repos.length} repo(s) indexed`,
-            }];
-        }
+        // Post-Phase-7: Atlas runs in-process; no subprocess to gate.
+        // Just report repo count from the registry.
+        const repos = api.listGitNexusRepos();
         return [{
             label: 'developer plugin',
-            ok: false,
-            message: 'Code indexer not set up — run `lore setup` to install it.',
+            ok: true,
+            message: `Atlas in-process indexer ready; ${repos.length} repo(s) registered`,
         }];
         void ctx;
     },

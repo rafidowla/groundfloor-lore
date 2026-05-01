@@ -195,12 +195,14 @@ export function registerDeveloperTools(
 
     server.tool(
         'code_full_context',
-        '360° view of a code symbol from the developer-plugin Kùzu graph: symbol metadata, callers, callees, and linked knowledge nodes.',
+        '360° view of a code symbol — symbol metadata, callers, callees, linked knowledge nodes, AND THE SOURCE SLICE between the symbol\'s startLine and endLine. AUTHORITATIVE — the source slice IS the implementation; you do NOT need to Read the file separately. Pass include_source: false to skip the slice on long symbols if you only want metadata.',
         {
             name: z.string().describe('Symbol name or qualified name'),
             repo: z.string().optional().describe('Optional repository filter applied during the name lookup'),
+            include_source: z.boolean().optional().describe('Include the source-code slice (default: true). Set false to get metadata only.'),
+            max_source_chars: z.number().optional().describe('Maximum characters of source to return (default: 4000). Slice is truncated with a ─SNIP─ marker if longer.'),
         },
-        async ({ name, repo }) => {
+        async ({ name, repo, include_source, max_source_chars }) => {
             try {
                 // Look up the uid by name first, then expand context.
                 const matches = await api.queryCodeSymbolsByName(name);
@@ -210,9 +212,45 @@ export function registerDeveloperTools(
                         content: [{ type: 'text' as const, text: `Symbol "${name}"${repo ? ` in repo "${repo}"` : ''} not found.` }],
                     };
                 }
-                // If multiple matches, take the first and note the ambiguity.
                 const target = filtered[0];
                 const ctx = await api.getCodeSymbolContext(target.uid);
+
+                // Read the source slice — this is the eval-headline fix
+                // (commits 9c287c6 → 0e25f61 showed the agent reading the
+                // file after every code_full_context call, doubling cost).
+                // Returning the slice inline eliminates the follow-up Read.
+                const wantSource = include_source !== false;
+                const maxChars = Math.max(200, Math.min(20000, max_source_chars ?? 4000));
+                let sourceSlice: string | null = null;
+                let sourceTruncated = false;
+                let sourceError: string | null = null;
+                if (wantSource && target.filePath && target.startLine && target.endLine) {
+                    try {
+                        // Resolve the abs path: registry knows repo→absPath
+                        const repoEntry = api.getGitNexusRepo(target.repo);
+                        const absDir = repoEntry?.path;
+                        if (!absDir) {
+                            sourceError = `repo "${target.repo}" not in registry; cannot resolve abs path`;
+                        } else {
+                            const fs = await import('node:fs/promises');
+                            const path = await import('node:path');
+                            const absFile = path.join(absDir, target.filePath);
+                            const all = await fs.readFile(absFile, 'utf-8');
+                            const lines = all.split('\n');
+                            const start = Math.max(0, target.startLine - 1);
+                            const end = Math.min(lines.length, target.endLine);
+                            let slice = lines.slice(start, end).join('\n');
+                            if (slice.length > maxChars) {
+                                slice = slice.slice(0, maxChars) + '\n─SNIP─ (truncated; pass max_source_chars to extend)';
+                                sourceTruncated = true;
+                            }
+                            sourceSlice = slice;
+                        }
+                    } catch (err) {
+                        sourceError = (err as Error).message;
+                    }
+                }
+
                 return {
                     content: [{
                         type: 'text' as const,
@@ -224,6 +262,10 @@ export function registerDeveloperTools(
                             callers: ctx.callers.map((c) => ({ uid: c.uid, name: c.name, kind: c.kind, file: c.filePath })),
                             callees: ctx.callees.map((c) => ({ uid: c.uid, name: c.name, kind: c.kind, file: c.filePath })),
                             knowledge: ctx.knowledge,
+                            source: sourceSlice,
+                            sourceTruncated,
+                            sourceError,
+                            sourceLineRange: target.startLine && target.endLine ? `${target.startLine}-${target.endLine}` : null,
                         }, null, 2),
                     }],
                 };
