@@ -1,0 +1,65 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+# Exception: vendor/groundfloor-ts-sdk/dist/ is a vendored, committed
+# type-declarations-only copy of a private dependency, not this repo's
+# own build output — see vendor/groundfloor-ts-sdk/package.json.
+!vendor/**/dist/
+!vendor/**/dist/**
+
+# Local graph data (per-repo, created by lore init)
+.lore/
+
+# Phase 6 P3 — per-app auth registry. Lives under loreHome
+# (~/.groundfloor in production), but defensively ignore it here in case
+# an operator points LORE_HOME at a repo-local dir for testing. Tokens
+# are local-only; they MUST NOT be synced to cloud or committed.
+auth/registry.json
+**/auth/registry.json
+
+# Environment / secrets
+.env
+
+# Self-hosted infrastructure (Docker, Cloudflare Tunnel, SurrealDB configs)
+# Keep these local-only — never push to remote
+infra/
+
+# Internal-only docs (platform integration details)
+docs/baas-integration.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+output.log
+
+# Eval per-run results — runner emits one JSON per cell + a rollup. Keep
+# the suite (eval/run-eval.mjs, eval/aggregate-report.mjs, eval/tasks/*,
+# eval/configs/*, eval/README.md) in source control; the per-run output
+# is reproducible and varies between runs.
+eval/results/
+
+# Claude Code agent state — scheduled-task locks + agent worktrees. These
+# are runtime tooling state, not project content; they reappear every
+# session and don't belong in git history.
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
+# also ignore a bare node_modules symlink (the node_modules/ rule only matches the dir)
+node_modules
+
+# Deep-audit sandbox (2026-06-17) — isolated tooling + reports; safe to rm -rf
+.audit-env/
+
+# Atlas incremental-index bookkeeping — machine-local (hardcodes an absolute
+# repo root + per-file mtimes); regenerated on every `atlas index`. The code
+# graph + knowledge live in Atlas's data home (~/.groundfloor/atlas/...), not here.
+.atlas/

@@ -1,0 +1,4 @@
+{
+  "note": "Known plugin-boundary violations tracked as technical debt. New violations must either be fixed or added here with a justification.",
+  "entries": []
+}

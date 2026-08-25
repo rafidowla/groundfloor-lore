@@ -1,0 +1,69 @@
+{
+    "schemaVersion": 1,
+    "description": "Lore eval task suite v1. Real developer questions against the groundfloor-lore monorepo. Each task has a prompt + ground-truth-keywords (regex patterns the answer should mention to count as 'correct'). Designed so a Lore-enabled agent should answer with sub-5k tokens, while a vanilla agent grepping/reading files balloons to 20-50k tokens.",
+    "tasks": [
+        {
+            "id": "find-cutover-script",
+            "category": "navigation",
+            "prompt": "Where is the Phase 7 destructive cutover script that drops CodeSymbol/CodeFile/CodeRelation rows? Give me the file path and the function that runs the destructive step.",
+            "groundTruth": ["scripts/atlas-cutover-destructive\\.mjs", "i-have-the-go|main"],
+            "rationale": "code_query / recall should answer in one tool call. Vanilla agent has to grep across the repo."
+        },
+        {
+            "id": "blast-radius-parsefile",
+            "category": "impact-analysis",
+            "prompt": "If I rename the function `parseFile` exported from packages/lore-plugin-developer/src/parser/index.ts, what other files would I need to update? I just want a list of files, not a refactor.",
+            "groundTruth": ["test/atlas/parser/parse-file\\.test\\.ts", "atlasIndexer\\.ts", "scripts/atlas-cutover"],
+            "rationale": "code_impact returns the call graph in one shot. Vanilla agent has to grep for `parseFile` and read each hit."
+        },
+        {
+            "id": "explain-reconnect",
+            "category": "explain-feature",
+            "prompt": "Explain in two sentences what the lore reconnect command does and where its core algorithm lives.",
+            "groundTruth": ["packages/lore/src/engines/reconnect\\.ts|engines/reconnect", "semantic|embedding|cosine"],
+            "rationale": "code_query + a Read of the named file. Both modes can answer; Lore is faster."
+        },
+        {
+            "id": "recall-cutover-status",
+            "category": "knowledge-recall",
+            "prompt": "What was the result of the Phase 7 destructive cutover that ran on 2026-04-30? How many CodeSymbols are in the post-cutover graph and how many cross-pillar edges were recovered?",
+            "groundTruth": ["15566|15,566", "147|LoreAppliesToCode", "20|LoreTouchesFile"],
+            "rationale": "recall hits the knowledge graph directly. Vanilla agent cannot answer at all without reading commit messages or grepping git log."
+        },
+        {
+            "id": "dead-code-candidates",
+            "category": "analytics",
+            "prompt": "List 5 functions in packages/lore-plugin-developer/src/ that look like dead code (no callers). Just names and file paths.",
+            "groundTruth": ["packages/lore-plugin-developer/src/", ".+", ".+", ".+", ".+"],
+            "rationale": "code_dead_code returns this directly. Vanilla agent has to grep for each function definition + look for callers — extremely token-heavy."
+        },
+        {
+            "id": "find-mcp-tool-list",
+            "category": "navigation",
+            "prompt": "What MCP tools does the developer plugin expose? Give me the names only, one per line.",
+            "groundTruth": ["code_query", "code_impact", "code_pagerank|code_dead_code|code_hotspots"],
+            "rationale": "tools/list call returns this. Vanilla agent must read tools.ts + atlasToolsRegistrar.ts and parse names."
+        },
+        {
+            "id": "trace-edge-pruning",
+            "category": "explain-feature",
+            "prompt": "When `lore reconnect --apply` runs, which edges does it prune before inserting new proposals? Where is the prune logic implemented?",
+            "groundTruth": ["semantic_neighbor|SEMANTIC_PREFIX", "pruneInferred|pruneInferredEdges", "engines/reconnect"],
+            "rationale": "Lore can answer via code_context on `reconnectGraph`. Vanilla agent reads the file + adjacent helpers."
+        },
+        {
+            "id": "find-fingerprint-mismatch",
+            "category": "debugging",
+            "prompt": "I see 'Embedding model fingerprint mismatch' in the daemon log. Where is this warning printed and what does it mean?",
+            "groundTruth": ["embeddingFingerprint|verbatimStore", "fingerprint", "model|dimension"],
+            "rationale": "code_query on 'fingerprint mismatch'. Vanilla agent greps."
+        },
+        {
+            "id": "what-changed-recently",
+            "category": "git-signals",
+            "prompt": "Which 3 files in this repo have changed the most in the last 30 days?",
+            "groundTruth": [".+", ".+", ".+"],
+            "rationale": "code_churn answers directly. Vanilla agent runs git log + parses output."
+        }
+    ]
+}

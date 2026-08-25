@@ -1,0 +1,60 @@
+// =====================================================================
+// PLACEHOLDER — NOT THE CANONICAL SCHEMA
+// =====================================================================
+// This is a Lore-local *mimic* of the Groundfloor portal_* SpiceDB
+// schema, written from the contract documented in the
+// agent brief (2026-05-10) before the canonical .zed file's location
+// was confirmed.
+//
+// HANDOFF: replace this file by pointing the bootstrap script at the
+// canonical portal_* schema in groundfloor-client-portal (or wherever
+// the platform team keeps it). Owner: Lore team to swap; client-portal
+// team owns the source of truth.
+//
+// We treat this as authoritative for LOCAL DEV + CI ONLY. Cloud deploys
+// must NOT push this schema — they consume the canonical one already
+// loaded into the production SpiceDB.
+//
+// Vocabulary locked here matches the closed permission set Lore uses
+// (rebacGate.ts):
+//   administer | read | write | delete | ddl | deploy |
+//   manage_members | view_billing
+// =====================================================================
+
+definition portal_user {}
+
+definition portal_account {
+    relation owner: portal_user
+    relation billing_admin: portal_user
+    relation member: portal_user
+
+    permission administer    = owner
+    permission read          = owner + billing_admin + member
+    permission manage_members = owner
+    permission view_billing  = owner + billing_admin
+}
+
+definition portal_workspace {
+    relation account: portal_account
+    relation owner: portal_user
+    relation admin: portal_user
+    relation writer: portal_user
+    relation member: portal_user
+
+    // Permissions cascade: workspace.owner > admin > writer > member.
+    // Account-level owners inherit administer through account#administer.
+    permission administer    = owner + admin + account->administer
+    permission read          = owner + admin + writer + member + account->read
+    permission write         = owner + admin + writer
+    permission delete        = owner + admin
+    permission ddl           = owner + admin
+    permission manage_members = owner + admin + account->manage_members
+}
+
+definition portal_environment {
+    relation workspace: portal_workspace
+    relation deployer: portal_user
+
+    permission read   = deployer + workspace->read
+    permission deploy = deployer + workspace->administer
+}

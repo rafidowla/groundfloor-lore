@@ -1,0 +1,71 @@
+{
+  "_doc": "Per-tool response-size regression test fixtures (v1.1.1 P1 of the Atlas Phase 6 strategy).",
+  "_purpose": "Each fixture runs one tool with the given args, measures the response body in bytes, and fails CI if it exceeds cap_bytes. Catches drift where a tool quietly grows its response size between releases.",
+  "_strategy_origin": "atlas-phase6-strategy-adjusted-2026-04-30: thin <= 400B, standard <= 1.5KB, full uncapped. Those targets are PER RESULT for the strategy's aspirational thin-mode work. This fixture file uses TODAY'S response sizes (with small headroom) as the regression bar, so any drift fails CI. Going FORWARD, when v1.1.2 adds explicit thin-mode flags to tools, add separate fixtures here for the thin variant with the strategy's per-result caps.",
+  "_when_to_update_caps": "If a feature adds fields a tool legitimately needs to return, bump the cap with a justification comment in this file. Don't loosen a cap without one. If a tool's response shape gets TIGHTER (e.g., a new thin mode), prefer adding a NEW fixture for that mode rather than editing an existing cap.",
+  "_run": "npm run test:byte-caps   # standalone   |   npm run test:arch   # chained",
+  "_runtime_requirement": "A live Lore daemon at http://127.0.0.1:3847 with auth.token. If unreachable, the test exits 0 with a warning so it's safe in CI environments without a daemon.",
+
+  "fixtures": [
+    {
+      "tool": "stats",
+      "args": { "workspace": "default" },
+      "cap_bytes": 1500,
+      "rationale": "Fixed-size graph statistics; node count, edge count, type breakdown for one workspace. Sprint L2: workspace is required, no silent fallback."
+    },
+    {
+      "tool": "lore_status",
+      "args": {},
+      "cap_bytes": 1500,
+      "rationale": "One-shot daemon health check. Fixed shape."
+    },
+    {
+      "tool": "search",
+      "args": { "workspace": "default", "query": "auth", "limit": 5 },
+      "cap_bytes": 12000,
+      "rationale": "Full-text search with limit=5. Each LoreNode currently includes full content+tags+metadata; 5 hits average ~1.6KB each. Cap reflects today's shape with ~50% headroom. v1.1.2 follow-up: add a thin mode that returns id+label+type+project only (~200B/hit); a separate fixture here will measure that path."
+    },
+    {
+      "tool": "search",
+      "args": { "workspace": "default", "query": "asdfqwerty-bogus-zzz-noresults-9k4j2", "limit": 5 },
+      "cap_bytes": 1500,
+      "rationale": "Search with no keyword matches. Exercises the negative-evidence path of P2: confidence 0 + reason string only. (Note: graph keyword search is the path used here, not verbatim semantic — keyword has true zero-result outcomes whereas semantic always returns something.)"
+    },
+    {
+      "tool": "recall",
+      "args": { "workspace": "default", "topic": "auth", "mode": "summary" },
+      "cap_bytes": 9000,
+      "rationale": "Summary mode caps response at ~2KB per the in-tool comment, but real responses run 1.5–4KB depending on hit count. 10 hits at ~448B each = ~4.5KB plus envelope. Cap raised 6000 → 9000 by Sprint L7 (2026-05-24): pre-Sprint-L the harness omitted workspace and the validation error fit under 6KB, so the real shape was never measured. First real measurement on the default workspace was 7378B; 9000B preserves ~20% headroom against today's knowledge graph (now larger than the dev-workspace baseline the 6KB cap was sized for)."
+    },
+    {
+      "tool": "recall",
+      "args": { "workspace": "default", "topic": "asdfqwerty-bogus-zzz-noresults-9k4j2", "mode": "summary" },
+      "cap_bytes": 6000,
+      "rationale": "Recall on a low-relevance topic — semantic search ALWAYS returns something (top-K by similarity), so the response shape is the same as a normal recall. v1.1.2 follow-up: when verbatim similarity scores are plumbed through (parked in V1.1_DEFERRED), this fixture can become a true negative-evidence test that drops to ~1KB on low-score results."
+    },
+    {
+      "tool": "list_nodes",
+      "args": { "workspace": "default", "type": "decision" },
+      "cap_bytes": 64000,
+      "rationale": "Re-enabled by Sprint 7 (2026-05-24). list_nodes now cursor-paginates with default limit=100; first-page response on the default workspace's 144 decision nodes fits well under the 64 KB cap (each entry carries id+type+label+tags+project+updatedAt only, ~170-450B/node). Callers wanting more nodes pass `cursor` from the prior response. Pre-Sprint-7 the tool returned every match in one shot (observed 2.4 MB = 38× the cap); the fixture sat in _deferred_fixtures with that observation noted."
+    }
+  ],
+
+  "_deferred_fixtures_note": "Fixtures moved out of the active set during Sprint L7 (2026-05-24) because their first real measurement (after the harness started passing workspace) was >2× the previously-aspirational cap. Per L7 spec scope guard, these need operator decision — either re-shape the tool's response, narrow the fixture args, or accept a substantially higher cap — before they return to the active set. Do NOT silently re-enable. The 2026-06-13 entries are different: they probe Atlas-domain code tools that Lore Core no longer serves (Atlas externalized as a client in v3.11.0), so a Core-only daemon returns 'Tool not found' and the suite fails on every host that has a live daemon. They belong in an Atlas-side byte-caps suite, not Core's.",
+  "_deferred_fixtures": [
+    {
+      "_deferred_reason": "2026-06-13: Atlas-domain tool, not served by Lore Core (Atlas externalized in v3.11.0). Returned MCP -32602 'Tool code_blast_radius not found' against the live Core daemon, failing test:arch on any host with a daemon up. Re-home in an Atlas byte-caps suite.",
+      "tool": "code_blast_radius",
+      "args": { "workspace": "default", "symbol": "thisDefinitelyDoesntExist_zzzqqq" },
+      "cap_bytes": 800,
+      "rationale": "v1.1.1 P2 — exercises the negative-evidence path on an unknown symbol. Response is { error, _meta:{confidence:0, negative_evidence, sources_consulted} }. Should be tight; if it grows past 800B the negative-evidence message has bloated and needs trimming."
+    },
+    {
+      "_deferred_reason": "2026-06-13: Atlas-domain tool, not served by Lore Core (Atlas externalized in v3.11.0). Returned MCP -32602 'Tool code_cycles not found' against the live Core daemon, failing test:arch on any host with a daemon up. Re-home in an Atlas byte-caps suite.",
+      "tool": "code_cycles",
+      "args": { "workspace": "default" },
+      "cap_bytes": 8000,
+      "rationale": "Cycle detection over the parsed graph. Response carries the cycles list + the v1.1.1 P2 _meta envelope. Bumped from 4000 → 8000 on 2026-05-10: codebase growth has produced more legitimately-detected cycles (observed ~6700B). Future tightening lever: add a thin mode that returns just the cycle ids (no member-symbol detail) and put a separate fixture on the thin variant rather than re-shrinking this cap."
+    }
+  ]
+}

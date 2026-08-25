@@ -1,0 +1,25 @@
+Sprint L1e marker — every L1-flagged MCP tool now requires a workspace argument at its Zod input schema.
+
+Files swept (L1b + L1e together):
+  packages/lore/src/mcp/tools/memory.ts        (L1b)
+  packages/lore/src/mcp/tools/analytical.ts    (L1e — aggregate, time_series)
+  packages/lore/src/mcp/tools/collections.ts   (L1e — 13 collection_* tools)
+  packages/lore/src/mcp/tools/diagnostic.ts    (L1e — get_full, list_nodes; stats reserved for Chain B / L2)
+  packages/lore/src/mcp/tools/governance.ts    (L1e — sync_status, sync_now, resolve_deferred, get_hot_context, prune_ephemeral)
+  packages/lore/src/mcp/tools/ingestion.ts     (L1e — lore_plugin_ingest, read_document_for_ingestion, reprocess_document, import_data)
+  packages/lore/src/mcp/tools/search.ts        (L1e — search, recall, structured_query)
+  packages/lore/src/mcp/tools/traverse.ts      (L1e — traverse)
+  packages/lore/src/mcp/tools/verbatim.ts      (L1e — store_verbatim, search_verbatim, get_verbatim)
+  packages/lore/src/mcp/phaseATools.ts         (L1e — 14 phase-A tools)
+
+Keep-admin tools intentionally untouched (audit Section 2):
+  lore_status, detect_language, register_workspace, list_workspaces, list_plugin_ir
+
+Chain B / L2 territory (intentionally not touched here):
+  stats (diagnostic.ts) — workspace-scoping + admin variant covered by a later chain
+
+When this marker is present, every L1-flagged MCP tool's Zod input schema
+declares `workspace: z.string().min(1)` (or equivalent required form). The
+schema-layer Zod validation surfaces missing-workspace as an input-validation
+error; handlers also defend-in-depth with a workspace_required envelope to
+match the REST 400 shape for callers that bypass the SDK's strip.

@@ -1,0 +1,15 @@
+{
+    "//": "Type-checking ONLY (noEmit). `tsconfig.json` deliberately scopes `include` to packages/lore/src so `npm run build` emits exactly the shipped tree — but that also meant NOTHING type-checked test/, which is where a missed call site is most likely to be written (a required field like AutolinkHandles.tracker was silently omitted by two test call sites for exactly this reason). scripts/test-test-types.mjs runs this config and ratchets the legacy failures in .test-type-baseline.json down to zero. rootDir is widened to the repo root purely so test/ is allowed in the program; nothing is emitted.",
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": true,
+        "rootDir": ".",
+        "declaration": false,
+        "sourceMap": false
+    },
+    "include": [
+        "packages/lore/src/**/*",
+        "test/**/*"
+    ],
+    "exclude": ["node_modules", "dist"]
+}

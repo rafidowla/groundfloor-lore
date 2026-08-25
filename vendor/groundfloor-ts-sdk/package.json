@@ -1,0 +1,7 @@
+{
+  "name": "groundfloor-ts-sdk",
+  "version": "1.2.0",
+  "description": "Vendored type declarations only, for build-time type-checking. Lore only ever type-imports this package or reaches it via a guarded dynamic import() at runtime (see test/tw1b-sdk-optional-unit.ts) — no .js implementation is needed or included here.",
+  "types": "dist/index.d.ts",
+  "main": "dist/index.js"
+}

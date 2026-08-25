@@ -1,0 +1,20 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "Node16",
+        "moduleResolution": "Node16",
+        "outDir": "dist",
+        "rootDir": "packages",
+        "strict": true,
+        "esModuleInterop": true,
+        "skipLibCheck": true,
+        "declaration": true,
+        "resolveJsonModule": true,
+        "sourceMap": true,
+        "forceConsistentCasingInFileNames": true
+    },
+    "include": [
+        "packages/lore/src/**/*"
+    ],
+    "exclude": ["node_modules", "dist"]
+}

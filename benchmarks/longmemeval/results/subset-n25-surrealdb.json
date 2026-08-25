@@ -1,0 +1,1476 @@
+{
+  "generatedAt": "2026-08-13T00:44:03.968Z",
+  "datasetFile": "/Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/data/longmemeval_s_cleaned.json",
+  "subsetSize": 25,
+  "ks": [
+    5,
+    10,
+    20
+  ],
+  "perInstance": [
+    {
+      "questionId": "e47becba",
+      "questionType": "single-session-user",
+      "isAbstention": false,
+      "question": "What degree did I graduate with?",
+      "expectedAnswer": "Business Administration",
+      "totalTurns": 550,
+      "totalSessions": 53,
+      "evidenceTurnCount": 2,
+      "ingestMs": 24847,
+      "retrieveMs": 82,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 0,
+      "retrievedNodeIds": [
+        "e47becba::d94b721b::1",
+        "e47becba::answer_280352e9::4",
+        "e47becba::02bd2b90_3::3",
+        "e47becba::sharegpt_rnG0ZuV_0::0",
+        "e47becba::sharegpt_8dJs7Ai_0::4",
+        "e47becba::d414cac5_4::1",
+        "e47becba::02bd2b90_3::5",
+        "e47becba::41abc171_4::1",
+        "e47becba::5dac7cc2_1::8",
+        "e47becba::41abc171_4::5",
+        "e47becba::2ae4f277_2::1",
+        "e47becba::978c0e70::8",
+        "e47becba::ultrachat_215809::0",
+        "e47becba::ultrachat_214101::0",
+        "e47becba::41abc171_4::3",
+        "e47becba::3b3a77d9::3",
+        "e47becba::41abc171_4::7",
+        "e47becba::47f00a5f::9",
+        "e47becba::sharegpt_UnjngE7_65::11",
+        "e47becba::sharegpt_Cr2tc1f_0::1",
+        "e47becba::e348269f_1::11",
+        "e47becba::sharegpt_DGTCD7D_0::2",
+        "e47becba::02bd2b90_3::1",
+        "e47becba::sharegpt_rnG0ZuV_0::1",
+        "e47becba::c3cd646c_1::1",
+        "e47becba::ultrachat_336116::6",
+        "e47becba::sharegpt_DGTCD7D_0::3",
+        "e47becba::c3cd646c_1::6",
+        "e47becba::sharegpt_QZMeA7V_17::10",
+        "e47becba::41abc171_4::6",
+        "e47becba::answer_280352e9::5",
+        "e47becba::sharegpt_PdnvIns_0::6",
+        "e47becba::ultrachat_231069::0",
+        "e47becba::sharegpt_8dJs7Ai_0::2",
+        "e47becba::sharegpt_PdnvIns_0::4",
+        "e47becba::02bd2b90_3::9",
+        "e47becba::sharegpt_qRdLQvN_7::3",
+        "e47becba::52c34859_1::1",
+        "e47becba::c3cd646c_1::4",
+        "e47becba::sharegpt_qRdLQvN_7::7",
+        "e47becba::sharegpt_qRdLQvN_7::5",
+        "e47becba::ultrachat_359984::0",
+        "e47becba::ultrachat_422229::0",
+        "e47becba::sharegpt_8dJs7Ai_0::14",
+        "e47becba::sharegpt_DGTCD7D_0::0",
+        "e47becba::d414cac5_4::11",
+        "e47becba::0586f435_3::9",
+        "e47becba::ultrachat_530213::2",
+        "e47becba::sharegpt_UnjngE7_65::13",
+        "e47becba::sharegpt_QZMeA7V_17::9",
+        "e47becba::sharegpt_BvwQVCO_0::1",
+        "e47becba::sharegpt_gTknhGs_0::0",
+        "e47becba::978c0e70::9",
+        "e47becba::sharegpt_QZMeA7V_17::7",
+        "e47becba::3418b277_3::8",
+        "e47becba::3b3a77d9::4",
+        "e47becba::sharegpt_QZMeA7V_17::6",
+        "e47becba::ultrachat_486410::2",
+        "e47becba::sharegpt_UnjngE7_65::10",
+        "e47becba::e348269f_1::1",
+        "e47becba::sharegpt_QZMeA7V_17::2",
+        "e47becba::41abc171_4::11",
+        "e47becba::ultrachat_486410::4",
+        "e47becba::sharegpt_QZMeA7V_17::0",
+        "e47becba::e27891d3_2::5",
+        "e47becba::sharegpt_UnjngE7_65::0",
+        "e47becba::ec6ca9ef::10",
+        "e47becba::sharegpt_PdnvIns_0::2",
+        "e47becba::7045db85_1::5",
+        "e47becba::sharegpt_PdnvIns_0::0",
+        "e47becba::d94b721b::0",
+        "e47becba::d94b721b::6",
+        "e47becba::sharegpt_8dJs7Ai_0::0",
+        "e47becba::d94b721b::8",
+        "e47becba::sharegpt_PdnvIns_0::1",
+        "e47becba::sharegpt_QZMeA7V_17::5",
+        "e47becba::ultrachat_286075::6",
+        "e47becba::f6859b48_2::10",
+        "e47becba::sharegpt_PdnvIns_0::5",
+        "e47becba::4fd76316::9",
+        "e47becba::f6859b48_2::0",
+        "e47becba::d414cac5_4::2",
+        "e47becba::ultrachat_458322::12",
+        "e47becba::sharegpt_BvwQVCO_0::0",
+        "e47becba::02bd2b90_3::6",
+        "e47becba::ec6ca9ef::2",
+        "e47becba::sharegpt_QZMeA7V_17::3",
+        "e47becba::sharegpt_PdnvIns_0::3",
+        "e47becba::ultrachat_336116::12",
+        "e47becba::41abc171_4::4",
+        "e47becba::sharegpt_T1EiHWI_13::7",
+        "e47becba::d414cac5_4::0",
+        "e47becba::sharegpt_8dJs7Ai_0::10",
+        "e47becba::a041cdd4_3::6",
+        "e47becba::d414cac5_4::9",
+        "e47becba::ultrachat_214101::2",
+        "e47becba::a041cdd4_3::2",
+        "e47becba::7045db85_1::4",
+        "e47becba::0586f435_3::2",
+        "e47becba::sharegpt_Cr2tc1f_0::2",
+        "e47becba::02bd2b90_3::4",
+        "e47becba::d414cac5_4::10",
+        "e47becba::ultrachat_574556::2",
+        "e47becba::sharegpt_gTknhGs_0::2",
+        "e47becba::ec6ca9ef::0",
+        "e47becba::d94b721b::10",
+        "e47becba::f6859b48_2::2",
+        "e47becba::sharegpt_PdnvIns_0::7",
+        "e47becba::sharegpt_UnjngE7_65::1",
+        "e47becba::47f00a5f::0",
+        "e47becba::ultrachat_422229::6",
+        "e47becba::answer_280352e9::2",
+        "e47becba::47f00a5f::7",
+        "e47becba::7045db85_1::6",
+        "e47becba::d94b721b::9",
+        "e47becba::sharegpt_QZMeA7V_17::4",
+        "e47becba::sharegpt_Jcy1CVN_0::3",
+        "e47becba::sharegpt_1L5GXZJ_0::1",
+        "e47becba::02bd2b90_3::2",
+        "e47becba::ultrachat_486410::9",
+        "e47becba::sharegpt_UnjngE7_65::9",
+        "e47becba::d94b721b::5",
+        "e47becba::ultrachat_458322::10",
+        "e47becba::sharegpt_Jcy1CVN_0::6",
+        "e47becba::sharegpt_UnjngE7_65::12",
+        "e47becba::c3cd646c_1::0",
+        "e47becba::sharegpt_QZMeA7V_17::8",
+        "e47becba::d94b721b::3",
+        "e47becba::sharegpt_Cr2tc1f_0::4",
+        "e47becba::ultrachat_574556::4",
+        "e47becba::47f00a5f::6",
+        "e47becba::2ae4f277_2::10",
+        "e47becba::f6859b48_2::1",
+        "e47becba::answer_280352e9::0",
+        "e47becba::sharegpt_QZMeA7V_17::1",
+        "e47becba::ultrachat_286075::0",
+        "e47becba::02bd2b90_3::0",
+        "e47becba::ultrachat_45576::10",
+        "e47becba::02bd2b90_3::8",
+        "e47becba::52c34859_1::6",
+        "e47becba::sharegpt_T1EiHWI_13::3",
+        "e47becba::d414cac5_4::4",
+        "e47becba::ultrachat_458322::4",
+        "e47becba::7045db85_1::8",
+        "e47becba::a041cdd4_3::10",
+        "e47becba::sharegpt_Jcy1CVN_0::1",
+        "e47becba::3b3a77d9::2",
+        "e47becba::sharegpt_8dJs7Ai_0::8",
+        "e47becba::2ae4f277_2::8",
+        "e47becba::3b3a77d9::5"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.38685280723454163
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.38685280723454163
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.38685280723454163
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "118b2229",
+      "questionType": "single-session-user",
+      "isAbstention": false,
+      "question": "How long is my daily commute to work?",
+      "expectedAnswer": "45 minutes each way",
+      "totalTurns": 485,
+      "totalSessions": 45,
+      "evidenceTurnCount": 1,
+      "ingestMs": 22522,
+      "retrieveMs": 99,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 104,
+      "retrievedNodeIds": [
+        "118b2229::answer_40a90d51::8",
+        "118b2229::answer_40a90d51::9",
+        "118b2229::927b9087::6",
+        "118b2229::sharegpt_dabXXRO_10::4",
+        "118b2229::5209e813_2::9",
+        "118b2229::db73b7e4_4::11",
+        "118b2229::answer_40a90d51::0",
+        "118b2229::sharegpt_5V5H2HN_0::4",
+        "118b2229::db73b7e4_4::0",
+        "118b2229::afe04238_1::10",
+        "118b2229::db50c0f6::1",
+        "118b2229::db73b7e4_4::5",
+        "118b2229::afe04238_1::3",
+        "118b2229::004edb32::5",
+        "118b2229::sharegpt_M3x4mZx_0::10",
+        "118b2229::febc8622::3",
+        "118b2229::5209e813_2::11",
+        "118b2229::ultrachat_577747::4",
+        "118b2229::0afa904a::2",
+        "118b2229::db73b7e4_4::4",
+        "118b2229::ultrachat_311002::0",
+        "118b2229::afe04238_1::7",
+        "118b2229::db73b7e4_4::6",
+        "118b2229::0afa904a::6",
+        "118b2229::927b9087::4",
+        "118b2229::7d8b5834_1::10",
+        "118b2229::927b9087::5",
+        "118b2229::5209e813_2::6",
+        "118b2229::7d8b5834_1::0",
+        "118b2229::answer_40a90d51::1",
+        "118b2229::ultrachat_368854::2",
+        "118b2229::ultrachat_392094::6",
+        "118b2229::628c958c_7::0",
+        "118b2229::a0b8b0ad_6::9",
+        "118b2229::ultrachat_392094::7",
+        "118b2229::febc8622::9",
+        "118b2229::sharegpt_M3x4mZx_0::8",
+        "118b2229::ultrachat_387144::10",
+        "118b2229::ultrachat_387144::7",
+        "118b2229::1f88b2b3::5",
+        "118b2229::ultrachat_20736::0",
+        "118b2229::5dce60dd::6",
+        "118b2229::5209e813_2::0",
+        "118b2229::0afa904a::3",
+        "118b2229::d600c646::2",
+        "118b2229::sharegpt_dabXXRO_10::3"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "51a45a95",
+      "questionType": "single-session-user",
+      "isAbstention": false,
+      "question": "Where did I redeem a $5 coupon on coffee creamer?",
+      "expectedAnswer": "Target",
+      "totalTurns": 529,
+      "totalSessions": 50,
+      "evidenceTurnCount": 1,
+      "ingestMs": 23789,
+      "retrieveMs": 121,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 110,
+      "retrievedNodeIds": [
+        "51a45a95::answer_d61669c7::4",
+        "51a45a95::answer_d61669c7::5",
+        "51a45a95::answer_d61669c7::1",
+        "51a45a95::5c44d9fe_1::2",
+        "51a45a95::55e0c6db_2::1",
+        "51a45a95::sharegpt_0dVk0BE_1::3",
+        "51a45a95::answer_d61669c7::0",
+        "51a45a95::sharegpt_MKMWjX0_25::4",
+        "51a45a95::07ba9acd_2::7",
+        "51a45a95::ultrachat_105249::1",
+        "51a45a95::6dfb33f1_1::10",
+        "51a45a95::5c44d9fe_1::1",
+        "51a45a95::5c44d9fe_1::3",
+        "51a45a95::sharegpt_CyJ3dal_0::9",
+        "51a45a95::sharegpt_EDBCs6g_23::8",
+        "51a45a95::sharegpt_EDBCs6g_23::10",
+        "51a45a95::sharegpt_MKMWjX0_25::2",
+        "51a45a95::ultrachat_282235::0",
+        "51a45a95::answer_d61669c7::7",
+        "51a45a95::answer_d61669c7::3",
+        "51a45a95::4679a05c::2",
+        "51a45a95::sharegpt_EDBCs6g_23::2",
+        "51a45a95::217debf7::4",
+        "51a45a95::sharegpt_MKMWjX0_25::0",
+        "51a45a95::fab585c2_1::11",
+        "51a45a95::dfe646a7_1::0",
+        "51a45a95::55e0c6db_2::3",
+        "51a45a95::55e0c6db_2::0",
+        "51a45a95::sharegpt_3vxz2Zr_0::0",
+        "51a45a95::f32d1ccf_1::11",
+        "51a45a95::b35610f4_3::7",
+        "51a45a95::answer_d61669c7::6",
+        "51a45a95::07d1915d_1::7",
+        "51a45a95::6e0b1800_2::11",
+        "51a45a95::217debf7::11",
+        "51a45a95::8fa64936_1::1",
+        "51a45a95::sharegpt_0dVk0BE_1::4",
+        "51a45a95::sharegpt_CyJ3dal_0::6",
+        "51a45a95::0a699029_4::11",
+        "51a45a95::07d1915d_1::3"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "58bf7951",
+      "questionType": "single-session-user",
+      "isAbstention": false,
+      "question": "What play did I attend at the local community theater?",
+      "expectedAnswer": "The Glass Menagerie",
+      "totalTurns": 616,
+      "totalSessions": 57,
+      "evidenceTurnCount": 1,
+      "ingestMs": 27515,
+      "retrieveMs": 173,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 129,
+      "retrievedNodeIds": [
+        "58bf7951::07b7a667_1::10",
+        "58bf7951::07b7a667_1::11",
+        "58bf7951::answer_355c48bb::3",
+        "58bf7951::answer_355c48bb::2",
+        "58bf7951::answer_355c48bb::4",
+        "58bf7951::answer_355c48bb::5",
+        "58bf7951::07b7a667_1::9",
+        "58bf7951::07b7a667_1::8",
+        "58bf7951::ultrachat_71618::6",
+        "58bf7951::sharegpt_DGiqvVv_270::7",
+        "58bf7951::ultrachat_268434::7",
+        "58bf7951::sharegpt_M84blrA_53::3",
+        "58bf7951::answer_355c48bb::6",
+        "58bf7951::sharegpt_OFiElWf_37::6",
+        "58bf7951::sharegpt_M84blrA_53::1",
+        "58bf7951::ultrachat_221066::3",
+        "58bf7951::987b36db_2::7",
+        "58bf7951::ultrachat_365156::1",
+        "58bf7951::answer_355c48bb::7",
+        "58bf7951::sharegpt_OFiElWf_37::12",
+        "58bf7951::sharegpt_OFiElWf_37::42"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.38685280723454163
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.38685280723454163
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.38685280723454163
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "0a995998",
+      "questionType": "multi-session",
+      "isAbstention": false,
+      "question": "How many items of clothing do I need to pick up or return from a store?",
+      "expectedAnswer": 3,
+      "totalTurns": 484,
+      "totalSessions": 44,
+      "evidenceTurnCount": 3,
+      "ingestMs": 26195,
+      "retrieveMs": 194,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 111,
+      "retrievedNodeIds": [
+        "0a995998::answer_afa9873b_1::4",
+        "0a995998::answer_afa9873b_2::0",
+        "0a995998::answer_afa9873b_1::5",
+        "0a995998::answer_afa9873b_3::6",
+        "0a995998::answer_afa9873b_2::8",
+        "0a995998::answer_afa9873b_2::1",
+        "0a995998::answer_afa9873b_1::7",
+        "0a995998::answer_afa9873b_3::7",
+        "0a995998::answer_afa9873b_3::1",
+        "0a995998::answer_afa9873b_1::3",
+        "0a995998::f5a8b1d0_1::8",
+        "0a995998::answer_afa9873b_2::9",
+        "0a995998::answer_afa9873b_2::2",
+        "0a995998::answer_afa9873b_2::5",
+        "0a995998::85846900_2::5",
+        "0a995998::answer_afa9873b_2::3",
+        "0a995998::answer_afa9873b_1::1",
+        "0a995998::answer_afa9873b_2::7",
+        "0a995998::25091584_1::3",
+        "0a995998::ultrachat_331531::4",
+        "0a995998::85846900_2::1",
+        "0a995998::ultrachat_331531::0",
+        "0a995998::25091584_1::1",
+        "0a995998::ad3d0815_1::8",
+        "0a995998::answer_afa9873b_3::0",
+        "0a995998::85846900_2::9",
+        "0a995998::ad3d0815_1::0",
+        "0a995998::85846900_2::0",
+        "0a995998::ultrachat_336874::4",
+        "0a995998::f10be626::10",
+        "0a995998::sharegpt_U3S02iq_0::0",
+        "0a995998::e6790684_1::5",
+        "0a995998::answer_afa9873b_2::4",
+        "0a995998::answer_afa9873b_1::0",
+        "0a995998::ultrachat_331531::1",
+        "0a995998::25091584_1::4",
+        "0a995998::ultrachat_336874::8",
+        "0a995998::answer_afa9873b_1::2",
+        "0a995998::85846900_2::8"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.6713860725233041
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.6713860725233041
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.6713860725233041
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "6d550036",
+      "questionType": "multi-session",
+      "isAbstention": false,
+      "question": "How many projects have I led or am currently leading?",
+      "expectedAnswer": 2,
+      "totalTurns": 505,
+      "totalSessions": 47,
+      "evidenceTurnCount": 4,
+      "ingestMs": 23742,
+      "retrieveMs": 230,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 145,
+      "retrievedNodeIds": [
+        "6d550036::sharegpt_J7ZAFLd_0::0",
+        "6d550036::sharegpt_oXgiN7q_53::3",
+        "6d550036::5558a42e_2::8",
+        "6d550036::2e4430d8_2::0",
+        "6d550036::2e4430d8_2::3"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 0,
+          "recallAll": 0,
+          "ndcg": 0
+        },
+        "10": {
+          "recallAny": 0,
+          "recallAll": 0,
+          "ndcg": 0
+        },
+        "20": {
+          "recallAny": 0,
+          "recallAll": 0,
+          "ndcg": 0
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "gpt4_59c863d7",
+      "questionType": "multi-session",
+      "isAbstention": false,
+      "question": "How many model kits have I worked on or bought?",
+      "expectedAnswer": "I have worked on or bought five model kits. The scales of the models are: Revell F-15 Eagle (scale not mentioned), Tamiya 1/48 scale Spitfire Mk.V, 1/16 scale German Tiger I tank, 1/72 scale B-29 bomber, and 1/24 scale '69 Camaro.",
+      "totalTurns": 481,
+      "totalSessions": 47,
+      "evidenceTurnCount": 5,
+      "ingestMs": 23430,
+      "retrieveMs": 285,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 126,
+      "retrievedNodeIds": [
+        "gpt4_59c863d7::answer_593bdffd_4::1",
+        "gpt4_59c863d7::answer_593bdffd_2::0",
+        "gpt4_59c863d7::answer_593bdffd_1::0",
+        "gpt4_59c863d7::answer_593bdffd_1::7",
+        "gpt4_59c863d7::answer_593bdffd_1::3",
+        "gpt4_59c863d7::answer_593bdffd_4::0",
+        "gpt4_59c863d7::ultrachat_307895::4",
+        "gpt4_59c863d7::answer_593bdffd_4::6",
+        "gpt4_59c863d7::answer_593bdffd_3::1",
+        "gpt4_59c863d7::answer_593bdffd_1::1",
+        "gpt4_59c863d7::answer_593bdffd_2::1",
+        "gpt4_59c863d7::answer_593bdffd_1::2",
+        "gpt4_59c863d7::sharegpt_Opm4kTV_0::1",
+        "gpt4_59c863d7::answer_593bdffd_4::7",
+        "gpt4_59c863d7::61d3fec4_2::4",
+        "gpt4_59c863d7::answer_593bdffd_4::5",
+        "gpt4_59c863d7::answer_593bdffd_4::3",
+        "gpt4_59c863d7::answer_593bdffd_1::5",
+        "gpt4_59c863d7::answer_593bdffd_3::0",
+        "gpt4_59c863d7::answer_593bdffd_1::9",
+        "gpt4_59c863d7::ultrachat_307895::8",
+        "gpt4_59c863d7::answer_593bdffd_1::4",
+        "gpt4_59c863d7::answer_593bdffd_1::6",
+        "gpt4_59c863d7::answer_593bdffd_4::4"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.38356636737133565
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.5043776700708298
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.5828519523419362
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "b5ef892d",
+      "questionType": "multi-session",
+      "isAbstention": false,
+      "question": "How many days did I spend on camping trips in the United States this year?",
+      "expectedAnswer": "8 days.",
+      "totalTurns": 516,
+      "totalSessions": 52,
+      "evidenceTurnCount": 2,
+      "ingestMs": 23886,
+      "retrieveMs": 245,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 140,
+      "retrievedNodeIds": [
+        "b5ef892d::answer_a8b4290f_1::0",
+        "b5ef892d::answer_a8b4290f_3::0",
+        "b5ef892d::answer_a8b4290f_3::7",
+        "b5ef892d::sharegpt_fwJ8yYA_0::0",
+        "b5ef892d::answer_a8b4290f_2::0",
+        "b5ef892d::sharegpt_fwJ8yYA_0::2",
+        "b5ef892d::answer_a8b4290f_3::6",
+        "b5ef892d::60db2dd6_1::8",
+        "b5ef892d::answer_a8b4290f_2::4",
+        "b5ef892d::sharegpt_fwJ8yYA_0::1"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.8503449055347546
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.8503449055347546
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.8503449055347546
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "e831120c",
+      "questionType": "multi-session",
+      "isAbstention": false,
+      "question": "How many weeks did it take me to watch all the Marvel Cinematic Universe movies and the main Star Wars films?",
+      "expectedAnswer": "3.5 weeks",
+      "totalTurns": 481,
+      "totalSessions": 47,
+      "evidenceTurnCount": 2,
+      "ingestMs": 25338,
+      "retrieveMs": 291,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 127,
+      "retrievedNodeIds": [
+        "e831120c::answer_86c505e7_2::4",
+        "e831120c::answer_86c505e7_2::3",
+        "e831120c::answer_86c505e7_1::0",
+        "e831120c::answer_86c505e7_2::0",
+        "e831120c::answer_86c505e7_2::1",
+        "e831120c::answer_86c505e7_2::5",
+        "e831120c::answer_86c505e7_2::7",
+        "e831120c::answer_86c505e7_2::9",
+        "e831120c::answer_86c505e7_2::2",
+        "e831120c::answer_86c505e7_1::7",
+        "e831120c::answer_86c505e7_2::6",
+        "e831120c::answer_86c505e7_1::5",
+        "e831120c::answer_86c505e7_1::3",
+        "e831120c::answer_86c505e7_2::11",
+        "e831120c::answer_86c505e7_1::9",
+        "e831120c::answer_86c505e7_1::1",
+        "e831120c::answer_86c505e7_1::8",
+        "e831120c::8fb3fe3a_1::9",
+        "e831120c::8fb3fe3a_1::1",
+        "e831120c::ba6b67af_2::4",
+        "e831120c::ba6b67af_2::2",
+        "e831120c::sharegpt_hvdBqMM_0::12",
+        "e831120c::8fb3fe3a_1::8"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.5706417189553201
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.5706417189553201
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.5706417189553201
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "3a704032",
+      "questionType": "multi-session",
+      "isAbstention": false,
+      "question": "How many plants did I acquire in the last month?",
+      "expectedAnswer": 3,
+      "totalTurns": 479,
+      "totalSessions": 48,
+      "evidenceTurnCount": 2,
+      "ingestMs": 22996,
+      "retrieveMs": 334,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 142,
+      "retrievedNodeIds": [
+        "3a704032::answer_c2204106_2::10",
+        "3a704032::answer_c2204106_1::4",
+        "3a704032::ultrachat_501733::4",
+        "3a704032::0babf5b6_2::11",
+        "3a704032::sharegpt_tzJ6yxo_0::2",
+        "3a704032::sharegpt_HrxBbBK_0::2",
+        "3a704032::78764b10_2::11",
+        "3a704032::sharegpt_jlDfWk7_17::3"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.38685280723454163
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.38685280723454163
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.38685280723454163
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "gpt4_d84a3211",
+      "questionType": "multi-session",
+      "isAbstention": false,
+      "question": "How much total money have I spent on bike-related expenses since the start of the year?",
+      "expectedAnswer": "$185",
+      "totalTurns": 495,
+      "totalSessions": 48,
+      "evidenceTurnCount": 4,
+      "ingestMs": 23319,
+      "retrieveMs": 309,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 128,
+      "retrievedNodeIds": [
+        "gpt4_d84a3211::answer_2880eb6c_4::4",
+        "gpt4_d84a3211::answer_2880eb6c_4::6",
+        "gpt4_d84a3211::answer_2880eb6c_3::2",
+        "gpt4_d84a3211::answer_2880eb6c_2::6",
+        "gpt4_d84a3211::answer_2880eb6c_1::4",
+        "gpt4_d84a3211::answer_2880eb6c_1::2",
+        "gpt4_d84a3211::answer_2880eb6c_2::4",
+        "gpt4_d84a3211::answer_2880eb6c_3::8",
+        "gpt4_d84a3211::answer_2880eb6c_4::2",
+        "gpt4_d84a3211::fd29aa98_1::8",
+        "gpt4_d84a3211::answer_2880eb6c_4::5",
+        "gpt4_d84a3211::answer_2880eb6c_2::9",
+        "gpt4_d84a3211::answer_2880eb6c_2::2",
+        "gpt4_d84a3211::answer_2880eb6c_2::0",
+        "gpt4_d84a3211::sharegpt_qHNCIfF_0::4",
+        "gpt4_d84a3211::sharegpt_sXKNzPE_29::1",
+        "gpt4_d84a3211::answer_2880eb6c_3::7",
+        "gpt4_d84a3211::answer_2880eb6c_3::3",
+        "gpt4_d84a3211::answer_2880eb6c_3::0",
+        "gpt4_d84a3211::answer_2880eb6c_3::6",
+        "gpt4_d84a3211::answer_2880eb6c_4::7",
+        "gpt4_d84a3211::answer_2880eb6c_1::3"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.24630238874073
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.369453583111095
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.47198672172931694
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "8a2466db",
+      "questionType": "single-session-preference",
+      "isAbstention": false,
+      "question": "Can you recommend some resources where I can learn more about video editing?",
+      "expectedAnswer": "The user would prefer responses that suggest resources specifically tailored to Adobe Premiere Pro, especially those that delve into its advanced settings. They might not prefer general video editing resources or resources related to other video editing software.",
+      "totalTurns": 508,
+      "totalSessions": 50,
+      "evidenceTurnCount": 1,
+      "ingestMs": 23607,
+      "retrieveMs": 337,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 139,
+      "retrievedNodeIds": [
+        "8a2466db::6dcf5fa0_1::1",
+        "8a2466db::6dcf5fa0_1::11",
+        "8a2466db::answer_edb03329::0",
+        "8a2466db::6dcf5fa0_1::5",
+        "8a2466db::answer_edb03329::1",
+        "8a2466db::6dcf5fa0_1::10",
+        "8a2466db::6dcf5fa0_1::4",
+        "8a2466db::6a5b5a78::5",
+        "8a2466db::answer_edb03329::11",
+        "8a2466db::answer_edb03329::17",
+        "8a2466db::answer_edb03329::5"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.5
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.5
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.5
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "06878be2",
+      "questionType": "single-session-preference",
+      "isAbstention": false,
+      "question": "Can you suggest some accessories that would complement my current photography setup?",
+      "expectedAnswer": "The user would prefer suggestions of Sony-compatible accessories or high-quality photography gear that can enhance their photography experience. They may not prefer suggestions of other brands' equipment or low-quality gear.",
+      "totalTurns": 443,
+      "totalSessions": 48,
+      "evidenceTurnCount": 3,
+      "ingestMs": 22999,
+      "retrieveMs": 398,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 145,
+      "retrievedNodeIds": [
+        "06878be2::answer_555dfb94::1",
+        "06878be2::8fcfbe43_2::3",
+        "06878be2::answer_555dfb94::5",
+        "06878be2::answer_555dfb94::15",
+        "06878be2::8fcfbe43_2::4"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 0,
+          "recallAll": 0,
+          "ndcg": 0
+        },
+        "10": {
+          "recallAny": 0,
+          "recallAll": 0,
+          "ndcg": 0
+        },
+        "20": {
+          "recallAny": 0,
+          "recallAll": 0,
+          "ndcg": 0
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "gpt4_59149c77",
+      "questionType": "temporal-reasoning",
+      "isAbstention": false,
+      "question": "How many days passed between my visit to the Museum of Modern Art (MoMA) and the 'Ancient Civilizations' exhibit at the Metropolitan Museum of Art?",
+      "expectedAnswer": "7 days. 8 days (including the last day) is also acceptable.",
+      "totalTurns": 484,
+      "totalSessions": 48,
+      "evidenceTurnCount": 2,
+      "ingestMs": 25194,
+      "retrieveMs": 359,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 131,
+      "retrievedNodeIds": [
+        "gpt4_59149c77::answer_d00ba6d0_2::6",
+        "gpt4_59149c77::answer_d00ba6d0_2::7",
+        "gpt4_59149c77::answer_d00ba6d0_1::0",
+        "gpt4_59149c77::answer_d00ba6d0_1::1",
+        "gpt4_59149c77::9e2c2a6c_2::0",
+        "gpt4_59149c77::9e2c2a6c_2::2",
+        "gpt4_59149c77::9e2c2a6c_2::1",
+        "gpt4_59149c77::9e2c2a6c_2::10",
+        "gpt4_59149c77::9e2c2a6c_2::3",
+        "gpt4_59149c77::answer_d00ba6d0_1::2",
+        "gpt4_59149c77::9e2c2a6c_2::4",
+        "gpt4_59149c77::answer_d00ba6d0_2::8",
+        "gpt4_59149c77::answer_d00ba6d0_2::9",
+        "gpt4_59149c77::9e2c2a6c_2::11",
+        "gpt4_59149c77::sharegpt_XlNs8Lz_199::2",
+        "gpt4_59149c77::9e2c2a6c_2::9",
+        "gpt4_59149c77::answer_d00ba6d0_2::5",
+        "gpt4_59149c77::answer_d00ba6d0_2::1",
+        "gpt4_59149c77::answer_d00ba6d0_1::10"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.9197207891481876
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.9197207891481876
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.9197207891481876
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "gpt4_f49edff3",
+      "questionType": "temporal-reasoning",
+      "isAbstention": false,
+      "question": "Which three events happened in the order from first to last: the day I helped my friend prepare the nursery, the day I helped my cousin pick out stuff for her baby shower, and the day I ordered a customized phone case for my friend's birthday?",
+      "expectedAnswer": "First, I helped my friend prepare the nursery, then I helped my cousin pick out stuff for her baby shower, and lastly, I ordered a customized phone case for my friend's birthday.",
+      "totalTurns": 498,
+      "totalSessions": 47,
+      "evidenceTurnCount": 3,
+      "ingestMs": 23215,
+      "retrieveMs": 393,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 142,
+      "retrievedNodeIds": [
+        "gpt4_f49edff3::answer_3e9fce53_3::0",
+        "gpt4_f49edff3::answer_3e9fce53_1::1",
+        "gpt4_f49edff3::answer_3e9fce53_2::1",
+        "gpt4_f49edff3::answer_3e9fce53_1::5",
+        "gpt4_f49edff3::answer_3e9fce53_3::3",
+        "gpt4_f49edff3::answer_3e9fce53_2::0",
+        "gpt4_f49edff3::answer_3e9fce53_1::0",
+        "gpt4_f49edff3::answer_3e9fce53_3::1"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.46927872602275644
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.7928654229965442
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.7928654229965442
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "71017276",
+      "questionType": "temporal-reasoning",
+      "isAbstention": false,
+      "question": "How many weeks ago did I meet up with my aunt and receive the crystal chandelier?",
+      "expectedAnswer": 4,
+      "totalTurns": 614,
+      "totalSessions": 49,
+      "evidenceTurnCount": 1,
+      "ingestMs": 27111,
+      "retrieveMs": 418,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 141,
+      "retrievedNodeIds": [
+        "71017276::answer_0b4a8adc_1::0",
+        "71017276::answer_0b4a8adc_1::2",
+        "71017276::answer_0b4a8adc_1::3",
+        "71017276::answer_0b4a8adc_1::4",
+        "71017276::6c7fea68_2::9",
+        "71017276::answer_0b4a8adc_1::1",
+        "71017276::f78a22b6_4::9",
+        "71017276::sharegpt_11WxPMZ_0::32",
+        "71017276::6c7fea68_2::8"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "b46e15ed",
+      "questionType": "temporal-reasoning",
+      "isAbstention": false,
+      "question": "How many months have passed since I participated in two charity events in a row, on consecutive days?",
+      "expectedAnswer": 2,
+      "totalTurns": 478,
+      "totalSessions": 46,
+      "evidenceTurnCount": 5,
+      "ingestMs": 24361,
+      "retrieveMs": 430,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 146,
+      "retrievedNodeIds": [
+        "b46e15ed::answer_4bfcc250_3::0",
+        "b46e15ed::answer_4bfcc250_1::10",
+        "b46e15ed::sharegpt_hcaZN94_433::7",
+        "b46e15ed::sharegpt_hcaZN94_433::1"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.3391602052736161
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.3391602052736161
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.3391602052736161
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "gpt4_fa19884c",
+      "questionType": "temporal-reasoning",
+      "isAbstention": false,
+      "question": "How many days passed between the day I started playing along to my favorite songs on my old keyboard and the day I discovered a bluegrass band?",
+      "expectedAnswer": "6 days. 7 days (including the last day) is also acceptable.",
+      "totalTurns": 507,
+      "totalSessions": 46,
+      "evidenceTurnCount": 2,
+      "ingestMs": 22888,
+      "retrieveMs": 460,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 142,
+      "retrievedNodeIds": [
+        "gpt4_fa19884c::answer_ff201786_2::0",
+        "gpt4_fa19884c::answer_ff201786_2::1",
+        "gpt4_fa19884c::answer_ff201786_1::9",
+        "gpt4_fa19884c::answer_ff201786_1::8",
+        "gpt4_fa19884c::answer_ff201786_1::10",
+        "gpt4_fa19884c::answer_ff201786_2::5",
+        "gpt4_fa19884c::answer_ff201786_2::3",
+        "gpt4_fa19884c::128082f8_1::11"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.8772153153380493
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.8772153153380493
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.8772153153380493
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "0bc8ad92",
+      "questionType": "temporal-reasoning",
+      "isAbstention": false,
+      "question": "How many months have passed since I last visited a museum with a friend?",
+      "expectedAnswer": 5,
+      "totalTurns": 443,
+      "totalSessions": 49,
+      "evidenceTurnCount": 3,
+      "ingestMs": 21627,
+      "retrieveMs": 461,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 139,
+      "retrievedNodeIds": [
+        "0bc8ad92::answer_f4ea84fb_3::4",
+        "0bc8ad92::ultrachat_349938::4",
+        "0bc8ad92::answer_f4ea84fb_3::7",
+        "0bc8ad92::answer_f4ea84fb_3::0",
+        "0bc8ad92::answer_f4ea84fb_3::6",
+        "0bc8ad92::answer_f4ea84fb_1::8",
+        "0bc8ad92::answer_f4ea84fb_3::9",
+        "0bc8ad92::ultrachat_349938::5",
+        "0bc8ad92::answer_f4ea84fb_1::10",
+        "0bc8ad92::answer_f4ea84fb_1::0",
+        "0bc8ad92::answer_f4ea84fb_3::1"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.18154179253735267
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.3171937659698004
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.3171937659698004
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "af082822",
+      "questionType": "temporal-reasoning",
+      "isAbstention": false,
+      "question": "How many weeks ago did I attend the friends and family sale at Nordstrom?",
+      "expectedAnswer": 2,
+      "totalTurns": 495,
+      "totalSessions": 43,
+      "evidenceTurnCount": 1,
+      "ingestMs": 23236,
+      "retrieveMs": 492,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 136,
+      "retrievedNodeIds": [
+        "af082822::1dfef591_2::10",
+        "af082822::1fcb4134_2::0",
+        "af082822::1fcb4134_2::10",
+        "af082822::1fcb4134_2::2",
+        "af082822::1040e24b_1::1",
+        "af082822::facef6e0_1::2",
+        "af082822::answer_b51b6115_1::4",
+        "af082822::1040e24b_1::10",
+        "af082822::ultrachat_323777::4",
+        "af082822::d048ae4b_2::0",
+        "af082822::1040e24b_1::5",
+        "af082822::cae65795_2::6",
+        "af082822::1fcb4134_2::1",
+        "af082822::1a920713_2::0"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 0,
+          "recallAll": 0,
+          "ndcg": 0
+        },
+        "10": {
+          "recallAny": 0,
+          "recallAll": 0,
+          "ndcg": 0
+        },
+        "20": {
+          "recallAny": 0,
+          "recallAll": 0,
+          "ndcg": 0
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "6a1eabeb",
+      "questionType": "knowledge-update",
+      "isAbstention": false,
+      "question": "What was my personal best time in the charity 5K run?",
+      "expectedAnswer": "25 minutes and 50 seconds (or 25:50)",
+      "totalTurns": 413,
+      "totalSessions": 40,
+      "evidenceTurnCount": 2,
+      "ingestMs": 21201,
+      "retrieveMs": 465,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 143,
+      "retrievedNodeIds": [
+        "6a1eabeb::answer_a25d4a91_1::4",
+        "6a1eabeb::answer_a25d4a91_2::0",
+        "6a1eabeb::answer_a25d4a91_2::10",
+        "6a1eabeb::answer_a25d4a91_2::1",
+        "6a1eabeb::afe04238_7::8",
+        "6a1eabeb::answer_a25d4a91_2::11",
+        "6a1eabeb::4aaf678f_3::8"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "6aeb4375",
+      "questionType": "knowledge-update",
+      "isAbstention": false,
+      "question": "How many Korean restaurants have I tried in my city?",
+      "expectedAnswer": "four",
+      "totalTurns": 468,
+      "totalSessions": 47,
+      "evidenceTurnCount": 2,
+      "ingestMs": 22068,
+      "retrieveMs": 506,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 133,
+      "retrievedNodeIds": [
+        "6aeb4375::answer_3f9693b7_1::8",
+        "6aeb4375::answer_3f9693b7_1::9",
+        "6aeb4375::answer_3f9693b7_2::2",
+        "6aeb4375::answer_3f9693b7_2::3",
+        "6aeb4375::answer_3f9693b7_1::6",
+        "6aeb4375::answer_3f9693b7_1::11",
+        "6aeb4375::answer_3f9693b7_1::7",
+        "6aeb4375::answer_3f9693b7_1::2",
+        "6aeb4375::answer_3f9693b7_1::0",
+        "6aeb4375::answer_3f9693b7_1::1",
+        "6aeb4375::402e0082_5::1",
+        "6aeb4375::answer_3f9693b7_2::0",
+        "6aeb4375::402e0082_5::2",
+        "6aeb4375::402e0082_5::9",
+        "6aeb4375::sharegpt_MWlvrvZ_0::7",
+        "6aeb4375::answer_3f9693b7_2::1",
+        "6aeb4375::answer_3f9693b7_2::5"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.9197207891481876
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.9197207891481876
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 0.9197207891481876
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "830ce83f",
+      "questionType": "knowledge-update",
+      "isAbstention": false,
+      "question": "Where did Rachel move to after her recent relocation?",
+      "expectedAnswer": "the suburbs",
+      "totalTurns": 511,
+      "totalSessions": 47,
+      "evidenceTurnCount": 3,
+      "ingestMs": 23272,
+      "retrieveMs": 509,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 138,
+      "retrievedNodeIds": [
+        "830ce83f::answer_0b1a0942_1::4",
+        "830ce83f::answer_0b1a0942_1::3",
+        "830ce83f::answer_0b1a0942_1::9",
+        "830ce83f::answer_0b1a0942_1::2",
+        "830ce83f::answer_0b1a0942_1::8",
+        "830ce83f::47c5482a::2",
+        "830ce83f::answer_0b1a0942_1::6",
+        "830ce83f::answer_0b1a0942_1::10",
+        "830ce83f::47c5482a::3",
+        "830ce83f::639cec58::7",
+        "830ce83f::sharegpt_GewGpB8_35::7",
+        "830ce83f::47c5482a::8"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.6713860725233041
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.6713860725233041
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 0,
+          "ndcg": 0.6713860725233041
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "852ce960",
+      "questionType": "knowledge-update",
+      "isAbstention": false,
+      "question": "What was the amount I was pre-approved for when I got my mortgage from Wells Fargo?",
+      "expectedAnswer": "$400,000",
+      "totalTurns": 396,
+      "totalSessions": 39,
+      "evidenceTurnCount": 2,
+      "ingestMs": 66912,
+      "retrieveMs": 594,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 138,
+      "retrievedNodeIds": [
+        "852ce960::answer_3a6f1e82_1::2",
+        "852ce960::answer_3a6f1e82_2::0",
+        "852ce960::answer_3a6f1e82_1::3",
+        "852ce960::answer_3a6f1e82_1::11",
+        "852ce960::answer_3a6f1e82_2::9",
+        "852ce960::sharegpt_Rmlombn_5::5",
+        "852ce960::answer_3a6f1e82_1::10",
+        "852ce960::a110c4dc_1::11",
+        "852ce960::answer_3a6f1e82_1::9",
+        "852ce960::0840765f_2::4",
+        "852ce960::answer_3a6f1e82_1::0",
+        "852ce960::answer_3a6f1e82_2::8"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    },
+    {
+      "questionId": "7161e7e2",
+      "questionType": "single-session-assistant",
+      "isAbstention": false,
+      "question": "I'm checking our previous chat about the shift rotation sheet for GM social media agents. Can you remind me what was the rotation for Admon on a Sunday?",
+      "expectedAnswer": "Admon was assigned to the 8 am - 4 pm (Day Shift) on Sundays.",
+      "totalTurns": 550,
+      "totalSessions": 48,
+      "evidenceTurnCount": 1,
+      "ingestMs": 23553,
+      "retrieveMs": 597,
+      "rawRetrievedCount": 150,
+      "contaminatedCount": 136,
+      "retrievedNodeIds": [
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::13",
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::11",
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::7",
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::3",
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::9",
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::1",
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::5",
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::10",
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::0",
+        "7161e7e2::sharegpt_xkWMnwQ_0::12",
+        "7161e7e2::sharegpt_xkWMnwQ_0::10",
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::4",
+        "7161e7e2::sharegpt_RtCgJK2_307::21",
+        "7161e7e2::answer_sharegpt_5Lzox6N_0::2"
+      ],
+      "retrievalMetricsByK": {
+        "5": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "10": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        },
+        "20": {
+          "recallAny": 1,
+          "recallAll": 1,
+          "ndcg": 1
+        }
+      },
+      "answer": null,
+      "answerError": "Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.",
+      "judge": null,
+      "judgeError": "No answer generated for this instance (see answerError) — nothing to judge."
+    }
+  ]
+}

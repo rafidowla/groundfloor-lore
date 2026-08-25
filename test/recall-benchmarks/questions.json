@@ -1,0 +1,86 @@
+{
+    "version": 1,
+    "notes": "Operator-derived question set for Sprint R benchmarks. Each question carries: id (stable), topic (the actual query string passed to recall), expectedTypes (any of these in top-5 is a positive), expectedKeywords (any expected substring in label/content), minMatchesInTop5 (precision@5 threshold for the question — usually 1), minMatchesInTop10 (recall@10 threshold — usually 1). Replay-friendly: no daemon dependency; consumed by runBenchmarks.ts against synthetic seed data that mirrors the Day-1 dogfood failure pattern.",
+    "questions": [
+        {
+            "id": "Q1",
+            "topic": "What did we ship in Sprint S?",
+            "expectedTypes": ["decision"],
+            "expectedKeywords": ["sprint", "shipped", "streaming"],
+            "minMatchesInTop5": 1,
+            "minMatchesInTop10": 1
+        },
+        {
+            "id": "Q2",
+            "topic": "What did we ship in Sprint H?",
+            "expectedTypes": ["decision", "architecture"],
+            "expectedKeywords": ["sprint", "migration"],
+            "minMatchesInTop5": 1,
+            "minMatchesInTop10": 1
+        },
+        {
+            "id": "Q3",
+            "topic": "What convention did we set for prompt budgets?",
+            "expectedTypes": ["convention"],
+            "expectedKeywords": ["prompt", "budget"],
+            "minMatchesInTop5": 1,
+            "minMatchesInTop10": 1
+        },
+        {
+            "id": "Q4",
+            "topic": "How do we handle broad except clauses?",
+            "expectedTypes": ["bug_pattern", "convention"],
+            "expectedKeywords": ["except", "broad"],
+            "minMatchesInTop5": 1,
+            "minMatchesInTop10": 1
+        },
+        {
+            "id": "Q5",
+            "topic": "What's the deployment model for Lore?",
+            "expectedTypes": ["architecture", "decision"],
+            "expectedKeywords": ["deploy", "local-first"],
+            "minMatchesInTop5": 1,
+            "minMatchesInTop10": 1
+        },
+        {
+            "id": "Q6",
+            "topic": "How does the outbox handle backpressure?",
+            "expectedTypes": ["architecture", "decision"],
+            "expectedKeywords": ["outbox", "backpressure"],
+            "minMatchesInTop5": 1,
+            "minMatchesInTop10": 1
+        },
+        {
+            "id": "Q7",
+            "topic": "What troubleshooting steps fix workspace_required errors?",
+            "expectedTypes": ["troubleshooting"],
+            "expectedKeywords": ["workspace_required", "workspace"],
+            "minMatchesInTop5": 1,
+            "minMatchesInTop10": 1
+        },
+        {
+            "id": "Q8",
+            "topic": "What is the embedding strategy?",
+            "expectedTypes": ["decision", "architecture"],
+            "expectedKeywords": ["embedding", "Xenova", "BGE"],
+            "minMatchesInTop5": 1,
+            "minMatchesInTop10": 1
+        },
+        {
+            "id": "Q9",
+            "topic": "What did Sprint Z deliver?",
+            "expectedTypes": ["decision"],
+            "expectedKeywords": ["bulk", "loader", "Sprint Z"],
+            "minMatchesInTop5": 1,
+            "minMatchesInTop10": 1
+        },
+        {
+            "id": "Q10",
+            "topic": "Loom solo build plan",
+            "expectedTypes": ["decision", "architecture"],
+            "expectedKeywords": ["Loom", "solo"],
+            "minMatchesInTop5": 1,
+            "minMatchesInTop10": 1
+        }
+    ]
+}

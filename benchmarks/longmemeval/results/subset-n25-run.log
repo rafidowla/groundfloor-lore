@@ -1,0 +1,286 @@
+Args: {
+  n: 25,
+  ks: [ 5, 10, 20 ],
+  dataset: '/Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/data/longmemeval_s_cleaned.json',
+  dataDir: '/Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/lore-home',
+  contextK: 10,
+  resultsFile: 'benchmarks/longmemeval/results/subset-n25-smoketest.json'
+}
+Loaded 500 instances from /Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/data/longmemeval_s_cleaned.json
+Selected stratified subset of 25: {
+  'single-session-user': 4,
+  'multi-session': 7,
+  'single-session-preference': 2,
+  'temporal-reasoning': 7,
+  'knowledge-update': 4,
+  'single-session-assistant': 1
+}
+[Lore MCP] Embedding provider: local (model=Xenova/multilingual-e5-small, dim=384)
+2026-08-12T23:59:28.790Z INFO [Lore MCP] ORT backend: onnxruntime-node 1.24.3 (cpu+webgpu+coreml)
+[Lore MCP] Node types: decision, convention, note, bug_pattern, architecture, troubleshooting
+[Lore MCP] Edge relations: owner, editor, viewer, member, parent, decided_for, caused_by, applies_to, supersedes, related_to, depends_on
+[audit-export] exporter 'file' started
+[outbox replicator] started
+
+[1/25] e47becba (single-session-user) — ingesting 550 turns...
+  ingested 550 turns / 53 sessions in 30145ms, 2 evidence turn(s)
+  retrieved 150 raw (0 cross-question, filtered out) → 150 own in 217ms (top-3: e47becba::d94b721b::1, e47becba::02bd2b90_3::3, e47becba::answer_280352e9::4)
+    @5: recall_any=1 recall_all=1 ndcg=0.544
+    @10: recall_any=1 recall_all=1 ndcg=0.544
+    @20: recall_any=1 recall_all=1 ndcg=0.544
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[2/25] 118b2229 (single-session-user) — ingesting 485 turns...
+  ingested 485 turns / 45 sessions in 29178ms, 1 evidence turn(s)
+  retrieved 150 raw (97 cross-question, filtered out) → 53 own in 211ms (top-3: 118b2229::answer_40a90d51::8, 118b2229::answer_40a90d51::9, 118b2229::5209e813_2::9)
+    @5: recall_any=1 recall_all=1 ndcg=1.000
+    @10: recall_any=1 recall_all=1 ndcg=1.000
+    @20: recall_any=1 recall_all=1 ndcg=1.000
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[3/25] 51a45a95 (single-session-user) — ingesting 529 turns...
+  ingested 529 turns / 50 sessions in 31586ms, 1 evidence turn(s)
+  retrieved 150 raw (109 cross-question, filtered out) → 41 own in 2056ms (top-3: 51a45a95::answer_d61669c7::4, 51a45a95::answer_d61669c7::5, 51a45a95::answer_d61669c7::1)
+    @5: recall_any=1 recall_all=1 ndcg=1.000
+    @10: recall_any=1 recall_all=1 ndcg=1.000
+    @20: recall_any=1 recall_all=1 ndcg=1.000
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[4/25] 58bf7951 (single-session-user) — ingesting 616 turns...
+  ingested 616 turns / 57 sessions in 35924ms, 1 evidence turn(s)
+  retrieved 150 raw (131 cross-question, filtered out) → 19 own in 230ms (top-3: 58bf7951::07b7a667_1::11, 58bf7951::07b7a667_1::10, 58bf7951::answer_355c48bb::3)
+    @5: recall_any=1 recall_all=1 ndcg=0.387
+    @10: recall_any=1 recall_all=1 ndcg=0.387
+    @20: recall_any=1 recall_all=1 ndcg=0.387
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[5/25] 0a995998 (multi-session) — ingesting 484 turns...
+  ingested 484 turns / 44 sessions in 30357ms, 3 evidence turn(s)
+  retrieved 150 raw (110 cross-question, filtered out) → 40 own in 2153ms (top-3: 0a995998::answer_afa9873b_1::4, 0a995998::answer_afa9873b_3::6, 0a995998::answer_afa9873b_1::5)
+    @5: recall_any=1 recall_all=0 ndcg=0.765
+    @10: recall_any=1 recall_all=0 ndcg=0.765
+    @20: recall_any=1 recall_all=0 ndcg=0.765
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[6/25] 6d550036 (multi-session) — ingesting 505 turns...
+  ingested 505 turns / 47 sessions in 30624ms, 4 evidence turn(s)
+  retrieved 150 raw (143 cross-question, filtered out) → 7 own in 292ms (top-3: 6d550036::sharegpt_J7ZAFLd_0::0, 6d550036::2e4430d8_2::0, 6d550036::sharegpt_oXgiN7q_53::3)
+    @5: recall_any=0 recall_all=0 ndcg=0.000
+    @10: recall_any=1 recall_all=0 ndcg=0.139
+    @20: recall_any=1 recall_all=0 ndcg=0.139
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[7/25] gpt4_59c863d7 (multi-session) — ingesting 481 turns...
+  ingested 481 turns / 47 sessions in 30427ms, 5 evidence turn(s)
+  retrieved 150 raw (127 cross-question, filtered out) → 23 own in 2209ms (top-3: gpt4_59c863d7::answer_593bdffd_4::1, gpt4_59c863d7::answer_593bdffd_2::0, gpt4_59c863d7::answer_593bdffd_4::0)
+    @5: recall_any=1 recall_all=0 ndcg=0.530
+    @10: recall_any=1 recall_all=0 ndcg=0.530
+    @20: recall_any=1 recall_all=0 ndcg=0.608
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[8/25] b5ef892d (multi-session) — ingesting 516 turns...
+  ingest attempt 1 hit a retryable Kùzu checkpoint timeout, retrying in 3s...
+  ingested 516 turns / 52 sessions in 30003ms, 2 evidence turn(s)
+  retrieved 150 raw (140 cross-question, filtered out) → 10 own in 1229ms (top-3: b5ef892d::answer_a8b4290f_1::0, b5ef892d::answer_a8b4290f_3::0, b5ef892d::answer_a8b4290f_2::0)
+    @5: recall_any=1 recall_all=1 ndcg=0.920
+    @10: recall_any=1 recall_all=1 ndcg=0.920
+    @20: recall_any=1 recall_all=1 ndcg=0.920
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[9/25] e831120c (multi-session) — ingesting 481 turns...
+  ingested 481 turns / 47 sessions in 35642ms, 2 evidence turn(s)
+  retrieved 150 raw (127 cross-question, filtered out) → 23 own in 342ms (top-3: e831120c::answer_86c505e7_2::4, e831120c::answer_86c505e7_2::3, e831120c::answer_86c505e7_1::0)
+    @5: recall_any=1 recall_all=1 ndcg=0.571
+    @10: recall_any=1 recall_all=1 ndcg=0.571
+    @20: recall_any=1 recall_all=1 ndcg=0.571
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[10/25] 3a704032 (multi-session) — ingesting 479 turns...
+  ingested 479 turns / 48 sessions in 30705ms, 2 evidence turn(s)
+  retrieved 150 raw (145 cross-question, filtered out) → 5 own in 2319ms (top-3: 3a704032::answer_c2204106_2::10, 3a704032::ultrachat_501733::4, 3a704032::answer_c2204106_1::4)
+    @5: recall_any=1 recall_all=0 ndcg=0.307
+    @10: recall_any=1 recall_all=0 ndcg=0.307
+    @20: recall_any=1 recall_all=0 ndcg=0.307
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[11/25] gpt4_d84a3211 (multi-session) — ingesting 495 turns...
+  ingested 495 turns / 48 sessions in 29114ms, 4 evidence turn(s)
+  retrieved 150 raw (122 cross-question, filtered out) → 28 own in 316ms (top-3: gpt4_d84a3211::answer_2880eb6c_4::4, gpt4_d84a3211::answer_2880eb6c_4::6, gpt4_d84a3211::answer_2880eb6c_3::2)
+    @5: recall_any=1 recall_all=0 ndcg=0.246
+    @10: recall_any=1 recall_all=0 ndcg=0.369
+    @20: recall_any=1 recall_all=1 ndcg=0.561
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[12/25] 8a2466db (single-session-preference) — ingesting 508 turns...
+  ingested 508 turns / 50 sessions in 27113ms, 1 evidence turn(s)
+  retrieved 150 raw (141 cross-question, filtered out) → 9 own in 317ms (top-3: 8a2466db::6dcf5fa0_1::1, 8a2466db::answer_edb03329::0, 8a2466db::6dcf5fa0_1::11)
+    @5: recall_any=1 recall_all=1 ndcg=0.631
+    @10: recall_any=1 recall_all=1 ndcg=0.631
+    @20: recall_any=1 recall_all=1 ndcg=0.631
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[13/25] 06878be2 (single-session-preference) — ingesting 443 turns...
+  ingested 443 turns / 48 sessions in 28843ms, 3 evidence turn(s)
+  retrieved 150 raw (141 cross-question, filtered out) → 9 own in 330ms (top-3: 06878be2::answer_555dfb94::1, 06878be2::answer_555dfb94::5, 06878be2::8fcfbe43_2::3)
+    @5: recall_any=0 recall_all=0 ndcg=0.000
+    @10: recall_any=0 recall_all=0 ndcg=0.000
+    @20: recall_any=0 recall_all=0 ndcg=0.000
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[14/25] gpt4_59149c77 (temporal-reasoning) — ingesting 484 turns...
+  ingested 484 turns / 48 sessions in 26498ms, 2 evidence turn(s)
+  retrieved 150 raw (127 cross-question, filtered out) → 23 own in 323ms (top-3: gpt4_59149c77::answer_d00ba6d0_2::6, gpt4_59149c77::answer_d00ba6d0_1::1, gpt4_59149c77::answer_d00ba6d0_1::0)
+    @5: recall_any=1 recall_all=1 ndcg=0.920
+    @10: recall_any=1 recall_all=1 ndcg=0.920
+    @20: recall_any=1 recall_all=1 ndcg=0.920
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[15/25] gpt4_f49edff3 (temporal-reasoning) — ingesting 498 turns...
+  ingested 498 turns / 47 sessions in 26844ms, 3 evidence turn(s)
+  retrieved 150 raw (141 cross-question, filtered out) → 9 own in 2338ms (top-3: gpt4_f49edff3::answer_3e9fce53_1::1, gpt4_f49edff3::answer_3e9fce53_3::0, gpt4_f49edff3::answer_3e9fce53_2::1)
+    @5: recall_any=1 recall_all=0 ndcg=0.498
+    @10: recall_any=1 recall_all=1 ndcg=0.655
+    @20: recall_any=1 recall_all=1 ndcg=0.655
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[16/25] 71017276 (temporal-reasoning) — ingesting 614 turns...
+  ingested 614 turns / 49 sessions in 32368ms, 1 evidence turn(s)
+  retrieved 150 raw (139 cross-question, filtered out) → 11 own in 372ms (top-3: 71017276::answer_0b4a8adc_1::0, 71017276::answer_0b4a8adc_1::2, 71017276::answer_0b4a8adc_1::3)
+    @5: recall_any=1 recall_all=1 ndcg=1.000
+    @10: recall_any=1 recall_all=1 ndcg=1.000
+    @20: recall_any=1 recall_all=1 ndcg=1.000
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[17/25] b46e15ed (temporal-reasoning) — ingesting 478 turns...
+  ingested 478 turns / 46 sessions in 27273ms, 5 evidence turn(s)
+  retrieved 150 raw (144 cross-question, filtered out) → 6 own in 2177ms (top-3: b46e15ed::answer_4bfcc250_3::0, b46e15ed::answer_4bfcc250_1::10, b46e15ed::answer_4bfcc250_3::1)
+    @5: recall_any=1 recall_all=0 ndcg=0.339
+    @10: recall_any=1 recall_all=0 ndcg=0.339
+    @20: recall_any=1 recall_all=0 ndcg=0.339
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[18/25] gpt4_fa19884c (temporal-reasoning) — ingesting 507 turns...
+  ingest attempt 1 hit a retryable Kùzu checkpoint timeout, retrying in 3s...
+  ingested 507 turns / 46 sessions in 28928ms, 2 evidence turn(s)
+  retrieved 150 raw (141 cross-question, filtered out) → 9 own in 1334ms (top-3: gpt4_fa19884c::answer_ff201786_2::0, gpt4_fa19884c::answer_ff201786_2::1, gpt4_fa19884c::answer_ff201786_1::10)
+    @5: recall_any=1 recall_all=0 ndcg=0.613
+    @10: recall_any=1 recall_all=1 ndcg=0.832
+    @20: recall_any=1 recall_all=1 ndcg=0.832
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[19/25] 0bc8ad92 (temporal-reasoning) — ingesting 443 turns...
+  ingested 443 turns / 49 sessions in 26423ms, 3 evidence turn(s)
+  retrieved 150 raw (138 cross-question, filtered out) → 12 own in 417ms (top-3: 0bc8ad92::ultrachat_349938::4, 0bc8ad92::answer_f4ea84fb_3::7, 0bc8ad92::answer_f4ea84fb_3::4)
+    @5: recall_any=1 recall_all=0 ndcg=0.202
+    @10: recall_any=1 recall_all=0 ndcg=0.202
+    @20: recall_any=1 recall_all=0 ndcg=0.333
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[20/25] af082822 (temporal-reasoning) — ingesting 495 turns...
+  ingested 495 turns / 43 sessions in 25990ms, 1 evidence turn(s)
+  retrieved 150 raw (142 cross-question, filtered out) → 8 own in 418ms (top-3: af082822::1fcb4134_2::0, af082822::1dfef591_2::10, af082822::1040e24b_1::1)
+    @5: recall_any=0 recall_all=0 ndcg=0.000
+    @10: recall_any=0 recall_all=0 ndcg=0.000
+    @20: recall_any=0 recall_all=0 ndcg=0.000
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[21/25] 6a1eabeb (knowledge-update) — ingesting 413 turns...
+  ingest attempt 1 hit a retryable Kùzu checkpoint timeout, retrying in 3s...
+  ingested 413 turns / 40 sessions in 23740ms, 2 evidence turn(s)
+  retrieved 150 raw (140 cross-question, filtered out) → 10 own in 455ms (top-3: 6a1eabeb::answer_a25d4a91_1::4, 6a1eabeb::answer_a25d4a91_2::0, 6a1eabeb::answer_a25d4a91_2::10)
+    @5: recall_any=1 recall_all=1 ndcg=1.000
+    @10: recall_any=1 recall_all=1 ndcg=1.000
+    @20: recall_any=1 recall_all=1 ndcg=1.000
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[22/25] 6aeb4375 (knowledge-update) — ingesting 468 turns...
+  ingested 468 turns / 47 sessions in 27194ms, 2 evidence turn(s)
+  retrieved 150 raw (136 cross-question, filtered out) → 14 own in 992ms (top-3: 6aeb4375::answer_3f9693b7_1::8, 6aeb4375::answer_3f9693b7_1::9, 6aeb4375::answer_3f9693b7_2::3)
+    @5: recall_any=1 recall_all=1 ndcg=0.877
+    @10: recall_any=1 recall_all=1 ndcg=0.877
+    @20: recall_any=1 recall_all=1 ndcg=0.877
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[23/25] 830ce83f (knowledge-update) — ingesting 511 turns...
+  ingested 511 turns / 47 sessions in 26516ms, 3 evidence turn(s)
+  retrieved 150 raw (139 cross-question, filtered out) → 11 own in 477ms (top-3: 830ce83f::answer_0b1a0942_1::4, 830ce83f::answer_0b1a0942_1::2, 830ce83f::answer_0b1a0942_1::3)
+    @5: recall_any=1 recall_all=0 ndcg=0.765
+    @10: recall_any=1 recall_all=0 ndcg=0.765
+    @20: recall_any=1 recall_all=0 ndcg=0.765
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[24/25] 852ce960 (knowledge-update) — ingesting 396 turns...
+  ingest attempt 1 hit a retryable Kùzu checkpoint timeout, retrying in 3s...
+  ingested 396 turns / 39 sessions in 69901ms, 2 evidence turn(s)
+  retrieved 150 raw (135 cross-question, filtered out) → 15 own in 481ms (top-3: 852ce960::answer_3a6f1e82_1::2, 852ce960::answer_3a6f1e82_2::0, 852ce960::answer_3a6f1e82_1::11)
+    @5: recall_any=1 recall_all=1 ndcg=1.000
+    @10: recall_any=1 recall_all=1 ndcg=1.000
+    @20: recall_any=1 recall_all=1 ndcg=1.000
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+[25/25] 7161e7e2 (single-session-assistant) — ingesting 550 turns...
+  ingested 550 turns / 48 sessions in 27889ms, 1 evidence turn(s)
+  retrieved 150 raw (134 cross-question, filtered out) → 16 own in 499ms (top-3: 7161e7e2::answer_sharegpt_5Lzox6N_0::13, 7161e7e2::answer_sharegpt_5Lzox6N_0::11, 7161e7e2::answer_sharegpt_5Lzox6N_0::3)
+    @5: recall_any=1 recall_all=1 ndcg=1.000
+    @10: recall_any=1 recall_all=1 ndcg=1.000
+    @20: recall_any=1 recall_all=1 ndcg=1.000
+  answer SKIPPED: Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+[Lore MCP] graceful shutdown begin (dispose)
+[outbox replicator] stopped
+[Lore MCP] graceful shutdown complete
+
+Wrote full results to benchmarks/longmemeval/results/subset-n25-smoketest.json
+
+==============================================================================
+LongMemEval x Lore — subset report
+==============================================================================
+generated:    2026-08-13T00:15:59.272Z
+dataset:      /Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/data/longmemeval_s_cleaned.json
+subset size:  25
+k values:     5, 10, 20
+
+ingested:     12429 turns across 25 questions in 769.2s
+avg ingest:   30.77s/question, 61.9ms/turn
+
+--- Objective retrieval metrics (no LLM judge required) ---
+Overall (mean across subset):
+  @5: recall_any=88.0%  recall_all=52.0%  ndcg=0.605
+  @10: recall_any=92.0%  recall_all=60.0%  ndcg=0.630
+  @20: recall_any=92.0%  recall_all=64.0%  ndcg=0.646
+
+By category:
+  single-session-user (n=4):
+    @5: recall_any=100.0%  recall_all=100.0%  ndcg=0.733
+    @10: recall_any=100.0%  recall_all=100.0%  ndcg=0.733
+    @20: recall_any=100.0%  recall_all=100.0%  ndcg=0.733
+  multi-session (n=7):
+    @5: recall_any=85.7%  recall_all=28.6%  ndcg=0.477
+    @10: recall_any=100.0%  recall_all=28.6%  ndcg=0.514
+    @20: recall_any=100.0%  recall_all=42.9%  ndcg=0.553
+  single-session-preference (n=2):
+    @5: recall_any=50.0%  recall_all=50.0%  ndcg=0.315
+    @10: recall_any=50.0%  recall_all=50.0%  ndcg=0.315
+    @20: recall_any=50.0%  recall_all=50.0%  ndcg=0.315
+  temporal-reasoning (n=7):
+    @5: recall_any=85.7%  recall_all=28.6%  ndcg=0.510
+    @10: recall_any=85.7%  recall_all=57.1%  ndcg=0.564
+    @20: recall_any=85.7%  recall_all=57.1%  ndcg=0.583
+  knowledge-update (n=4):
+    @5: recall_any=100.0%  recall_all=75.0%  ndcg=0.911
+    @10: recall_any=100.0%  recall_all=75.0%  ndcg=0.911
+    @20: recall_any=100.0%  recall_all=75.0%  ndcg=0.911
+  single-session-assistant (n=1):
+    @5: recall_any=100.0%  recall_all=100.0%  ndcg=1.000
+    @10: recall_any=100.0%  recall_all=100.0%  ndcg=1.000
+    @20: recall_any=100.0%  recall_all=100.0%  ndcg=1.000
+
+--- Answering (assistant under test) ---
+  answered: 0/25, skipped: 25/25
+  skip reason (first): Neither OPENAI_API_KEY nor ANTHROPIC_API_KEY is set. No scriptable answering model is available in this environment — see answerModel.ts header for what was used instead in the subset smoke test.
+
+--- Judge (official gpt-4o-2024-08-06 grading) ---
+  judged: 0/25, skipped: 25/25
+  BLOCKED: No answer generated for this instance (see answerError) — nothing to judge.
+==============================================================================
+
+EXIT_CODE=0

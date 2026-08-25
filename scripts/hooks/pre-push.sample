@@ -1,0 +1,24 @@
+#!/bin/sh
+#
+# pre-push hook that runs MDM Schema Drift detection via Lore.
+#
+# To enable this hook, rename this file to "pre-push" and make it executable:
+#   mv scripts/hooks/pre-push.sample .git/hooks/pre-push
+#   chmod +x .git/hooks/pre-push
+
+echo "\n[lore] Running Master Data Model Pre-Push Audit..."
+
+# If 'lore' is perfectly installed globally:
+# lore audit
+
+# Alternatively, if running locally via npx in development environment:
+npx tsx src/cli/index.ts audit
+
+if [ $? -ne 0 ]; then
+    echo "[lore] ❌ PUSH ABORTED: Schema Drift Detected."
+    echo "[lore] Please align your codebase to the Master Data Model before pushing."
+    exit 1
+fi
+
+echo "[lore] ✅ Audit passed. Proceeding with push."
+exit 0

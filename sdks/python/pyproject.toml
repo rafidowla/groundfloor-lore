@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lore-client"
+version = "0.1.0"
+description = "Python client for Lore Core — a local-first tri-substrate (graph+vector+relational) database for AI agent memory. Wraps Lore's REST API and can spawn/manage a local `lore serve` daemon for embedded-like ergonomics."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Elastic-2.0"
+authors = [{ name = "Groundfloor" }]
+keywords = ["lore", "memory", "agent", "knowledge-graph", "vector-search", "rag"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "httpx>=0.27",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.urls]
+Repository = "https://bitbucket.org/codementeam/groundfloor-lore"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lore_client"]

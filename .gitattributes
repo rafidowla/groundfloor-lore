@@ -1,0 +1,3 @@
+# atlas-memory-merge-begin
+.atlas/memory.jsonl merge=atlas-memory-union
+# atlas-memory-merge-end
