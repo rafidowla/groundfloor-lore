@@ -222,7 +222,10 @@ Three substrates, all first-class:
   Nodes, edges, traversal.
 - **Vector** — embedded [LanceDB](https://lancedb.com/). Embeddings for
   semantic recall, generated locally with no API key and no network.
-- **Relational** — SQLite. Outbox, migrations, audit log, auth.
+- **Relational** — SQLite. Outbox, migrations, audit log, auth, plus a
+  schema-agnostic tabular surface (`collection_*` tools / `/v1/{collection}`
+  REST) for application-defined tables — typed columns, filtered CRUD, and
+  SQL aggregates (count/sum/avg/group-by/time-series).
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌─────────────────────────┐
