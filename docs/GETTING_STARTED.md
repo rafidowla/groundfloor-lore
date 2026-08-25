@@ -55,7 +55,8 @@ hosted Dataplane.
 - **Three substrates:** SurrealDB (graph: nodes + edges + traversal — Kùzu
   was fully removed 2026-08-21, see `docs/KUZU_REMOVAL.md`), LanceDB
   (vector: embeddings for semantic recall), SQLite (relational: outbox,
-  migrations, audit, auth). All writes go through `LoreStorageClient`.
+  migrations, audit, auth, plus tabular collections + SQL aggregates). All
+  writes go through `LoreStorageClient`.
 - **Local-first:** Works fully offline. No network needed for solo use.
 - **Optional sync:** The Sync Engine pushes/pulls team-shared knowledge to a
   hosted **Dataplane** via `groundfloor-ts-sdk`, buffered through a local WAL.

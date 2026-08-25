@@ -10,7 +10,8 @@
 
 Lore Core is domain-agnostic. The same engine backs many **workspaces**, each with its own schema and vocabulary: engineering, IT/security, commercial real estate, sales, legal, or personal. Code intelligence is **not** built in — it lives in **Atlas**, one external client application for the software-development domain (see *External clients* below).
 
-The system operates as a **single MCP server** (`@groundfloor/lore`) over three local substrates: **SurrealDB or Kùzu** (embedded graph — SurrealDB by default as of v3.13.0, Kùzu remains fully supported per workspace), **LanceDB** (vector store for semantic recall), and **SQLite** (outbox, migrations, audit, auth). Team-shared knowledge syncs to a hosted **Dataplane** via the Groundfloor TS-SDK.
+The system operates as a **single MCP server** (`@groundfloor/lore`) over three local substrates: **SurrealDB or Kùzu** (embedded graph — SurrealDB by default as of v3.13.0, Kùzu remains fully supported per workspace), **LanceDB** (vector store for semantic recall), and **SQLite** (outbox, migrations, audit, auth, plus application-defined
+tabular collections with SQL aggregates). Team-shared knowledge syncs to a hosted **Dataplane** via the Groundfloor TS-SDK.
 
 **Current Status:**
 
@@ -18,7 +19,7 @@ The system operates as a **single MCP server** (`@groundfloor/lore`) over three 
 |---|---|---|
 | Graph substrate (SurrealDB default, Kùzu supported) | ✅ Built | `LoreNode` / `LoreEdge` tables (`engines/surrealGraph.ts`, `engines/localGraph.ts`) |
 | Vector substrate (LanceDB) | ✅ Built | Embeddings + semantic recall (`engines/verbatimStore.ts`, `dataplaneVectorStore.ts`) |
-| Relational substrate (SQLite) | ✅ Built | Outbox, migrations, audit, auth |
+| Relational substrate (SQLite) | ✅ Built | Outbox, migrations, audit, auth, plus tabular collections + SQL aggregates |
 | `LoreStorageClient` facade | ✅ Built | Single write path; local ↔ Dataplane swap point (`storage/loreStorageClient.ts`) |
 | Offline-first sync engine (WAL) | ✅ Built | Local-first push/pull to Dataplane (`engines/syncEngine.ts`) |
 | Dataplane sync adapter (TS-SDK) | ✅ Built | `TsSdkAdapter` over `groundfloor-ts-sdk` (`engines/tsSdkAdapter.ts`) |
@@ -262,7 +263,7 @@ interconnected knowledge nodes.
 |---|---|---|
 | **Graph** | SurrealDB (default) or Kùzu (embedded) | Zero-process, schema-agnostic node/edge model with native graph traversal |
 | **Vector** | LanceDB (embedded) | Embedding store for semantic recall without a separate service |
-| **Relational** | SQLite (embedded) | Outbox, migrations, audit, auth in one durable engine |
+| **Relational** | SQLite (embedded) | Outbox, migrations, audit, auth, plus tabular collections + SQL aggregates, in one durable engine |
 | **Team sync** | Dataplane via TS-SDK | `TsSdkAdapter` implements the `SyncAdapter` interface |
 | **Offline buffer** | WAL file (JSONL) | Local writes never blocked on network |
 
@@ -512,7 +513,7 @@ listMemoriesByTag(agentId: string, tag: string, orgId: string): Promise<MemoryEn
 |---|---|
 | 1 | Graph engine (SurrealDB default, Kùzu supported per workspace) with schema-agnostic `LoreNode` / `LoreEdge` tables (`engines/surrealGraph.ts`, `engines/localGraph.ts`) |
 | 2 | LanceDB vector store for embeddings + semantic recall |
-| 3 | SQLite for outbox, migrations, audit, and auth |
+| 3 | SQLite for outbox, migrations, audit, and auth, plus tabular collections + SQL aggregates |
 | 4 | `LoreStorageClient` facade fronting all three as the single write path |
 
 ### Phase 2: Sync Engine (Dataplane)
