@@ -449,7 +449,7 @@
   "devDependencies": {
     "@types/mailparser": "^3.4.6",
     "@types/node": "^20.11.0",
-    "groundfloor-ts-sdk": "file:../../v3/groundfloor-ts-sdk",
+    "groundfloor-ts-sdk": "file:vendor/groundfloor-ts-sdk",
     "tsc-alias": "^1.8.16",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3"
