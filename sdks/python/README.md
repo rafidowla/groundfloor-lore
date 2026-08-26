@@ -197,3 +197,11 @@ an actual daemon via `LoreSidecar` (isolated data dir + free port), stores a
 node, reads it back, searches and recalls it, bulk-writes, deletes it, and
 tears the daemon down. It needs the same run-time prerequisites as
 `LoreSidecar` above (repo checkout with `node_modules`, Node 22 reachable).
+
+## License
+
+[Apache License 2.0](LICENSE) — deliberately more permissive than Lore Core
+itself (Elastic License 2.0). The client SDK is Apache-licensed so that any
+application talking to Lore over its REST/MCP API has zero license
+entanglement with ELv2. The ELv2 hosted-service restriction applies to Lore
+Core, not to apps built with this client.

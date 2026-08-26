@@ -8,13 +8,13 @@ version = "0.1.0"
 description = "Python client for Lore Core — a local-first tri-substrate (graph+vector+relational) database for AI agent memory. Wraps Lore's REST API and can spawn/manage a local `lore serve` daemon for embedded-like ergonomics."
 readme = "README.md"
 requires-python = ">=3.9"
-license = "Elastic-2.0"
+license = "Apache-2.0"
 authors = [{ name = "Groundfloor" }]
 keywords = ["lore", "memory", "agent", "knowledge-graph", "vector-search", "rag"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: Other/Proprietary License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",

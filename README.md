@@ -330,4 +330,12 @@ This project builds on the work of several open-source projects:
 
 ## License
 
-[Elastic License 2.0](LICENSE).
+[Elastic License 2.0](LICENSE) for Lore Core — free for personal, corporate,
+and commercial use, including embedding Lore inside your own products; the one
+restriction is offering Lore itself as a hosted or managed service.
+
+**Client SDKs are Apache 2.0.** Everything under [`sdks/`](sdks/) (currently
+the [Python client](sdks/python/)) is licensed
+[Apache License 2.0](sdks/python/LICENSE) so that applications talking to Lore
+over its REST/MCP API have zero license entanglement — build on Lore, license
+your app however you want.

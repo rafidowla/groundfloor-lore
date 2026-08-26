@@ -6,6 +6,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+### Changed (2026-08-26) — client SDKs carved out as Apache 2.0
+
+The Python client SDK (`sdks/python/`) is now licensed Apache License 2.0
+(own `LICENSE` file; `pyproject.toml` updated), deliberately more permissive
+than Lore Core's Elastic License 2.0. Rationale: apps that talk to Lore over
+the REST/MCP API should have zero license entanglement with ELv2 — the
+hosted-service restriction is meant for Lore Core itself, not for the client
+libraries apps build with. Same pattern Elastic uses (ELv2 server, Apache 2.0
+clients). Future client SDKs under `sdks/` follow the same rule.
+
 ### Changed (2026-08-25) — license switched from Apache 2.0 to Elastic License 2.0
 
 Lore is source-available, not open source: free for personal, corporate, and
