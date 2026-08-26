@@ -62,6 +62,64 @@ function countFragments(tableDir: string): number {
 /* ─── LanceDB maintainer ───────────────────────────────────────── */
 
 /**
+ * Does this error match LanceDB's own "retryable commit conflict" class?
+ * `table.optimize()` internally commits a Rewrite (and, when it merges the
+ * FTS index, a CreateIndex) transaction under optimistic concurrency — a
+ * concurrent writer or a second overlapping optimize() call can preempt
+ * that commit, and LanceDB's error text explicitly says "Please retry" when
+ * this happens (verified empirically against 0.37.1: "Retryable commit
+ * conflict for version N: This Rewrite/CreateIndex transaction was
+ * preempted by concurrent transaction ...). This predicate is deliberately
+ * narrow — it must NOT match unrelated failures (missing table, corrupt
+ * index, disk errors), which should fail fast rather than retry blindly.
+ */
+export function isRetryableLanceConflict(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err);
+    return /retryable commit conflict/i.test(message) || /transaction was preempted/i.test(message);
+}
+
+/**
+ * Retry `table.optimize()` a bounded number of times when it throws an
+ * error LanceDB marks retryable (see {@link isRetryableLanceConflict});
+ * anything else propagates on the first attempt.
+ *
+ * A commit conflict means the Table handle's in-memory view is already
+ * stale — it prepared a Rewrite/CreateIndex against a base version some
+ * other writer has since superseded. Simply calling `.optimize()` again on
+ * the SAME handle re-prepares against that same stale base and fails the
+ * same way (verified empirically: retrying without a refresh did not
+ * lower the observed failure rate at all, even with much larger attempt
+ * counts/backoff). `checkoutLatest()` pulls the handle forward to the
+ * table's current version before the next attempt, which is what actually
+ * lets the retry land. Small linear backoff on top gives a concurrent
+ * writer's own commit a chance to finish first.
+ *
+ * Empirically load-bearing: under concurrent-writer load (a live writer +
+ * reader racing the maintenance call on the same table, matching Atlas's
+ * embedded daemon topology), ~20-30% of `optimizeTable()` calls failed with
+ * this exact "please retry" error before this fix; under two overlapping
+ * maintenance calls on the same table, ~65-70% did. See
+ * scripts/spikes/lancedb-fts-optimize-repro/ for the repro this measures
+ * against.
+ */
+export async function retryOptimizeOnConflict(
+    table: LanceTable,
+    optOpts: { cleanupOlderThan?: Date },
+    maxAttempts = 4,
+    baseDelayMs = 25,
+): Promise<OptimizeStats> {
+    for (let attempt = 1; ; attempt++) {
+        try {
+            return await table.optimize(optOpts);
+        } catch (err) {
+            if (!isRetryableLanceConflict(err) || attempt >= maxAttempts) throw err;
+            await new Promise((resolve) => setTimeout(resolve, baseDelayMs * attempt));
+            await table.checkoutLatest().catch(() => { /* best effort — optimize's own error wins if this fails too */ });
+        }
+    }
+}
+
+/**
  * Real LanceDB maintainer for one workspace's `.lore/lancedb` dir.
  *
  * Note on the LanceDB Node SDK (verified empirically against the pinned
@@ -132,7 +190,7 @@ export class LanceMaintainer implements LanceMaintainerPort {
         if (opts.cleanupOlderThanMs !== undefined) {
             optOpts.cleanupOlderThan = new Date(opts.now - opts.cleanupOlderThanMs);
         }
-        const stats = await table.optimize(optOpts);
+        const stats = await retryOptimizeOnConflict(table, optOpts);
         const afterBytes = dirSizeBytes(tableDir);
         return {
             name,
@@ -154,6 +212,7 @@ interface OptimizeStats {
 interface LanceTable {
     listVersions(): Promise<Array<{ version: number; timestamp: Date | string }>>;
     optimize(opts?: { cleanupOlderThan?: Date }): Promise<OptimizeStats>;
+    checkoutLatest(): Promise<void>;
 }
 
 /* ─── Node store ───────────────────────────────────────────────── */

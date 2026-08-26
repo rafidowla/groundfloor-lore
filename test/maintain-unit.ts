@@ -36,6 +36,10 @@ import type {
     LanceMaintainerPort, LanceTableProbe, LanceTableResult,
     NodeStorePort, WorkspaceRegistryPort, SafetyPort,
 } from '../packages/lore/src/engines/maintain/ports.js';
+import {
+    isRetryableLanceConflict,
+    retryOptimizeOnConflict,
+} from '../packages/lore/src/engines/maintain/adapters.js';
 
 const DAY = 86_400_000;
 const NOW = 1_700_000_000_000; // fixed clock
@@ -329,6 +333,84 @@ async function testDisabledOps(): Promise<void> {
     console.log('  ✓ per-operation disable flags honored');
 }
 
+// ── LanceDB retryable-conflict retry (optimizeTable) ─────────────────────────
+
+function testIsRetryableLanceConflict(): void {
+    assert.ok(isRetryableLanceConflict(new Error(
+        "lance error: Retryable commit conflict for version 476: This Rewrite transaction was preempted by concurrent transaction Delete at version 476. Please retry.",
+    )), 'Rewrite-preempted conflict is retryable');
+    assert.ok(isRetryableLanceConflict(new Error(
+        "lance error: Retryable commit conflict for version 670: This CreateIndex transaction was preempted by concurrent transaction Rewrite at version 670. Please retry.",
+    )), 'CreateIndex-preempted conflict is retryable');
+    assert.ok(!isRetryableLanceConflict(new Error('lancedb dir missing: /tmp/nope')), 'unrelated Error is not retryable');
+    assert.ok(!isRetryableLanceConflict(new Error(
+        "lance error: LanceError(IO): Generic memory error: Invalid range 0..904 for object of size 7 bytes",
+    )), 'a genuine corruption error is not retryable');
+    assert.ok(!isRetryableLanceConflict('a plain string, not an Error'), 'non-Error input does not crash and is not retryable');
+    console.log('  ✓ isRetryableLanceConflict recognises the exact LanceDB "please retry" class, nothing else');
+}
+
+const FAKE_OPTIMIZE_STATS = {
+    compaction: { fragmentsRemoved: 0, fragmentsAdded: 0, filesRemoved: 0, filesAdded: 0 },
+    prune: { bytesRemoved: 0, oldVersionsRemoved: 0 },
+};
+
+/** Minimal fake matching the LanceTable surface retryOptimizeOnConflict needs. */
+function fakeTable(optimizeImpl: () => Promise<typeof FAKE_OPTIMIZE_STATS>) {
+    let checkoutCalls = 0;
+    return {
+        optimize: optimizeImpl,
+        async checkoutLatest() { checkoutCalls++; },
+        async listVersions() { return []; },
+        get checkoutCalls() { return checkoutCalls; },
+    };
+}
+
+async function testRetryOnLanceConflictSucceedsAfterTransientConflicts(): Promise<void> {
+    let calls = 0;
+    const table = fakeTable(async () => {
+        calls++;
+        if (calls < 3) {
+            throw new Error(`lance error: Retryable commit conflict for version ${calls}: This Rewrite transaction was preempted by concurrent transaction Delete at version ${calls}. Please retry.`);
+        }
+        return FAKE_OPTIMIZE_STATS;
+    });
+    const result = await retryOptimizeOnConflict(table, {}, 4, 1);
+    assert.deepEqual(result, FAKE_OPTIMIZE_STATS);
+    assert.equal(calls, 3, 'succeeded on the 3rd attempt, no more');
+    assert.equal(table.checkoutCalls, 2, 'checked out the latest version before each of the 2 retries');
+    console.log('  ✓ retryOptimizeOnConflict retries a transient conflict (refreshing the handle) until it clears');
+}
+
+async function testRetryOnLanceConflictGivesUpAfterMaxAttempts(): Promise<void> {
+    let calls = 0;
+    const table = fakeTable(async () => {
+        calls++;
+        throw new Error('lance error: Retryable commit conflict for version 9: This Rewrite transaction was preempted by concurrent transaction Delete at version 9. Please retry.');
+    });
+    await assert.rejects(
+        () => retryOptimizeOnConflict(table, {}, 3, 1),
+        /Retryable commit conflict/,
+    );
+    assert.equal(calls, 3, 'stopped at maxAttempts, did not retry forever');
+    console.log('  ✓ retryOptimizeOnConflict is bounded — gives up and throws after maxAttempts');
+}
+
+async function testRetryOnLanceConflictDoesNotRetryOtherErrors(): Promise<void> {
+    let calls = 0;
+    const table = fakeTable(async () => {
+        calls++;
+        throw new Error('lance error: LanceError(IO): Generic memory error: Invalid range 0..904 for object of size 7 bytes');
+    });
+    await assert.rejects(
+        () => retryOptimizeOnConflict(table, {}, 4, 1),
+        /Invalid range/,
+    );
+    assert.equal(calls, 1, 'a non-retryable error fails on the first attempt, no wasted retries');
+    assert.equal(table.checkoutCalls, 0, 'never checks out — there was nothing worth retrying');
+    console.log('  ✓ retryOptimizeOnConflict does not blanket-retry unrelated errors');
+}
+
 // ── runner ───────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -347,6 +429,10 @@ async function main(): Promise<void> {
     await testErrorIsolation();
     await testNodeDeleteAction();
     await testDisabledOps();
+    testIsRetryableLanceConflict();
+    await testRetryOnLanceConflictSucceedsAfterTransientConflicts();
+    await testRetryOnLanceConflictGivesUpAfterMaxAttempts();
+    await testRetryOnLanceConflictDoesNotRetryOtherErrors();
     console.log('\n✓ All maintain unit tests passed.');
 }
 

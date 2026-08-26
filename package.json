@@ -424,7 +424,7 @@
   "dependencies": {
     "@hono/node-server": "^1.19.14",
     "@huggingface/transformers": "^4.1.0",
-    "@lancedb/lancedb": "0.27.2",
+    "@lancedb/lancedb": "0.37.1",
     "@lumis-sh/wasm-sql": "^0.26.1",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@surrealdb/node": "3.0.3",
