@@ -35,6 +35,7 @@ export const FORWARDED_METHODS = [
     'store',
     'storeBatch',
     'search',
+    'searchByVector',
     'bm25Search',
     'getById',
     'getContentHashesByIds',
@@ -100,4 +101,10 @@ export const WORKER_ENV = {
     EMBED_OVERRIDES: 'LORE_WORKER_EMBED_OVERRIDES',
     /** Marks a process as a Lore search worker (diagnostics / guard). */
     IS_WORKER: 'LORE_IS_SEARCH_WORKER',
+    /** Set to '1' when the parent process handles all embedding — child skips model load. */
+    PARENT_EMBEDS: 'LORE_WORKER_PARENT_EMBEDS' as const,
+    /** Embedding vector dimension, passed so the child's stub provider reports it correctly. */
+    EMBED_DIM: 'LORE_WORKER_EMBED_DIM' as const,
+    /** Embedding model id, passed so the child's stub provider reports it correctly. */
+    EMBED_MODEL: 'LORE_WORKER_EMBED_MODEL' as const,
 } as const;

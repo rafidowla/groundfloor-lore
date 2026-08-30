@@ -18,9 +18,11 @@
  */
 
 import { createEmbeddingProvider } from '../mcp/services.js';
+import { log } from '../logger.js';
 import { VerbatimStore } from './verbatimStore.js';
 import { FORWARDED_METHODS, WORKER_ENV } from './verbatimWorkerProtocol.js';
 import type { CallMessage, ChildToParent } from './verbatimWorkerProtocol.js';
+import type { EmbeddingProvider } from '../providers/types.js';
 
 function post(msg: ChildToParent): void {
     // process.send exists because we were forked with an IPC channel.
@@ -57,16 +59,42 @@ async function main(): Promise<void> {
 
     let store: VerbatimStore;
     try {
-        // Reconstruct the embedding provider from env (inherited from the parent)
-        // plus any serialized programmatic overrides. Same factory the parent
-        // uses, so results are identical to the in-process path.
-        let overrides: Record<string, unknown> | undefined;
-        const rawOverrides = process.env[WORKER_ENV.EMBED_OVERRIDES];
-        if (rawOverrides) {
-            try { overrides = JSON.parse(rawOverrides); } catch { overrides = undefined; }
+        let embeddingProvider: EmbeddingProvider;
+        if (process.env[WORKER_ENV.PARENT_EMBEDS] === '1') {
+            // The parent embeds every query/document itself (Option A) and only
+            // ever calls searchByVector/bulkUpsertPrebuiltRows on this store, so
+            // embedQuery/embedDocument are never reached here. Loading the real
+            // ONNX model in every forked child would defeat that memory win
+            // (~600MiB RSS per workspace fork) for no benefit — VerbatimStore
+            // only needs `dimension`/`modelId` from the provider to size its
+            // LanceDB schema, so a lightweight stub is sufficient.
+            const dim = parseInt(process.env[WORKER_ENV.EMBED_DIM] || '0', 10);
+            const modelId = process.env[WORKER_ENV.EMBED_MODEL] || 'parent-embeds';
+            const unreachable = (fn: string) => async (): Promise<never> => {
+                throw new Error(`NOT REACHABLE: parent embeds — ${fn} must not be called on the child's stub provider`);
+            };
+            embeddingProvider = {
+                dimension: dim > 0 ? dim : 384,
+                modelId,
+                initialize: async () => {},
+                embed: unreachable('embed'),
+                embedQuery: unreachable('embedQuery'),
+                embedDocument: unreachable('embedDocument'),
+                embedDocumentBatch: unreachable('embedDocumentBatch'),
+            };
+            log.info(`[search-worker] parent-embeds mode — skipping model load (dimension=${embeddingProvider.dimension})`);
+        } else {
+            // Reconstruct the embedding provider from env (inherited from the parent)
+            // plus any serialized programmatic overrides. Same factory the parent
+            // uses, so results are identical to the in-process path.
+            let overrides: Record<string, unknown> | undefined;
+            const rawOverrides = process.env[WORKER_ENV.EMBED_OVERRIDES];
+            if (rawOverrides) {
+                try { overrides = JSON.parse(rawOverrides); } catch { overrides = undefined; }
+            }
+            embeddingProvider = await createEmbeddingProvider(overrides as never);
         }
-        const provider = await createEmbeddingProvider(overrides as never);
-        store = new VerbatimStore(basePath, provider);
+        store = new VerbatimStore(basePath, embeddingProvider);
         await store.initialize(); // opens LanceDB + runs the crash-safe self-heal
     } catch (err) {
         post({ type: 'init-error', error: toErrorShape(err) });

@@ -48,7 +48,7 @@ import assert from 'node:assert/strict';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tryNodesRoutes } from '../packages/lore/src/mcp/http/routes/nodes.js';
 import { computeContentHash } from '../packages/lore/src/engines/contentHash.js';
-import { buildVerbatimText } from '../packages/lore/src/engines/verbatimStore.js';
+import { buildVerbatimText } from '../packages/lore/src/engines/verbatimSchema.js';
 import type { OutboxStore, OutboxEntry } from '../packages/lore/src/outbox/types.js';
 
 let passed = 0;

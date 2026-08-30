@@ -27,6 +27,7 @@
  */
 
 import { VerbatimStore } from '../engines/verbatimStore.js';
+import { VerbatimSearchWorkerProxy } from '../engines/verbatimSearchWorkerProxy.js';
 import type { EmbeddingProvider } from '../providers/types.js';
 import { assertWorkspaceOpenAllowed } from '../security/routeWorkspaceBinding.js';
 import { getWorkspacePath } from '../config/workspaces.js';
@@ -41,7 +42,11 @@ export class WorkspaceVerbatimResolver {
      *  shutdown drain owns those handles. */
     private pinnedPaths = new Set<string>();
 
-    constructor(private readonly embeddingProvider?: EmbeddingProvider) {}
+    constructor(
+        private readonly embeddingProvider?: EmbeddingProvider,
+        private readonly searchWorkerIsolation?: boolean,
+        private readonly embedOverrides?: Record<string, unknown>,
+    ) {}
 
     /**
      * Pre-seed the boot-bound VerbatimStore for a workspace so
@@ -78,7 +83,9 @@ export class WorkspaceVerbatimResolver {
         const inflight = this.inflight.get(resolvedPath);
         if (inflight) return inflight;
         const opening = (async () => {
-            const store = new VerbatimStore(resolvedPath, this.embeddingProvider);
+            const store = this.searchWorkerIsolation
+                ? new VerbatimSearchWorkerProxy(resolvedPath, this.embedOverrides, this.embeddingProvider) as unknown as VerbatimStore
+                : new VerbatimStore(resolvedPath, this.embeddingProvider);
             await store.initialize();
             this.byPath.set(resolvedPath, store);
             return store;

@@ -21,7 +21,8 @@
  */
 
 import { nodeUpsert as nodeServiceUpsert } from '../core/nodeService.js';
-import { buildVerbatimText, VerbatimStore } from '../engines/verbatimStore.js';
+import { VerbatimStore } from '../engines/verbatimStore.js';
+import { buildVerbatimText } from '../engines/verbatimSchema.js';
 import { tagsToArray, tagsToString } from '../engines/normalizeTags.js';
 import { computeContentHash } from '../engines/contentHash.js';
 import type { EmbeddingProvider } from '../providers/types.js';

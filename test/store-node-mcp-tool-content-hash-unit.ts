@@ -46,7 +46,7 @@ import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { registerStoreNodeTool } from '../packages/lore/src/mcp/tools/memory/storeNode.js';
 import { computeContentHash } from '../packages/lore/src/engines/contentHash.js';
-import { buildVerbatimText } from '../packages/lore/src/engines/verbatimStore.js';
+import { buildVerbatimText } from '../packages/lore/src/engines/verbatimSchema.js';
 
 let passed = 0;
 let failed = 0;

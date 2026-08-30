@@ -16,7 +16,8 @@
  *   step that didn't complete on the last run.
  */
 
-import { buildVerbatimText, type VerbatimStore } from './verbatimStore.js';
+import type { VerbatimStore } from './verbatimStore.js';
+import { buildVerbatimText } from './verbatimSchema.js';
 import { tagsToString } from './normalizeTags.js';
 import type { DataplaneVectorStore } from './dataplaneVectorStore.js';
 import type { LoreNode } from '../providers/types.js';

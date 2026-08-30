@@ -1,6 +1,6 @@
 {
   "name": "@groundfloor/lore",
-  "version": "3.16.0",
+  "version": "3.17.0",
   "description": "Knowledge database for agentic AI — a local-first, schema-agnostic SurrealDB/Kùzu + LanceDB knowledge graph exposed to any AI tool over MCP, with optional Dataplane team sync.",
   "type": "module",
   "license": "Elastic-2.0",

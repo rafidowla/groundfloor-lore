@@ -36,7 +36,7 @@
  */
 
 import type { GraphProvider } from '../providers/types.js';
-import { buildVerbatimText } from '../engines/verbatimStore.js';
+import { buildVerbatimText } from '../engines/verbatimSchema.js';
 import type { OutboxStore } from '../outbox/types.js';
 import { recordHotWriteBatch } from '../outbox/hotLane.js';
 import type { BatchedEmbedder } from './batchedEmbedder.js';

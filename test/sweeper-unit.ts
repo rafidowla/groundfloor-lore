@@ -25,7 +25,7 @@ import { strict as assert } from 'node:assert';
 
 import { runConsistencySweep } from '../packages/lore/src/diagnostics/sweeper.js';
 import { computeContentHash } from '../packages/lore/src/engines/contentHash.js';
-import { buildVerbatimText } from '../packages/lore/src/engines/verbatimStore.js';
+import { buildVerbatimText } from '../packages/lore/src/engines/verbatimSchema.js';
 import type { GraphReader } from '../packages/lore/src/diagnostics/consistency.js';
 import type { LoreNode } from '../packages/lore/src/providers/types.js';
 import type { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';

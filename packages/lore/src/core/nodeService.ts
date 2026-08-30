@@ -31,7 +31,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { buildVerbatimText } from '../engines/verbatimStore.js';
+import { buildVerbatimText } from '../engines/verbatimSchema.js';
 import { tagsToArray, tagsToString } from '../engines/normalizeTags.js';
 import { assertSafeLanceId } from '../engines/verbatimHistory.js';
 import { computeContentHash } from '../engines/contentHash.js';

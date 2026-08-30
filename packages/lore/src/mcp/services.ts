@@ -287,6 +287,7 @@ export interface CreateVectorStoreOpts {
     deploymentMode: 'local' | 'cloud';
     graphBasePath: string;
     embeddingProvider: EmbeddingProvider;
+    embedOverrides?: Record<string, unknown>;
 }
 
 /**
@@ -322,8 +323,7 @@ export async function createVectorStore(opts: CreateVectorStoreOpts): Promise<Lo
     // native LanceDB store in a child process so a native crash restarts a worker
     // instead of taking the host down. Child rebuilds its provider from env.
     if (searchWorkerIsolationEnabled()) {
-        console.error('[Lore MCP] Search worker isolation ENABLED (LORE_SEARCH_WORKER) — LanceDB runs in a child process.');
-        return new VerbatimSearchWorkerProxy(opts.graphBasePath);
+        return new VerbatimSearchWorkerProxy(opts.graphBasePath, opts.embedOverrides, opts.embeddingProvider);
     }
     return new VerbatimStore(opts.graphBasePath, opts.embeddingProvider);
 }

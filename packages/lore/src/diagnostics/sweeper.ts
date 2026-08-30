@@ -64,7 +64,7 @@ import {
     type GraphReader,
     type SqliteOrphanCheck,
 } from './consistency.js';
-import { buildVerbatimText } from '../engines/verbatimStore.js';
+import { buildVerbatimText } from '../engines/verbatimSchema.js';
 import { computeContentHash } from '../engines/contentHash.js';
 import type { ITableStorage } from '../contracts/tables.js';
 

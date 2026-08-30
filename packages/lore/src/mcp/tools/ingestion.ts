@@ -21,7 +21,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { buildVerbatimText } from '../../engines/verbatimStore.js';
+import { buildVerbatimText } from '../../engines/verbatimSchema.js';
 import type { WriteAheadLog } from '../../engines/syncEngine.js';
 import type { StorageBundle } from '../services.js';
 import type { ExtractorRegistry } from '../../engines/extractors/index.js';

@@ -19,7 +19,7 @@ import { isUnscopedEcosystem } from '../core/ecosystemMatch.js';
 import type { LoreNode } from '../providers/types.js';
 import type { VerbatimStore } from './verbatimStore.js';
 import type { DataplaneVectorStore } from './dataplaneVectorStore.js';
-import { buildVerbatimText } from './verbatimStore.js';
+import { buildVerbatimText } from './verbatimSchema.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 /**
  * Phase 3 — was `LocalGraph | DataplaneGraph`. Reconnect only ever calls

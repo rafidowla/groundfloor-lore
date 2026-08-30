@@ -7,7 +7,8 @@ Kept as standalone tools, not wired into any npm script or CI gate.
 
 The directory originally held a set of Kùzu-specific probes (`scan-*.mjs`,
 `probe-v3-*.mjs`) written during the 2026-08-03 investigation into corrupted
-`LoreNode.metadata` values.
+`LoreNode.metadata` values (background:
+[`docs/spike-bulk-write-corruption-2026-08-03.md`](../../docs/spike-bulk-write-corruption-2026-08-03.md)).
 The finding had a trivial signature — many rows sharing one byte-identical
 large value — and was built into `lore check-corruption`
 (`packages/lore/src/cli/commands/checkCorruption.ts`).

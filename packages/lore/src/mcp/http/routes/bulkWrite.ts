@@ -35,7 +35,7 @@ import type { StorageBundle } from '../../services.js';
 import { LoreStorageClient } from '../../../storage/loreStorageClient.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../../engines/localGraphRegistry.js';
 import { isWorkspaceGraph } from '../../../engines/requireWorkspaceGraph.js';
-import { buildVerbatimText } from '../../../engines/verbatimStore.js';
+import { buildVerbatimText } from '../../../engines/verbatimSchema.js';
 import { assertSafeLanceId } from '../../../engines/verbatimHistory.js';
 import { tagsToArray, tagsToString } from '../../../engines/normalizeTags.js';
 import type { AuditLog } from '../../../security/audit.js';

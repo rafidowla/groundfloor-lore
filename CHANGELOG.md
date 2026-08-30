@@ -26,6 +26,40 @@ decision (see `NEW_OWNER_GUIDE.md` §8) that had been superseded without a
 recorded reason. `LICENSE`, `package.json`, `sdks/python/pyproject.toml`, and
 `README.md` are reconciled; copyright holder (Rafi Ud Dowla) unchanged.
 
+
+## [3.17.0] — 2026-08-29
+
+### Added — parent-embeds mode for search-worker crash isolation
+
+When `VerbatimSearchWorkerProxy` is constructed with a `parentEmbedder`,
+the search-worker child process skips loading its own embedding model
+(~600 MiB RSS saved per concurrently-open workspace). The parent process
+handles all embedding: `search()` embeds the query locally and sends the
+pre-computed vector to the child via the new `searchByVector` protocol
+method; `store()`/`storeBatch()` embed documents locally and send
+pre-built rows via `bulkUpsertPrebuiltRows`. The child becomes a pure
+vector storage/search server with zero model overhead. Backward
+compatible: when no `parentEmbedder` is provided, the child loads its
+own model as before.
+
+### Fixed — embedOverrides now reach search-worker children
+
+Programmatic embedding overrides passed to `createLore({ embedding: {
+device, modelId, ... } })` now propagate through `createVectorStore` →
+`VerbatimSearchWorkerProxy` → `LORE_WORKER_EMBED_OVERRIDES` env var →
+child `createEmbeddingProvider()`. Previously the proxy was constructed
+without the overrides argument, so the child always fell back to env
+vars or defaults, silently diverging from the parent.
+
+### Fixed — non-boot workspace crash isolation in outbox paths
+
+`WorkspaceVerbatimResolver.getOrOpen()` now creates a
+`VerbatimSearchWorkerProxy` (instead of a plain in-process
+`VerbatimStore`) for non-boot workspaces when `LORE_SEARCH_WORKER=1`.
+Previously the outbox replicator's per-workspace vector stores bypassed
+crash isolation entirely, running LanceDB in the daemon process for every
+non-boot workspace.
+
 ## [3.16.0] — 2026-08-22
 
 ### Removed — Kùzu is no longer a supported graph engine

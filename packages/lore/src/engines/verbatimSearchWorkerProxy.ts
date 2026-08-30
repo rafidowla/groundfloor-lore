@@ -41,6 +41,8 @@ import {
     type ForwardedMethod,
 } from './verbatimWorkerProtocol.js';
 
+import type { EmbeddingProvider, VerbatimSearchResult, VerbatimDocument } from '../providers/types.js';
+
 /** Retriable error surfaced to callers whose call was in flight when the worker
  *  crashed (or was restarting). Distinct type so callers/tests can recognise it. */
 export class SearchWorkerRestartError extends Error {
@@ -92,25 +94,89 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
     private readonly readyTimeoutMs = positiveIntEnv('LORE_SEARCH_WORKER_READY_MS', 60_000);
     private readonly callTimeoutMs = positiveIntEnv('LORE_SEARCH_WORKER_CALL_MS', 120_000);
     private readonly maxConsecutiveRestarts = positiveIntEnv('LORE_SEARCH_WORKER_MAX_RESTARTS', 5);
-
+    private parentEmbedder?: EmbeddingProvider;
     private readonly workerBasePath: string;
     private readonly embedOverridesJson: string | undefined;
-
-    constructor(basePath: string, embedOverrides?: Record<string, unknown>) {
+    constructor(basePath: string, embedOverrides?: Record<string, unknown>, parentEmbedder?: EmbeddingProvider) {
         // Base ctor only sets up paths + a (never-initialized) default provider
         // for schema sizing; it does NOT open LanceDB. We never call
         // super.initialize(), so no native handle is ever created in-process.
         super(basePath);
         this.workerBasePath = basePath;
         this.embedOverridesJson = embedOverrides ? JSON.stringify(embedOverrides) : undefined;
+        this.parentEmbedder = parentEmbedder;
 
         // Generic forwarding: shadow every forwarded method with an IPC call.
-        // (initialize/close have bespoke lifecycle below and are skipped.)
+        // (initialize/close have bespoke lifecycle below; search/store/storeBatch
+        // are overridden to embed locally when a parentEmbedder is set.)
         for (const method of FORWARDED_METHODS) {
             if (method === 'initialize' || method === 'close') continue;
+            if (method === 'search' || method === 'store' || method === 'storeBatch') continue;
             (this as unknown as Record<string, unknown>)[method] =
                 (...args: unknown[]): Promise<unknown> => this.call(method, args);
         }
+    }
+
+    /**
+     * When a parentEmbedder is configured: embed the query locally, send
+     * the pre-computed vector to the child via {@code searchByVector}.
+     * Without one: forward to the child's own {@code search} (the child
+     * has its own model — backward-compatible path).
+     */
+    override async search(
+        query: string,
+        limit: number = 10,
+        filter?: Partial<VerbatimDocument['metadata']>,
+        opts?: { includeHistory?: boolean },
+        actorScopes?: ReadonlyArray<string>,
+    ): Promise<VerbatimSearchResult[]> {
+        if (!this.parentEmbedder) {
+            return this.call('search', [query, limit, filter, opts, actorScopes]) as Promise<VerbatimSearchResult[]>;
+        }
+        const queryVector = await this.parentEmbedder.embedQuery(query);
+        return this.call('searchByVector', [queryVector, { topK: limit, filter, includeHistory: opts?.includeHistory, actorScopes }]) as Promise<VerbatimSearchResult[]>;
+    }
+
+    /** Delegates to {@link storeBatch} so embedding logic lives in one place. */
+    override async store(row: VerbatimDocument): Promise<void> {
+        return this.storeBatch([row]);
+    }
+
+    /**
+     * When a parentEmbedder is configured: embed every row's text locally,
+     * then send pre-built rows (vector included) to the child via
+     * {@code bulkUpsertPrebuiltRows}. Without one: forward to the child's
+     * own {@code storeBatch} (backward-compatible path). Rows that already
+     * carry a {@code vector} field skip local embedding.
+     */
+    override async storeBatch(rows: VerbatimDocument[]): Promise<void> {
+        const embedder = this.parentEmbedder;
+        if (!embedder) {
+            return this.call('storeBatch', [rows]) as Promise<void>;
+        }
+        const textsToEmbed: string[] = [];
+        const embedIndices: number[] = [];
+        for (let i = 0; i < rows.length; i++) {
+            const row = rows[i] as unknown as Record<string, unknown>;
+            if (row.vector === undefined && typeof row.text === 'string' && (row.text as string).length > 0) {
+                textsToEmbed.push(row.text as string);
+                embedIndices.push(i);
+            }
+        }
+        let vectors: number[][];
+        if (textsToEmbed.length > 0) {
+            vectors = await embedder.embedDocumentBatch!(textsToEmbed);
+        } else {
+            vectors = [];
+        }
+        const prebuiltRows = rows.map((row, i) => {
+            const embedIdx = embedIndices.indexOf(i);
+            if (embedIdx >= 0) {
+                return { ...row, vector: vectors[embedIdx] };
+            }
+            return row;
+        });
+        return this.call('bulkUpsertPrebuiltRows', [prebuiltRows]) as Promise<void>;
     }
 
     /** Spawn (or reuse) the worker; resolves once it has initialized. */
@@ -136,6 +202,14 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
             [WORKER_ENV.IS_WORKER]: '1',
         };
         if (this.embedOverridesJson) env[WORKER_ENV.EMBED_OVERRIDES] = this.embedOverridesJson;
+        if (this.parentEmbedder) {
+            // Parent handles all embedding: tell the child to skip loading its own
+            // ONNX model entirely, and pass along the dimension/modelId so the
+            // child's stub provider can still satisfy VerbatimStore's schema needs.
+            env[WORKER_ENV.PARENT_EMBEDS] = '1';
+            env[WORKER_ENV.EMBED_DIM] = String(this.parentEmbedder.dimension);
+            env[WORKER_ENV.EMBED_MODEL] = this.parentEmbedder.modelId;
+        }
 
         // execArgv defaults to the parent's, so a tsx-loaded parent runs the
         // worker under tsx too (native ABI match); a compiled parent runs .js.

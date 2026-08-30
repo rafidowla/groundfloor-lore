@@ -40,7 +40,7 @@ import { assertZipWithinBudget } from '../../../engines/extractors/zipGuard.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
-import { buildVerbatimText } from '../../../engines/verbatimStore.js';
+import { buildVerbatimText } from '../../../engines/verbatimSchema.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, extractWorkspace, writeJson, writeError } from '../helpers.js';
 import { assertSafeLanceId } from '../../../engines/verbatimHistory.js';
 import { redactError } from '../../../security/logRedact.js';

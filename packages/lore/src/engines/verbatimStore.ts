@@ -1,6 +1,7 @@
 import * as lancedb from '@lancedb/lancedb';
-import { Schema, Field, Float32, Utf8, List, FixedSizeList } from 'apache-arrow';
+import { Schema } from 'apache-arrow';
 import * as fs from 'fs';
+import { buildVerbatimSchema } from './verbatimSchema.js';
 import * as path from 'path';
 
 import type { EmbeddingProvider, VectorProvider, VerbatimDocument, VerbatimSearchResult } from '../providers/types.js';
@@ -45,48 +46,6 @@ export class VerbatimStoreError extends Error {
         this.name = 'VerbatimStoreError';
         this.operation = operation;
     }
-}
-
-export function buildVerbatimText(label: string, content: string, tags: string[] | string): string {
-    // Pass 3 — tags is canonically string[]; tolerate a string for legacy
-    // callers and hardcoded literals. Join for the embedding text only.
-    const tagsStr = Array.isArray(tags) ? tags.join(',') : tags;
-    return [label, content, tagsStr].filter(p => p && p.trim() !== '').join('\n\n');
-}
-
-/**
- * Build the LanceDB lore_verbatim table schema.
- *
- * The vector field's dimension MUST match the EmbeddingProvider's
- * `dimension`. Slice 6a took this from a hardcoded 384 (Xenova
- * all-MiniLM-L6-v2) to a parameter so future provider swaps (slice 6b
- * cloud BGE-M3, slice 7 multilingual-e5-small) land cleanly.
- *
- * Existing tables retain their original dimension — LanceDB will reject
- * a schema mismatch on writes. Operators changing models against an
- * existing graph need to drop+rebuild the lore_verbatim table (full
- * reconnect pass).
- *
- * Explicit schema (vs. inferred) prevents LanceDB type-inference
- * failures when fields like security_scopes contain empty arrays on
- * first record insertion.
- */
-function buildVerbatimSchema(dimension: number): Schema {
-    return new Schema([
-        new Field('vector', new FixedSizeList(dimension, new Field('item', new Float32(), true)), false),
-        new Field('id', new Utf8(), false),
-        new Field('text', new Utf8(), false),
-        new Field('type', new Utf8(), true),
-        new Field('label', new Utf8(), true),
-        new Field('tags', new Utf8(), true),
-        new Field('project', new Utf8(), true),
-        new Field('ecosystem', new Utf8(), true),
-        new Field('updatedAt', new Utf8(), true),
-        new Field('security_scopes', new List(new Field('item', new Utf8(), true)), true),
-        // V2.1: content hash lets reconnect skip nodes whose text hasn't
-        // changed since the last embed. Cheap sha1-16 over the embed text.
-        new Field('contentHash', new Utf8(), true),
-    ]);
 }
 
 export class VerbatimStore implements VectorProvider {
@@ -1190,30 +1149,79 @@ export class VerbatimStore implements VectorProvider {
         );
     }
 
-    /** The original search body — embed + pooled vectorSearch +
-     *  actor-scope filter. Wrapped by search() with cache + single-
-     *  flight. Split so the caching layer reads cleanly without
-     *  nesting another try/catch around the work. */
-    private async _searchUncached(
-        query: string,
+    /**
+     * Vector search with a pre-computed query vector — the IPC path for
+     * the search-worker proxy. The parent process embeds the query locally
+     * and sends the vector to the child, so the child never loads an
+     * embedding model for reads. Otherwise identical to {@link search}:
+     * same filtering, actor-scoping, history exclusion, read-pool routing,
+     * and cache/single-flight wrapping.
+     *
+     * @param queryVector - Pre-computed embedding vector (parent-embedded).
+     * @param opts.topK    - Maximum results (default 10).
+     * @param opts.filter  - Metadata field exact-match filter, AND'd.
+     * @param opts.includeHistory - When true, history snapshots and
+     *   tombstoned rows are included in results.
+     * @param opts.actorScopes - Caller's security scopes for row-level
+     *   filtering.
+     */
+    async searchByVector(
+        queryVector: number[],
+        opts?: {
+            topK?: number;
+            filter?: Partial<VerbatimDocument['metadata']>;
+            includeHistory?: boolean;
+            actorScopes?: ReadonlyArray<string>;
+        },
+    ): Promise<VerbatimSearchResult[]> {
+        if (!this.initialized || !this.table) {
+            return [];
+        }
+        const limit = opts?.topK ?? 10;
+        // Cache + single-flight wrap (same machinery as search()).
+        const sortedScopes = opts?.actorScopes
+            ? [...opts.actorScopes].sort()
+            : (getCurrentActorScopes() ? [...getCurrentActorScopes()!].sort() : null);
+        const normFilter = opts?.filter
+            ? Object.fromEntries(
+                Object.entries(opts.filter)
+                    .filter(([, v]) => v !== undefined && v !== null)
+                    .sort(([a], [b]) => a.localeCompare(b)),
+            )
+            : null;
+        // Cache key uses a truncated-vector fingerprint so the key is small
+        // but still distinct across different query vectors.
+        const vecFingerprint = queryVector.slice(0, 8).map((v) => v.toFixed(4)).join(',');
+        return this.cachedRead<VerbatimSearchResult[]>(
+            'verbatim-searchByVector',
+            {
+                vecFp: vecFingerprint,
+                limit,
+                filter: normFilter,
+                includeHistory: opts?.includeHistory ?? false,
+                scopes: sortedScopes,
+            },
+            () => this.searchGate.read(() => this._runVectorSearchUncached(queryVector, limit, opts?.filter, opts?.includeHistory, opts?.actorScopes, 'searchByVector')),
+        );
+    }
+
+    /** Shared uncached vector-search body for both search() (embeds locally
+     *  then delegates) and searchByVector() (pre-computed parent vector).
+     *  Filters, history exclusion, read-pool routing, row-level scoping,
+     *  corruption self-heal — identical semantics for both entry points.
+     *  @param operation - Operation label for VerbatimStoreError ('search'
+     *    or 'searchByVector'). */
+    private async _runVectorSearchUncached(
+        vector: number[],
         limit: number,
         filter: Partial<VerbatimDocument['metadata']> | undefined,
-        opts: { includeHistory?: boolean } | undefined,
+        includeHistory: boolean | undefined,
         actorScopes: ReadonlyArray<string> | undefined,
+        operation: string,
     ): Promise<VerbatimSearchResult[]> {
         try {
-            // Query side of the asymmetric pair: e5 needs "query: ".
-            const vector = await this.embeddingProvider.embedQuery(query);
-
-            // Filter conditions are independent of which Table handle
-            // runs the query — compute once, pass into the pool block.
             const conditions: string[] = [];
-            // Hide history snapshot rows AND tombstoned canonical rows
-            // by default. Verbatim is append-only, so without these
-            // filters search results would mix superseded content with
-            // current authoritative content. Pass `{ includeHistory: true }`
-            // to surface them (e.g. for an "audit / changelog" UI).
-            if (!opts?.includeHistory) {
+            if (!includeHistory) {
                 conditions.push(`id NOT LIKE '${HISTORY_ID_LIKE_PATTERN}'`);
                 conditions.push("text NOT LIKE '[TOMBSTONED%'");
             }
@@ -1225,22 +1233,14 @@ export class VerbatimStore implements VectorProvider {
                     }
                 }
             }
-
-            // Route through the read pool when available so concurrent
-            // recalls land on independent Table handles. Falls back to
-            // the single this.table when the pool hasn't built yet
-            // (e.g. brand-new install, table created after initialize()).
             const pool = await this.ensureReadPool();
             const runVectorSearch = async (tbl: lancedb.Table) => {
-                let qb = tbl.vectorSearch(vector as number[]).limit(limit);
+                let qb = tbl.vectorSearch(vector).limit(limit);
                 if (conditions.length > 0) {
                     qb = qb.filter(conditions.join(' AND '));
                 }
                 return await qb.toArray();
             };
-            // search() narrows this.table to non-null before delegating
-            // here; the `!` is safe and matches the original code's
-            // (implicit) assumption.
             const results = pool
                 ? await pool.withTable(runVectorSearch)
                 : await runVectorSearch(this.table!);
@@ -1255,25 +1255,25 @@ export class VerbatimStore implements VectorProvider {
                     project: r.project,
                     ecosystem: r.ecosystem,
                     updatedAt: r.updatedAt,
-                    security_scopes: r.security_scopes || []
-                }
+                    security_scopes: r.security_scopes || [],
+                },
             }));
-            // Row-level enforcement on top of the workspace-grain SpiceDB
-            // check. Explicit `actorScopes` arg wins; otherwise fall through
-            // to the bound request actor (Clerk middleware populates it).
-            // When neither is set (daemon-internal callers), behaves as
-            // before — no filtering.
             return applyActorScopeFilter(mapped, actorScopes ?? getCurrentActorScopes());
         } catch (error: any) {
-            // A corrupt vector index surfaces here as a catchable error (it can
-            // also hard-abort natively — that's what worker isolation is for).
-            // Schedule a background self-heal so subsequent queries recover,
-            // then surface a catchable error (never a crash) for this one.
             if (isIndexCorruptionError(error)) {
                 this.scheduleIndexHeal();
             }
-            throw new VerbatimStoreError('search', error.message);
+            throw new VerbatimStoreError(operation, error.message);
         }
+    }
+    private async _searchUncached(
+        query: string, limit: number,
+        filter: Partial<VerbatimDocument['metadata']> | undefined,
+        opts: { includeHistory?: boolean } | undefined, actorScopes: ReadonlyArray<string> | undefined,
+    ): Promise<VerbatimSearchResult[]> {
+        // Query side of the asymmetric pair: e5 needs "query: ".
+        const vector = await this.embeddingProvider.embedQuery(query);
+        return this._runVectorSearchUncached(vector, limit, filter, opts?.includeHistory, actorScopes, 'search');
     }
 
     /**

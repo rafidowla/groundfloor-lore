@@ -25,7 +25,7 @@ import {
     migrateProjectsJsonToWorkspacesJson,
 } from '../config/workspaceRegistry.js';
 import { LocalSourceWatcher } from '../engines/localSourceWatcher.js';
-import { buildVerbatimText } from '../engines/verbatimStore.js';
+import { buildVerbatimText } from '../engines/verbatimSchema.js';
 import { sweepFreshness, type IFreshnessGraph } from '../engines/freshnessEngine.js';
 import { log } from '../logger.js';
 import { KuzuSchemaGraphOps, type SchemaGraphOps } from '../schemas/substrate/schemaGraphOps.js';

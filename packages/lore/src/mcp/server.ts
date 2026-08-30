@@ -39,6 +39,7 @@ import { getAnalyticalCached } from './analyticalGetter.js';
 import { LocalGraphRegistry } from '../engines/localGraphRegistry.js';
 import { SyncEngineRegistry } from '../engines/syncEngineRegistry.js';
 import { WorkspaceVerbatimResolver } from '../outbox/workspaceVerbatimResolver.js';
+import { searchWorkerIsolationEnabled } from '../engines/verbatimSearchWorkerProxy.js';
 import { VerbatimStore } from '../engines/verbatimStore.js';
 import type { EmbeddingProvider } from '../providers/types.js';
 import { FeedbackStore } from '../engines/feedbackStore.js';
@@ -552,10 +553,11 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         deploymentMode,
         graphBasePath,
         embeddingProvider,
+        embedOverrides: opts.embedding as Record<string, unknown> | undefined,
     });
 
     // SP-F3 — per-workspace verbatim resolver for the outbox replicator (local mode).
-    const workspaceVerbatimResolver = deploymentMode === 'cloud' ? undefined : new WorkspaceVerbatimResolver(embeddingProvider); const workspaceQuotaStore = new InMemoryWorkspaceQuotaStore(); const getWorkspaceEntryForQuota = (ws: string) => loadWorkspaces().workspaces.find((w) => w.name === ws); // L-033 shared write quota (REST + MCP).
+    const workspaceVerbatimResolver = deploymentMode === 'cloud' ? undefined : new WorkspaceVerbatimResolver(embeddingProvider, searchWorkerIsolationEnabled(), opts.embedding as Record<string, unknown> | undefined); const workspaceQuotaStore = new InMemoryWorkspaceQuotaStore(); const getWorkspaceEntryForQuota = (ws: string) => loadWorkspaces().workspaces.find((w) => w.name === ws); // L-033 shared write quota (REST + MCP).
 
     // Architecture gap #2 — async embed queue (factory in embed/wiring.ts).
     // RA2-reaudit2 — resolveStores routes a job to its own workspace's graph +

@@ -28,7 +28,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { VerbatimStore, buildVerbatimText } from '../packages/lore/src/engines/verbatimStore.js';
+import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { buildVerbatimText } from '../packages/lore/src/engines/verbatimSchema.js';
 import { computeContentHash } from '../packages/lore/src/engines/contentHash.js';
 import { runConsistencySweep } from '../packages/lore/src/diagnostics/sweeper.js';
 import type { EmbeddingProvider, LoreNode } from '../packages/lore/src/providers/types.js';

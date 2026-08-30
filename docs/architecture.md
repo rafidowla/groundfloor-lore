@@ -8,7 +8,7 @@
 
 **Lore** is a knowledge database for Agentic AI: a local-first, schema-agnostic memory layer that any AI tool (Claude, Cursor, Antigravity, internal agents) reads and writes over **MCP**. It gives agents **persistent, structured knowledge** of your work — decisions, conventions, documents, systems, people, and history — so they stop rediscovering context from scratch every session.
 
-Lore Core is domain-agnostic. The same engine backs many **workspaces**, each with its own schema and vocabulary: engineering, IT/security, commercial real estate, sales, legal, or personal. Code intelligence is **not** built in — it lives in **Atlas**, one external client application for the software-development domain (see *External clients* below).
+Lore Core is domain-agnostic. The same engine backs many **workspaces**, each with its own schema and vocabulary: engineering, IT/security, commercial real estate, sales, legal, or personal. Code intelligence is **not** built in — it lives in **Atlas**, one external client application for the software-development domain (see *External clients* below). For the broader product positioning across domains, see [MARKETING.md](MARKETING.md).
 
 The system operates as a **single MCP server** (`@groundfloor/lore`) over three local substrates: **SurrealDB or Kùzu** (embedded graph — SurrealDB by default as of v3.13.0, Kùzu remains fully supported per workspace), **LanceDB** (vector store for semantic recall), and **SQLite** (outbox, migrations, audit, auth, plus application-defined
 tabular collections with SQL aggregates). Team-shared knowledge syncs to a hosted **Dataplane** via the Groundfloor TS-SDK.
