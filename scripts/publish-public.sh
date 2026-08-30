@@ -41,6 +41,7 @@ STRIP=(
   cursor-hooks
   runs
   test/internal
+  scripts/sprint-R-live-smoke.mjs
   auto_ingest.mjs
   bitbucket-pipelines.yml
   AGENTS.md
@@ -169,16 +170,23 @@ if git -C "$WORK" ls-files | grep -q '^\.atlas/'; then
   exit 1
 fi
 # 2. Every staged change vs origin must be a deletion OR one of the two
-#    rewritable files; and inside the rewritable files only deletions.
+#    rewritable files. Inside the rewritable files, rewrites must be pure
+#    line replacements: with -U0 every '+' must immediately follow its '-'
+#    counterpart (a pure insertion would fail the pairing check).
 while read -r status path; do
   case "$status" in
     D) ;;
     M)
       case "$path" in
-        "$(printf '%s\n' "${REWRITABLE[@]}" | grep -Fx "$path")")
-          if git -C "$WORK" diff --cached "origin/$BRANCH" -- "$path" | grep '^+[^+]' | grep -q .; then
-            echo "ERROR: $path sanitizer inserted lines (deletions only):" >&2
-            git -C "$WORK" diff --cached "origin/$BRANCH" -- "$path" | grep '^+[^+]' | head -10 >&2
+        "package.json"|".test-type-baseline.json")
+          git -C "$WORK" diff -U0 --cached "origin/$BRANCH" -- "$path" | awk '
+            /^\+/ && !/^\+\+\+/ && prev != "-" { print "unpaired insertion: " $0; bad = 1 }
+            { prev = substr($0, 1, 1) }
+            END { exit bad }
+          ' && prev_ok=1 || prev_ok=0
+          if [ "$prev_ok" != 1 ]; then
+            echo "ERROR: $path sanitizer made a pure insertion (rewrites must be deletions/line replacements):" >&2
+            git -C "$WORK" diff -U0 --cached "origin/$BRANCH" -- "$path" | grep '^+[^+]' | head -10 >&2
             exit 1
           fi
           ;;

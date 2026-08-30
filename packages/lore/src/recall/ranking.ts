@@ -286,13 +286,19 @@ export interface SortedCandidate<T extends RankInputs['node']> {
  */
 export function sortByRank<T extends RankInputs['node']>(
     candidates: ReadonlyArray<RankCandidate<T>>,
-    opts: { nowMs?: number; halfLifeDays?: number } = {},
+    opts: { nowMs?: number; halfLifeDays?: number; curatedTypes?: ReadonlySet<string> } = {},
 ): SortedCandidate<T>[] {
     return candidates
         .map((c) => ({
             node: c.node,
             baseScore: c.baseScore,
-            finalScore: rankScore({ node: c.node, baseScore: c.baseScore, nowMs: opts.nowMs, halfLifeDays: opts.halfLifeDays }),
+            finalScore: rankScore({
+                node: c.node,
+                baseScore: c.baseScore,
+                nowMs: opts.nowMs,
+                halfLifeDays: opts.halfLifeDays,
+                curatedTypes: opts.curatedTypes,
+            }),
         }))
         .sort((a, b) => b.finalScore - a.finalScore);
 }
@@ -316,6 +322,7 @@ export function reRankLoreNodes<T extends RankInputs['node']>(
     nodes: ReadonlyArray<T>,
     nowMs?: number,
     baseScores?: ReadonlyMap<string, number>,
+    curatedTypes?: ReadonlySet<string>,
 ): T[] {
     const at = nowMs ?? Date.now();
     return nodes
@@ -324,7 +331,7 @@ export function reRankLoreNodes<T extends RankInputs['node']>(
             // callers passing id-less nodes (tests, one-off re-ranks) still
             // get the rank-position fallback instead of a blind cast.
             const real = ('id' in n && typeof n.id === 'string') ? baseScores?.get(n.id) : undefined;
-            return { n, fs: rankScore({ node: n, baseScore: real ?? 1 / (1 + idx), nowMs: at }) };
+            return { n, fs: rankScore({ node: n, baseScore: real ?? 1 / (1 + idx), nowMs: at, curatedTypes }) };
         })
         .sort((a, b) => b.fs - a.fs)
         .map((x) => x.n);

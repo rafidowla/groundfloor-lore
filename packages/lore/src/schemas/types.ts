@@ -547,12 +547,12 @@ export const DEFAULT_SCHEMA_V2: LoreSchemaV2 = {
     domain: 'General',
     description: 'Schema-agnostic default for Groundfloor-Lore.',
     nodeTypes: [
-        { name: 'decision', description: 'A choice made between options, and its reasoning.', kind: 'factual' },
-        { name: 'convention', description: 'An agreed-upon pattern or practice.', kind: 'factual' },
-        { name: 'note', description: 'A general note or observation.', kind: 'factual' },
-        { name: 'bug_pattern', description: 'A recurring problem, its root cause, and the fix.', kind: 'factual' },
-        { name: 'architecture', description: 'High-level structure or design of a system or entity.', kind: 'factual' },
-        { name: 'troubleshooting', description: 'Step-by-step recovery for a known failure.', kind: 'factual' },
+        { name: 'decision', description: 'A choice made between options, and its reasoning.', kind: 'factual', operatorCurated: true },
+        { name: 'convention', description: 'An agreed-upon pattern or practice.', kind: 'factual', operatorCurated: true },
+        { name: 'note', description: 'A general note or observation.', kind: 'factual', operatorCurated: true },
+        { name: 'bug_pattern', description: 'A recurring problem, its root cause, and the fix.', kind: 'factual', operatorCurated: true },
+        { name: 'architecture', description: 'High-level structure or design of a system or entity.', kind: 'factual', operatorCurated: true },
+        { name: 'troubleshooting', description: 'Step-by-step recovery for a known failure.', kind: 'factual', operatorCurated: true },
     ],
     edgeTypes: [
         ...REBAC_RELATION_EDGES,

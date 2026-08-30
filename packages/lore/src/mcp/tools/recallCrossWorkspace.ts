@@ -26,7 +26,8 @@ import type { VerbatimStore } from '../../engines/verbatimStore.js';
 import type { DataplaneVectorStore } from '../../engines/dataplaneVectorStore.js';
 import type { ISessionCache } from '../../engines/sessionCache.js';
 import { listWorkspaceNames } from '../../config/workspaces.js';
-import { rankScore } from '../../recall/ranking.js';
+import { curatedTypesFromSchema, rankScore } from '../../recall/ranking.js';
+import { DEFAULT_SCHEMA_V2 } from '../../schemas/types.js';
 import { ecosystemMatches } from '../../core/ecosystemMatch.js';
 import { resolveRecallFanoutWsCap, resolveRecallFanoutConcurrency, mapWithConcurrency } from '../../recall/recallFanout.js';
 import { redactError } from '../../security/logRedact.js';
@@ -282,8 +283,9 @@ export async function runCrossWorkspaceRecall(
     // boot-store count (verbatimCount).
     const semanticConsulted = perWorkspaceSeeding ? anySemanticConsulted : verbatimCount > 0;
 
+    const curatedTypes = curatedTypesFromSchema(DEFAULT_SCHEMA_V2.nodeTypes);
     let merged = Array.from(byId.values())
-        .map((c) => ({ ...c, fs: rankScore({ node: c.node, baseScore: c.score }) })).sort((a, b) => b.fs - a.fs);
+        .map((c) => ({ ...c, fs: rankScore({ node: c.node, baseScore: c.score, curatedTypes }) })).sort((a, b) => b.fs - a.fs);
 
     if (tags && tags.length > 0) {
         const lowerTags = tags.map((t) => t.toLowerCase().trim());

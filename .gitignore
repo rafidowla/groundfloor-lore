@@ -63,3 +63,6 @@ node_modules
 # repo root + per-file mtimes); regenerated on every `atlas index`. The code
 # graph + knowledge live in Atlas's data home (~/.groundfloor/atlas/...), not here.
 .atlas/
+
+# Local `npm pack` output — never commit release tarballs.
+*.tgz

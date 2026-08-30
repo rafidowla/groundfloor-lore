@@ -27,7 +27,8 @@ import type { LoreNode } from '../providers/types.js';
 import type { LocalGraphRegistry } from '../engines/localGraphRegistry.js';
 import type { StorageBundle } from '../mcp/services.js';
 import { WorkspaceNotFoundError } from '../engines/localGraphRegistry.js';
-import { reRankLoreNodes } from './ranking.js';
+import { curatedTypesFromSchema, reRankLoreNodes } from './ranking.js';
+import { DEFAULT_SCHEMA_V2 } from '../schemas/types.js';
 import { ensureAccessTracker } from '../engines/accessTracker.js';
 import { reciprocalRankFusion, estimateTokens } from '../mcp/tools/search/helpers.js';
 import { applyActorScopeFilter } from '../security/scopeFilter.js';
@@ -154,6 +155,12 @@ export interface RetrieveContext {
             bm25Search(query: string, limit: number, filter?: { ecosystem?: string }): Promise<Bm25Envelope<{ id: string; score?: number }>>;
         }>;
     };
+    /**
+     * Types that receive the 1.5× recall type-bias. When omitted, the default
+     * schema's operatorCurated types apply (decision, convention, …). Pass an
+     * empty set to disable type bias (schema-agnostic caller).
+     */
+    curatedTypes?: ReadonlySet<string>;
 }
 
 /* ─── Internals ────────────────────────────────────────────────── */
@@ -610,7 +617,8 @@ export async function retrieve(
         const prov = seedProvenance.get(n.id)?.score;
         if (prov !== undefined) seedBaseScores.set(n.id, prov);
     }
-    seeds = reRankLoreNodes(seeds, undefined, seedBaseScores).slice(0, limit);
+    const curatedTypes = ctx.curatedTypes ?? curatedTypesFromSchema(DEFAULT_SCHEMA_V2.nodeTypes);
+    seeds = reRankLoreNodes(seeds, undefined, seedBaseScores, curatedTypes).slice(0, limit);
 
     // fix/fts-index-and-tokenizer (item 2): sourcesConsulted must not claim
     // 2 (semantic + bm25) when the hybrid seed pass ran but bm25 came back
