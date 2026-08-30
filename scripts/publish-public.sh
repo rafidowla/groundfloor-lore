@@ -9,10 +9,13 @@
 #   1. snapshot origin/main into a scratch worktree
 #   2. rebase onto the public lineage (github/main) so pushes stay fast-forward
 #   3. strip the internal-file list below
-#   4. FAIL-CLOSED assertion: the staged tree may differ from origin/main ONLY
-#      by strip-list deletions. Any addition/modification (e.g. a new internal
-#      file someone forgot to classify) refuses the publish.
-#   5. commit + fast-forward push to github main (no --force used)
+#   4. apply documented deletion-only rewrites to package.json and
+#      .test-type-baseline.json so the public tree never references the
+#      stripped test/internal/ files
+#   5. FAIL-CLOSED assertion: the staged tree may differ from origin/main ONLY
+#      by strip-list deletions + the two rewritable files (deletions only
+#      inside them). Any other addition/modification refuses the publish.
+#   6. commit + fast-forward push to github main (no --force used)
 #
 # Runs the same as a user would run it manually; the memory guard in
 # ~/.groundfloor/hooks/pre-push stays in place for accidental pushes from the
@@ -90,6 +93,14 @@ STRIP=(
   docs/architecture/rc4-workspace-audit-2026-05-18.md
 )
 
+# ── Files rewritable by the sanitizer (deletions ONLY) ─────────────────────
+# package.json: script entries pointing at test/internal/ are removed, and
+# aggregates that chained them drop those segments — otherwise the public
+# `npm test` would fail on missing files. .test-type-baseline.json: entries
+# for test/internal/ files are removed — otherwise the arch gate reports them
+# stale. Any other file may only be DELETED by this publish.
+REWRITABLE=("package.json" ".test-type-baseline.json")
+
 cd "$ROOT"
 git fetch -q origin "$BRANCH"
 git fetch -q "$GITHUB_REMOTE" "$BRANCH" || true
@@ -111,19 +122,79 @@ git -C "$WORK" checkout -q "$GITHUB_REMOTE/$BRANCH" 2>/dev/null || true
 git -C "$WORK" read-tree "origin/$BRANCH"
 git -C "$WORK" rm -rq -f --cached --ignore-unmatch "${STRIP[@]}"
 
+# ── Sanitizer: deletion-only rewrites of the rewritable files ──────────────
+# Start from the INDEX (origin's) content, never the stale worktree copy.
+git -C "$WORK" show :package.json > "$WORK/package.json"
+git -C "$WORK" show :.test-type-baseline.json > "$WORK/.test-type-baseline.json"
+
+node -e '
+const fs = require("fs");
+const wk = process.argv[1];
+const pkgPath = wk + "/package.json";
+const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+const removed = new Set();
+for (const [k, v] of Object.entries(pkg.scripts || {})) {
+  if (String(v).includes("tsx test/internal/")) removed.add(k);
+}
+for (const k of removed) delete pkg.scripts[k];
+for (const [k, v] of Object.entries(pkg.scripts || {})) {
+  if (typeof v !== "string") continue;
+  const segs = v.split(" && ");
+  const kept = segs.filter((s) => !(removed.has(s) || removed.has(s.replace(/^npm run /, ""))));
+  pkg.scripts[k] = kept.join(" && ");
+}
+if (JSON.stringify(pkg.scripts).includes("test/internal")) {
+  console.error("package.json still references test/internal after sanitize"); process.exit(1);
+}
+fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
+' "$WORK"
+
+node -e '
+const fs = require("fs");
+const wk = process.argv[1];
+const basePath = wk + "/.test-type-baseline.json";
+const base = JSON.parse(fs.readFileSync(basePath, "utf8"));
+for (const k of Object.keys(base.quarantined || {})) {
+  if (k.startsWith("test/internal/")) delete base.quarantined[k];
+}
+fs.writeFileSync(basePath, JSON.stringify(base, null, 2) + "\n");
+' "$WORK"
+
+git -C "$WORK" add package.json .test-type-baseline.json
+
 # ── Fail-closed assertions ──────────────────────────────────────────────────
 # 1. No Atlas memory in the staged tree, ever.
 if git -C "$WORK" ls-files | grep -q '^\.atlas/'; then
   echo "ERROR: .atlas/ files staged for publish — refusing to ship Atlas memory" >&2
   exit 1
 fi
-# 2. The publish must be exactly "origin main minus the strip list": any line
-#    that is not a deletion (D) means an unclassified file would ship — refuse.
-if grep -v '^D' <(git -C "$WORK" diff --cached --name-status "origin/$BRANCH") | grep -q .; then
-  echo "ERROR: publish tree contains additions/modifications vs origin/$BRANCH — unclassified file? Refusing." >&2
-  git -C "$WORK" diff --cached --name-status "origin/$BRANCH" | grep -v '^D' | head -20 >&2
-  exit 1
-fi
+# 2. Every staged change vs origin must be a deletion OR one of the two
+#    rewritable files; and inside the rewritable files only deletions.
+while read -r status path; do
+  case "$status" in
+    D) ;;
+    M)
+      case "$path" in
+        "$(printf '%s\n' "${REWRITABLE[@]}" | grep -Fx "$path")")
+          if git -C "$WORK" diff --cached "origin/$BRANCH" -- "$path" | grep '^+[^+]' | grep -q .; then
+            echo "ERROR: $path sanitizer inserted lines (deletions only):" >&2
+            git -C "$WORK" diff --cached "origin/$BRANCH" -- "$path" | grep '^+[^+]' | head -10 >&2
+            exit 1
+          fi
+          ;;
+        *)
+          echo "ERROR: unclassified modification to $path — refuses publish" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    *)
+      echo "ERROR: publish tree adds $path vs origin/$BRANCH — unclassified file? Refusing." >&2
+      git -C "$WORK" diff --cached --name-status "origin/$BRANCH" | grep -v '^D' | head -20 >&2
+      exit 1
+      ;;
+  esac
+done < <(git -C "$WORK" diff --cached --name-status "origin/$BRANCH")
 
 # Nothing staged to ship (already in sync).
 if git -C "$WORK" diff --cached --quiet; then
@@ -136,7 +207,7 @@ git -C "$WORK" commit -q -m "chore(publish): mirror origin/$BRANCH $(git rev-par
 if [ "$DRY_RUN" = 1 ]; then
   echo "Dry run — would push to $GITHUB_REMOTE/$BRANCH:"
   git -C "$WORK" diff --stat "$GITHUB_REMOTE/$BRANCH" HEAD | tail -5
-  echo "(staged tree verified: origin/$BRANCH minus strip list only)"
+  echo "(staged tree verified: origin/$BRANCH minus strip list, deletions-only rewrites)"
   exit 0
 fi
 
