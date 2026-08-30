@@ -108,7 +108,7 @@
     "test:unit:route-gates-l068": "tsx test/route-gates-l068-unit.ts",
     "test:unit:final-audit-fixes": "tsx test/final-audit-fixes-unit.ts",
     "test:smoke:sprint-v": "tsx test/sprint-v-smoke.ts",
-    "test:sprint-r": "tsx test/sprint-R-recall-ranking-property.ts",
+    "test:sprint-r": "tsx test/internal/sprint-R-recall-ranking-property.ts",
     "test:sprint-r-bench": "tsx test/recall-benchmarks/runBenchmarks.ts",
     "test:unit:substrate-adversarial": "tsx test/substrate-adversarial-unit.ts",
     "test:unit:sp05-injection": "tsx test/sp05-injection-unit.ts",
