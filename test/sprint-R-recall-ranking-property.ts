@@ -161,7 +161,7 @@ const cases: Case[] = [
         name: 'sentinel: Sprint L workspace_required test file present + non-trivial',
         mode: 'expectPass',
         fn: () => {
-            const p = path.join(__dirname, 'L1-workspace-required-unit.ts');
+            const p = path.join(__dirname, 'internal', 'L1-workspace-required-unit.ts');
             assert.ok(fs.existsSync(p), 'Sprint L workspace-required unit test missing');
             const body = fs.readFileSync(p, 'utf8');
             assert.ok(body.includes('writeWorkspaceRequired') || body.includes('workspace_required'),

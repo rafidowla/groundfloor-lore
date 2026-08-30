@@ -37,6 +37,7 @@ STRIP=(
   .swarm
   cursor-hooks
   runs
+  test/internal
   auto_ingest.mjs
   bitbucket-pipelines.yml
   AGENTS.md
