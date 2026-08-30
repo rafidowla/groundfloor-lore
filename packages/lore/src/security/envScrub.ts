@@ -203,6 +203,9 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_SEARCH_WORKER_MAX_RESTARTS',           // search-worker: consecutive-crash restart cap before failing fast (default 5)
     'LORE_WORKER_BASE_PATH',                     // search-worker internal: workspace base path passed to the child (set by the parent on fork)
     'LORE_WORKER_EMBED_OVERRIDES',               // search-worker internal: JSON embedding overrides passed to the child (set by the parent on fork)
+    'LORE_WORKER_PARENT_EMBEDS',                 // search-worker internal: parent owns embedding, so child must not load a second model
+    'LORE_WORKER_EMBED_DIM',                     // search-worker internal: parent provider vector dimension for the child's stub
+    'LORE_WORKER_EMBED_MODEL',                   // search-worker internal: parent provider model identity for the child's stub
     'LORE_IS_SEARCH_WORKER',                     // search-worker internal: marks a process as a Lore search worker (prevents recursive forking)
     'LORE_SEARCH_WEIGHT_TAGS',                   // search: ranking weight for tags match (default 1)
     // Observability — Prometheus + OpenTelemetry. Read via

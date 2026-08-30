@@ -571,9 +571,12 @@ per-call IPC timeout (covers a large `storeBatch` / index build); and the
 consecutive-crash cap after which the supervisor stops restarting and fails
 calls fast (so a genuinely broken workspace surfaces instead of crash-looping).
 
-`LORE_WORKER_BASE_PATH`, `LORE_WORKER_EMBED_OVERRIDES` and `LORE_IS_SEARCH_WORKER`
-are **internal** — the parent sets them on the child when it forks a worker
-(workspace path, serialized embedding overrides, and the recursion guard). Do not
+`LORE_WORKER_BASE_PATH`, `LORE_WORKER_EMBED_OVERRIDES`,
+`LORE_WORKER_PARENT_EMBEDS`, `LORE_WORKER_EMBED_DIM`,
+`LORE_WORKER_EMBED_MODEL`, and `LORE_IS_SEARCH_WORKER` are **internal** — the
+parent sets them on the child when it forks a worker (workspace path, serialized
+embedding overrides, whether embedding stays in the parent, the parent
+provider's vector dimension/model identity, and the recursion guard). Do not
 set them yourself.
 
 Source: `src/engines/verbatimSearchWorkerProxy.ts`
@@ -2588,6 +2591,9 @@ Source: `src/engines/surreal/surrealConnection.ts`
 | `LORE_SEARCH_WORKER_MAX_RESTARTS` | `5` | Search |
 | `LORE_WORKER_BASE_PATH` | _(internal)_ | Search |
 | `LORE_WORKER_EMBED_OVERRIDES` | _(internal)_ | Search |
+| `LORE_WORKER_PARENT_EMBEDS` | _(internal)_ | Search |
+| `LORE_WORKER_EMBED_DIM` | _(internal)_ | Search |
+| `LORE_WORKER_EMBED_MODEL` | _(internal)_ | Search |
 | `LORE_IS_SEARCH_WORKER` | _(internal)_ | Search |
 | `LORE_SEARCH_WEIGHT_TAGS` | `1` | Search |
 | `LORE_LANCE_ADD_COLUMN_SUPPORTED` | `true` | DB Internals |

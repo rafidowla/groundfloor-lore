@@ -41,6 +41,13 @@ import type { LoreNode } from '../packages/lore/src/providers/types.js';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const WRITER_SCRIPT = path.join(REPO_ROOT, 'test', 'helpers', 'surreal-crash-writer.ts');
 
+/** Native SurrealKV teardown can release its final SSTable a few milliseconds
+ * after close() resolves. Node's built-in retry handles that transient
+ * ENOTEMPTY without weakening any durability assertion. */
+function removeScratch(dir: string): void {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 25 });
+}
+
 /**
  * Both on-disk backends survive a crash, so both are covered for SIGKILL.
  *
@@ -110,7 +117,7 @@ for (const backend of REOPENABLE_BACKENDS) {
             assert.ok(await second.getNode('after-reopen'), 'reopened store accepts writes');
             await second.close();
         } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
+            removeScratch(dir);
         }
     });
 
@@ -129,7 +136,7 @@ for (const backend of REOPENABLE_BACKENDS) {
                 await graph.close();
             }
         } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
+            removeScratch(dir);
         }
     });
 
@@ -146,7 +153,7 @@ for (const backend of REOPENABLE_BACKENDS) {
             assert.ok(await graph.getNode('x'));
             await graph.close();
         } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
+            removeScratch(dir);
         }
     });
 
@@ -167,7 +174,7 @@ for (const backend of REOPENABLE_BACKENDS) {
             assert.equal((await second.getStats()).edgeCount, 2);
             await second.close();
         } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
+            removeScratch(dir);
         }
     });
 }
@@ -209,7 +216,7 @@ await test('[rocksdb] in-process reopen fails LOUDLY within the budget (never ha
         else process.env['LORE_SURREAL_OPEN_BUDGET_MS'] = previousBudget;
         if (previousTimeout === undefined) delete process.env['LORE_SURREAL_OPEN_TIMEOUT_MS'];
         else process.env['LORE_SURREAL_OPEN_TIMEOUT_MS'] = previousTimeout;
-        fs.rmSync(dir, { recursive: true, force: true });
+        removeScratch(dir);
     }
 });
 
@@ -279,7 +286,7 @@ for (const backend of CRASH_BACKENDS) {
             assert.ok(await graph.getNode('post-crash'), 'store is writable after crash recovery');
             await graph.close();
         } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
+            removeScratch(dir);
         }
     });
 
@@ -307,7 +314,7 @@ for (const backend of REOPENABLE_BACKENDS) {
             assert.ok(await second.getNode('still-writable'));
             await second.close();
         } finally {
-            fs.rmSync(dir, { recursive: true, force: true });
+            removeScratch(dir);
         }
     });
 }
@@ -348,7 +355,7 @@ await test('[rocksdb] a closed store stays locked against OTHER processes too', 
         assert.match(stderr, /Failed to open embedded SurrealDB \(rocksdb\)/,
             'and it must fail with the named error rather than hanging silently');
     } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
+        removeScratch(dir);
     }
 });
 
