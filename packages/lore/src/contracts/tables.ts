@@ -27,7 +27,7 @@
  *     that don't support it throw a clear error.
  */
 
-import type { Filter, FindOptions } from '../engines/collectionStorage.js';
+import type { Filter, FilterNode, FindOptions } from '../engines/collectionStorage.js';
 
 /**
  * ColumnType — declared column type in a TableSchema. Maps to
@@ -95,6 +95,23 @@ export interface TableSchema {
 export type Row = Record<string, unknown>;
 
 /**
+ * One typed mutation inside an all-or-nothing table transaction.
+ * The public API accepts only these closed operations — never raw SQL.
+ */
+export type TableOp =
+    | { op: 'insert'; collection: string; row: Row }
+    | { op: 'update'; collection: string; filter: FilterNode; patch: Partial<Row> }
+    | { op: 'delete'; collection: string; filter: FilterNode }
+    | { op: 'upsert'; collection: string; row: Row };
+
+export type TableOpResult =
+    | { op: 'insert' | 'upsert'; collection: string; key: unknown }
+    | { op: 'update' | 'delete'; collection: string; count: number };
+
+/** Bound SQLite's single-writer lock time for one public transaction. */
+export const MAX_TABLE_TX_OPS = 100;
+
+/**
  * JoinSpec — for the optional `join` method. Inner-join only;
  * left/right/outer joins are not exposed (adapters that need them
  * compose two `query` calls + client-side merge).
@@ -104,6 +121,22 @@ export interface JoinSpec {
     table: string;
     /** Join condition. Both sides reference column names by short name. */
     on: { left: string; right: string };
+}
+
+/** One hop in joinMany. `on.from`/`on.to` are unprefixed column names (assertIdent). */
+export interface JoinHop {
+    collection: string;
+    on: { from: string; to: string };
+    type: 'inner' | 'left';
+}
+
+export const MAX_JOIN_HOPS = 4;
+
+export interface JoinQuery {
+    from: string;
+    join: JoinHop[];
+    where?: FilterNode;
+    opts?: FindOptions;
 }
 
 /**
@@ -127,6 +160,8 @@ export interface JoinSpec {
 export interface BackendCapabilities {
     /** Inner JOINs via the optional `join()` method. */
     join: boolean;
+    /** Cap for `joinMany` hops when join is supported. Omit when join is false. */
+    maxJoinHops?: number;
     /** `contains` / `startsWith` filters are case-sensitive. (false
      *  on backends whose LIKE is case-insensitive by default —
      *  Postgres ILIKE, SQLite without PRAGMA case_sensitive_like.) */
@@ -171,7 +206,7 @@ export interface ITableStorage {
      * Read with filter, sort, limit. Filter semantics match
      * `CollectionStorage.find` (see `src/engines/collectionStorage.ts` for `Filter`).
      */
-    query(table: string, filter?: Filter, opts?: FindOptions): Promise<Row[]>;
+    query(table: string, filter?: FilterNode, opts?: FindOptions): Promise<Row[]>;
 
     /**
      * Single-row read by primary key. Returns null if absent.
@@ -182,12 +217,12 @@ export interface ITableStorage {
      * Update rows matching the filter. Patch is column-name → new value.
      * Returns the count of rows updated.
      */
-    update(table: string, filter: Filter, patch: Partial<Row>): Promise<number>;
+    update(table: string, filter: FilterNode, patch: Partial<Row>): Promise<number>;
 
     /**
      * Delete rows matching the filter. Returns the count of rows deleted.
      */
-    delete(table: string, filter: Filter): Promise<number>;
+    delete(table: string, filter: FilterNode): Promise<number>;
 
     /**
      * Phase 2.5 — count rows matching the filter. With no filter,
@@ -195,7 +230,7 @@ export interface ITableStorage {
      * should implement as a server-side count (not a client-side
      * `query().length`) so the network cost is bounded.
      */
-    count(table: string, filter?: Filter): Promise<number>;
+    count(table: string, filter?: FilterNode): Promise<number>;
 
     /**
      * Phase 2.5 — remove ALL rows from the collection while
@@ -208,6 +243,12 @@ export interface ITableStorage {
     truncate(table: string): Promise<number>;
 
     /**
+     * Apply several typed mutations atomically. Either every operation commits
+     * in order or the backend leaves every touched table unchanged.
+     */
+    runTransaction(ops: TableOp[]): Promise<TableOpResult[]>;
+
+    /**
      * Optional inner-join. Adapters that don't implement it throw a
      * clear "join not supported on this adapter" error. Caller code
      * that needs cross-adapter portability should fall back to two
@@ -216,9 +257,14 @@ export interface ITableStorage {
     join?(
         leftTable: string,
         join: JoinSpec,
-        filter?: Filter,
+        filter?: FilterNode,
         opts?: FindOptions,
     ): Promise<Row[]>;
+
+    /**
+     * Multi-hop join (1..MAX_JOIN_HOPS). Adapters without join throw or omit this.
+     */
+    joinMany?(query: JoinQuery): Promise<Row[]>;
 
     /**
      * Architecture gap #11 — additive schema evolution. Apply a new

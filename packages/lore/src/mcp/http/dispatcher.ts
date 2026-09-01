@@ -100,6 +100,12 @@ export interface DispatcherDeps {
     detectedScope: { workspace: string; ecosystem: string };
     graphBasePath: string;
     loreDir: string;
+    /**
+     * LORE_HOME root (as opposed to `loreDir`, the per-workspace
+     * `.lore/` dir). Threaded into runHttpGates for the
+     * /api/auth/bootstrap one-time-nonce gate (security/authToken.ts).
+     */
+    dataHome: string;
 
     /** Singletons. */
     /** Phase 2 unified storage handle — used by every route family. */
@@ -234,6 +240,9 @@ export interface DispatcherDeps {
      *  the store still types; the load routes short-circuit if absent. */
     loadJobsStore?: LoadJobsStore;
 
+    /** WP3b — live runner so POST .../cancel can abort an in-flight job. */
+    loadJobsRunner?: { requestCancel(jobId: string): void };
+
     /** Sprint Z3 — per-workspace concurrency manager. Optional so cloud /
      *  test wiring without it still types; the load route falls back to
      *  uncapped behaviour when missing (Z3 production wiring always
@@ -334,6 +343,7 @@ export async function dispatchHttpRequest(
     const gate = await runHttpGates(req, res, {
         port: deps.port,
         getAuthToken: deps.getAuthToken,
+        dataHome: deps.dataHome,
         getSharedSecret: deps.getSharedSecret,
         rateLimiter: deps.rateLimiter,
         deploymentMode: deps.deploymentMode,
@@ -416,6 +426,9 @@ async function dispatchAfterGates(
         pendingOpsStore: deps.pendingOpsStore,
         coreNodeTypes: deps.coreNodeTypes,
         outboxStore: deps.outboxStore,
+        // Cloud: outbox records verbatim.upsert but the replicator does
+        // not re-apply (getVerbatim is undefined). Write Dataplane now.
+        inlineVerbatim: deps.deploymentMode === 'cloud' ? deps.store.storageClient : undefined,
         outboxLagCache: deps.outboxLagCache,
         quotaStore: deps.quotaStore,
         getWorkspaceEntryForQuota: deps.getWorkspaceEntryForQuota,
@@ -525,6 +538,7 @@ async function dispatchAfterGates(
         outboxStore: deps.outboxStore,
         outboxLagCache: deps.outboxLagCache,
         concurrencyManager: deps.loadConcurrencyManager,
+        loadJobsRunner: deps.loadJobsRunner,
         // L-019 — POST /api/load now runs ReBAC + token write-scope gates.
         deploymentMode: deps.deploymentMode,
         dataplane: deps.dataplane,

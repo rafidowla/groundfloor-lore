@@ -319,6 +319,7 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
         quotaStore: deps.quotaStore, // L-033 — MCP store_node enforces the shared write quota.
         getWorkspaceEntryForQuota: deps.getWorkspaceEntryForQuota, // L-033.
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // L-056 — delete_node tombstones in the resolved workspace.
+        inlineVerbatim: deps.deploymentMode === 'cloud' ? deps.store.storageClient : undefined,
     });
 
     /* ─── Step #5a: universal Core surfaces (verbatim + analytical) ─ */

@@ -41,6 +41,7 @@ import {
     bm25WithEcosystemUnion,
     type VerbatimSeedHit,
 } from './ecosystemSeedUnion.js';
+import { timeRecallStage, timeRecallStageSync, withRecallStageTiming } from './recallStageTiming.js';
 
 /**
  * D2-recall-1/2 — Row-level security_scopes enforcement on the localGraph
@@ -297,6 +298,14 @@ export async function retrieve(
     query: string,
     opts: RetrieveOptions,
 ): Promise<RetrieveOutcome> {
+    return withRecallStageTiming(() => retrieveInner(ctx, query, opts));
+}
+
+async function retrieveInner(
+    ctx: RetrieveContext,
+    query: string,
+    opts: RetrieveOptions,
+): Promise<RetrieveOutcome> {
     const {
         workspace,
         ecosystem,
@@ -481,7 +490,7 @@ export async function retrieve(
     const hydrateVectorSeeds = async (): Promise<LoreNode[]> => {
         const out: LoreNode[] = [];
         const stripped = seedNodeIds.map((id) => (id.startsWith('lore:') ? id.slice(5) : id));
-        const map = await graph.getNodesByIds(stripped);
+        const map = await timeRecallStage('hydrate', () => graph.getNodesByIds(stripped));
         // carry seedProvenance keyed by the (possibly lore:-prefixed) id onto the
         // stripped graph id.
         seedNodeIds.forEach((rawId, i) => {
@@ -529,11 +538,13 @@ export async function retrieve(
      * unaffected: ecosystemScope is already '*' there, so this is a no-op.
      */
     const applySeedFilters = (raw: LoreNode[]): LoreNode[] => {
-        let s = filterNodesByActorScope(raw);
-        if (ecosystemScope !== '*') s = s.filter((n) => ecosystemMatches(n.ecosystem, ecosystemScope));
-        if (!includeSuperseded) s = s.filter((n) => !(n as HiddenFlags).supersededAt);
-        if (!includeArchived) s = s.filter((n) => (n as HiddenFlags).status !== 'archived');
-        return s;
+        return timeRecallStageSync('filter', () => {
+            let s = filterNodesByActorScope(raw);
+            if (ecosystemScope !== '*') s = s.filter((n) => ecosystemMatches(n.ecosystem, ecosystemScope));
+            if (!includeSuperseded) s = s.filter((n) => !(n as HiddenFlags).supersededAt);
+            if (!includeArchived) s = s.filter((n) => (n as HiddenFlags).status !== 'archived');
+            return s;
+        });
     };
 
     let seeds: LoreNode[];

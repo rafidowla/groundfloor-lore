@@ -68,8 +68,15 @@ export async function spawnDaemon(opts: { home?: string; port?: number } = {}): 
     return { proc, home, port, token: '', log };
 }
 
-export async function fetchAuthToken(port: number): Promise<string> {
-    const res = await fetch(`http://127.0.0.1:${port}/api/auth/bootstrap`, { headers: { Origin: `http://127.0.0.1:${port}` } });
+export async function fetchAuthToken(port: number, home: string): Promise<string> {
+    // The bootstrap route requires the one-time nonce the daemon minted at
+    // boot (security/authToken.ts's ensureBootstrapNonce) — same trust
+    // tier as reading auth.token directly, since spawnDaemon sets HOME to
+    // this test's isolated dir and no LORE_HOME override, so the daemon's
+    // default dataHome resolves to `<home>/.groundfloor`.
+    const noncePath = path.join(home, '.groundfloor', 'bootstrap.nonce');
+    const nonce = fs.readFileSync(noncePath, 'utf-8').trim();
+    const res = await fetch(`http://127.0.0.1:${port}/api/auth/bootstrap?nonce=${encodeURIComponent(nonce)}`, { headers: { Origin: `http://127.0.0.1:${port}` } });
     if (!res.ok) throw new Error(`bootstrap failed ${res.status}`);
     return (await res.json() as { token: string }).token;
 }

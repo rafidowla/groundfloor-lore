@@ -35,6 +35,11 @@ import type { EmbedQueue } from '../embed/queue.js';
 import type { ReconnectableGraph } from '../engines/reconnect.js';
 import type { PendingAutolinkTracker } from '../engines/pendingAutolink.js';
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
+import {
+    ABORT_EMBED_CHUNK_SIZE,
+    markCancelled,
+    rollbackCancelledNode,
+} from './bulkIngestCancel.js';
 
 export interface BulkIngestOpts {
     /**
@@ -61,6 +66,11 @@ export interface BulkIngestOpts {
      * memory budgets. Not used when `embed: 'precomputed'`.
      */
     embedBatchSize?: number;
+    /**
+     * Cooperative cancel. Polled between graph-write workers, embed chunks,
+     * and Lance writes. Never kills an in-flight native write or ONNX forward.
+     */
+    shouldAbort?: () => boolean;
 }
 
 export interface BulkIngestResult {
@@ -300,11 +310,33 @@ export async function runBulkIngest(
     // NW-BULK — bounded: getNode borrows a pool connection; an unbounded
     // Promise.all here overflowed the pool waiter cap under high-volume reindex.
     // Skip nodes whose graph resolve failed above (resolvedGraphs[i] === null).
+    const aborted = (): boolean => Boolean(opts.shouldAbort?.());
+
     const previousStates = await mapLimit(nodes, BULK_INGEST_CONCURRENCY, (_node, i) =>
-        (deps.versionStore && resolvedGraphs[i])
+        resolvedGraphs[i]
             ? resolvedGraphs[i]!.getNode(nodes[i]!.id).catch(() => null)
             : Promise.resolve(null),
     );
+
+    const rollbackPipelineIds = async (pipelineIndices: number[]): Promise<void> => {
+        await Promise.all(pipelineIndices.map(async (i) => {
+            const node = nodes[i]!;
+            markCancelled(resultSlots, slotOf(i), node.id);
+            await rollbackCancelledNode({
+                node,
+                previousState: previousStates[i],
+                graph: resolvedGraphs[i] ?? null,
+                deps,
+            });
+        }));
+    };
+
+    if (aborted()) {
+        for (let i = 0; i < nodes.length; i++) {
+            if (!resultSlots[slotOf(i)]) markCancelled(resultSlots, slotOf(i), nodes[i]!.id);
+        }
+        return finish();
+    }
 
     // ── Step 1b: Graph writes (bounded, skipEmbed=true) ──────────────────────
     // Writes are serialized at the Kùzu level via LocalGraph's globalWriteQueue;
@@ -313,6 +345,10 @@ export async function runBulkIngest(
     // pool cap. skipEmbed=true: nodeService writes the graph row + WAL + version
     // but skips the outbox verbatim entry (vector writes handled in step 3).
     await mapLimit(nodes, BULK_INGEST_CONCURRENCY, async (node, i) => {
+        if (aborted()) {
+            markCancelled(resultSlots, slotOf(i), node.id);
+            return;
+        }
         // R5 #3 — skip nodes whose workspace resolve failed in Step 1a (their
         // failure is already recorded in resultSlots[i]).
         const targetGraph = resolvedGraphs[i];
@@ -387,6 +423,16 @@ export async function runBulkIngest(
         }
     });
 
+    if (aborted()) {
+        const written: number[] = [];
+        for (let i = 0; i < nodes.length; i++) {
+            if (resultSlots[slotOf(i)]?.ok) written.push(i);
+            else if (!resultSlots[slotOf(i)]) markCancelled(resultSlots, slotOf(i), nodes[i]!.id);
+        }
+        await rollbackPipelineIds(written);
+        return finish();
+    }
+
     // ── Step 2: Collect nodes that need vector writes ─────────────────────
     // idx is the ORIGINAL result slot (slotOf) so downstream per-slot writes
     // land on the right input entry even after Step 0 dedupe.
@@ -427,24 +473,68 @@ export async function runBulkIngest(
     }
 
     // sync mode: one embedDocumentBatch call → bulkAddPrebuiltRows.
+    // When shouldAbort is set, force chunks so cancel can land between them.
     const texts = toEmbed.map(({ node }) => buildVerbatimText(
         String(node.nodeData.label ?? ''),
         String(node.nodeData.content ?? ''),
         tagsToArray(node.nodeData.tags as string | string[] | undefined),
     ));
 
-    // Batch embed — one ONNX session call for all N texts.
+    const abortedPipelineFromToEmbed = (from: number): number[] => {
+        const ids = new Set(toEmbed.slice(from).map(({ node }) => node.id));
+        const out: number[] = [];
+        for (let i = 0; i < nodes.length; i++) {
+            if (ids.has(nodes[i]!.id)) out.push(i);
+        }
+        return out;
+    };
+
     let vectors: number[][];
     try {
-        const batchSize = opts.embedBatchSize;
-        if (batchSize && batchSize < texts.length) {
-            // Caller requested chunked embedding to bound memory.
+        const chunkSize = opts.shouldAbort
+            ? Math.min(
+                opts.embedBatchSize && opts.embedBatchSize > 0 ? opts.embedBatchSize : ABORT_EMBED_CHUNK_SIZE,
+                ABORT_EMBED_CHUNK_SIZE,
+            )
+            : opts.embedBatchSize;
+        const chunked = Boolean(opts.shouldAbort)
+            || (typeof chunkSize === 'number' && chunkSize > 0 && chunkSize < texts.length);
+        if (chunked) {
+            const size = (chunkSize && chunkSize > 0) ? chunkSize : ABORT_EMBED_CHUNK_SIZE;
             const chunks: number[][][] = [];
-            for (let s = 0; s < texts.length; s += batchSize) {
-                chunks.push(await deps.embeddingProvider.embedDocumentBatch!(texts.slice(s, s + batchSize)));
+            for (let s = 0; s < texts.length; s += size) {
+                if (aborted()) {
+                    if (chunks.length > 0) {
+                        const done = chunks.flat();
+                        const doneItems = toEmbed.slice(0, s);
+                        await writePrebuiltRowsPerWorkspace(deps, doneItems.map(({ node, idx }, i) => ({
+                            node, idx,
+                            row: {
+                                vector: done[i]!,
+                                id: `lore:${node.id}`,
+                                text: texts[i]!,
+                                type: String(node.nodeData.type ?? ''),
+                                label: String(node.nodeData.label ?? ''),
+                                tags: tagsToString(node.nodeData.tags as string | string[] | undefined),
+                                project: String(node.nodeData.project ?? node.ecosystem),
+                                ecosystem: node.ecosystem,
+                                updatedAt: new Date().toISOString(),
+                                security_scopes: (node.nodeData['security_scopes'] as string[] | undefined) ?? [],
+                                contentHash: computeContentHash(texts[i]!),
+                            },
+                        })), resultSlots);
+                    }
+                    await rollbackPipelineIds(abortedPipelineFromToEmbed(s));
+                    return finish();
+                }
+                chunks.push(await deps.embeddingProvider.embedDocumentBatch!(texts.slice(s, s + size)));
             }
             vectors = chunks.flat();
         } else {
+            if (aborted()) {
+                await rollbackPipelineIds(abortedPipelineFromToEmbed(0));
+                return finish();
+            }
             vectors = await deps.embeddingProvider.embedDocumentBatch!(texts);
         }
     } catch (embedErr) {
@@ -464,6 +554,11 @@ export async function runBulkIngest(
     // depth the sink (bulkUpsertPrebuiltRows) also dedupes its source batch
     // keep-last, since mergeInsert alone does not collapse duplicate source
     // keys. Cloud stores fall back to per-row store() (an upsert itself).
+    if (aborted()) {
+        await rollbackPipelineIds(abortedPipelineFromToEmbed(0));
+        return finish();
+    }
+
     await writePrebuiltRowsPerWorkspace(deps, toEmbed.map(({ node, idx }, i) => ({
         node, idx,
         row: {

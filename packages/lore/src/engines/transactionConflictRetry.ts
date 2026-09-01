@@ -20,6 +20,9 @@
  * `backoffMs` is injectable so tests can run near-instantly — production
  * callers omit it and get the real exponential+jitter schedule.
  */
+
+import { log } from '../logger.js';
+
 export interface TransactionConflictRetryOpts {
     maxAttempts?: number;
     /** attempt is 1-based — the attempt number that just failed. */
@@ -47,7 +50,14 @@ export async function withTransactionConflictRetry<T>(
         try {
             return await fn();
         } catch (err) {
-            if (!isTransactionConflictError(err) || attempt >= maxAttempts) throw err;
+            const conflict = isTransactionConflictError(err);
+            if (!conflict || attempt >= maxAttempts) {
+                if (conflict) {
+                    log.error(`[transactionConflictRetry] giving up after ${attempt} attempt(s)`);
+                }
+                throw err;
+            }
+            log.warn(`[transactionConflictRetry] conflict on attempt ${attempt}/${maxAttempts}; retrying`);
             await new Promise((r) => setTimeout(r, backoffMs(attempt)));
         }
     }

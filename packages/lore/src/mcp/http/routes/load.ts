@@ -9,6 +9,7 @@
  *                                     and emits a `load.received` outbox
  *                                     notification).
  *   GET  /api/load/jobs/<id>        — read job state.
+ *   POST /api/load/jobs/<id>/cancel — cooperative cancel (received|running).
  *   GET  /api/load/jobs?workspace=X — list recent jobs in workspace.
  *
  * Invariants preserved from prior sprints:
@@ -116,6 +117,9 @@ export interface LoadRouteDeps {
      *  /api/load checks the cap before creating the job row and
      *  returns 429 + Retry-After when at the limit. */
     concurrencyManager?: WorkspaceConcurrencyManager;
+    /** WP3b — in-process abort flag for a running job. Optional in tests
+     *  that only cancel `received` jobs via the store. */
+    loadJobsRunner?: { requestCancel(jobId: string): void };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -222,6 +226,10 @@ export async function tryLoadRoutes(
     }
     if (pathname === '/api/load/jobs' && req.method === 'GET') {
         return handleListJobs(req, res, url, deps);
+    }
+    const cancelMatch = pathname.match(/^\/api\/load\/jobs\/([^/]+)\/cancel$/);
+    if (cancelMatch && req.method === 'POST') {
+        return handleCancelJob(req, res, cancelMatch[1]!, deps);
     }
     if (pathname.startsWith('/api/load/jobs/') && req.method === 'GET') {
         const jobId = pathname.slice('/api/load/jobs/'.length);
@@ -450,6 +458,47 @@ async function handlePostLoad(
         bytesReceived: streamResult.bytesReceived,
         createdAt,
     });
+    return true;
+}
+
+// ─── POST /api/load/jobs/<id>/cancel ────────────────────────────────────
+
+async function handleCancelJob(
+    _req: IncomingMessage,
+    res: ServerResponse,
+    jobId: string,
+    deps: LoadRouteDeps,
+): Promise<boolean> {
+    if (!jobId || jobId.includes('/')) {
+        writeError(res, 400, 'invalid_job_id', 'job_id must be a non-empty path segment');
+        return true;
+    }
+    const job = await deps.loadJobsStore.get(jobId);
+    if (!job) {
+        writeError(res, 404, 'load_job_not_found', `no load job with id ${jobId}`);
+        return true;
+    }
+    const gate = await gateRoute(
+        { deploymentMode: deps.deploymentMode, dataplane: deps.dataplane },
+        { permission: 'write' },
+    );
+    if (!gate.allowed) { writePermissionDenied(res, gate); return true; }
+    if (bindRouteTarget(res, { requested: job.workspace, intent: 'write' }) === null) return true;
+
+    deps.loadJobsRunner?.requestCancel(jobId);
+    const result = await deps.loadJobsStore.requestCancel(jobId);
+    if (result === 'not_found') {
+        writeError(res, 404, 'load_job_not_found', `no load job with id ${jobId}`);
+        return true;
+    }
+    if (result === 'not_cancellable') {
+        const latest = await deps.loadJobsStore.get(jobId);
+        writeError(res, 409, 'job_not_cancellable',
+            `load job ${jobId} is ${latest?.status ?? 'terminal'} and cannot be cancelled`,
+            { job_id: jobId, status: latest?.status });
+        return true;
+    }
+    writeJson(res, 200, { job_id: jobId, status: 'cancelled' });
     return true;
 }
 

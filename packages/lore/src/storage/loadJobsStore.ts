@@ -192,6 +192,57 @@ export class LoadJobsStore {
         });
     }
 
+    /** Promote `received` → `running`. False if cancel already won. */
+    async tryClaimRunning(jobId: string, startedAt: string): Promise<boolean> {
+        const info = this.db.prepare(
+            `UPDATE load_jobs
+             SET status = 'running',
+                 started_at = COALESCE(@started_at, started_at)
+             WHERE job_id = @job_id AND status = 'received'`,
+        ).run({
+            job_id: jobId,
+            started_at: startedAt,
+        });
+        return info.changes > 0;
+    }
+
+    /**
+     * Stamp a terminal status only while the job is still `received` or
+     * `running`. Returns false when cancel already won the race against
+     * complete/failed (property: a cancelled job must not become complete).
+     */
+    async trySetTerminal(
+        jobId: string,
+        status: 'complete' | 'failed' | 'cancelled',
+        opts?: { completedAt?: string },
+    ): Promise<boolean> {
+        const info = this.db.prepare(
+            `UPDATE load_jobs
+             SET status = @status,
+                 completed_at = COALESCE(@completed_at, completed_at)
+             WHERE job_id = @job_id
+               AND status IN ('received', 'running')`,
+        ).run({
+            job_id: jobId,
+            status,
+            completed_at: opts?.completedAt ?? null,
+        });
+        return info.changes > 0;
+    }
+
+    /**
+     * Cooperative cancel. `received` jobs never get claimed; `running` jobs
+     * stay cancelled so the runner cannot overwrite with `complete`.
+     */
+    async requestCancel(jobId: string): Promise<'ok' | 'not_found' | 'not_cancellable'> {
+        const job = await this.get(jobId);
+        if (!job) return 'not_found';
+        const ok = await this.trySetTerminal(jobId, 'cancelled', {
+            completedAt: new Date().toISOString(),
+        });
+        return ok ? 'ok' : 'not_cancellable';
+    }
+
     async incrementBytesReceived(jobId: string, n: number): Promise<void> {
         if (n <= 0) return;
         this.db.prepare(

@@ -295,7 +295,14 @@ class LoreSidecar:
                 f"{self.ready_timeout}s\n--- daemon log tail ---\n{tail}"
             )
 
-        self.token = LoreClient.fetch_bootstrap_token(self.base_url)
+        # The bootstrap route requires the one-time nonce minted at boot
+        # to <home>/.groundfloor/bootstrap.nonce (0600, same trust tier
+        # as auth.token) — see packages/lore/src/security/authToken.ts.
+        # HOME is set to self.home above with no LORE_HOME override, so
+        # that's the daemon's default data home.
+        nonce_path = pathlib.Path(self.home) / ".groundfloor" / "bootstrap.nonce"
+        nonce = nonce_path.read_text().strip()
+        self.token = LoreClient.fetch_bootstrap_token(self.base_url, nonce=nonce)
         return self
 
     def stop(self) -> None:

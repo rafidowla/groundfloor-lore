@@ -15,6 +15,8 @@
  *   B3. outboxStore wired  → outbox-first ordering; verbatim.upsert recorded;
  *       on verbatim failure: graph deleted + node.upsert outbox row retracted
  *       (TW-4a rollback invariant).
+ *   B3b. outbox + inlineVerbatim (cloud) → adapter store() runs on the
+ *        request path; adapter failure rolls back the graph.
  *   B4. inline verbatim (verbatim hook, no outbox)  → verbatimStore called;
  *       on failure: graph deleted; error surfaced (TW-4a error signal).
  *
@@ -319,6 +321,38 @@ test('B3 — outbox-routed happy path: both outbox rows written, graph node exis
     const kinds = outboxState.recordOrder;
     assert.ok(kinds.includes('node.upsert'), 'node.upsert outbox row must be recorded');
     assert.ok(kinds.includes('verbatim.upsert'), 'verbatim.upsert outbox row must be recorded');
+});
+
+test('B3b — outbox + inlineVerbatim: adapter store runs (cloud primary path)', async () => {
+    const { graph, state: graphState } = makeFakeGraph();
+    const { store, state: outboxState } = makeFakeOutboxStore('normal');
+    const written: string[] = [];
+    const result = await nodeUpsert(baseArgs('b3-inline', graph), {
+        outboxStore: store,
+        inlineVerbatim: {
+            verbatimStore: async (doc) => { written.push(doc.id); },
+        },
+    });
+    assert.ok(result.ok === true);
+    assert.ok(graphState.live.has('b3-inline'), 'graph node must exist');
+    assert.deepEqual(written, ['lore:b3-inline']);
+    assert.ok(outboxState.recordOrder.includes('verbatim.upsert'), 'outbox row still recorded');
+});
+
+test('B3b — inlineVerbatim failure rolls back graph + retracts node.upsert', async () => {
+    const { graph, state: graphState } = makeFakeGraph();
+    const { store, state: outboxState } = makeFakeOutboxStore('normal');
+    const result = await nodeUpsert(baseArgs('b3-inline-fail', graph), {
+        outboxStore: store,
+        inlineVerbatim: {
+            verbatimStore: async () => { throw new Error('cloud vector down'); },
+        },
+    });
+    assert.ok(result.ok === false, 'nodeUpsert must return failure');
+    assert.equal(result.ok === false ? result.code : undefined, 'verbatim_unavailable');
+    assert.ok(!graphState.live.has('b3-inline-fail'), 'graph node must be deleted by rollback');
+    const pendingNodeUpserts = outboxState.entries.filter((e) => e.operationKind === 'node.upsert');
+    assert.equal(pendingNodeUpserts.length, 0, 'node.upsert outbox row must be retracted');
 });
 
 test('B3 — TW-4a rollback: verbatim outbox failure → graph deleted + node.upsert retracted', async () => {

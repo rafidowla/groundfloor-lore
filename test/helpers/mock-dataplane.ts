@@ -126,36 +126,68 @@ export async function startMockDataplane(): Promise<MockDataplane> {
         return c;
     }
 
+    function tenantFromHeader(req: http.IncomingMessage): string {
+        const raw = req.headers['x-tenant-id'] ?? req.headers['x-lore-workspace'];
+        const v = Array.isArray(raw) ? raw[0] : raw;
+        return (v ?? '').trim() || '_';
+    }
+
     const server = http.createServer(async (req, res) => {
         try {
             const url = req.url ?? '/';
             const method = req.method ?? 'GET';
-            // All paths follow /v1/{tenant}/{...}
-            const match = url.match(/^\/v1\/([^\/\?]+)(\/.*)?$/);
-            if (!match) {
-                sendJson(res, 404, { error: 'not found' });
+            const pathname = url.split('?')[0] ?? '/';
+            if (pathname === '/health' && method === 'GET') {
+                sendJson(res, 200, { ok: true });
                 return;
             }
-            const tenantId = decodeURIComponent(match[1] ?? '');
-            const rest = (match[2] ?? '').replace(/\?.*$/, ''); // strip query string
 
-            // POST /v1/{tenant}/schema — createCollection
-            if (rest === '/schema' && method === 'POST') {
+            // Current SDK CRUD: POST /v1/schema (tenant from X-Tenant-Id).
+            if (pathname === '/v1/schema' && method === 'POST') {
                 const body = await readJson(req);
                 const collName = String(body['name'] ?? '');
-                getCollection(tenantId, collName); // materialize
+                getCollection(tenantFromHeader(req), collName);
                 sendJson(res, 200, body);
                 return;
             }
 
-            // Collection-scoped routes: /v1/{tenant}/{collection}/...
-            const collMatch = rest.match(/^\/([^\/]+)(\/.*)?$/);
-            if (!collMatch) {
+            const parts = pathname.replace(/^\/v1\/?/, '').split('/').filter(Boolean).map(decodeURIComponent);
+            if (parts.length === 0) {
                 sendJson(res, 404, { error: 'not found' });
                 return;
             }
-            const collection = decodeURIComponent(collMatch[1] ?? '');
-            const sub = collMatch[2] ?? '';
+            // Legacy: POST /v1/{tenant}/schema
+            if (parts.length === 2 && parts[1] === 'schema' && method === 'POST') {
+                const body = await readJson(req);
+                getCollection(parts[0]!, String(body['name'] ?? ''));
+                sendJson(res, 200, body);
+                return;
+            }
+
+            const CRUD_VERBS = new Set(['query', 'count', 'update-by-query', 'delete-by-query']);
+            let tenantId: string;
+            let collection: string;
+            let sub: string;
+            if (parts.length >= 3 && (parts[2] === 'vector' || parts[2] === 'graph')) {
+                tenantId = parts[0]!;
+                collection = parts[1]!;
+                sub = '/' + parts.slice(2).join('/');
+            } else if (parts.length >= 2 && CRUD_VERBS.has(parts[1]!)) {
+                tenantId = tenantFromHeader(req);
+                collection = parts[0]!;
+                sub = '/' + parts.slice(1).join('/');
+            } else if (parts.length === 2) {
+                tenantId = tenantFromHeader(req);
+                collection = parts[0]!;
+                sub = '/' + parts[1]!;
+            } else if (parts.length === 1) {
+                tenantId = tenantFromHeader(req);
+                collection = parts[0]!;
+                sub = '';
+            } else {
+                sendJson(res, 404, { error: 'not found' });
+                return;
+            }
 
             // POST /v1/{tenant}/{coll}/query
             if (sub === '/query' && method === 'POST') {
@@ -305,7 +337,7 @@ export async function startMockDataplane(): Promise<MockDataplane> {
                 return;
             }
 
-            sendJson(res, 404, { error: `no handler for ${method} ${rest}` });
+            sendJson(res, 404, { error: `no handler for ${method} ${pathname}` });
         } catch (err) {
             sendJson(res, 500, { error: (err as Error).message });
         }

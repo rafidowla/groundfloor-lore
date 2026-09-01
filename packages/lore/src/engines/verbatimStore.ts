@@ -12,6 +12,7 @@ import { getCurrentActorScopes } from '../security/actorContext.js';
 import { LanceTablePool, resolveLancePoolSize } from './lanceTablePool.js';
 import { resolvePoolMaxWaiters, resolvePoolAcquireTimeoutMs } from './poolLimits.js';
 import { log } from '../logger.js';
+import { timeRecallStage } from '../recall/recallStageTiming.js';
 import { ReadCache, cacheKey } from './cache.js';
 import { BoundedVectorCache } from './boundedVectorCache.js';
 import { computeContentHash } from './contentHash.js';
@@ -1271,9 +1272,8 @@ export class VerbatimStore implements VectorProvider {
         filter: Partial<VerbatimDocument['metadata']> | undefined,
         opts: { includeHistory?: boolean } | undefined, actorScopes: ReadonlyArray<string> | undefined,
     ): Promise<VerbatimSearchResult[]> {
-        // Query side of the asymmetric pair: e5 needs "query: ".
-        const vector = await this.embeddingProvider.embedQuery(query);
-        return this._runVectorSearchUncached(vector, limit, filter, opts?.includeHistory, actorScopes, 'search');
+        const vector = await timeRecallStage('embed', () => this.embeddingProvider.embedQuery(query));
+        return timeRecallStage('vector', () => this._runVectorSearchUncached(vector, limit, filter, opts?.includeHistory, actorScopes, 'search'));
     }
 
     /**
@@ -1637,7 +1637,7 @@ export class VerbatimStore implements VectorProvider {
                 filter: normFilter,
                 scopes: sortedScopes,
             },
-            () => this.searchGate.read(() => this._bm25SearchUncached(query, limit, filter, actorScopes)),
+            () => this.searchGate.read(() => timeRecallStage('fts', () => this._bm25SearchUncached(query, limit, filter, actorScopes))),
         );
     }
 

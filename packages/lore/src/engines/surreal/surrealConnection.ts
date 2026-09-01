@@ -102,6 +102,20 @@ export function resolveSurrealBackend(
  * actual on-disk directory exactly, matching what the raw (un-normalized)
  * literal path never does once it contains such a character.
  *
+ * `#` and `?` need a manual pre-escape before that `new URL()` call, and
+ * every other reserved character does not — because those two are WHATWG
+ * URL DELIMITERS (they start the fragment/query components), not merely
+ * "unsafe" pathname bytes. `new URL()` percent-encodes an unsafe byte like
+ * space/quote/backslash/unicode in place, but a `#` or `?` is parsed as a
+ * component boundary and everything after it is silently DROPPED from
+ * `.pathname` instead of being escaped. Confirmed live: two workspace paths
+ * differing only after a `#` or `?` collapsed onto the identical `.pathname`
+ * and therefore the identical on-disk store directory — writes to one
+ * workspace were readable from the other. Escaping `#`/`?` to `%23`/`%3F`
+ * in `literal` before it ever reaches `new URL()` neutralizes them as
+ * delimiters so they survive as literal (percent-encoded) pathname data,
+ * exactly like every other reserved character already does.
+ *
  * The fix is to stop fighting that and make it Lore's own answer: run the
  * SAME normalization here, once, so this function's return value is what
  * `openSurreal` connects to AND the single source of truth every other
@@ -113,12 +127,19 @@ export function resolveSurrealBackend(
  */
 export function surrealDataPath(basePath: string): string {
     const literal = path.join(basePath, '.lore', 'surreal');
+    // `#`/`?` are delimiters, not unsafe bytes — `new URL()` would silently
+    // truncate `.pathname` at the first one instead of percent-encoding it
+    // (see the doc comment above). Pre-escape only these two so they reach
+    // `new URL()` as inert literal text; every other character is already
+    // handled correctly by `new URL()` itself and MUST NOT be touched here —
+    // doing so would silently relocate already-correct existing on-disk data.
+    const escaped = literal.replace(/#/g, '%23').replace(/\?/g, '%3F');
     // Mirror exactly what `openSurreal`'s `${backend}://${dataPath}` connect
     // string will do to this path — see the doc comment above. The backend
     // scheme is irrelevant to path normalization; 'surrealkv' is fixed here
     // rather than threading `resolveSurrealBackend()` through, since both
     // supported backends parse identically as a URL authority+path.
-    return new URL(`surrealkv://${literal}`).pathname;
+    return new URL(`surrealkv://${escaped}`).pathname;
 }
 
 /**

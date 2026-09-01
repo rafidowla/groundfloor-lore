@@ -137,8 +137,14 @@ Default limit 50, sorted by `created_at DESC`.
 
 ### `POST /api/load/jobs/<id>/cancel`
 
-Mark a `running` job as `cancelled`. The runner shuts the consumer
-pipeline at the next checkpoint boundary.
+Mark a `received` or `running` job as `cancelled`. The HTTP handler
+flips store status immediately (so a `received` job is never claimed)
+and signals the in-process runner. The runner polls at each parsed
+row — the same cooperative style as `reconnect.ts` `shouldAbort` —
+rolls back unflushed dispatcher buffers, and **must not** stamp
+`complete`. Rows already flushed at a progress/checkpoint boundary
+stay durable (same as a crash); remaining buffered graph/sqlite/lance
+rows are dropped and never written.
 
 ## Per-substrate adapter design
 

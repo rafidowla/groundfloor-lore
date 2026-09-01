@@ -89,7 +89,7 @@ hosted Dataplane.
 `lore setup` configures your own IDE automatically. But when a **separate
 app** (Atlas, Groundfloor Atlas, Mira-local, or any other client) needs to talk to
 your local daemon, do NOT hand it the bootstrap token
-(`<LORE_HOME>/auth.token`, also called the "god token" below). Issue that
+(`<LORE_HOME>/auth.token`). Issue that
 app its own **workspace-scoped token** instead. This section is the
 step-by-step for that.
 
@@ -97,16 +97,16 @@ step-by-step for that.
 
 The bootstrap token is the 64-char hex string the daemon mints for itself at
 `<LORE_HOME>/auth.token` (default `~/.groundfloor/auth.token`). Any request
-bearing it resolves to a `kind: 'bootstrap'` principal, which the daemon's
-workspace-confinement gate treats as a **daemon operator** — equivalent to
-an admin, free to read and write **every workspace**, run workspace CRUD,
-and touch daemon-wide control operations. That's the right shape for the
-one human operating their own daemon. It is the **wrong** shape for an app
-integration: if you paste the bootstrap token into Atlas's or Groundfloor Atlas's
-config, that app can now read and write every other app's workspace on the
-same machine — silently defeating the per-workspace isolation the daemon
-otherwise enforces. There is no scope on the bootstrap token to take away;
-it is all-or-nothing by construction.
+bearing it resolves to a `kind: 'bootstrap'` principal bound to the
+workspace the daemon booted into, with `read` + `write` only. It is **not**
+a cross-workspace credential (TW-3a): it does not carry
+`cross-workspace-read` / `cross-workspace-write`, and targeting another
+workspace via `X-Lore-Workspace` or `?workspace=` is `403
+workspace_forbidden`. That's the right shape for the one human operating
+their own daemon on its boot workspace. It is the **wrong** shape for an
+app integration: apps should not share the operator token. Issue each app
+its own workspace-scoped token so isolation stays explicit and you can
+revoke one client without rotating the daemon's own credential.
 
 A **workspace-scoped app token** (`lore_<workspace>_<random>`), by contrast,
 is confined to exactly the workspace it was issued for (plus whatever
@@ -216,8 +216,9 @@ This must come back `403` with
 `{"code":"workspace_forbidden", ...}` (or `scope_missing` /
 `workspace_forbidden` depending on which gate rejects first). If it
 instead returns `200`, the token was minted with `cross-workspace-read` /
-`cross-workspace-write` (or you accidentally handed the app the bootstrap
-token) — stop and re-check which token you gave the app.
+`cross-workspace-write` — stop and re-check which token you gave the app.
+(The bootstrap token also 403s here: it is bound to the boot workspace
+and has no cross-workspace scopes.)
 
 ### Managing tokens afterward
 

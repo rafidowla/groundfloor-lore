@@ -363,21 +363,30 @@ class LoreClient:
 
     @staticmethod
     def fetch_bootstrap_token(
-        base_url: str, *, http_client: Optional[httpx.Client] = None
+        base_url: str, *, nonce: str, http_client: Optional[httpx.Client] = None
     ) -> str:
-        """GET /api/auth/bootstrap — fetch the daemon's bootstrap ("god")
-        token. Mirrors test/helpers/live-daemon.ts's fetchAuthToken(): sends
-        `Origin: <base_url>` so the daemon's Host+Origin localhost gate
-        accepts it (see docs/GETTING_STARTED.md "Embedded mode" +
-        "Connecting your app" for why this token is daemon-operator-scoped,
-        not per-app — issue a `lore auth issue --workspace <name>` token
-        instead for anything beyond local dev/test use).
+        """GET /api/auth/bootstrap?nonce=<nonce> — fetch the daemon's
+        bootstrap ("god") token. Mirrors test/helpers/live-daemon.ts's
+        fetchAuthToken(): sends `Origin: <base_url>` so the daemon's
+        Host+Origin localhost gate accepts it (see docs/GETTING_STARTED.md
+        "Embedded mode" + "Connecting your app" for why this token is
+        daemon-operator-scoped, not per-app — issue a
+        `lore auth issue --workspace <name>` token instead for anything
+        beyond local dev/test use).
+
+        `nonce` is the one-time value the daemon minted at boot to
+        `<LORE_HOME>/bootstrap.nonce` (0600, same trust tier as
+        auth.token — see packages/lore/src/security/authToken.ts).
+        Presenting it consumes it: a captured request can't be replayed.
+        LoreSidecar reads the file for you; callers using this directly
+        must read `<home>/.groundfloor/bootstrap.nonce` themselves.
         """
         owns_client = http_client is None
         client = http_client or httpx.Client(timeout=DEFAULT_TIMEOUT)
         try:
             resp = client.get(
                 f"{base_url.rstrip('/')}/api/auth/bootstrap",
+                params={"nonce": nonce},
                 headers={"Origin": base_url},
             )
             if resp.status_code != 200:

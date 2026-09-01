@@ -54,13 +54,11 @@ export interface NodesDeps {
      *  verbatim.upsert before substrate writes; optional). */
     outboxStore?: OutboxStore;
     /**
-     * Slice 3 (arcade data plane) — INLINE verbatim writer used ONLY when no
-     * outbox is wired and embedding is not skipped. Local mode leaves this unset
-     * (its HTTP verbatim seed goes through the outbox + replicator), so local
-     * behavior is unchanged. The arcade data plane has no outbox this slice, so
-     * it passes the cell's storageClient facade here to seed `lore:<id>`
-     * synchronously — making the embed→recall round trip work over HTTP. Mirrors
-     * nodeService.NodeUpsertDeps.verbatim exactly. */
+     * INLINE verbatim writer. Local mode leaves this unset (HTTP seed goes
+     * through the outbox + replicator). Cloud mode passes storageClient so
+     * DataplaneVectorStore.store runs on the request path — the replicator
+     * does not re-apply verbatim in cloud (getVerbatim is undefined). Arcade
+     * without an outbox lane uses the same hook as the no-outbox fallback. */
     inlineVerbatim?: import('../../../../core/nodeService.js').VerbatimWriter;
     /** Sprint O4 — backpressure lag cache (optional; absent = skip). */
     outboxLagCache?: OutboxLagCache;

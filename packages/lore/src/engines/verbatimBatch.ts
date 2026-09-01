@@ -94,6 +94,9 @@ export interface VerbatimBatchCtx {
      */
     readonly lancedbPath: string;
     bumpSearchEpoch(): void;
+    /** Write-path index ensure (WP4). Defaults: 256 rows, 2000ms debounce. */
+    indexEnsureMinRows?: number;
+    indexEnsureDebounceMs?: number;
 }
 
 /**
@@ -170,6 +173,7 @@ export async function bulkAddPrebuiltRows(
     const { table } = await ensureVerbatimTable(ctx);
     await table.add(rows as Array<{ [k: string]: unknown }>);
     ctx.bumpSearchEpoch();
+    scheduleSearchIndexesAfterBulk(ctx, await table.countRows());
 }
 
 /**
@@ -204,6 +208,7 @@ export async function bulkUpsertPrebuiltRows(
             .execute(chunk);
     }
     ctx.bumpSearchEpoch();
+    scheduleSearchIndexesAfterBulk(ctx, await table.countRows());
 }
 
 /**
@@ -226,6 +231,51 @@ export async function bulkUpsertPrebuiltRows(
  * own guidance) while flooring at ~50 rows/partition so a partition always
  * has enough vectors to cluster meaningfully, however small the table is.
  */
+const DEFAULT_WRITE_PATH_INDEX_MIN_ROWS = 256;
+const DEFAULT_WRITE_PATH_INDEX_DEBOUNCE_MS = 2000;
+
+const scheduledEnsureTimer = new WeakMap<VerbatimBatchCtx, ReturnType<typeof setTimeout>>();
+const scheduledEnsurePromise = new WeakMap<VerbatimBatchCtx, Promise<void>>();
+
+/** Await the coalesced write-path ensure (tests with `indexEnsureDebounceMs: 0`). */
+export function waitForScheduledSearchIndexes(ctx: VerbatimBatchCtx): Promise<void> {
+    return scheduledEnsurePromise.get(ctx) ?? Promise.resolve();
+}
+
+/**
+ * After bulk vector writes, build IVF_FLAT + FTS once the table is large
+ * enough — debounced so a 10-row flush does not rebuild. Non-fatal, fire-and-forget.
+ */
+function scheduleSearchIndexesAfterBulk(ctx: VerbatimBatchCtx, rowCount: number): void {
+    const minRows = ctx.indexEnsureMinRows ?? DEFAULT_WRITE_PATH_INDEX_MIN_ROWS;
+    const debounceMs = ctx.indexEnsureDebounceMs ?? DEFAULT_WRITE_PATH_INDEX_DEBOUNCE_MS;
+    if (rowCount < minRows) return;
+
+    const prev = scheduledEnsureTimer.get(ctx);
+    if (prev) clearTimeout(prev);
+
+    const run = async (): Promise<void> => {
+        scheduledEnsureTimer.delete(ctx);
+        await ensureVectorIndex(ctx, { minRows }).catch(() => undefined);
+        await ensureFtsIndex(ctx, { minRows }).catch(() => undefined);
+    };
+
+    if (debounceMs <= 0) {
+        const p = run();
+        scheduledEnsurePromise.set(ctx, p);
+        return;
+    }
+
+    const p = new Promise<void>((resolve) => {
+        const t = setTimeout(() => {
+            void run().then(() => resolve(), () => resolve());
+        }, debounceMs);
+        t.unref();
+        scheduledEnsureTimer.set(ctx, t);
+    });
+    scheduledEnsurePromise.set(ctx, p);
+}
+
 export function computeIvfPartitions(rows: number): number {
     return Math.max(1, Math.min(Math.round(Math.sqrt(rows)), Math.floor(rows / 50)));
 }

@@ -101,4 +101,10 @@ export interface MemoryToolsDeps {
      * Optional so cloud mode + test fixtures fall back to store.loreVerbatim.
      */
     workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<import('../../../engines/verbatimStore.js').VerbatimStore> };
+    /**
+     * Cloud primary verbatim write. When set, store_node still records
+     * the outbox row but also writes DataplaneVectorStore on the request
+     * path (replicator does not apply verbatim in cloud). Local leaves
+     * this unset. */
+    inlineVerbatim?: import('../../../core/nodeService.js').VerbatimWriter;
 }

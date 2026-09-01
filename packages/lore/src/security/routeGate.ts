@@ -86,6 +86,31 @@ export async function gateRoute(
             detail: `no ${resourceType} id in request context`,
         };
     }
+    // Deliberate broad grant, not a narrow admin-lane one: the cloud
+    // shared-secret principal (the daemon's service credential) bypasses
+    // this ReBAC check on every non-admin route gateRoute() guards — the
+    // ~29 of its 34 call sites covering Lore's data plane (nodes, edges,
+    // search/recall, bulk ops, ingestion, versioning, verbatim,
+    // collections, etc.), not just the handful that also touch
+    // bindDaemonOperatorLane. This is NOT that lane's precedent:
+    // bindDaemonOperatorLane (routeWorkspaceBinding.ts) decides which
+    // WORKSPACE a shared-secret request may target; this decides whether a
+    // specific RESOURCE-level action is permitted, a different SpiceDB
+    // question, and the commit that added bindDaemonOperatorLane's
+    // shared-secret handling never touches this file. The real
+    // justification: digital-employee-framework's LoreMcpClient uses this
+    // ONE token (LORE_MCP_AUTH_TOKEN) for the entirety of its Lore
+    // data-plane traffic when configured, with no per-route fallback
+    // credential (digital-employee-framework/docs/LOCAL_CLOUD_REPLICA.md:
+    // 225-229) — a narrower bypass would break that real, in-production
+    // integration. This establishes new precedent for a first-party
+    // trusted service credential, trusting it the same unconditional way
+    // the 'bootstrap' principal kind is already trusted elsewhere in this
+    // codebase.
+    const principal = getCurrentPrincipal();
+    if (principal?.kind === 'shared-secret') {
+        return { allowed: true };
+    }
     return requirePermission(deps, {
         resourceType,
         resourceId,

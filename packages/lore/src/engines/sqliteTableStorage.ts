@@ -35,14 +35,26 @@ import * as path from 'node:path';
 import type { Database as DatabaseType } from 'better-sqlite3';
 import Database from 'better-sqlite3';
 import { buildSqliteWhere, quoteSqliteIdent as quoteIdent } from './whereClause.js';
-import type { Filter, FindOptions } from './collectionStorage.js';
-import type {
-    ColumnDecl,
-    ColumnType,
-    EvolutionStep,
-    JoinSpec,
-    Row,
-    TableSchema,
+import type { FilterNode, FindOptions } from './collectionStorage.js';
+import {
+    deleteSqliteTableRows,
+    insertSqliteTableRow,
+    runSqliteTableTransaction,
+    updateSqliteTableRows,
+    type SqliteTableMutationContext,
+} from './sqliteTableTransaction.js';
+import {
+    MAX_JOIN_HOPS,
+    type ColumnDecl,
+    type ColumnType,
+    type EvolutionStep,
+    type JoinHop,
+    type JoinQuery,
+    type JoinSpec,
+    type Row,
+    type TableOp,
+    type TableOpResult,
+    type TableSchema,
 } from '../contracts/tables.js';
 import type { RelationalProvider } from '../providers/relationalTypes.js';
 
@@ -153,7 +165,7 @@ export function decodeValue(v: unknown, type: ColumnType): unknown {
  * inside the shared builder — they're text matches.
  */
 function buildWhereClause(
-    filter: Filter | undefined,
+    filter: FilterNode | undefined,
     colTypes?: Map<string, ColumnType>,
     alias?: string,
 ): { where: string; params: unknown[] } {
@@ -174,75 +186,6 @@ function colTypeMap(...schemas: TableSchema[]): Map<string, ColumnType> {
         for (const c of s.columns) if (!m.has(c.name)) m.set(c.name, c.type);
     }
     return m;
-}
-
-/** Best-effort coerce a JSON-column value to a plain object so
- *  inner-field extraction can read it. Accepts an already-parsed
- *  object, a JSON-string, or null/undefined. Returns null on any
- *  parse failure rather than throwing — a write that fails to
- *  populate sidecars shouldn't fail the whole insert. */
-function coerceJsonObject(v: unknown): Record<string, unknown> | null {
-    if (v === null || v === undefined) return null;
-    if (typeof v === 'object') return v as Record<string, unknown>;
-    if (typeof v === 'string') {
-        try {
-            const parsed = JSON.parse(v);
-            return parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : null;
-        } catch { return null; }
-    }
-    return null;
-}
-
-/**
- * 1.6 (2026-08-17 audit) — refuse caller keys that match no declared
- * column. insert()/insertBatch() previously dropped them silently while
- * the handler echoed the caller's input back as if stored; update() on
- * the same table threw for the same typo. Both write paths now throw.
- */
-function assertNoUnknownColumns(schema: TableSchema, row: Row, table: string, op: string): void {
-    for (const key of Object.keys(row)) {
-        if (!schema.columns.some(c => c.name === key)) {
-            throw new Error(`SqliteTableStorage.${op}: unknown column '${key}' on table '${table}'`);
-        }
-    }
-}
-
-/** Shared insert-row builder for insert()/insertBatch(): declared columns
- *  present in the row, plus json extracted-field sidecars. Throws on a row
- *  that maps to zero declared columns (1.5 — previously a silent skip in
- *  insertBatch while the handler reported inserted: records.length). */
-function buildInsertParts(
-    schema: TableSchema,
-    row: Row,
-    table: string,
-    op: string,
-    rowIndex?: number,
-): { cols: string[]; placeholders: string[]; params: unknown[] } {
-    const cols: string[] = [];
-    const placeholders: string[] = [];
-    const params: unknown[] = [];
-    for (const c of schema.columns) {
-        if (!(c.name in row)) continue;
-        cols.push(quoteIdent(c.name));
-        placeholders.push('?');
-        params.push(encodeValue(row[c.name], c.type));
-        // Architecture gap #6 — populate extracted sidecar columns
-        // for json columns. Read the inner field from the source
-        // object; null when missing.
-        if (c.type === 'json' && c.extractedFields) {
-            const obj = coerceJsonObject(row[c.name]);
-            for (const ef of c.extractedFields) {
-                cols.push(quoteIdent(`${c.name}__${ef.key}`));
-                placeholders.push('?');
-                params.push(encodeValue(obj?.[ef.key], ef.type));
-            }
-        }
-    }
-    if (cols.length === 0) {
-        const where = rowIndex === undefined ? '' : ` (row index ${rowIndex})`;
-        throw new Error(`SqliteTableStorage.${op}: empty row for ${table}${where}`);
-    }
-    return { cols, placeholders, params };
 }
 
 export class SqliteTableStorage implements RelationalProvider {
@@ -354,6 +297,7 @@ export class SqliteTableStorage implements RelationalProvider {
     capabilities() {
         return {
             join: true,
+            maxJoinHops: MAX_JOIN_HOPS,
             // SQLite's default LIKE is case-INSENSITIVE for ASCII;
             // we set PRAGMA case_sensitive_like = ON would change that
             // but we don't, so report honestly.
@@ -429,41 +373,22 @@ export class SqliteTableStorage implements RelationalProvider {
 
     async insert(table: string, row: Row): Promise<void> {
         this.loadSchemaCacheOnce();
-        const schema = this.requireSchema(table, 'insert');
-        // 1.6 (2026-08-17 audit) — refuse caller keys that match no declared
-        // column instead of silently discarding them, matching update()'s
-        // long-standing strictness. A field-name typo is now a hard error on
-        // BOTH write paths, not silent data loss on insert alone.
-        assertNoUnknownColumns(schema, row, table, 'insert');
-        const built = buildInsertParts(schema, row, table, 'insert');
-        this.db.prepare(
-            `INSERT INTO ${quoteIdent(table)} (${built.cols.join(', ')}) VALUES (${built.placeholders.join(', ')})`,
-        ).run(...built.params);
+        insertSqliteTableRow(this.mutationContext(), table, row);
     }
 
     async insertBatch(table: string, rows: Row[]): Promise<void> {
         if (rows.length === 0) return;
         this.loadSchemaCacheOnce();
-        const schema = this.requireSchema(table, 'insertBatch');
-        // 1.5 (2026-08-17 audit) — a row that maps to ZERO declared columns
-        // was previously dropped by `continue` with no error/counter while
-        // handleBulkInsert still reported inserted: records.length. Match
-        // insert()'s strictness: throw, so the whole batch (single
-        // transaction) aborts visibly instead of partially landing silently.
+        const ctx = this.mutationContext();
         const insertOne = this.db.transaction((batch: Row[]) => {
             for (let i = 0; i < batch.length; i++) {
-                const row = batch[i]!;
-                assertNoUnknownColumns(schema, row, table, 'insertBatch');
-                const built = buildInsertParts(schema, row, table, 'insertBatch', i);
-                this.db.prepare(
-                    `INSERT INTO ${quoteIdent(table)} (${built.cols.join(', ')}) VALUES (${built.placeholders.join(', ')})`,
-                ).run(...built.params);
+                insertSqliteTableRow(ctx, table, batch[i]!, 'insertBatch', i);
             }
         });
         insertOne(rows);
     }
 
-    async query(table: string, filter?: Filter, opts?: FindOptions): Promise<Row[]> {
+    async query(table: string, filter?: FilterNode, opts?: FindOptions): Promise<Row[]> {
         this.loadSchemaCacheOnce();
         const schema = this.requireSchema(table, 'query');
         const { where, params } = buildWhereClause(filter, colTypeMap(schema));
@@ -500,57 +425,17 @@ export class SqliteTableStorage implements RelationalProvider {
         return this.decodeRow(row, schema) as T;
     }
 
-    async update(table: string, filter: Filter, patch: Partial<Row>): Promise<number> {
+    async update(table: string, filter: FilterNode, patch: Partial<Row>): Promise<number> {
         this.loadSchemaCacheOnce();
-        const schema = this.requireSchema(table, 'update');
-        const sets: string[] = [];
-        const setParams: unknown[] = [];
-        for (const [k, v] of Object.entries(patch)) {
-            const col = schema.columns.find(c => c.name === k);
-            if (!col) throw new Error(`SqliteTableStorage.update: unknown column '${k}' on table '${table}'`);
-            sets.push(`${quoteIdent(k)} = ?`);
-            setParams.push(encodeValue(v, col.type));
-            // Architecture gap #6 — keep sidecar extracted columns in
-            // sync when the json column itself is patched.
-            if (col.type === 'json' && col.extractedFields) {
-                const obj = coerceJsonObject(v);
-                for (const ef of col.extractedFields) {
-                    sets.push(`${quoteIdent(`${col.name}__${ef.key}`)} = ?`);
-                    setParams.push(encodeValue(obj?.[ef.key], ef.type));
-                }
-            }
-        }
-        if (sets.length === 0) return 0;
-        const { where, params: whereParams } = buildWhereClause(filter, colTypeMap(schema));
-        // re-audit 2026-06-25 (data loss) — refuse an empty/all-matching filter
-        // so a missing predicate can't silently patch every row (symmetric with
-        // the delete guard).
-        if (!where) {
-            throw new Error(
-                `SqliteTableStorage.update: refusing to update all rows of '${table}' with an empty/all filter — provide a scoping filter.`,
-            );
-        }
-        const result = this.db.prepare(
-            `UPDATE ${quoteIdent(table)} SET ${sets.join(', ')} ${where}`,
-        ).run(...setParams, ...whereParams);
-        return result.changes;
+        return updateSqliteTableRows(this.mutationContext(), table, filter, patch);
     }
 
-    async delete(table: string, filter: Filter): Promise<number> {
+    async delete(table: string, filter: FilterNode): Promise<number> {
         this.loadSchemaCacheOnce();
-        const schema = this.requireSchema(table, 'delete');
-        const { where, params } = buildWhereClause(filter, colTypeMap(schema));
-        if (!where) {
-            throw new Error(
-                `SqliteTableStorage.delete: refusing to delete all rows from '${table}' with no filter. ` +
-                `Use truncate() for that.`,
-            );
-        }
-        const result = this.db.prepare(`DELETE FROM ${quoteIdent(table)} ${where}`).run(...params);
-        return result.changes;
+        return deleteSqliteTableRows(this.mutationContext(), table, filter);
     }
 
-    async count(table: string, filter?: Filter): Promise<number> {
+    async count(table: string, filter?: FilterNode): Promise<number> {
         this.loadSchemaCacheOnce();
         const schema = this.requireSchema(table, 'count');
         const { where, params } = buildWhereClause(filter, colTypeMap(schema));
@@ -570,10 +455,15 @@ export class SqliteTableStorage implements RelationalProvider {
         return count;
     }
 
+    async runTransaction(ops: TableOp[]): Promise<TableOpResult[]> {
+        this.loadSchemaCacheOnce();
+        return runSqliteTableTransaction(this.mutationContext(), ops);
+    }
+
     async join(
         leftTable: string,
         join: JoinSpec,
-        filter?: Filter,
+        filter?: FilterNode,
         opts?: FindOptions,
     ): Promise<Row[]> {
         this.loadSchemaCacheOnce();
@@ -599,6 +489,62 @@ export class SqliteTableStorage implements RelationalProvider {
         // No per-column decode here — joined results carry prefixed
         // column names so the schema lookup is ambiguous. Callers that
         // need typed shapes can post-process.
+        return this.db.prepare(sql).all(...params) as Row[];
+    }
+
+    async joinMany(query: JoinQuery): Promise<Row[]> {
+        const hops = query.join ?? [];
+        if (hops.length < 1) {
+            throw new Error('joinMany requires at least one hop');
+        }
+        if (hops.length > MAX_JOIN_HOPS) {
+            throw new Error(`joinMany accepts at most ${MAX_JOIN_HOPS} hops (got ${hops.length})`);
+        }
+        this.loadSchemaCacheOnce();
+        const tables = [query.from, ...hops.map((hop: JoinHop) => hop.collection)];
+        const schemas = tables.map(table => this.requireSchema(table, 'joinMany'));
+        const aliases = tables.map((_, index) => `j${index}`);
+        const cols: string[] = [];
+        for (let i = 0; i < schemas.length; i++) {
+            for (const column of schemas[i]!.columns) {
+                cols.push(`${aliases[i]}.${quoteIdent(column.name)} AS "${tables[i]}.${column.name}"`);
+            }
+        }
+        let sql = `SELECT ${cols.join(', ')} FROM ${quoteIdent(tables[0]!)} ${aliases[0]}`;
+        for (let i = 0; i < hops.length; i++) {
+            const hop = hops[i]!;
+            const joinKw = hop.type === 'left' ? 'LEFT JOIN' : 'INNER JOIN';
+            sql += ` ${joinKw} ${quoteIdent(hop.collection)} ${aliases[i + 1]}`
+                + ` ON ${aliases[i]}.${quoteIdent(hop.on.from)} = ${aliases[i + 1]}.${quoteIdent(hop.on.to)}`;
+        }
+        const types = colTypeMap(...schemas);
+        const qualify = (column: string): string => {
+            const hits: string[] = [];
+            for (let i = 0; i < schemas.length; i++) {
+                if (schemas[i]!.columns.some(c => c.name === column)) hits.push(aliases[i]!);
+            }
+            const alias = hits[0];
+            return alias ? `${alias}."${column}"` : `"${column}"`;
+        };
+        const { where, params } = buildSqliteWhere(query.where, {
+            qualify,
+            encode: (k, v) => {
+                const t = types.get(k);
+                return t !== undefined ? encodeValue(v, t) : v;
+            },
+        });
+        sql += ` ${where}`;
+        const opts = query.opts;
+        if (opts?.orderBy) {
+            const dir = opts.orderDir === 'desc' ? 'DESC' : 'ASC';
+            sql += ` ORDER BY ${quoteIdent(opts.orderBy)} ${dir}`;
+        }
+        const effectiveLimit = typeof opts?.limit === 'number'
+            ? Math.max(0, Math.floor(opts.limit))
+            : 10_000;
+        if (Number.isFinite(effectiveLimit)) {
+            sql += ` LIMIT ${effectiveLimit}`;
+        }
         return this.db.prepare(sql).all(...params) as Row[];
     }
 
@@ -793,6 +739,15 @@ export class SqliteTableStorage implements RelationalProvider {
             );
         }
         return s;
+    }
+
+    private mutationContext(): SqliteTableMutationContext {
+        return {
+            db: this.db,
+            requireSchema: (table, op) => this.requireSchema(table, op),
+            encodeValue,
+            buildWhere: (filter, schema) => buildWhereClause(filter, colTypeMap(schema)),
+        };
     }
 
     private decodeRow(row: Row, schema: TableSchema): Row {

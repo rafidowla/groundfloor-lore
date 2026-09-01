@@ -49,7 +49,7 @@ import path from 'path';
 import { SchemaLoader } from '../schemas/loader.js';
 import { ConfigManager, resolveDeploymentMode } from '../config/configManager.js';
 import { probeEmbeddingBackend } from '../providers/embeddingBackend.js';
-import { ensureAuthToken, getAuthTokenPath } from '../security/authToken.js';
+import { ensureAuthToken, ensureBootstrapNonce, getAuthTokenPath } from '../security/authToken.js';
 import { InMemoryReplayHandlerRegistry } from '../security/approvalReplay.js';
 import { createCloudSyncClient } from '../sync/createCloudSyncClient.js';
 import { SyncPoller } from '../sync/syncPoller.js';
@@ -1468,7 +1468,7 @@ async function main(): Promise<LoreInstance | void> {
 
     // S3 — ensure the localhost auth token exists. Written with 0600.
     const dataHome = loreHome();
-    authToken = ensureAuthToken(dataHome);
+    authToken = ensureAuthToken(dataHome); ensureBootstrapNonce(dataHome); // one-time /api/auth/bootstrap nonce — a stale one from a killed daemon's prior boot must not authorize THIS instance; see authToken.ts + middleware.ts
     log.info(`[Lore MCP] Auth token at ${getAuthTokenPath(dataHome)} (0600)`);
 
     await d.getGraph().initialize();
@@ -1545,7 +1545,7 @@ async function main(): Promise<LoreInstance | void> {
                 deploymentMode, runMode: lore.runMode, // ITEM 3 (launch-fixes-2026-08) — full run mode threaded to the schema-approve HITL gate (embedded refusal).
                 detectedScope,
                 graphBasePath,
-                loreDir,
+                loreDir, dataHome,
                 store,
                 configManager,
                 schemaLoader,
@@ -1583,7 +1583,7 @@ async function main(): Promise<LoreInstance | void> {
                 graphRegistry, workspaceVerbatimResolver: d.workspaceVerbatimResolver, quotaStore: d.workspaceQuotaStore, getWorkspaceEntryForQuota: d.getWorkspaceEntryForQuota, // L-018 routing + L-033 REST shares the MCP write-quota store.
                 coreNodeTypes: domainSchema.nodeTypes,
                 getOutboxStats: () => outboxWiring.store.aggregateStats!(), outboxStore: outboxWiring.store, outboxLagCache: outboxWiring.lagCache,
-                loadJobsStore,
+                loadJobsStore, loadJobsRunner: loadJobsRunner ?? undefined,
                 loadConcurrencyManager,
                 streamRegistry,
                 getAnalytical: getAnalyticalCached(deploymentMode, store),

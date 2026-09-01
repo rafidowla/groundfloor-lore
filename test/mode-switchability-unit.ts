@@ -315,7 +315,17 @@ try {
     } else {
         process.env['LORE_HOME'] = savedLoreHome;
     }
-    fs.rmSync(embeddedTmpDir, { recursive: true, force: true });
+    // Surreal can still flush `manifest/` after dispose(); retry so a
+    // late writer does not fail the suite on ENOTEMPTY.
+    for (let attempt = 0; attempt < 8; attempt++) {
+        try {
+            fs.rmSync(embeddedTmpDir, { recursive: true, force: true });
+            break;
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'ENOTEMPTY' || attempt === 7) throw err;
+            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+        }
+    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════

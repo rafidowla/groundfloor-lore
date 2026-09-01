@@ -35,6 +35,33 @@ export interface Filter {
     [op: string]: Record<string, unknown> | undefined;
 }
 
+/** Max parenthesized and/or/not depth for FilterNode. Deeper throws filter_too_nested. */
+export const MAX_FILTER_NESTING = 8;
+
+/**
+ * Nested boolean WHERE tree. Leaves are the existing conjunctive `Filter`.
+ * Do not put `and`/`or`/`not` inside a leaf Filter bag — that collides with `eq`.
+ */
+export type FilterNode =
+    | Filter
+    | { and: FilterNode[] }
+    | { or: FilterNode[] }
+    | { not: FilterNode };
+
+export function isFilterAnd(node: FilterNode): node is { and: FilterNode[] } {
+    return typeof node === 'object' && node !== null && Array.isArray((node as { and?: unknown }).and);
+}
+
+export function isFilterOr(node: FilterNode): node is { or: FilterNode[] } {
+    return typeof node === 'object' && node !== null && Array.isArray((node as { or?: unknown }).or);
+}
+
+export function isFilterNot(node: FilterNode): node is { not: FilterNode } {
+    const candidate = node as { not?: unknown };
+    return typeof node === 'object' && node !== null && 'not' in node && candidate.not !== undefined
+        && !Array.isArray(candidate.not);
+}
+
 export interface FindOptions {
     /** Hard cap on row count returned. Adapters apply at the query level. */
     limit?: number;

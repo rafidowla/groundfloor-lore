@@ -46,6 +46,11 @@
 import * as fs from 'node:fs';
 import * as readline from 'node:readline';
 import type { LoadJobsStore, LoadJob, LoadJobError } from './loadJobsStore.js';
+import {
+    LoadCancelledError,
+    LoadJobAbortRegistry,
+    isLoadCancelled,
+} from './loadJobsAbort.js';
 import type { OutboxStore, OutboxEntry } from '../outbox/types.js';
 import {
     LoaderDispatcher,
@@ -118,6 +123,7 @@ export class LoadJobsRunner {
     private readonly log: (msg: string) => void;
     private readonly concurrency: WorkspaceConcurrencyManager;
     private readonly sweeper?: TempFileSweeper;
+    private readonly abort = new LoadJobAbortRegistry();
 
     private running = false;
     private looping = false;
@@ -141,6 +147,15 @@ export class LoadJobsRunner {
      *  429 check before creating a new job row. */
     getConcurrencyManager(): WorkspaceConcurrencyManager {
         return this.concurrency;
+    }
+
+    /** Cooperative cancel — HTTP cancel route + tests. Polled per parsed row. */
+    requestCancel(jobId: string): void {
+        this.abort.requestCancel(jobId);
+    }
+
+    private throwIfCancelled(jobId: string): void {
+        if (this.abort.isCancelled(jobId)) throw new LoadCancelledError();
     }
 
     start(): void {
@@ -245,7 +260,7 @@ export class LoadJobsRunner {
             } catch (err) {
                 this.log(`job ${job.jobId} failed: ${(err as Error).message}`);
                 try {
-                    await this.store.updateStatus(job.jobId, 'failed', {
+                    await this.store.trySetTerminal(job.jobId, 'failed', {
                         completedAt: new Date().toISOString(),
                     });
                 } catch { /* best-effort */ }
@@ -284,7 +299,13 @@ export class LoadJobsRunner {
         const isResume = resumeFromRow > 0;
         const startedAt = isResume ? (job.startedAt ?? new Date().toISOString()) : new Date().toISOString();
         if (!isResume) {
-            await this.store.updateStatus(job.jobId, 'running', { startedAt });
+            const claimed = await this.store.tryClaimRunning(job.jobId, startedAt);
+            if (!claimed) {
+                this.log(`job ${job.jobId} not claimed (cancelled or gone)`);
+                return;
+            }
+        } else {
+            this.throwIfCancelled(job.jobId);
         }
         if (isResume) {
             this.log(`resuming job ${job.jobId} from row ${resumeFromRow}`);
@@ -380,7 +401,9 @@ export class LoadJobsRunner {
         };
 
         try {
+            this.throwIfCancelled(job.jobId);
             await this.streamParse(job, async (parsed) => {
+                this.throwIfCancelled(job.jobId);
                 // Sprint Z3 resume — skip rows whose source-index is
                 // below the checkpoint. We re-read the temp file from
                 // the top because the underlying file stream API does
@@ -412,10 +435,12 @@ export class LoadJobsRunner {
                 }
                 rowIdx++;
                 if (rowIdx - lastFlushIdx >= this.progressInterval) {
+                    this.throwIfCancelled(job.jobId);
                     await flushProgress();
                     lastFlushIdx = rowIdx;
                 }
                 if (rowIdx - lastCheckpointIdx >= this.checkpointInterval) {
+                    this.throwIfCancelled(job.jobId);
                     // Sprint Z3 — atomic checkpoint write. Combines
                     // rows_processed/failed + checkpoint_row in one
                     // UPDATE so a crash never desyncs them.
@@ -438,7 +463,9 @@ export class LoadJobsRunner {
                 }
             });
 
+            this.throwIfCancelled(job.jobId);
             const finalResult = await dispatcher.flushAll();
+            this.throwIfCancelled(job.jobId);
             // 1.8 — drain any remaining queued-embed rows now that every
             // row is durable, BEFORE the job flips to 'complete'.
             await emitQueuedEmbeds();
@@ -455,17 +482,30 @@ export class LoadJobsRunner {
             // (in which case the load is meaningfully broken). A
             // partial failure is normal and surfaces in rows_failed.
             const status = (totalProcessed === 0 && totalFailed > 0) ? 'failed' : 'complete';
-            await this.store.updateStatus(job.jobId, status, { completedAt });
+            const stamped = await this.store.trySetTerminal(job.jobId, status, { completedAt });
+            if (!stamped) {
+                this.log(`job ${job.jobId} cancel won the race against ${status}`);
+                return;
+            }
 
             await this.emitLoadDone(job, status, totalProcessed, totalFailed, deps);
             this.log(`job ${job.jobId} ${status}: ${totalProcessed} written, ${totalFailed} failed`);
         } catch (err) {
             try { await dispatcher.rollback(); } catch { /* ignore */ }
             const completedAt = new Date().toISOString();
-            await this.store.updateStatus(job.jobId, 'failed', { completedAt });
+            if (isLoadCancelled(err)) {
+                await this.store.trySetTerminal(job.jobId, 'cancelled', { completedAt });
+                const snap = dispatcher.snapshot();
+                await this.emitLoadDone(job, 'cancelled', snap.written, snap.failed + runnerErrors.length, deps);
+                this.log(`job ${job.jobId} cancelled`);
+                return;
+            }
+            await this.store.trySetTerminal(job.jobId, 'failed', { completedAt });
             const snap = dispatcher.snapshot();
             await this.emitLoadDone(job, 'failed', snap.written, snap.failed + runnerErrors.length, deps);
             throw err;
+        } finally {
+            this.abort.clear(job.jobId);
         }
     }
 
@@ -565,7 +605,7 @@ export class LoadJobsRunner {
 
     private async emitLoadDone(
         job: LoadJob,
-        status: 'complete' | 'failed',
+        status: 'complete' | 'failed' | 'cancelled',
         rowsProcessed: number,
         rowsFailed: number,
         deps: LoaderDispatcherDeps,

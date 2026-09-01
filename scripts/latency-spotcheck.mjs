@@ -26,7 +26,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 
-process.env.LORE_LOG_LEVEL = 'error';
+if (!process.env.LORE_LOG_LEVEL) process.env.LORE_LOG_LEVEL = 'error';
 const N = Number(process.argv[2] ?? 1000);
 const QUERIES = Number(process.argv[3] ?? 60);
 

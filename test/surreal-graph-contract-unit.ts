@@ -321,6 +321,19 @@ async function main(): Promise<void> {
                 'substring-within-a-tag must NOT match');
         });
 
+        await check('search tag matching: punctuation-bearing exact tag stays intact', async () => {
+            await g.upsertNode({
+                id: 'punctuated-tag', type: 'note', label: 'unrelated label',
+                content: 'unrelated content', tags: ['q1-7-xsect'],
+                project: 'p', ecosystem: 'e', metadata: '{}',
+            });
+            assert.ok(ids(await g.search('q1-7-xsect', 50)).includes('punctuated-tag'),
+                'the exact tag matches before keyword tokenization');
+            assert.equal(ids(await g.search('q1-7-xsec', 50)).includes('punctuated-tag'), false,
+                'a partial punctuation-bearing tag must not match');
+            await g.deleteNode('punctuated-tag');
+        });
+
         await check('search SUBSTRING (prefix) — the FTS tripwire', async () => {
             // `search` matches SUBSTRINGS today, so 'kapp' finds 'kappa header'.
             // A full-text index matches whole WORDS and would find nothing — so

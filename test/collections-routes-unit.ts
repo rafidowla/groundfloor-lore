@@ -19,10 +19,13 @@ import { AddressInfo } from 'node:net';
 import { tryCollectionsRoutes } from '../packages/lore/src/mcp/http/routes/collections.js';
 import type {
     ITableStorage,
+    JoinQuery,
     Row,
+    TableOp,
+    TableOpResult,
     TableSchema,
 } from '../packages/lore/src/contracts/tables.js';
-import type { Filter, FindOptions } from '../packages/lore/src/engines/collectionStorage.js';
+import type { Filter, FilterNode, FindOptions } from '../packages/lore/src/engines/collectionStorage.js';
 
 let passed = 0;
 let failed = 0;
@@ -41,6 +44,14 @@ class FakeTableStorage implements ITableStorage {
     public schemas = new Map<string, TableSchema>();
     private rows = new Map<string, Map<unknown, Row>>();
 
+    capabilities() {
+        return {
+            join: false,
+            caseSensitiveContains: false,
+            extractedJsonFields: false,
+            additiveSchemaEvolution: false,
+        };
+    }
     async createTable(schema: TableSchema): Promise<void> {
         this.schemas.set(schema.name, schema);
         if (!this.rows.has(schema.name)) this.rows.set(schema.name, new Map());
@@ -56,11 +67,12 @@ class FakeTableStorage implements ITableStorage {
     async insertBatch(table: string, rows: Row[]): Promise<void> {
         for (const r of rows) await this.insert(table, r);
     }
-    async query(table: string, filter?: Filter, opts?: FindOptions): Promise<Row[]> {
+    async query(table: string, filter?: FilterNode, opts?: FindOptions): Promise<Row[]> {
         const tbl = this.rows.get(table) ?? new Map();
         let out = Array.from(tbl.values());
-        if (filter?.eq) {
-            for (const [k, v] of Object.entries(filter.eq)) {
+        const eq = filter && 'eq' in filter ? (filter as { eq?: Record<string, unknown> }).eq : undefined;
+        if (eq) {
+            for (const [k, v] of Object.entries(eq)) {
                 out = out.filter(r => r[k] === v);
             }
         }
@@ -71,19 +83,19 @@ class FakeTableStorage implements ITableStorage {
         const r = this.rows.get(table)?.get(key);
         return (r as T) ?? null;
     }
-    async update(table: string, filter: Filter, patch: Partial<Row>): Promise<number> {
+    async update(table: string, filter: FilterNode, patch: Partial<Row>): Promise<number> {
         const matches = await this.query(table, filter);
         for (const r of matches) Object.assign(r, patch);
         return matches.length;
     }
-    async delete(table: string, filter: Filter): Promise<number> {
+    async delete(table: string, filter: FilterNode): Promise<number> {
         const matches = await this.query(table, filter);
         const tbl = this.rows.get(table)!;
         const pkCol = this.schemas.get(table)?.columns.find(c => c.primary)?.name;
         for (const r of matches) tbl.delete(pkCol ? r[pkCol] : JSON.stringify(r));
         return matches.length;
     }
-    async count(table: string, filter?: Filter): Promise<number> {
+    async count(table: string, filter?: FilterNode): Promise<number> {
         return (await this.query(table, filter)).length;
     }
     async truncate(table: string): Promise<number> {
@@ -91,6 +103,46 @@ class FakeTableStorage implements ITableStorage {
         const n = tbl.size;
         tbl.clear();
         return n;
+    }
+    async runTransaction(ops: TableOp[]): Promise<TableOpResult[]> {
+        const before = new Map(
+            [...this.rows].map(([table, rows]) => [
+                table,
+                new Map([...rows].map(([key, row]) => [key, { ...row }])),
+            ]),
+        );
+        const results: TableOpResult[] = [];
+        let failedOpIndex = -1;
+        try {
+            for (let i = 0; i < ops.length; i++) {
+                failedOpIndex = i;
+                const op = ops[i]!;
+                if (op.op === 'insert') {
+                    await this.insert(op.collection, op.row);
+                    const pk = this.schemas.get(op.collection)?.columns.find(c => c.primary)?.name;
+                    results.push({ op: 'insert', collection: op.collection, key: pk ? op.row[pk] : undefined });
+                } else if (op.op === 'update') {
+                    results.push({ op: 'update', collection: op.collection, count: await this.update(op.collection, op.filter, op.patch) });
+                } else if (op.op === 'delete') {
+                    results.push({ op: 'delete', collection: op.collection, count: await this.delete(op.collection, op.filter) });
+                } else {
+                    const pk = this.schemas.get(op.collection)?.columns.find(c => c.primary)?.name;
+                    const key = pk ? op.row[pk] : undefined;
+                    const current = await this.getByKey(op.collection, key);
+                    if (current) await this.update(op.collection, { eq: { [pk!]: key } }, op.row);
+                    else await this.insert(op.collection, op.row);
+                    results.push({ op: 'upsert', collection: op.collection, key });
+                }
+            }
+            return results;
+        } catch (error) {
+            this.rows = before;
+            (error as Error & { failedOpIndex: number }).failedOpIndex = failedOpIndex;
+            throw error;
+        }
+    }
+    async joinMany(query: JoinQuery): Promise<Row[]> {
+        return [{ from: query.from, hops: query.join.length }];
     }
 }
 
@@ -140,6 +192,63 @@ const SDK_SCHEMA = {
 };
 
 console.log('collections REST routes — Phase 2 item 5');
+
+test('POST /v1/transaction is routed before the collection catch-all', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        const result = await fetchJson(`${srv.baseUrl}/v1/transaction`, {
+            method: 'POST',
+            body: {
+                operations: [
+                    { op: 'insert', collection: 'orders', row: { id: 't1', amount: 10, status: 'open' } },
+                    { op: 'update', collection: 'orders', filter: { eq: { id: 't1' } }, patch: { status: 'closed' } },
+                ],
+            },
+        });
+        assert.equal(result.status, 200);
+        assert.equal((result.body as { results: unknown[] }).results.length, 2);
+        const row = await fetchJson(`${srv.baseUrl}/v1/orders/t1`);
+        assert.equal((row.body as { status: string }).status, 'closed');
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/transaction reports the failed operation and applies nothing', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        const result = await fetchJson(`${srv.baseUrl}/v1/transaction`, {
+            method: 'POST',
+            body: {
+                operations: [
+                    { op: 'insert', collection: 'orders', row: { id: 'rollback-me', amount: 10 } },
+                    { op: 'insert', collection: 'orders', row: { id: 'rollback-me', amount: 20 } },
+                ],
+            },
+        });
+        assert.equal(result.status, 409);
+        const body = result.body as { failed_op_index: number; reason: string };
+        assert.equal(body.failed_op_index, 1);
+        assert.equal(body.reason, 'duplicate_primary_key');
+        const row = await fetchJson(`${srv.baseUrl}/v1/orders/rollback-me`);
+        assert.equal(row.status, 404);
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/query is routed before treating query as a collection', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        const result = await fetchJson(`${srv.baseUrl}/v1/query`, {
+            method: 'POST',
+            body: {
+                from: 'orders',
+                join: [{ collection: 'customers', on: { from: 'customer_id', to: 'id' }, type: 'inner' }],
+            },
+        });
+        assert.equal(result.status, 200);
+        assert.equal((result.body as { records: Array<{ from: string }> }).records[0]?.from, 'orders');
+    } finally { await srv.close(); }
+});
 
 /* ---------- meta routes ---------- */
 

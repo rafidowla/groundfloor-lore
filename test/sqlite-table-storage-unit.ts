@@ -86,6 +86,78 @@ test('createTable with changed shape throws', async () => {
     } finally { t.cleanup(); }
 });
 
+/* ---------- Q1.10 — all-or-nothing typed transactions ---------- */
+
+test('runTransaction commits insert, update, delete, and upsert together', async () => {
+    const t = mkTmp();
+    try {
+        const s = new SqliteTableStorage(t.dbPath);
+        await s.createTable(TENANT);
+        await s.insertBatch('tenant', [
+            { id: 'old', name: 'Old', rent: 10 },
+            { id: 'gone', name: 'Gone', rent: 20 },
+        ]);
+        const results = await s.runTransaction([
+            { op: 'insert', collection: 'tenant', row: { id: 'new', name: 'New', rent: 30 } },
+            { op: 'update', collection: 'tenant', filter: { eq: { id: 'old' } }, patch: { rent: 11 } },
+            { op: 'delete', collection: 'tenant', filter: { eq: { id: 'gone' } } },
+            { op: 'upsert', collection: 'tenant', row: { id: 'new', name: 'Newer', rent: 31 } },
+        ]);
+        assert.equal(results.length, 4);
+        assert.equal((await s.getByKey('tenant', 'old'))?.rent, 11);
+        assert.equal(await s.getByKey('tenant', 'gone'), null);
+        assert.equal((await s.getByKey('tenant', 'new'))?.name, 'Newer');
+        s.close();
+    } finally { t.cleanup(); }
+});
+
+test('runTransaction rolls every touched table back when one operation fails', async () => {
+    const t = mkTmp();
+    try {
+        const s = new SqliteTableStorage(t.dbPath);
+        await s.createTable(TENANT);
+        await s.createTable({
+            name: 'ledger',
+            columns: [
+                { name: 'id', type: 'string', primary: true },
+                { name: 'amount', type: 'integer', required: true },
+            ],
+        });
+        await s.insert('tenant', { id: 'existing', name: 'Before', rent: 5 });
+        await assert.rejects(
+            () => s.runTransaction([
+                { op: 'update', collection: 'tenant', filter: { eq: { id: 'existing' } }, patch: { rent: 99 } },
+                { op: 'insert', collection: 'ledger', row: { id: 'bad', amount: null } },
+                { op: 'insert', collection: 'tenant', row: { id: 'never', name: 'Never' } },
+            ]),
+            (error: Error & { failedOpIndex?: number }) => {
+                assert.equal(error.failedOpIndex, 1);
+                return true;
+            },
+        );
+        assert.equal((await s.getByKey('tenant', 'existing'))?.rent, 5);
+        assert.equal(await s.getByKey('tenant', 'never'), null);
+        assert.equal(await s.count('ledger'), 0);
+        s.close();
+    } finally { t.cleanup(); }
+});
+
+test('runTransaction rejects 101 operations before writing anything', async () => {
+    const t = mkTmp();
+    try {
+        const s = new SqliteTableStorage(t.dbPath);
+        await s.createTable(TENANT);
+        const operations = Array.from({ length: 101 }, (_, index) => ({
+            op: 'insert' as const,
+            collection: 'tenant',
+            row: { id: `t-${index}`, name: `Tenant ${index}` },
+        }));
+        await assert.rejects(() => s.runTransaction(operations), /at most 100 operations/);
+        assert.equal(await s.count('tenant'), 0);
+        s.close();
+    } finally { t.cleanup(); }
+});
+
 test('createTable refuses an injection-style identifier', async () => {
     const t = mkTmp();
     try {
@@ -301,6 +373,105 @@ test('inner join returns prefixed column names', async () => {
         // Prefixed-column convention.
         assert.ok('tenant.name' in rows[0], 'left columns prefixed');
         assert.ok('lease.rent' in rows[0], 'right columns prefixed');
+        s.close();
+    } finally { t.cleanup(); }
+});
+
+test('nested or/and/not filter matches the equivalent handwritten WHERE', async () => {
+    const t = mkTmp();
+    try {
+        const s = new SqliteTableStorage(t.dbPath);
+        await s.createTable(TENANT);
+        await s.insertBatch('tenant', [
+            { id: 'a', name: 'Ann', rent: 100, active: true },
+            { id: 'b', name: 'Bob', rent: 200, active: false },
+            { id: 'c', name: 'Cal', rent: 300, active: true },
+            { id: 'd', name: 'Dee', rent: 400, active: false },
+            { id: 'e', name: 'Eve', rent: 500, active: true },
+            { id: 'f', name: 'Fay', rent: 600, active: false },
+        ]);
+        const found = await s.query('tenant', {
+            or: [
+                { and: [{ eq: { active: true } }, { gte: { rent: 300 } }] },
+                { not: { lt: { rent: 600 } } },
+            ],
+        });
+        const ids = found.map(r => r.id).sort();
+        assert.deepEqual(ids, ['c', 'e', 'f']);
+        await assert.rejects(
+            () => s.query('tenant', { eq: { 'id); DROP TABLE': 'x' } }),
+            /invalid identifier/i,
+        );
+        await assert.rejects(
+            () => s.query('tenant', { or: [{ eq: { 'id); DROP': 'x' } }] }),
+            /invalid identifier/i,
+        );
+        s.close();
+    } finally { t.cleanup(); }
+});
+
+test('joinMany supports inner and left hops and rejects a fifth hop', async () => {
+    const t = mkTmp();
+    try {
+        const s = new SqliteTableStorage(t.dbPath);
+        await s.createTable({
+            name: 'customers',
+            columns: [
+                { name: 'id', type: 'string', primary: true },
+                { name: 'address_id', type: 'string' },
+            ],
+        });
+        await s.createTable({
+            name: 'addresses',
+            columns: [
+                { name: 'id', type: 'string', primary: true },
+                { name: 'city', type: 'string' },
+            ],
+        });
+        await s.createTable({
+            name: 'orders',
+            columns: [
+                { name: 'id', type: 'string', primary: true },
+                { name: 'customer_id', type: 'string' },
+                { name: 'amount', type: 'integer' },
+            ],
+        });
+        await s.insert('addresses', { id: 'ad1', city: 'Austin' });
+        await s.insert('customers', { id: 'c1', address_id: 'ad1' });
+        await s.insert('customers', { id: 'c2', address_id: 'missing' });
+        await s.insert('orders', { id: 'o1', customer_id: 'c1', amount: 10 });
+        await s.insert('orders', { id: 'o2', customer_id: 'c2', amount: 20 });
+        const inner = await s.joinMany!({
+            from: 'orders',
+            join: [
+                { collection: 'customers', on: { from: 'customer_id', to: 'id' }, type: 'inner' },
+                { collection: 'addresses', on: { from: 'address_id', to: 'id' }, type: 'inner' },
+            ],
+        });
+        assert.equal(inner.length, 1);
+        assert.equal(inner[0]!['orders.id'], 'o1');
+        assert.equal(inner[0]!['addresses.city'], 'Austin');
+        const left = await s.joinMany!({
+            from: 'orders',
+            join: [
+                { collection: 'customers', on: { from: 'customer_id', to: 'id' }, type: 'left' },
+                { collection: 'addresses', on: { from: 'address_id', to: 'id' }, type: 'left' },
+            ],
+        });
+        assert.equal(left.length, 2);
+        await assert.rejects(
+            () => s.joinMany!({
+                from: 'orders',
+                join: [
+                    { collection: 'customers', on: { from: 'customer_id', to: 'id' }, type: 'inner' },
+                    { collection: 'addresses', on: { from: 'address_id', to: 'id' }, type: 'inner' },
+                    { collection: 'customers', on: { from: 'id', to: 'id' }, type: 'inner' },
+                    { collection: 'addresses', on: { from: 'id', to: 'id' }, type: 'inner' },
+                    { collection: 'customers', on: { from: 'id', to: 'id' }, type: 'inner' },
+                ],
+            }),
+            /at most 4 hops/i,
+        );
         s.close();
     } finally { t.cleanup(); }
 });
@@ -524,6 +695,7 @@ test('capabilities() reports SQLite\'s actual feature set', async () => {
         const s = new SqliteTableStorage(t.dbPath);
         const caps = s.capabilities();
         assert.equal(caps.join, true, 'SQLite supports JOIN');
+        assert.equal(caps.maxJoinHops, 4);
         assert.equal(caps.caseSensitiveContains, false, 'LIKE is case-insensitive by default');
         assert.equal(caps.extractedJsonFields, true);
         assert.equal(caps.additiveSchemaEvolution, true);

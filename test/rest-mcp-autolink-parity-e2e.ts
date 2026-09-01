@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     try {
         h = await spawnDaemon();
         assert.ok(await waitForReady(h.port), `daemon never ready\n${h.log.text}`);
-        h.token = await fetchAuthToken(h.port);
+        h.token = await fetchAuthToken(h.port, h.home);
         const base = `http://127.0.0.1:${h.port}`;
         const authHdr = { Authorization: `Bearer ${h.token}`, Origin: base };
         const jsonHdr = { ...authHdr, 'Content-Type': 'application/json' };

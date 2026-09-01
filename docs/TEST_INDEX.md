@@ -39,8 +39,8 @@
 | `Z1-load-endpoint-unit.ts` | load, loadJobsStore, types |
 | `bulk-list-route-unit.ts` | bulkList, rateLimit |
 | `bulk-write-w9-unit.ts` | bulkWrite, rateLimit |
-| `collections-routes-unit.ts` | collections, tables, collectionStorage |
-| `collections-tools-unit.ts` | collections, tables, collectionStorage |
+| `collections-routes-unit.ts` | collections, tables, collectionStorage, transactions |
+| `collections-tools-unit.ts` | collections, tables, collectionStorage, transactions |
 | `consistency-cleanup-route-unit.ts` | diagnostic, types |
 | `edges-route-unit.ts` | edges |
 | `import-routes-unit.ts` | import |
@@ -123,6 +123,7 @@
 | `sp20-facade-discipline-unit.ts` | syncEngine, loreStorageClient, localGraph, verbatimStore |
 | `sp25-paranoia-unit.ts` | kuzuTableStorage |
 | `sqlite-table-storage-unit.ts` | sqliteTableStorage, tables |
+| `table-transaction-contract-unit.ts` | sqliteTableStorage, tables, transactions |
 | `store-node-mcp-tool-content-hash-unit.ts` | storeNode, contentHash, verbatimStore |
 | `substrate-adversarial-unit.ts` | sqliteTableStorage, tables |
 | `sw01-injection-unit.ts` | kuzuAnalyticalStorage, kuzuCollectionStorage, kuzuResult |

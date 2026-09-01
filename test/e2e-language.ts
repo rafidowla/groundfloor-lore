@@ -9,23 +9,23 @@
  *
  * Strategy:
  *   - Pure unit tests for the core `detectLanguage()` utility
- *   - HTTP + MCP integration against the live launchd daemon
- *   - Self-cleaning: tagged probe nodes are deleted at the end
+ *   - HTTP + MCP integration against a fresh isolated `--http` daemon
+ *   - Self-cleaning: the daemon's temporary HOME is removed at the end
  *
  * Usage: npx tsx test/e2e-language.ts
  */
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 import { detectLanguage } from '../packages/lore/src/engines/language.js';
-
-const DAEMON_URL = 'http://127.0.0.1:3847/mcp';
-const HTTP_BASE = 'http://127.0.0.1:3847';
-const AUTH_TOKEN_PATH = path.join(os.homedir(), '.groundfloor', 'auth.token');
+import {
+    cleanup,
+    fetchAuthToken,
+    spawnDaemon,
+    waitForReady,
+    type DaemonHandle,
+} from './helpers/live-daemon.js';
 
 interface Check { name: string; pass: boolean; detail?: string; }
 const checks: Check[] = [];
@@ -71,12 +71,11 @@ function testDetectionPure(): void {
 
 /* ─── Phase A — HTTP endpoint ──────────────────────────────────── */
 
-async function testHttpDetect(): Promise<void> {
+async function testHttpDetect(httpBase: string, token: string): Promise<void> {
     console.log('\n─── Phase A: POST /api/language/detect ───');
-    const token = fs.readFileSync(AUTH_TOKEN_PATH, 'utf8').trim();
 
     const call = async (text: string) => {
-        const resp = await fetch(`${HTTP_BASE}/api/language/detect`, {
+        const resp = await fetch(`${httpBase}/api/language/detect`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
             body: JSON.stringify({ text }),
@@ -91,7 +90,7 @@ async function testHttpDetect(): Promise<void> {
     record('HTTP Spanish detected', es.language === 'es', `lang=${es.language}`);
 
     // Missing body → 400
-    const badResp = await fetch(`${HTTP_BASE}/api/language/detect`, {
+    const badResp = await fetch(`${httpBase}/api/language/detect`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: '{}',
@@ -121,9 +120,8 @@ async function testMcpDetect(client: Client): Promise<void> {
 
 /* ─── Phase A — store_node round-trip ──────────────────────────── */
 
-async function testStoreNodeRoundTrip(client: Client): Promise<string | null> {
+async function testStoreNodeRoundTrip(client: Client, httpBase: string, token: string): Promise<string | null> {
     console.log('\n─── Phase A: store_node round-trip with language ───');
-    const token = fs.readFileSync(AUTH_TOKEN_PATH, 'utf8').trim();
     const probeId = `e2e-lang-es-${Date.now()}`;
 
     const storeResp = await client.callTool({
@@ -135,6 +133,7 @@ async function testStoreNodeRoundTrip(client: Client): Promise<string | null> {
             content: 'Nodo de prueba en español con el tag explícito es.',
             tags: 'e2e,language-test',
             language: 'es',
+            workspace: 'default',
         },
     });
     const storeText = (storeResp as { content?: Array<{ text?: string }> }).content?.[0]?.text;
@@ -142,7 +141,7 @@ async function testStoreNodeRoundTrip(client: Client): Promise<string | null> {
     record('store_node with language succeeded', storeJson?.success === true);
 
     // Read back via HTTP
-    const detail = await fetch(`${HTTP_BASE}/api/node?id=${probeId}`, {
+    const detail = await fetch(`${httpBase}/api/node?id=${probeId}&workspace=default`, {
         headers: { Authorization: `Bearer ${token}` },
     }).then((r) => r.json() as Promise<{ node?: { language?: string | null } }>);
     record('language field persisted', detail.node?.language === 'es', `lang=${detail.node?.language}`);
@@ -157,16 +156,17 @@ async function testStoreNodeRoundTrip(client: Client): Promise<string | null> {
             label: 'Untagged probe',
             content: 'This node has no explicit language tag. Caller did not pass it.',
             tags: 'e2e,language-test',
+            workspace: 'default',
         },
     });
-    const untaggedDetail = await fetch(`${HTTP_BASE}/api/node?id=${untaggedId}`, {
+    const untaggedDetail = await fetch(`${httpBase}/api/node?id=${untaggedId}&workspace=default`, {
         headers: { Authorization: `Bearer ${token}` },
     }).then((r) => r.json() as Promise<{ node?: { language?: string | null } }>);
     record('untagged node stays language=null', untaggedDetail.node?.language === null || untaggedDetail.node?.language === undefined);
 
     // Cleanup both probes
-    await client.callTool({ name: 'delete_node', arguments: { id: probeId } });
-    await client.callTool({ name: 'delete_node', arguments: { id: untaggedId } });
+    await client.callTool({ name: 'delete_node', arguments: { id: probeId, workspace: 'default' } });
+    await client.callTool({ name: 'delete_node', arguments: { id: untaggedId, workspace: 'default' } });
     return probeId;
 }
 
@@ -175,13 +175,30 @@ async function testStoreNodeRoundTrip(client: Client): Promise<string | null> {
 async function testPhaseBHint(client: Client): Promise<void> {
     console.log('\n─── Phase B: queryLanguage hint on recall ───');
 
-    // Query in a rare language ('ja') with a small corpus should produce
-    // a hint.
+    // Phase A deletes its probes, so a fresh isolated daemon has an empty
+    // corpus here. buildLanguageHint returns null when total === 0 (no
+    // basis for a mismatch). Seed one tagged non-ja node so a ja query
+    // produces the product hint this phase is checking.
+    const seedId = `e2e-lang-hint-seed-${Date.now()}`;
+    await client.callTool({
+        name: 'store_node',
+        arguments: {
+            id: seedId,
+            type: 'note',
+            label: 'English seed for language hint',
+            content: 'This English node exists so recall(queryLanguage=ja) has tagged corpus to compare against.',
+            tags: 'e2e,language-test',
+            language: 'en',
+            workspace: 'default',
+        },
+    });
+
     const resp = await client.callTool({
         name: 'recall',
         arguments: {
             topic: 'architecture',
             queryLanguage: 'ja',
+            workspace: 'default',
         },
     });
     const textOut = (resp as { content?: Array<{ text?: string }> }).content?.[0]?.text;
@@ -194,19 +211,20 @@ async function testPhaseBHint(client: Client): Promise<void> {
     // Query in no language tag → no hint
     const resp2 = await client.callTool({
         name: 'recall',
-        arguments: { topic: 'architecture' },
+        arguments: { topic: 'architecture', workspace: 'default' },
     });
     const textOut2 = (resp2 as { content?: Array<{ text?: string }> }).content?.[0]?.text;
     const body2 = textOut2 ? JSON.parse(textOut2) : null;
     record('recall without queryLanguage omits hint', body2?.hint == null);
+
+    await client.callTool({ name: 'delete_node', arguments: { id: seedId, workspace: 'default' } });
 }
 
 /* ─── Phase C — /api/stats includes breakdown ──────────────────── */
 
-async function testPhaseCStatsBreakdown(): Promise<void> {
+async function testPhaseCStatsBreakdown(httpBase: string, token: string): Promise<void> {
     console.log('\n─── Phase C: /api/stats exposes languageBreakdown ───');
-    const token = fs.readFileSync(AUTH_TOKEN_PATH, 'utf8').trim();
-    const stats = await fetch(`${HTTP_BASE}/api/stats`, {
+    const stats = await fetch(`${httpBase}/api/stats?workspace=default`, {
         headers: { Authorization: `Bearer ${token}` },
     }).then((r) => r.json() as Promise<{ languageBreakdown?: Record<string, number> }>);
     record('languageBreakdown present', stats.languageBreakdown != null);
@@ -215,9 +233,8 @@ async function testPhaseCStatsBreakdown(): Promise<void> {
 
 /* ─── Main ─────────────────────────────────────────────────────── */
 
-async function connectMcp(): Promise<Client> {
-    const token = fs.readFileSync(AUTH_TOKEN_PATH, 'utf8').trim();
-    const transport = new StreamableHTTPClientTransport(new URL(DAEMON_URL), {
+async function connectMcp(daemonUrl: string, token: string): Promise<Client> {
+    const transport = new StreamableHTTPClientTransport(new URL(daemonUrl), {
         requestInit: { headers: { Authorization: `Bearer ${token}` } },
     });
     const client = new Client({ name: 'e2e-language', version: '1.0.0' });
@@ -227,28 +244,32 @@ async function connectMcp(): Promise<Client> {
 
 async function main(): Promise<void> {
     console.log('═══ V2.2 Multilingual E2E ═══');
-    console.log(`Daemon: ${DAEMON_URL}`);
 
     testDetectionPure();
-    await testHttpDetect();
 
+    let daemon: DaemonHandle | null = null;
     let client: Client | null = null;
     try {
-        client = await connectMcp();
-    } catch (err) {
-        console.error(`\n✗ Cannot connect to daemon: ${(err as Error).message}`);
-        record('daemon reachable', false, (err as Error).message);
-        printSummary();
-        process.exit(1);
-    }
+        daemon = await spawnDaemon();
+        const ready = await waitForReady(daemon.port, 60_000);
+        if (!ready) throw new Error(`daemon never became ready\n${daemon.log.text}`);
+        daemon.token = await fetchAuthToken(daemon.port, daemon.home);
+        const httpBase = `http://127.0.0.1:${daemon.port}`;
+        const daemonUrl = `${httpBase}/mcp`;
+        console.log(`Daemon: ${daemonUrl}`);
 
-    try {
+        await testHttpDetect(httpBase, daemon.token);
+        client = await connectMcp(daemonUrl, daemon.token);
         await testMcpDetect(client);
-        await testStoreNodeRoundTrip(client);
+        await testStoreNodeRoundTrip(client, httpBase, daemon.token);
         await testPhaseBHint(client);
-        await testPhaseCStatsBreakdown();
+        await testPhaseCStatsBreakdown(httpBase, daemon.token);
+    } catch (err) {
+        console.error(`\n✗ Disposable daemon failed: ${(err as Error).message}`);
+        record('daemon reachable', false, (err as Error).message);
     } finally {
-        await client.close().catch(() => { /* ignore */ });
+        await client?.close().catch(() => { /* ignore */ });
+        cleanup(daemon);
     }
 
     printSummary();

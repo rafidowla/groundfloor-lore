@@ -400,6 +400,8 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                         // Inline verbatim path (no outbox wired): the boot-
                         // bound storage-client facade, as before.
                         verbatim: deps.store.storageClient,
+                        // Cloud: write Dataplane now; local leaves this unset.
+                        inlineVerbatim: deps.inlineVerbatim,
                         getWal: deps.getWal,
                         versionStore: deps.versionStore,
                         previousState: prevNodeForVersion ?? null,

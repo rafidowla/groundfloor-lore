@@ -96,6 +96,7 @@ function fakeRes(): ServerResponse & { _status: number; _body: string; _ended: b
 function cloudDeps(bootstrapWorkspace: string): HttpGateDeps {
     return {
         port: PORT,
+        dataHome: '/tmp/tw3a-unit-unused',
         getAuthToken: () => SESSION_TOKEN,
         getSharedSecret: () => SHARED_SECRET,
         rateLimiter: allowAllLimiter,
@@ -107,6 +108,7 @@ function cloudDeps(bootstrapWorkspace: string): HttpGateDeps {
 function localDeps(bootstrapWorkspace: string): HttpGateDeps {
     return {
         port: PORT,
+        dataHome: '/tmp/tw3a-unit-unused',
         getAuthToken: () => SESSION_TOKEN,
         getSharedSecret: () => undefined,
         rateLimiter: allowAllLimiter,

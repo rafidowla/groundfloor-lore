@@ -24,7 +24,14 @@
  *     ordered array (better-sqlite3's shape).
  */
 
-import type { Filter } from './collectionStorage.js';
+import {
+    MAX_FILTER_NESTING,
+    isFilterAnd,
+    isFilterNot,
+    isFilterOr,
+    type Filter,
+    type FilterNode,
+} from './collectionStorage.js';
 
 /**
  * Validate a table / column / identifier before it is interpolated into a
@@ -83,6 +90,9 @@ export function buildCypherWhere(
     paramPrefix: string,
 ): CypherWhere {
     if (!filter) return { where: '', params: {} };
+    if (isFilterAnd(filter) || isFilterOr(filter) || isFilterNot(filter)) {
+        throw new Error('filter_too_nested');
+    }
     const clauses: string[] = [];
     const params: Record<string, unknown> = {};
     let i = 0;
@@ -132,29 +142,78 @@ export function buildCypherWhere(
  * positional `?` in clause order, encoded via the optional `encode` hook.
  */
 export function buildSqliteWhere(
-    filter: Filter | undefined,
-    opts?: { alias?: string; encode?: ValueEncoder },
+    filter: FilterNode | undefined,
+    opts?: { alias?: string; encode?: ValueEncoder; qualify?: (column: string) => string },
 ): SqliteWhere {
     if (!filter) return { where: '', params: [] };
+    const compiled = compileSqliteNode(filter, 0, opts);
+    return {
+        where: compiled.sql.length > 0 ? `WHERE ${compiled.sql}` : '',
+        params: compiled.params,
+    };
+}
+
+function compileSqliteNode(
+    node: FilterNode,
+    depth: number,
+    opts?: { alias?: string; encode?: ValueEncoder; qualify?: (column: string) => string },
+): { sql: string; params: unknown[] } {
+    if (depth > MAX_FILTER_NESTING) {
+        throw new Error('filter_too_nested');
+    }
+    if (isFilterAnd(node)) {
+        if (node.and.length === 0) {
+            throw new Error('empty and[] is not allowed');
+        }
+        const parts = node.and.map(child => compileSqliteNode(child, depth + 1, opts));
+        return {
+            sql: `(${parts.map(part => part.sql).join(' AND ')})`,
+            params: parts.flatMap(part => part.params),
+        };
+    }
+    if (isFilterOr(node)) {
+        if (node.or.length === 0) {
+            throw new Error('empty or[] is not allowed');
+        }
+        const parts = node.or.map(child => compileSqliteNode(child, depth + 1, opts));
+        return {
+            sql: `(${parts.map(part => part.sql).join(' OR ')})`,
+            params: parts.flatMap(part => part.params),
+        };
+    }
+    if (isFilterNot(node)) {
+        const inner = compileSqliteNode(node.not, depth + 1, opts);
+        if (!inner.sql) {
+            throw new Error('empty not is not allowed');
+        }
+        return { sql: `NOT (${inner.sql})`, params: inner.params };
+    }
+    return compileSqliteLeaf(node, opts);
+}
+
+function compileSqliteLeaf(
+    filter: Filter,
+    opts?: { alias?: string; encode?: ValueEncoder; qualify?: (column: string) => string },
+): { sql: string; params: unknown[] } {
     const alias = opts?.alias;
     const encode = opts?.encode ?? ((_k: string, v: unknown) => v);
     const clauses: string[] = [];
     const params: unknown[] = [];
-    // SECURITY (SW-01): validate + quote every key. The alias prefix is
-    // fixed code (l./r. on joins), not caller input.
-    const col = (k: string) => alias ? `${alias}."${assertIdent(k)}"` : `"${assertIdent(k)}"`;
+    const col = (k: string) => {
+        if (opts?.qualify) return opts.qualify(assertIdent(k));
+        return alias ? `${alias}."${assertIdent(k)}"` : `"${assertIdent(k)}"`;
+    };
 
     for (const [k, v] of Object.entries(filter.eq ?? {})) {
         clauses.push(`${col(k)} = ?`); params.push(encode(k, v));
     }
     for (const [k, v] of Object.entries(filter.contains ?? {})) {
-        // F-COL1: empty/whitespace value → LIKE '%%' matches all — skip it.
         if (typeof v === 'string' && v.trim().length === 0) continue;
         clauses.push(`${col(k)} LIKE ? ESCAPE '\\'`);
         params.push(`%${escapeLike(String(v))}%`);
     }
     for (const [k, v] of Object.entries(filter.startsWith ?? {})) {
-        if (typeof v === 'string' && v.trim().length === 0) continue; // F-COL1
+        if (typeof v === 'string' && v.trim().length === 0) continue;
         clauses.push(`${col(k)} LIKE ? ESCAPE '\\'`);
         params.push(`${escapeLike(String(v))}%`);
     }
@@ -173,8 +232,6 @@ export function buildSqliteWhere(
     for (const [k, values] of Object.entries(filter.in ?? {})) {
         const vals = values as unknown[];
         if (vals.length === 0) {
-            // IN with empty list matches nothing — validate the key first
-            // so a hostile key still throws rather than silently passing.
             void col(k);
             clauses.push('0 = 1');
             continue;
@@ -184,10 +241,7 @@ export function buildSqliteWhere(
         params.push(...vals.map(x => encode(k, x)));
     }
 
-    return {
-        where: clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '',
-        params,
-    };
+    return { sql: clauses.join(' AND '), params };
 }
 
 /**

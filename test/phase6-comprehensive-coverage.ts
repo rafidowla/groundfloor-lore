@@ -360,6 +360,7 @@ async function testP3E1_missingBearer401(): Promise<void> {
     const res = mockResponse();
     const gate = await runHttpGates(req as never, res as never, {
         port: 3897,
+        dataHome: '/tmp/phase6-coverage-unused',
         getAuthToken: () => 'a'.repeat(64),
         getSharedSecret: () => undefined,
         rateLimiter: new RateLimiter(),
@@ -382,6 +383,7 @@ async function testP3E2_malformedBearer401(): Promise<void> {
     const res = mockResponse();
     const gate = await runHttpGates(req as never, res as never, {
         port: 3897,
+        dataHome: '/tmp/phase6-coverage-unused',
         getAuthToken: () => 'a'.repeat(64),
         getSharedSecret: () => undefined,
         rateLimiter: new RateLimiter(),
@@ -409,6 +411,7 @@ async function testP3E3_unregisteredAppToken401(): Promise<void> {
     const res = mockResponse();
     const gate = await runHttpGates(req as never, res as never, {
         port: 3897,
+        dataHome: '/tmp/phase6-coverage-unused',
         getAuthToken: () => 'a'.repeat(64),
         getSharedSecret: () => undefined,
         rateLimiter: new RateLimiter(),

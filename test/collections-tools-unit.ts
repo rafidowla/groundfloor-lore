@@ -31,12 +31,15 @@ import {
     internalToSdkSchema,
     type SdkCollectionSchema,
 } from '../packages/lore/src/mcp/tools/collections.js';
+import { handleTransaction } from '../packages/lore/src/mcp/tools/collectionsTransaction.js';
 import type {
     ITableStorage,
     Row,
+    TableOp,
+    TableOpResult,
     TableSchema,
 } from '../packages/lore/src/contracts/tables.js';
-import type { Filter, FindOptions } from '../packages/lore/src/engines/collectionStorage.js';
+import type { Filter, FilterNode, FindOptions } from '../packages/lore/src/engines/collectionStorage.js';
 
 let passed = 0;
 let failed = 0;
@@ -53,8 +56,16 @@ function test(name: string, fn: () => void | Promise<void>) {
 class FakeTableStorage implements ITableStorage {
     public schemas = new Map<string, TableSchema>();
     private rows = new Map<string, Map<unknown, Row>>();
-    public lastQuery: { table: string; filter?: Filter; opts?: FindOptions } | null = null;
+    public lastQuery: { table: string; filter?: FilterNode; opts?: FindOptions } | null = null;
 
+    capabilities() {
+        return {
+            join: false,
+            caseSensitiveContains: false,
+            extractedJsonFields: false,
+            additiveSchemaEvolution: false,
+        };
+    }
     async createTable(schema: TableSchema): Promise<void> {
         this.schemas.set(schema.name, schema);
         if (!this.rows.has(schema.name)) this.rows.set(schema.name, new Map());
@@ -70,12 +81,13 @@ class FakeTableStorage implements ITableStorage {
     async insertBatch(table: string, rows: Row[]): Promise<void> {
         for (const r of rows) await this.insert(table, r);
     }
-    async query(table: string, filter?: Filter, opts?: FindOptions): Promise<Row[]> {
+    async query(table: string, filter?: FilterNode, opts?: FindOptions): Promise<Row[]> {
         this.lastQuery = { table, filter, opts };
         const tbl = this.rows.get(table) ?? new Map();
         let out = Array.from(tbl.values());
-        if (filter?.eq) {
-            for (const [k, v] of Object.entries(filter.eq)) {
+        const eq = filter && 'eq' in filter ? (filter as Filter).eq : undefined;
+        if (eq) {
+            for (const [k, v] of Object.entries(eq)) {
                 out = out.filter(r => r[k] === v);
             }
         }
@@ -95,19 +107,19 @@ class FakeTableStorage implements ITableStorage {
         const r = this.rows.get(table)?.get(key);
         return (r as T) ?? null;
     }
-    async update(table: string, filter: Filter, patch: Partial<Row>): Promise<number> {
+    async update(table: string, filter: FilterNode, patch: Partial<Row>): Promise<number> {
         const matches = await this.query(table, filter);
         for (const r of matches) Object.assign(r, patch);
         return matches.length;
     }
-    async delete(table: string, filter: Filter): Promise<number> {
+    async delete(table: string, filter: FilterNode): Promise<number> {
         const matches = await this.query(table, filter);
         const tbl = this.rows.get(table)!;
         const pkCol = this.schemas.get(table)?.columns.find(c => c.primary)?.name;
         for (const r of matches) tbl.delete(pkCol ? r[pkCol] : JSON.stringify(r));
         return matches.length;
     }
-    async count(table: string, filter?: Filter): Promise<number> {
+    async count(table: string, filter?: FilterNode): Promise<number> {
         return (await this.query(table, filter)).length;
     }
     async truncate(table: string): Promise<number> {
@@ -115,6 +127,43 @@ class FakeTableStorage implements ITableStorage {
         const n = tbl.size;
         tbl.clear();
         return n;
+    }
+    async runTransaction(ops: TableOp[]): Promise<TableOpResult[]> {
+        const before = new Map(
+            [...this.rows].map(([table, rows]) => [
+                table,
+                new Map([...rows].map(([key, row]) => [key, { ...row }])),
+            ]),
+        );
+        const results: TableOpResult[] = [];
+        let failedOpIndex = -1;
+        try {
+            for (let i = 0; i < ops.length; i++) {
+                failedOpIndex = i;
+                const op = ops[i]!;
+                if (op.op === 'insert') {
+                    await this.insert(op.collection, op.row);
+                    const pk = this.schemas.get(op.collection)?.columns.find(c => c.primary)?.name;
+                    results.push({ op: 'insert', collection: op.collection, key: pk ? op.row[pk] : undefined });
+                } else if (op.op === 'update') {
+                    results.push({ op: 'update', collection: op.collection, count: await this.update(op.collection, op.filter, op.patch) });
+                } else if (op.op === 'delete') {
+                    results.push({ op: 'delete', collection: op.collection, count: await this.delete(op.collection, op.filter) });
+                } else {
+                    const pk = this.schemas.get(op.collection)?.columns.find(c => c.primary)?.name;
+                    const key = pk ? op.row[pk] : undefined;
+                    const current = await this.getByKey(op.collection, key);
+                    if (current) await this.update(op.collection, { eq: { [pk!]: key } }, op.row);
+                    else await this.insert(op.collection, op.row);
+                    results.push({ op: 'upsert', collection: op.collection, key });
+                }
+            }
+            return results;
+        } catch (error) {
+            this.rows = before;
+            (error as Error & { failedOpIndex: number }).failedOpIndex = failedOpIndex;
+            throw error;
+        }
     }
 }
 
@@ -286,6 +335,20 @@ test('handleDelete returns {deleted: count} and removes the row', async () => {
     assert.equal(row, null);
 });
 
+test('handleTransaction returns every operation result atomically', async () => {
+    const store = new FakeTableStorage();
+    await handleCreateCollection({ tableStorage: store }, SDK_SCHEMA);
+    await store.insert('customers', { id: 'old', email: 'old@x.com' });
+    const result = await handleTransaction({ tableStorage: store }, {
+        operations: [
+            { op: 'insert', collection: 'customers', row: { id: 'new', email: 'new@x.com' } },
+            { op: 'update', collection: 'customers', filter: { eq: { id: 'old' } }, patch: { email: 'updated@x.com' } },
+        ],
+    });
+    assert.equal(result.results.length, 2);
+    assert.equal((await store.getByKey('customers', 'old'))?.email, 'updated@x.com');
+});
+
 /* ---------- F-COL2 (Wave 2): unscoped update/delete data-loss guard ---------- */
 
 test('F-COL2: handleUpdate REFUSES an empty/all filter without all:true (no silent wipe)', async () => {
@@ -301,6 +364,23 @@ test('F-COL2: handleUpdate REFUSES an empty/all filter without all:true (no sile
     );
     // Explicit opt-in (all:true) proceeds — the intentional bulk update.
     const ok = await handleUpdate({ tableStorage: store }, 'customers', {} as never, { email: 'intentional@x.com' }, true);
+    assert.equal(ok.updated, 2);
+});
+
+test('F-COL2: handleUpdate REFUSES a nested and/or filter that reduces to all-rows', async () => {
+    const store = new FakeTableStorage();
+    await handleCreateCollection({ tableStorage: store }, SDK_SCHEMA);
+    await store.insert('customers', { id: 'u3', email: 'c@x.com' });
+    await store.insert('customers', { id: 'u4', email: 'd@x.com' });
+    // `or: [{ eq: {} }]` still matches every row — the empty leaf inside the
+    // OR must not be waved through just because it's wrapped in a boolean node.
+    const nestedAllFilter = { or: [{ eq: {} }] } as never;
+    await assert.rejects(
+        () => handleUpdate({ tableStorage: store }, 'customers', nestedAllFilter, { email: 'WIPED@x.com' }),
+        /refuses an empty\/all filter|all:true/i,
+        'nested empty-inside-or update must be refused',
+    );
+    const ok = await handleUpdate({ tableStorage: store }, 'customers', nestedAllFilter, { email: 'intentional@x.com' }, true);
     assert.equal(ok.updated, 2);
 });
 
@@ -321,6 +401,23 @@ test('F-COL2: handleDelete REFUSES an empty/all filter without all:true (no sile
         'empty-contains must not bypass the guard',
     );
     const ok = await handleDelete({ tableStorage: store }, 'customers', {} as never, true);
+    assert.equal(ok.deleted, 2);
+});
+
+test('F-COL2: handleDelete REFUSES a nested and/or filter that reduces to all-rows', async () => {
+    const store = new FakeTableStorage();
+    await handleCreateCollection({ tableStorage: store }, SDK_SCHEMA);
+    await store.insert('customers', { id: 'd3', email: 'z@x.com' });
+    await store.insert('customers', { id: 'd4', email: 'w@x.com' });
+    // `and: [{ eq: {} }, { eq: {} }]` — every branch is unscoped, so the AND
+    // as a whole still matches every row and must not bypass the guard.
+    const nestedAllFilter = { and: [{ eq: {} }, { eq: {} }] } as never;
+    await assert.rejects(
+        () => handleDelete({ tableStorage: store }, 'customers', nestedAllFilter),
+        /refuses an empty\/all filter|all:true/i,
+        'nested empty-inside-and delete must be refused',
+    );
+    const ok = await handleDelete({ tableStorage: store }, 'customers', nestedAllFilter, true);
     assert.equal(ok.deleted, 2);
 });
 
@@ -388,6 +485,27 @@ test('isAllFilter recognises empty/missing filters', () => {
     assert.equal(isAllFilter({ eq: {} }), true);
     assert.equal(isAllFilter({ eq: { id: 'a' } }), false);
     assert.equal(isAllFilter({ contains: { name: 'x' } }), false);
+});
+
+test('isAllFilter recurses into nested and/or/not filters (blind-spot fix)', () => {
+    // Bug case: an empty leaf nested inside `or` still matches every row —
+    // the recursion must reach it, not stop at the boolean node.
+    assert.equal(isAllFilter({ or: [{ eq: {} }] }), true);
+    // Bug case: every branch of an `and` is unscoped → the AND is unscoped too.
+    assert.equal(isAllFilter({ and: [{ eq: {} }, { eq: {} }] }), true);
+    // Regression guard: one real predicate in an `and` narrows the whole
+    // thing — must stay scoped even though a sibling branch is empty.
+    assert.equal(isAllFilter({ and: [{ eq: { status: 'archived' } }, { eq: {} }] }), false);
+    // Both `or` branches are real predicates — the union is still scoped.
+    assert.equal(
+        isAllFilter({ or: [{ eq: { status: 'archived' } }, { eq: { status: 'draft' } }] }),
+        false,
+    );
+    // `not` of an all-filter matches nothing, not everything — never unscoped.
+    assert.equal(isAllFilter({ not: { eq: {} } }), false);
+    // Multi-level nesting: empty leaf wrapped in `and`, wrapped in `or` —
+    // confirms the recursion reaches leaves at any depth, not just one level.
+    assert.equal(isAllFilter({ or: [{ and: [{ eq: {} }] }] }), true);
 });
 
 test('handleDeleteByQuery refuses an all-filter (footgun guard)', async () => {

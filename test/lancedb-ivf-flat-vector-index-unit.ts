@@ -40,7 +40,8 @@ import * as lancedb from '@lancedb/lancedb';
 
 import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
 import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
-import { computeIvfPartitions } from '../packages/lore/src/engines/verbatimBatch.js';
+import { computeIvfPartitions, waitForScheduledSearchIndexes } from '../packages/lore/src/engines/verbatimBatch.js';
+import type { VerbatimBatchCtx } from '../packages/lore/src/engines/verbatimBatch.js';
 
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'ivfflat-home-'));
 process.env['LORE_HOME'] = TEST_HOME;
@@ -199,6 +200,66 @@ async function main(): Promise<void> {
         }
         assert.ok(hits >= QUERIES * 0.9, `expected >=90% recall@1 on a well-separated sanity corpus, got ${hits}/${QUERIES}`);
 
+        await store.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    await test('bulkAddPrebuiltRows schedules IvfFlat without an explicit ensureVectorIndex', async () => {
+        const dir = tmpDir('writepath');
+        const embedder = new KnownVectorEmbedder();
+        const store = new VerbatimStore(dir, embedder);
+        await store.initialize();
+        const ctx = (store as unknown as { batchCtx: VerbatimBatchCtx }).batchCtx;
+        ctx.indexEnsureMinRows = 50;
+        ctx.indexEnsureDebounceMs = 0;
+        const built = await Promise.all(Array.from({ length: 60 }, async (_, i) => ({
+            vector: await embedder.embedDocument(`row:${i}`),
+            id: `lore:wp${i}`,
+            text: `row:${i}`,
+            type: '',
+            label: '',
+            tags: '',
+            project: '',
+            ecosystem: '',
+            updatedAt: '',
+            security_scopes: [] as string[],
+            contentHash: `h${i}`,
+        })));
+        await store.bulkAddPrebuiltRows(built);
+        await waitForScheduledSearchIndexes(ctx);
+        const indices = await listVectorIndices(store);
+        const vecIdx = indices.find((idx) => idx.columns?.includes('vector'));
+        assert.ok(vecIdx, 'write-path ensure must create a vector index');
+        assert.equal(vecIdx!.indexType, 'IvfFlat');
+        await store.close();
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    await test('bulkAddPrebuiltRows below minRows does not build an index', async () => {
+        const dir = tmpDir('writeskip');
+        const embedder = new KnownVectorEmbedder();
+        const store = new VerbatimStore(dir, embedder);
+        await store.initialize();
+        const ctx = (store as unknown as { batchCtx: VerbatimBatchCtx }).batchCtx;
+        ctx.indexEnsureMinRows = 50;
+        ctx.indexEnsureDebounceMs = 0;
+        const built = await Promise.all(Array.from({ length: 10 }, async (_, i) => ({
+            vector: await embedder.embedDocument(`row:${i}`),
+            id: `lore:sk${i}`,
+            text: `row:${i}`,
+            type: '',
+            label: '',
+            tags: '',
+            project: '',
+            ecosystem: '',
+            updatedAt: '',
+            security_scopes: [] as string[],
+            contentHash: `h${i}`,
+        })));
+        await store.bulkAddPrebuiltRows(built);
+        await waitForScheduledSearchIndexes(ctx);
+        const indices = await listVectorIndices(store);
+        assert.equal(indices.find((idx) => idx.columns?.includes('vector')), undefined);
         await store.close();
         fs.rmSync(dir, { recursive: true, force: true });
     });

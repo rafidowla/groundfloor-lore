@@ -8,7 +8,7 @@
  */
 
 import type { ITableStorage, Row } from '../../contracts/tables.js';
-import type { Filter, FindOptions } from '../../engines/collectionStorage.js';
+import type { FilterNode, FindOptions } from '../../engines/collectionStorage.js';
 
 export interface QueryResultShape {
     records: Row[];
@@ -29,7 +29,7 @@ export interface CollectionQueryDeps {
 export async function handleQuery(
     deps: CollectionQueryDeps,
     collection: string,
-    filter: Filter | undefined,
+    filter: FilterNode | undefined,
     opts: FindOptions | undefined,
 ): Promise<QueryResultShape> {
     const records = await deps.tableStorage.query(collection, filter, opts);
@@ -55,7 +55,7 @@ export async function handleQuery(
 export async function handleCount(
     deps: CollectionQueryDeps,
     collection: string,
-    filter?: Filter,
+    filter?: FilterNode,
 ): Promise<CountResultShape> {
     const count = await deps.tableStorage.count(collection, filter);
     return { count, collection };

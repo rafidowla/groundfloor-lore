@@ -79,7 +79,7 @@ async function main(): Promise<void> {
         const base = `http://127.0.0.1:${h.port}`;
 
         // 2. client obtains a token.
-        h.token = await fetchAuthToken(h.port);
+        h.token = await fetchAuthToken(h.port, h.home);
         assert.ok(h.token.length > 0, 'bootstrap must return a token');
 
         // 3. MCP handshake.

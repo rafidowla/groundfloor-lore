@@ -1555,6 +1555,22 @@ Source: `src/recall/ranking.ts`
 
 ---
 
+### `LORE_RECALL_STAGE_TIMING`
+
+| | |
+|---|---|
+| **Default** | off |
+| **Values** | `1` to enable |
+| **Surface** | daemon (`/api/recall`, retrieve) |
+
+Debug-only: when set to `1`, each retrieve logs JSON stage timings (`embed`,
+`vector`, `fts`, `hydrate`, `filter`, plus `total_ms`). Leave unset in
+production; this is measurement for WP5, not a ranking or behavior change.
+
+Source: `src/recall/recallStageTiming.ts`
+
+---
+
 ### `LORE_RECALL_RECENCY_HALF_LIFE_DAYS`
 
 | | |
@@ -2572,6 +2588,7 @@ Source: `src/engines/surreal/surrealConnection.ts`
 | `LORE_STREAM_CONSUMER` | built-in | Streaming |
 | `LORE_LANCE_BATCH_ROWS` | `5000` | Load/LanceDB |
 | `LORE_RECALL_RANKING` | enabled | Recall |
+| `LORE_RECALL_STAGE_TIMING` | off | Recall |
 | `LORE_RECALL_RECENCY_HALF_LIFE_DAYS` | `30` | Recall |
 | `LORE_RECALL_FANOUT_WS_CAP` | `50` | Recall |
 | `LORE_RECALL_FANOUT_CONCURRENCY` | `8` | Recall |

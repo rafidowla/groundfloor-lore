@@ -11,9 +11,8 @@
  * Strategy:
  *   - F3 runs as a pure unit test with synthetic files under a temp
  *     directory. No daemon, no graph — just logRotator.ts in isolation.
- *   - F1/F2a/F2b talk to the live launchd daemon via the MCP
- *     StreamableHTTP client against http://127.0.0.1:3847/mcp.
- *     Bearer token loaded from ~/.groundfloor/auth.token.
+ *   - F1/F2a/F2b start a fresh isolated `--http` daemon on a free port and
+ *     talk to it through the MCP StreamableHTTP client.
  *   - All probe nodes are deleted at the end. If the run crashes, the
  *     F2b reaper can clean them up with `lore verbatim reap --apply`.
  *
@@ -31,17 +30,16 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 import { rotateIfNeeded } from '../packages/lore/src/security/logRotator.js';
+import {
+    cleanup,
+    fetchAuthToken,
+    spawnDaemon,
+    waitForReady,
+    type DaemonHandle,
+} from './helpers/live-daemon.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 void __dirname;
-
-const DAEMON_URL = 'http://127.0.0.1:3847/mcp';
-// Respect LORE_HOME so tests work against a non-default data home
-// (e.g. this machine uses ~/Downloads/.../lore-local-data/ not ~/.groundfloor/).
-const AUTH_TOKEN_PATH = path.join(
-    process.env.LORE_HOME ?? path.join(os.homedir(), '.groundfloor'),
-    'auth.token',
-);
 
 /* ─── Results ─────────────────────────────────────────────────── */
 
@@ -128,9 +126,8 @@ async function testF3LogRotation(): Promise<void> {
 
 /* ─── MCP client helpers ──────────────────────────────────────── */
 
-async function connectMcp(): Promise<Client> {
-    const token = fs.readFileSync(AUTH_TOKEN_PATH, 'utf8').trim();
-    const transport = new StreamableHTTPClientTransport(new URL(DAEMON_URL), {
+async function connectMcp(daemonUrl: string, token: string): Promise<Client> {
+    const transport = new StreamableHTTPClientTransport(new URL(daemonUrl), {
         requestInit: { headers: { Authorization: `Bearer ${token}` } },
     });
     const client = new Client({ name: 'e2e-phase-7a', version: '1.0.0' });
@@ -279,7 +276,7 @@ async function testF2bReaperListsOrphans(client: Client): Promise<void> {
     // manual-verified commit f2a5d81. Here we just confirm the MCP
     // surface stays stable after the F2a round-trip.
     const stats = await callTool(client, 'stats', { workspace: 'default' }) as { nodeCount?: number } | null;
-    record('graph still healthy after probes', (stats?.nodeCount ?? 0) > 0, `${stats?.nodeCount} nodes`);
+    record('graph still healthy after probes', typeof stats?.nodeCount === 'number', `${stats?.nodeCount} nodes`);
 }
 
 /* ─── Main ─────────────────────────────────────────────────────── */
@@ -290,31 +287,33 @@ function sleep(ms: number): Promise<void> {
 
 async function main(): Promise<void> {
     console.log('═══ Phase 7a E2E ═══');
-    console.log(`Daemon: ${DAEMON_URL}`);
 
     // F3 is pure — run it first, no daemon needed.
     await testF3LogRotation();
 
-    // F1/F2a/F2b need the daemon.
+    // F1/F2a/F2b run against a disposable daemon, never an operator service.
+    let daemon: DaemonHandle | null = null;
     let client: Client | null = null;
     try {
-        client = await connectMcp();
-    } catch (err) {
-        console.error(`\n✗ Cannot connect to daemon at ${DAEMON_URL}: ${(err as Error).message}`);
-        console.error('  Make sure the launchd-managed daemon is running (launchctl list | grep com.groundfloor.lore).');
-        record('daemon reachable', false, (err as Error).message);
-        printSummary();
-        process.exit(1);
-    }
+        daemon = await spawnDaemon();
+        const ready = await waitForReady(daemon.port, 60_000);
+        if (!ready) throw new Error(`daemon never became ready\n${daemon.log.text}`);
+        daemon.token = await fetchAuthToken(daemon.port, daemon.home);
+        const daemonUrl = `http://127.0.0.1:${daemon.port}/mcp`;
+        console.log(`Daemon: ${daemonUrl}`);
+        client = await connectMcp(daemonUrl, daemon.token);
 
-    try {
         await testF1Traverse(client).catch((err: unknown) => {
             record('F1 traverse section (timeout guard)', false, (err as Error).message?.substring(0, 80));
         });
         await testF2aDeleteReapsEmbedding(client);
         await testF2bReaperListsOrphans(client);
+    } catch (err) {
+        console.error(`\n✗ Disposable daemon failed: ${(err as Error).message}`);
+        record('daemon reachable', false, (err as Error).message);
     } finally {
-        await client.close().catch(() => { /* ignore */ });
+        await client?.close().catch(() => { /* ignore */ });
+        cleanup(daemon);
     }
 
     printSummary();

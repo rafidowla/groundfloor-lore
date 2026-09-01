@@ -41,11 +41,15 @@ import type {
     Row,
     TableSchema,
 } from '../../contracts/tables.js';
-import type { Filter, FindOptions } from '../../engines/collectionStorage.js';
+import type { Filter, FilterNode, FindOptions } from '../../engines/collectionStorage.js';
+import { isFilterAnd, isFilterNot, isFilterOr } from '../../engines/collectionStorage.js';
 import { assertMcpScope, type McpScopeMode } from './mcpScope.js';
 import type { StorageBundle } from '../services.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import { resolveTargetTableStorage, workspaceRequiredEnvelope as workspaceRequiredEnvelopeShared } from './workspaceResolve.js';
+import { registerCollectionTransactionTool } from './collectionsTransaction.js';
+import { registerCollectionJoinQueryTool } from './collectionsJoin.js';
+import { filterNodeZ, optionalFilterNodeZ } from './collectionsFilterSchema.js';
 // 1.M6 split (file-size cap) — query/count handlers live in collectionsQuery.ts.
 // Re-export so existing consumers keep their import path.
 export { handleQuery, handleCount, type QueryResultShape, type CountResultShape } from './collectionsQuery.js';
@@ -134,16 +138,7 @@ const sdkCollectionSchemaZ = z.object({
  * Filter shape exposed to callers. Matches `Filter` from table storage.
  * Each key is conjunction-only; multiple keys → AND.
  */
-const filterZ = z.object({
-    eq: z.record(z.string(), z.unknown()).optional(),
-    contains: z.record(z.string(), z.string()).optional(),
-    startsWith: z.record(z.string(), z.string()).optional(),
-    gt: z.record(z.string(), z.unknown()).optional(),
-    gte: z.record(z.string(), z.unknown()).optional(),
-    lt: z.record(z.string(), z.unknown()).optional(),
-    lte: z.record(z.string(), z.unknown()).optional(),
-    in: z.record(z.string(), z.array(z.unknown())).optional(),
-}).optional();
+const filterZ = optionalFilterNodeZ;
 
 const findOptionsZ = z.object({
     limit: z.number().int().positive().optional(),
@@ -222,7 +217,7 @@ export async function handleGet(
  * opts in with `all: true`. An absent/empty/all filter would otherwise
  * update or delete every row. Throws when the guard trips.
  */
-function assertScopedOrAllOptIn(op: string, filter: Filter | undefined, all: boolean | undefined): void {
+function assertScopedOrAllOptIn(op: string, filter: FilterNode | undefined, all: boolean | undefined): void {
     if (all !== true && isAllFilter(filter)) {
         throw new Error(`${op} refuses an empty/all filter — pass all:true to confirm an unscoped ${op}, or use collection_truncate.`);
     }
@@ -231,7 +226,7 @@ function assertScopedOrAllOptIn(op: string, filter: Filter | undefined, all: boo
 export async function handleUpdate(
     deps: CollectionsDeps,
     collection: string,
-    filter: Filter,
+    filter: FilterNode,
     patch: Record<string, unknown>,
     all?: boolean, // F-COL2
 ): Promise<{ updated: number }> {
@@ -243,7 +238,7 @@ export async function handleUpdate(
 export async function handleDelete(
     deps: CollectionsDeps,
     collection: string,
-    filter: Filter,
+    filter: FilterNode,
     all?: boolean, // F-COL2
 ): Promise<{ deleted: number }> {
     assertScopedOrAllOptIn('collection_delete', filter, all); // F-COL2
@@ -293,7 +288,7 @@ export interface UpdateByQueryResultShape {
 export async function handleUpdateByQuery(
     deps: CollectionsDeps,
     collection: string,
-    filter: Filter,
+    filter: FilterNode,
     fields: Record<string, unknown>,
 ): Promise<UpdateByQueryResultShape> {
     assertScopedOrAllOptIn('collection_update_by_query', filter, undefined); // D2-data-4
@@ -320,9 +315,22 @@ function isScopingTextGroup(g: Record<string, string> | undefined): boolean {
  * Returns true if the filter is "all" — every clause missing, empty, or
  * (for text predicates) an empty/whitespace value matching everything
  * (F-COL1). Rejected before destructive ops; use `truncate` to wipe.
+ *
+ * Nested and/or/not (WP2) must recurse rather than being treated as
+ * automatically scoped:
+ * - AND is unscoped only if every branch is unscoped — one real predicate
+ *   narrows the whole AND, so `every` is correct.
+ * - OR is unscoped if any branch is unscoped — one unscoped branch means
+ *   the union already covers every row, so `some` is correct.
+ * - NOT never counts as unscoped: negating an unscoped filter (matches
+ *   everything) produces a filter matching NOTHING, not everything, so
+ *   `not` is never the dangerous case and stays `false` unconditionally.
  */
-export function isAllFilter(filter: Filter | undefined): boolean {
+export function isAllFilter(filter: FilterNode | undefined): boolean {
     if (!filter) return true;
+    if (isFilterNot(filter)) return false;
+    if (isFilterAnd(filter)) return filter.and.every(isAllFilter);
+    if (isFilterOr(filter)) return filter.or.some(isAllFilter);
     const f = filter as Filter & { endsWith?: Record<string, string> };
     // F-COL1: text predicates only scope when at least one value is non-empty.
     if (isScopingTextGroup(filter.contains) || isScopingTextGroup(filter.startsWith) || isScopingTextGroup(f.endsWith)) return false;
@@ -333,7 +341,7 @@ export function isAllFilter(filter: Filter | undefined): boolean {
 export async function handleDeleteByQuery(
     deps: CollectionsDeps,
     collection: string,
-    filter: Filter,
+    filter: FilterNode,
 ): Promise<DeleteByQueryResultShape> {
     if (isAllFilter(filter)) {
         throw new Error(
@@ -455,6 +463,14 @@ async function resolveDepsForWorkspace(
 const workspaceFieldZ = z.string().min(1).describe('Workspace scope (required — Sprint L1e: no silent fallback).');
 
 export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsDeps): void {
+    registerCollectionTransactionTool(mcpServer, deps, {
+        gateWorkspace,
+        resolveDeps: resolveDepsForWorkspace,
+    });
+    registerCollectionJoinQueryTool(mcpServer, deps, {
+        gateWorkspace,
+        resolveDeps: resolveDepsForWorkspace,
+    });
     mcpServer.tool(
         'collection_create',
         'Create a new collection (table). Mirrors GroundfloorClient.createCollection — uses SDK field names (field_type, primary_key). Local mode backs each collection with a Kùzu node table; cloud mode is not yet implemented.',
@@ -550,7 +566,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                 const result = await handleQuery(
                     routed.deps,
                     args.collection as string,
-                    args.filter as Filter | undefined,
+                    args.filter as FilterNode | undefined,
                     args.opts as FindOptions | undefined,
                 );
                 return ok(result);
@@ -563,16 +579,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
         'Bulk update rows matching the filter. Mirrors GroundfloorClient.update. Returns {updated: count}.',
         {
             collection: z.string(),
-            filter: z.object({
-                eq: z.record(z.string(), z.unknown()).optional(),
-                contains: z.record(z.string(), z.string()).optional(),
-                startsWith: z.record(z.string(), z.string()).optional(),
-                gt: z.record(z.string(), z.unknown()).optional(),
-                gte: z.record(z.string(), z.unknown()).optional(),
-                lt: z.record(z.string(), z.unknown()).optional(),
-                lte: z.record(z.string(), z.unknown()).optional(),
-                in: z.record(z.string(), z.array(z.unknown())).optional(),
-            }),
+            filter: filterNodeZ,
             updates: z.record(z.string(), z.unknown()),
             all: z.boolean().optional().describe('F-COL2: required true to confirm an unscoped update (empty/all filter).'),
             workspace: workspaceFieldZ,
@@ -586,7 +593,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                 const result = await handleUpdate(
                     routed.deps,
                     args.collection as string,
-                    args.filter as Filter,
+                    args.filter as FilterNode,
                     args.updates as Record<string, unknown>,
                     args.all as boolean | undefined, // F-COL2
                 );
@@ -600,16 +607,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
         'Bulk delete rows matching the filter. Mirrors GroundfloorClient.delete. Returns {deleted: count}.',
         {
             collection: z.string(),
-            filter: z.object({
-                eq: z.record(z.string(), z.unknown()).optional(),
-                contains: z.record(z.string(), z.string()).optional(),
-                startsWith: z.record(z.string(), z.string()).optional(),
-                gt: z.record(z.string(), z.unknown()).optional(),
-                gte: z.record(z.string(), z.unknown()).optional(),
-                lt: z.record(z.string(), z.unknown()).optional(),
-                lte: z.record(z.string(), z.unknown()).optional(),
-                in: z.record(z.string(), z.array(z.unknown())).optional(),
-            }),
+            filter: filterNodeZ,
             all: z.boolean().optional().describe('F-COL2: required true to confirm an unscoped delete (empty/all filter).'),
             workspace: workspaceFieldZ,
         },
@@ -622,7 +620,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                 const result = await handleDelete(
                     routed.deps,
                     args.collection as string,
-                    args.filter as Filter,
+                    args.filter as FilterNode,
                     args.all as boolean | undefined, // F-COL2
                 );
                 return ok(result);
@@ -673,7 +671,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                 const result = await handleCount(
                     routed.deps,
                     args.collection as string,
-                    args.filter as Filter | undefined,
+                    args.filter as FilterNode | undefined,
                 );
                 return ok(result);
             } catch (e) { return mcpToolError('collection_count', e, log); }
@@ -685,16 +683,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
         'Update all records matching a filter. Mirrors GroundfloorClient.updateByQuery. Distinct from collection_update only by SDK-shaped response: {updated, collection}.',
         {
             collection: z.string(),
-            filter: z.object({
-                eq: z.record(z.string(), z.unknown()).optional(),
-                contains: z.record(z.string(), z.string()).optional(),
-                startsWith: z.record(z.string(), z.string()).optional(),
-                gt: z.record(z.string(), z.unknown()).optional(),
-                gte: z.record(z.string(), z.unknown()).optional(),
-                lt: z.record(z.string(), z.unknown()).optional(),
-                lte: z.record(z.string(), z.unknown()).optional(),
-                in: z.record(z.string(), z.array(z.unknown())).optional(),
-            }),
+            filter: filterNodeZ,
             fields: z.record(z.string(), z.unknown()),
             workspace: workspaceFieldZ,
         },
@@ -707,7 +696,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                 const result = await handleUpdateByQuery(
                     routed.deps,
                     args.collection as string,
-                    args.filter as Filter,
+                    args.filter as FilterNode,
                     args.fields as Record<string, unknown>,
                 );
                 return ok(result);
@@ -720,16 +709,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
         'Delete all records matching a filter. Mirrors GroundfloorClient.deleteByQuery. Refuses empty/all filter (footgun guard) — use collection_truncate for full wipes. Returns {deleted, collection}.',
         {
             collection: z.string(),
-            filter: z.object({
-                eq: z.record(z.string(), z.unknown()).optional(),
-                contains: z.record(z.string(), z.string()).optional(),
-                startsWith: z.record(z.string(), z.string()).optional(),
-                gt: z.record(z.string(), z.unknown()).optional(),
-                gte: z.record(z.string(), z.unknown()).optional(),
-                lt: z.record(z.string(), z.unknown()).optional(),
-                lte: z.record(z.string(), z.unknown()).optional(),
-                in: z.record(z.string(), z.array(z.unknown())).optional(),
-            }),
+            filter: filterNodeZ,
             workspace: workspaceFieldZ,
         },
         async (args) => {
@@ -741,7 +721,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                 const result = await handleDeleteByQuery(
                     routed.deps,
                     args.collection as string,
-                    args.filter as Filter,
+                    args.filter as FilterNode,
                 );
                 return ok(result);
             } catch (e) { return mcpToolError('collection_delete_by_query', e, log); }

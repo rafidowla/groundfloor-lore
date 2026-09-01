@@ -326,6 +326,10 @@ export class LoaderDispatcher {
     }
 
     async rollback(): Promise<void> {
+        this.graphBuf = [];
+        this.sqliteBuf = [];
+        this.lanceBuf = [];
+        this.lanceCountable = [];
         if (this.sqlite) await this.sqlite.rollback();
         if (this.graph) await this.graph.rollback();
         if (this.lance) await this.lance.rollback();

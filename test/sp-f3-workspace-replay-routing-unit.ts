@@ -291,7 +291,10 @@ test('MCP store_node / store_edge / delete_node call recordHotWrite', () => {
     const svc = read('packages/lore/src/core/nodeService.ts');
     assert.match(svc, /recordHotWrite\(/, 'nodeService.ts must record the outbox hot-lane write');
     assert.match(svc, /operationKind: 'node\.upsert'/);
-    assert.match(svc, /operationKind: 'verbatim\.upsert'/);
+    // Verbatim fan-out (including verbatim.upsert) lives in the file-size split.
+    const verbatim = read('packages/lore/src/core/nodeServiceVerbatim.ts');
+    assert.match(verbatim, /recordHotWrite\(/, 'nodeServiceVerbatim.ts must record verbatim.upsert');
+    assert.match(verbatim, /operationKind: 'verbatim\.upsert'/);
     const se = read('packages/lore/src/mcp/tools/memory/storeEdge.ts');
     assert.match(se, /operationKind: 'edge\.upsert'/);
     const dn = read('packages/lore/src/mcp/tools/memory/deleteNode.ts');

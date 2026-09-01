@@ -42,6 +42,7 @@ import { startMockDataplane, type MockDataplane } from './helpers/mock-dataplane
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const SERVER_ENTRY = path.join(REPO_ROOT, 'packages/lore/src/mcp/server.ts');
+const CLOUD_SHARED_SECRET = 'a'.repeat(64);
 
 async function findFreePort(): Promise<number> {
     return new Promise((resolve, reject) => {
@@ -85,6 +86,7 @@ async function waitForReady(port: number, timeoutMs = 20_000): Promise<boolean> 
 async function spawnDaemon(opts: {
     mode?: 'local' | 'cloud';
     dataplaneApiKey?: string;
+    sharedSecret?: string;
     /**
      * When set (Q2.2 slice 2), points DATAPLANE_URL at a reachable mock
      * so cloud-mode graph ops actually roundtrip. When absent, the URL
@@ -102,6 +104,8 @@ async function spawnDaemon(opts: {
         LORE_PORT: String(port),
     };
     if (opts.mode) env.LORE_DEPLOYMENT_MODE = opts.mode;
+    if (opts.mode === 'cloud') env.DATAPLANE_ORG_ID = 'org-q2-1';
+    if (opts.sharedSecret) env.LORE_MCP_AUTH_TOKEN = opts.sharedSecret;
     if (opts.dataplaneApiKey) {
         env.DATAPLANE_API_KEY = opts.dataplaneApiKey;
         // Q2.2 slice 2: cloud-mode graph ops route through DataplaneGraph,
@@ -124,8 +128,14 @@ async function spawnDaemon(opts: {
     return { proc, home, port, token: '', log };
 }
 
-async function fetchAuthToken(port: number): Promise<string> {
-    const res = await fetch(`http://127.0.0.1:${port}/api/auth/bootstrap`, {
+async function fetchAuthToken(port: number, home: string): Promise<string> {
+    // Mirrors test/helpers/live-daemon.ts's fetchAuthToken: the bootstrap
+    // route now requires the one-time nonce minted at boot under
+    // `<home>/.groundfloor/bootstrap.nonce` (spawnDaemon sets HOME=home,
+    // no LORE_HOME override, so that's the daemon's default dataHome).
+    const noncePath = path.join(home, '.groundfloor', 'bootstrap.nonce');
+    const nonce = fs.readFileSync(noncePath, 'utf-8').trim();
+    const res = await fetch(`http://127.0.0.1:${port}/api/auth/bootstrap?nonce=${encodeURIComponent(nonce)}`, {
         headers: { Origin: `http://127.0.0.1:${port}` },
     });
     if (!res.ok) throw new Error(`bootstrap failed ${res.status}`);
@@ -146,7 +156,7 @@ async function caseLocalMode(): Promise<void> {
         h = await spawnDaemon({});
         const ready = await waitForReady(h.port);
         if (!ready) throw new Error(`daemon never became ready\nSTDERR:\n${h.log.text}`);
-        h.token = await fetchAuthToken(h.port);
+        h.token = await fetchAuthToken(h.port, h.home);
         const origin = `http://127.0.0.1:${h.port}`;
         const authHdr = { Authorization: `Bearer ${h.token}`, Origin: origin };
 
@@ -173,7 +183,11 @@ async function caseLocalMode(): Promise<void> {
                 workspace: 'default',
             }),
         });
-        assert.ok(ingest.status === 200 || ingest.status === 201, `ingest failed: ${ingest.status}`);
+        const ingestText = await ingest.text();
+        assert.ok(
+            ingest.status === 200 || ingest.status === 201,
+            `ingest failed: ${ingest.status} ${ingestText}\ndaemon:\n${h.log.text}`,
+        );
 
         // Verify the node is retrievable. Wait up to 5s for the outbox to drain
         // (replicator ticks at ~250 ms; verbatim write is sync but graph write is async).
@@ -235,10 +249,13 @@ async function caseCloudWithCredential(): Promise<void> {
             mode: 'cloud',
             dataplaneApiKey: 'q2-1-smoke-test-key',
             dataplaneUrl: mock.url,
+            sharedSecret: CLOUD_SHARED_SECRET,
         });
         const ready = await waitForReady(h.port);
         if (!ready) throw new Error(`daemon never became ready\nSTDERR:\n${h.log.text}`);
-        h.token = await fetchAuthToken(h.port);
+        // Cloud cross-tenant requests use the service principal. The bootstrap
+        // token is intentionally confined to its boot workspace.
+        h.token = CLOUD_SHARED_SECRET;
         const origin = `http://127.0.0.1:${h.port}`;
         const authHdr = { Authorization: `Bearer ${h.token}`, Origin: origin };
 
@@ -271,9 +288,13 @@ async function caseCloudWithCredential(): Promise<void> {
                 workspace: 'tenant-alpha',
             }),
         });
-        assert.ok(ingest.status === 200 || ingest.status === 201, `ingest failed: ${ingest.status}`);
+        const cloudIngestText = await ingest.text();
+        assert.ok(
+            ingest.status === 200 || ingest.status === 201,
+            `ingest failed: ${ingest.status} ${cloudIngestText}\ndaemon:\n${h.log.text}`,
+        );
 
-        const stats = await fetch(`http://127.0.0.1:${h.port}/api/stats`, {
+        const stats = await fetch(`http://127.0.0.1:${h.port}/api/stats?workspace=tenant-alpha`, {
             headers: { ...authHdr, 'X-Lore-Workspace': 'tenant-alpha' },
         });
         assert.equal(stats.status, 200);

@@ -21,7 +21,14 @@
  *      All /api/* routes except an explicit allowlist (health, bootstrap)
  *      require `Authorization: Bearer <token>`. Token is generated at
  *      daemon start, stored at ~/.groundfloor/auth.token with 0600 perms.
- *      Only the owning OS user can read it.
+ *      Only the owning OS user can read it. `/api/auth/bootstrap` itself
+ *      is exempt from THIS layer (there is no bearer yet at bootstrap
+ *      time) but is gated instead by a one-time filesystem-backed nonce
+ *      enforced in mcp/http/middleware.ts — see security/authToken.ts.
+ *      Host+Origin alone would let any local process (sandboxed, or one
+ *      that simply omits Origin) mint the master token; the nonce
+ *      requires the same filesystem access as reading auth.token
+ *      directly.
  *
  * A request that clears all three is trusted as a local user action.
  * Failures return 401 (missing/wrong bearer) or 403 (Host/Origin mismatch)
@@ -29,6 +36,8 @@
  *
  * `/api/health` stays auth-free so uptime monitors + the UI's first ping
  * work without bootstrapping. It still must pass Host + Origin checks.
+ * `/api/auth/bootstrap` also skips this layer's Bearer check but is not
+ * "public" in the same sense — see the nonce gate above.
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -57,10 +66,13 @@ export interface AuthConfig {
  *
  *  - /health and /api/health: open for uptime monitors, UI liveness ping.
  *  - /api/auth/bootstrap:     the endpoint the UI calls ONCE to fetch its
- *                             token. Protected instead by Host+Origin;
- *                             a cross-origin attacker's Origin will not
- *                             match localhost, so this endpoint is not
- *                             reachable from a hostile tab.
+ *                             token. Host+Origin rule out a hostile
+ *                             cross-origin browser tab, but NOT a
+ *                             same-machine process that simply omits
+ *                             Origin — that gap is closed by a separate
+ *                             one-time nonce gate enforced in
+ *                             mcp/http/middleware.ts (not this file);
+ *                             see security/authToken.ts.
  */
 const PUBLIC_API_PATHS = new Set<string>([
     '/health',

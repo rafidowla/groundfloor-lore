@@ -2,11 +2,6 @@
   "note": "Files currently exceeding the 800-line hard cap, tracked as technical debt. New oversize files are a CI failure. Splitting these is encouraged. Refresh after a split with: node scripts/test-file-sizes.mjs --update",
   "entries": [
     {
-      "path": "packages/lore/src/engines/localGraph.ts",
-      "lines": 1892,
-      "justification": "pre-existing"
-    },
-    {
       "path": "packages/lore/src/engines/verbatimStore.ts",
       "lines": 1843,
       "justification": "pre-existing"
@@ -29,21 +24,6 @@
     {
       "path": "packages/lore/src/outbox/replicator.ts",
       "lines": 857,
-      "justification": "pre-existing"
-    },
-    {
-      "path": "packages/lore/src/engines/localGraphRegistry.ts",
-      "lines": 806,
-      "justification": "pre-existing"
-    },
-    {
-      "path": "packages/lore/src/engines/sqliteTableStorage.ts",
-      "lines": 805,
-      "justification": "pre-existing"
-    },
-    {
-      "path": "packages/lore/src/mcp/http/routes/bulkWrite.ts",
-      "lines": 805,
       "justification": "pre-existing"
     }
   ]

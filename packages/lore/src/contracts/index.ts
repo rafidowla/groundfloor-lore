@@ -43,6 +43,10 @@ export type {
     ColumnDecl,
     Row,
     JoinSpec,
+    JoinHop,
+    JoinQuery,
+    TableOp,
+    TableOpResult,
 } from './tables.js';
 
 /**

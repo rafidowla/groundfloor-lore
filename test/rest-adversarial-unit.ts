@@ -30,9 +30,11 @@ import { trySearchRoutes } from '../packages/lore/src/mcp/http/routes/search.js'
 import type {
     ITableStorage,
     Row,
+    TableOp,
+    TableOpResult,
     TableSchema,
 } from '../packages/lore/src/contracts/tables.js';
-import type { Filter, FindOptions } from '../packages/lore/src/engines/collectionStorage.js';
+import type { Filter, FilterNode, FindOptions } from '../packages/lore/src/engines/collectionStorage.js';
 
 /* ---------- minimal in-memory ITableStorage ---------- */
 
@@ -40,6 +42,14 @@ class FakeTableStorage implements ITableStorage {
     public schemas = new Map<string, TableSchema>();
     private rows = new Map<string, Map<unknown, Row>>();
 
+    capabilities() {
+        return {
+            join: false,
+            caseSensitiveContains: false,
+            extractedJsonFields: false,
+            additiveSchemaEvolution: false,
+        };
+    }
     async createTable(schema: TableSchema): Promise<void> {
         this.schemas.set(schema.name, schema);
         if (!this.rows.has(schema.name)) this.rows.set(schema.name, new Map());
@@ -59,7 +69,7 @@ class FakeTableStorage implements ITableStorage {
     async insertBatch(table: string, rows: Row[]): Promise<void> {
         for (const r of rows) await this.insert(table, r);
     }
-    async query(table: string, _filter?: Filter, _opts?: FindOptions): Promise<Row[]> {
+    async query(table: string, _filter?: FilterNode, _opts?: FindOptions): Promise<Row[]> {
         this.requireSchema(table, 'query');
         return Array.from(this.rows.get(table)!.values());
     }
@@ -67,15 +77,15 @@ class FakeTableStorage implements ITableStorage {
         this.requireSchema(table, 'getByKey');
         return (this.rows.get(table)!.get(key) as T) ?? null;
     }
-    async update(table: string, _filter: Filter, _patch: Partial<Row>): Promise<number> {
+    async update(table: string, _filter: FilterNode, _patch: Partial<Row>): Promise<number> {
         this.requireSchema(table, 'update');
         return 0;
     }
-    async delete(table: string, _filter: Filter): Promise<number> {
+    async delete(table: string, _filter: FilterNode): Promise<number> {
         this.requireSchema(table, 'delete');
         return 0;
     }
-    async count(table: string, _filter?: Filter): Promise<number> {
+    async count(table: string, _filter?: FilterNode): Promise<number> {
         this.requireSchema(table, 'count');
         return this.rows.get(table)!.size;
     }
@@ -84,6 +94,41 @@ class FakeTableStorage implements ITableStorage {
         const n = this.rows.get(table)!.size;
         this.rows.get(table)!.clear();
         return n;
+    }
+    async runTransaction(ops: TableOp[]): Promise<TableOpResult[]> {
+        const before = new Map(
+            [...this.rows].map(([table, rows]) => [
+                table,
+                new Map([...rows].map(([key, row]) => [key, { ...row }])),
+            ]),
+        );
+        const results: TableOpResult[] = [];
+        try {
+            for (const op of ops) {
+                if (op.op === 'insert') {
+                    await this.insert(op.collection, op.row);
+                    const pk = this.schemas.get(op.collection)?.columns.find(c => c.primary)?.name;
+                    results.push({ op: 'insert', collection: op.collection, key: pk ? op.row[pk] : undefined });
+                } else if (op.op === 'update') {
+                    results.push({ op: 'update', collection: op.collection, count: await this.update(op.collection, op.filter, op.patch) });
+                } else if (op.op === 'delete') {
+                    results.push({ op: 'delete', collection: op.collection, count: await this.delete(op.collection, op.filter) });
+                } else {
+                    const pk = this.schemas.get(op.collection)?.columns.find(c => c.primary)?.name;
+                    const key = pk ? op.row[pk] : undefined;
+                    if (await this.getByKey(op.collection, key)) {
+                        await this.update(op.collection, { eq: { [pk!]: key } }, op.row);
+                    } else {
+                        await this.insert(op.collection, op.row);
+                    }
+                    results.push({ op: 'upsert', collection: op.collection, key });
+                }
+            }
+            return results;
+        } catch (error) {
+            this.rows = before;
+            throw error;
+        }
     }
 }
 

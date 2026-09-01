@@ -54,6 +54,11 @@ import {
     handleTruncate,
     type SdkCollectionSchema,
 } from '../../tools/collections.js';
+import {
+    describeTransactionFailure,
+    handleTransaction,
+} from '../../tools/collectionsTransaction.js';
+import { handleJoinQuery } from '../../tools/collectionsJoin.js';
 import type { ITableStorage, Row } from '../../../contracts/tables.js';
 import type { Filter, FindOptions } from '../../../engines/collectionStorage.js';
 import { readJsonBody, writeJson, writeError, isPayloadTooLarge, MAX_BODY_BYTES, PAYLOAD_TOO_LARGE } from '../helpers.js';
@@ -274,6 +279,48 @@ export async function tryCollectionsRoutes(
 ): Promise<boolean> {
     if (!pathname.startsWith(V1_PREFIX)) return false;
 
+    /* ─── POST /v1/transaction — atomic typed mutations ───────── */
+    if ((pathname === '/v1/transaction' || pathname === '/v1/transaction/')
+        && req.method === 'POST') {
+        if (await denyCollectionWrite(res, deps)) return true;
+        try {
+            const body = await readJsonBody(req);
+            const rdeps = await routeDeps(deps, res);
+            if (!rdeps) return true;
+            writeJson(res, 200, await handleTransaction(rdeps, body));
+        } catch (error) {
+            const failure = describeTransactionFailure(error);
+            writeError(res, failure.status, failure.code, failure.message, {
+                ...(failure.failed_op_index === undefined
+                    ? {}
+                    : { failed_op_index: failure.failed_op_index }),
+                reason: failure.reason,
+            });
+        }
+        return true;
+    }
+
+    /* ─── POST /v1/query — multi-hop join ─────────────────────── */
+    if ((pathname === '/v1/query' || pathname === '/v1/query/')
+        && req.method === 'POST') {
+        if (await denyCollectionRead(res, deps)) return true;
+        try {
+            const body = await readJsonBody(req);
+            const rdeps = await routeDeps(deps, res);
+            if (!rdeps) return true;
+            writeJson(res, 200, await handleJoinQuery(rdeps, body));
+        } catch (error) {
+            const message = (error as Error).message ?? '';
+            if (/invalid identifier|filter_too_nested|empty (and|or)|joinMany accepts at most|joinMany requires|join not supported/i.test(message)) {
+                writeError(res, 400, 'invalid_join_query', 'join query was rejected');
+            } else {
+                const c = classifyStorageErr(error as Error, 'join_query_failed');
+                writeError(res, c.status, c.code, c.message);
+            }
+        }
+        return true;
+    }
+
     /* ─── meta: createCollection ──────────────────────────────── */
     if (pathname === META_PREFIX && req.method === 'POST') {
         if (await denyCollectionWrite(res, deps)) return true; // L-067 — creating a collection is a mutating op; require write scope.
@@ -338,7 +385,7 @@ export async function tryCollectionsRoutes(
     // If we got here with one of these, it's an unsupported variant
     // (e.g. wrong method) and should 404 rather than be treated as a
     // collection name.
-    const RESERVED = new Set(['schema', 'sql', 'authz']);
+    const RESERVED = new Set(['schema', 'sql', 'authz', 'transaction', 'query']);
     if (RESERVED.has(segments[0])) {
         writeError(res, 404, 'unknown_v1_path',
             `no /v1 route for ${pathname}`);

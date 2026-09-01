@@ -23,6 +23,7 @@ import { requireWorkspaceGraph, isWorkspaceGraph } from '../engines/requireWorks
 import { collectSupersededEligible } from '../engines/nodePager.js';
 import { hasCapability } from '../engines/connectorCapabilities.js';
 import { DataplaneGraph } from '../engines/dataplaneGraph.js';
+import { createLoreDataplaneSdk } from '../engines/dataplaneSdkCompat.js';
 import { VerbatimStore } from '../engines/verbatimStore.js';
 import type { PendingAutolinkTracker } from '../engines/pendingAutolink.js';
 import { VerbatimSearchWorkerProxy, searchWorkerIsolationEnabled } from '../engines/verbatimSearchWorkerProxy.js';
@@ -170,9 +171,9 @@ export async function createGraph(opts: CreateGraphOpts): Promise<LoreGraph> {
         const apiKey = process.env['DATAPLANE_API_KEY'] ?? '';
         const orgId = requireDataplaneOrgId();
         const GroundfloorClient = await loadGroundfloorClient();
-        const client = new GroundfloorClient(baseUrl, apiKey || 'pending-keychain');
+        const client = createLoreDataplaneSdk(GroundfloorClient, baseUrl, apiKey || 'pending-keychain');
         return new DataplaneGraph({
-            client,
+            client: client as never,
             tenantProvider: () => requireCurrentTenantId(),
             orgId,
         });
@@ -307,9 +308,9 @@ export async function createVectorStore(opts: CreateVectorStoreOpts): Promise<Lo
         // placeholder satisfied by the same maybeUpgradeAdapterFromKeychain
         // rebuild when a keychain credential is present.
         const GroundfloorClient = await loadGroundfloorClient();
-        const client = new GroundfloorClient(baseUrl, apiKey || 'pending-keychain');
+        const client = createLoreDataplaneSdk(GroundfloorClient, baseUrl, apiKey || 'pending-keychain');
         return new DataplaneVectorStore({
-            client,
+            client: client as never,
             tenantProvider: () => requireCurrentTenantId(),
             orgId,
             embeddingProvider: opts.embeddingProvider,
@@ -438,9 +439,9 @@ export async function maybeUpgradeAdapterFromKeychain(
     // requests use the real key instead of the 'pending-keychain' stub.
     if (deps.deploymentMode === 'cloud') {
         const GroundfloorClient = await loadGroundfloorClient();
-        const newClient = new GroundfloorClient(baseUrl, keychainKey);
+        const newClient = createLoreDataplaneSdk(GroundfloorClient, baseUrl, keychainKey);
         const newGraph = new DataplaneGraph({
-            client: newClient,
+            client: newClient as never,
             tenantProvider: () => requireCurrentTenantId(),
             orgId,
         });

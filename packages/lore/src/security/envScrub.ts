@@ -141,6 +141,7 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_OUTBOX_PRUNE_REPLICATED_MS',          // outbox: prune replicated entries older than N ms
     'LORE_OUTBOX_BACKEND',                      // outbox storage backend selector
     'LORE_RECALL_RANKING',                      // recall ranking strategy
+    'LORE_RECALL_STAGE_TIMING',                 // WP5 — debug JSON stage timings on retrieve (default off)
     'LORE_RECALL_RECENCY_HALF_LIFE_DAYS',       // recall recency decay half-life
     'LORE_LOAD_MAX_CONCURRENT_PER_WORKSPACE',   // bulk-load concurrency cap
     'LORE_LOAD_TEMP_RETENTION_HOURS_COMPLETE',  // bulk-load temp retention (success)

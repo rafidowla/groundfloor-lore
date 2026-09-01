@@ -32,6 +32,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import { log } from '../logger.js';
+import { redactSecrets } from '../security/secretScan.js';
 import { VerbatimStore } from './verbatimStore.js';
 import {
     FORWARDED_METHODS,
@@ -154,10 +155,22 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         if (!embedder) {
             return this.call('storeBatch', [rows]) as Promise<void>;
         }
+        // 2.6 parity: VerbatimStore.storeBatch (child-process path) redacts
+        // secrets before embed/persist (verbatimStore.ts). This branch bypasses
+        // that path entirely — rows are embedded HERE, in the parent process, and
+        // sent straight to bulkUpsertPrebuiltRows (no redaction of its own) — so
+        // it must redact itself, once, up front, before either use of row.text.
+        const redactedRows = rows.map((row) => {
+            const r = row as unknown as Record<string, unknown>;
+            if (typeof r.text === 'string' && r.text.length > 0) {
+                return { ...row, text: redactSecrets(r.text) };
+            }
+            return row;
+        });
         const textsToEmbed: string[] = [];
         const embedIndices: number[] = [];
-        for (let i = 0; i < rows.length; i++) {
-            const row = rows[i] as unknown as Record<string, unknown>;
+        for (let i = 0; i < redactedRows.length; i++) {
+            const row = redactedRows[i] as unknown as Record<string, unknown>;
             if (row.vector === undefined && typeof row.text === 'string' && (row.text as string).length > 0) {
                 textsToEmbed.push(row.text as string);
                 embedIndices.push(i);
@@ -169,7 +182,7 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         } else {
             vectors = [];
         }
-        const prebuiltRows = rows.map((row, i) => {
+        const prebuiltRows = redactedRows.map((row, i) => {
             const embedIdx = embedIndices.indexOf(i);
             if (embedIdx >= 0) {
                 return { ...row, vector: vectors[embedIdx] };

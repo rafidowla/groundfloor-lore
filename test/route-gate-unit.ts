@@ -94,6 +94,42 @@ const test = async (name: string, fn: () => Promise<void> | void) => {
         if (r.allowed === false) assert.equal(r.reason, 'no_actor');
     });
 
+    // These two prove the bypass SHORT-CIRCUITS before reaching
+    // requirePermission/SpiceDB — not that it coincidentally lands on
+    // `allowed: true`. Neither case binds an actor (no runWithActor), and
+    // the sibling 'no actor' test directly above shows that a workspace-
+    // bound-but-actorless call into requirePermission returns `no_actor`,
+    // never `allowed`. So the ONLY way these can return `allowed: true`
+    // is the `principal?.kind === 'shared-secret'` check returning before
+    // requirePermission's own `getCurrentActor()` check ever runs. Both
+    // exercise ordinary data-route permissions (read, write) — not an
+    // admin-only permission like 'administer' — since the grant covers
+    // gateRoute()'s full data plane, not just its admin-lane overlap with
+    // bindDaemonOperatorLane.
+    for (const permission of ['read', 'write'] as const) {
+        await test(`cloud + shared-secret service principal + workspace → allowed without human actor (${permission})`, async () => {
+            const r = await runWithPrincipal(
+                {
+                    kind: 'shared-secret',
+                    workspace: 'default',
+                    scopes: ['read', 'write', 'cross-workspace-read', 'cross-workspace-write'],
+                    label: 'service',
+                },
+                () => runWithWorkspace(
+                    { workspaceId: 'tenant-alpha' },
+                    () => gateRoute(
+                        { deploymentMode: 'cloud', dataplane: null },
+                        { permission },
+                    ),
+                ),
+            );
+            // If the bypass didn't fire, this would be `{allowed:false,
+            // reason:'no_actor'}` (per the sibling test above) — never
+            // `allowed:true` — regardless of SpiceDB/dataplane state.
+            assert.equal(r.allowed, true);
+        });
+    }
+
     await test('cloud + actor + workspace + no dataplane → no_dataplane (cloud-feature-misconfig signal)', async () => {
         const r = await runWithWorkspace(
             { workspaceId: 'ws-2' },

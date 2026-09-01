@@ -11,6 +11,7 @@
 
 import assert from 'node:assert/strict';
 import { withTransactionConflictRetry, isTransactionConflictError } from '../packages/lore/src/engines/transactionConflictRetry.js';
+import { log } from '../packages/lore/src/logger.js';
 
 let passed = 0, failed = 0;
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
@@ -114,6 +115,38 @@ await test('does not match an unrelated error', async () => {
 
 await test('does not match a non-Error value', async () => {
     assert.equal(isTransactionConflictError({ some: 'object' }), false);
+});
+
+await test('retries log warn, not error; exhausted conflict logs error once', async () => {
+    const warns: unknown[] = [];
+    const errors: unknown[] = [];
+    const origWarn = log.warn;
+    const origError = log.error;
+    log.warn = (m) => { warns.push(m); };
+    log.error = (m) => { errors.push(m); };
+    try {
+        let calls = 0;
+        await withTransactionConflictRetry(async () => {
+            calls++;
+            if (calls < 3) throw conflictErr();
+            return 'ok';
+        }, { backoffMs: noDelay });
+        assert.equal(warns.length, 2);
+        assert.equal(errors.length, 0);
+        assert.match(String(warns[0]), /conflict on attempt 1/);
+
+        warns.length = 0;
+        await assert.rejects(
+            () => withTransactionConflictRetry(async () => { throw conflictErr(); }, { maxAttempts: 3, backoffMs: noDelay }),
+            /Transaction conflict/,
+        );
+        assert.equal(warns.length, 2);
+        assert.equal(errors.length, 1);
+        assert.match(String(errors[0]), /giving up after 3/);
+    } finally {
+        log.warn = origWarn;
+        log.error = origError;
+    }
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

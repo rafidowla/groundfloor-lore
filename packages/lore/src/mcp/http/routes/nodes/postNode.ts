@@ -230,6 +230,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
             {
                 outboxStore: deps.outboxStore,
                 verbatim: deps.inlineVerbatim,
+                inlineVerbatim: deps.inlineVerbatim,
                 autolink,
             },
         ));

@@ -108,6 +108,7 @@ const noopRateLimiter = { tryConsume: () => ({ allowed: true, limit: 1, remainin
 function gateDeps(resolveActor?: (req: IncomingMessage) => Promise<import('../packages/lore/src/security/actorContext.js').ActorContext | null>) {
     return {
         port: PORT,
+        dataHome: '/tmp/actor-binding-unit-unused',
         getAuthToken: () => 'x'.repeat(64),
         rateLimiter: noopRateLimiter as never,
         deploymentMode: 'local' as const,

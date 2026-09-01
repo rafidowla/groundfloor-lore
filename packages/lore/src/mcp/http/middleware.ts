@@ -4,7 +4,8 @@
  * Every incoming request runs through this gauntlet in order:
  *   1. Host + Origin + Bearer token validation (httpAuth)
  *   2. Rate limiting (per-bucket token buckets)
- *   3. Bootstrap short-circuit (`/api/auth/bootstrap` returns the token)
+ *   3. Bootstrap short-circuit (`/api/auth/bootstrap` returns the token,
+ *      gated by a one-time nonce — see consumeBootstrapNonce)
  *   4. Workspace header check (cloud mode: `X-Lore-Workspace` required)
  *
  * If any gate writes a response, `runHttpGates` returns `{handled: true}`
@@ -38,6 +39,7 @@ import { runWithActor, type ActorContext } from '../../security/actorContext.js'
 import { ClerkAuthError } from '../../security/clerkAuth.js';
 import { runWithRouteBindingSlot } from '../../security/routeWorkspaceBinding.js';
 import { AUTH_REQUIRED, TOKEN_EXPIRED, INVALID_ACTOR_TOKEN } from './errorCodes.js';
+import { consumeBootstrapNonce } from '../../security/authToken.js';
 
 /**
  * L-030 — resolves the per-request actor identity (Clerk JWT → operator
@@ -96,6 +98,13 @@ export const OUTBOX_BACKPRESSURE_STATUS = 503;
 export interface HttpGateDeps {
     /** Daemon's listening port — used by httpAuth for Host header validation. */
     port: number;
+    /**
+     * LORE_HOME root — used only by the /api/auth/bootstrap gate to
+     * validate the one-time nonce (security/authToken.ts). Same root
+     * ensureAuthToken/ensureBootstrapNonce write auth.token /
+     * bootstrap.nonce under.
+     */
+    dataHome: string;
     /** Zero-arg getter so callers see the latest token after main() sets it. */
     getAuthToken: () => string;
     /**
@@ -240,18 +249,9 @@ export async function runHttpGates(
             const lower = bearerRaw.toLowerCase();
             const sessionTok = deps.getAuthToken().toLowerCase();
             const sharedSec = deps.getSharedSecret?.()?.toLowerCase();
-            if (lower === sessionTok) {
-                principal = {
-                    kind: 'bootstrap',
-                    workspace: deps.getBootstrapWorkspace(),
-                    scopes: ['read', 'write'],
-                    label: 'bootstrap',
-                    // TW-3a — bootstrap is confined to the boot workspace;
-                    // it explicitly holds NO cross-workspace scope, so a
-                    // tenant header for any other workspace must 403.
-                    allowedWorkspaces: [deps.getBootstrapWorkspace()],
-                };
-            } else if (sharedSec && lower === sharedSec) {
+            // Shared-secret first: when LORE_MCP_AUTH_TOKEN equals the
+            // bootstrap file token, the bearer is the service principal.
+            if (sharedSec && lower === sharedSec) {
                 principal = {
                     kind: 'shared-secret',
                     workspace: deps.getBootstrapWorkspace(),
@@ -261,6 +261,17 @@ export async function runHttpGates(
                     // scopes authorize ANY tenant header (no allow-list
                     // confinement). This is the ONE principal that may
                     // legitimately target other tenants.
+                };
+            } else if (lower === sessionTok) {
+                principal = {
+                    kind: 'bootstrap',
+                    workspace: deps.getBootstrapWorkspace(),
+                    scopes: ['read', 'write'],
+                    label: 'bootstrap',
+                    // TW-3a — bootstrap is confined to the boot workspace;
+                    // it explicitly holds NO cross-workspace scope, so a
+                    // tenant header for any other workspace must 403.
+                    allowedWorkspaces: [deps.getBootstrapWorkspace()],
                 };
             }
             // Legacy auth.token deprecation hint — surfaced as a header
@@ -380,12 +391,23 @@ export async function runHttpGates(
 
     // Bootstrap endpoint — the UI calls this once on load to fetch
     // the auth token, then attaches it as Authorization: Bearer on
-    // every subsequent /api/* request. Safe because: (a) validateRequest
-    // already enforced Host + Origin must be localhost, so a hostile
-    // cross-origin tab can't reach here; (b) UI is always same-origin
-    // on the daemon's port in production, or served from localhost:5173
-    // in dev (also allowed Origin).
+    // every subsequent /api/* request. Host + Origin (validateRequest,
+    // above) rule out a hostile cross-origin browser tab, but a
+    // sandboxed or network-only LOCAL process (no filesystem access)
+    // can still satisfy Host+Origin by simply omitting Origin — so
+    // Host+Origin alone is not sufficient to hand out the master
+    // daemon token. The caller must additionally present the current
+    // one-time nonce written to <LORE_HOME>/bootstrap.nonce (0600,
+    // same trust tier as auth.token itself) at daemon boot; presenting
+    // it consumes it, so a captured request can't be replayed after
+    // the legitimate caller has already bootstrapped this boot. See
+    // security/authToken.ts's ensureBootstrapNonce/consumeBootstrapNonce.
     if (pathname === '/api/auth/bootstrap' && req.method === 'GET') {
+        const nonce = new URL(url, 'http://localhost').searchParams.get('nonce') ?? '';
+        if (!consumeBootstrapNonce(deps.dataHome, nonce)) {
+            writeAuthFailure(res, { ok: false, status: 401, message: AUTH_REQUIRED });
+            return { handled: true };
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ token: deps.getAuthToken() }));
         return { handled: true };

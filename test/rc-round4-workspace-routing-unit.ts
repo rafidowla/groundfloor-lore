@@ -160,7 +160,8 @@ await test('T5 — guard: every workspace-routed embedQueue.enqueue carries a 3r
     // fallback bug. We scan the known producers and require enqueue(...) to
     // have >2 comma-separated top-level args (id, text, workspace).
     const producers = [
-        'packages/lore/src/core/nodeService.ts',
+        // embedQueue.enqueue lives on the verbatim fan-out (split from nodeService.ts).
+        'packages/lore/src/core/nodeServiceVerbatim.ts',
         'packages/lore/src/mcp/bulkIngest.ts',
         'packages/lore/src/mcp/http/routes/import.ts',
         'packages/lore/src/diagnostics/sweeper.ts',

@@ -10,7 +10,9 @@
  * substrate primitives, so the in-process API was strictly weaker than
  * HTTP/MCP.
  *
- * This module owns that orchestration as a pure data-in / data-out function:
+ * Verbatim fan-out + TW-4a rollback live in `nodeServiceVerbatim.ts`
+ * (file-size split). This module owns the rest of the orchestration as a
+ * pure data-in / data-out function:
  *   - `nodeUpsert(deps, args): Promise<NodeWriteResult>` — no req/res, no MCP
  *     envelope. The two transport handlers resolve their own gauntlet (ReBAC,
  *     MCP scope, principal default, quota, backpressure, body parsing,
@@ -31,16 +33,16 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { buildVerbatimText } from '../engines/verbatimSchema.js';
-import { tagsToArray, tagsToString } from '../engines/normalizeTags.js';
+import { tagsToArray } from '../engines/normalizeTags.js';
 import { assertSafeLanceId } from '../engines/verbatimHistory.js';
-import { computeContentHash } from '../engines/contentHash.js';
 import { reconnectOneNode } from '../engines/reconnect.js';
 import { defaultAutolinkTracker, PendingAutolinkTracker } from '../engines/pendingAutolink.js';
 import { redactId, redactError } from '../security/logRedact.js';
 import { CAPPED_NODE_TEXT_FIELDS, MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../engines/nodeFieldLimits.js';
 import { log } from '../logger.js';
 import { recordHotWrite } from '../outbox/hotLane.js';
+import { KeyedMutex } from '../engines/writeQueue.js';
+import { applyVerbatimFanout, rollbackPartialWrite } from './nodeServiceVerbatim.js';
 import {
     checkVocab,
     type VocabCheckResult,
@@ -191,6 +193,14 @@ export interface NodeUpsertHooks {
     /** Inline verbatim writer (storage-client facade). Used only when no
      *  outbox is wired and embedding is not skipped/async. */
     verbatim?: VerbatimWriter;
+    /**
+     * Primary verbatim write that still runs when `outboxStore` is wired.
+     * Cloud mode records `verbatim.upsert` for durability, but the
+     * replicator leaves `getVerbatim` undefined (it must not re-apply
+     * into a boot LanceDB). Without this hook the outbox row dead-letters
+     * and Dataplane never sees the vector. Local HTTP leaves this unset
+     * so the replicator remains the one writer. */
+    inlineVerbatim?: VerbatimWriter;
     /** WAL handle. When supplied AND the write is active-workspace, an
      *  `upsert_node` entry is appended after both stores succeed. */
     getWal?: () => WriteAheadLog;
@@ -264,88 +274,36 @@ export function resolveVocabVerdict(input: {
     }
 }
 
-/* ─── Rollback helper (TW-4a) ───────────────────────────────────────── */
+/* ─── The guarded write core ────────────────────────────────────────── */
 
 /**
- * Fully undo a partial node write after the verbatim step failed.
+ * Per-(workspace,id) write-ordering lock for `nodeUpsert`'s externally
+ * visible write sequence (outbox `node.upsert` record → graph upsert →
+ * verbatim/vector fan-out — steps 1-3 below). MUST be a module-level
+ * singleton: constructing a fresh `KeyedMutex` per call is a no-op lock
+ * (nothing to chain against). Keyed by `workspace + id`, not `id` alone,
+ * so concurrent writes to the SAME id in DIFFERENT workspaces never
+ * contend with each other — this matters because `DataplaneGraph` (cloud)
+ * is one shared instance routing many tenants via AsyncLocalStorage, not
+ * one instance per workspace the way `SurrealGraph` is.
  *
- * Two traces must be retracted, not one:
- *   1. the graph node (`targetGraph.deleteNode`), and
- *   2. the `node.upsert` outbox row recorded in step 1 — otherwise the
- *      replicator re-applies it and resurrects a graph-only orphan
- *      (corr-rollback-defeated-by-orphan-node-upsert-row).
- *
- * Error-signal contract (corr-embedded-default-write-no-error-signal): if
- * EITHER retraction throws, the rollback is incomplete and the
- * "NO partial state" guarantee is violated. We do NOT swallow that into a
- * tidy `{ ok: false }` — we throw, so the caller learns the write left an
- * inconsistent state behind instead of a clean, fully-rolled-back failure.
+ * Root cause this closes: before this lock, only step 2
+ * (`targetGraph.upsertNode`) was serialized per id — and only on
+ * `SurrealGraph`, via its own private `nodeWriteChain` (writeQueue.ts).
+ * Steps 1 and 3 ran completely unserialized relative to each other AND to
+ * step 2's ordering, so two concurrent same-id `nodeUpsert()` calls could
+ * apply their graph writes (step 2) in one order and their verbatim/vector
+ * writes (step 3) in the OPPOSITE order — a durable split-brain where the
+ * graph holds one caller's content and the verbatim/search mirror holds
+ * the other's, with BOTH callers seeing `ok: true`. Widening the lock to
+ * cover the whole step 1-3 sequence forces one strict, shared order across
+ * all three substrates for a given id. `SurrealGraph.nodeWriteChain` stays
+ * in place underneath as harmless defense-in-depth for callers that reach
+ * `upsertNode`/`deleteNode` directly without going through this
+ * orchestration (e.g. `bulkUpsertNodes` — a separate, NOT-yet-covered
+ * write surface; see bulkWrite.ts / bulkLoader/surrealAdapter.ts).
  */
-async function rollbackPartialWrite(input: {
-    id: string;
-    workspace: string;
-    initiator: string;
-    logPrefix: string;
-    targetGraph: NodeWriteGraph;
-    outboxStore?: OutboxStore;
-    nodeUpsertOutboxEntryId: string | null;
-    verbatimError: Error;
-}): Promise<void> {
-    const { id, workspace, initiator, logPrefix, targetGraph, outboxStore, nodeUpsertOutboxEntryId, verbatimError } = input;
-    let rollbackError: Error | null = null;
-
-    // 1. Delete the graph node.
-    try {
-        await targetGraph.deleteNode(id);
-    } catch (rollbackErr) {
-        rollbackError = rollbackErr as Error;
-        log.error(`${logPrefix} graph rollback (deleteNode) failed for ${redactId(id)}: ${redactError(rollbackErr)}`);
-    }
-
-    // 2. Retract the node.upsert outbox row so the replicator can't replay it.
-    //    C-R2-03 — use the CONDITIONAL remove. There is a race: between
-    //    recording the node.upsert row and this rollback, the replicator can
-    //    CLAIM (markEntryStatus 'replicating') and dispatch the row, re-applying
-    //    the graph node AFTER our deleteNode above → a graph-only orphan that a
-    //    plain remove() can't undo. removeIfPending() deletes only a still-pending
-    //    row; if it returns false the replicator already owns it, so we record a
-    //    compensating node.delete (a LATER sequenceId) that the replicator applies
-    //    after the resurrect, converging back to "node gone". Legacy stores
-    //    without removeIfPending fall back to the old unconditional remove().
-    if (outboxStore && nodeUpsertOutboxEntryId) {
-        try {
-            if (outboxStore.removeIfPending) {
-                const removed = await outboxStore.removeIfPending(nodeUpsertOutboxEntryId);
-                if (!removed) {
-                    await recordHotWrite(outboxStore, {
-                        workspace,
-                        operationKind: 'node.delete',
-                        payload: { id },
-                        initiator,
-                        operation: 'graph.delete',
-                    });
-                    log.warn(`${logPrefix} node.upsert row for ${redactId(id)} was already claimed by the replicator; recorded a compensating node.delete to undo the resurrected orphan (C-R2-03)`);
-                }
-            } else {
-                await outboxStore.remove(nodeUpsertOutboxEntryId);
-            }
-        } catch (retractErr) {
-            rollbackError = rollbackError ?? (retractErr as Error);
-            log.error(`${logPrefix} node.upsert outbox retraction failed for ${redactId(id)}: ${redactError(retractErr)} — replicator may resurrect a graph-only orphan`);
-        }
-    }
-
-    // Surface incomplete rollback to the caller rather than masking it as a
-    // clean handled failure (the embedded default-write swallow bug).
-    if (rollbackError) {
-        throw new Error(
-            `nodeUpsert rollback incomplete for ${redactId(id)} after verbatim failure ` +
-            `(${redactError(verbatimError)}): ${redactError(rollbackError)} — partial state may remain`,
-        );
-    }
-}
-
-/* ─── The guarded write core ────────────────────────────────────────── */
+const nodeUpsertLock = new KeyedMutex();
 
 /**
  * nodeUpsert — outbox-first guarded node write shared by store_node (MCP)
@@ -532,165 +490,88 @@ export async function nodeUpsert(
         }
     }
 
-    // 1. Outbox-first node.upsert (durability + replay + per-workspace replication).
-    //    TW-4a — capture the recorded entry so the verbatim-failure rollback
-    //    below can RETRACT it. Without this, deleting the graph node on a
-    //    verbatim failure left the node.upsert row pending; the replicator then
-    //    re-applied it (dispatcher case 'node.upsert'), resurrecting a graph-
-    //    only orphan — the exact partial state the rollback claims to prevent.
-    let nodeUpsertOutboxEntryId: string | null = null;
-    if (hooks.outboxStore) {
-        const nodeUpsertEntry = await recordHotWrite(hooks.outboxStore, {
-            workspace,
-            operationKind: 'node.upsert',
-            payload: nodeData,
-            initiator,
-            operation: 'graph.upsert',
-        });
-        nodeUpsertOutboxEntryId = nodeUpsertEntry.id;
-    }
+    // 1-3. Outbox `node.upsert` record → substrate graph upsert →
+    //      verbatim/vector fan-out. These are the three externally-visible
+    //      writes of a node write; they now run under ONE per-(workspace,id)
+    //      lock (`nodeUpsertLock`, defined above) so two concurrent calls
+    //      for the same id cannot land their graph and verbatim/vector
+    //      writes in different relative orders (split-brain — see the lock's
+    //      doc comment for the full root-cause account).
+    const lockKey = `${workspace}\u0000${id}`;
+    const writeOutcome = await nodeUpsertLock.run(lockKey, async (): Promise<{ node: LoreNode } | { verbatimError: Error }> => {
+        // 1. Outbox-first node.upsert (durability + replay + per-workspace replication).
+        //    TW-4a — capture the recorded entry so the verbatim-failure rollback
+        //    below can RETRACT it. Without this, deleting the graph node on a
+        //    verbatim failure left the node.upsert row pending; the replicator then
+        //    re-applied it (dispatcher case 'node.upsert'), resurrecting a graph-
+        //    only orphan — the exact partial state the rollback claims to prevent.
+        let nodeUpsertOutboxEntryId: string | null = null;
+        if (hooks.outboxStore) {
+            const nodeUpsertEntry = await recordHotWrite(hooks.outboxStore, {
+                workspace,
+                operationKind: 'node.upsert',
+                payload: nodeData,
+                initiator,
+                operation: 'graph.upsert',
+            });
+            nodeUpsertOutboxEntryId = nodeUpsertEntry.id;
+        }
 
-    // 2. Substrate graph upsert.
-    //    2.1 (2026-08-17 functional-correctness) — this call previously had
-    //    NO failure handling: when it threw (e.g. a SurrealDB transaction
-    //    conflict under concurrent writes), the caller was told the write
-    //    FAILED, step 3 never ran, and the step-1 node.upsert outbox row was
-    //    never retracted — the replicator later replayed it, creating the
-    //    node anyway with NO verbatim row (permanently invisible to semantic
-    //    recall). Route the failure through the SAME retraction mechanism
-    //    the step-3 verbatim-failure path uses (rollbackPartialWrite), so
-    //    both failure paths behave identically: graph node deleted (no-op
-    //    cleanup of any partial row on a failed create) + outbox row
-    //    retracted (or a compensating node.delete recorded when the
-    //    replicator already claimed it, C-R2-03).
-    let node: LoreNode;
-    try {
-        node = await targetGraph.upsertNode(nodeData);
-    } catch (graphErr) {
-        log.error(`${logPrefix} graph upsert failed for ${redactId(id)}: ${redactError(graphErr)} — retracting the node.upsert outbox row so the replicator cannot replay a write the caller was told failed`);
-        await rollbackPartialWrite({
+        // 2. Substrate graph upsert.
+        //    2.1 (2026-08-17 functional-correctness) — this call previously had
+        //    NO failure handling: when it threw (e.g. a SurrealDB transaction
+        //    conflict under concurrent writes), the caller was told the write
+        //    FAILED, step 3 never ran, and the step-1 node.upsert outbox row was
+        //    never retracted — the replicator later replayed it, creating the
+        //    node anyway with NO verbatim row (permanently invisible to semantic
+        //    recall). Route the failure through the SAME retraction mechanism
+        //    the step-3 verbatim-failure path uses (rollbackPartialWrite), so
+        //    both failure paths behave identically: graph node deleted (no-op
+        //    cleanup of any partial row on a failed create) + outbox row
+        //    retracted (or a compensating node.delete recorded when the
+        //    replicator already claimed it, C-R2-03).
+        let node: LoreNode;
+        try {
+            node = await targetGraph.upsertNode(nodeData);
+        } catch (graphErr) {
+            log.error(`${logPrefix} graph upsert failed for ${redactId(id)}: ${redactError(graphErr)} — retracting the node.upsert outbox row so the replicator cannot replay a write the caller was told failed`);
+            await rollbackPartialWrite({
+                id,
+                workspace,
+                initiator,
+                logPrefix,
+                targetGraph,
+                outboxStore: hooks.outboxStore,
+                nodeUpsertOutboxEntryId,
+                verbatimError: graphErr as Error,
+            });
+            throw graphErr;
+        }
+
+        // 3. Verbatim fan-out (canonical `lore:<id>` key) + rollback on failure.
+        //    Lives in nodeServiceVerbatim.ts (file-size split).
+        const verbatimWriteFailed = await applyVerbatimFanout({
+            skipEmbed,
+            asyncEmbed: args.asyncEmbed,
             id,
             workspace,
             initiator,
             logPrefix,
+            node,
+            nodeData,
             targetGraph,
-            outboxStore: hooks.outboxStore,
+            hooks,
             nodeUpsertOutboxEntryId,
-            verbatimError: graphErr as Error,
         });
-        throw graphErr;
-    }
-
-    // 3. Verbatim fan-out (canonical `lore:<id>` key) + rollback on failure.
-    const label = String(nodeData.label ?? '');
-    const content = String(nodeData.content ?? '');
-    // Pass 3 — canonical tags shape is string[]. tagsArr feeds the
-    // embedding text (buildVerbatimText accepts an array); tagsStr is the
-    // comma-joined form the LanceDB verbatim metadata field stores.
-    const tagsArr = tagsToArray(nodeData.tags as string | string[] | null | undefined);
-    const tagsStr = tagsToString(tagsArr);
-    let verbatimWriteFailed: Error | null = null;
-
-    if (skipEmbed) {
-        // Explicit opt-out — graph row stays; no verbatim, no autolink.
-    } else if (hooks.outboxStore) {
-        // RC-round4 (workspace-confinement): the durable outbox branch is
-        // checked BEFORE async_embed. In local multi-app mode BOTH the
-        // outboxStore and the embedQueue are wired; the outbox path stamps
-        // `workspace` on the row and the replicator resolves the requested
-        // workspace's LanceDB via the per-workspace resolver, whereas the
-        // in-memory async queue is best-effort. Preferring the durable,
-        // workspace-correct path keeps non-active-workspace writes from
-        // silently landing in (or being dropped by) the boot store.
-        //
-        // Outbox-routed verbatim — replicator applies it to `workspace`'s
-        // store via the per-workspace resolver. A record failure surfaces
-        // as the same error + graph rollback the inline path used.
-        try {
-            const verbatimText = buildVerbatimText(label, content, tagsArr);
-            await recordHotWrite(hooks.outboxStore, {
-                workspace,
-                operationKind: 'verbatim.upsert',
-                payload: {
-                    id: `lore:${id}`,
-                    text: verbatimText,
-                    metadata: {
-                        type: node.type,
-                        label: node.label,
-                        tags: tagsStr,
-                        project: node.project,
-                        ecosystem: node.ecosystem,
-                        security_scopes: node.security_scopes ?? [],
-                        updatedAt: node.updatedAt,
-                        // PR #69 P2: contentHash drives skip-on-unchanged.
-                        contentHash: computeContentHash(verbatimText),
-                    },
-                },
-                initiator,
-                operation: 'verbatim.upsert',
-            });
-        } catch (err) {
-            verbatimWriteFailed = err as Error;
-            log.error(`${logPrefix} verbatim outbox record failed for ${redactId(id)}: ${redactError(err)} — graph node + node.upsert outbox row will be retracted to maintain consistency`);
-            await rollbackPartialWrite({
-                id,
-                workspace,
-                initiator,
-                logPrefix,
-                targetGraph,
-                outboxStore: hooks.outboxStore,
-                nodeUpsertOutboxEntryId,
-                verbatimError: verbatimWriteFailed,
-            });
+        if (verbatimWriteFailed) {
+            return { verbatimError: verbatimWriteFailed };
         }
-    } else if (args.asyncEmbed && hooks.embedQueue) {
-        // Gap #2 opt-in (no outbox wired): enqueue + return; sweeper heals
-        // any drift. The synchronous rollback-on-vector-fail safety is
-        // traded for write throughput; callers opt in explicitly.
-        //
-        // RC-round4: pass the REQUESTED `workspace` as the 3rd arg so the
-        // EmbedQueue executor's resolveStores routes the embed to that
-        // workspace's graph + LanceDB. Without it the job.workspace is
-        // undefined and the executor falls back to the boot store —
-        // B's node would never be semantically recallable in B.
-        hooks.embedQueue.enqueue(id, buildVerbatimText(label, content, tagsArr), workspace);
-    } else if (hooks.verbatim) {
-        // Inline verbatim write (no outbox wired — test fixtures / legacy).
-        try {
-            const verbatimText = buildVerbatimText(label, content, tagsArr);
-            await hooks.verbatim.verbatimStore({
-                id: `lore:${id}`,
-                text: verbatimText,
-                metadata: {
-                    type: node.type,
-                    label: node.label,
-                    tags: tagsStr,
-                    project: node.project,
-                    ecosystem: node.ecosystem,
-                    security_scopes: node.security_scopes ?? [],
-                    updatedAt: node.updatedAt,
-                    contentHash: computeContentHash(verbatimText),
-                },
-            });
-        } catch (err) {
-            verbatimWriteFailed = err as Error;
-            log.error(`${logPrefix} VerbatimStore write failed for ${redactId(id)}: ${redactError(err)} — graph node will be deleted to maintain consistency`);
-            await rollbackPartialWrite({
-                id,
-                workspace,
-                initiator,
-                logPrefix,
-                targetGraph,
-                outboxStore: hooks.outboxStore,
-                nodeUpsertOutboxEntryId,
-                verbatimError: verbatimWriteFailed,
-            });
-        }
+        return { node };
+    });
+    if ('verbatimError' in writeOutcome) {
+        return { ok: false, code: 'verbatim_unavailable', error: writeOutcome.verbatimError };
     }
-
-    if (verbatimWriteFailed) {
-        return { ok: false, code: 'verbatim_unavailable', error: verbatimWriteFailed };
-    }
+    const { node } = writeOutcome;
 
     // 4. WAL append — active-workspace only (P1.C scope), when wired.
     if (args.isActiveWorkspace && hooks.getWal) {
@@ -757,6 +638,9 @@ export async function nodeUpsert(
     if (hooks.autolink) {
         const tracker = hooks.autolink.tracker ?? defaultAutolinkTracker;
         if (!tracker.isSealed()) {
+            const label = String(nodeData.label ?? '');
+            const content = String(nodeData.content ?? '');
+            const tagsArr = tagsToArray(nodeData.tags as string | string[] | null | undefined);
             tracker.track(reconnectOneNode(hooks.autolink.graph, hooks.autolink.verbatim, {
                 id,
                 label,

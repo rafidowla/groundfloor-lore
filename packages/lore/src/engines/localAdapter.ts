@@ -26,6 +26,7 @@ import type {
     TableSchema,
     Row,
     JoinSpec,
+    TableOp,
 } from '../contracts/index.js';
 import type { Filter, FindOptions } from './collectionStorage.js';
 
@@ -77,6 +78,7 @@ function unimplementedTables(): ITableStorage {
         delete: (_t: string, _f: Filter) => fail<number>('delete'),
         count: (_t: string, _f?: Filter) => fail<number>('count'),
         truncate: (_t: string) => fail<number>('truncate'),
+        runTransaction: (_ops: TableOp[]) => fail('runTransaction'),
         join: (_lt: string, _j: JoinSpec, _f?: Filter, _o?: FindOptions) => fail<Row[]>('join'),
     };
 }

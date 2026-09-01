@@ -139,16 +139,13 @@ reading the route source):
   (`metadata: node.metadata ?? null`). `NodeFull.metadata` is typed
   `Optional[str]` here to match the wire reality; `json.loads(...)` it
   yourself if you need the structured value.
-- **The bootstrap ("god") token is not an unconfined admin bypass in
-  practice**, despite `docs/GETTING_STARTED.md` describing it as resolving
-  to a principal "free to read and write every workspace". Live, writing to
-  a workspace other than the daemon's active one with the bootstrap token
-  gets `403 workspace_forbidden` — same confinement behavior as a
-  workspace-scoped app token, not the operator bypass the docs describe.
-  `LoreSidecar`'s bootstrap-token client is effectively single-workspace in
-  this build; for real multi-workspace use from Python, issue and pass a
-  proper `lore auth issue --workspace <name>` app token instead of relying
-  on cross-workspace access via bootstrap.
+- **The bootstrap token is bound to the daemon's boot workspace**
+  (`read` + `write` only; no `cross-workspace-*` scopes). Writing to a
+  different workspace with it gets `403 workspace_forbidden` — same
+  confinement as a workspace-scoped app token (TW-3a). `LoreSidecar`'s
+  bootstrap-token client is single-workspace; for multi-workspace use
+  from Python, issue and pass a `lore auth issue --workspace <name>`
+  app token.
 - **Recall's keyword-only fallback is much stricter about phrasing than
   `search()` is.** Right after a write, before the async embedding has
   landed (`vector_index_consulted: false`), `GET /api/recall` runs on

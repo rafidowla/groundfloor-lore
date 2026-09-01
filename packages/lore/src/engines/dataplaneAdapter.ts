@@ -35,6 +35,8 @@ import type {
     TimeBucket,
     GroupResult,
     TimeSeriesPoint,
+    TableOp,
+    TableOpResult,
 } from '../contracts/index.js';
 import type { Filter, FindOptions } from './collectionStorage.js';
 
@@ -90,6 +92,13 @@ function unimplementedTables(): ITableStorage {
             `DataplaneAdapter.tables.${op}: not yet wired. ` +
             'DataplaneTableStorage (Postgres-backed CRUD) lands in step #6 follow-up.',
         ));
+    const failTransaction = (): Promise<TableOpResult[]> => {
+        const error = new Error(
+            'DataplaneAdapter.tables.runTransaction: Postgres-backed transactions are not yet wired.',
+        ) as Error & { code: string };
+        error.code = 'transaction_not_implemented';
+        return Promise.reject(error);
+    };
     return {
         capabilities: () => ({
             // Postgres-backed: real JOIN, case-INSENSITIVE ILIKE,
@@ -107,6 +116,7 @@ function unimplementedTables(): ITableStorage {
         delete: (_t: string, _f: Filter) => fail<number>('delete'),
         count: (_t: string, _f?: Filter) => fail<number>('count'),
         truncate: (_t: string) => fail<number>('truncate'),
+        runTransaction: (_ops: TableOp[]) => failTransaction(),
         join: (_lt: string, _j: JoinSpec, _f?: Filter, _o?: FindOptions) => fail<Row[]>('join'),
     };
 }

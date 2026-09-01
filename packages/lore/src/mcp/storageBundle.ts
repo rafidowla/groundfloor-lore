@@ -47,6 +47,11 @@ const cloudTableStorageStub: ITableStorage = {
     async delete() { throw new Error(CLOUD_NOT_IMPL_MSG); },
     async count() { throw new Error(CLOUD_NOT_IMPL_MSG); },
     async truncate() { throw new Error(CLOUD_NOT_IMPL_MSG); },
+    async runTransaction() {
+        const error = new Error(CLOUD_NOT_IMPL_MSG) as Error & { code: string };
+        error.code = 'transaction_not_implemented';
+        throw error;
+    },
 };
 
 /**

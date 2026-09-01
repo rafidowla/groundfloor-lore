@@ -84,7 +84,7 @@ async function main(): Promise<void> {
         h = await spawnDaemon();
         const ready = await waitForReady(h.port);
         if (!ready) throw new Error(`daemon never became ready\nSTDERR:\n${h.log.text}`);
-        h.token = await fetchAuthToken(h.port);
+        h.token = await fetchAuthToken(h.port, h.home);
         const base = `http://127.0.0.1:${h.port}`;
         const origin = base;
 

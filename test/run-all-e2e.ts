@@ -29,6 +29,7 @@ const suites: Suite[] = [
     { name: 'Q2.1 server mode (deploy toggle)', script: 'e2e-q2-1-server-mode.ts' },
     { name: 'Q2.2 cloud roundtrip (DataplaneGraph)', script: 'e2e-q2-2-cloud-roundtrip.ts' },
     { name: 'MVP live daemon (local: store·recall·search·get-full·bulk·isolation)', script: 'mvp-live-e2e.ts' },
+    { name: 'Load-job cancel over live --http daemon', script: 'load-job-cancel-live-e2e.ts' },
     { name: 'Wave 4 multi-app isolation (adversarial cross-workspace matrix)', script: 'wave4-multi-app-isolation-e2e.ts' },
     { name: 'MVP crash recovery (SIGKILL → restart → zero loss)', script: 'mvp-crash-recovery-e2e.ts' },
     { name: 'MVP getting-started (cold install → connect over MCP → store+recall)', script: 'mvp-getting-started-e2e.ts' },

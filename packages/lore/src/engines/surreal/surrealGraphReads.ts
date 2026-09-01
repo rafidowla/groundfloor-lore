@@ -377,7 +377,7 @@ export async function search(
             const scoped = filters.length > 0 ? ` AND ${filters.join(' AND ')}` : '';
             const tail = ' ORDER BY updatedAt DESC, id ASC LIMIT $scanCap';
 
-            const matchClause = terms.length > 0
+            const termMatchClause = terms.length > 0
                 ? terms.map((t, i) => {
                     vars[`t${i}`] = t;
                     // Tag branch stays EXACT membership ($tN IN tags), the
@@ -392,6 +392,12 @@ export async function search(
                         + ` OR $t${i} IN tags)`;
                 }).join(' AND ')
                 : 'true';
+            // Tags are exact-match fields. A punctuation-bearing tag such as
+            // "q1-7-xsect" must therefore match that exact query before the
+            // keyword tokenizer splits it into q1/7/xsect terms.
+            const matchClause = terms.length > 0
+                ? `($q IN tags OR (${termMatchClause}))`
+                : termMatchClause;
 
             // Candidate set. Ranking is the SAME shared function either way —
             // only WHICH rows become candidates differs, which is what keeps

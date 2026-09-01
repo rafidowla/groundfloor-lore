@@ -31,7 +31,7 @@ async function main(): Promise<void> {
         h = await spawnDaemon();
         home = h.home;
         assert.ok(await waitForReady(h.port), `daemon never ready\n${h.log.text}`);
-        h.token = await fetchAuthToken(h.port);
+        h.token = await fetchAuthToken(h.port, h.home);
         let base = `http://127.0.0.1:${h.port}`;
         const hdr = (t: string) => ({ Authorization: `Bearer ${t}`, Origin: base, 'Content-Type': 'application/json' });
 
@@ -65,7 +65,7 @@ async function main(): Promise<void> {
             await new Promise((r) => setTimeout(r, 3000)); // lock not free yet — back off + retry
         }
         assert.ok(recovered, `daemon never recovered after crash (last boot log)\n${h.log.text.slice(-1500)}`);
-        h.token = await fetchAuthToken(h.port);
+        h.token = await fetchAuthToken(h.port, h.home);
         base = `http://127.0.0.1:${h.port}`;
         const get = (p: string) => fetch(`${base}${p}`, { headers: { Authorization: `Bearer ${h!.token}`, Origin: base } });
 

@@ -14,14 +14,15 @@
  * depth).
  *
  * Token consumers:
- *   - UI fetches the token once via /api/auth/bootstrap (Host+Origin gated,
- *     no Authorization required for bootstrap itself).
+ *   - UI fetches the token once via /api/auth/bootstrap. The endpoint
+ *     itself requires a one-time nonce (see ensureBootstrapNonce /
+ *     consumeBootstrapNonce below) proving the caller can read
+ *     <LORE_HOME> — the same trust tier as reading auth.token directly —
+ *     rather than merely reaching the TCP socket with an acceptable
+ *     Host/Origin. No Authorization header is required for bootstrap
+ *     itself (there is no bearer yet at that point).
  *   - Programmatic clients (CLI, MCP, test scripts) read the token file
  *     directly (since only the owning user can, by perms) and pass it
- *     as `Authorization: Bearer <token>`.
- *
- * Rotation: delete the file; next daemon start generates a new one. UI
- * will re-bootstrap on next load. CLI needs to re-read the file.
  */
 
 import * as fs from 'fs';
@@ -85,4 +86,86 @@ export function ensureAuthToken(dataHome: string): string {
  */
 export function getAuthTokenPath(dataHome: string): string {
     return path.join(dataHome, TOKEN_FILENAME);
+}
+
+const NONCE_FILENAME = 'bootstrap.nonce';
+const NONCE_BYTES = 32;
+
+/**
+ * ensureBootstrapNonce — mint a fresh one-time nonce for GET
+ * /api/auth/bootstrap and persist it (0600) alongside auth.token.
+ *
+ * Call once per daemon boot, after ensureAuthToken. A stale nonce left
+ * over from a killed daemon's prior boot must never authorize a
+ * bootstrap call against the CURRENT daemon instance, so this always
+ * overwrites rather than reusing an existing file.
+ *
+ * Why a nonce instead of trusting Host+Origin alone: Host/Origin only
+ * prove the caller can reach the daemon's TCP socket on localhost with
+ * an acceptable browser-style header pair — a sandboxed or
+ * network-only local process can satisfy both while never having
+ * touched the filesystem. Requiring the current nonce (readable only
+ * by the owning OS user, same 0600 tier as auth.token) closes that gap
+ * without changing anything for a legitimate same-user caller, which
+ * already has filesystem access by construction.
+ */
+export function ensureBootstrapNonce(dataHome: string): string {
+    const noncePath = getBootstrapNoncePath(dataHome);
+    const nonce = crypto.randomBytes(NONCE_BYTES).toString('hex');
+    fs.mkdirSync(dataHome, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(noncePath, nonce + '\n', { mode: 0o600 });
+    try {
+        fs.chmodSync(noncePath, 0o600);
+    } catch {
+        // non-fatal; perms are best-effort on non-POSIX
+    }
+    return nonce;
+}
+
+/**
+ * getBootstrapNoncePath — return the nonce file location without reading it.
+ */
+export function getBootstrapNoncePath(dataHome: string): string {
+    return path.join(dataHome, NONCE_FILENAME);
+}
+
+/**
+ * consumeBootstrapNonce — validate `presented` against the on-disk nonce
+ * and, on a match, delete the file so it can never be replayed
+ * (one-time use: a captured request can't be reissued after the
+ * legitimate caller has already bootstrapped this boot).
+ *
+ * Any mismatch — wrong value, empty presented value, or a missing file
+ * (never minted, or already consumed) — returns false and leaves the
+ * file untouched.
+ */
+export function consumeBootstrapNonce(dataHome: string, presented: string): boolean {
+    const noncePath = getBootstrapNoncePath(dataHome);
+    let current: string;
+    try {
+        current = fs.readFileSync(noncePath, 'utf-8').trim();
+    } catch {
+        return false;
+    }
+    if (!current || !presented || !constantTimeEqStr(presented, current)) {
+        return false;
+    }
+    try {
+        fs.unlinkSync(noncePath);
+    } catch {
+        // best-effort — still authorize this call even if the unlink races
+    }
+    return true;
+}
+
+/**
+ * Constant-time string equality, mirroring httpAuth.ts's
+ * constantTimeEqHex. Length mismatch short-circuits (leaks length only,
+ * which is not secret — nonces are a fixed 64-char hex shape).
+ */
+function constantTimeEqStr(a: string, b: string): boolean {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return diff === 0;
 }
