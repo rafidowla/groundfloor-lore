@@ -29,6 +29,76 @@ recorded reason. `LICENSE`, `package.json`, `sdks/python/pyproject.toml`, and
 
 ## [3.17.0] — 2026-08-29
 
+### Fixed (2026-08-31) — 4 sprint findings: workspace collision, bootstrap token leak, redaction bypass, upsert split-brain
+
+- `surrealDataPath()` truncated at the first `#`/`?` (a URL delimiter, not
+  an escapable byte), so two physical paths differing only after one of
+  those characters could collapse onto the same on-disk SurrealDB store.
+  Now pre-escapes both before URL parsing.
+- `POST /api/auth/bootstrap` handed the master daemon token to any
+  unauthenticated local caller once Host+Origin passed. Now also requires
+  a filesystem-backed one-time nonce, minted fresh at boot.
+- `VerbatimSearchWorkerProxy.storeBatch`'s parent-embeds branch (see the
+  "parent-embeds mode" entry below) sent row text to the embedding
+  provider and persisted it before redaction ran. Redaction now runs once,
+  up front, before either the embed call or the write.
+- Concurrent `nodeUpsert()` calls on the same id could interleave the
+  outbox → graph → verbatim write sequence, splitting the two mirrors
+  while both callers saw `ok: true`. A module-level per-`(workspace, id)`
+  lock now covers the full sequence. `delete_node` has the identical gap
+  and is not yet fixed; `POST /api/nodes/bulk` does not route through the
+  new lock.
+
+### Added (2026-08-31) — table transactions, nested filters, multi-hop joins, cooperative cancel, write-path indexing
+
+- `collection_transaction` / `POST /v1/transaction`: atomic multi-op
+  batch (insert/update/delete/upsert) against local SQLite-backed
+  collections.
+- Nested `and`/`or`/`not` filters and multi-hop joins (`joinMany`, up to 4
+  hops) alongside the existing flat-filter and single-hop join.
+- Cooperative cancel (`shouldAbort`) for `bulkIngest`, and a real
+  `POST /api/load/jobs/<id>/cancel` endpoint — `docs/architecture/bulk-loader.md`
+  had documented the cancel endpoint as shipped since v3.5.0, but it was
+  never actually wired into the load-job runner until now.
+- Bulk vector writes now schedule a debounced search-index build once a
+  table crosses 256 rows, instead of only indexing on store open.
+- Debug-only `LORE_RECALL_STAGE_TIMING` flag for per-stage recall timing.
+
+### Fixed (2026-08-31) — write-safety gap in the new nested-filter guard
+
+The unscoped-write guard (refuses `collection_update`/`collection_delete`
+on an empty/all filter without an explicit `all: true`) treated every
+`and`/`or`/`not` filter as automatically scoped without recursing into it,
+so a nested filter that reduced to "matches every row" could skip the
+confirmation. Now recurses correctly.
+
+### Fixed (2026-08-31) — cloud Dataplane SDK tenant-argument mismatch
+
+`groundfloor-ts-sdk` dropped `tenantId` as the leading positional argument
+on its collection-first calls; Lore's cloud adapters still called it
+tenant-first, so the tenant id silently landed in the collection-name slot
+and 404'd. Tenant is now injected via header instead.
+
+### Fixed (2026-08-31) — exact-match tag search, loader rollback, latency script
+
+- A punctuation-bearing tag (e.g. `q1-7-xsect`) was silently unmatchable
+  in search — only tokenized terms were tested against tag membership,
+  never the whole string.
+- `LoaderDispatcher.rollback()` cleared each sub-store but not its own
+  in-memory write buffers, so a retry after rollback could resend stale
+  buffered rows.
+
+### Known issue (2026-09-01) — space-in-path restore can silently drop data
+
+`restoreWorkspace`'s handling of a live SurrealDB store already sitting at
+a space-scattered destination does not reliably relocate the restored data
+where a freshly-opened engine will find it (regression test:
+`test/surreal-space-path-backup-restore-unit.ts`, not wired into the
+aggregate `npm test`). Same root cause as the workspace-collision fix
+above (`surrealDataPath()`'s URL-encoding of reserved characters), but a
+distinct code path (restore's sideline-vs-clobber logic) that needs its
+own fix. Not fixed in this release.
+
 ### Added — parent-embeds mode for search-worker crash isolation
 
 When `VerbatimSearchWorkerProxy` is constructed with a `parentEmbedder`,
