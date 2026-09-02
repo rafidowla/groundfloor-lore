@@ -51,6 +51,9 @@ opinion about what a node means; that is the writing application's job.
   daemon and no port, or run it as a server.
 - **Schema-agnostic** — model any domain. Code intelligence is an external
   client, not something baked in.
+- **Stoppable** — cooperative cancel for bulk ingest and load jobs. A caller
+  that gives up doesn't leave a half-embedded node behind: anything left
+  without a search vector is rolled back, not silently reported as done.
 
 ## Install
 
@@ -224,8 +227,11 @@ Three substrates, all first-class:
   semantic recall, generated locally with no API key and no network.
 - **Relational** — SQLite. Outbox, migrations, audit log, auth, plus a
   schema-agnostic tabular surface (`collection_*` tools / `/v1/{collection}`
-  REST) for application-defined tables — typed columns, filtered CRUD, and
-  SQL aggregates (count/sum/avg/group-by/time-series).
+  REST) for application-defined tables — typed columns, filtered CRUD,
+  atomic multi-op transactions (`collection_transaction` /
+  `/v1/transaction`), nested boolean filters and multi-hop joins
+  (`collection_join_query`), and SQL aggregates
+  (count/sum/avg/group-by/time-series).
 
 ```
 ┌──────────────┐     ┌──────────────┐     ┌─────────────────────────┐
