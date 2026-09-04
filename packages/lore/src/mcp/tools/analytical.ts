@@ -19,6 +19,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
     AnalyticalScanCapExceeded,
+    resolveGroupByLimit,
     type IAnalyticalStorage,
     type AggregationType,
     type TimeBucket,
@@ -90,7 +91,7 @@ export function registerAnalyticalTools(mcpServer: McpServer, deps: AnalyticalTo
             groupBy: z.string().optional().describe('Group results by this field. When set, returns per-group rows.'),
             distinct: z.boolean().optional().describe('Return distinct values of `field`. Mutually exclusive with aggregation.'),
             filterJson: z.string().optional().describe('JSON-encoded Filter (eq/contains/startsWith/gt/gte/lt/lte/in). Same shape as CollectionStorage.find.'),
-            limit: z.number().int().positive().optional().describe('Cap on returned groups (groupBy only).'),
+            limit: z.number().int().positive().optional().describe('Cap on returned rows (groupBy and distinct).'),
             workspace: z.string().min(1).describe('Workspace scope (required — Sprint L1e: no silent fallback).'),
         },
         async (args) => {
@@ -111,8 +112,19 @@ export function registerAnalyticalTools(mcpServer: McpServer, deps: AnalyticalTo
                     if (!args.field) {
                         return { content: [{ type: 'text', text: 'aggregate(distinct) requires `field`' }], isError: true };
                     }
-                    const values = await a.distinct(args.collection, args.field, filter);
-                    return { content: [{ type: 'text', text: JSON.stringify({ values }) }] };
+                    const values = await a.distinct(args.collection, args.field, filter, args.limit);
+                    // LORE_ANALYTICAL_GROUP_LIMIT — same resolveGroupByLimit
+                    // SqliteAnalyticalStorage.distinct used to cap the result
+                    // set (see the groupBy branch below for the full
+                    // rationale); surfaced here too so a caller knows the
+                    // value list may be incomplete.
+                    const { clamped: distinctClamped } = resolveGroupByLimit(args.limit);
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({ values, ...(distinctClamped ? { truncated: true } : {}) }),
+                        }],
+                    };
                 }
                 if (args.groupBy) {
                     const groups = await a.groupBy(
@@ -123,7 +135,20 @@ export function registerAnalyticalTools(mcpServer: McpServer, deps: AnalyticalTo
                         filter,
                         args.limit,
                     );
-                    return { content: [{ type: 'text', text: JSON.stringify({ groups }) }] };
+                    // LORE_ANALYTICAL_GROUP_LIMIT (docs/CONFIGURATION.md) —
+                    // `resolveGroupByLimit` is the SAME function
+                    // `SqliteAnalyticalStorage.groupBy` used to cap the
+                    // result set (no explicit `limit` means the default cap
+                    // was applied; an explicit `limit` above the cap was
+                    // lowered) — either way there may be more groups than
+                    // what's returned.
+                    const { clamped } = resolveGroupByLimit(args.limit);
+                    return {
+                        content: [{
+                            type: 'text',
+                            text: JSON.stringify({ groups, ...(clamped ? { truncated: true } : {}) }),
+                        }],
+                    };
                 }
                 let value: number | null;
                 switch (args.aggregation as AggregationType) {

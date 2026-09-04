@@ -45,6 +45,7 @@ import type { Filter } from './collectionStorage.js';
 import {
     AnalyticalScanCapExceeded,
     ANALYTICAL_SCAN_CAP_DEFAULT,
+    resolveGroupByLimit,
     type AggregationType,
     type GroupResult,
     type IAnalyticalStorage,
@@ -239,13 +240,24 @@ export class SqliteAnalyticalStorage implements IAnalyticalStorage {
             ? 'count(*)'
             : `${aggregation}(${quoteSqliteIdent(assertIdent(aggregationField ?? ''))})`;
         const { where, params } = this.typedWhere(coll, filter);
-        const lim = SqliteAnalyticalStorage.checkLimit(limit, 'groupBy');
+        // Validate an explicit `limit`'s shape first (positive integer),
+        // THEN resolve it against LORE_ANALYTICAL_GROUP_LIMIT — a caller
+        // that passes NO limit no longer means "unbounded": a
+        // high-cardinality groupField (id/hash/timestamp) would otherwise
+        // materialize one row per distinct value with no bound (mirrors the
+        // prior legacy-engine-backed implementation's default cap, dropped
+        // in the SQLite rebuild). `resolveGroupByLimit` also clamps an explicit limit
+        // above the cap; `mcp/tools/analytical.ts` and `mcp/http/routes/
+        // analytics.ts` call the SAME function to decide whether to surface
+        // `truncated: true` in the response.
+        const checked = SqliteAnalyticalStorage.checkLimit(limit, 'groupBy');
+        const { limit: lim } = resolveGroupByLimit(checked ?? undefined);
         const rows = this.db.prepare(
             `SELECT ${key} AS k, ${expr} AS v, count(*) AS c
              FROM ${this.table(coll)} ${where}
              GROUP BY ${key}
-             ORDER BY ${key} ASC${lim === null ? '' : ' LIMIT ?'}`,
-        ).all(...(lim === null ? params : [...params, lim])) as Array<{ k: unknown; v: unknown; c: number }>;
+             ORDER BY ${key} ASC LIMIT ?`,
+        ).all(...params, lim) as Array<{ k: unknown; v: unknown; c: number }>;
         return rows.map((r) => ({
             key: this.decode(coll, groupField, r.k) as TKey,
             value: Number(r.v ?? 0),
@@ -257,10 +269,17 @@ export class SqliteAnalyticalStorage implements IAnalyticalStorage {
     async distinct<T = unknown>(coll: string, field: string, filter?: Filter, limit?: number): Promise<T[]> {
         const col = quoteSqliteIdent(assertIdent(field));
         const { where, params } = this.typedWhere(coll, filter);
-        const lim = SqliteAnalyticalStorage.checkLimit(limit, 'distinct');
+        // Same LORE_ANALYTICAL_GROUP_LIMIT cap groupBy() enforces above (see
+        // its comment) — a caller passing no limit no longer means
+        // "unbounded": a high-cardinality field otherwise returns one row
+        // per distinct value with no bound. resolveGroupByLimit is also
+        // what mcp/tools/analytical.ts and mcp/http/routes/analytics.ts
+        // call to decide whether to surface `truncated: true`.
+        const checked = SqliteAnalyticalStorage.checkLimit(limit, 'distinct');
+        const { limit: lim } = resolveGroupByLimit(checked ?? undefined);
         const rows = this.db.prepare(
-            `SELECT DISTINCT ${col} AS v FROM ${this.table(coll)} ${where} ORDER BY ${col} ASC${lim === null ? '' : ' LIMIT ?'}`,
-        ).all(...(lim === null ? params : [...params, lim])) as Array<{ v: unknown }>;
+            `SELECT DISTINCT ${col} AS v FROM ${this.table(coll)} ${where} ORDER BY ${col} ASC LIMIT ?`,
+        ).all(...params, lim) as Array<{ v: unknown }>;
         return rows.map((r) => this.decode(coll, field, r.v) as T);
     }
 

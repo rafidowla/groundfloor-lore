@@ -197,6 +197,7 @@ const ALLOWED_VARS: readonly string[] = [
     // TW-4c — search scan-cap + ranking weights (engines/searchRanking.ts intEnv reads).
     'LORE_SEARCH_SCAN_CAP',                      // search: candidate scan cap before ranking (default 2000)
     'LORE_ANALYTICAL_SCAN_CAP',                  // analytical timeSeries: row scan cap before JS bucketing, fail-loud over it (default 200000)
+    'LORE_ANALYTICAL_GROUP_LIMIT',                // analytical groupBy: cap on GROUPS returned; applied even when caller passes no limit (default 10000)
     'LORE_SEARCH_WEIGHT_LABEL',                  // search: ranking weight for label match (default 4)
     'LORE_SEARCH_WEIGHT_CONTENT',                // search: ranking weight for content match (default 2)
     'LORE_SEARCH_CONCURRENCY',                   // search admission: max concurrent native searches (default: scales to CPU cores, 2-8)

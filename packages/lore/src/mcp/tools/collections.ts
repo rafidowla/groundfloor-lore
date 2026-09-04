@@ -35,28 +35,48 @@ import { log } from '../../logger.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import type {
-    ITableStorage,
     Row,
     TableSchema,
 } from '../../contracts/tables.js';
 import type { Filter, FilterNode, FindOptions } from '../../engines/collectionStorage.js';
 import { CollectionValidationError, validateRowAgainstSchema } from '../../engines/collectionRowValidation.js';
 import { assertMcpScope, type McpScopeMode } from './mcpScope.js';
-import type { StorageBundle } from '../services.js';
-import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import { resolveTargetTableStorage, workspaceRequiredEnvelope as workspaceRequiredEnvelopeShared } from './workspaceResolve.js';
 import { registerCollectionTransactionTool } from './collectionsTransaction.js';
 import { registerCollectionJoinQueryTool } from './collectionsJoin.js';
-import { registerCollectionByQueryTools } from './collectionsByQuery.js'; // X-allrows split (800-line cap)
-import { filterNodeZ, optionalFilterNodeZ, filterInvalidMcpEnvelope } from './collectionsFilterSchema.js';
+// ITEM collections-cycle (2026-09) — handleUpdateByQuery/handleDeleteByQuery/
+// filterOrRowOrGeneric moved INTO collectionsByQuery.ts (see collectionsDeps.ts's
+// header for why): this was a genuine two-way runtime import (collectionsByQuery.ts
+// imported those 3 VALUES from here, while this file imports
+// registerCollectionByQueryTools from it) — the only /v1 tools split with a
+// live cycle, not the harmless `import type`-only kind collectionsJoin.ts/
+// collectionsTransaction.ts still have back to this file. Re-exported below
+// so existing importers (tests, HTTP routes) keep their import path.
+import { registerCollectionByQueryTools, filterOrRowOrGeneric, collectionValidationEnvelope } from './collectionsByQuery.js';
+export {
+    registerCollectionByQueryTools,
+    filterOrRowOrGeneric,
+    handleUpdateByQuery,
+    handleDeleteByQuery,
+    type UpdateByQueryResultShape,
+    type DeleteByQueryResultShape,
+} from './collectionsByQuery.js';
+import { filterNodeZ, optionalFilterNodeZ } from './collectionsFilterSchema.js';
 // F-COL5 split — the write-guard classifier lives in collectionsFilterScope.ts.
 // Re-export so existing consumers keep their import path.
 export { isAllFilter, classifyFilterScope, type FilterScope } from './collectionsFilterScope.js';
-import { assertValidFilter } from './collectionsFilterScope.js';
+import { assertScopedOrAllOptIn } from './collectionsFilterScope.js';
 // 1.M6 split (file-size cap) — query/count handlers live in collectionsQuery.ts.
 // Re-export so existing consumers keep their import path.
 export { handleQuery, handleCount, type QueryResultShape, type CountResultShape } from './collectionsQuery.js';
 import { handleQuery, handleCount } from './collectionsQuery.js';
+// ITEM collections-cycle (2026-09) — CollectionsDeps + getIntrospectableSchema
+// moved to collectionsDeps.ts, a zero-dependency module both this file and
+// collectionsByQuery.ts import one-way. Re-exported so existing consumers
+// (collectionsTransaction.ts, collectionsJoin.ts, collectionsQuery.ts,
+// collectionsSchemaList.ts, HTTP routes, tests) keep their import path.
+export { type CollectionsDeps, getIntrospectableSchema } from './collectionsDeps.js';
+import { type CollectionsDeps, getIntrospectableSchema } from './collectionsDeps.js';
 
 /* ------------------------------------------------------------------ */
 /*  SDK ↔ Lore translation                                             */
@@ -93,24 +113,8 @@ const findOptionsZ = z.object({
 /*  Handler bodies (shared between MCP tools and REST routes)          */
 /* ------------------------------------------------------------------ */
 
-export interface CollectionsDeps {
-    /**
-     * Boot/active-workspace table storage. Used as the fallback when no
-     * graphRegistry/store is wired (embedded/cloud mode, tests) so behavior
-     * is unchanged from before per-workspace routing existed.
-     */
-    tableStorage: ITableStorage;
-    /**
-     * Local-mode per-workspace routing inputs (all OPTIONAL — when absent the
-     * resolver returns the boot store and behavior is unchanged):
-     *   - store: the boot StorageBundle (carries loreGraph for the active ws)
-     *   - graphRegistry: opens/serves each workspace's own LocalGraph
-     *   - activeWorkspace: the daemon's currently-active workspace name
-     */
-    store?: StorageBundle;
-    graphRegistry?: LocalGraphRegistry;
-    activeWorkspace?: string;
-}
+/* CollectionsDeps / getIntrospectableSchema moved to collectionsDeps.ts
+ * (ITEM collections-cycle) — imported + re-exported at the top. */
 
 /* handleQuery / handleCount / QueryResultShape / CountResultShape moved to
  * collectionsQuery.ts (1.M6 file-size split) — re-exported at the top. */
@@ -121,28 +125,6 @@ export async function handleCreateCollection(
 ): Promise<SdkCollectionSchema> {
     await deps.tableStorage.createTable(sdkToInternalSchema(schema));
     return schema;
-}
-
-/**
- * getIntrospectableSchema — same private-map side channel as
- * `handleSchemaGet` (ITableStorage exposes no schema-get method), reused
- * by the row-validation call sites below. Returns `undefined` when the
- * adapter isn't introspectable — those callers skip pre-validation and
- * behave exactly as before (fail open, never break an adapter that
- * doesn't expose its schemas).
- *
- * Exported (not just module-private) so `collectionsTransaction.ts`'s
- * `handleTransaction` can resolve the same schema for insert/update/upsert
- * ops before calling `runTransaction` — QA finding B2 (2026-09-03):
- * collection_transaction / POST /v1/transaction bypassed
- * collectionRowValidation.ts entirely, silently coercing rows that every
- * other write path (insert/update/bulk_insert/update_by_query) rejects.
- */
-export function getIntrospectableSchema(deps: CollectionsDeps, name: string): TableSchema | undefined {
-    const introspectable = deps.tableStorage as ITableStorage & {
-        schemas?: Map<string, TableSchema>;
-    };
-    return introspectable.schemas?.get(name);
 }
 
 export async function handleSchemaGet(
@@ -213,17 +195,9 @@ export async function handleGet(
 }
 
 
-/**
- * F-COL2: refuse an unscoped destructive op unless the caller explicitly
- * opts in with `all: true`. An absent/empty/all filter would otherwise
- * update or delete every row. Throws when the guard trips.
- */
-function assertScopedOrAllOptIn(op: string, filter: FilterNode | undefined, all: boolean | undefined): void {
-    const scope = assertValidFilter(op, filter); // F-COL5
-    if (all !== true && scope === 'ALL') {
-        throw new Error(`${op} refuses an empty/all filter — pass all:true to confirm an unscoped ${op}, or use collection_truncate.`);
-    }
-}
+/* assertScopedOrAllOptIn (F-COL2) moved to collectionsFilterScope.ts (ITEM
+ * collections-cycle) — imported at the top, alongside assertValidFilter
+ * which it wraps. */
 
 export async function handleUpdate(
     deps: CollectionsDeps,
@@ -292,44 +266,10 @@ export async function handleBulkInsert(
 }
 
 
-export interface UpdateByQueryResultShape {
-    updated: number;
-    collection: string;
-}
-
-export async function handleUpdateByQuery(
-    deps: CollectionsDeps,
-    collection: string,
-    filter: FilterNode,
-    fields: Record<string, unknown>,
-    all?: boolean, // X-allrows — was hardcoded `undefined` (no opt-in existed)
-): Promise<UpdateByQueryResultShape> {
-    assertScopedOrAllOptIn('collection_update_by_query', filter, all); // D2-data-4, X-allrows
-    // F6 — same partial-patch validation as handleUpdate.
-    const schema = getIntrospectableSchema(deps, collection);
-    if (schema) validateRowAgainstSchema(schema, fields, 'update');
-    const updated = await deps.tableStorage.update(collection, filter, fields, { all }); // X-allrows
-    return { updated, collection };
-}
-
-export interface DeleteByQueryResultShape {
-    deleted: number;
-    collection: string;
-}
-
-export async function handleDeleteByQuery(
-    deps: CollectionsDeps,
-    collection: string,
-    filter: FilterNode,
-    all?: boolean, // X-allrows — was unconditionally refused; no opt-in existed
-): Promise<DeleteByQueryResultShape> {
-    const scope = assertValidFilter('delete-by-query', filter); // F-COL5
-    if (all !== true && scope === 'ALL') {
-        throw new Error('delete-by-query refuses an empty/all filter — pass all:true to confirm, or use truncate to wipe a collection.');
-    }
-    const deleted = await deps.tableStorage.delete(collection, filter, { all }); // X-allrows
-    return { deleted, collection };
-}
+/* UpdateByQueryResultShape/handleUpdateByQuery, DeleteByQueryResultShape/
+ * handleDeleteByQuery moved to collectionsByQuery.ts (ITEM collections-cycle
+ * — breaking the two-way runtime import between this file and that one).
+ * Re-exported at the top so existing importers keep their import path. */
 
 export interface TruncateResultShape {
     truncated: boolean;
@@ -352,42 +292,10 @@ function ok(payload: unknown) {
     return { content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }] };
 }
 
-/**
- * F6 (2026-09-03 audit) — MCP envelope for a rejected row. Deliberately
- * bypasses `mcpToolError`/`redactError`: redactError hashes every quoted
- * string in a message (`'unknown column 'email'…'` → `'id#40ce4379'…`),
- * which would destroy the exact field/table names this error exists to
- * surface. table/field/row_index are read off the structured
- * CollectionValidationError properties, not parsed out of prose, so
- * nothing sensitive-looking needs to pass through the hash in the first
- * place. Mirrors the existing `{error: '<code>', ...}` shape used by
- * `workspaceRequiredEnvelope` above.
- */
-function collectionValidationEnvelope(
-    e: CollectionValidationError,
-): { content: Array<{ type: 'text'; text: string }>; isError: true } {
-    return {
-        content: [{
-            type: 'text' as const,
-            text: JSON.stringify({
-                error: 'invalid_row',
-                table: e.table,
-                ...(e.field === undefined ? {} : { field: e.field }),
-                ...(e.rowIndex === undefined ? {} : { row_index: e.rowIndex }),
-                message: e.message,
-            }, null, 2),
-        }],
-        isError: true,
-    };
-}
-
-// X-allrows split — shared with collectionsByQuery.ts's collection_update_by_query/
-// collection_delete_by_query registrations, which moved out for the 800-line cap.
-export function filterOrRowOrGeneric(toolName: string, e: unknown) { // QA round-3 — shared catch for the 4 write tools below
-    if (e instanceof z.ZodError) return filterInvalidMcpEnvelope(e);
-    if (e instanceof CollectionValidationError) return collectionValidationEnvelope(e); // F6
-    return mcpToolError(toolName, e, log);
-}
+/* collectionValidationEnvelope (private) + filterOrRowOrGeneric moved to
+ * collectionsByQuery.ts (ITEM collections-cycle). filterOrRowOrGeneric is
+ * imported + re-exported at the top for this file's own collection_update/
+ * collection_delete tools below and for existing external importers. */
 
 /**
  * Sprint L1e — workspace_required guard. Mirrors REST 400 shape.

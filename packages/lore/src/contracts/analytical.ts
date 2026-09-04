@@ -31,6 +31,49 @@ import type { Filter } from '../engines/collectionStorage.js';
 export const ANALYTICAL_SCAN_CAP_DEFAULT = 200_000;
 
 /**
+ * Default LORE_ANALYTICAL_GROUP_LIMIT (docs/CONFIGURATION.md) — the cap
+ * `groupBy` applies to the number of GROUPS returned when the caller passes
+ * no `limit` at all. Matches the prior legacy-engine-backed analytical
+ * storage's hardcoded 10_000 `groupBy` default — "a high-cardinality
+ * groupField produced one unbounded row per distinct value" — lost when the
+ * analytical store was rebuilt on SQLite during the graph-engine removal
+ * (2026-08-21). Distinct from `ANALYTICAL_SCAN_CAP_DEFAULT`, which bounds
+ * rows SCANNED before aggregating — this bounds rows RETURNED after
+ * aggregating.
+ */
+export const ANALYTICAL_GROUP_LIMIT_DEFAULT = 10_000;
+
+/**
+ * Re-read on every call (not cached at module load) — same pattern as
+ * `analyticalScanCap()` in engines/sqliteAnalyticalStorage.ts.
+ */
+export function analyticalGroupLimit(): number {
+    const raw = Number(process.env['LORE_ANALYTICAL_GROUP_LIMIT']);
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : ANALYTICAL_GROUP_LIMIT_DEFAULT;
+}
+
+/**
+ * resolveGroupByLimit — the single source of truth for "what LIMIT does this
+ * groupBy call actually get, and was it clamped from what the caller asked
+ * for (or from having asked for nothing at all)". Shared by
+ * `SqliteAnalyticalStorage.groupBy` (which uses `limit` as the SQL LIMIT)
+ * and its MCP (`aggregate` tool) / REST (`POST /api/aggregate`) callers
+ * (which use `clamped` to decide whether to add `truncated: true` to the
+ * response) — both must agree on the same cap or the response could claim
+ * "truncated: false" for a call storage silently capped, or vice versa.
+ *
+ * `clamped` is true both when no `limit` was given (the default cap was
+ * applied) and when an explicit `limit` exceeded the cap (it was lowered) —
+ * either way, groups beyond the returned set may exist.
+ */
+export function resolveGroupByLimit(requested: number | undefined): { limit: number; clamped: boolean } {
+    const cap = analyticalGroupLimit();
+    if (requested === undefined) return { limit: cap, clamped: true };
+    if (requested > cap) return { limit: cap, clamped: true };
+    return { limit: requested, clamped: false };
+}
+
+/**
  * AnalyticalScanCapExceeded — thrown by an IAnalyticalStorage implementation
  * when honoring LORE_ANALYTICAL_SCAN_CAP (docs/CONFIGURATION.md) requires
  * refusing an operation rather than scanning past the cap.

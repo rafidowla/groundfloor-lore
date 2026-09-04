@@ -36,7 +36,13 @@ export type {
     GroupResult,
     TimeSeriesPoint,
 } from './analytical.js';
-export { AnalyticalScanCapExceeded, ANALYTICAL_SCAN_CAP_DEFAULT } from './analytical.js';
+export {
+    AnalyticalScanCapExceeded,
+    ANALYTICAL_SCAN_CAP_DEFAULT,
+    ANALYTICAL_GROUP_LIMIT_DEFAULT,
+    analyticalGroupLimit,
+    resolveGroupByLimit,
+} from './analytical.js';
 export type {
     ITableStorage,
     TableSchema,

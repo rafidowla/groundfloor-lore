@@ -1761,6 +1761,19 @@ Source: `src/engines/sqliteAnalyticalStorage.ts` (this cap silently stopped bein
 
 ---
 
+### `LORE_ANALYTICAL_GROUP_LIMIT`
+
+| | |
+|---|---|
+| **Default** | `10000` |
+| **Surface** | daemon + embedded (analytical `groupBy` and `distinct`) |
+
+Maximum number of rows `groupBy` (one per group) and `distinct` (one per distinct value) return — distinct from `LORE_ANALYTICAL_SCAN_CAP` above, which bounds rows *scanned* before aggregating; this bounds rows *returned* after aggregating/deduplicating. Applied even when the caller passes no `limit` at all: a high-cardinality `groupField`/`field` (an id, hash, or timestamp column) would otherwise return one row per distinct value with no bound. An explicit `limit` above this cap is clamped down to it rather than refused. Either way — no limit given, or an explicit limit clamped — the `aggregate` MCP tool and `POST /api/aggregate` REST sibling add `truncated: true` to the response (for both the `groupBy` and `distinct` shapes) so a caller knows more rows may exist. Matches the prior legacy-engine-backed implementation's hardcoded 10 000 default for the same reason, restored here after it was dropped in the SQLite rebuild.
+
+Source: `src/contracts/analytical.ts` (`resolveGroupByLimit`), applied to both `groupBy` and `distinct` in `src/engines/sqliteAnalyticalStorage.ts`
+
+---
+
 ### `LORE_TOPOLOGY_SCAN_CAP`
 
 | | |
@@ -2659,6 +2672,7 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_POOL_ACQUIRE_TIMEOUT_MS` | `30000` | DB Internals |
 | `LORE_SEARCH_SCAN_CAP` | `2000` | Search |
 | `LORE_ANALYTICAL_SCAN_CAP` | `200000` | Analytical |
+| `LORE_ANALYTICAL_GROUP_LIMIT` | `10000` | Analytical |
 | `LORE_TOPOLOGY_SCAN_CAP` | `50000` | Search |
 | `LORE_SEARCH_WEIGHT_LABEL` | `4` | Search |
 | `LORE_SEARCH_WEIGHT_CONTENT` | `2` | Search |

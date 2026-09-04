@@ -25,6 +25,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
     AnalyticalScanCapExceeded,
+    resolveGroupByLimit,
     type IAnalyticalStorage,
     type AggregationType,
     type TimeBucket,
@@ -212,9 +213,14 @@ export async function tryAnalyticsRoutes(
                     writeError(res, 400, 'invalid_request_body', 'distinct requires field');
                     return true;
                 }
-                const values = await a.distinct(collection, body.field, filter);
+                const requestedDistinctLimit = typeof body.limit === 'number' ? body.limit : undefined;
+                const values = await a.distinct(collection, body.field, filter, requestedDistinctLimit);
+                // LORE_ANALYTICAL_GROUP_LIMIT — same resolveGroupByLimit
+                // SqliteAnalyticalStorage.distinct used to cap the result
+                // set (see the groupBy branch below for the full rationale).
+                const { clamped: distinctClamped } = resolveGroupByLimit(requestedDistinctLimit);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ values }));
+                res.end(JSON.stringify({ values, ...(distinctClamped ? { truncated: true } : {}) }));
                 return true;
             }
             if (typeof body.groupBy === 'string') {
@@ -227,16 +233,22 @@ export async function tryAnalyticsRoutes(
                     writeError(res, 400, 'invalid_aggregation', `aggregation must be one of ${[...AGGREGATIONS].join(',')}`);
                     return true;
                 }
+                const requestedLimit = typeof body.limit === 'number' ? body.limit : undefined;
                 const groups = await a.groupBy(
                     collection,
                     body.groupBy,
                     aggregation,
                     typeof body.field === 'string' ? body.field : null,
                     filter,
-                    typeof body.limit === 'number' ? body.limit : undefined,
+                    requestedLimit,
                 );
+                // LORE_ANALYTICAL_GROUP_LIMIT (docs/CONFIGURATION.md) — same
+                // resolution SqliteAnalyticalStorage.groupBy applied to cap
+                // the result set; surface it so a caller knows the group
+                // list may be incomplete.
+                const { clamped } = resolveGroupByLimit(requestedLimit);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ groups }));
+                res.end(JSON.stringify({ groups, ...(clamped ? { truncated: true } : {}) }));
                 return true;
             }
             if (!AGGREGATIONS.has(aggregation)) {

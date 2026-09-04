@@ -123,6 +123,7 @@ import { nodeUpsert as nodeServiceUpsert, resolveAutolinkHandles, type NodeWrite
 // wrapper (previously wired ONLY into bulkIngest) now covers the embedded
 // single/batch upsert paths too. No-op for engines that serialize writes internally.
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
+import { runBootEphemeralPrune } from './bootEphemeralPrune.js';
 import { recordHotWriteBatch } from '../outbox/hotLane.js';
 import { setTimeout as delayMs } from 'node:timers/promises';
 import { runBulkIngest, mapLimit, type BulkIngestNodeArgs, type BulkIngestOpts, type BulkIngestResult } from './bulkIngest.js';
@@ -1475,10 +1476,9 @@ async function main(): Promise<LoreInstance | void> {
 
     await verbatimStore.initialize();
 
-    // Fix #5 — prune expired ephemeral nodes at startup. Non-fatal.
-    store.storageClient.pruneEphemeralNodes().catch((err) => {
-        log.warn(`[Lore MCP] Startup ephemeral prune failed (non-fatal): ${(err as Error).message}`);
-    });
+    // Fix #5 — prune expired ephemeral nodes at startup. Non-fatal. ITEM
+    // boot-pruneeph (2026-09) — see mcp/bootEphemeralPrune.ts.
+    void runBootEphemeralPrune({ graph: d.getGraph(), workspace: detectedScope.workspace, outboxStore: outboxWiring.store, workspaceVerbatimResolver: d.workspaceVerbatimResolver, verbatimStore });
 
     const toolTier = resolveToolTier();
     if (toolTier !== 'default') {

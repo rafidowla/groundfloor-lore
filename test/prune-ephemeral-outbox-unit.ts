@@ -57,6 +57,7 @@ import { dispatch, type DispatcherSubstrates } from '../packages/lore/src/outbox
 import { wireOutbox } from '../packages/lore/src/outbox/wiring.js';
 import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
 import type { StorageBundle } from '../packages/lore/src/mcp/services.js';
+import { runBootEphemeralPrune } from '../packages/lore/src/mcp/bootEphemeralPrune.js';
 
 class ConstEmbedProvider implements EmbeddingProvider {
     get modelId() { return 'prune-ephemeral-unit-const'; }
@@ -405,6 +406,59 @@ test('HTTP POST /api/prune-ephemeral: a concurrent upsert that refreshes the TTL
         const finalNode = await stack.graph.getNode(id);
         assert.ok(finalNode, 'BUG: prune deleted a node whose TTL was refreshed between the query and the lock');
         assert.equal(finalNode?.content, 'still-in-use', 'node must keep the concurrent write\'s content');
+    } finally {
+        await stack.close();
+    }
+});
+
+/* ─── Boot path: mcp/server.ts's daemon-startup prune ──────────────── */
+
+test('Boot-time prune (mcp/server.ts): expired node with a verbatim row — graph gone, verbatim tombstoned, node.delete + verbatim.tombstone recorded', async () => {
+    // ITEM boot-pruneeph — mcp/server.ts's startup prune used to call
+    // `store.storageClient.pruneEphemeralNodes()` directly, bypassing the
+    // nodeWriteLock / outbox / verbatim-tombstone discipline this file
+    // already covers for the HTTP route and the MCP tool. It now calls
+    // `runBootEphemeralPrune` (mcp/bootEphemeralPrune.ts) — the EXACT
+    // function mcp/server.ts's boot path calls — which wraps the SAME
+    // `safePruneEphemeralNodes` shared function the HTTP route and MCP tool
+    // use (see engines/safeEphemeralPrune.ts). No workspaceVerbatimResolver
+    // here, so it falls back to the boot VerbatimStore instance directly —
+    // matches mcp/server.ts's own fallback ternary.
+    const stack = await openStack('lore-pruneeph-boot');
+    const ws = 'w-boot';
+    try {
+        const id = 'eph-boot-1';
+        const seeded = await seedEphemeral(stack, ws, id, 1);
+        assert.equal(seeded.ok, true);
+        await sleep(20); // past the 1ms ttl
+
+        const rowsAfterCreate = await stack.outboxStore.listPendingForWorkspace(ws, 1000);
+        assert.deepEqual(
+            rowsAfterCreate.map((r) => r.operationKind),
+            ['node.upsert', 'verbatim.upsert'],
+            'sanity: seeding leaves exactly these two rows pending',
+        );
+
+        await runBootEphemeralPrune({
+            graph: stack.graph,
+            workspace: ws,
+            outboxStore: stack.outboxStore,
+            workspaceVerbatimResolver: undefined,
+            verbatimStore: stack.store,
+        });
+
+        const graphAfter = await stack.graph.getNode(id);
+        assert.equal(graphAfter, null, 'BUG: pruned node still readable in the graph');
+
+        const verbatimAfter = await stack.store.getById(`lore:${id}`);
+        assert.ok(verbatimAfter?.text?.startsWith('[TOMBSTONED'), `BUG: verbatim row was not tombstoned — got ${JSON.stringify(verbatimAfter?.text?.slice(0, 60))}`);
+
+        const rowsAfterPrune = await stack.outboxStore.listPendingForWorkspace(ws, 1000);
+        assert.deepEqual(
+            rowsAfterPrune.map((r) => r.operationKind),
+            ['node.upsert', 'verbatim.upsert', 'node.delete', 'verbatim.tombstone'],
+            `BUG: boot-time prune must record node.delete then verbatim.tombstone — got ${JSON.stringify(rowsAfterPrune.map((r) => r.operationKind))}`,
+        );
     } finally {
         await stack.close();
     }

@@ -163,3 +163,21 @@ export function assertValidFilter(op: string, filter: FilterNode | undefined): F
     }
     return scope;
 }
+
+/**
+ * F-COL2: refuse an unscoped destructive op unless the caller explicitly
+ * opts in with `all: true`. An absent/empty/all filter would otherwise
+ * update or delete every row. Throws when the guard trips.
+ *
+ * ITEM collections-cycle (2026-09) — moved here from collections.ts
+ * alongside `assertValidFilter`, which it wraps: both collections.ts's own
+ * handleUpdate/handleDelete and collectionsByQuery.ts's handleUpdateByQuery
+ * need it, and this module has no dependency on either, so both import it
+ * one-way with no cycle.
+ */
+export function assertScopedOrAllOptIn(op: string, filter: FilterNode | undefined, all: boolean | undefined): void {
+    const scope = assertValidFilter(op, filter);
+    if (all !== true && scope === 'ALL') {
+        throw new Error(`${op} refuses an empty/all filter — pass all:true to confirm an unscoped ${op}, or use collection_truncate.`);
+    }
+}

@@ -6,6 +6,77 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+## [3.18.1] — 2026-09-04
+
+**Highlights.** This is a small patch release: a data-safety fix for
+boot-time ephemeral node pruning (writes now go through the same lock,
+outbox row, and tombstone as every other delete path), a default cap
+restored on `groupBy`/`distinct` result size so a high-cardinality field
+can't return an unbounded response, and two internal refactors (a route
+file split, an import-cycle cleanup) with no behavior change. No API
+removals.
+
+**Upgrade notes.**
+
+- New optional environment variable `LORE_ANALYTICAL_GROUP_LIMIT` (default
+  `10000`) caps how many groups/values `groupBy` and `distinct` return when
+  the caller passes no `limit`, and clamps an explicit `limit` above the
+  cap rather than refusing it. The `aggregate` MCP tool and `POST
+  /api/aggregate` REST sibling now also accept `limit` for the `distinct`
+  shape (previously `groupBy`-only) and add `truncated: true` to the
+  response whenever the cap changed what was returned.
+- Boot-time ephemeral-node pruning now records the same outbox
+  `node.delete` row and tombstone as the `POST /api/prune-ephemeral` route
+  and `prune_ephemeral` MCP tool already did. An embedding host that
+  watches the outbox may see prune-related outbox activity at daemon
+  startup that it did not see before; this is expected and matches the
+  bookkeeping every other delete path already had.
+- No API removals.
+
+### Changed
+
+- HANDOFF.md rewritten as the 2026-09-04 engineering handover; NEW_OWNER_GUIDE.md marked historical.
+
+### Fixed
+
+- Boot-time ephemeral prune (`mcp/server.ts`) called the engine's
+  `pruneEphemeralNodes` directly, bypassing the per-id `nodeWriteLock`,
+  outbox `node.delete` row and verbatim tombstone that `POST
+  /api/prune-ephemeral` and the `prune_ephemeral` MCP tool already used
+  (ITEM X-pruneeph, 2026-09-03). Extracted the shared discipline into
+  `engines/safeEphemeralPrune.ts` and routed all three callers — the HTTP
+  route, the MCP tool, and the daemon's startup prune — through it.
+- `groupBy` returned every distinct group with no bound when the caller
+  passed no `limit` (a high-cardinality `groupField` produced one row per
+  distinct value). Restored the historical 10,000-group default cap
+  (`LORE_ANALYTICAL_GROUP_LIMIT`, matching the prior Kùzu-backed engine's
+  behavior, lost in the SQLite rebuild) and clamp an explicit `limit` above
+  the cap instead of refusing it. `distinct` had the same unbounded gap and
+  now shares the same cap and clamping behavior. The `aggregate` MCP tool
+  and `POST /api/aggregate` REST sibling now accept `limit` for the
+  `distinct` shape too (previously `groupBy`-only) and add `truncated:
+  true` to the response whenever the cap changed what was returned.
+- `mcp/http/routes/collections.ts` had grown to exactly the 800-line
+  file-size hard cap. Split it along its schema-routes/row-routes seam:
+  `collections.ts` keeps the module docstring, `tryCollectionsRoutes` entry
+  point, and the transaction/join-query/`/v1/schema*` routes; the new
+  `collectionsRowRoutes.ts` holds the shared request-gating/routing
+  helpers and every route keyed on a `{collection}` path segment. Pure
+  extraction — route registration order and behavior are unchanged.
+- `mcp/tools/collections.ts` and `mcp/tools/collectionsByQuery.ts` had a
+  two-way runtime import: `collectionsByQuery.ts` imported
+  `handleUpdateByQuery`/`handleDeleteByQuery`/`filterOrRowOrGeneric`
+  (values) from `collections.ts`, while `collections.ts` imported
+  `registerCollectionByQueryTools` (a value) from `collectionsByQuery.ts`.
+  Moved those three handlers into `collectionsByQuery.ts` (their sole
+  by-query consumer) and `CollectionsDeps`/`getIntrospectableSchema` /
+  `assertScopedOrAllOptIn` into new zero-dependency modules
+  (`collectionsDeps.ts`, `collectionsFilterScope.ts`) both files import
+  one-way; `collections.ts` re-exports everything so existing importers
+  keep their `tools/collections.js` import path. No behavior change —
+  verified with `npx madge --circular` (the pair no longer appears) and
+  the existing collections-tools/write-guard-holes suites.
+
 ## [3.18.0] — 2026-09-04
 
 **Highlights.** This release closes a batch of 13 verified findings from a
