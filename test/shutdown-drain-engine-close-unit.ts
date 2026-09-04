@@ -26,7 +26,7 @@
  *
  * Deliberately structural: the drain's deps are a loose structural contract,
  * so these fakes are the same shape the daemon passes without dragging a real
- * Kùzu or SurrealDB instance into a unit test.
+ * SurrealDB instance into a unit test.
  */
 
 import assert from 'node:assert/strict';

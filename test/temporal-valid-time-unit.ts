@@ -3,7 +3,7 @@
  * temporal-valid-time-unit.ts — bi-temporal valid-time storage/query primitive.
  *
  * Covers the SurrealDB engine (the default backend new workspaces get —
- * Kùzu is legacy and intentionally NOT exercised here, per the 2026-08
+ * the legacy graph engine is legacy and intentionally NOT exercised here, per the 2026-08
  * migration off it). Proves:
  *   - validFrom/validUntil round-trip through upsertNode -> getNode.
  *   - A node written WITHOUT a valid-time window is always "as-of" valid

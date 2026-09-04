@@ -1,7 +1,7 @@
 /**
  * ident-test-util.ts — Test-only re-export of assertIdent.
  *
- * Moved from packages/lore/src/engines/kuzuTableStorage.ts (NW-7d).
+ * Moved from packages/lore/src/engines/legacyTableStorage.ts (NW-7d).
  * Production code must never export test helpers; this module gives
  * SP-25 exploit regression tests a stable import path without leaking
  * into the production bundle.
@@ -19,7 +19,7 @@ export function assertIdentForTests(name: string): string {
 
 /**
  * Underscore alias kept for backwards compat with existing test imports
- * that use the old `_assertIdentForTests` name from kuzuTableStorage.
+ * that use the old `_assertIdentForTests` name from legacyTableStorage.
  * @deprecated Use assertIdentForTests instead.
  */
 export const _assertIdentForTests = assertIdentForTests;

@@ -218,7 +218,7 @@ await withGraph(async (g) => {
     ok(hasPersonalToGlobal, 'aggregateEdges contains personal-plugin → Global (fold working)');
 });
 // Section 8 (Plugin raw-Cypher write × cache invalidation) removed here:
-// it exercised LocalGraph.getGraphContext(), a Kùzu-only raw-Cypher escape
+// it exercised LocalGraph.getGraphContext(), a legacy-only raw-Cypher escape
 // hatch that is not part of LoreGraphHandle and has no SurrealGraph
 // counterpart (SurrealGraph.getSchemaGraphOps() is a narrower, internally
 // scoped SurrealQL surface, not a generic plugin write path). No SurrealDB

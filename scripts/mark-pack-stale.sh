@@ -37,8 +37,9 @@ if [ ! -f "$LORE_CLI" ]; then
     exit 0
 fi
 
-# Try to mark nodes stale. If the command fails (e.g. Kùzu lock held by
-# daemon), print a non-fatal warning and exit 0 so the commit is not blocked.
+# Try to mark nodes stale. If the command fails (e.g. the graph store locked
+# by a running daemon), print a non-fatal warning and exit 0 so the commit is
+# not blocked.
 if node "$LORE_CLI" mark-stale --tags orientation-pack 2>&1; then
     echo "[Lore] orientation-pack nodes marked stale. Run 'lore recall' to check which nodes need refreshing."
 else

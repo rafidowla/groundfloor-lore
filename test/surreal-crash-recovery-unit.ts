@@ -4,7 +4,7 @@
  * SurrealDB engine (Phase 1 hard constraint: "a close/reopen crash-and-
  * recovery test, not just the SIGKILL-mid-write test already done").
  *
- * Why close/reopen specifically: Kùzu has documented close/reopen SEGFAULT
+ * Why close/reopen specifically: the legacy graph engine has documented close/reopen SEGFAULT
  * behaviour in this very codebase — `cli/commands/migrateWorkspaceToWorkspace.ts`
  * carries explicit handling for it, and `LocalGraph.close()` has a
  * drain-before-teardown dance guarding a use-after-free. That is a property of
@@ -14,7 +14,7 @@
  *
  * Covered:
  *   A. Close then reopen IN THE SAME PROCESS, repeatedly — the exact shape
- *      that segfaults Kùzu. Data survives every cycle.
+ *      that segfaults the legacy graph engine. Data survives every cycle.
  *   B. Reopen after a HARD KILL (SIGKILL, no close, mid-write) in a child
  *      process. Committed writes survive; nothing is corrupted; the store is
  *      writable again afterwards.

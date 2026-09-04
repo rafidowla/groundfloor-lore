@@ -4,12 +4,12 @@
  *
  * `listNodeSummaries` returns `id`/`type`/`label` where `listNodes` returns
  * whole `LoreNode` records. The prediction was that it helps SurrealDB most,
- * because a document store materialises whole documents while Kùzu is columnar
- * and can skip the columns nobody asked for. That is a prediction; this
- * measures it on both engines against the same corpus.
+ * because a document store materialises whole documents rather than skipping
+ * the columns nobody asked for. That is a prediction; this measures it
+ * against the same corpus.
  *
- * One engine per process — kuzu-lite's open/close ceiling, and so each reading
- * is cold rather than warmed by the other engine's buffer pool.
+ * One workspace per process invocation, so each reading is cold rather than
+ * warmed by a prior run's buffer pool.
  *
  *   LORE_HOME=<home> BENCH_WS=src|dst tsx scripts/diagnostics/summary-read-bench.ts
  */

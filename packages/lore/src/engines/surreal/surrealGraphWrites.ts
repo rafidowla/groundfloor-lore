@@ -5,7 +5,7 @@
  * the split LocalGraph uses across graphEdges.ts + nodeLifecycle.ts, kept in
  * one file here because the SurrealQL forms are a fraction of the Cypher.
  *
- * Two invariants carried over from the Kùzu engine, both load-bearing:
+ * Two invariants carried over from the prior local graph engine, both load-bearing:
  *   - **Field-for-field storage parity.** The stored document uses LocalGraph's
  *     exact column names AND its exact empty-value conventions (`''` for an
  *     absent language / supersession, `false` for flags, `0` for ttl_ms), so
@@ -28,11 +28,11 @@ import type { SurrealQuery } from './surrealGraphReads.js';
 import { EDGE_TABLE, ridToId, toNodeRid } from './surrealRecordId.js';
 import { withTransactionConflictRetry } from '../transactionConflictRetry.js';
 
-/** The node document as stored. Keys match LocalGraph's Kùzu columns 1:1. */
+/** The node document as stored. Keys match LocalGraph's column convention 1:1. */
 type NodeDocument = Record<string, unknown>;
 
 /**
- * Columns the Kùzu schema declares with a `DEFAULT 0` and that
+ * Columns the prior engine's schema declared with a `DEFAULT 0` and that
  * LocalGraph.upsertNode never writes — outcome feedback, owned by
  * `record_outcome`. They are seeded ONCE at insert so `rowToLoreNode` reads
  * `0` rather than `undefined`, which is what LocalGraph returns for a node
@@ -55,18 +55,18 @@ const OUTCOME_COUNTER_SEED = {
  *
  * `createdAt`/`updatedAt` are supplied by the caller (upsert decides whether
  * createdAt is preserved or minted), everything else is defaulted exactly as
- * LocalGraph's Kùzu columns default, EXCEPT when `existing` is supplied: then
+ * LocalGraph's columns default, EXCEPT when `existing` is supplied: then
  * every server-managed/lifecycle field falls back to the STORED value before
  * the schema default, so a caller (store_node / POST /api/node) that omits
  * these fields on an ordinary edit does not reset them.
  *
  * 2026-08-17 (functional-correctness 4.2, fresh sibling of the
- * upsertLifecycle.ts fix on the Kùzu side, landed the same day): before this
+ * upsertLifecycle.ts fix on the prior engine's side, landed the same day): before this
  * fix, EVERY field below except `type`/`label`/`content`/`tags`/`project`/
  * `ecosystem`/`metadata` was unconditionally reset to its schema default on
  * every partial update — an archived node came back active, its scopes were
  * dropped, `validFrom`/`validUntil` were wiped, etc. SurrealGraph has been
- * the DEFAULT graph engine since 2026-08-11; the earlier Kùzu-only fix never
+ * the DEFAULT graph engine since 2026-08-11; the earlier single-engine fix never
  * covered it.
  *
  * 2026-08-17 (functional-correctness 4.3) — `supersededBy`/`supersededAt`/
@@ -121,7 +121,7 @@ export function toNodeDocument(
         anchor_stale: node.anchor_stale ?? priorBool('anchor_stale') ?? false,
         anchor_stale_since: node.anchor_stale_since ?? priorStr('anchor_stale_since') ?? '',
         // Bi-temporal valid-time window (storage primitive). '' (not null)
-        // mirrors LocalGraph's Kùzu STRING DEFAULT '' convention, so the
+        // mirrors LocalGraph's STRING DEFAULT '' convention, so the
         // SHARED rowToLoreNode mapper's ''-means-null coercion applies
         // identically on both engines. Caller-supplied only — never set here
         // — but PRESERVED on omit like every other field (previously reset
@@ -158,11 +158,11 @@ export function toNodeDocument(
  * createdAt-only probe already did.
  *
  * The outcome counters are merged in ONLY on the insert path. That mirrors
- * LocalGraph exactly: its Kùzu columns carry `DEFAULT 0`, and neither its SET
+ * LocalGraph exactly: its columns carry `DEFAULT 0`, and neither its SET
  * nor its CREATE branch lists them, so a stored value is never clobbered by an
  * ordinary upsert. (This also faithfully reproduces a KNOWN open gap —
  * `record_outcome` mirrors counters onto the node via `upsertNode`, and that
- * write is dropped on Kùzu today. Diverging here would silently change
+ * write was dropped on the prior engine. Diverging here would silently change
  * behaviour when a workspace switches engines; fixing it belongs on BOTH
  * engines at once, not in this one.)
  */
@@ -261,7 +261,7 @@ export async function deleteNode(query: SurrealQuery, id: string): Promise<boole
  * a blind RELATE would produce two rows for one logical edge.
  *
  * Missing endpoints fail LOUDLY (NW-BULK). SurrealDB's RELATE would happily
- * create the relation with a dangling side, which is worse than Kùzu's silent
+ * create the relation with a dangling side, which is worse than the prior engine's silent
  * zero-row CREATE — so the endpoint check is mandatory here, not defensive.
  *
  * BOTH checks are id/adjacency-bounded rather than table scans. The obvious
@@ -296,7 +296,7 @@ export async function addEdge(query: SurrealQuery, edge: LoreEdge): Promise<void
         }
 
         // Dedup against the SOURCE's outgoing adjacency only — O(out-degree),
-        // not O(edges). Same scope as Kùzu's MATCH pattern guard.
+        // not O(edges). Same scope as the prior engine's MATCH pattern guard.
         // Audit cluster 5 (2026-08-17): store_edge is documented as an UPSERT.
         // An existing (source, target, relation) triple is UPDATED with the new
         // confidence/confidenceScore instead of silently keeping the old values
@@ -505,7 +505,7 @@ export async function markStaleByTags(query: SurrealQuery, tags: string[]): Prom
     const normalized = tags.map((t) => t.trim().toLowerCase()).filter(Boolean);
     if (normalized.length === 0) return 0;
     try {
-        // ONE statement — LocalGraph loops per id only because Kùzu rejects a
+        // ONE statement — LocalGraph loops per id only because the prior engine rejected a
         // list parameter in `WHERE n.id IN $ids` on the prepare path.
         // 1.1 residual — conflict-retry wrap (composite write verb).
         const updated = await withTransactionConflictRetry(() => query(
@@ -516,4 +516,143 @@ export async function markStaleByTags(query: SurrealQuery, tags: string[]): Prom
     } catch (error) {
         throw surrealError(`Failed to mark nodes stale by tags [${tags.join(', ')}]`, 'markStaleByTags', error);
     }
+}
+
+/**
+ * findNodeIdsByTags — 2026-09-03 (X-markstale audit fix) read-only resolver:
+ * every node id carrying ANY of the tags (same exact-membership match as
+ * `markStaleByTags`), WITHOUT mutating anything. The mark_stale entry points
+ * (mcp/tools/memory/markStale.ts, POST /api/mark-stale) call this FIRST to
+ * get the full matched id set, then chunk-lock + outbox-record + apply
+ * `markStaleByIds` per chunk — so the read (tag scan) and the write (id-
+ * scoped, lockable, replayable) are separate steps.
+ */
+export async function findNodeIdsByTags(query: SurrealQuery, tags: string[]): Promise<string[]> {
+    const normalized = tags.map((t) => t.trim().toLowerCase()).filter(Boolean);
+    if (normalized.length === 0) return [];
+    try {
+        const rows = await query(
+            'SELECT id FROM node WHERE tags ANYINSIDE $tags',
+            { tags: normalized },
+        );
+        return rows.map((r) => ridToId(r['id']));
+    } catch (error) {
+        throw surrealError(`Failed to find nodes by tags [${tags.join(', ')}]`, 'findNodeIdsByTags', error);
+    }
+}
+
+/**
+ * markStaleByIds — 2026-09-03 (X-markstale audit fix) set `stale = true` on
+ * EXACTLY the given ids (no tag re-query) — the substrate primitive the
+ * outbox dispatcher calls on `node.mark_stale` replay (outbox/wiring.ts),
+ * and that the live entry points call inside their own per-chunk
+ * `withNodeLocks` region, mirroring `deleteNode`'s role for `node.delete`.
+ *
+ * Targets records DIRECTLY via `UPDATE $ids` (RecordId array), not
+ * `UPDATE node SET ... WHERE id IN $ids` — see surrealGraphReads.ts
+ * `getNodesByIds` for the measured full-table-scan cost of the WHERE-IN
+ * spelling; direct record targeting is the same fix applied there.
+ * Idempotent: an already-stale or since-deleted id is silently skipped.
+ */
+export async function markStaleByIds(query: SurrealQuery, ids: string[]): Promise<number> {
+    const unique = Array.from(new Set(ids.filter((id) => typeof id === 'string' && id.length > 0)));
+    if (unique.length === 0) return 0;
+    try {
+        const rids = unique.map((id) => toNodeRid(id, 'markStaleByIds'));
+        // 1.1 residual — conflict-retry wrap (composite write verb), same as
+        // markStaleByTags above.
+        const updated = await withTransactionConflictRetry(() => query(
+            'UPDATE $ids SET stale = true RETURN id',
+            { ids: rids },
+        ));
+        // A since-deleted id's slot comes back without an `id` field (same
+        // shape getNodesByIds' direct-fetch form returns for an absent
+        // record) — don't count it as marked.
+        return updated.filter((r) => r['id'] != null).length;
+    } catch (error) {
+        throw surrealError(`Failed to mark ${unique.length} node(s) stale by id`, 'markStaleByIds', error);
+    }
+}
+
+/**
+ * stampAccessTimes — 2026-09-03 (X-accesstimes audit fix) restores the
+ * access-time coldness writer on the ONLY local graph engine still standing.
+ * See docs/design/maintain-access-coldness.md: `lastAccessedAt` /
+ * `last_retrieved_at` back `lore maintain`'s cold-node retention. The prior
+ * local engine (Cypher-based, removed 2026-08-21 — see surrealGraph.ts's
+ * header) was the sole implementor of `LocalGraph.stampAccessTimes`;
+ * SurrealGraph never got an equivalent, so `engines/accessTracker.ts`'s
+ * `ensureAccessTracker()` feature-detect (`typeof t.stampAccessTimes ===
+ * 'function'`) always failed and the whole signal was a silent no-op on
+ * SurrealDB. This is that missing writer.
+ *
+ * Same two invariants the design doc requires, both load-bearing (see the
+ * doc's "Why a naive stamp-on-read is dangerous"):
+ *   - does NOT bump the read-cache epoch — SurrealGraph.stampAccessTimes
+ *     below deliberately skips `bumpWriteEpoch()`, unlike every other write
+ *     in this file;
+ *   - does NOT touch `updatedAt` / `syncedAt` — only the two access columns
+ *     are SET.
+ *
+ * No outbox row: the design doc states these columns are "instance-local...
+ * never synced to cloud" (cross-machine access-time churn has zero benefit),
+ * so unlike `markStaleByIds`/`deleteNode` there is no outbox counterpart —
+ * this is local telemetry, not a replicated domain write.
+ *
+ * Batching: `AccessTracker.touch()` stamps every id passed in ONE call with
+ * a single shared timestamp, but a flush interval can contain several
+ * touch() calls (e.g. two recalls a few seconds apart), so entries in one
+ * batch can carry different (accessedAt, retrievedAt) pairs. Grouping by
+ * that pair — instead of looping per id like the deleted engine did (it had
+ * no `UPDATE $ids`-style batch primitive) — still collapses the common case
+ * (one touch() call, N ids, one timestamp) into a SINGLE `UPDATE $ids`
+ * statement, mirroring `markStaleByIds`'s direct record-targeting form.
+ *
+ * Best-effort, must never fail a read: this runs off the AccessTracker's
+ * debounced background flush, never on the synchronous read path. A bad id
+ * (since-deleted, or one that fails `toNodeRid`'s validation) sinks only its
+ * own group, not the whole batch — every group is caught independently and
+ * logged rather than thrown, so a locked/read-only store degrades this
+ * signal instead of raising through the read that triggered it.
+ */
+export async function stampAccessTimes(
+    query: SurrealQuery,
+    entries: Array<{ id: string; accessedAt: string; retrievedAt?: string }>,
+): Promise<number> {
+    const valid = entries.filter(
+        (e) => typeof e.id === 'string' && e.id.length > 0 && typeof e.accessedAt === 'string' && e.accessedAt.length > 0,
+    );
+    if (valid.length === 0) return 0;
+
+    const groups = new Map<string, { accessedAt: string; retrievedAt?: string; ids: string[] }>();
+    for (const e of valid) {
+        const key = `${e.accessedAt} ${e.retrievedAt ?? ''}`;
+        const existing = groups.get(key);
+        if (existing) existing.ids.push(e.id);
+        else groups.set(key, { accessedAt: e.accessedAt, retrievedAt: e.retrievedAt, ids: [e.id] });
+    }
+
+    let stamped = 0;
+    for (const group of groups.values()) {
+        try {
+            const rids = group.ids.map((id) => toNodeRid(id, 'stampAccessTimes'));
+            const updated = group.retrievedAt
+                ? await withTransactionConflictRetry(() => query(
+                    'UPDATE $ids SET lastAccessedAt = $a, last_retrieved_at = $r RETURN id',
+                    { ids: rids, a: group.accessedAt, r: group.retrievedAt },
+                ))
+                : await withTransactionConflictRetry(() => query(
+                    'UPDATE $ids SET lastAccessedAt = $a RETURN id',
+                    { ids: rids, a: group.accessedAt },
+                ));
+            // A since-deleted id's slot comes back without an `id` field,
+            // same convention markStaleByIds relies on above.
+            stamped += updated.filter((r) => r['id'] != null).length;
+        } catch (error) {
+            console.error(
+                `[SurrealGraph] stampAccessTimes: skipped a group of ${group.ids.length} pending stamp(s): ${(error as Error).message}`,
+            );
+        }
+    }
+    return stamped;
 }

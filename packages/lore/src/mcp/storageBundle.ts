@@ -4,8 +4,8 @@
  * Extracted from `mcp/services.ts` (827 lines, cap 800). This is one concern —
  * "assemble the handles a workspace runs on" — and it was the part of
  * `services.ts` most likely to keep growing, because every substrate change
- * lands here. Kùzu removal is the current example: the local branch used to
- * refuse to boot without a Kùzu database.
+ * lands here: removing the local graph engine that used to gate boot on a
+ * specific database being present is one such example.
  */
 
 import { createTableStorage } from '../engines/tableStorageFactory.js';
@@ -39,6 +39,7 @@ const cloudTableStorageStub: ITableStorage = {
         extractedJsonFields: false, additiveSchemaEvolution: false,
     }),
     async createTable() { throw new Error(CLOUD_NOT_IMPL_MSG); },
+    async listTables() { throw new Error(CLOUD_NOT_IMPL_MSG); },
     async insert() { throw new Error(CLOUD_NOT_IMPL_MSG); },
     async insertBatch() { throw new Error(CLOUD_NOT_IMPL_MSG); },
     async query() { throw new Error(CLOUD_NOT_IMPL_MSG); },
@@ -108,24 +109,20 @@ export async function createStorageClient(
             deploymentMode: 'cloud',
         };
     }
-    // KÙZU REMOVAL — this branch used to open with
-    // `requireLocalGraph(graph, 'createStorageClient.local')`, which meant local
-    // mode refused to boot without a Kùzu database. It needed the LocalGraph for
-    // exactly two things, and NEITHER of them is Kùzu: `sessionCache` (a JSON
-    // file keyed on a path) and `getTableStorage()` (SQLite by default since
-    // 061e189). That single line was the furthest-upstream blocker to running a
-    // workspace with no Kùzu on disk, and removing it unblocks every other step.
+    // This branch used to require a specific local graph class for exactly
+    // two things: `sessionCache` (a JSON file keyed on a path) and
+    // `getTableStorage()` (SQLite by default since 061e189). That
+    // requirement was the furthest-upstream blocker to running a workspace
+    // whose graph engine doesn't bundle those, so it was removed: local
+    // mode now builds a bundle-owned SessionCacheManager +
+    // createTableStorage(path) directly, needing no graph instance to
+    // obtain either.
     //
-    // Phase 3d: the `isLocalGraph(graph)` class check — and with it
-    // engines/assertLocalGraph.ts — is gone. The Kùzu-free path (bundle-owned
-    // SessionCacheManager + createTableStorage(path)) is the default and only
-    // path. The one surviving branch is the structural sessionCache probe
-    // below, which exists solely to keep the TW-7e single-writer invariant for
-    // as long as a LocalGraph can still be booted (a workspace explicitly
-    // declaring 'kuzu' still gets one, until the LocalGraph-deletion step).
-    // SurrealGraph exposes no sessionCache, so the probe is false for every
-    // engine except LocalGraph — the capability-probe pattern of
-    // requireWorkspaceGraph, not a class check.
+    // The one surviving branch is the structural sessionCache probe below,
+    // kept for the TW-7e single-writer invariant. SurrealGraph exposes no
+    // sessionCache, so the probe is false for every current engine — it
+    // stays as a capability probe (requireWorkspaceGraph's pattern, not a
+    // class check) in case a future engine reintroduces one.
     if (!(verbatimStore instanceof VerbatimStore)) {
         throw new Error('createStorageClient: local mode requires VerbatimStore for loreVerbatim');
     }

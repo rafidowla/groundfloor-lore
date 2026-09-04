@@ -72,7 +72,7 @@ export const SKIP_CORRELATION_IF_NO_SAMEKIND = new Set<string>(['node_type.renam
  * (they are not in DESTRUCTIVE_OP_KINDS), so they are unaffected.
  *
  * D2-authz-1 (regression of F-M05/M06) — the earlier version appended
- * `.toLowerCase()`. But Kùzu node-table / type names are CASE-SENSITIVE:
+ * `.toLowerCase()`. But graph node-type / target names are CASE-SENSITIVE:
  * `know.Tenant` and `know.tenant` are DISTINCT live types. Lower-casing
  * collapsed them to one approved signature, so an unapproved op on
  * `know.tenant` could match an approval for `know.Tenant`. The fix is to drop
@@ -85,7 +85,7 @@ export const SKIP_CORRELATION_IF_NO_SAMEKIND = new Set<string>(['node_type.renam
  * for them and cannot break the existing schema-routes-unit happy paths.
  */
 export function canonicalizeTarget(target: string): string {
-    // D2-authz-1 — preserve case; do NOT lower-case Kùzu type/target names.
+    // D2-authz-1 — preserve case; do NOT lower-case graph type/target names.
     return String(target ?? '')
         .trim()
         .split('.')

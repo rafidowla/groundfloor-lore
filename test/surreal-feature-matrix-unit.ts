@@ -275,7 +275,7 @@ await test('countView ROLLBACK: turning it off on a store that has one still wor
 });
 
 await test('countView UNDER CONCURRENCY: the view can silently undercount even though every write lands (why this flag defaults OFF)', async () => {
-    // Reproduces the Kuzu-removal Phase-3f-adjacent finding (2026-08-21):
+    // Reproduces the legacy-removal Phase-3f-adjacent finding (2026-08-21):
     // runBulkIngest against a fresh SurrealGraph at default concurrency
     // looked like an ~80% write-loss bug. It wasn't -- every node landed.
     // The `node_counts` view's own maintained count silently undercounted
@@ -317,7 +317,7 @@ await test('countView UNDER CONCURRENCY: the view can silently undercount even t
 
 /* ─── fts: the divergence, pinned as a known set ─────────────────── */
 
-await test('fts OFF (default): substring search matches, as it does on Kùzu', async () => {
+await test('fts OFF (default): substring search matches, as it does on the legacy graph engine', async () => {
     await withGraph({ fts: false }, async (g) => {
         await seed(g);
         assert.ok((await g.search('kapp', 50)).length > 0, 'prefix matches');

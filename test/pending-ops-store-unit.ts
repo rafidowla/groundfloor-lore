@@ -2,9 +2,9 @@
 /**
  * pending-ops-store-unit.ts — InMemoryPendingOpsStore lifecycle tests.
  *
- * Exercises the queue contract used by every PendingOpsStore impl
- * (in-memory today, Kùzu/Postgres later). When the Kùzu-backed store
- * lands, the same test cases re-run against it for parity.
+ * Exercises the queue contract used by every PendingOpsStore impl (in-memory
+ * here; SQLite in production, see test/sqlite-pending-ops-store-unit.ts,
+ * which re-runs the same cases against it for parity).
  */
 
 import assert from 'node:assert/strict';

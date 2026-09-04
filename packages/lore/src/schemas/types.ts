@@ -199,7 +199,7 @@ export const REBAC_RELATION_EDGE_NAMES: readonly string[] =
  *   "viewer | editor | owner"
  *
  * AND, NOT, and parent-traversal expressions are deferred. When needed they
- * land in the SpiceDB-backed cloud evaluator first; the local Kùzu evaluator
+ * land in the SpiceDB-backed cloud evaluator first; the local evaluator
  * follows.
  */
 export type PermissionExpression = string;

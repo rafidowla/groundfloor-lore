@@ -4,7 +4,7 @@
  * `graphReport.ts` used to feed four raw Cypher aggregates off
  * `graph.getGraphContext().queryRows(...)`: edge-confidence tally, hub
  * ranking by degree (a Cypher `COUNT{}` subquery), recently-updated, and
- * orphans. That only ran on Kùzu. This module reproduces all four from the
+ * orphans. That only ran on one graph engine. This module reproduces all four from the
  * portable primitives BOTH `LocalGraph` and `SurrealGraph` implement
  * (`queryEdges`, `getNodesByIds`, `bulkListProjected`) — the same shape as
  * `engines/searchRanking.ts` (read its header for the precedent): the report
@@ -95,8 +95,8 @@ export interface HubRow {
  * computeTopHubs — rank `degreeById` and hydrate the winners' label/type.
  *
  * Deterministic tie-break: the source Cypher (`ORDER BY deg DESC LIMIT $n`,
- * no tie-break clause) sorted equal-degree nodes in whatever order Kùzu's
- * `COUNT{}` subquery happened to enumerate them — not a documented or
+ * no tie-break clause) sorted equal-degree nodes in whatever order the graph
+ * engine's `COUNT{}` subquery happened to enumerate them — not a documented or
  * stable order. `id` ascending here makes it explicit and reproducible.
  * (`degreeById` only ever holds ids that appeared on ≥1 edge, so every entry
  * is already > 0 — the source Cypher's `WHERE deg > 0` has nothing to do.)
@@ -184,8 +184,8 @@ export interface OrphanRow {
  * Walks the node table via `bulkListProjected` (`updatedAt DESC, id ASC`)
  * and keeps rows whose id is absent from `endpointIds` (built by
  * `computeEdgeAggregates`), up to `limit`. The source Cypher had no
- * `ORDER BY` on this query at all — its result order was whatever Kùzu's
- * internal node-scan happened to produce, undocumented and not guaranteed
+ * `ORDER BY` on this query at all — its result order was whatever the graph
+ * engine's internal node-scan happened to produce, undocumented and not guaranteed
  * stable across runs or versions. This is a genuine ordering IMPROVEMENT,
  * not a preserved behavior: same orphan set (up to `limit`), now in a
  * defined, reproducible order. Nothing downstream depended on the old order

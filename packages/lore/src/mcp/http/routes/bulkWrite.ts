@@ -51,18 +51,19 @@ import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 // edge.upsert, node.delete, verbatim.upsert) are idempotent — the replicator
 // replays no-ops. Marker tokens `withOutbox` + `outboxBatch` satisfy the O-D2
 // gate-test regex without renaming the helper.
-import { recordHotWriteBatch } from '../../../outbox/hotLane.js';
+import { recordHotWriteBatch, retractHotWriteOrCompensate } from '../../../outbox/hotLane.js';
+import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE } from '../../../core/nodeWriteLock.js';
 import { flushBulkQueuedEmbeds, buildVerbatimSpec, type VerbatimSpec } from './bulkEmbedFlush.js';
 import { handleBulkRecall } from './bulkRecall.js';
 import { handleBulkEdges, handleBulkDelete } from './bulkWriteEdgesDelete.js';
 import { normaliseBulkNodeScope, buildBulkVerbatimMetadata } from '../../../core/bulkNodeScope.js';
-import type { OutboxStore } from '../../../outbox/types.js';
+import type { OutboxEntry, OutboxStore } from '../../../outbox/types.js';
 import type { WorkspaceVerbatimResolver } from '../../../outbox/workspaceVerbatimResolver.js';
 import type { VerbatimStore } from '../../../engines/verbatimStore.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 
-// Widened for the Kùzu removal: naming CONCRETE classes excluded SurrealGraph.
+// Widened when the local graph engine changed: naming CONCRETE classes excluded SurrealGraph.
 type LoreGraph = LoreGraphHandle;
 
 export interface BulkWriteDeps {
@@ -95,6 +96,14 @@ export interface BulkWriteDeps {
      *  falls back to deps.store.loreVerbatim. QUEUED/outbox path is already ws-
      *  correct (embed.batch keyed requestedWorkspace). */
     workspaceVerbatimResolver?: WorkspaceVerbatimResolver;
+    /** Round-E X-edges — WAL access for `handleBulkDelete`'s node.delete
+     *  entries (bulkWriteEdgesDelete.ts). Optional and unwired from the
+     *  dispatcher today (REST routes generally don't append to the WAL —
+     *  see nodeService.ts's `getWal` for the one place that does); present
+     *  so a future wiring pass has the hook without another BulkWriteDeps
+     *  shape change. Absent = no WAL append (unchanged from before this
+     *  field existed). */
+    getWal?: () => import('../../../engines/writeAheadLog.js').WriteAheadLog;
 }
 
 export const ITEM_CAP = 1000;
@@ -111,9 +120,10 @@ export async function resolveGraph(
     if (!deps.graphRegistry) return deps.store.loreGraph;
     const target = requestedWorkspace ?? deps.graphRegistry.activeName();
     try {
-        // getGraphHandle resolves the DECLARED engine; getOrOpen is the Kùzu
-        // substrate accessor, so a Surreal workspace used to land every bulk
-        // item in its empty Kùzu db and report ok:true. Gate still runs inside.
+        // getGraphHandle resolves the DECLARED engine, so a bulk write
+        // lands in the requested workspace's own graph rather than an
+        // empty db for the wrong engine while reporting ok:true. Gate
+        // still runs inside.
         return await deps.graphRegistry.getGraphHandle(target);
     } catch (err) {
         if (err instanceof WorkspaceNotFoundError) {
@@ -264,6 +274,12 @@ async function handleBulkNodes(
         if (q.handled) return true;
     }
     const targetGraph = await resolveGraph(deps, requestedWorkspace);
+    // Lock key workspace — must name the workspace the writes actually land
+    // in, which is what resolveGraph() resolved: the requested one, else the
+    // registry's active name. Using a bare `requestedWorkspace!` here would
+    // key the lock on the string "undefined" on the (dispatcher-guarded)
+    // no-workspace path and silently stop contending with nodeUpsert.
+    const lockWorkspace = requestedWorkspace ?? deps.graphRegistry?.activeName() ?? '';
     if ('error' in targetGraph) { writeWorkspaceNotFound(res, targetGraph); return true; }
     // L-012 — resolve the REQUESTED workspace's verbatim (LanceDB) store so the
     // inline embed path seeds into the same ws the graph node landed in (else a
@@ -337,7 +353,21 @@ async function handleBulkNodes(
         // route used to pass every field straight to the graph writer, so any
         // write token could mass-set scopes/status/classification. The single-
         // write siblings reject these via checkUnknownFields; mirror that here.
-        const forbidden = ['status', 'classification', 'security_scopes', 'stale', 'anchor_stale', 'anchor_stale_since']
+        //
+        // QA finding 1 (A4 round E, 2026-09-03) — this denylist is NOT the
+        // same allowlist checkUnknownFields uses (STORE_NODE_KNOWN_FIELDS):
+        // bulk items legitimately accept a caller-supplied `project` field
+        // (see bulkNodeScope.ts / test/bulk-write-scope-metadata-unit.ts),
+        // which STORE_NODE_KNOWN_FIELDS does not include, so switching this
+        // route to that allowlist wholesale would reject a currently-tested,
+        // legitimate bulk field. Denylist stays the minimal fix: it was
+        // missing `supersededReason`/`supersededBy`/`supersededAt`, so a bulk
+        // upsert could stamp an uncapped supersession reason straight onto a
+        // node, bypassing supersede_node's MAX_NODE_FIELD_BYTES cap entirely.
+        const forbidden = [
+            'status', 'classification', 'security_scopes', 'stale', 'anchor_stale', 'anchor_stale_since',
+            'supersededReason', 'supersededBy', 'supersededAt',
+        ]
             .filter((f) => f in (raw as Record<string, unknown>));
         if (forbidden.length > 0) {
             results[i] = { ok: false, id: raw.id as string, error: `unknown_field: ${forbidden.join(', ')}` };
@@ -351,35 +381,6 @@ async function handleBulkNodes(
         const embedMode = parseBulkEmbedMode(raw.embed, callEmbedMode);
         validSpecs.push({ idx: i, raw, embedMode });
     }
-    if (deps.outboxStore && validSpecs.length > 0) {
-        try {
-            await recordHotWriteBatch(deps.outboxStore, validSpecs.map(({ raw }) => ({
-                workspace: requestedWorkspace!,
-                operationKind: 'node.upsert',
-                payload: raw as unknown as Record<string, unknown>,
-                initiator: 'http:POST /api/nodes/bulk',
-                operation: 'graph.upsert',
-            })));
-        } catch (err) {
-            // Outbox commit failure is fatal for the whole batch — we
-            // never want a partially-durable result. Mark the valid
-            // items as outbox-commit failures so the caller sees per-
-            // item status and can retry.
-            const msg = `outbox commit failed: ${(err as Error).message}`;
-            for (const { idx, raw } of validSpecs) {
-                results[idx] = { ok: false, id: raw.id as string, error: msg };
-            }
-            deps.auditLog.log({
-                toolName: 'bulk_store_nodes',
-                args: { count: items.length, workspace: requestedWorkspace ?? null, surface: 'http' },
-                result: 'error',
-                resultDetail: msg,
-                durationMs: 0,
-            });
-            writeJson(res, 200, { ok: false, count: items.length, succeeded: 0, results });
-            return true;
-        }
-    }
     let succeeded = 0;
     // Sprint E2 — LOCAL queued-embed accumulator (one embed.batch row). Collected
     // AFTER substrate upsert succeeds so a failed upsert never leaks in.
@@ -392,80 +393,238 @@ async function handleBulkNodes(
     // RA2-reaudit2 (bulk wall-time) — one write-lane trip instead of N×
     // upsertNode (~1.9x) on a local engine; isWorkspaceGraph probes capability.
     const batchGraph = isWorkspaceGraph(targetGraph) ? targetGraph : null;
+    // QA A2 round-3 finding (2026-09-03) — the O3 outbox-batch commit for
+    // this request's node.upsert rows used to run BEFORE either branch below
+    // took its lock(s). A concurrent delete on one of these ids records its
+    // own node.delete row inside ITS lock and can finish (and release the
+    // lock) before this batch's lock request for that id is even granted, so
+    // the real substrate order (delete, then this upsert re-creating the
+    // node) came out backwards from the outbox commit order (this upsert's
+    // row already durable first) — a replay contradicted the real end state.
+    // Fix: move the `recordHotWriteBatch` call to be the first thing done
+    // INSIDE the lock region, so nothing touching an id can land between the
+    // commit and the substrate write for that id.
+    //
+    // QA A2 round-4 finding 1 (2026-09-03) — the round-3 fix then held ALL
+    // of a large batch's locks for the WHOLE substrate loop (`withNodeLocks`
+    // never releases a key until its whole callback returns), so a
+    // concurrent single-key writer on ANY one of 1000 ids waited for nearly
+    // the entire batch (~865-960x amplification measured). Fix: run
+    // `withNodeLocks` per CHUNK of at most `BULK_LOCK_CHUNK_SIZE` ids
+    // instead of once over the whole batch — see nodeWriteLock.ts for why
+    // this bounds the worst-case hold without reopening the round-3 race
+    // (the outbox commit and substrate writes for a given id are still
+    // atomic under that id's own chunk lock; only OTHER ids' turns release
+    // sooner). Each chunk's outbox commit failure only fails that chunk's
+    // items — a batch spanning multiple chunks can partially succeed, which
+    // `results`/`succeeded` already report per-item.
     if (batchGraph) {
-        const batchResults = await batchGraph.bulkUpsertNodes(
-            validSpecs.map((s) => s.raw as unknown as Parameters<typeof batchGraph.bulkUpsertNodes>[0][number]),
-        );
-        for (let k = 0; k < validSpecs.length; k++) {
-            const { idx, raw, embedMode } = validSpecs[k]!;
-            const br = batchResults[k]!;
-            if (!br.ok) { results[idx] = { ok: false, id: raw.id as string, error: br.error }; continue; }
-            succeeded++;
-            results[idx] = { ok: true, id: raw.id as string };
-            const verbatimText = buildVerbatimText(
-                raw.label as string,
-                (raw.content as string | undefined) ?? '',
-                tagsToArray(raw.tags as string | string[] | undefined),
-            );
-            if (embedMode === 'inline') {
-                // C-R3-01 — AWAIT the inline seed (was fire-and-forget
-                // `.catch(console.error)`). A swallowed verbatim failure left the
-                // graph node committed + the caller told ok:true = a durable
-                // graph-only orphan. On failure now: report the item ok:false and
-                // roll back its graph node. (The default 'queued' path is outbox-
-                // tracked and unaffected.)
-                try {
-                    // Metadata via the shared builder — this branch used to
-                    // hardcode `project:'*', ecosystem:'*'` inline. See
-                    // bulkNodeScope.ts for what that silently broke.
-                    const rec = raw as Record<string, unknown>;
-                    await target.verbatimStore({
-                        id: `lore:${raw.id as string}`,
-                        text: verbatimText,
-                        metadata: buildBulkVerbatimMetadata({
-                            type: raw.type as string,
-                            label: raw.label as string,
-                            tags: tagsToString(raw.tags as string | string[] | undefined),
-                            project: rec.project as string,
-                            ecosystem: rec.ecosystem as string,
-                            text: verbatimText,
-                        }),
-                    });
-                } catch (err) {
-                    results[idx] = { ok: false, id: raw.id as string, error: `verbatim seed failed: ${redactError(err)}` };
-                    succeeded--;
-                    try { await withTransactionConflictRetry(() => targetGraph.deleteNode(raw.id as string)); }
-                    catch (delErr) { console.error(`[Lore HTTP] bulk inline rollback deleteNode failed for ${raw.id as string}: ${redactError(delErr)}`); }
+        // The outbox commit + graph write + per-node verbatim seed all run
+        // under the SAME per-(workspace,id) locks `nodeUpsert` holds
+        // (core/nodeWriteLock.ts). Unlocked, a concurrent single-write or
+        // delete for one of these ids interleaved between this batch's graph
+        // write and its verbatim seed and left the two substrates durably
+        // disagreeing. `bulkUpsertNodes` is ONE substrate call per CHUNK, so
+        // the locks cannot be taken a node at a time without giving up the
+        // chunk — `withNodeLocks` holds all of a chunk's ids, acquired in
+        // sorted order (deadlock-free; see nodeWriteLock.ts rule 3).
+        for (const chunk of chunkForLocking(validSpecs, BULK_LOCK_CHUNK_SIZE)) {
+            await withNodeLocks(lockWorkspace, chunk.map(({ raw }) => raw.id as string), async () => {
+                let chunkEntries: OutboxEntry[] | null = null;
+                if (deps.outboxStore && chunk.length > 0) {
+                    try {
+                        chunkEntries = await recordHotWriteBatch(deps.outboxStore, chunk.map(({ raw }) => ({
+                            workspace: requestedWorkspace!,
+                            operationKind: 'node.upsert',
+                            payload: raw as unknown as Record<string, unknown>,
+                            initiator: 'http:POST /api/nodes/bulk',
+                            operation: 'graph.upsert',
+                        })));
+                    } catch (err) {
+                        const msg = `outbox commit failed: ${(err as Error).message}`;
+                        for (const { idx, raw } of chunk) results[idx] = { ok: false, id: raw.id as string, error: msg };
+                        return;
+                    }
                 }
-            } else if (embedMode === 'queued') {
-                embedTexts.push(verbatimText);
-                embedTargetIds.push(`lore:${raw.id as string}`);
-            }
+                const batchResults = await batchGraph.bulkUpsertNodes(
+                    chunk.map((s) => s.raw as unknown as Parameters<typeof batchGraph.bulkUpsertNodes>[0][number]),
+                );
+                for (let k = 0; k < chunk.length; k++) {
+                    const { idx, raw, embedMode } = chunk[k]!;
+                    const br = batchResults[k]!;
+                    if (!br.ok) {
+                        results[idx] = { ok: false, id: raw.id as string, error: br.error };
+                        // QA A2 round-4 finding 2 (2026-09-03) — this chunk's
+                        // node.upsert outbox row for `raw.id` is already committed
+                        // (above), but the substrate write for THIS node failed, so
+                        // the row is now pending for a write the caller was just
+                        // told failed. Retract it the same way nodeService.ts's
+                        // single-write path retracts its own node.upsert row on a
+                        // downstream failure — else a later replicator tick creates
+                        // a ghost node the caller was told ok:false for.
+                        if (deps.outboxStore && chunkEntries) {
+                            const entry = chunkEntries[k];
+                            if (entry) {
+                                try {
+                                    await retractHotWriteOrCompensate(deps.outboxStore, entry.id, {
+                                        workspace: requestedWorkspace!,
+                                        operationKind: 'node.delete',
+                                        payload: { id: raw.id as string },
+                                        initiator: 'http:POST /api/nodes/bulk',
+                                        operation: 'graph.delete',
+                                    });
+                                } catch (retractErr) {
+                                    console.error(`[Lore HTTP] bulk upsert: node.upsert outbox retraction failed for ${raw.id as string}: ${redactError(retractErr)} — replicator may create a ghost node`);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    succeeded++;
+                    results[idx] = { ok: true, id: raw.id as string };
+                    const verbatimText = buildVerbatimText(
+                        raw.label as string,
+                        (raw.content as string | undefined) ?? '',
+                        tagsToArray(raw.tags as string | string[] | undefined),
+                    );
+                    if (embedMode === 'inline') {
+                        // C-R3-01 — AWAIT the inline seed (was fire-and-forget
+                        // `.catch(console.error)`). A swallowed verbatim failure left the
+                        // graph node committed + the caller told ok:true = a durable
+                        // graph-only orphan. On failure now: report the item ok:false and
+                        // roll back its graph node. (The default 'queued' path is outbox-
+                        // tracked and unaffected.)
+                        try {
+                            // Metadata via the shared builder — this branch used to
+                            // hardcode `project:'*', ecosystem:'*'` inline. See
+                            // bulkNodeScope.ts for what that silently broke.
+                            const rec = raw as Record<string, unknown>;
+                            await target.verbatimStore({
+                                id: `lore:${raw.id as string}`,
+                                text: verbatimText,
+                                metadata: buildBulkVerbatimMetadata({
+                                    type: raw.type as string,
+                                    label: raw.label as string,
+                                    tags: tagsToString(raw.tags as string | string[] | undefined),
+                                    project: rec.project as string,
+                                    ecosystem: rec.ecosystem as string,
+                                    text: verbatimText,
+                                }),
+                            });
+                        } catch (err) {
+                            results[idx] = { ok: false, id: raw.id as string, error: `verbatim seed failed: ${redactError(err)}` };
+                            succeeded--;
+                            try { await withTransactionConflictRetry(() => targetGraph.deleteNode(raw.id as string)); }
+                            catch (delErr) { console.error(`[Lore HTTP] bulk inline rollback deleteNode failed for ${raw.id as string}: ${redactError(delErr)}`); }
+                            // QA E5-A2 (2026-09-03) — this id's node.upsert outbox row was
+                            // committed above (recordHotWriteBatch) and `br.ok` was true, so
+                            // the `!br.ok` branch's retraction above never runs for it. The
+                            // inline verbatim seed then failed and the graph write was just
+                            // rolled back, but without retracting here the row stays pending
+                            // and a replicator replay resurrects the node as a graph-only
+                            // orphan with no verbatim mirror — the caller was told ok:false.
+                            // Mirror the `!br.ok` branch's retraction (and upsertOne's ARCADE-
+                            // path equivalent, which already retracts via the shared
+                            // `!r.ok` handling in the ARCADE loop below).
+                            if (deps.outboxStore && chunkEntries) {
+                                const entry = chunkEntries[k];
+                                if (entry) {
+                                    try {
+                                        await retractHotWriteOrCompensate(deps.outboxStore, entry.id, {
+                                            workspace: requestedWorkspace!,
+                                            operationKind: 'node.delete',
+                                            payload: { id: raw.id as string },
+                                            initiator: 'http:POST /api/nodes/bulk',
+                                            operation: 'graph.delete',
+                                        });
+                                    } catch (retractErr) {
+                                        console.error(`[Lore HTTP] bulk inline verbatim rollback: node.upsert outbox retraction failed for ${raw.id as string}: ${redactError(retractErr)} — replicator may create a ghost node`);
+                                    }
+                                }
+                            }
+                        }
+                    } else if (embedMode === 'queued') {
+                        embedTexts.push(verbatimText);
+                        embedTargetIds.push(`lore:${raw.id as string}`);
+                    }
+                }
+            });
         }
     } else {
-        for (const { idx, raw, embedMode } of validSpecs) {
-            const r = await upsertOne(target, raw, deps, embedMode);
-            if (r.ok) {
-                succeeded++;
-                if (embedMode === 'queued') {
-                    // ARCADE (non-local): queued embeds ride a WIRED verbatim.upsert
-                    // row per node (see bulkEmbedFlush.ts). project was stamped above.
-                    verbatimSpecs.push(buildVerbatimSpec({
-                        id: raw.id as string,
-                        text: buildVerbatimText(
-                            raw.label as string,
-                            (raw.content as string | undefined) ?? '',
-                            tagsToArray(raw.tags as string | string[] | undefined),
-                        ),
-                        type: raw.type as string,
-                        label: raw.label as string,
-                        tags: tagsToString(raw.tags as string | string[] | undefined),
-                        project: (raw as Record<string, unknown>).project as string,
-                        ecosystem: (raw as Record<string, unknown>).ecosystem as string,
-                    }));
+        // ARCADE/cloud path — no `bulkUpsertNodes` batch primitive, so each
+        // id is written one at a time via `upsertOne` (raw facade
+        // `upsertNode`, not `nodeUpsert` — cannot re-enter the lock). Each
+        // CHUNK's ids are locked TOGETHER via `withNodeLocks` (same reasoning
+        // as the batchGraph branch above) so that chunk's `recordHotWriteBatch`
+        // commit stays atomic with that chunk's sequential write loop, instead
+        // of racing a concurrent same-id delete the way the pre-lock commit
+        // used to.
+        for (const chunk of chunkForLocking(validSpecs, BULK_LOCK_CHUNK_SIZE)) {
+            await withNodeLocks(lockWorkspace, chunk.map(({ raw }) => raw.id as string), async () => {
+                let chunkEntries: OutboxEntry[] | null = null;
+                if (deps.outboxStore && chunk.length > 0) {
+                    try {
+                        chunkEntries = await recordHotWriteBatch(deps.outboxStore, chunk.map(({ raw }) => ({
+                            workspace: requestedWorkspace!,
+                            operationKind: 'node.upsert',
+                            payload: raw as unknown as Record<string, unknown>,
+                            initiator: 'http:POST /api/nodes/bulk',
+                            operation: 'graph.upsert',
+                        })));
+                    } catch (err) {
+                        const msg = `outbox commit failed: ${(err as Error).message}`;
+                        for (const { idx, raw } of chunk) results[idx] = { ok: false, id: raw.id as string, error: msg };
+                        return;
+                    }
                 }
-            }
-            results[idx] = r;
+                for (let k = 0; k < chunk.length; k++) {
+                    const { idx, raw, embedMode } = chunk[k]!;
+                    const r = await upsertOne(target, raw, deps, embedMode);
+                    if (r.ok) {
+                        succeeded++;
+                        if (embedMode === 'queued') {
+                            // ARCADE (non-local): queued embeds ride a WIRED verbatim.upsert
+                            // row per node (see bulkEmbedFlush.ts). project was stamped above.
+                            verbatimSpecs.push(buildVerbatimSpec({
+                                id: raw.id as string,
+                                text: buildVerbatimText(
+                                    raw.label as string,
+                                    (raw.content as string | undefined) ?? '',
+                                    tagsToArray(raw.tags as string | string[] | undefined),
+                                ),
+                                type: raw.type as string,
+                                label: raw.label as string,
+                                tags: tagsToString(raw.tags as string | string[] | undefined),
+                                project: (raw as Record<string, unknown>).project as string,
+                                ecosystem: (raw as Record<string, unknown>).ecosystem as string,
+                            }));
+                        }
+                    } else if (deps.outboxStore && chunkEntries) {
+                        // QA A2 round-4 finding 2 (2026-09-03) — `upsertOne`'s outer
+                        // catch (a genuine post-outbox-commit substrate failure) AND
+                        // its own inline-verbatim rollback branch both return here as
+                        // `ok:false` after this id's node.upsert row was already
+                        // committed above; either way the row now claims a write that
+                        // did not durably happen, same as the batchGraph branch's
+                        // `!br.ok` case. Retract it.
+                        const entry = chunkEntries[k];
+                        if (entry) {
+                            try {
+                                await retractHotWriteOrCompensate(deps.outboxStore, entry.id, {
+                                    workspace: requestedWorkspace!,
+                                    operationKind: 'node.delete',
+                                    payload: { id: raw.id as string },
+                                    initiator: 'http:POST /api/nodes/bulk',
+                                    operation: 'graph.delete',
+                                });
+                            } catch (retractErr) {
+                                console.error(`[Lore HTTP] bulk upsert (ARCADE): node.upsert outbox retraction failed for ${raw.id as string}: ${redactError(retractErr)} — replicator may create a ghost node`);
+                            }
+                        }
+                    }
+                    results[idx] = r;
+                }
+            });
         }
     }
     // Flush the queued-embed outbox rows — mode-specific strategy (LOCAL

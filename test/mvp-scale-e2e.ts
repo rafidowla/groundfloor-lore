@@ -114,10 +114,14 @@ async function main(): Promise<void> {
         console.log(`  ✓ load (producer): ${N} nodes in ${(loadMs / 1000).toFixed(1)}s = ${loadRate} nodes/s`);
 
         // ── Phase 2: wait for the embed pipeline to drain the whole corpus ────
+        // FINDING 4 (2026-09-03): /api/health's `outbox` block is now only in
+        // the Bearer-authenticated body; an anonymous probe here would read
+        // `hb.outbox` as undefined and the `?? 0` fallback would make the
+        // loop wrongly declare "drained" on its very first iteration.
         const embedStart = Date.now();
         let depth = Infinity;
         while (Date.now() - embedStart < DRAIN_TIMEOUT_MS) {
-            const hb = await (await fetch(`${base}/api/health`, { headers: { Origin: base } })).json() as { outbox?: { depth?: number } };
+            const hb = await (await fetch(`${base}/api/health`, { headers: hdr })).json() as { outbox?: { depth?: number } };
             depth = hb.outbox?.depth ?? 0;
             if (depth === 0) break;
             await new Promise((r) => setTimeout(r, 2000));

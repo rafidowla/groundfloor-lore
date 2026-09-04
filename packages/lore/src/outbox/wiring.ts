@@ -26,6 +26,7 @@ import type { BatchedEmbedder } from '../embed/batchedEmbedder.js';
 import { batchedEmbedderFor } from '../embed/batchedEmbedder.js';
 import { computeContentHash } from '../engines/contentHash.js';
 import { normaliseEcosystem } from '../core/bulkNodeScope.js';
+import { withNodeLock, withNodeLocks, withEdgeLock } from '../core/nodeWriteLock.js';
 import { FileOutboxStore } from './store.js';
 import { SqliteOutboxStore } from './sqliteStore.js';
 import type { OutboxStore as IOutboxStore } from './types.js';
@@ -114,7 +115,7 @@ export function wireOutbox(input: {
         // resolver THROWS (workspace transiently missing / removed-from-
         // workspaces.json / graph-open failure), do NOT fall back to boot:
         // that applies a FOREIGN tenant's node/edge/vector write to the boot
-        // workspace's Kùzu+LanceDB — a silent cross-workspace isolation breach
+        // workspace's graph engine+LanceDB — a silent cross-workspace isolation breach
         // — and because the misrouted write SUCCEEDS the replicator marks the
         // row replicated and drains it, so it is never retried against the
         // correct workspace (permanent misplacement). Propagate instead: the
@@ -216,24 +217,64 @@ export function wireOutbox(input: {
         // Sprint O2 — graph fan-out for hot-lane node + edge writes.
         // Wired only when caller supplies getGraph (local mode).
         ...(input.getGraph ? {
+            // The replay takes the SAME per-(workspace,id) lock the live write
+            // paths hold (core/nodeWriteLock.ts). Without it a replayed
+            // node.upsert / node.delete could interleave with a live same-id
+            // write and re-assert a state the caller had already superseded —
+            // the replicator's whole premise (idempotent re-assertion) only
+            // holds if no live write is mid-sequence for that id. The
+            // replicator runs on its own background loop and `recordHotWrite`
+            // never dispatches inline, so this can never be entered from
+            // inside a lock (nodeWriteLock.ts rule 1). A legacy row with no
+            // workspace keys on '' — those rows predate per-workspace routing
+            // and go to the boot graph, so there is no better key available.
             upsertNode: async (payload: Record<string, unknown>, workspace?: string) => {
                 const g = await resolveGraph(workspace);
-                await g.upsertNode(payload as unknown as LoreNode);
+                const id = String((payload as { id?: unknown }).id ?? '');
+                await withNodeLock(workspace ?? '', id, () => g.upsertNode(payload as unknown as LoreNode));
             },
+            // Round-E X-edges — edges now DO take a lock: a per-triple one
+            // (core/nodeWriteLock.ts `withEdgeLock`), keyed on
+            // (sourceId, targetId, relation) rather than a node id. The
+            // earlier note here ("edges are deliberately NOT locked")
+            // predates that lock's existence and was reasoning about the
+            // NODE lock specifically (correct: an edge write touches no
+            // verbatim mirror, so it never needed the node lock) — it did
+            // not mean edges needed no serialization of their own. Without
+            // this, a replayed edge.upsert could interleave with a live
+            // same-triple store_edge/delete_edge/REST write and re-assert a
+            // state the live write had already superseded. Same
+            // never-entered-from-inside-a-lock guarantee as the node
+            // substrates above: `recordHotWrite` never dispatches inline.
             addEdge: async (payload: Record<string, unknown>, workspace?: string) => {
                 const g = await resolveGraph(workspace);
-                await g.addEdge(payload as unknown as LoreEdge);
+                const p = payload as unknown as LoreEdge;
+                await withEdgeLock(workspace ?? '', p.sourceId, p.targetId, p.relation, () => g.addEdge(p));
             },
             deleteNode: async (id: string, workspace?: string) => {
                 const g = await resolveGraph(workspace);
-                await g.deleteNode(id);
+                await withNodeLock(workspace ?? '', id, () => g.deleteNode(id));
+            },
+            // 2026-09-03 (X-markstale audit fix) — replay of a
+            // `node.mark_stale` chunk row. Takes the SAME per-(workspace,id)
+            // locks the live mark_stale entry points hold for this chunk
+            // (mcp/tools/memory/markStale.ts, POST /api/mark-stale) so a
+            // replay can't interleave with a live write on any id in the
+            // chunk — same rationale as upsertNode/deleteNode above.
+            markStale: async (ids: string[], workspace?: string) => {
+                const g = await resolveGraph(workspace);
+                await withNodeLocks(workspace ?? '', ids, () => g.markStaleByIds(ids));
             },
             deleteEdge: async (payload, workspace?: string) => {
                 const g = await resolveGraph(workspace);
                 if (typeof (g as unknown as { deleteEdge?: unknown }).deleteEdge === 'function') {
-                    await (g as unknown as {
+                    const delGraph = g as unknown as {
                         deleteEdge: (s: string, t: string, r: string) => Promise<number>;
-                    }).deleteEdge(payload.sourceId, payload.targetId, payload.relation);
+                    };
+                    await withEdgeLock(
+                        workspace ?? '', payload.sourceId, payload.targetId, payload.relation,
+                        () => delGraph.deleteEdge(payload.sourceId, payload.targetId, payload.relation),
+                    );
                 }
             },
         } : {}),
@@ -248,6 +289,15 @@ export function wireOutbox(input: {
                 if (!id) return;
                 const v = await resolveVerbatim(workspace);
                 await v.store({ id, text, metadata });
+            },
+            // 2026-09-03 (A2 finding 2 fix) — verbatim tombstone fan-out for
+            // every node-delete path's `verbatim.tombstone` outbox row (see
+            // outbox/types.ts). `tombstone()` is itself idempotent (a
+            // no-op on an already-tombstoned or already-absent row — see
+            // VerbatimStore.tombstone), so replaying it is safe.
+            tombstoneVerbatim: async (id: string, reason: string, workspace?: string) => {
+                const v = await resolveVerbatim(workspace);
+                await v.tombstone(id, reason);
             },
             // SP-13 — consolidated verbatim upsert. The replicator merges a
             // run of adjacent verbatim.upsert rows into one of these so
@@ -399,8 +449,8 @@ export function wireOutbox(input: {
         } : {}),
         // Sprint O6 (2026-05-24) — verifier hooks for self-heal +
         // operator drain-failed. Each is an indexed substrate probe:
-        //   hasNode       → LocalGraph.getNode (kuzu PK lookup)
-        //   hasEdge       → kuzu MATCH on (src, tgt, relation) triple
+        //   hasNode       → LoreGraphHandle.getNode (PK lookup)
+        //   hasEdge       → LoreGraphHandle.queryEdges on (src, tgt, relation) triple
         //   hasVerbatim   → VerbatimStore.getById (lance id query)
         //   hasEmbeddings → all targetNodeIds have a verbatim row
         //
@@ -413,7 +463,7 @@ export function wireOutbox(input: {
                 // 2026-08-17 (launch blocker): DO NOT swallow substrate errors
                 // into `false`. The self-heal verifier treats `false` as
                 // "confirmed absent" for node.delete/edge.delete, so a transient
-                // Kùzu error here would mark a delete 'replicated' that never
+                // graph error here would mark a delete 'replicated' that never
                 // actually happened. Propagate the error — verifyApplied's
                 // outer catch turns it into `verified:false`, leaving the
                 // delete failed (fail-closed).
@@ -421,9 +471,9 @@ export function wireOutbox(input: {
                 const node = await g.getNode(id);
                 return node !== null && node !== undefined;
             },
-            // 2026-08-10 — was a Kùzu-only `getGraphContext()` escape hatch that
-            // is undefined on every non-Kuzu engine (SurrealGraph, DataplaneGraph),
-            // so `ctx` was always undefined there and hasEdge ALWAYS returned
+            // 2026-08-10 — was a `getGraphContext()` escape hatch tied to a
+            // single local engine, undefined on every other engine (SurrealGraph,
+            // DataplaneGraph), so `ctx` was always undefined there and hasEdge ALWAYS returned
             // false — self-heal could never confirm a real edge on a
             // Surreal-backed workspace, so it endlessly believed the edge was
             // missing. `queryEdges` is on `LoreGraphHandle` (non-optional) and

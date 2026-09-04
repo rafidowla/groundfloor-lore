@@ -5,7 +5,7 @@
  * directory, applying the graph schema idempotently, and closing it cleanly.
  * No query logic lives here.
  *
- * Deployment shape mirrors Kùzu exactly: an embedded engine (`@surrealdb/node`
+ * Deployment shape mirrors the prior local graph engine exactly: an embedded engine (`@surrealdb/node`
  * NAPI addon), one instance per workspace directory, no port, no daemon, no
  * shared server. This is NOT the 2026-04 shared-Docker-server attempt that
  * DECISIONS.md removed — see docs/SURREALDB_BUILD_PLAN.md, "The historical
@@ -55,7 +55,7 @@ export const DEFAULT_SURREAL_BACKEND: SurrealBackend = 'surrealkv';
 /**
  * Namespace/database inside the embedded instance. Fixed rather than derived
  * from the workspace name: isolation is per-DIRECTORY (one instance per
- * workspace, same as Kùzu's single-writer-per-workspace rule), so a second
+ * workspace, same as the prior engine's single-writer-per-workspace rule), so a second
  * name axis would add a way to get confinement wrong without adding isolation.
  */
 export const SURREAL_NAMESPACE = 'lore';
@@ -82,7 +82,7 @@ export function resolveSurrealBackend(
 /**
  * surrealDataPath — where a workspace's SurrealDB files ACTUALLY live.
  *
- * Sibling of Kùzu's `.lore/graph` and LanceDB's `.lore/lancedb`, so a
+ * Sibling of the legacy `.lore/graph` directory and LanceDB's `.lore/lancedb`, so a
  * Surreal-backed workspace is inspectable/backup-able with the same mental
  * model — and so a workspace can hold BOTH engines' data during a Phase-4
  * migration without either clobbering the other.
@@ -149,7 +149,7 @@ export function surrealDataPath(basePath: string): string {
 export interface SurrealFeatures {
     /**
      * Pre-computed count view (`node_counts`). DEFAULT OFF as of the
-     * Kuzu-removal bulk-write investigation (2026-08-21): it is a plain
+     * bulk-write investigation (2026-08-21): it is a plain
      * `DEFINE TABLE … AS SELECT … GROUP BY`, it leaks no process handle, and
      * it backfills correctly when defined over existing data — but it does
      * NOT reliably return the same numbers as the live GROUP BY it replaces.
@@ -330,7 +330,7 @@ function delay(ms: number): Promise<void> {
  * The graph schema.
  *
  * SCHEMALESS on purpose: Lore Core is a schema-agnostic database, and
- * LocalGraph's own Kùzu table has accreted ~30 `ALTER TABLE ... ADD` migration
+ * LocalGraph's own prior graph-engine table accreted ~30 `ALTER TABLE ... ADD` migration
  * statements precisely because the column set is not knowable up front. A
  * SCHEMALESS table makes that entire migration ladder a no-op here — a node
  * gaining a field is a write, not a DDL event.
@@ -353,13 +353,12 @@ const SCHEMA_STATEMENTS: readonly string[] = [
  *    FIRST boot of a workspace would hang — which is worse than always, not
  *    better, because it hangs exactly once per machine and looks like a fluke.
  *
- * 2. **Parity: LocalGraph has no secondary indexes either.** The Kùzu binding
- *    exposes no CREATE INDEX surface at all (see
- *    migration/adapters/kuzuMigrationAdapter.ts, `addIndex: false` — "kuzu
- *    binding has no CREATE INDEX surface"). Both `search()` and `listNodes()`
- *    are scan-then-sort on Kùzu today. Shipping without indexes is therefore
- *    engine parity, not a regression, and it keeps the Phase-2 comparison
- *    honest (indexed-Surreal vs unindexed-Kùzu would flatter Surreal).
+ * 2. **Parity: LocalGraph has no secondary indexes either.** The prior engine's
+ *    binding exposed no CREATE INDEX surface at all. Both `search()` and
+ *    `listNodes()` were scan-then-sort on that prior engine. Shipping without
+ *    indexes is therefore engine parity, not a regression, and it keeps the
+ *    Phase-2 comparison honest (indexed-Surreal vs unindexed-legacy-engine
+ *    would flatter Surreal).
  *
  * `LORE_SURREAL_DEFINE_INDEXES=1` turns them on for the Phase-2 real-scale
  * measurement, where the trade — a hung process at the end of a benchmark run
@@ -378,7 +377,7 @@ const INDEX_STATEMENTS: readonly string[] = [
  * Pre-computed count view — the fix for `getStats`.
  *
  * `SELECT type, count() … GROUP BY type` is a full table scan: 42.4 ms at
- * 20 000 nodes, 210 ms at 50 000, against Kùzu's 4.4 ms. This view IS that
+ * 20 000 nodes, 210 ms at 50 000, against the prior engine's 4.4 ms. This view IS that
  * aggregate, maintained by the database as rows are written, so reading it is
  * 0.4 ms and flat in corpus size (measured 106× at 20k).
  *
@@ -423,7 +422,7 @@ const COUNT_VIEW_STATEMENTS: readonly string[] = [
  *
  * What it costs: the analyzer tokenizes, so matching becomes WHOLE-WORD where
  * `string::contains` is SUBSTRING. `search('kapp')` finds `kappa` today and
- * would not with FTS. That breaks set-parity with Kùzu by construction, which
+ * would not with FTS. That breaks set-parity with the prior engine's behaviour by construction, which
  * is why this cannot be defaulted on — and why the divergence is measured
  * rather than described (test/surreal-fts-parity-unit.ts).
  *

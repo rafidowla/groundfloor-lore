@@ -1,8 +1,9 @@
 import fs from 'fs';
 import http from 'http';
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { isRevisionHistoryId } from '../../engines/verbatimHistory.js';
 import { loreHome, loreHomePath } from '../../config/loreHome.js';
+import { openGraphForCli } from './shared.js';
+import { DEFAULT_PORT } from './migrateWorkspaceToWorkspaceShared.js';
 
 interface ReapResponse {
     prefix: string;
@@ -25,7 +26,7 @@ async function tryHttpReap(prefix: string, apply: boolean): Promise<ReapResponse
     return new Promise((resolve) => {
         const payload = JSON.stringify({ apply, prefix });
         const req = http.request(
-            'http://127.0.0.1:3847/api/verbatim/reap',
+            `http://127.0.0.1:${DEFAULT_PORT}/api/verbatim/reap`,
             {
                 method: 'POST',
                 headers: {
@@ -76,7 +77,7 @@ export async function verbatimCommand(args: string[]): Promise<void> {
     if (httpResult) {
         console.log(`Inspected ${httpResult.inspected} verbatim records with prefix "${prefix}"...`);
         console.log('');
-        console.log(`  Alive:   ${httpResult.alive} verbatim records have a matching Kùzu node`);
+        console.log(`  Alive:   ${httpResult.alive} verbatim records have a matching graph node`);
         console.log(`  Orphan:  ${httpResult.orphans} verbatim records with NO matching node`);
         console.log('');
         if (httpResult.orphans > 0) {
@@ -95,16 +96,22 @@ export async function verbatimCommand(args: string[]): Promise<void> {
             console.log('No action needed.');
         }
         console.log('');
-        console.log('(Routed through the running Lore daemon at 127.0.0.1:3847.)');
+        console.log(`(Routed through the running Lore daemon at 127.0.0.1:${DEFAULT_PORT}.)`);
         return;
     }
 
     const basePath = loreHome();
-    const graph = openWorkspaceGraph(basePath);
+    // Finding 11 (round E) — the HTTP attempt above already tried the
+    // daemon; this direct-open fallback is what used to sit in the ~15s
+    // openSurreal retry storm. tryHttpReap() above now resolves
+    // DEFAULT_PORT (LORE_PORT-aware) instead of a hardcoded 3847, so this
+    // fallback fires only when the HTTP attempt genuinely misses the daemon
+    // (missing/stale auth token, daemon down, timeout). Refuse fast with a
+    // clear message instead of the raw driver error.
+    const graph = await openGraphForCli(basePath);
     const { VerbatimStore } = await import('../../engines/verbatimStore.js');
     const verbatim = new VerbatimStore(basePath);
 
-    await graph.initialize();
     await verbatim.initialize();
 
     const allIds = await verbatim.listIds(prefix);
@@ -129,7 +136,7 @@ export async function verbatimCommand(args: string[]): Promise<void> {
     }
 
     console.log('');
-    console.log(`  Alive:   ${alive} verbatim records have a matching Kùzu node`);
+    console.log(`  Alive:   ${alive} verbatim records have a matching graph node`);
     console.log(`  Orphan:  ${orphans.length} verbatim records with NO matching node`);
     console.log('');
 

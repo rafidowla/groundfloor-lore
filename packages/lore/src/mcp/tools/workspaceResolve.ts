@@ -38,12 +38,12 @@ export async function resolveTargetGraph(
         return { ok: true, graph: store.loreGraph, resolvedWorkspace: requested, isActive: true };
     }
     try {
-        // getGraphHandle, not getOrOpen: the latter is the KÙZU substrate
-        // accessor and returns a LocalGraph for every workspace, so a
-        // Surreal-backed one read and wrote an empty Kùzu database and
-        // reported success. getGraphHandle resolves the declared engine, and
-        // goes through getOrOpen first so the workspace-confinement gate
-        // (assertWorkspaceOpenAllowed) still runs on this path.
+        // getGraphHandle resolves the workspace's declared engine, so a
+        // Surreal-backed workspace reads and writes its own graph rather
+        // than an empty database for a different engine while reporting
+        // success. It also goes through getOrOpen first so the
+        // workspace-confinement gate (assertWorkspaceOpenAllowed) still
+        // runs on this path.
         const g = await registry.getGraphHandle(requested);
         return {
             ok: true,
@@ -61,8 +61,8 @@ export async function resolveTargetGraph(
 
 /**
  * resolveTargetTableStorage — per-workspace ITableStorage routing
- * (2026-06-19, Postgres-model isolation). Collections live in Kùzu's table
- * storage, which is `LocalGraph.getTableStorage()`. So routing a collection op
+ * (2026-06-19, Postgres-model isolation). Collections live in SQLite table
+ * storage, reached via `LocalGraph.getTableStorage()`. So routing a collection op
  * to the requested workspace is just resolving that workspace's graph and
  * taking its table storage — no separate registry needed. Same contract as
  * resolveTargetGraph: missing workspace → {ok:false,missing}; unknown →
@@ -83,8 +83,9 @@ export async function resolveTargetTableStorage(
     if (!res.ok) return res;
     // Table storage is NOT a graph concept — it is a SQLite file keyed on the
     // workspace path. It used to be reached by casting the graph handle to
-    // something with `getTableStorage()`, which quietly required the workspace
-    // to be Kùzu-backed. The registry owns it now; the active workspace has no
+    // something with `getTableStorage()`, which quietly required a specific
+    // local engine's graph implementation. The registry owns it now; the
+    // active workspace has no
     // registry entry, so it uses the bundle's, which is the same file.
     const ts = registry && !res.isActive
         ? await registry.tableStorageFor(res.resolvedWorkspace)

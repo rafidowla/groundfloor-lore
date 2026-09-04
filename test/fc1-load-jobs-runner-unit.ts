@@ -45,7 +45,7 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
 }
 
 /** Recording fake substrate adapter — captures every writeBatch call. */
-function fakeAdapter(substrate: 'sqlite' | 'kuzu' | 'lance') {
+function fakeAdapter(substrate: 'sqlite' | 'graph' | 'lance') {
     const calls: string[][] = [];
     const adapter: BulkLoaderAdapter = {
         substrate,

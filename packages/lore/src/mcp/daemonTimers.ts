@@ -41,13 +41,10 @@ export interface DaemonTimersDeps {
      *  once against the boot substrate, so non-active workspaces B/C get
      *  the same periodic reconciliation + retention tombstoning as A.
      *  Absent in cloud mode → boot-only single-workspace path (unchanged).
-     *  Kùzu-removal step2 commit 8 — the fan-out below resolves each
-     *  workspace's graph via `getGraphHandle`, not `getOrOpen`: `getOrOpen`
-     *  is the Kùzu substrate accessor and would silently sweep a
-     *  Surreal-backed workspace against its own empty Kùzu store.
-     *  `getGraphHandle` still opens Kùzu first internally (inheriting the
-     *  workspace-confinement gate), so only it — not `getOrOpen` — needs to
-     *  be exposed here. */
+     *  The fan-out below resolves each workspace's graph via
+     *  `getGraphHandle`, which opens the workspace's declared engine
+     *  (inheriting the workspace-confinement gate), so only it needs to be
+     *  exposed here. */
     graphRegistry?: Pick<LocalGraphRegistry, 'getGraphHandle' | 'tableStorageFor'>;
     /** RC-round4 — audit log for the per-workspace retention fan-out (the
      *  boot closure captured it internally; the fan-out re-derives the
@@ -165,13 +162,11 @@ export function wireDaemonTimers(deps: DaemonTimersDeps): DaemonTimersHandles {
  * the per-workspace healing side effects (re-embed enqueue into THAT
  * workspace's store) are the real output.
  *
- * Kùzu-removal step2 commit 8 — this fan-out is exactly why the graph MUST
- * be resolved through `getGraphHandle`, not `getOrOpen`: `getOrOpen` is the
- * Kùzu substrate accessor, so a Surreal-backed workspace swept through it
- * got the real-but-EMPTY Kùzu database that workspace still carries on
- * disk. The pass then diffed that empty graph against the workspace's real
- * LanceDB store, reported zero missing/orphan embeddings, and never touched
- * a single row of the workspace's actual (Surreal) data.
+ * This fan-out MUST resolve each workspace's graph through
+ * `getGraphHandle`, which opens that workspace's own declared engine —
+ * resolving the wrong handle here would diff an empty/foreign graph
+ * against the workspace's real LanceDB store, report zero missing/orphan
+ * embeddings, and never touch a single row of the workspace's actual data.
  */
 async function runConsistencySweepAllWorkspaces(
     deps: DaemonTimersDeps,
@@ -182,25 +177,23 @@ async function runConsistencySweepAllWorkspaces(
     const agg = emptySweepResult();
     for (const ws of listWs()) {
         try {
-            // getGraphHandle resolves the workspace's DECLARED engine
-            // (Kùzu or Surreal) instead of always opening Kùzu — see the
-            // doc comment above for why that silently broke this sweep for
-            // non-Kùzu workspaces. It still opens Kùzu first internally, so
-            // the workspace-confinement gate (assertWorkspaceOpenAllowed)
-            // is unchanged.
+            // getGraphHandle resolves the workspace's DECLARED engine —
+            // see the doc comment above for why that matters for this
+            // sweep. It also enforces the workspace-confinement gate
+            // (assertWorkspaceOpenAllowed).
             const graph = await registry.getGraphHandle(ws);
             const vectorStore = await resolver.getOrOpen(ws);
             // From the registry, not the graph: table storage is a SQLite file
             // keyed on the workspace path, and casting a graph handle to reach
-            // it silently required the workspace to be Kùzu-backed.
+            // it silently required a specific engine's graph implementation.
             const tableStorage = await registry.tableStorageFor(ws);
             const r = await runConsistencySweep(
                 {
-                    // WorkspaceGraph (Kùzu | Surreal) satisfies SweepDeps['graph']
-                    // directly now — both engines implement listNodes/getNode/
-                    // getNodesByIds/bulkListProjected, so no cast is needed here
-                    // any more (the `as unknown as` this replaced was already
-                    // redundant once the shared handle type widened).
+                    // WorkspaceGraph satisfies SweepDeps['graph'] directly:
+                    // listNodes/getNode/getNodesByIds/bulkListProjected, so no
+                    // cast is needed here (the `as unknown as` this replaced
+                    // was already redundant once the shared handle type
+                    // widened).
                     graph,
                     vectorStore: vectorStore as unknown as Parameters<typeof runConsistencySweep>[0]['vectorStore'],
                     tableStorage,
@@ -222,13 +215,11 @@ async function runConsistencySweepAllWorkspaces(
  * OWN policy governs its OWN superseded-row tombstoning. Sequential,
  * fail-soft per workspace.
  *
- * Kùzu-removal step2 commit 8 — same silent-clean-sweep bug as the
- * consistency fan-out above: `getOrOpen` always opens Kùzu, so a
- * Surreal-backed workspace's retention pass ran against its own empty Kùzu
- * store and reported `eligible: 0` / `archived: 0` with `ok:true`, never
- * tombstoning a single superseded row in the workspace's real (Surreal)
- * graph. `getGraphHandle` resolves the workspace's declared engine so the
- * policy actually governs that workspace's own data.
+ * Same invariant as the consistency fan-out above: the graph MUST be
+ * resolved via `getGraphHandle`, which opens the workspace's declared
+ * engine, so the retention policy actually governs that workspace's own
+ * data instead of reporting `eligible: 0` / `archived: 0` with `ok:true`
+ * against the wrong graph.
  */
 async function runRetentionSweepAllWorkspaces(
     deps: DaemonTimersDeps,

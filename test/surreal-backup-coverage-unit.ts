@@ -4,9 +4,9 @@
  * must be backup-able and restorable (docs/SURREALDB_BUILD_PLAN.md).
  *
  * The plan flags this as a real risk: "the existing auto-snapshot-before-
- * destructive mechanism and backup sweeper know Kùzu's on-disk file layout. A
- * SurrealDB-backed workspace gets zero backup coverage unless this phase adds
- * it."
+ * destructive mechanism and backup sweeper know the legacy graph engine's
+ * on-disk file layout. A SurrealDB-backed workspace gets zero backup
+ * coverage unless this phase adds it."
  *
  * Reading the code says otherwise for the TARBALL path — `engines/backup.ts`
  * treats `.lore/` as an opaque bag and copies it whole, so `.lore/surreal`
@@ -16,8 +16,8 @@
  *
  * It also pins the one place where the assumption genuinely does NOT hold:
  *   - a backup taken while the store is OPEN is not asserted to be consistent,
- *     because it is not — the same caveat the Kùzu path carries.
- * (The pre-destructive-change data snapshotter used to be Kùzu-Cypher-only
+ *     because it is not — the same caveat the legacy-engine path carried.
+ * (The pre-destructive-change data snapshotter used to be Cypher-only
  * and gated on a Surreal-backed workspace; Phase 2 rewired it onto the
  * engine-agnostic SchemaGraphOps port, so it now snapshots for real instead
  * of failing closed — see the dedicated test below.)
@@ -74,7 +74,7 @@ async function seededWorkspace(): Promise<{ dir: string; cleanup: () => void }> 
     await g.addEdge({ sourceId: 'n1', targetId: 'n2', relation: 'refers_to' });
     await g.addEdge({ sourceId: 'n2', targetId: 'n3', relation: 'cites' });
     // CLOSED before the backup: a live surrealkv store is mid-write by
-    // definition, and copying one is the same caveat Kùzu carries.
+    // definition, and copying one is the same caveat the legacy engine carried.
     await g.close();
     return { dir, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
@@ -153,21 +153,24 @@ await test('restoreWorkspace round-trips the graph: nodes, edges and traversal s
     }
 });
 
-await test('a mixed workspace backs up BOTH substrates (surreal graph + kuzu sidecars)', async () => {
-    // A Surreal-backed workspace still has a Kùzu database for collections,
-    // analytical storage, pending-ops and ReBAC. A backup that captured only
-    // one of the two would restore a workspace with no authorization data.
+await test('a mixed workspace backs up BOTH substrates (surreal graph + legacy on-disk sidecars)', async () => {
+    // An older workspace directory can still carry a leftover `.lore/graph`
+    // file from before the legacy graph engine was removed, alongside the
+    // SQLite substrates used today for collections, analytical storage,
+    // pending-ops and ReBAC. A backup that skipped either would restore an
+    // incomplete workspace.
     const ws = await seededWorkspace();
     const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-bk-out-'));
     try {
-        // Stand in for the Kùzu-side files the real runtime writes alongside.
-        fs.writeFileSync(path.join(ws.dir, '.lore', 'graph'), 'kuzu-placeholder');
+        // Stand in for a leftover on-disk artefact from a pre-removal
+        // workspace, alongside the files the real runtime writes today.
+        fs.writeFileSync(path.join(ws.dir, '.lore', 'graph'), 'legacy-graph-placeholder');
         fs.writeFileSync(path.join(ws.dir, '.lore', 'tables.sqlite'), '');
 
         const result = await backupWorkspace({ workspaceDir: ws.dir, workspaceName: 'bk', outDir });
         const captured = result.catalog.files.map((f) => f.relPath);
         assert.ok(captured.some((f) => f.includes('surreal')), 'surreal graph captured');
-        assert.ok(captured.some((f) => f.endsWith('graph')), 'kuzu graph file captured');
+        assert.ok(captured.some((f) => f.endsWith('graph')), 'legacy graph-engine artefact file captured');
     } finally {
         fs.rmSync(outDir, { recursive: true, force: true });
         ws.cleanup();
@@ -178,8 +181,9 @@ await test('the pre-destructive-change data snapshotter works end-to-end against
     // Was 'KNOWN GAP: the pre-destructive-change snapshotter has no Surreal
     // path' — stale since Phase 2 rewired dataSnapshot.ts's
     // LocalGraphSnapshotter onto the engine-agnostic SchemaGraphOps port
-    // (dataSnapshot.ts no longer contains raw Kùzu Cypher) and removed the
-    // assertKuzuGraphSubstrate gate from bootSteps.ts that used to fail the
+    // (dataSnapshot.ts no longer contains raw legacy-engine Cypher) and
+    // removed the legacy engine's graph-substrate assertion gate from
+    // bootSteps.ts that used to fail the
     // approval closed on a Surreal-backed workspace. This is the positive
     // replacement: a real embedded SurrealGraph, a real destructive-change
     // snapshot, real rows on disk — not a fake SchemaGraphOps (that's

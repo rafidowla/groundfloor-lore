@@ -19,7 +19,7 @@
  *   leases under PropertyB.
  *
  * Shares one store across the process and resets data between tests. The
- * original reason was that repeated open/close cycles segfaulted kuzu-lite's
+ * original reason was that repeated open/close cycles segfaulted the legacy engine's
  * WASM finalizer on macOS; that constraint is gone with the engine, but the
  * shape is kept because it is also simply faster.
  */
@@ -70,7 +70,7 @@ async function getShared(): Promise<{ store: RebacStore; nodes: Set<string> }> {
         return _shared;
     }
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-rebac-l1-test-'));
-    // The graph node set the endpoint probe answers from. On Kùzu this was a
+    // The graph node set the endpoint probe answers from. On the legacy engine this was a
     // real LoreNode table; the store no longer cares which engine supplies it,
     // which is the point of the injected probe.
     const nodes = new Set<string>();
@@ -159,14 +159,14 @@ async function main() {
     /* ---------- grant must not report phantom success ---------- */
     //
     // `grant()` issues `MATCH (s),(r) CREATE (s)-[e]->(r)`. When an endpoint is
-    // absent Kùzu binds nothing, creates nothing and raises nothing — and the
+    // absent the legacy engine bound nothing, created nothing and raised nothing — and the
     // pre-fix version returned `true`. A false success in an authorization
     // function is the worst shape available here: the caller believes access
     // was granted, every later has() disagrees.
     //
     // Note these run against a LoreNode table the harness has just EMPTIED,
     // which is precisely the state a workspace has when its graph substrate is
-    // not Kùzu (DECISIONS.md DEC-SURREAL-REBAC) — not a synthetic one-off id.
+    // not the legacy engine (DECISIONS.md DEC-SURREAL-REBAC) — not a synthetic one-off id.
 
     await test('grant with a missing SUBJECT throws and names the subject', async () => {
         const f = await getShared();
@@ -470,12 +470,12 @@ async function main() {
     });
 
 
-    /* ---------- engine independence (replaces the Kùzu-only files) ---------- */
+    /* ---------- engine independence (replaces the legacy-engine-only files) ---------- */
 
-    // These three replace `test/kuzu-rebac-delete-semantics-unit.ts` and
+    // These three replace the former legacy-engine rebac-delete-semantics test and
     // `test/rebac-surreal-workspace-unit.ts`, both deleted. Each asserted a fact
-    // about ReBAC edges living inside Kùzu — that deleting a LoreNode cascades
-    // into the grants, and that a Surreal-backed workspace's empty Kùzu LoreNode
+    // about ReBAC edges living inside the legacy graph engine — that deleting a LoreNode cascades
+    // into the grants, and that a Surreal-backed workspace's empty legacy-engine LoreNode
     // table makes grant() a phantom success. Neither statement can be true of a
     // store that no longer lives in a graph engine, so they are replaced by what
     // IS now true rather than adjusted to keep passing.
@@ -492,14 +492,14 @@ async function main() {
 
     await test('grants work on ANY engine whose probe reports the endpoints', async () => {
         // The DEC-SURREAL-REBAC hole, closed. On a Surreal-backed workspace the
-        // Kùzu LoreNode table existed and was EMPTY, so every grant matched
+        // legacy engine's LoreNode table existed and was EMPTY, so every grant matched
         // nothing and returned a phantom `true`. The endpoint check is now
         // supplied by the caller, so it reflects whichever graph is real.
         const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-rebac-anyengine-'));
-        const nonKuzuGraph = new Set(['alice', 'workspaceS']);
+        const otherEngineGraph = new Set(['alice', 'workspaceS']);
         const store = new RebacStore(
             path.join(dir, 'rebac.sqlite'),
-            async (ids) => new Set(ids.filter((id) => nonKuzuGraph.has(id))),
+            async (ids) => new Set(ids.filter((id) => otherEngineGraph.has(id))),
         );
         await store.ensureSchema();
 
@@ -520,7 +520,7 @@ async function main() {
     });
 
     await test('deleting a graph node ORPHANS its grants rather than destroying them', async () => {
-        // The replaced Kùzu file measured a cascade: deleting a LoreNode wiped
+        // The replaced legacy-engine file measured a cascade: deleting a LoreNode wiped
         // the node's semantic edges and then failed, while `DETACH DELETE`
         // destroyed the grants outright — both data loss. Tuples in their own
         // store cannot be cascaded into, so the new failure mode is the opposite

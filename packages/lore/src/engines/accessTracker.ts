@@ -199,7 +199,7 @@ let singleton: AccessTracker | null = null;
 // NON-active workspace stamped last_retrieved_at / lastAccessedAt onto the BOOT
 // graph — corrupting the coldness/retention signal `lore maintain` prunes on
 // (acutely on id reuse across one human's workspaces). A per-graph map routes
-// each stamp to its own workspace's Kùzu. WeakMap so an evicted graph's tracker
+// each stamp to its own workspace's graph store. WeakMap so an evicted graph's tracker
 // is GC'd with it.
 const trackers = new WeakMap<object, AccessTracker>();
 

@@ -22,13 +22,11 @@ Lore Core runs in one of two modes, selected by `LORE_DEPLOYMENT_MODE`
 
 | Mode | Storage substrate | Tenant scope | Network surface |
 |------|-------------------|--------------|-----------------|
-| **local** (default) | Embedded SurrealDB (default as of v3.13.0) or Kùzu + LanceDB + SQLite on the user's disk | Single user, no org | Daemon binds `127.0.0.1` only |
+| **local** (default) | Embedded SurrealDB + LanceDB + SQLite on the user's disk | Single user, no org | Daemon binds `127.0.0.1` only |
 | **cloud** | Groundfloor Dataplane via `groundfloor-ts-sdk` | Multi-tenant, org-scoped | Reaches the Dataplane over TLS |
 
 The mode determines which storage client is wired
-(`src/storage/loreStorageClient.ts`): local mode uses the workspace's
-resolved graph engine directly — `SurrealGraph` by default as of v3.13.0,
-or `LocalGraph` (Kùzu) when a workspace opts in via `graphEngine: 'kuzu'`
+(`src/storage/loreStorageClient.ts`): local mode always uses `SurrealGraph`
 (`engines/graphEngineSelector.ts`); cloud mode swaps in `DataplaneGraph`
 via `LoreStorageClient.fromDataplane(sdk)`.
 
@@ -89,17 +87,22 @@ SDK-aligned CRUD surfaces) — require `Authorization: Bearer <token>`
 A deliberately small allowlist skips the bearer requirement but still
 passes Host + Origin validation (`PUBLIC_API_PATHS`, `httpAuth.ts:64`):
 
-- `/health`, `/api/health` — liveness probes.
+- `/health`, `/api/health` — liveness probes. Reaching the route needs no
+  bearer, but the RESPONSE BODY still depends on one (2026-09-03 FINDING 4
+  fix): an anonymous request gets only the lite liveness shape (`status`,
+  `version`, `sessions`, `backgroundReconnect`, `embeddingBackend`); a
+  Bearer-authenticated request gets the full snapshot (per-workspace
+  counts, `loreHome`, outbox state, the live rate-limit config). Before
+  this fix the full body was served to any local process with no token —
+  see `docs/OPERATIONS.md`'s Health checks section for the response shapes.
+  The arcade-mode boot's own `/health`/`/api/health` (`mcp/arcadeBoot.ts`)
+  applies the same split for its operator-only fields (`arcadeBaseUrl`,
+  `rateLimit`). This is a local-mode decision only — a cloud/remote
+  deployment's equivalent policy is a separate, not-yet-designed follow-up.
 - `/api/auth/bootstrap` — the **bootstrap** endpoint the local UI calls
   **once** to fetch its session token. It is protected by Host+Origin
   (a hostile cross-origin tab's `Origin` cannot match localhost), not by
   a bearer (there is no bearer yet at bootstrap time).
-- `/api/recall` — read-only compact recall used by the CLI and the
-  Claude Code prompt hook. The handler **fails closed** for the
-  cross-workspace aggregation paths (`workspace="*"`, `crossProject=true`)
-  when no principal is bound, so an unauthenticated local process cannot
-  aggregate across every workspace (see `search.ts` gate, referenced at
-  `httpAuth.ts:81`).
 - `/metrics` — Prometheus scrape, gated additionally by `LORE_METRICS=on`
   (default off).
 
@@ -109,6 +112,49 @@ Security hardening notes recorded in the source:
 - `/api/node-full` was removed from the public set (SP-04) because it can
   dump a node's full body (potential secrets / source URLs)
   (`httpAuth.ts:74`).
+
+---
+
+## 3a. Response headers
+
+Every HTTP response the daemon writes — every gate rejection (401/403/429),
+every `/api/*` and `/v1/*` route, the MCP Streamable-HTTP transport at
+`/mcp`, and the OPTIONS preflight — carries a baseline set of browser
+security headers, applied once as the first statement of
+`src/mcp/http/middleware.ts`'s `runHttpGates` (`applySecurityHeaders`,
+`src/mcp/http/helpers.ts`) so there is a single chokepoint every response
+passes through before any gate or route writes a byte:
+
+- `X-Content-Type-Options: nosniff` — no MIME-sniffing a JSON body into an
+  executable content type.
+- `X-Frame-Options: DENY` — nothing should ever be able to frame this
+  daemon; it serves no UI.
+- `Referrer-Policy: no-referrer` — daemon URLs can carry workspace
+  names/ids in the path or query string.
+- `Cache-Control: no-store` — API responses sit behind Bearer auth and can
+  carry live graph data.
+- `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` —
+  the strict default for every JSON/NDJSON/SSE response.
+
+These are set via `res.setHeader()`, not folded into a `writeHead()` call,
+so Node's own header-merge rule lets an individual route override just the
+one header it needs (e.g. `routes/stream.ts`'s own `Cache-Control:
+no-cache, no-transform` on its chunked NDJSON response) while every other
+response inherits the defaults untouched.
+
+`GET /api/export/html` (`routes/static.ts`) is the one response that is
+actually rendered as a page in a browser (the self-contained vis-network
+snapshot from `src/engines/htmlExport.ts`), so it overrides the default CSP
+with a page-specific policy (`buildHtmlExportCsp`, `src/mcp/http/
+helpers.ts`) scoped to exactly what that template needs: the SRI-pinned
+vis-network CDN script is allow-listed by origin, and the page's one inline
+`<script>` and one inline `<style>` block carry a fresh per-response
+`nonce` (never `'unsafe-inline'`).
+
+No HSTS: the daemon only ever listens on loopback plain HTTP (see §2 —
+`127.0.0.1` exclusively). HSTS forces a browser to upgrade future requests
+to HTTPS for an origin; there is no HTTPS variant of this loopback origin
+to upgrade to.
 
 ---
 
@@ -250,9 +296,8 @@ Lore fails **closed** at every authorization decision point:
 A **workspace** is the unit of data isolation. Each workspace owns its own
 storage tree at `<LORE_HOME>/workspaces/<name>/.lore/`:
 
-- `graph` — its own Kùzu database (nodes + edges), when the workspace uses
-  the legacy `graphEngine: 'kuzu'`, **or** `surreal` — its own SurrealDB
-  database (nodes + edges), the default as of v3.13.0.
+- `surreal` — its own SurrealDB database (nodes + edges), the only graph
+  engine.
 - `lancedb/` — its own LanceDB vector store.
 - `tables.sqlite` — relational store, including the `lore_rebac_edge`
   permission table (see §5).
@@ -363,9 +408,9 @@ not echoed, since the *name* can itself be sensitive — `envScrub.ts:184`).
 An honest accounting for your review:
 
 - **No application-level encryption-at-rest.** Lore Core does **not**
-  encrypt the live graph store (SurrealDB by default as of v3.13.0, or
-  Kùzu per workspace via `graphEngine: 'kuzu'`), the LanceDB vector store,
-  or the verbatim text on disk. At-rest confidentiality relies on OS/disk
+  encrypt the live graph store (SurrealDB, the only graph engine), the
+  LanceDB vector store, or the verbatim text on disk. At-rest
+  confidentiality relies on OS/disk
   encryption (FileVault, LUKS, dm-crypt) for the user running the
   daemon. NW-7h removed the unused AES-GCM primitives that previously
   shipped alongside an inaccurate "verbatim opt-in flag" docstring —
@@ -393,6 +438,52 @@ An honest accounting for your review:
 
 ---
 
+## 12. Dependency vulnerability policy
+
+CI (`bitbucket-pipelines.yml`) runs `npm audit --omit=dev --audit-level=high`
+after install, failing the pipeline on any high/critical vulnerability in a
+production dependency; dev-only tooling and moderate/low findings are out of
+scope for that gate and are tracked instead in `docs/SECURITY_ADVISORIES.md`.
+Renovate (`renovate.json`, installed via the Mend app for Bitbucket Cloud)
+keeps dependencies current with weekly lockfile-only maintenance, grouped
+minor/patch PRs, and immediate, unscheduled PRs for security advisories.
+
+### Tracked exceptions to the high-severity gate (2026-09-03)
+
+`npm audit fix` (non-breaking) was applied for `fast-uri`, `deepmerge-ts`,
+`qs`, and `@xmldom/xmldom`, closing 6 of the 10 findings open at the time
+the gate above was added. Two high-severity findings remain open and would
+fail the gate on its first run; both were already assessed as NOT REACHABLE
+/ ACCEPTED in `docs/SECURITY_ADVISORIES.md` (Fourth-Pass Audit, 2026-08-12)
+before this gate existed, and no reachable fix exists yet:
+
+- **`adm-zip` `<0.6.0`** (GHSA-xcpc-8h2w-3j85, via `onnxruntime-node` →
+  `@huggingface/transformers`) — install-time only (unzips a prebuilt
+  onnxruntime binary during `npm install`, never touches user-ingested
+  content). No patched `adm-zip` exists in `onnxruntime-node`'s declared
+  range (`fixAvailable: false`); the only path forward is an upstream
+  `@huggingface/transformers` major release repinning `onnxruntime-node`.
+- **`pdfjs-dist` `>=5.6.83 <6.2.108`** (GHSA-hq66-cqwq-w95j) — the
+  vulnerable scripting-sandbox path requires `enableScripting: true`, which
+  `packages/lore/src/engines/extractors/pdf.ts` never sets and which is
+  architecturally absent from the `pdf.mjs` entry point it imports.
+  Fixed in `pdfjs-dist@6.2.108`, a breaking major-version bump (5→6),
+  deliberately deferred rather than taken as part of this dependency-audit
+  pass.
+
+**Update (2026-09-04, decision by Rafi):** the blanket `|| echo ...`
+soft-fail above has been replaced. The CI step now runs
+`scripts/audit-dependencies.mjs`, which parses `npm audit --omit=dev
+--audit-level=high --json` and hard-fails the pipeline on *any*
+high/critical advisory except the two GHSA IDs named above
+(`GHSA-xcpc-8h2w-3j85` for adm-zip, `GHSA-hq66-cqwq-w95j` for pdfjs-dist),
+which are matched explicitly against an `ALLOWLIST` const in that script
+(kept in sync with this section). A genuinely new high/critical finding
+now blocks the merge instead of only printing a warning. Remove an entry
+from `ALLOWLIST` (and this section) once its fix lands.
+
+---
+
 ## Source map (verify any claim here)
 
 | Capability | File |
@@ -405,6 +496,7 @@ An honest accounting for your review:
 | ReBAC L2 permission evaluator | `src/security/rebacEvaluator.ts` |
 | Cloud SpiceDB gate / authz wrapper | `src/security/rebacGate.ts`, `src/security/dataplaneAuthz.ts` |
 | Cloud workspace/tenant binding | `src/mcp/http/middleware.ts` |
+| Response security headers (nosniff/frame-deny/CSP/etc.) | `src/mcp/http/helpers.ts` (`applySecurityHeaders`, `buildHtmlExportCsp`), wired in `src/mcp/http/middleware.ts` |
 | `DATAPLANE_ORG_ID` boot gate | `src/mcp/services.ts` (`requireDataplaneOrgId`) |
 | Env scrub | `src/security/envScrub.ts` |
 | Keychain key storage | `src/security/keyring.ts` |

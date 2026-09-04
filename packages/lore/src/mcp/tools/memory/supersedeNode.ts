@@ -15,6 +15,7 @@ import { mcpToolError } from '../mcpToolError.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import { recordHotWrite } from '../../../outbox/hotLane.js';
 import { redactError } from '../../../security/logRedact.js';
+import { MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../../../engines/nodeFieldLimits.js';
 
 export function registerSupersedeNodeTool(mcpServer: McpServer, deps: MemoryToolsDeps): void {
     mcpServer.tool(
@@ -23,7 +24,21 @@ export function registerSupersedeNodeTool(mcpServer: McpServer, deps: MemoryTool
         {
             old_id: z.string().describe('ID of the node being superseded (no longer authoritative)'),
             new_id: z.string().describe('ID of the new node that replaces it'),
-            reason: z.string().optional().describe('Optional free-form note explaining why the supersession happened'),
+            // DATA_CONTRACT (2026-09-03) — reason is stored verbatim on every
+            // graph engine (no redaction/sanitization); the cap here is a
+            // size guard, not a content filter. Callers sanitize secrets/PII
+            // before calling. See docs/DATA_CONTRACT.md.
+            //
+            // QA finding 3 (A4 round E, 2026-09-03) — `.max()` counts UTF-16
+            // code units (`.length`), not the UTF-8 bytes MAX_NODE_FIELD_BYTES
+            // is named for and documented in. A string of multi-byte
+            // characters (CJK, emoji) could pass `.length <= cap` while its
+            // persisted UTF-8 form was 2-4x the byte cap. `.refine()` with the
+            // same `exceedsNodeFieldCap` helper nodeService.ts's chokepoint
+            // uses makes both checks agree on what "cap" means.
+            reason: z.string().refine((v) => !exceedsNodeFieldCap(v), {
+                message: `reason exceeds the ${MAX_NODE_FIELD_BYTES}-byte limit`,
+            }).optional().describe('Optional free-form note explaining why the supersession happened. Stored verbatim, not sanitized — scrub secrets/PII before calling. See docs/DATA_CONTRACT.md.'),
             workspace: z.string().min(1).describe('Workspace scope (required — Sprint L1b: no silent fallback).'),
         },
         async ({ old_id, new_id, reason, workspace: _ws }) => {

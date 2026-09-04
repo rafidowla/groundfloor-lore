@@ -116,8 +116,8 @@ function fakeRes(): ServerResponse & { _status: number; _body: string } {
 // In-memory multi-workspace registry stub. Mirrors the LocalGraphRegistry
 // surface that diagnostic.ts uses: getOrOpen(name) → graph; unknown name
 // → WorkspaceNotFoundError(known: [...]). stats.ts resolves graphs through
-// getGraphHandle (the workspace's declared engine) since Kùzu-removal step2
-// commit 8 (40d0d90); getOrOpen stays wired too since it's still the Kùzu
+// getGraphHandle (the workspace's declared engine) since legacy-removal step2
+// commit 8 (40d0d90); getOrOpen stays wired too since it's still the legacy graph engine
 // substrate accessor other callers use.
 function makeRegistry(graphsByName: Record<string, unknown>): any {
     const open = async (name: string) => {
@@ -238,13 +238,19 @@ await test('T5 /api/admin/stats in cloud mode with no dataplane → non-2xx (gat
     assert.ok(res._status >= 400 && res._status < 600 && res._status !== 200, `expected non-2xx; got ${res._status}: ${res._body}`);
 });
 
-/* ---- T6: /api/health body includes workspaces.perWorkspaceStats ---- */
+/* ---- T6: /api/health body includes workspaces.perWorkspaceStats ----
+ *
+ * FINDING 4 (2026-09-03) — the rich body (workspaces block included) is
+ * now gated on a bound principal; an anonymous call gets the lite body
+ * instead (see T6b below). Run under AUTHED to exercise the same
+ * per-workspace contract this test always asserted.
+ */
 await test('T6 /api/health body includes workspaces.perWorkspaceStats per known workspace', async () => {
     const defaultGraph = makeFakeGraph(146, 412);
     const res = fakeRes();
-    await tryDiagnosticRoutes(reqGet(), res, '/api/health', '/api/health', baseDeps({
+    await runWithPrincipal(AUTHED, () => tryDiagnosticRoutes(reqGet(), res, '/api/health', '/api/health', baseDeps({
         store: makeFakeStore(defaultGraph, 146, 412, 0) as never,
-    }));
+    })));
     assert.equal(res._status, 200, `got ${res._status}: ${res._body}`);
     const body = JSON.parse(res._body) as Record<string, unknown>;
     const ws = body.workspaces as Record<string, unknown>;
@@ -255,6 +261,23 @@ await test('T6 /api/health body includes workspaces.perWorkspaceStats per known 
     const gt = ws.globalTotals as { nodeCount: number; edgeCount: number };
     assert.equal(typeof gt.nodeCount, 'number');
     assert.equal(typeof gt.edgeCount, 'number');
+});
+
+/* ---- T6b: FINDING 4 — anonymous /api/health gets the LITE body, not the
+ * per-workspace snapshot ---- */
+await test('T6b ANONYMOUS /api/health omits the workspaces block (lite body only)', async () => {
+    const defaultGraph = makeFakeGraph(146, 412);
+    const res = fakeRes();
+    await tryDiagnosticRoutes(reqGet(), res, '/api/health', '/api/health', baseDeps({
+        store: makeFakeStore(defaultGraph, 146, 412, 0) as never,
+    }));
+    assert.equal(res._status, 200, `got ${res._status}: ${res._body}`);
+    const body = JSON.parse(res._body) as Record<string, unknown>;
+    assert.equal(body.workspaces, undefined, 'anonymous caller must not see the workspaces block');
+    assert.equal(body.loreHome, undefined, 'anonymous caller must not see loreHome');
+    assert.equal(body.rateLimit, undefined, 'anonymous caller must not see the rate-limit snapshot');
+    assert.equal(typeof body.status, 'string');
+    assert.equal(typeof body.version, 'string');
 });
 
 /* ---- T7: workspace divergence visible in /api/health ----
@@ -273,16 +296,16 @@ await test('T7 /api/health surfaces workspace-vs-global divergence', async () =>
         getLanguageBreakdown: async () => ({}),
     };
     const before = fakeRes();
-    await tryDiagnosticRoutes(reqGet(), before, '/api/health', '/api/health', baseDeps({
+    await runWithPrincipal(AUTHED, () => tryDiagnosticRoutes(reqGet(), before, '/api/health', '/api/health', baseDeps({
         store: { loreGraph: liveGraph as never, loreVerbatim: { count: async () => 0 } } as never,
-    }));
+    })));
     const beforeBody = JSON.parse(before._body);
     const beforeTotal = (beforeBody.workspaces.globalTotals as { nodeCount: number }).nodeCount;
     n += 1; // operator wrote one node
     const after = fakeRes();
-    await tryDiagnosticRoutes(reqGet(), after, '/api/health', '/api/health', baseDeps({
+    await runWithPrincipal(AUTHED, () => tryDiagnosticRoutes(reqGet(), after, '/api/health', '/api/health', baseDeps({
         store: { loreGraph: liveGraph as never, loreVerbatim: { count: async () => 0 } } as never,
-    }));
+    })));
     const afterBody = JSON.parse(after._body);
     const afterTotal = (afterBody.workspaces.globalTotals as { nodeCount: number }).nodeCount;
     assert.equal(afterTotal - beforeTotal, 1, `expected +1; got ${afterTotal} - ${beforeTotal}`);
@@ -313,9 +336,9 @@ function makeRegistryWithOpen(graphsByName: Record<string, unknown>, openNames: 
 await test('T8 /api/health default scan reports scanned:open + honesty flags', async () => {
     const active = makeFakeGraph(10, 5);
     const res = fakeRes();
-    await tryDiagnosticRoutes(reqGet(), res, '/api/health', '/api/health', baseDeps({
+    await runWithPrincipal(AUTHED, () => tryDiagnosticRoutes(reqGet(), res, '/api/health', '/api/health', baseDeps({
         graphRegistry: makeRegistryWithOpen({ default: active }, ['default']) as never,
-    }));
+    })));
     assert.equal(res._status, 200, `got ${res._status}: ${res._body}`);
     const ws = JSON.parse(res._body).workspaces as Record<string, unknown>;
     assert.equal(ws.scanned, 'open', 'default scan must be hot-only');
@@ -336,27 +359,31 @@ await test('T9 AUTHENTICATED /api/health?workspaces=all forces a full scan (scan
     assert.equal(ws.globalTotalsComplete, true, 'full scan is always complete');
 });
 
-await test('T9b ANONYMOUS /api/health?workspaces=all downgrades to hot-only (no stampede)', async () => {
+await test('T9b ANONYMOUS /api/health?workspaces=all gets the lite body (no stampede, no data)', async () => {
     const active = makeFakeGraph(10, 5);
     const res = fakeRes();
-    // No principal bound (unauthenticated GET storm). The expensive force-open
-    // path must NOT be reachable: it silently downgrades to the cheap hot-only
-    // scan, still returning 200 so liveness monitors are unaffected.
+    // No principal bound (unauthenticated GET storm). Pre-FINDING-4 this
+    // silently downgraded to a cheap hot-only scan but still returned the
+    // (smaller) workspaces block. FINDING 4 (2026-09-03) supersedes that:
+    // an anonymous caller now never reaches the workspace-scan code at all
+    // (handleHealth returns the lite body before it runs) — strictly less
+    // exposure than the old downgrade, and still 200 so liveness monitors
+    // are unaffected.
     await tryDiagnosticRoutes(reqGet(), res, '/api/health?workspaces=all', '/api/health', baseDeps({
         graphRegistry: makeRegistryWithOpen({ default: active }, ['default']) as never,
     }));
     assert.equal(res._status, 200, `got ${res._status}: ${res._body}`);
-    const ws = JSON.parse(res._body).workspaces as Record<string, unknown>;
-    assert.equal(ws.scanned, 'open', 'anonymous ?workspaces=all must downgrade to hot-only');
+    const body = JSON.parse(res._body) as Record<string, unknown>;
+    assert.equal(body.workspaces, undefined, 'anonymous ?workspaces=all must not surface any workspace scan result');
 });
 
 await test('T10 registry without openedNames() falls back to full scan', async () => {
     const active = makeFakeGraph(10, 5);
     const res = fakeRes();
-    await tryDiagnosticRoutes(reqGet(), res, '/api/health', '/api/health', baseDeps({
+    await runWithPrincipal(AUTHED, () => tryDiagnosticRoutes(reqGet(), res, '/api/health', '/api/health', baseDeps({
         // makeRegistry has no openedNames → back-compat full scan.
         graphRegistry: makeRegistry({ default: active }) as never,
-    }));
+    })));
     assert.equal(res._status, 200, `got ${res._status}: ${res._body}`);
     const ws = JSON.parse(res._body).workspaces as Record<string, unknown>;
     assert.equal(ws.scanned, 'all', 'no openedNames → preserve old full-scan behavior');

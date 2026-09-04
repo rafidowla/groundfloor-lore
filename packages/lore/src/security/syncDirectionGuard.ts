@@ -15,14 +15,14 @@
  *
  * The guard sits at every write boundary that could persist data to
  * disk. Storage adapters call `assertCanPersistLocally` before writing
- * a Lore node to local Kùzu / LanceDB. Sync engines call
+ * a Lore node to local SurrealDB / LanceDB. Sync engines call
  * `assertCanSyncDown` before applying a cloud→local sync delta. Both
  * throw a typed error when the policy denies the operation, so the
  * caller can refuse gracefully (audit + reject the inbound write
  * rather than continuing).
  *
  * Why a separate module: the rule is invariant across substrate
- * adapters (Kùzu, LanceDB, future SQL). Centralizing the gate makes
+ * adapters (SurrealDB, LanceDB, future SQL). Centralizing the gate makes
  * "I forgot to add the check" impossible to ship — every persistence
  * call routes through this guard.
  */

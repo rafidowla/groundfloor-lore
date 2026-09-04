@@ -2,7 +2,7 @@
 /**
  * F8-dogfood.ts — End-to-end dogfood for Feature 8 (2026-05-26).
  *
- * Repointed from LocalGraph to SurrealGraph (Kùzu removal, Phase 3F):
+ * Repointed from LocalGraph to SurrealGraph (the legacy graph engine removal, Phase 3F):
  * exercises the same workflow against the embedded SurrealDB engine —
  * a real graph engine + VersionStore (no HTTP/daemon needed), in a temp
  * dir so the running daemon is never touched.

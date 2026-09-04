@@ -16,9 +16,9 @@
  * ── COARSE RBAC (identical policy to arcadeScopeGuard.ts) ────────────────────
  *   - `scopes` is an immutable ReadonlySet captured at construction.
  *   - write verbs (upsertNode, addEdge, addBidirectionalEdge, deleteNode,
- *     supersedeNode, unsupersedeNode, markStaleByTags, pruneEphemeralNodes,
- *     pruneInferredLoreEdges; vector store/delete) throw ScopeError BEFORE any
- *     HTTP call when 'write' is absent.
+ *     supersedeNode, unsupersedeNode, markStaleByTags, markStaleByIds,
+ *     pruneEphemeralNodes, pruneInferredLoreEdges; vector store/delete) throw
+ *     ScopeError BEFORE any HTTP call when 'write' is absent.
  *   - read verbs pass straight through.
  *   - scopes NEVER widen reach — reach is fixed by the wrapped adapter's
  *     immutable tenantDb binding (the auth wall), scopes gate verbs only.
@@ -140,6 +140,16 @@ export class ScopedArcadeGraphHandle implements LoreGraphHandle {
   markStaleByTags(tags: string[]): Promise<number> {
     this.requireWrite();
     return this.inner.markStaleByTags(tags);
+  }
+  // 2026-09-03 (X-markstale audit fix) — findNodeIdsByTags is a read (no
+  // requireWrite, matching getNode/other reads above); markStaleByIds is a
+  // write, gated like markStaleByTags.
+  findNodeIdsByTags(tags: string[]): Promise<string[]> {
+    return this.inner.findNodeIdsByTags(tags);
+  }
+  markStaleByIds(ids: string[]): Promise<number> {
+    this.requireWrite();
+    return this.inner.markStaleByIds(ids);
   }
   pruneEphemeralNodes(defaultTtlMs?: number): Promise<number> {
     this.requireWrite();

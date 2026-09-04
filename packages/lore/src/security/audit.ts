@@ -22,11 +22,11 @@
  *
  * Why JSONL, not sqlite:
  *   - Zero deps. We already have too many native modules (keytar,
- *     kuzu-lite, lancedb) — adding another would grow install surface.
+ *     surrealdb, lancedb) — adding another would grow install surface.
  *   - Append-only writes are atomic on POSIX for small lines — no
  *     journal, no wal, no file-locking drama.
  *   - `tail -f audit.jsonl | jq` is the debugging UX.
- *   - When we need structured queries (Phase 6+), ingest into Kùzu or
+ *   - When we need structured queries (Phase 6+), ingest into SQLite or
  *     DuckDB offline — don't couple the write-path to query speed.
  *
  * Redaction:

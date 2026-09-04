@@ -1,0 +1,28 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "description": [
+    "Dependency-update policy for @groundfloor/lore. Primary remote is Bitbucket Cloud (codementeam/groundfloor-lore) — Renovate reaches it via the Mend/Renovate app for Bitbucket Cloud (Renovate does not use GitHub-only Dependabot config, and none is present in this repo). The same file also governs the GitHub mirror (rafidowla/groundfloor-lore) if/when Renovate is installed there too, since Renovate reads this config from whichever remote it runs against."
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "description": "Weekly lockfile-only refresh (no manifest range changes) to pick up transitive-dependency fixes between explicit version bumps.",
+    "schedule": ["before 6am on monday"]
+  },
+  "packageRules": [
+    {
+      "description": "Group all non-major (minor/patch) updates into a single PR per run instead of one PR per package.",
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "minor and patch dependencies",
+      "groupSlug": "minor-patch-deps"
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "description": "Security-driven updates bypass scheduling entirely and open immediately, independent of the weekly lockfile-maintenance and grouped minor/patch cadence above.",
+    "schedule": ["at any time"],
+    "labels": ["security"],
+    "prPriority": 10
+  },
+  "osvVulnerabilityAlerts": true
+}

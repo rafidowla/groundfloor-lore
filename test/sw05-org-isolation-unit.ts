@@ -19,6 +19,11 @@
  *   - the thrown error is actionable (mentions the env var, never invents a
  *     'default' org).
  *   - cloud-mode init with DATAPLANE_ORG_ID set does NOT throw on the gate.
+ *     (Finding #10, 2026-09-03: this one needs the REAL groundfloor-ts-sdk
+ *     runtime, not just its vendored .d.ts-only package. It self-gates on
+ *     `await import('groundfloor-ts-sdk')` and logs a SKIP line — naming the
+ *     reason — instead of failing when only the type-only vendor copy is
+ *     resolvable. Every other assertion below runs regardless.)
  *   - local mode is unaffected (builds the local graph / VerbatimStore with no org).
  *
  * Fails on the pre-fix base (no throw — 'default' is used); passes on branch.
@@ -181,21 +186,57 @@ await test('resolveSyncAdapterFromEnv(local) does NOT throw with key set and no 
 
 // ── Cloud mode: present org id passes the gate ──────────────────────────────
 
-await test('createGraph(cloud) does NOT throw on the gate when org id is set', async () => {
-    await withOrgId('tenant-acme', async () => {
-        // Construction must reach past the org-id gate. DataplaneGraph does no
-        // network on construct, so a returned object proves the gate passed.
-        // TW-1b: now async (lazily imports the optional SDK; present in dev).
-        const g = await createGraph({
-            deploymentMode: 'cloud',
-            graphBasePath: tmpBase,
-            cacheTtlMs: 1000,
-            cacheMaxSize: 10,
-            cacheDisabled: false,
+// Finding #10 (2026-09-03): this is the ONE assertion in this file that
+// needs the REAL groundfloor-ts-sdk runtime (compiled JS), not just its
+// vendored .d.ts-only package — vendor/groundfloor-ts-sdk ships types only
+// (see its package.json), and on `npm ci` (no private sibling checkout
+// providing the compiled JS) `await import('groundfloor-ts-sdk')` throws.
+// That used to abort the whole `npm test` `&&` chain ~130 steps early.
+// Probe the SDK's own runtime availability and skip ONLY this assertion
+// with a clear reason when it's missing — every other assertion in this
+// file (the org-id gate itself, local-mode unaffected, etc.) still runs
+// either way, since none of them touch the SDK.
+let sdkRuntimeAvailable = true;
+try {
+    await import('groundfloor-ts-sdk');
+} catch (e) {
+    // Finding (2026-09-03): this used to catch ANY import error and treat it
+    // as "no runnable JS", so a real regression in the SDK's own module body
+    // (a syntax error, a broken re-export, a missing transitive dependency)
+    // would silently print the same SKIP line instead of failing the test.
+    // Narrow to actual module-resolution failures — the one case that
+    // legitimately means "only the vendored .d.ts-only package is present" —
+    // and let anything else propagate and fail this file.
+    const err = e as NodeJS.ErrnoException;
+    const isResolutionFailure = err.code === 'ERR_MODULE_NOT_FOUND'
+        || /Cannot find (package|module)/.test(err.message ?? '');
+    if (!isResolutionFailure) throw e;
+    sdkRuntimeAvailable = false;
+    console.log(
+        `  SKIP: createGraph(cloud) does NOT throw on the gate when org id is set — ` +
+            `optional dependency 'groundfloor-ts-sdk' has no runnable JS in this ` +
+            `environment (${err.message}); needs the private sibling checkout, ` +
+            `not just the vendored .d.ts-only package.`,
+    );
+}
+
+if (sdkRuntimeAvailable) {
+    await test('createGraph(cloud) does NOT throw on the gate when org id is set', async () => {
+        await withOrgId('tenant-acme', async () => {
+            // Construction must reach past the org-id gate. DataplaneGraph does no
+            // network on construct, so a returned object proves the gate passed.
+            // TW-1b: now async (lazily imports the optional SDK; present in dev).
+            const g = await createGraph({
+                deploymentMode: 'cloud',
+                graphBasePath: tmpBase,
+                cacheTtlMs: 1000,
+                cacheMaxSize: 10,
+                cacheDisabled: false,
+            });
+            assert.ok(g, 'cloud graph builds when org id is present');
         });
-        assert.ok(g, 'cloud graph builds when org id is present');
-    });
-})();
+    })();
+}
 
 // ── Local mode: unaffected, builds with no org id ───────────────────────────
 

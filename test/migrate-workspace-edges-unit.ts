@@ -277,9 +277,10 @@ async function testT4_failedNodeUpsertRefusesDelete(): Promise<void> {
 
 /* ─── Runner ───────────────────────────────────────────────────── */
 //
-// Unlike the Kùzu-backed original (which spawned each test in its own
-// child process to dodge kuzu-lite's native-teardown segfault), SurrealGraph
-// has no such close/reopen hazard, so all four scenarios run in one process.
+// Unlike the legacy-engine-backed original (which spawned each test in its
+// own child process to dodge the legacy engine's native-teardown segfault),
+// SurrealGraph has no such close/reopen hazard, so all four scenarios run in
+// one process.
 
 type TestFn = () => Promise<void>;
 const TESTS: Record<string, TestFn> = {

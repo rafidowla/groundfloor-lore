@@ -6,6 +6,7 @@
  * changing only the base URL:
  *
  *   POST   /v1/schema                            — createCollection
+ *   GET    /v1/schema                            — listCollections (finding #7, 2026-09-03)
  *   GET    /v1/schema/{name}                     — getCollectionSchema
  *   POST   /v1/{collection}                      — insert (single row in body)
  *   GET    /v1/{collection}/{id}                 — get by primary key
@@ -38,10 +39,12 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { z } from 'zod';
 
 import {
     handleCreateCollection,
     handleSchemaGet,
+    handleSchemaListPaged,
     handleInsert,
     handleGet,
     handleQuery,
@@ -52,13 +55,15 @@ import {
     handleUpdateByQuery,
     handleDeleteByQuery,
     handleTruncate,
-    type SdkCollectionSchema,
 } from '../../tools/collections.js';
 import {
     describeTransactionFailure,
     handleTransaction,
 } from '../../tools/collectionsTransaction.js';
 import { handleJoinQuery } from '../../tools/collectionsJoin.js';
+import { filterNodeZ, describeFilterZodError } from '../../tools/collectionsFilterSchema.js';
+import { sdkCollectionSchemaZ, describeSchemaZodError } from '../../tools/collectionsSchemaTranslate.js';
+import { CollectionValidationError } from '../../../engines/collectionRowValidation.js';
 import type { ITableStorage, Row } from '../../../contracts/tables.js';
 import type { Filter, FindOptions } from '../../../engines/collectionStorage.js';
 import { readJsonBody, writeJson, writeError, isPayloadTooLarge, MAX_BODY_BYTES, PAYLOAD_TOO_LARGE } from '../helpers.js';
@@ -127,6 +132,44 @@ function classifyStorageErr(
             message: `request body exceeded ${MAX_BODY_BYTES} bytes`,
         };
     }
+    // QA follow-up (2026-09-03) — readJsonBody (mcp/http/helpers.ts) throws
+    // a plain `Error('invalid JSON body: ...')` on malformed JSON (truncated
+    // body, trailing comma, etc). That's a structural client error (400),
+    // not a server crash — every route that calls readJsonBody inside its
+    // try block previously fell through to this function's 500 fallback
+    // (e.g. `insert_failed`/`bulk_insert_failed`) with no indication the
+    // body itself was unparseable.
+    if (/^invalid JSON body:/i.test(e.message)) {
+        return { status: 400, code: 'invalid_json_body', message: e.message };
+    }
+    // QA round-3 (A3) — the routes below now run `body.filter` through the
+    // now-.strict() filterNodeZ (previously unvalidated); map a resulting
+    // ZodError to 400 filter_invalid, naming the key, not a 500.
+    if (e instanceof z.ZodError) {
+        const detail = describeFilterZodError(e);
+        if (detail) {
+            return { status: 400, code: detail.code, message: detail.message };
+        }
+        return { status: 400, code: 'invalid_request', message: 'request body failed validation' };
+    }
+    // F6 (2026-09-03 audit) — collectionRowValidation.ts already validated
+    // the row against its declared schema BEFORE the storage call, so this
+    // is a structural client error (400), not a server crash. Read the
+    // table/field/row-index off the error's own properties (not off the
+    // message) so the response names them exactly, with no regex parsing
+    // and no risk of `redactError`-style mangling.
+    if (e instanceof CollectionValidationError) {
+        return {
+            status: 400,
+            code: 'invalid_row',
+            message: e.message,
+            extras: {
+                table: e.table,
+                ...(e.field === undefined ? {} : { field: e.field }),
+                ...(e.rowIndex === undefined ? {} : { row_index: e.rowIndex }),
+            },
+        };
+    }
     const m = e.message;
     const unknownMatch = m.match(/unknown table '([^']+)'/i);
     if (unknownMatch) {
@@ -136,11 +179,33 @@ function classifyStorageErr(
             message: `collection '${unknownMatch[1]}' not found`,
         };
     }
+    // QA follow-up (2026-09-03) — `SqliteTableStorage.requireSchema` throws a
+    // DIFFERENT message than "unknown table" when the table physically
+    // exists on disk but its schema wasn't reloaded (schemas.json deleted,
+    // or an upgrade dropped it, then the daemon restarted): "table 'X'
+    // exists in the DB but its schema is not cached...". That regex above
+    // never matched it, so GET/DELETE `/v1/{collection}/{id}` fell through
+    // to the 500 fallback below. From the API's point of view the
+    // collection is not currently reachable either way — re-declaring the
+    // same schema via `collection_create`/`POST /v1/schema` restores access
+    // (data is preserved) — so this is honestly a 404, not a 400: the
+    // request itself isn't malformed, the collection just isn't resolvable
+    // right now.
+    const uncachedMatch = m.match(/table '([^']+)' exists in the DB but its schema is not cached/i);
+    if (uncachedMatch) {
+        return {
+            status: 404,
+            code: 'collection_not_found',
+            message: `collection '${uncachedMatch[1]}' schema is not loaded — re-declare it via `
+                + 'collection_create/POST /v1/schema with the original schema to restore access '
+                + '(data is preserved)',
+        };
+    }
     // R4 #9 — match the REAL backend messages, not just the engine-agnostic
     // 'duplicate primary key': better-sqlite3 throws 'UNIQUE constraint failed:
-    // <table>.<col>' and Kùzu a 'duplicated primary key' runtime exception.
-    // These previously fell through to a 500 that LEAKED the raw SQLite/Kùzu
-    // text. Return a clean 409 with no internal detail.
+    // <table>.<col>' and the former local graph engine a 'duplicated primary
+    // key' runtime exception. These previously fell through to a 500 that
+    // LEAKED the raw backend text. Return a clean 409 with no internal detail.
     if (/duplicate primary key|UNIQUE constraint failed|duplicated primary key|primary key.*already exists/i.test(m)) {
         return { status: 409, code: 'duplicate_primary_key', message: 'a row with this primary key already exists' };
     }
@@ -148,6 +213,16 @@ function classifyStorageErr(
     // not a 500 (also reachable via the R4 #8 type-aware backfill).
     if (/NOT NULL constraint failed/i.test(m)) {
         return { status: 400, code: 'missing_required_field', message: 'a required field is missing or null' };
+    }
+    // Round-E A3 fix: INVALID (structurally malformed / over-nested) used to
+    // share the ALL branch's wording and its 400 all_filter_refused code —
+    // including "use collection_truncate to wipe" advice — even for a
+    // filter that targets exactly one row but merely nests too deep. Check
+    // the INVALID phrasing (unique to assertValidFilter's INVALID throw,
+    // collectionsFilterScope.ts) first so it gets its own code with no
+    // all-filter/truncate advice.
+    if (/structurally invalid filter/i.test(m)) {
+        return { status: 400, code: 'filter_invalid', message: m };
     }
     if (/empty\/all filter|use truncate/i.test(m)) {
         return { status: 400, code: 'all_filter_refused', message: m };
@@ -295,6 +370,10 @@ export async function tryCollectionsRoutes(
                     ? {}
                     : { failed_op_index: failure.failed_op_index }),
                 reason: failure.reason,
+                // B2 — carry table/field through for an invalid_row failure,
+                // same as insert/bulk_insert's classifyStorageErr extras.
+                ...(failure.table === undefined ? {} : { table: failure.table }),
+                ...(failure.field === undefined ? {} : { field: failure.field }),
             });
         }
         return true;
@@ -325,21 +404,76 @@ export async function tryCollectionsRoutes(
     if (pathname === META_PREFIX && req.method === 'POST') {
         if (await denyCollectionWrite(res, deps)) return true; // L-067 — creating a collection is a mutating op; require write scope.
         try {
-            const body = await readJsonBody(req) as SdkCollectionSchema;
-            if (!body || typeof body !== 'object' || !('name' in body) || !('fields' in body)) {
-                writeError(res, 400, 'invalid_schema',
-                    'body must be a CollectionSchema with `name` and `fields[]`');
-                return true;
-            }
+            const body = await readJsonBody(req);
+            // Round-S fix (2026-09-04, finding 1) — used to duck-type the
+            // body instead of running it through the same zod schema
+            // `collection_create` already validates against, so a field
+            // with the wrong key or an unrecognized type (`type:'text'`,
+            // not `field_type`/COLUMN_TYPE_ENUM) silently persisted with
+            // type `undefined` — see describeSchemaZodError below.
+            const schema = sdkCollectionSchemaZ.parse(body);
             const rdeps = await routeDeps(deps, res);
             if (!rdeps) return true;
-            const created = await handleCreateCollection(rdeps, body);
+            const created = await handleCreateCollection(rdeps, schema);
             writeJson(res, 201, created);
         } catch (e) {
+            if (e instanceof z.ZodError) {
+                const d = describeSchemaZodError(e);
+                writeError(res, 400, d.code, d.message);
+                return true;
+            }
             // audit 2026-06-25 — route through classifyStorageErr so a structural
             // error maps to a clean 4xx and the 500 fallthrough returns a generic
             // 'internal storage error' instead of leaking the raw engine message.
             const c = classifyStorageErr(e as Error, 'create_collection_failed');
+            writeError(res, c.status, c.code, c.message);
+        }
+        return true;
+    }
+
+    /* ─── meta: listCollections ────────────────────────────────
+     * Finding #7 (2026-09-03) — `GET /v1/schema` (no trailing name)
+     * used to fall through to the `/v1/{collection}` segment split
+     * below, where `schema` is a RESERVED top-level segment, so it
+     * 404'd as `unknown_v1_path`. There was no way to enumerate
+     * collections short of already knowing a name. Handled here,
+     * BEFORE the `startsWith(META_PREFIX + '/')` schema-get branch,
+     * since a bare `/v1/schema` doesn't match that prefix anyway —
+     * ordering only matters relative to the segment-split fallthrough.
+     *
+     * Finding B3 (round E, 2026-09-03) — paginated via `?limit=`,
+     * `?offset=`/`?cursor=`, `?withCounts=` query params (defaults:
+     * 100 / 0 / false — see `handleSchemaListPaged`). Non-numeric
+     * limit/offset fall back to their defaults rather than 400ing,
+     * matching this codebase's existing GET-list query-param
+     * convention (e.g. routes/versioning.ts, routes/edges.ts).
+     *
+     * Finding B3 (round E2, 2026-09-03) — `?cursor=` is now a keyset
+     * cursor (the name of the last entry on the prior page), stable
+     * under concurrent collection creates/drops; `?offset=` remains
+     * supported as a raw, best-effort position but is NOT stable
+     * under concurrent creates/drops — prefer following `?cursor=`
+     * for a correct full-set walk. A cursor from before this fix
+     * (`{offset}`-shaped) fails to decode and falls back to
+     * `?offset=` (0 if absent), same as any other malformed cursor.
+     */
+    if (pathname === META_PREFIX && req.method === 'GET') {
+        if (await denyCollectionRead(res, deps)) return true;
+        try {
+            const rdeps = await routeDeps(deps, res);
+            if (!rdeps) return true;
+            const qp = new URL(url, 'http://localhost').searchParams;
+            const limitRaw = qp.get('limit');
+            const offsetRaw = qp.get('offset');
+            const result = await handleSchemaListPaged(rdeps, {
+                limit: limitRaw !== null ? Number(limitRaw) : undefined,
+                offset: offsetRaw !== null ? Number(offsetRaw) : undefined,
+                cursor: qp.get('cursor') ?? undefined,
+                withCounts: qp.get('withCounts') === 'true',
+            });
+            writeJson(res, 200, result);
+        } catch (e) {
+            const c = classifyStorageErr(e as Error, 'schema_list_failed');
             writeError(res, c.status, c.code, c.message);
         }
         return true;
@@ -429,9 +563,12 @@ export async function tryCollectionsRoutes(
         if (await denyCollectionRead(res, deps)) return true; // audit 2026-06-25 — cross-workspace read gate
         try {
             const body = await readJsonBody(req) as { filter?: Filter; opts?: FindOptions };
+            // QA round-3 (A3) — reads are lower-risk than the mutate routes
+            // below, but get the same strict filter validation for consistency.
+            const filter = filterNodeZ.optional().parse(body?.filter);
             const rdeps = await routeDeps(deps, res);
             if (!rdeps) return true;
-            const result = await handleQuery(rdeps, collection, body?.filter, body?.opts);
+            const result = await handleQuery(rdeps, collection, filter, body?.opts);
             writeJson(res, 200, result);
         } catch (e) {
             const c = classifyStorageErr(e as Error, 'query_failed');
@@ -457,8 +594,10 @@ export async function tryCollectionsRoutes(
             const result = await handleBulkInsert(rdeps, collection, body.records);
             writeJson(res, 201, { success: true, data: result });
         } catch (e) {
+            // F6 — pass `extras` through so an invalid_row 400 names the
+            // offending table/field/row_index, not just a bare message.
             const c = classifyStorageErr(e as Error, 'bulk_insert_failed');
-            writeError(res, c.status, c.code, c.message);
+            writeError(res, c.status, c.code, c.message, c.extras);
         }
         return true;
     }
@@ -468,9 +607,11 @@ export async function tryCollectionsRoutes(
         if (await denyCollectionRead(res, deps)) return true; // audit 2026-06-25 — cross-workspace read gate
         try {
             const body = await readJsonBody(req) as { filter?: Filter };
+            // QA round-3 — see POST /v1/{collection}/query above.
+            const filter = filterNodeZ.optional().parse(body?.filter);
             const rdeps = await routeDeps(deps, res);
             if (!rdeps) return true;
-            const result = await handleCount(rdeps, collection, body?.filter);
+            const result = await handleCount(rdeps, collection, filter);
             writeJson(res, 200, { success: true, data: result });
         } catch (e) {
             const c = classifyStorageErr(e as Error, 'count_failed');
@@ -483,19 +624,23 @@ export async function tryCollectionsRoutes(
     if (req.method === 'PUT' && sub === 'update-by-query' && segments.length === 2) {
         if (await denyCollectionWrite(res, deps)) return true; // L-067
         try {
-            const body = await readJsonBody(req) as { filter?: Filter; fields?: Record<string, unknown> };
+            const body = await readJsonBody(req) as { filter?: Filter; fields?: Record<string, unknown>; all?: boolean };
             if (!body || !body.filter || !body.fields) {
                 writeError(res, 400, 'invalid_update_by_query_body',
                     'body must be {filter: Filter, fields: object}');
                 return true;
             }
+            const filter = filterNodeZ.parse(body.filter); // QA round-3 (A3)
             const rdeps = await routeDeps(deps, res);
             if (!rdeps) return true;
-            const result = await handleUpdateByQuery(rdeps, collection, body.filter, body.fields);
+            // X-allrows — `all:true` opt-in, same semantics as collection_update.
+            const result = await handleUpdateByQuery(rdeps, collection, filter, body.fields, body.all === true);
             writeJson(res, 200, { success: true, data: result });
         } catch (e) {
+            // QA follow-up — pass `extras` through so an invalid_row 400
+            // names the offending table/field, matching insert/bulk_insert.
             const c = classifyStorageErr(e as Error, 'update_by_query_failed');
-            writeError(res, c.status, c.code, c.message);
+            writeError(res, c.status, c.code, c.message, c.extras);
         }
         return true;
     }
@@ -504,19 +649,62 @@ export async function tryCollectionsRoutes(
     if (req.method === 'DELETE' && sub === 'delete-by-query' && segments.length === 2) {
         if (await denyCollectionWrite(res, deps)) return true; // L-067
         try {
-            const body = await readJsonBody(req) as { filter?: Filter };
+            const body = await readJsonBody(req) as { filter?: Filter; all?: boolean };
             if (!body || !body.filter) {
                 writeError(res, 400, 'invalid_delete_by_query_body',
                     'body must be {filter: Filter}');
                 return true;
             }
+            // QA round-3 — see PUT /v1/{collection}/update-by-query above.
+            const filter = filterNodeZ.parse(body.filter);
             const rdeps = await routeDeps(deps, res);
             if (!rdeps) return true;
-            const result = await handleDeleteByQuery(rdeps, collection, body.filter);
+            // X-allrows — `all:true` opt-in, same semantics as collection_delete.
+            const result = await handleDeleteByQuery(rdeps, collection, filter, body.all === true);
             writeJson(res, 200, { success: true, data: result });
         } catch (e) {
             // isAllFilter throws — classifyStorageErr maps it to 400.
             const c = classifyStorageErr(e as Error, 'delete_by_query_failed');
+            writeError(res, c.status, c.code, c.message);
+        }
+        return true;
+    }
+
+    /*
+     * DELETE /v1/{collection}/{id} — delete by primary key.
+     *
+     * F-DEL8 — the SDK/docs/DATAPLANE_INTEGRATION.md have always
+     * documented this shape (mirrors `GET /v1/{collection}/{id}`
+     * above), but only the filter form (`DELETE /v1/{collection}`
+     * with `{filter}` body) and `delete-by-query` existed; this path
+     * previously fell through to the 405 at the bottom of this
+     * function. The `sub === 'delete-by-query'` branch above already
+     * claimed that literal segment, so any other two-segment DELETE
+     * lands here.
+     *
+     * Same response shape as the filter-delete branch below
+     * (`{ deleted: number }`) so callers don't need to branch on
+     * which DELETE shape they used.
+     */
+    if (req.method === 'DELETE' && sub !== undefined && segments.length === 2) {
+        if (await denyCollectionWrite(res, deps)) return true; // L-067
+        try {
+            const rdeps = await routeDeps(deps, res);
+            if (!rdeps) return true;
+            // The primary-key column isn't necessarily named "id" — read
+            // it off the schema (falls back to "id" when the schema isn't
+            // introspectable, matching the historical getByKey behavior).
+            const schema = await handleSchemaGet(rdeps, collection);
+            const pkField = schema?.fields.find((f) => f.primary_key)?.name ?? 'id';
+            const result = await handleDelete(rdeps, collection, { eq: { [pkField]: sub } });
+            if (result.deleted === 0) {
+                writeError(res, 404, 'row_not_found',
+                    `no row with id '${sub}' in '${collection}'`);
+                return true;
+            }
+            writeJson(res, 200, result);
+        } catch (e) {
+            const c = classifyStorageErr(e as Error, 'delete_failed');
             writeError(res, c.status, c.code, c.message);
         }
         return true;
@@ -551,8 +739,10 @@ export async function tryCollectionsRoutes(
             const inserted = await handleInsert(rdeps, collection, body);
             writeJson(res, 201, inserted);
         } catch (e) {
+            // F6 — pass `extras` through so an invalid_row 400 names the
+            // offending table/field, not just a bare message.
             const c = classifyStorageErr(e as Error, 'insert_failed');
-            writeError(res, c.status, c.code, c.message);
+            writeError(res, c.status, c.code, c.message, c.extras);
         }
         return true;
     }
@@ -567,13 +757,16 @@ export async function tryCollectionsRoutes(
                     'body must be {filter: Filter, updates: object}');
                 return true;
             }
+            const filter = filterNodeZ.parse(body.filter); // QA round-3 (A3) — the hole this finding reproduced
             const rdeps = await routeDeps(deps, res);
             if (!rdeps) return true;
-            const result = await handleUpdate(rdeps, collection, body.filter, body.updates);
+            const result = await handleUpdate(rdeps, collection, filter, body.updates);
             writeJson(res, 200, result);
         } catch (e) {
+            // QA follow-up — pass `extras` through so an invalid_row 400
+            // names the offending table/field, matching insert/bulk_insert.
             const c = classifyStorageErr(e as Error, 'update_failed');
-            writeError(res, c.status, c.code, c.message);
+            writeError(res, c.status, c.code, c.message, c.extras);
         }
         return true;
     }
@@ -588,9 +781,11 @@ export async function tryCollectionsRoutes(
                     'body must be {filter: Filter}');
                 return true;
             }
+            // QA round-3 — see PUT /v1/{collection} above.
+            const filter = filterNodeZ.parse(body.filter);
             const rdeps = await routeDeps(deps, res);
             if (!rdeps) return true;
-            const result = await handleDelete(rdeps, collection, body.filter);
+            const result = await handleDelete(rdeps, collection, filter);
             writeJson(res, 200, result);
         } catch (e) {
             const c = classifyStorageErr(e as Error, 'delete_failed');

@@ -13,21 +13,26 @@ import type { StorageBundle } from '../../services.js';
 import type { AuxStore } from '../../../outbox/auxStore.js';
 import type { VersionStore } from '../../../outbox/versionStore.js';
 import { loadWorkspaces } from '../../../config/workspaces.js';
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 import type { LocalGraphRegistry } from '../../../engines/localGraphRegistry.js';
 import type { WorkspaceVerbatimResolver } from '../../../outbox/workspaceVerbatimResolver.js';
 import { resolveTargetGraph } from '../../tools/workspaceResolve.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, writeWorkspaceRequired } from '../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, writeWorkspaceRequired, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../security/routeWorkspaceBinding.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
+import { withNodeLock } from '../../../core/nodeWriteLock.js';
+import { recordHotWrite } from '../../../outbox/hotLane.js';
+import type { OutboxStore } from '../../../outbox/types.js';
+import type { WriteAheadLog } from '../../../engines/syncEngine.js';
 
 export interface LifecycleRouteDeps {
     store: StorageBundle;
@@ -45,6 +50,22 @@ export interface LifecycleRouteDeps {
     /** Postgres-model isolation — opens the REQUESTED workspace's VerbatimStore
      *  for the hard-delete tombstone. Absent (cloud/tests) → boot fallback. */
     workspaceVerbatimResolver?: WorkspaceVerbatimResolver;
+    /**
+     * 2026-09-03 (A2 finding 2 fix) — when wired, hard_delete records a
+     * `verbatim.tombstone` outbox row (after its `node.delete` row) so a
+     * replay of a stale `verbatim.upsert` from an earlier create can't
+     * outlive the delete and resurrect the tombstoned content. Optional so
+     * cloud mode / tests that don't wire an outbox keep the prior
+     * direct-tombstone-only behavior.
+     */
+    outboxStore?: OutboxStore;
+    /**
+     * ITEM X-walnode (2026-09-03) — when wired, hard_delete appends a
+     * `delete_node` WAL entry (active-workspace only), mirroring the MCP
+     * prune sibling and store_node / store_edge / delete_node. Optional so
+     * cloud mode / tests that don't wire a WAL keep prior behavior.
+     */
+    getWal?: () => WriteAheadLog;
 }
 
 export async function tryLifecycleRoutes(
@@ -71,7 +92,7 @@ export async function tryLifecycleRoutes(
             return true;
         }
         try {
-            const parsed = JSON.parse(body || '{}') as {
+            const parsed = parseJsonBody(body) as {
                 workspace?: string;
                 dry_run?: boolean;
                 classification?: string;
@@ -217,52 +238,133 @@ export async function tryLifecycleRoutes(
 
             for (const node of matched) {
                 try {
-                    if (hard_delete) {
-                        await withTransactionConflictRetry(() => graph.deleteNode(node.id));
-                        // audit 2026-06-18 — hard_delete must ALSO tombstone the LanceDB
-                        // vector (mirrors delete_node F2a/L-056 + the MCP prune sibling).
-                        // Graph-only delete left the embedding orphaned, so 'permanently
-                        // deleted' content stayed semantically recallable. Non-fatal.
-                        try {
-                            // Postgres-model isolation — tombstone the REQUESTED
-                            // workspace's LanceDB (the graph delete above already
-                            // routed to it), not the boot/active store. getOrOpen
-                            // is cached; boot fallback only when no resolver
-                            // (cloud/tests). The delete fallback (for a backend
-                            // lacking tombstone) MUST hit the SAME resolved store —
-                            // routing it to deps.store.storageClient.verbatimDelete
-                            // would delete from the ACTIVE workspace's LanceDB,
-                            // orphaning B's vector and (on an id collision)
-                            // corrupting A's, exactly the confinement leak this
-                            // routing exists to prevent.
-                            const targetVerbatim = deps.workspaceVerbatimResolver
-                                ? await deps.workspaceVerbatimResolver.getOrOpen(workspace)
-                                : deps.store.loreVerbatim;
-                            const vstore = targetVerbatim as unknown as {
-                                tombstone?: (id: string, reason: string) => Promise<void>;
-                                delete?: (id: string) => Promise<void>;
-                            };
-                            if (typeof vstore.tombstone === 'function') {
-                                await vstore.tombstone(`lore:${node.id}`, 'graph node hard-deleted via /api/nodes/prune');
-                            } else if (typeof vstore.delete === 'function') {
-                                await vstore.delete(`lore:${node.id}`);
+                    // QA A2 finding 1 (2026-09-03) — `node` here is a STALE
+                    // snapshot from the pre-loop listNodes() read above. A
+                    // concurrent POST /api/node upsert can land on this id
+                    // AFTER the snapshot but BEFORE this id's turn in the loop
+                    // (prune may be iterating thousands of other ids first —
+                    // no lock contention needed, just elapsed wall-clock time).
+                    // Writing `{ ...node, status: 'archived' }` inside the lock
+                    // would silently REVERT that concurrent write to its
+                    // pre-loop content — the lock only serializes access, it
+                    // does not refresh the snapshot. Fix: re-read the node
+                    // fresh INSIDE the lock and re-check the SAME eligibility
+                    // filters that built `matched`; skip (don't touch it) if it
+                    // no longer qualifies or is gone, and patch status onto the
+                    // fresh read instead of the stale one. The graph write +
+                    // its verbatim tombstone run under the SAME
+                    // per-(workspace,id) lock `nodeUpsert` holds
+                    // (core/nodeWriteLock.ts), so a concurrent same-id
+                    // POST /api/node cannot interleave between them
+                    // (hard-delete). Raw substrate primitives only inside — no
+                    // lock re-entry (nodeWriteLock.ts rule 1).
+                    const applied = await withNodeLock(workspace, node.id, async (): Promise<
+                        { kind: 'archive' | 'hard_delete'; node: typeof node } | null
+                    > => {
+                        const fresh = await graph.getNode(node.id);
+                        if (!fresh) return null; // deleted since the snapshot.
+                        if (fresh.status === 'protected' || fresh.status === 'archived') return null;
+                        if (parsed.classification && fresh.classification !== parsed.classification) return null;
+                        if (cutoff && fresh.createdAt >= cutoff) return null;
+                        if (filterTags.length > 0 && !filterTags.every((t) => (fresh.tags ?? []).includes(t))) return null;
+
+                        if (hard_delete) {
+                            // QA A2 round-2 finding 1 (2026-09-03) — record
+                            // node.delete BEFORE the substrate delete, same
+                            // outbox-first pattern as DELETE /api/node
+                            // (nodes-delete.ts) and the MCP prune sibling.
+                            // Without this, a still-pending node.upsert from
+                            // this id's original create has nothing in the
+                            // 'node' outbox family to supersede it, and a
+                            // crash-recovery replay resurrects the node in
+                            // the GRAPH after this hard delete.
+                            if (deps.outboxStore) {
+                                await recordHotWrite(deps.outboxStore, {
+                                    workspace,
+                                    operationKind: 'node.delete',
+                                    payload: { id: fresh.id },
+                                    initiator: 'http:prune',
+                                    operation: 'node.delete',
+                                });
                             }
-                        } catch (vErr) {
-                            console.error(`[Lore HTTP] prune verbatim tombstone failed for ${node.id}: ${(vErr as Error).message}`);
+                            await withTransactionConflictRetry(() => graph.deleteNode(fresh.id));
+                            // audit 2026-06-18 — hard_delete must ALSO tombstone the LanceDB
+                            // vector (mirrors delete_node F2a/L-056 + the MCP prune sibling).
+                            // Graph-only delete left the embedding orphaned, so 'permanently
+                            // deleted' content stayed semantically recallable. Non-fatal.
+                            try {
+                                // Postgres-model isolation — tombstone the REQUESTED
+                                // workspace's LanceDB (the graph delete above already
+                                // routed to it), not the boot/active store. getOrOpen
+                                // is cached; boot fallback only when no resolver
+                                // (cloud/tests). The delete fallback (for a backend
+                                // lacking tombstone) MUST hit the SAME resolved store —
+                                // routing it to deps.store.storageClient.verbatimDelete
+                                // would delete from the ACTIVE workspace's LanceDB,
+                                // orphaning B's vector and (on an id collision)
+                                // corrupting A's, exactly the confinement leak this
+                                // routing exists to prevent.
+                                const targetVerbatim = deps.workspaceVerbatimResolver
+                                    ? await deps.workspaceVerbatimResolver.getOrOpen(workspace)
+                                    : deps.store.loreVerbatim;
+                                const vstore = targetVerbatim as unknown as {
+                                    tombstone?: (id: string, reason: string) => Promise<void>;
+                                    delete?: (id: string) => Promise<void>;
+                                };
+                                const reason = 'graph node hard-deleted via /api/nodes/prune';
+                                if (typeof vstore.tombstone === 'function') {
+                                    await vstore.tombstone(`lore:${fresh.id}`, reason);
+                                } else if (typeof vstore.delete === 'function') {
+                                    await vstore.delete(`lore:${fresh.id}`);
+                                }
+                                // QA A2 finding 2 (2026-09-03) — record a
+                                // verbatim.tombstone outbox row so a stale
+                                // pending `verbatim.upsert` from an earlier
+                                // POST /api/node on this id can't later replay
+                                // AFTER this tombstone and resurrect the
+                                // content (outbox/types.ts). Non-fatal: the
+                                // synchronous tombstone above already ran.
+                                if (deps.outboxStore) {
+                                    await recordHotWrite(deps.outboxStore, {
+                                        workspace,
+                                        operationKind: 'verbatim.tombstone',
+                                        payload: { id: `lore:${fresh.id}`, reason },
+                                        initiator: 'http:prune',
+                                        operation: 'verbatim.tombstone',
+                                    });
+                                }
+                            } catch (vErr) {
+                                console.error(`[Lore HTTP] prune verbatim tombstone failed for ${fresh.id}: ${(vErr as Error).message}`);
+                            }
+                            // ITEM X-walnode (2026-09-03) — append a
+                            // `delete_node` WAL entry, same active-workspace
+                            // gate `graphRes.isActive` uses elsewhere in this
+                            // handler, still inside the SAME lock the delete
+                            // + tombstone ran under.
+                            if (graphRes.isActive && deps.getWal) {
+                                deps.getWal().append('delete_node', { id: fresh.id, workspace });
+                            }
+                            return { kind: 'hard_delete', node: fresh };
                         }
-                        hardDeleted++;
-                    } else {
-                        await withTransactionConflictRetry(() => graph.upsertNode({ ...node, status: 'archived' }));
-                        archived++;
+                        await withTransactionConflictRetry(() => graph.upsertNode({ ...fresh, status: 'archived' }));
+                        return { kind: 'archive', node: fresh };
+                    });
+
+                    if (!applied) {
+                        skipped++;
+                        continue;
                     }
+                    if (applied.kind === 'hard_delete') hardDeleted++;
+                    else archived++;
+
                     if (deps.versionStore) {
                         try {
                             deps.versionStore.recordVersion({
-                                versionId: randomUUID(), nodeId: node.id, workspace,
+                                versionId: randomUUID(), nodeId: applied.node.id, workspace,
                                 timestamp: new Date().toISOString(), principal: 'http',
-                                operation: hard_delete ? 'delete' : 'archive',
-                                previousState: node,
-                                newState: hard_delete ? null : { ...node, status: 'archived' },
+                                operation: applied.kind === 'hard_delete' ? 'delete' : 'archive',
+                                previousState: applied.node,
+                                newState: applied.kind === 'hard_delete' ? null : { ...applied.node, status: 'archived' },
                                 changesetId: null,
                             });
                         } catch { /* non-fatal */ }
@@ -287,6 +389,11 @@ export async function tryLifecycleRoutes(
                 dry_run: false,
             }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+            // through to internal_error/500 here (client mistake reported
+            // as a server crash); parseJsonBody's tagged error is caught
+            // first now.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 500, 'internal_error', redactError(err));
         }
         return true;
@@ -310,7 +417,7 @@ export async function tryLifecycleRoutes(
         }
         try {
             const nodeId = restoreMatch[1];
-            const parsed = JSON.parse(body || '{}') as { workspace?: string };
+            const parsed = parseJsonBody(body) as { workspace?: string };
             const workspace = parsed.workspace ?? '';
 
             // B4 (audit 2026-06-18) — per-token write-scope gate, mirroring the
@@ -364,13 +471,24 @@ export async function tryLifecycleRoutes(
             const graph = graphRes.graph as LoreGraph;
             await graph.initialize();
 
-            const node = await graph.getNode(nodeId);
-            if (!node) {
+            // Read-modify-write on one id — the getNode AND the write it
+            // derives from run inside the shared per-(workspace,id) lock
+            // (core/nodeWriteLock.ts). Split across the lock boundary, a
+            // concurrent same-id POST /api/node could land between them and
+            // then be silently reverted to this pre-restore snapshot. Raw
+            // graph primitives only: no re-entry (nodeWriteLock.ts rule 1).
+            const restored = await withNodeLock(effectiveWorkspace, nodeId, async () => {
+                const found = await graph.getNode(nodeId);
+                if (!found) return null;
+                const prev = found.status ?? 'active';
+                await withTransactionConflictRetry(() => graph.upsertNode({ ...found, status: 'active' }));
+                return { node: found, previousStatus: prev };
+            });
+            if (!restored) {
                 writeError(res, 404, 'node_not_found', `node not found: ${nodeId}`, { id: nodeId });
                 return true;
             }
-            const previousStatus = node.status ?? 'active';
-            await withTransactionConflictRetry(() => graph.upsertNode({ ...node, status: 'active' }));
+            const { node, previousStatus } = restored;
 
             if (deps.versionStore) {
                 try {
@@ -388,6 +506,8 @@ export async function tryLifecycleRoutes(
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, id: nodeId, previous_status: previousStatus, new_status: 'active' }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — same fix as the prune route above.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 500, 'internal_error', redactError(err));
         }
         return true;

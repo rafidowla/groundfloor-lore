@@ -2,7 +2,7 @@
  * engines/writeQueue.ts — single-writer serialization queue
  * (architecture gaps #4 + #5).
  *
- * Kùzu and SQLite are both single-writer per database. Today,
+ * SurrealDB and SQLite are both single-writer per database. Today,
  * concurrent unrelated writes (sync + migration + user + external)
  * collide at the substrate's internal mutex with no fairness, no
  * ordering guarantees, and no observability into how deep the
@@ -14,7 +14,7 @@
  * run strictly serially (FIFO), so the substrate sees one writer at
  * a time even when many callers race.
  *
- * The queue does NOT increase substrate throughput — Kùzu/SQLite
+ * The queue does NOT increase substrate throughput — SurrealDB/SQLite
  * remain single-writer underneath. What it adds:
  *
  *   - Explicit ordering (FIFO) so behavior is reproducible.

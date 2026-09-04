@@ -128,7 +128,7 @@ function runChild(mode: 'embedded' | 'local' | 'cloud', owns: boolean, stripClou
         // and realistic (a host process has a populated env).
         env: childEnv,
         encoding: 'utf-8',
-        // Model load + Kùzu/LanceDB init dominate; generous so a cold first run
+        // Model load + the legacy graph engine/LanceDB init dominate; generous so a cold first run
         // (model download) cannot flake the security assertion.
         timeout: 300_000,
     });

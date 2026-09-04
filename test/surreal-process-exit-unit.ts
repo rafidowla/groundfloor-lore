@@ -12,9 +12,9 @@
  * like a fluke.
  *
  * That is why `applySurrealSchema` defines no secondary indexes by default
- * (and why doing so costs nothing: the Kùzu binding exposes no CREATE INDEX
+ * (and why doing so costs nothing: the legacy graph engine binding exposes no CREATE INDEX
  * surface at all, so LocalGraph has none either — see
- * migration/adapters/kuzuMigrationAdapter.ts `addIndex: false`).
+ * migration/adapters/legacyMigrationAdapter.ts `addIndex: false`).
  *
  * Both halves are asserted:
  *   A. The DEFAULT engine lifecycle — open, write, read, traverse, close —

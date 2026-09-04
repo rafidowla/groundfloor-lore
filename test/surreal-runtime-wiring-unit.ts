@@ -3,7 +3,7 @@
  * surreal-runtime-wiring-unit.ts — Phase 3 runtime wiring
  * (docs/SURREALDB_BUILD_PLAN.md).
  *
- * Phase 1 built the engine, Phase 2 proved it agrees with Kùzu. Neither made it
+ * Phase 1 built the engine, Phase 2 proved it agrees with the legacy graph engine. Neither made it
  * REACHABLE: the local runtime resolves graphs through `LocalGraphRegistry`.
  * This file covers the wiring that makes a workspace select its graph engine,
  *
@@ -296,8 +296,8 @@ await test('gate: the schema-subsystem seam refuses a handle with neither schema
     // subsystem (migration backend, pre-destructive snapshots, blast-radius
     // estimates). Since the SchemaGraphOps port landed, it selects the ops
     // instance per engine (SurrealGraph.getSchemaGraphOps() or a
-    // KuzuSchemaGraphOps wrapping getGraphContext()) instead of refusing
-    // non-Kùzu workspaces. What still fails closed — with the same named
+    // LegacySchemaGraphOps wrapping getGraphContext()) instead of refusing
+    // non-legacy-engine workspaces. What still fails closed — with the same named
     // error — is a handle that exposes NEITHER hatch (e.g. a cloud
     // DataplaneGraph reaching this seam).
     const h = makeHome([{ name: 'sws', graphEngine: 'surreal' }]);
@@ -327,8 +327,9 @@ await test('gate: the schema-subsystem seam refuses a handle with neither schema
 /* ─── 6. the typed neighbour hooks the HTTP routes feature-detect ── */
 
 await test('routes: SurrealGraph exposes neighbors1Hop, so GET /api/node needs no Cypher', async () => {
-    // Without this the route falls back to raw Cypher against the EMPTY Kùzu
-    // node table and returns 200-with-no-neighbours — the silent-empty class.
+    // Without this the route falls back to raw Cypher against the EMPTY
+    // legacy-engine node table and returns 200-with-no-neighbours — the
+    // silent-empty class.
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-p3-nb-'));
     const g = new SurrealGraph(dir, { cacheDisabled: true });
     try {
@@ -373,11 +374,12 @@ await test('routes: SurrealGraph exposes subgraphFetch, so GET /api/subgraph nee
     }
 });
 
-await test('routes: workspace export reads via getGraphHandle, so a surreal workspace exports real data (not an empty Kuzu table)', async () => {
+await test('routes: workspace export reads via getGraphHandle, so a surreal workspace exports real data (not an empty legacy-engine table)', async () => {
     // Regression for a real bug: mcp/http/routes/workspaceExport.ts used to call
-    // registry.withGraph(), which unconditionally opens Kuzu regardless of the
-    // workspace's declared engine. On a surreal-backed workspace that meant the
-    // export route silently read the empty Kuzu table and streamed a
+    // registry.withGraph(), which unconditionally opened the legacy engine
+    // regardless of the workspace's declared engine. On a surreal-backed
+    // workspace that meant the export route silently read the empty
+    // legacy-engine table and streamed a
     // successful-looking empty bundle. getGraphHandle() is engine-honouring.
     const h = makeHome([{ name: 'exp', graphEngine: 'surreal' }]);
     const registry = new LocalGraphRegistry({ home: h.home });
@@ -389,7 +391,7 @@ await test('routes: workspace export reads via getGraphHandle, so a surreal work
 
         const nodes = await g.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true });
         const edges = await g.queryEdges({ limit: 1000, offset: 0 });
-        assert.deepEqual(nodes.map((n) => n.id).sort(), ['a', 'b'], 'real nodes, not an empty Kuzu read');
+        assert.deepEqual(nodes.map((n) => n.id).sort(), ['a', 'b'], 'real nodes, not an empty legacy-engine read');
         assert.equal(edges.length, 1);
         assert.equal(edges[0]?.sourceId, 'a');
     } finally {

@@ -17,13 +17,19 @@ import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
 
 import { tryCollectionsRoutes } from '../packages/lore/src/mcp/http/routes/collections.js';
+import {
+    DEFAULT_SCHEMA_LIST_LIMIT,
+    MAX_SCHEMA_LIST_LIMIT,
+} from '../packages/lore/src/mcp/tools/collections.js';
 import type {
     ITableStorage,
     JoinQuery,
+    ListTablesOptions,
     Row,
     TableOp,
     TableOpResult,
     TableSchema,
+    TableSchemaSummary,
 } from '../packages/lore/src/contracts/tables.js';
 import type { Filter, FilterNode, FindOptions } from '../packages/lore/src/engines/collectionStorage.js';
 
@@ -55,6 +61,29 @@ class FakeTableStorage implements ITableStorage {
     async createTable(schema: TableSchema): Promise<void> {
         this.schemas.set(schema.name, schema);
         if (!this.rows.has(schema.name)) this.rows.set(schema.name, new Map());
+    }
+    async listTables(opts: ListTablesOptions = {}): Promise<TableSchemaSummary[]> {
+        // Mirrors SqliteTableStorage.listTables (incl. the B3 round E2
+        // keyset fix): name-sorted for stable pagination, `after`
+        // (keyset, `n > after`) takes precedence over `offset` (raw
+        // position, unstable under concurrent creates), limit slices
+        // BEFORE any counting, withCounts (default true, matching the
+        // original unpaginated behavior) gates whether rowCount is
+        // computed at all.
+        const { offset = 0, limit, withCounts = true, after } = opts;
+        const names = Array.from(this.schemas.keys()).sort();
+        const start = after !== undefined ? names.findIndex((n) => n > after) : offset;
+        const sliceStart = start === -1 ? names.length : start;
+        const pageNames = limit === undefined ? names.slice(sliceStart) : names.slice(sliceStart, sliceStart + limit);
+        return pageNames.map((name) => {
+            const schema = this.schemas.get(name)!;
+            return {
+                name: schema.name,
+                columns: schema.columns,
+                primaryKey: schema.columns.find(c => c.primary)?.name ?? '',
+                rowCount: withCounts ? (this.rows.get(schema.name)?.size ?? 0) : undefined,
+            };
+        });
     }
     async insert(table: string, row: Row): Promise<void> {
         const tbl = this.rows.get(table) ?? new Map();
@@ -235,6 +264,301 @@ test('POST /v1/transaction reports the failed operation and applies nothing', as
     } finally { await srv.close(); }
 });
 
+/*
+ * B2 (QA finding, 2026-09-03) — collection_transaction / POST /v1/transaction
+ * bypassed collectionRowValidation.ts entirely: a wrong-typed value or an
+ * unknown column was silently coerced/stored instead of rejected like
+ * collection_insert/update/bulk_insert/update_by_query. These tests fail
+ * against the pre-fix handleTransaction (no schema/filter validation before
+ * runTransaction) and pass once handleTransaction pre-validates every op.
+ */
+test('POST /v1/transaction: string into an integer column -> 400 invalid_row naming op index + field, nothing applied', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        const result = await fetchJson(`${srv.baseUrl}/v1/transaction`, {
+            method: 'POST',
+            body: {
+                operations: [
+                    { op: 'insert', collection: 'orders', row: { id: 'tx-bad-type', amount: '42', status: 'open' } },
+                ],
+            },
+        });
+        assert.equal(result.status, 400);
+        const body = result.body as { code: string; failed_op_index: number; table: string; field: string };
+        assert.equal(body.code, 'invalid_row');
+        assert.equal(body.failed_op_index, 0);
+        assert.equal(body.table, 'orders');
+        assert.equal(body.field, 'amount');
+        const row = await fetchJson(`${srv.baseUrl}/v1/orders/tx-bad-type`);
+        assert.equal(row.status, 404); // nothing applied
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/transaction: unknown column -> 400 invalid_row naming op index + field, nothing applied', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        const result = await fetchJson(`${srv.baseUrl}/v1/transaction`, {
+            method: 'POST',
+            body: {
+                operations: [
+                    { op: 'insert', collection: 'orders', row: { id: 'tx-bad-col', bogus_field: 1 } },
+                ],
+            },
+        });
+        assert.equal(result.status, 400);
+        const body = result.body as { code: string; failed_op_index: number; table: string; field: string };
+        assert.equal(body.code, 'invalid_row');
+        assert.equal(body.failed_op_index, 0);
+        assert.equal(body.table, 'orders');
+        assert.equal(body.field, 'bogus_field');
+        const row = await fetchJson(`${srv.baseUrl}/v1/orders/tx-bad-col`);
+        assert.equal(row.status, 404); // nothing applied
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/transaction: a fully valid transaction still returns 200', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        const result = await fetchJson(`${srv.baseUrl}/v1/transaction`, {
+            method: 'POST',
+            body: {
+                operations: [
+                    { op: 'insert', collection: 'orders', row: { id: 'tx-valid', amount: 42, status: 'open' } },
+                ],
+            },
+        });
+        assert.equal(result.status, 200);
+        const row = await fetchJson(`${srv.baseUrl}/v1/orders/tx-valid`);
+        assert.equal(row.status, 200);
+        assert.equal((row.body as { amount: number }).amount, 42);
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/transaction: an empty/all filter on an update op is refused (400), nothing applied', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        await fetchJson(`${srv.baseUrl}/v1/orders`, { method: 'POST', body: { id: 'tx-scope-1', amount: 1, status: 'open' } });
+        const result = await fetchJson(`${srv.baseUrl}/v1/transaction`, {
+            method: 'POST',
+            body: {
+                operations: [
+                    { op: 'update', collection: 'orders', filter: {}, patch: { status: 'closed' } },
+                ],
+            },
+        });
+        assert.equal(result.status, 400);
+        const row = await fetchJson(`${srv.baseUrl}/v1/orders/tx-scope-1`);
+        assert.equal((row.body as { status: string }).status, 'open'); // nothing applied
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/transaction: an empty/all filter on a delete op is refused (400), nothing applied', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        await fetchJson(`${srv.baseUrl}/v1/orders`, { method: 'POST', body: { id: 'tx-scope-2', amount: 1, status: 'open' } });
+        const result = await fetchJson(`${srv.baseUrl}/v1/transaction`, {
+            method: 'POST',
+            body: {
+                operations: [
+                    { op: 'delete', collection: 'orders', filter: {} },
+                ],
+            },
+        });
+        assert.equal(result.status, 400);
+        const row = await fetchJson(`${srv.baseUrl}/v1/orders/tx-scope-2`);
+        assert.equal(row.status, 200); // nothing applied
+    } finally { await srv.close(); }
+});
+
+/*
+ * QA follow-up (2026-09-03) — malformed JSON on POST /v1/{collection} and
+ * /bulk fell through classifyStorageErr's 500 fallback (insert_failed /
+ * bulk_insert_failed) instead of a clean 400.
+ */
+test('POST /v1/{collection} with truncated JSON body -> 400 invalid_json_body', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        const res = await fetch(`${srv.baseUrl}/v1/orders`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{"id":"x"',
+        });
+        const body = await res.json() as { code: string };
+        assert.equal(res.status, 400);
+        assert.equal(body.code, 'invalid_json_body');
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/{collection}/bulk with a trailing-comma JSON body -> 400 invalid_json_body', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        const res = await fetch(`${srv.baseUrl}/v1/orders/bulk`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{"records":[{"id":"x",}]}',
+        });
+        const body = await res.json() as { code: string };
+        assert.equal(res.status, 400);
+        assert.equal(body.code, 'invalid_json_body');
+    } finally { await srv.close(); }
+});
+
+/*
+ * Coordinator finding (2026-09-03, round E2 addendum) — POST /v1/transaction
+ * did not check `readJsonBody`'s "invalid JSON body:" errors or
+ * `isPayloadTooLarge` before falling through to `describeTransactionFailure`'s
+ * generic `transaction_failed` branch, unlike every sibling /v1/{collection}
+ * route (classifyStorageErr, routes/collections.ts). Malformed JSON lost the
+ * parse detail; an oversized body answered 400 instead of 413.
+ */
+test('POST /v1/transaction with a truncated JSON body -> 400 invalid_json_body', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        const res = await fetch(`${srv.baseUrl}/v1/transaction`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{"operations":[',
+        });
+        const body = await res.json() as { code: string };
+        assert.equal(res.status, 400);
+        assert.equal(body.code, 'invalid_json_body');
+    } finally { await srv.close(); }
+});
+
+/*
+ * A3 round-2 (QA finding, 2026-09-03) — filterZ (collectionsTransaction.ts)
+ * used to silently STRIP an unrecognized `and`/`or`/`not` key instead of
+ * rejecting it (zod's default non-strict behavior), so a filter combining a
+ * scoping `and` with a broader leaf ran with the `and` dropped — matching
+ * every row sharing that leaf value instead of the one row the caller
+ * scoped to. `filterZ` is now `.strict()`, so the whole op is rejected
+ * before anything is applied.
+ */
+test('POST /v1/transaction: a nested and/or filter on an update op is REJECTED (400 filter_invalid), nothing applied', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        await fetchJson(`${srv.baseUrl}/v1/orders`, { method: 'POST', body: { id: 'r1', amount: 10, status: 'closed' } });
+        await fetchJson(`${srv.baseUrl}/v1/orders`, { method: 'POST', body: { id: 'r2', amount: 20, status: 'closed' } });
+        // Caller intent: update ONLY r1, expressed as an `and` combining a
+        // scoping id-eq with the shared status-eq.
+        const trickyFilter = { and: [{ eq: { id: 'r1' } }], eq: { status: 'closed' } };
+        const result = await fetchJson(`${srv.baseUrl}/v1/transaction`, {
+            method: 'POST',
+            body: {
+                operations: [
+                    { op: 'update', collection: 'orders', filter: trickyFilter, patch: { amount: 999 } },
+                ],
+            },
+        });
+        assert.equal(result.status, 400);
+        const body = result.body as { code: string; failed_op_index: number; message: string };
+        assert.equal(body.code, 'filter_invalid');
+        assert.equal(body.failed_op_index, 0);
+        assert.match(body.message, /"and"/);
+        const r1 = await fetchJson(`${srv.baseUrl}/v1/orders/r1`);
+        const r2 = await fetchJson(`${srv.baseUrl}/v1/orders/r2`);
+        assert.equal((r1.body as { amount: number }).amount, 10); // nothing applied
+        assert.equal((r2.body as { amount: number }).amount, 20);
+    } finally { await srv.close(); }
+});
+
+/*
+ * QA follow-up (2026-09-03) — PUT /v1/{collection} and
+ * PUT /v1/{collection}/update-by-query dropped classifyStorageErr's
+ * `extras`, so an invalid_row 400 lacked table/field (insert/bulk already
+ * included them).
+ */
+test('PUT /v1/{collection} with an invalid patch field carries table/field extras', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        await fetchJson(`${srv.baseUrl}/v1/orders`, { method: 'POST', body: { id: 'put-bad', amount: 1, status: 'open' } });
+        const result = await fetchJson(`${srv.baseUrl}/v1/orders`, {
+            method: 'PUT',
+            body: { filter: { eq: { id: 'put-bad' } }, updates: { amount: 'not-a-number' } },
+        });
+        assert.equal(result.status, 400);
+        const body = result.body as { code: string; table?: string; field?: string };
+        assert.equal(body.code, 'invalid_row');
+        assert.equal(body.table, 'orders');
+        assert.equal(body.field, 'amount');
+    } finally { await srv.close(); }
+});
+
+test('PUT /v1/{collection}/update-by-query with an unknown field carries table/field extras', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedOrders(srv);
+        await fetchJson(`${srv.baseUrl}/v1/orders`, { method: 'POST', body: { id: 'put-uq-bad', amount: 1, status: 'open' } });
+        const result = await fetchJson(`${srv.baseUrl}/v1/orders/update-by-query`, {
+            method: 'PUT',
+            body: { filter: { eq: { id: 'put-uq-bad' } }, fields: { unknownField: 1 } },
+        });
+        assert.equal(result.status, 400);
+        const body = result.body as { code: string; table?: string; field?: string };
+        assert.equal(body.code, 'invalid_row');
+        assert.equal(body.table, 'orders');
+        assert.equal(body.field, 'unknownField');
+    } finally { await srv.close(); }
+});
+
+/*
+ * QA follow-up (2026-09-03) — SqliteTableStorage.requireSchema throws a
+ * DIFFERENT message ("table 'X' exists in the DB but its schema is not
+ * cached...") than "unknown table 'X'" when a table physically exists but
+ * schemas.json was deleted/lost before a restart. classifyStorageErr's
+ * `unknownMatch` regex never matched that message, so it fell through to
+ * a 500 (get_failed/delete_failed) leaking no useful detail. It should be
+ * a clean 404 collection_not_found — the API can't currently reach the
+ * collection either way.
+ */
+test('GET /v1/{collection}/{id} maps a schema-not-cached storage error to 404 collection_not_found', async () => {
+    class SchemaNotCachedStore extends FakeTableStorage {
+        async getByKey<T extends Row = Row>(): Promise<T | null> {
+            throw new Error(
+                "SqliteTableStorage.get: table 'orders' exists in the DB but its "
+                + 'schema is not cached. Likely cause: schemas.json was deleted or '
+                + 'an upgrade dropped it. Re-declare the table via createTable() with '
+                + 'the original schema to restore access — data is preserved.',
+            );
+        }
+    }
+    const srv = await startServer({ tableStorage: new SchemaNotCachedStore() });
+    try {
+        const r = await fetchJson(`${srv.baseUrl}/v1/orders/some-id`);
+        assert.equal(r.status, 404);
+        assert.equal((r.body as { code: string }).code, 'collection_not_found');
+    } finally { await srv.close(); }
+});
+
+test('DELETE /v1/{collection}/{id} maps a schema-not-cached storage error to 404 collection_not_found', async () => {
+    class SchemaNotCachedStore extends FakeTableStorage {
+        async delete(): Promise<number> {
+            throw new Error(
+                "SqliteTableStorage.delete: table 'orders' exists in the DB but its "
+                + 'schema is not cached. Likely cause: schemas.json was deleted or '
+                + 'an upgrade dropped it. Re-declare the table via createTable() with '
+                + 'the original schema to restore access — data is preserved.',
+            );
+        }
+    }
+    const srv = await startServer({ tableStorage: new SchemaNotCachedStore() });
+    try {
+        const r = await fetchJson(`${srv.baseUrl}/v1/orders/some-id`, { method: 'DELETE' });
+        assert.equal(r.status, 404);
+        assert.equal((r.body as { code: string }).code, 'collection_not_found');
+    } finally { await srv.close(); }
+});
+
 test('POST /v1/query is routed before treating query as a collection', async () => {
     const srv = await startServer({ tableStorage: new FakeTableStorage() });
     try {
@@ -289,6 +613,70 @@ test('POST /v1/schema returns 400 for malformed body', async () => {
     } finally { await srv.close(); }
 });
 
+/**
+ * Round-S fix (2026-09-04, finding 1) — QA smoke
+ * (<SCRATCH>/audit/smoke-final/07-collections.mjs,
+ * 11-schema-delete.mjs): `POST /v1/schema` with
+ * `fields:[{name:'id',type:'text',primary_key:true},...]` (SDK's field
+ * key is `field_type`, not `type`; `'text'` isn't in COLUMN_TYPE_ENUM
+ * either) used to 201, echoing the caller's own malformed body back. The
+ * field's `type` silently became `undefined` (never persisted), `GET
+ * /v1/schema` then listed the field with no type, and every subsequent
+ * `POST /v1/{collection}` insert 400'd with the confusing "expected type
+ * 'undefined' for column 'id'". The route now validates against the same
+ * zod schema `collection_create` already used, so this never reaches 201.
+ */
+test('POST /v1/schema rejects a field using `type` instead of `field_type` — never 201s (live repro)', async () => {
+    const store = new FakeTableStorage();
+    const srv = await startServer({ tableStorage: store });
+    try {
+        const r = await fetchJson(`${srv.baseUrl}/v1/schema`, {
+            method: 'POST',
+            body: {
+                name: 'smoke_final_coll',
+                fields: [
+                    { name: 'id', type: 'text', primary_key: true },
+                    { name: 'val', type: 'text' },
+                ],
+            },
+        });
+        assert.equal(r.status, 400, `expected 400, got ${r.status} ${JSON.stringify(r.body)} -- pre-fix this was 201`);
+        assert.equal((r.body as { code: string }).code, 'invalid_schema');
+        assert.ok(!store.schemas.has('smoke_final_coll'), 'the malformed schema must never be persisted');
+        const list = await fetchJson(`${srv.baseUrl}/v1/schema`);
+        const names = (list.body as { schemas: Array<{ name: string }> }).schemas.map(s => s.name);
+        assert.ok(!names.includes('smoke_final_coll'), 'GET /v1/schema must not list the never-created collection');
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/schema rejects `field_type: "text"` (not in COLUMN_TYPE_ENUM) and names the accepted types', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        const r = await fetchJson(`${srv.baseUrl}/v1/schema`, {
+            method: 'POST',
+            body: { name: 'bad_type', fields: [{ name: 'id', field_type: 'text', primary_key: true }] },
+        });
+        assert.equal(r.status, 400);
+        assert.equal((r.body as { code: string }).code, 'invalid_schema');
+        const message = (r.body as { message: string }).message;
+        assert.ok(message.includes('string'), 'the accepted-type list must be in the message');
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/schema with a correct field_type still 201s and every insert works (no regression)', async () => {
+    const store = new FakeTableStorage();
+    const srv = await startServer({ tableStorage: store });
+    try {
+        const created = await fetchJson(`${srv.baseUrl}/v1/schema`, {
+            method: 'POST',
+            body: { name: 'good_coll', fields: [{ name: 'id', field_type: 'string', primary_key: true }] },
+        });
+        assert.equal(created.status, 201);
+        const inserted = await fetchJson(`${srv.baseUrl}/v1/good_coll`, { method: 'POST', body: { id: 'r1' } });
+        assert.equal(inserted.status, 201, `expected 201, got ${inserted.status} ${JSON.stringify(inserted.body)}`);
+    } finally { await srv.close(); }
+});
+
 test('GET /v1/schema/{name} returns the SDK schema', async () => {
     const store = new FakeTableStorage();
     const srv = await startServer({ tableStorage: store });
@@ -309,6 +697,244 @@ test('GET /v1/schema/{name} returns 404 for unknown', async () => {
         const r = await fetchJson(`${srv.baseUrl}/v1/schema/nope`);
         assert.equal(r.status, 404);
         assert.equal((r.body as { code: string }).code, 'collection_not_found');
+    } finally { await srv.close(); }
+});
+
+/* ---------- GET /v1/schema (finding #7, 2026-09-03) ---------- */
+
+test('GET /v1/schema returns 200 with an empty list when nothing has been created', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        const r = await fetchJson(`${srv.baseUrl}/v1/schema`);
+        assert.equal(r.status, 200);
+        assert.deepEqual((r.body as { schemas: unknown[] }).schemas, []);
+    } finally { await srv.close(); }
+});
+
+test('GET /v1/schema lists both collections, SDK-shaped, after two creates', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await fetchJson(`${srv.baseUrl}/v1/schema`, { method: 'POST', body: SDK_SCHEMA });
+        const CUSTOMERS_SCHEMA = {
+            name: 'customers',
+            fields: [
+                { name: 'id', field_type: 'string' as const, primary_key: true, required: true },
+                { name: 'email', field_type: 'string' as const },
+            ],
+        };
+        await fetchJson(`${srv.baseUrl}/v1/schema`, { method: 'POST', body: CUSTOMERS_SCHEMA });
+
+        const r = await fetchJson(`${srv.baseUrl}/v1/schema`);
+        assert.equal(r.status, 200);
+        const { schemas } = r.body as { schemas: Array<{ name: string; fields: Array<{ name: string; field_type: string; primary_key?: boolean }> }> };
+        assert.equal(schemas.length, 2);
+        const byName = new Map(schemas.map(s => [s.name, s]));
+        assert.ok(byName.has('orders'));
+        assert.ok(byName.has('customers'));
+        assert.equal(byName.get('orders')!.fields[0].primary_key, true);
+        assert.equal(byName.get('customers')!.fields[0].field_type, 'string');
+    } finally { await srv.close(); }
+});
+
+/* ---------- GET /v1/schema pagination (finding B3, round E, 2026-09-03) ----------
+ * Original finding #7 fix had no pagination and no way to skip the
+ * per-table COUNT(*) fan-out. These prove the fix end-to-end over HTTP:
+ * a 250-collection workspace's default call is capped with a cursor,
+ * the cursor can be followed to enumerate every collection exactly
+ * once, and ?withCounts= controls whether rowCount is computed. */
+
+async function createManyCollections(baseUrl: string, n: number): Promise<void> {
+    for (let i = 0; i < n; i++) {
+        // Zero-padded names sort predictably (t0000, t0001, ...) so
+        // "first page" / "next page" assertions below are deterministic.
+        await fetchJson(`${baseUrl}/v1/schema`, {
+            method: 'POST',
+            body: {
+                name: `t${String(i).padStart(4, '0')}`,
+                fields: [{ name: 'id', field_type: 'string' as const, primary_key: true }],
+            },
+        });
+    }
+}
+
+test('GET /v1/schema: default call on 250 collections returns DEFAULT_SCHEMA_LIST_LIMIT + a cursor', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await createManyCollections(srv.baseUrl, 250);
+        const r = await fetchJson(`${srv.baseUrl}/v1/schema`);
+        assert.equal(r.status, 200);
+        const { schemas, nextCursor } = r.body as { schemas: Array<{ name: string }>; nextCursor?: string };
+        assert.equal(schemas.length, DEFAULT_SCHEMA_LIST_LIMIT);
+        assert.equal(schemas[0]!.name, 't0000');
+        assert.ok(typeof nextCursor === 'string' && nextCursor.length > 0);
+    } finally { await srv.close(); }
+});
+
+test('GET /v1/schema: following ?cursor= enumerates all 250 collections exactly once, then stops', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await createManyCollections(srv.baseUrl, 250);
+        const seen: string[] = [];
+        let cursor: string | undefined;
+        let iterations = 0;
+        do {
+            const qs = cursor ? `?cursor=${encodeURIComponent(cursor)}` : '';
+            const r = await fetchJson(`${srv.baseUrl}/v1/schema${qs}`);
+            assert.equal(r.status, 200);
+            const { schemas, nextCursor } = r.body as { schemas: Array<{ name: string }>; nextCursor?: string };
+            for (const s of schemas) seen.push(s.name);
+            cursor = nextCursor;
+            iterations++;
+            assert.ok(iterations <= 10, 'pagination did not terminate within a sane number of pages');
+        } while (cursor !== undefined);
+
+        assert.equal(seen.length, 250);
+        assert.equal(new Set(seen).size, 250, 'no collection should appear twice across pages');
+        assert.equal(iterations, 3); // 100 + 100 + 50, ceil(250/100)
+    } finally { await srv.close(); }
+});
+
+test('GET /v1/schema: withCounts omitted (default) has no rowCount field', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await fetchJson(`${srv.baseUrl}/v1/schema`, { method: 'POST', body: SDK_SCHEMA });
+        await fetchJson(`${srv.baseUrl}/v1/orders`, { method: 'POST', body: { id: 'o1', amount: 5, status: 'new' } });
+
+        const r = await fetchJson(`${srv.baseUrl}/v1/schema`);
+        assert.equal(r.status, 200);
+        const { schemas } = r.body as { schemas: Array<Record<string, unknown>> };
+        assert.equal(schemas.length, 1);
+        assert.equal('rowCount' in schemas[0]!, false);
+    } finally { await srv.close(); }
+});
+
+test('GET /v1/schema?withCounts=true includes rowCount', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await fetchJson(`${srv.baseUrl}/v1/schema`, { method: 'POST', body: SDK_SCHEMA });
+        await fetchJson(`${srv.baseUrl}/v1/orders`, { method: 'POST', body: { id: 'o1', amount: 5, status: 'new' } });
+        await fetchJson(`${srv.baseUrl}/v1/orders`, { method: 'POST', body: { id: 'o2', amount: 7, status: 'new' } });
+
+        const r = await fetchJson(`${srv.baseUrl}/v1/schema?withCounts=true`);
+        assert.equal(r.status, 200);
+        const { schemas } = r.body as { schemas: Array<{ rowCount?: number }> };
+        assert.equal(schemas.length, 1);
+        assert.equal(schemas[0]!.rowCount, 2);
+    } finally { await srv.close(); }
+});
+
+test('GET /v1/schema?limit= is clamped to MAX_SCHEMA_LIST_LIMIT', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await createManyCollections(srv.baseUrl, 5);
+        const r = await fetchJson(`${srv.baseUrl}/v1/schema?limit=${MAX_SCHEMA_LIST_LIMIT + 500}`);
+        assert.equal(r.status, 200);
+        const { schemas, nextCursor } = r.body as { schemas: unknown[]; nextCursor?: string };
+        assert.equal(schemas.length, 5);
+        assert.equal(nextCursor, undefined);
+    } finally { await srv.close(); }
+});
+
+/* ---------- GET /v1/schema keyset cursor (finding B3, round E2, 2026-09-03) ----------
+ * The round-E fix's ?cursor= encoded a raw numeric offset, but the
+ * underlying name-sorted list is re-derived fresh on every request — a
+ * collection created between two page fetches, whose name sorts before
+ * the boundary, shifts every later name's position by one, so the
+ * boundary entry came back twice. The fix switches ?cursor= to a
+ * keyset (last-returned name, `n > lastName`), which doesn't move when
+ * something is created elsewhere in the set. */
+
+test('GET /v1/schema: creating a collection before the page boundary mid-walk causes no duplicates and no skips', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await createManyCollections(srv.baseUrl, 25); // t0000..t0024
+
+        const r1 = await fetchJson(`${srv.baseUrl}/v1/schema?limit=10`);
+        assert.equal(r1.status, 200);
+        const page1 = r1.body as { schemas: Array<{ name: string }>; nextCursor?: string };
+        assert.equal(page1.schemas.length, 10);
+        assert.equal(page1.schemas[9]!.name, 't0009');
+        assert.ok(page1.nextCursor);
+
+        // Sorts before every existing "t..." name and before the
+        // just-returned boundary entry ("t0009") — the shape that
+        // triggered the duplicate under the old offset-based cursor.
+        await fetchJson(`${srv.baseUrl}/v1/schema`, {
+            method: 'POST',
+            body: { name: 'aaa_inserted_before_boundary', fields: [{ name: 'id', field_type: 'string' as const, primary_key: true }] },
+        });
+
+        const seen: string[] = [...page1.schemas.map(s => s.name)];
+        let cursor: string | undefined = page1.nextCursor;
+        let iterations = 1;
+        while (cursor !== undefined) {
+            const qs = `?limit=10&cursor=${encodeURIComponent(cursor)}`;
+            const r = await fetchJson(`${srv.baseUrl}/v1/schema${qs}`);
+            assert.equal(r.status, 200);
+            const page = r.body as { schemas: Array<{ name: string }>; nextCursor?: string };
+            for (const s of page.schemas) seen.push(s.name);
+            cursor = page.nextCursor;
+            iterations++;
+            assert.ok(iterations <= 10, 'pagination did not terminate within a sane number of pages');
+        }
+
+        const tTableSeen = seen.filter(n => n.startsWith('t0'));
+        assert.equal(tTableSeen.length, 25, `expected all 25 pre-existing collections exactly once, got: ${JSON.stringify(tTableSeen)}`);
+        assert.equal(new Set(tTableSeen).size, 25, 'no pre-existing collection should appear twice across pages');
+        assert.ok(tTableSeen.includes('t0010'), 't0010 must not be skipped');
+        assert.equal(seen.filter(n => n === 't0009').length, 1, 't0009 (the page1/page2 boundary) must not be duplicated');
+    } finally { await srv.close(); }
+});
+
+test('GET /v1/schema: a collection created after the page boundary appears exactly once', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await createManyCollections(srv.baseUrl, 25); // t0000..t0024
+
+        const r1 = await fetchJson(`${srv.baseUrl}/v1/schema?limit=10`);
+        const page1 = r1.body as { schemas: Array<{ name: string }>; nextCursor?: string };
+        assert.ok(page1.nextCursor);
+
+        // Sorts after every existing name, so it lands at the very end of the walk.
+        await fetchJson(`${srv.baseUrl}/v1/schema`, {
+            method: 'POST',
+            body: { name: 'zzz_inserted_after_boundary', fields: [{ name: 'id', field_type: 'string' as const, primary_key: true }] },
+        });
+
+        const seen: string[] = [...page1.schemas.map(s => s.name)];
+        let cursor: string | undefined = page1.nextCursor;
+        let iterations = 1;
+        while (cursor !== undefined) {
+            const qs = `?limit=10&cursor=${encodeURIComponent(cursor)}`;
+            const r = await fetchJson(`${srv.baseUrl}/v1/schema${qs}`);
+            const page = r.body as { schemas: Array<{ name: string }>; nextCursor?: string };
+            for (const s of page.schemas) seen.push(s.name);
+            cursor = page.nextCursor;
+            iterations++;
+            assert.ok(iterations <= 10, 'pagination did not terminate within a sane number of pages');
+        }
+
+        assert.equal(seen.filter(n => n === 'zzz_inserted_after_boundary').length, 1,
+            'a collection created after the boundary must appear exactly once in the rest of the walk');
+    } finally { await srv.close(); }
+});
+
+test('GET /v1/schema: an old-style numeric-offset ?cursor= is treated as malformed and ignored', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await createManyCollections(srv.baseUrl, 5); // t0000..t0004
+
+        // Shape produced by the pre-round-E2 encoder (`{offset: number}`,
+        // no `after` field) — must not 500, and must not be honored as a
+        // position; falls back to ?offset= (0, since none is given here)
+        // exactly like garbage/truncated base64url does.
+        const oldStyleCursor = Buffer.from(JSON.stringify({ offset: 2 }), 'utf8').toString('base64url');
+
+        const r = await fetchJson(`${srv.baseUrl}/v1/schema?cursor=${encodeURIComponent(oldStyleCursor)}`);
+        assert.equal(r.status, 200);
+        const { schemas } = r.body as { schemas: Array<{ name: string }> };
+        assert.equal(schemas.length, 5, 'old-style cursor should fall back to offset 0, returning the full set');
+        assert.equal(schemas[0]!.name, 't0000');
     } finally { await srv.close(); }
 });
 
@@ -362,6 +988,36 @@ test('GET /v1/{collection}/{id} returns 404 when row absent', async () => {
     try {
         await fetchJson(`${srv.baseUrl}/v1/schema`, { method: 'POST', body: SDK_SCHEMA });
         const r = await fetchJson(`${srv.baseUrl}/v1/orders/nope`);
+        assert.equal(r.status, 404);
+        assert.equal((r.body as { code: string }).code, 'row_not_found');
+    } finally { await srv.close(); }
+});
+
+// F-DEL8 — the SDK/docs (DATAPLANE_INTEGRATION.md) and the Python SDK have
+// always expected DELETE /v1/{collection}/{id} to delete-by-primary-key
+// (the mirror of the GET-by-id route above); only the filter-body form
+// (DELETE /v1/{collection}) and /delete-by-query existed, so this shape
+// used to 405 ("method DELETE not allowed on /v1/orders/del1").
+test('DELETE /v1/{collection}/{id} deletes by primary key and returns {deleted}', async () => {
+    const store = new FakeTableStorage();
+    const srv = await startServer({ tableStorage: store });
+    try {
+        await fetchJson(`${srv.baseUrl}/v1/schema`, { method: 'POST', body: SDK_SCHEMA });
+        await fetchJson(`${srv.baseUrl}/v1/orders`, { method: 'POST', body: { id: 'del1', amount: 5 } });
+        const r = await fetchJson(`${srv.baseUrl}/v1/orders/del1`, { method: 'DELETE' });
+        assert.equal(r.status, 200, JSON.stringify(r.body));
+        assert.equal((r.body as { deleted: number }).deleted, 1);
+        // Same response shape as the filter-delete route above ({ deleted }).
+        const get = await fetchJson(`${srv.baseUrl}/v1/orders/del1`);
+        assert.equal(get.status, 404, 'row must be gone after DELETE by id');
+    } finally { await srv.close(); }
+});
+
+test('DELETE /v1/{collection}/{id} returns 404 when the row is absent', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await fetchJson(`${srv.baseUrl}/v1/schema`, { method: 'POST', body: SDK_SCHEMA });
+        const r = await fetchJson(`${srv.baseUrl}/v1/orders/nope`, { method: 'DELETE' });
         assert.equal(r.status, 404);
         assert.equal((r.body as { code: string }).code, 'row_not_found');
     } finally { await srv.close(); }
@@ -561,7 +1217,7 @@ test('POST /v1/{collection}/truncate wipes all rows and returns {success, data: 
 });
 
 /* ---------- R4 #9 — real backend dup-PK / NOT NULL messages ---------- */
-// better-sqlite3 throws 'UNIQUE constraint failed: <t>.<c>' and Kùzu a
+// better-sqlite3 throws 'UNIQUE constraint failed: <t>.<c>' and the legacy graph engine a
 // 'duplicated primary key' runtime exception — NOT the engine-agnostic
 // 'duplicate primary key' the old classifier matched. Those fell through to a
 // 500 that leaked the raw text. Verify the broadened mapping + no leak.
@@ -596,6 +1252,150 @@ test('R4#9 generic storage error → 500 with no raw internal text leaked', asyn
     assert.equal(r.status, 500);
     const body = JSON.stringify(r.body);
     assert.ok(!body.includes('/Users/secret/path') && !body.includes('disk image is malformed'), 'raw engine text must not leak');
+});
+
+/* ---------- F6 (2026-09-03 audit): invalid rows rejected with 400, not 500 ---------- */
+// Before this fix every one of these was a 500 insert_failed/bulk_insert_failed
+// (or, for the numeric string, a silently-corrupted 201) because validation
+// happened only deep inside SqliteTableStorage, whose plain Errors don't match
+// classifyStorageErr's regexes. Now collectionRowValidation.ts rejects them at
+// the boundary, before ITableStorage.insert is ever called.
+
+const VALIDATION_SCHEMA = {
+    name: 'accounts',
+    fields: [
+        { name: 'id', field_type: 'string' as const, primary_key: true, required: true },
+        { name: 'name', field_type: 'string' as const },
+        { name: 'age', field_type: 'integer' as const },
+        { name: 'active', field_type: 'boolean' as const },
+    ],
+};
+
+async function seedAccounts(srv: { baseUrl: string }) {
+    await fetchJson(`${srv.baseUrl}/v1/schema`, { method: 'POST', body: VALIDATION_SCHEMA });
+}
+
+test('POST /v1/{collection} rejects an unknown field with 400 naming table + field', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedAccounts(srv);
+        const r = await fetchJson(`${srv.baseUrl}/v1/accounts`, {
+            method: 'POST',
+            body: { id: 'a1', bogus: 'x' },
+        });
+        assert.equal(r.status, 400);
+        const body = r.body as { code: string; field?: string; table?: string };
+        assert.equal(body.code, 'invalid_row');
+        assert.equal(body.field, 'bogus');
+        assert.equal(body.table, 'accounts');
+        // Confirm it was never stored.
+        const get = await fetchJson(`${srv.baseUrl}/v1/accounts/a1`);
+        assert.equal(get.status, 404);
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/{collection} rejects a wrong-typed boolean with 400', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedAccounts(srv);
+        const r = await fetchJson(`${srv.baseUrl}/v1/accounts`, {
+            method: 'POST',
+            body: { id: 'a2', active: 'maybe' },
+        });
+        assert.equal(r.status, 400);
+        const body = r.body as { code: string; field?: string };
+        assert.equal(body.code, 'invalid_row');
+        assert.equal(body.field, 'active');
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/{collection} rejects an object into a declared string column with 400', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedAccounts(srv);
+        const r = await fetchJson(`${srv.baseUrl}/v1/accounts`, {
+            method: 'POST',
+            body: { id: 'a3', name: { first: 'x' } },
+        });
+        assert.equal(r.status, 400);
+        assert.equal((r.body as { code: string }).code, 'invalid_row');
+        assert.equal((r.body as { field?: string }).field, 'name');
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/{collection} rejects an array into a declared integer column with 400', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedAccounts(srv);
+        const r = await fetchJson(`${srv.baseUrl}/v1/accounts`, {
+            method: 'POST',
+            body: { id: 'a4', age: [1, 2, 3] },
+        });
+        assert.equal(r.status, 400);
+        assert.equal((r.body as { code: string }).code, 'invalid_row');
+        assert.equal((r.body as { field?: string }).field, 'age');
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/{collection} rejects an empty row with 400', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedAccounts(srv);
+        const r = await fetchJson(`${srv.baseUrl}/v1/accounts`, { method: 'POST', body: {} });
+        assert.equal(r.status, 400);
+        assert.equal((r.body as { code: string }).code, 'invalid_row');
+        assert.equal((r.body as { table?: string }).table, 'accounts');
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/{collection} rejects a numeric string into an integer column with 400 (reject, not coerce)', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedAccounts(srv);
+        const r = await fetchJson(`${srv.baseUrl}/v1/accounts`, {
+            method: 'POST',
+            body: { id: 'a5', age: '5' },
+        });
+        assert.equal(r.status, 400);
+        assert.equal((r.body as { code: string }).code, 'invalid_row');
+        assert.equal((r.body as { field?: string }).field, 'age');
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/{collection} still inserts a fully valid row as 201', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedAccounts(srv);
+        const r = await fetchJson(`${srv.baseUrl}/v1/accounts`, {
+            method: 'POST',
+            body: { id: 'ok1', name: 'Ada', age: 30, active: true },
+        });
+        assert.equal(r.status, 201);
+        assert.equal((r.body as { id: string }).id, 'ok1');
+    } finally { await srv.close(); }
+});
+
+test('POST /v1/{collection}/bulk rejects a bad row with 400 naming its index + field, inserting nothing', async () => {
+    const srv = await startServer({ tableStorage: new FakeTableStorage() });
+    try {
+        await seedAccounts(srv);
+        const r = await fetchJson(`${srv.baseUrl}/v1/accounts/bulk`, {
+            method: 'POST',
+            body: { records: [
+                { id: 'b1', name: 'ok' },
+                { id: 'b2', bogus: true },
+                { id: 'b3', name: 'also ok' },
+            ] },
+        });
+        assert.equal(r.status, 400);
+        const body = r.body as { code: string; field?: string; row_index?: number };
+        assert.equal(body.code, 'invalid_row');
+        assert.equal(body.field, 'bogus');
+        assert.equal(body.row_index, 1);
+        // Pre-validation runs before any insert — row 0 must not have landed.
+        const get = await fetchJson(`${srv.baseUrl}/v1/accounts/b1`);
+        assert.equal(get.status, 404);
+    } finally { await srv.close(); }
 });
 
 await Promise.all(pending);

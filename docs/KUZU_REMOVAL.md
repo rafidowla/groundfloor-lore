@@ -141,6 +141,17 @@ accident."
 - File size budget: 500-line target, 800 hard cap.
 - **No timing assertions.** If you measure, print the number; do not gate on it.
 
+## Drift guard
+
+A drift guard, `scripts/test-no-legacy-engine-refs.mjs`, fails the build if
+the name reappears outside the historical records listed there (this doc,
+`CHANGELOG.md`, `DECISIONS.md`, `AUDIT_*.md`, `SWARM_QUEUE*.md`, and the
+`docs/audit/`, `docs/audits/`, `docs/archive/`, `docs/decisions/` trees,
+among a few other dated one-off records) — plus one narrow code allowance for
+the `'kuzu'` `GraphEngineKind` sentinel literal that must keep matching a
+legacy `workspaces.json` declaration on purpose. It is wired into
+`npm run test:arch`.
+
 ## Gate
 
 1. `npm run build` — clean.
@@ -149,6 +160,17 @@ accident."
 4. `npm test` — green, **run three times**, not once. Baseline at `a993d82` is
    **2691 assertions, parity 64/64**. Account for the delta.
 5. `~/.groundfloor/` unmodified.
+
+## Third-party attribution (historical)
+
+README's Credits table carried this row for the embedded graph engine this
+removal deleted (commit `b0fe2d88` dropped it — that table documents what
+Lore currently embeds, not what it once did). Recorded here verbatim so the
+attribution isn't lost outright:
+
+| Project | Author / Maintainer | License | Role |
+| --- | --- | --- | --- |
+| [Kùzu](https://kuzudb.com/) | Kùzu Inc. (Semih Salihoğlu et al.) | MIT | Embedded graph database — the original local engine through v3.x; fully removed 2026-08-21 in favor of SurrealDB (see [docs/KUZU_REMOVAL.md](docs/KUZU_REMOVAL.md)) |
 
 ## Report back
 

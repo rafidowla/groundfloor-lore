@@ -14,7 +14,7 @@
  * caller's close() can never race an in-flight write.
  *
  * NOTE: opens a real embedded SurrealDB graph (the default engine since the
- * Kùzu removal; migrateV1Sqlite is engine-agnostic — it writes through the
+ * the legacy graph engine removal; migrateV1Sqlite is engine-agnostic — it writes through the
  * LoreGraphHandle surface). Ends with process.exit() per the tsx unit-harness
  * convention so pass/fail counters translate to the exit code.
  */

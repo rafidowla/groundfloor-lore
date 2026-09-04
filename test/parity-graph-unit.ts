@@ -12,7 +12,7 @@
  *
  * HOW: a single fixture set of nodes + edges is loaded into:
  *   (a) a real SurrealGraph over a fresh temp dir (embedded SurrealDB on
- *       disk — the local engine since the Kùzu removal; LocalGraph played
+ *       disk — the local engine since the legacy graph engine removal; LocalGraph played
  *       this side before it), and
  *   (b) a DataplaneGraph backed by `StatefulSdkClient` — an in-process fake
  *       that ACTUALLY stores rows and answers query/get/traverse (not the
@@ -40,7 +40,7 @@
  *   - bulkList / listNodes: SAME id set across pages.
  *
  * Timestamps: the local side cannot pin absolute updatedAt (no raw-SQL back
- * door since the Kùzu removal), so the fixture is loaded in updatedAt-ascending
+ * door since the legacy graph engine removal), so the fixture is loaded in updatedAt-ascending
  * order with a real gap between writes — the same relative-order strategy as
  * test/surreal-graph-contract-unit.ts. The cloud fake pins exact fixture
  * timestamps; both sides therefore rank identically.
@@ -290,7 +290,7 @@ class StatefulSdkClient {
 //
 // Note: P15 (2026-06-26) restored tag parity. Pass 2 (2026-06-24) had dropped
 // the tag branch from the local Cypher FTS scan; local now re-adds it via EXACT
-// membership ($q IN n.tags — Kùzu can't substring-match a list element against a
+// membership ($q IN n.tags — the legacy graph engine can't substring-match a list element against a
 // bound parameter). The `kappa-tag-only` fixture below (label/content do NOT
 // contain "kappa"; only the exact tag does) asserts both backends surface it.
 // Remaining edge: substring WITHIN a tag (e.g. "auth" → "authentication") is

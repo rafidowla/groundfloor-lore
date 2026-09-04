@@ -16,7 +16,7 @@ import type { AuditLog } from '../../../security/audit.js';
 import { FeedbackStore } from '../../../engines/feedbackStore.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError } from '../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { bindDaemonOperatorLane } from '../../../security/routeWorkspaceBinding.js';
 import { redactError } from '../../../security/logRedact.js';
 
@@ -51,7 +51,7 @@ export async function tryAuditRoutes(
             return true;
         }
         try {
-            const payload = JSON.parse(fbBody || '{}') as {
+            const payload = parseJsonBody(fbBody) as {
                 messageId?: string;
                 provider?: string;
                 model?: string;
@@ -74,6 +74,10 @@ export async function tryAuditRoutes(
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true }));
         } catch (fbErr) {
+            // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+            // through to 500 here; parseJsonBody's tagged error is caught
+            // first now.
+            if (isInvalidJsonBody(fbErr)) { writeInvalidJson(res, fbErr); return true; }
             writeError(res, 500, 'internal_error', redactError(fbErr));
         }
         return true;

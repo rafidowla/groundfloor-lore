@@ -23,8 +23,8 @@
  *     btree index). H1 wires the surface; runtime can be exercised
  *     against a real lance dataset by the operator.
  *
- * Like the kuzu adapter, this adapter takes a narrow shim so tests can
- * inject deterministic fakes without spinning a real lance datastore.
+ * This adapter takes a narrow shim so tests can inject deterministic
+ * fakes without spinning a real lance datastore.
  *
  * SCOPE GUARD (audit Section 7 + spec H1):
  *   LanceDB Arrow add-field may require Parquet rewrite. Adapter

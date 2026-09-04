@@ -98,16 +98,17 @@ function assertRelation(name: string): asserts name is RebacRelation {
 /**
  * RebacStore — relation tuples in SQLite, endpoint validation delegated.
  *
- * ── WHY THIS IS NO LONGER A KÙZU DAO ────────────────────────────────────────
+ * ── WHY THIS IS NOT A GRAPH-NATIVE DAO ───────────────────────────────────────
  *
- * ReBAC edges were a Kùzu `REL TABLE` anchored to `LoreNode` endpoints. That
- * anchoring is what made the subsystem engine-bound, and DEC-SURREAL-REBAC
- * recorded the consequence: on a workspace whose graph is NOT Kùzu, the Kùzu
- * `LoreNode` table is present and EMPTY, so every grant matched nothing. The
- * decision at the time was "leave it on Kùzu, nothing calls it" — a position
- * that only held while Kùzu existed. It does not survive Kùzu removal, so this
- * revisits it deliberately, which is exactly what arch rule D-023 exists to
- * force.
+ * ReBAC edges used to be a `REL TABLE` in the local graph engine, anchored to
+ * `LoreNode` endpoints. That anchoring is what made the subsystem
+ * engine-bound, and DEC-SURREAL-REBAC recorded the consequence: on a
+ * workspace whose graph engine didn't back that table, the `LoreNode` table
+ * was present and EMPTY, so every grant matched nothing. The decision at the
+ * time was "leave it as-is, nothing calls it" — a position that only held
+ * while that engine was still in use. It did not survive that engine's
+ * removal, so this revisits it deliberately, which is exactly what arch rule
+ * D-023 exists to force.
  *
  * ── WHAT CHANGED, AND WHY IT IS AN IMPROVEMENT RATHER THAN A TRANSLATION ────
  *
@@ -118,8 +119,8 @@ function assertRelation(name: string): asserts name is RebacRelation {
  * The part that WAS graph-shaped — "do both endpoints exist as real nodes?" —
  * is not deleted, it is INJECTED. `nodeExists` is supplied by the caller and
  * backed by whatever graph the workspace actually runs. So the check that used
- * to work only on Kùzu now works on every engine, and the empty-LoreNode hole
- * DEC-SURREAL-REBAC documented is closed rather than inherited.
+ * to work only on one engine now works on every engine, and the empty-LoreNode
+ * hole DEC-SURREAL-REBAC documented is closed rather than inherited.
  *
  * A store with no probe is REFUSED at construction rather than defaulting to
  * "assume the endpoints exist". Silently skipping endpoint validation in an
@@ -170,9 +171,10 @@ export class RebacStore {
      * Idempotent DDL. Safe across reboots.
      *
      * The primary key is `(subject, relation, resource)` — the identity of a
-     * grant. On Kùzu this uniqueness was maintained by `grant()` checking
-     * `has()` first, which is a race; here the schema enforces it, so a
-     * duplicate cannot be created even by two concurrent granters.
+     * grant. In the former graph-native implementation this uniqueness was
+     * maintained by `grant()` checking `has()` first, which is a race; here
+     * the schema enforces it, so a duplicate cannot be created even by two
+     * concurrent granters.
      */
     async ensureSchema(): Promise<void> {
         this.db.exec(`
@@ -202,10 +204,11 @@ export class RebacStore {
      *   2. Post-write existence check, which is the authoritative one — it
      *      catches every cause of failure, not only the predicted one.
      *
-     * (2) is cheap here and was load-bearing on Kùzu, where `MATCH … CREATE`
-     * with an absent endpoint bound nothing, created nothing, raised nothing,
-     * and returned success. A silent false success in an authorization
-     * function is the worst shape of bug available in this file.
+     * (2) is cheap here and was load-bearing on the former graph-native
+     * implementation, where `MATCH … CREATE` with an absent endpoint bound
+     * nothing, created nothing, raised nothing, and returned success. A
+     * silent false success in an authorization function is the worst shape
+     * of bug available in this file.
      */
     async grant(input: RebacGrantInput): Promise<boolean> {
         assertRelation(input.relation);
@@ -303,12 +306,10 @@ export class RebacStore {
      * Effective relation check — direct edge, group inheritance, or ancestor
      * inheritance via the `parent` chain.
      *
-     * Kept as a bounded iterative walk rather than a recursive CTE. The Kùzu
-     * version cited its engine's inability to filter intermediate edges by
-     * relation, which no longer applies — but the second reason still does and
-     * is the better one: `maxDepth` caps the walk so a cycle or pathological
-     * chain cannot stall a permission check. A recursive CTE would need its own
-     * cycle guard to match, for no gain at these sizes.
+     * Kept as a bounded iterative walk rather than a recursive CTE:
+     * `maxDepth` caps the walk so a cycle or pathological chain cannot stall
+     * a permission check. A recursive CTE would need its own cycle guard to
+     * match, for no gain at these sizes.
      *
      * Walks performed:
      *   1. Direct: subject --relation--> resource
@@ -370,9 +371,8 @@ export class RebacStore {
     /**
      * Parents of a set of ids — one BFS step up the parent chain.
      *
-     * ONE query for the whole frontier. The Kùzu version issued one query per
-     * id because "Kùzu lacks a clean `id IN $list` parameter shape across
-     * versions"; SQLite has one, so that fan-out is gone.
+     * ONE query for the whole frontier — SQLite has a clean `id IN $list`
+     * parameter shape, so there is no need to fan out one query per id.
      */
     private listParentsOf(ids: string[]): string[] {
         if (ids.length === 0) return [];

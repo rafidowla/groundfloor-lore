@@ -20,12 +20,19 @@ import { log } from '../logger.js';
 /**
  * WalOperation — The type of operation recorded in the WAL.
  *
- * Core recognizes three operations. Any other op string is unrecognized:
+ * Core recognizes four operations. Any other op string is unrecognized:
  * there is no live producer of such ops (the plugin system was removed in
  * v3.11.0), and pushPending retains them in the WAL (SW-02 B3) rather than
  * pushing or dropping them.
+ *
+ * Round-E X-edges — `delete_edge` added. Before this, `store_edge` appended
+ * `add_edge` but no edge-delete path appended anything at all: `delete_edge`
+ * (MCP) and `DELETE /api/edge` (REST) both mutated the graph with no WAL
+ * record, so a locally-deleted edge was never buffered for a sync push to
+ * remove remotely. See syncEngine.ts's `pushPendingInner` for the consuming
+ * side and `SyncAdapter.pushEdgeDeletes` for the adapter hook.
  */
-export type WalOperation = 'upsert_node' | 'add_edge' | 'delete_node' | (string & {});
+export type WalOperation = 'upsert_node' | 'add_edge' | 'delete_node' | 'delete_edge' | (string & {});
 
 /**
  * WalEntry — A single write operation buffered in the WAL.

@@ -7,7 +7,7 @@
  * changes, additive passthrough. Also covers required-param errors
  * and "missing on live schema" errors.
  *
- * Pure unit tests against in-memory schemas — no Kùzu, no
+ * Pure unit tests against in-memory schemas — no legacy graph engine, no
  * filesystem, no daemon.
  */
 

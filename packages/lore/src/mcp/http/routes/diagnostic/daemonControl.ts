@@ -20,7 +20,7 @@ export function handleDaemonRestart(res: ServerResponse): void {
     res.end(JSON.stringify({ ok: true, restarting: true }));
     // SP-02 — respond first, THEN run the same ordered drain SIGTERM
     // uses (await outbox replicator, embed queue, sync poller, session
-    // cache, consistency sweep, then close Kùzu/LanceDB) before exit.
+    // cache, consistency sweep, then close the graph engine/LanceDB) before exit.
     // Previously this was setTimeout(process.exit, 150), which hard-killed
     // every in-flight write. launchd KeepAlive relaunches after exit.
     console.error('[Lore MCP] /api/daemon/restart — draining for relaunch.');

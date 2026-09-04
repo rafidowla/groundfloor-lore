@@ -9,7 +9,7 @@
  * script that verifies the SurrealDB native addon, and the compiled `dist/`
  * output as a real npm consumer sees it. Release blocker #1 was exactly
  * this gap — the published tarball's `files` array once omitted the
- * then-postinstall script `scripts/ensure-kuzu-native.mjs`, so `npm install`
+ * then-postinstall script for the former legacy graph engine, so `npm install`
  * silently ran no postinstall and every fresh install shipped without the
  * native graph engine. No unit test caught it because unit tests never
  * leave the repo's own node_modules.
@@ -91,7 +91,7 @@ async function main(): Promise<void> {
          * just silently no-ops (node exits non-zero on a missing file, but
          * npm had ALREADY extracted an incomplete package by then). The
          * original incident was exactly this with the repo's former
-         * ensure-kuzu-native.mjs. Assert against npm's own reported file
+         * legacy-engine postinstall script. Assert against npm's own reported file
          * list first (authoritative), then cross-check by actually listing
          * the tarball contents on disk. */
         const packedPaths = new Set(packResult[0]!.files.map((f) => f.path));

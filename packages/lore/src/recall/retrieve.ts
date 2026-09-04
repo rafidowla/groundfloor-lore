@@ -186,7 +186,7 @@ const SEED_HIDDEN_HEADROOM = 4;
 const SEED_MAX_HEADROOM = 16;
 
 /** Minimal view of the graph methods the core uses (keeps casts out of the
- *  pipeline; every `LoreGraphHandle` — Kùzu, SurrealDB, or the Dataplane
+ *  pipeline; every `LoreGraphHandle` — SurrealDB or the Dataplane
  *  cloud adapter — satisfies it). */
 interface RetrievalGraph {
     search(q: string, n: number, ws: string, eco: string, excludeHidden?: boolean, signals?: { scanCapHit: boolean }): Promise<LoreNode[]>;
@@ -327,12 +327,11 @@ async function retrieveInner(
     }
 
     // 1. Resolve the target graph (named workspace via the registry).
-    // getGraphHandle, not getOrOpen: the latter is the Kùzu substrate
-    // accessor and returns a LocalGraph for every workspace, so a
-    // Surreal-backed one silently read/wrote the empty Kùzu database it
-    // still carries. getGraphHandle resolves the workspace's DECLARED
-    // engine (and still runs assertWorkspaceOpenAllowed via getOrOpen
-    // internally first). `WorkspaceGraph` — like `LoreGraph` — already
+    // getGraphHandle resolves the workspace's DECLARED engine, so a
+    // Surreal-backed workspace reads/writes its own graph rather than an
+    // empty database for a different engine (and still runs
+    // assertWorkspaceOpenAllowed via getOrOpen internally first).
+    // `WorkspaceGraph` — like `LoreGraph` — already
     // satisfies `RetrievalGraph` structurally (search/getNodesByIds/
     // traverse are on the shared `GraphProvider` base), so no cast is
     // needed here any more.

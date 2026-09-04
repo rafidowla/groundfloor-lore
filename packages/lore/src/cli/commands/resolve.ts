@@ -1,5 +1,4 @@
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
-import { resolveGraphBasePath } from './shared.js';
+import { resolveGraphBasePath, openGraphForCli } from './shared.js';
 
 export async function resolveDeferredCommand(args: string[]): Promise<void> {
     const nodeId = args[0];
@@ -28,8 +27,10 @@ export async function resolveDeferredCommand(args: string[]): Promise<void> {
     }
 
     const basePath = resolveGraphBasePath();
-    const graph = openWorkspaceGraph(basePath);
-    await graph.initialize();
+    // Finding 11 (round E) — refuse fast with a clear message when a
+    // running daemon holds this store's lock, instead of the old ~15s
+    // openSurreal retry storm ending in a raw driver error.
+    const graph = await openGraphForCli(basePath);
 
     try {
         const { stampResolved } = await import('../../engines/deferred.js');

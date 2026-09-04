@@ -3,7 +3,7 @@
  * fc-round5-bulk-autolink-workspace-e2e.ts — 2026-08-18 gap 1 (regression).
  *
  * bulkIngest({ autolink: true }) routing, at the REAL production entry point
- * (createLore embedded; default SurrealGraph engine — no Kùzu, no mocks).
+ * (createLore embedded; default SurrealGraph engine — no legacy graph engine, no mocks).
  *
  * The 1.4 fix removed nodeService's boot-workspace gate but left bulkIngest
  * hardcoding the BOOT graph + BOOT verbatim store in the autolink handles for

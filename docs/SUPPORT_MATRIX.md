@@ -49,9 +49,7 @@ LTS lines (20, 22).
 
 ### Why macOS x64 and Linux x64/arm64 are the primary targets
 
-Lore Core uses five native packages that ship prebuilt binaries — one of
-them, `@kineviz/kuzu-lite`, is an **optional** dependency now that
-SurrealDB is the default graph engine (see below):
+Lore Core uses four native packages that ship prebuilt binaries:
 
 1. **`@lancedb/lancedb` 0.27.2** — Ships optional prebuilts for:
    - `@lancedb/lancedb-darwin-arm64`
@@ -64,27 +62,19 @@ SurrealDB is the default graph engine (see below):
    Note: no `darwin-x64` binary is shipped; macOS x64 falls back to
    `darwin-arm64` via Rosetta 2 or source compilation.
 
-2. **`@surrealdb/node` 3.0.3** — the **default graph engine as of v3.13.0**
+2. **`@surrealdb/node` 3.0.3** — the **only graph engine**
    (`DEFAULT_GRAPH_ENGINE = 'surreal'`,
    `packages/lore/src/engines/graphEngineSelector.ts`). A `napi-rs` native
    addon; ships prebuilt binaries for `darwin-arm64`, `darwin-x64`,
    `linux-arm64-gnu`, `linux-arm64-musl`, `linux-x64-gnu`, `linux-x64-musl`,
    `win32-arm64-msvc`, and `win32-x64-msvc` — broader platform coverage
-   than the other three native deps below.
+   than the other two native deps below.
 
-3. **`@kineviz/kuzu-lite` 0.11.3** — the legacy graph engine, reachable only
-   via an explicit per-workspace `graphEngine: 'kuzu'` declaration (see
-   [`docs/KUZU_REMOVAL.md`](./KUZU_REMOVAL.md)); an `optionalDependency` in
-   `package.json`, not a hard requirement. Ships a single pre-compiled
-   WASM/native bundle. Platform coverage includes macOS and Linux but is
-   not individually arch-flagged in the npm manifest (binary is bundled in
-   the package).
-
-4. **`better-sqlite3` 12.10.0** — Ships prebuilts via `prebuild-install` for
+3. **`better-sqlite3` 12.10.0** — Ships prebuilts via `prebuild-install` for
    Node 20.x and 22.x on Linux x64/arm64 and macOS x64/arm64. Source
    compilation with `node-gyp` is the fallback (requires Python + compiler).
 
-5. **`sharp` 0.34.5** (image processing for OCR pipeline) — Ships prebuilts
+4. **`sharp` 0.34.5** (image processing for OCR pipeline) — Ships prebuilts
    for Linux x64/arm64 (glibc ≥2.31) and macOS arm64/x64. Requires
    `libvips` on platforms without prebuilts.
 
@@ -129,8 +119,7 @@ These versions match what is resolved in `package-lock.json`.
 
 | Package | Pinned Version | Reason |
 |---------|---------------|--------|
-| `@surrealdb/node` | `3.0.3` | Native SurrealDB embedded graph engine; default as of v3.13.0; binary must match |
-| `@kineviz/kuzu-lite` | `0.11.3` | Native Kùzu graph engine (legacy, optional — per-workspace `graphEngine: 'kuzu'` opt-in only); binary must match when present |
+| `@surrealdb/node` | `3.0.3` | Native SurrealDB embedded graph engine; the only graph engine; binary must match |
 | `@lancedb/lancedb` | `0.27.2` | Native LanceDB vector store; binary must match |
 | `better-sqlite3` | `12.10.0` | Native SQLite binding; binary must match |
 

@@ -2,8 +2,8 @@
  * arcadeBoot.ts — the db-per-app ArcadeDB cloud boot path
  * (spike/arcadedb-multitenant, slice 2 W1 + W4).
  *
- * WHY A SEPARATE BOOT: arcade mode never brings up Kùzu / LanceDB /
- * LocalGraphRegistry / sync / watchers / daemon maintenance timers. Tenant
+ * WHY A SEPARATE BOOT: arcade mode never brings up the local graph engine /
+ * LanceDB / LocalGraphRegistry / sync / watchers / daemon maintenance timers. Tenant
  * graph+vector live in ONE ArcadeDB database per customer-app; the daemon's
  * only local state is the SQLite/JSONL RELATIONAL LANE (outbox + audit +
  * provisioning/token registry). Delegating here keeps server.ts's local/cloud
@@ -21,7 +21,7 @@
  *     ({code:'not_supported_in_arcade_mode'}) — no route silently touches a
  *     local substrate.
  *
- * WHAT DOES NOT BOOT: LocalGraph/Kùzu, LanceDB/VerbatimStore,
+ * WHAT DOES NOT BOOT: LocalGraph, LanceDB/VerbatimStore,
  * LocalGraphRegistry, sync engine/poller, source watchers, schema-authoring,
  * and ALL daemon maintenance timers. The bounded tenant DATA plane (cell pool
  * + per-request cell binding) is a following slice; here every data verb 501s.
@@ -29,6 +29,7 @@
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server as HttpServer } from 'node:http';
 import { log } from '../logger.js';
+import { VERSION } from '../version.js';
 import { AuditLog } from '../security/audit.js';
 import { SqliteOutboxStore } from '../outbox/sqliteStore.js';
 import { ensureAuthToken, getAuthTokenPath } from '../security/authToken.js';
@@ -136,6 +137,27 @@ function requireOperatorPrincipal(
 }
 
 /**
+ * isOperatorBearer — true when the request's Bearer matches the daemon
+ * operator token or the shared secret (the same two credentials
+ * `requireOperatorPrincipal` accepts), false otherwise (missing, malformed,
+ * a tenant `lore_at_*` token, or unknown).
+ *
+ * FINDING 4(b) (2026-09-03, Rafi DECISION) — kept separate from
+ * `requireOperatorPrincipal` because that function WRITES a 401 + returns
+ * on failure; the health branch below must stay 200 either way (a liveness
+ * probe never fails auth) and only chooses which body to send.
+ */
+export function isOperatorBearer(req: IncomingMessage, authToken: string, sharedSecret: string | undefined): boolean {
+    const authHeader = (req.headers.authorization ?? '') as string;
+    const bearer = authHeader.trim().replace(/^Bearer\s+/i, '');
+    if (!bearer) return false;
+    const lower = bearer.toLowerCase();
+    if (/^[a-f0-9]{64}$/i.test(bearer) && lower === authToken.toLowerCase()) return true;
+    if (sharedSecret && lower === sharedSecret.toLowerCase()) return true;
+    return false;
+}
+
+/**
  * arcadeDispatch — the arcade listener's request router. Health + operator
  * control plane only; everything else 501s deny-by-default so no request can
  * silently fall back to a local substrate that does not exist in this mode.
@@ -172,11 +194,21 @@ async function arcadeDispatch(
     const method = req.method ?? 'GET';
 
     // Health is unauthenticated (matches local mode's public /health) AND exempt
-    // from rate limiting — checked before the limiter so /health never 429s. The
-    // health payload surfaces the limiter's live config snapshot for operators.
+    // from rate limiting — checked before the limiter so /health never 429s.
+    //
+    // FINDING 4(b) (2026-09-03, Rafi DECISION) — an anonymous caller gets only
+    // the lite liveness shape; the operator-scoped rate-limit snapshot +
+    // ARCADE_BASE_URL (an internal endpoint, not for tenant/anonymous eyes)
+    // are surfaced only once the request presents a valid operator Bearer.
+    // Mirrors the local-mode split in diagnostic/health.ts handleHealth.
     if ((pathname === '/health' || pathname === '/api/health') && method === 'GET') {
+        if (!isOperatorBearer(req, deps.authToken, deps.sharedSecret)) {
+            writeJson(res, 200, { status: 'ok', version: VERSION, mode: 'arcade' });
+            return;
+        }
         writeJson(res, 200, {
             status: 'ok',
+            version: VERSION,
             mode: 'arcade',
             arcadeBaseUrl: ARCADE_BASE_URL,
             rateLimit: deps.limiter.getConfigSnapshot(),

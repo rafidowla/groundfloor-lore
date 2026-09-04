@@ -613,7 +613,7 @@ async function runOneTestInProcess(name: string): Promise<void> {
     const fn = TESTS[name];
     if (!fn) { console.error(`unknown test: ${name}`); process.exit(2); }
     await fn();
-    // Hard-exit to dodge kuzu-lite teardown segfaults.
+    // Hard-exit to dodge the legacy engine teardown segfaults.
     process.exit(0);
 }
 
@@ -628,7 +628,7 @@ async function runAllTestsInChildren(): Promise<void> {
     let fail = 0;
     for (const name of Object.keys(TESTS)) {
         // Each child gets its OWN LORE_HOME with the same workspaces.json
-        // pre-seeded so per-test Kùzu state is isolated.
+        // pre-seeded so per-test the legacy graph engine state is isolated.
         const childHome = fs.mkdtempSync(path.join(TEST_HOME!, `${name}-home-`));
         seedWorkspacesJson(childHome);
         const result = spawnSync(tsxBin, [selfPath, '--child', name], {

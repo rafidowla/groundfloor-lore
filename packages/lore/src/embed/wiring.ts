@@ -21,9 +21,10 @@ import type { DataplaneVectorStore } from '../engines/dataplaneVectorStore.js';
 import { computeContentHash } from '../engines/contentHash.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
 

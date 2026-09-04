@@ -3,8 +3,8 @@
  * surreal-graph-contract-unit.ts — embedded SurrealDB graph correctness
  * against the W0-SEARCH-CONTRACT.
  *
- * Born as `parity-surreal-graph-unit.ts` (Kùzu vs SurrealDB parity, Phase 2
- * of the engine evaluation). The Kùzu side died with the engine removal, but
+ * Born as `parity-surreal-graph-unit.ts` (the legacy graph engine vs SurrealDB parity, Phase 2
+ * of the engine evaluation). The legacy graph engine side died with the engine removal, but
  * the Surreal-side assertions carry the real regression coverage — search
  * ordering, traversal depth/diamond/cycle/self-loop/leaf semantics, directed
  * walks, pagination cursors, lifecycle verbs, aggregate shapes, and the
@@ -542,7 +542,7 @@ async function main(): Promise<void> {
                 /invalid identifier/i, 'hostile identifier refused');
         });
 
-        /* ── the operations that used to exist only on Kùzu ─────────── */
+        /* ── the operations that used to exist only on the legacy graph engine ─────────── */
 
         await check('getLanguageBreakdown: every node counted exactly once', async () => {
             const breakdown = await g.getLanguageBreakdown();
@@ -620,7 +620,7 @@ async function main(): Promise<void> {
         });
 
         await check('cache controls exist and behave', async () => {
-            // getCacheStats/resetCacheStats/reconfigureCache used to be Kùzu-only,
+            // getCacheStats/resetCacheStats/reconfigureCache used to be legacy-only,
             // so /api/config and the storage diagnostics route 500'd without them.
             await g.getNode('hub');
             g.resetCacheStats();
@@ -892,7 +892,7 @@ async function main(): Promise<void> {
             assert.equal(wide['supersededReason'], 'parity reason', 'reason persisted');
             assert.ok(typeof wide['supersededAt'] === 'string' && wide['supersededAt'] !== '', 'supersededAt stamped');
             // NOTE: validUntil-on-supersede was a tracked divergence in the old
-            // Kùzu-vs-Surreal harness (Kùzu left it null). SurrealDB stamps it —
+            // legacy-vs-Surreal harness (the legacy graph engine left it null). SurrealDB stamps it —
             // that is the surviving engine's contract, pinned here.
             assert.ok(typeof wide['validUntil'] === 'string' && wide['validUntil'] !== '',
                 'validUntil stamped on supersede');

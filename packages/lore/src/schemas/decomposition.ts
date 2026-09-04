@@ -277,7 +277,7 @@ function decomposeFieldRemoved(change: ProposedChange, opts: DecomposeOpts, plan
  * pay attention to the marker can coerce values they encounter.
  *
  * The migrate phase runs the existing `field.type_changed` op so the
- * MigrationRunner (Kùzu backend already supports it) re-writes every
+ * MigrationRunner (the local backend already supports it) re-writes every
  * row's value through the coercer.
  *
  * The contract phase deep-clones again, flips the field's `type` to

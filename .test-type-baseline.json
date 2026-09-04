@@ -75,7 +75,7 @@
     "test/sync-embedding-unit.ts": 8,
     "test/sync-wal-no-remote-gate-unit.ts": 1,
     "test/topology-route-gate-unit.ts": 1,
-    "test/triage-recommended-fixes-unit.ts": 3,
+    "test/triage-recommended-fixes-unit.ts": 2,
     "test/tw4c-search-preorder-unit.ts": 1,
     "test/tw6b-no-chat-no-ui-unit.ts": 2,
     "test/unit-deferred.ts": 17,

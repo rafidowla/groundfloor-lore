@@ -5,7 +5,7 @@
  * getNode / traverse) repeats the same few queries in tight loops
  * (chat context-expansion, recall() dominating tool traffic, the
  * filter panel re-fetching topology on every open). Those queries
- * round-trip through Kùzu's prepare→execute→getAll, which even on
+ * round-trip through the graph engine's prepare→execute→getAll, which even on
  * an embedded DB is 10–50× slower than a memory read. This module
  * is the in-proc substrate.
  *
@@ -143,7 +143,7 @@ export interface CacheStats {
      *  Added 2026-05-14 to inform cloud Redis cache sizing. Each kind has
      *  its own hit/miss counters and a loader-latency histogram so we can
      *  see (a) which kinds benefit most from caching, (b) what the actual
-     *  cold-Kùzu cost is per kind. */
+     *  cold-graph-engine cost is per kind. */
     byKind: Record<string, PerKindStats>;
 }
 
@@ -268,7 +268,7 @@ export class ReadCache {
      *  result, return it. `loader` is only awaited on miss.
      *
      *  Audit 2026-05-14: on miss, time the loader and record into the
-     *  per-kind latency histogram. This is the actual Kùzu round-trip
+     *  per-kind latency histogram. This is the actual graph-engine round-trip
      *  cost — the data point we need to size the Redis cache for cloud.
      *  Disabled-cache path is excluded so disabling the cache doesn't
      *  pollute the latency baseline. */

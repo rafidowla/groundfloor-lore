@@ -3,7 +3,7 @@
  * unit-deferred.ts — Pure unit tests for Q1.7 deferred-surfacing engine.
  *
  * Scope: findDeferredMatches + stampResolved in isolation. No daemon,
- * no Kùzu, no LanceDB — an in-memory GraphProvider double supplies
+ * no legacy graph engine, no LanceDB — an in-memory GraphProvider double supplies
  * just enough of the contract for the engine's match logic to run.
  *
  * Cases covered:

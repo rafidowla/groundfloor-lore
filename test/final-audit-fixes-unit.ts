@@ -145,8 +145,8 @@ function versioningDeps(csWorkspace: string, status = 'open') {
         assert.equal(ok, 'Hello World', `normal RTF still extracts body; got "${ok}"`);
     });
 
-    /* ── analytics Cypher injection (CRITICAL) — REMOVED with KuzuAnalyticalStorage,
-     *    which had zero production callers and was deleted in the Kùzu-removal
+    /* ── analytics Cypher injection (CRITICAL) — REMOVED with LegacyAnalyticalStorage,
+     *    which had zero production callers and was deleted in the legacy-removal
      *    Phase 3 sweep. No replacement subject exists (SQLite's analytical path
      *    never had this class of injection surface). ── */
 

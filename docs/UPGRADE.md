@@ -21,8 +21,8 @@ Lore data lives in `<LORE_HOME>/` (default `~/.groundfloor/`) and is independent
 the installed binary, so an upgrade is mostly "swap the binary, restart, verify."
 
 ```bash
-# 1. Stop the daemon (avoids a mid-write backup; also releases Kùzu's
-#    single-writer handle for any workspace still on graphEngine: 'kuzu').
+# 1. Stop the daemon (avoids a mid-write backup; also releases SurrealDB's
+#    single-writer handle on the workspace).
 
 # 2. BACK UP every workspace first — this is your rollback path.
 lore backup --all --out /srv/lore-backups
@@ -33,7 +33,11 @@ npm i -g @groundfloor/lore@latest      # or your pinned version
 # 4. Restart and verify.
 lore serve --http &
 lore doctor
-curl -s http://localhost:3847/api/health | jq '.version, .workspaces.globalTotals'
+# `workspaces.globalTotals` is full-body-only (needs a Bearer) — `version`
+# is present in both the lite and full bodies. See docs/OPERATIONS.md's
+# "GET /api/health" section for the anonymous-vs-authenticated split.
+curl -s -H "Authorization: Bearer $(cat ~/.groundfloor/auth.token)" \
+     http://localhost:3847/api/health | jq '.version, .workspaces.globalTotals'
 ```
 
 If `lore doctor` is clean and `/api/health` reports the new `version` with sane
@@ -46,12 +50,9 @@ step 2 per [`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md).
 
 ### Note on `LoreNode` indexing
 
-There is **no one-time index-build step** on upgrade, on either graph engine:
+There is **no one-time index-build step** on upgrade:
 
-- **Kùzu** (legacy, per-workspace `graphEngine: 'kuzu'` opt-in) exposes no
-  secondary-index DDL at all in the `@kineviz/kuzu-lite` binding, so the
-  `LoreNode` table is primary-keyed on `id` only.
-- **SurrealDB** (default as of v3.13.0) has secondary B-tree indexes
+- **SurrealDB** (the only graph engine) has secondary B-tree indexes
   (`DEFINE INDEX`, `engines/surreal/surrealConnection.ts`) but ships them
   **default OFF** — `@surrealdb/node@3.0.3` leaks a libuv handle from the
   `DEFINE INDEX` that builds an index, so the daemon process never exits
@@ -74,7 +75,7 @@ no recognized target to see the built-in usage list. The targets:
 
 | Target | What it does |
 | --- | --- |
-| `v1-sqlite [<path>] [--apply] [--archive]` | One-off: migrate a legacy V1 `knowledge.db` SQLite file into the local graph (SurrealDB by default, or Kùzu on a legacy `graphEngine: 'kuzu'` workspace) |
+| `v1-sqlite [<path>] [--apply] [--archive]` | One-off: migrate a legacy V1 `knowledge.db` SQLite file into the local graph (SurrealDB, the only graph engine) |
 | `embedding-model --to <modelId> [--dim <n>] [--apply] [--force]` | Re-embed the corpus into a different embedding model's vector space |
 | `workspace-to-workspace --from <a> --to <b> [filters] [--apply]` | Move filtered nodes (and optionally edges + vectors) between workspaces |
 | `list [--substrate <name>] [--workspace <name>] [--status <s>]` | List online schema migrations tracked in `migrations.sqlite` |
@@ -126,16 +127,18 @@ CLI opens an ephemeral coordinator.
 
 - **SQLite substrate is the only one wired through the standalone CLI today.**
   `apply` for a `sqlite` spec requires `--db-path <sqlite-file>`. Specs targeting
-  `kuzu` or `lance` exit with a "requires daemon-side wiring; not yet exposed via
-  the standalone CLI" notice — that integration is a later step (H1.next).
-  **`kuzu` has no adapter registered at all** — `kuzuMigrationAdapter.ts` was
-  deleted as part of the Kuzu-removal work (see `docs/KUZU_REMOVAL.md`), so a
-  `kuzu`-targeted spec now hits the same "not wired" path as `lance` purely
+  the legacy graph-engine substrate or `lance` exit with a "requires daemon-side
+  wiring; not yet exposed via the standalone CLI" notice — that integration is
+  a later step (H1.next). **The legacy graph-engine substrate has no adapter
+  registered at all** — its migration adapter module was deleted as part of
+  the removal work for that engine (see `docs/KUZU_REMOVAL.md`), so a spec
+  targeting it now hits the same "not wired" path as `lance` purely
   because nothing claims it, not because daemon wiring is pending. The Lance
   adapter logic (`migration/adapters/lanceMigrationAdapter.ts`) does exist and
   is exercised by the in-process test suite, but it is not reachable from
   `lore migrate apply` on the command line either. Note this `SubstrateName`
-  type (`sqlite | kuzu | lance`) has **no `surreal` option** — a
+  type still carries that legacy substrate value alongside `sqlite`/`lance`
+  (unused since the engine's removal) and has **no `surreal` option** — a
   SurrealDB-backed workspace has no online-schema-migration path through
   `lore migrate apply` today. (This coordinator is a distinct, older
   subsystem from the one that migrates `LoreSchemaV2` node/edge type
@@ -225,8 +228,8 @@ confirmed you no longer need the old shape — that step burns your in-band roll
 ## Upgrade checklist
 
 1. **Back up every workspace** — `lore backup --all`. This is the rollback path.
-2. Stop the daemon (releases Kùzu's single-writer handle on workspaces still
-   using `graphEngine: 'kuzu'`; also avoids a mid-write backup on SurrealDB).
+2. Stop the daemon (releases SurrealDB's single-writer handle on the
+   workspace; also avoids a mid-write backup).
 3. Install the new version.
 4. Run any required one-off `lore migrate <target>` step **dry-run first**, then
    `--apply`. For schema-spec migrations, never `advance` past a reversible phase

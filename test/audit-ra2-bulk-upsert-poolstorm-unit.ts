@@ -4,14 +4,14 @@
  * (write-path regression; Atlas full-re-scan completeness).
  *
  * History: LocalGraph's upsertNode used to run its read-decide-write PRE-READ
- * via getNode(), borrowing a separate Kùzu pool connection PER call. Under a
+ * via getNode(), borrowing a separate the legacy graph engine pool connection PER call. Under a
  * bulk fan-out plus concurrent reads those pre-reads saturated the pool's
  * waiter queue → "waiter queue full" → "No write was applied". The fix ran
  * the existence read through the write lane; that engine serialized all
  * writes through one global queue, so even a 250-wide UNBOUNDED fan-out of
  * individual upsertNode calls succeeded.
  *
- * The engine-agnostic core survives the Kùzu removal: a BULK WRITE FAN-OUT
+ * The engine-agnostic core survives the legacy graph engine removal: a BULK WRITE FAN-OUT
  * RUNNING AGAINST CONCURRENT READS on the same handle must produce zero
  * write failures and zero dropped writes. On SurrealGraph the bulk surface is
  * `bulkUpsertNodes` — SurrealDB is optimistically concurrent, and

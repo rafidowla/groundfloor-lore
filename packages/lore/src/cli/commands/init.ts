@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { openWorkspaceGraph, resolveGraphEngineForPath } from '../../engines/openWorkspaceGraph.js';
+import { resolveGraphEngineForPath } from '../../engines/openWorkspaceGraph.js';
 import { loreHomePath } from '../../config/loreHome.js';
 import {
     readWorkspaceRegistry,
@@ -9,7 +9,7 @@ import {
     upsertWorkspaceMapping,
     workspaceRegistryPath,
 } from '../../config/workspaceRegistry.js';
-import { resolveGraphBasePath } from './shared.js';
+import { resolveGraphBasePath, openGraphForCli } from './shared.js';
 
 export async function initCommand(args: string[]): Promise<void> {
     const basePath = resolveGraphBasePath();
@@ -17,11 +17,30 @@ export async function initCommand(args: string[]): Promise<void> {
 
     console.log(`→ Initializing Lore in ${basePath}`);
 
-    const graph = openWorkspaceGraph(basePath);
-    await graph.initialize();
+    // Finding 11 (round E) — re-running `lore init` against a workspace a
+    // daemon already serves used to sit in the ~15s openSurreal retry storm
+    // and end in a raw driver error; refuse fast with a clear message
+    // instead. Nothing here needs concurrent access with a live daemon —
+    // init only ever writes during first-time bootstrap.
+    const graph = await openGraphForCli(basePath);
     const engine = resolveGraphEngineForPath(basePath).engine;
     const graphDirName = engine === 'surreal' ? 'surreal' : 'graph';
-    console.log(`✓ ${engine === 'surreal' ? 'SurrealDB' : 'Kùzu'} graph initialized at ${loreDir}/${graphDirName}/`);
+    console.log(`✓ ${engine === 'surreal' ? 'SurrealDB' : 'legacy graph engine'} graph initialized at ${loreDir}/${graphDirName}/`);
+
+    // `loreDir` is never created by `graph.initialize()` itself when the
+    // engine is Surreal AND `basePath` (or an ancestor) contains a URL-
+    // reserved character, e.g. a space: `surrealDataPath()` correctly
+    // percent-encodes that into the connect string it hands the embedded
+    // engine (see its doc comment in surreal/surrealConnection.ts — the same
+    // scattering backup.ts/restore.ts already account for), so the graph's
+    // own files land in a %20-spelled SIBLING directory tree, not under the
+    // literal `.lore/` this function computed above. Nothing else had
+    // created the literal `.lore/` in that case, so the plain
+    // `fs.writeFileSync` below threw ENOENT. `sync.wal` is a sidecar file
+    // unrelated to the graph engine (same as config.json / aux.sqlite), so
+    // it belongs at the literal, predictable path regardless of engine or
+    // path scattering — just make sure that directory exists first.
+    fs.mkdirSync(loreDir, { recursive: true });
 
     const walPath = path.join(loreDir, 'sync.wal');
     if (!fs.existsSync(walPath)) {

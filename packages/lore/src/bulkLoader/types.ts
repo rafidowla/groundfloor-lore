@@ -5,8 +5,8 @@
  *   - sqliteAdapter (prepared INSERT + db.transaction wrapper; SQLite
  *     has no COPY per Z0 audit, but prepared+txn floor measured at
  *     1.23M rps so this is plenty fast)
- *   - kuzuAdapter (runtime-detected COPY FROM where supported, else
- *     batched MERGE + Cypher transaction; chunk default 1000)
+ *   - surrealAdapter (graph rows routed through SurrealGraph's
+ *     bulkUpsertNodes/addEdge write verbs)
  *   - lanceAdapter (table.add Arrow batch with server-side chunking;
  *     default 5k rows/batch to bound memory pressure)
  *
@@ -66,7 +66,7 @@ export interface BulkLoaderOpts {
     /** Workspace scope — Sprint L invariant, threaded for audit. */
     workspace: string;
     /** Job id — used by adapters that want to emit per-chunk outbox
-     *  entries (kuzuAdapter uses this for graph fan-out). */
+     *  entries (the graph adapter uses this for graph fan-out). */
     jobId: string;
     /** The offset of the FIRST row in this batch within the overall
      *  job (so per-row failure errors can carry a stable row index). */
@@ -123,7 +123,7 @@ export interface BulkLoaderAdapter<Row = unknown> {
     /** Substrate identifier — purely for logs + outbox routing. Phase 3c
      *  adds 'surreal' for the SurrealDB graph adapter; a workspace's
      *  graph rows route to whichever engine actually backs it. */
-    readonly substrate: 'sqlite' | 'kuzu' | 'lance' | 'surreal';
+    readonly substrate: 'sqlite' | 'graph' | 'lance' | 'surreal';
 
     /** Open a write session for one batch run. */
     begin(opts: BulkLoaderOpts): Promise<void>;
@@ -145,15 +145,13 @@ export interface BulkLoaderAdapter<Row = unknown> {
 }
 
 // ─── Graph bulk-load row shapes + shared validator (engine-neutral) ────────
-// Relocated from bulkLoader/kuzuAdapter.ts (Kuzu removal phase 3d, 2026-08):
-// these describe the rows `loadJobsRunner.routeJsonlObject` produces for ANY
+// These describe the rows `loadJobsRunner.routeJsonlObject` produces for ANY
 // graph substrate — id/type/label/content for nodes, from/to/relationship
 // for edges — so they live next to the adapter contract rather than in a
-// substrate-specific file. The `Kuzu` prefix is historical naming; renaming
-// is a later step of the removal.
+// substrate-specific file.
 
 /** Graph node row shape. Matches LoreNode fields the runner produces. */
-export interface KuzuNodeRow {
+export interface GraphNodeRow {
     id: string;
     type: string;
     label: string;
@@ -166,7 +164,7 @@ export interface KuzuNodeRow {
 }
 
 /** Graph edge row shape. */
-export interface KuzuEdgeRow {
+export interface GraphEdgeRow {
     from: string;
     to: string;
     relationship: string;
@@ -174,9 +172,9 @@ export interface KuzuEdgeRow {
     metadata?: string;
 }
 
-export type KuzuRow =
-    | { kind: 'node'; row: KuzuNodeRow }
-    | { kind: 'edge'; row: KuzuEdgeRow };
+export type GraphRow =
+    | { kind: 'node'; row: GraphNodeRow }
+    | { kind: 'edge'; row: GraphEdgeRow };
 
 /**
  * Per-row shape validation shared by every graph-substrate adapter. Same
@@ -185,7 +183,7 @@ export type KuzuRow =
  * the row is acceptable, else a machine-readable error string for
  * BatchResult.errors[].
  */
-export function validateRow(row: KuzuRow | undefined, expectedWorkspace: string): string | null {
+export function validateRow(row: GraphRow | undefined, expectedWorkspace: string): string | null {
     if (!row) return 'null_row';
     if (row.kind === 'node') {
         if (!row.row || typeof row.row.id !== 'string' || row.row.id.length === 0) {

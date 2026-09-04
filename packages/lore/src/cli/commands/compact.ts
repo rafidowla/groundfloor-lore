@@ -15,15 +15,19 @@
  *   --force          Bypass the daemon preflight (tests only).
  *
  * History: this command once had a `--kuzu` best-effort half (a no-op —
- * kuzu-lite had no public VACUUM). It was removed with the Kùzu engine
- * (2026-08-21); LanceDB compaction is the only step. The legacy `--kuzu`
- * and `--all` selectors are accepted and ignored.
+ * that engine's native binding had no public VACUUM). It was removed along
+ * with that engine (2026-08-21); LanceDB compaction is the only step. The
+ * legacy `--kuzu` and `--all` selectors are accepted and ignored.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getWorkspacePath } from '../../config/workspaces.js';
-import { isDaemonUp, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
+import { loreHome } from '../../config/loreHome.js';
+import { isDaemonServingHome, daemonRefuseMessage, otherDaemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
+import { probeSurrealLock } from '../../engines/surreal/surrealSettle.js';
+import { surrealDataPath } from '../../engines/surreal/surrealConnection.js';
+import { retryOptimizeOnConflict } from '../../engines/maintain/adapters.js';
 
 interface CompactReport {
     workspace: string;
@@ -76,16 +80,6 @@ export async function compactCommand(args: string[]): Promise<void> {
     const rest = args.slice(1);
     const force = rest.includes('--force');
 
-    // Preflight — refuse if the daemon is up; it holds the workspace's
-    // stores open and a mid-compact race could corrupt them.
-    if (!force) {
-        const daemonUp = await isDaemonUp();
-        if (daemonUp) {
-            console.error(daemonRefuseMessage('lore compact'));
-            process.exit(1);
-        }
-    }
-
     let wsPath: string;
     try {
         wsPath = getWorkspacePath(workspace);
@@ -94,6 +88,76 @@ export async function compactCommand(args: string[]): Promise<void> {
         process.exit(1);
         return;
     }
+
+    // Preflight — refuse if the daemon is up; it holds the workspace's
+    // stores open and a mid-compact race could corrupt them.
+    if (force) {
+        // Round E4, 2026-09-03 (finding, low) — --force silently skipped
+        // every check below with no signal at the moment it actually did
+        // so; the only warning text lived in the refusal messages below,
+        // which an operator who already passed --force up front never
+        // sees. Print the bypass itself.
+        console.error('proceeding with --force; daemon/lock checks skipped');
+    } else {
+        // Round E2, 2026-09-03 — isDaemonUp() alone refused whenever ANY
+        // process answered 200 on the port, never checking it served THIS
+        // home; isDaemonServingHome() only reports true when the daemon's
+        // own Bearer-authenticated /api/health confirms it.
+        const probe = await isDaemonServingHome(loreHome());
+        if (probe.servesHome) {
+            console.error(daemonRefuseMessage('lore compact'));
+            process.exit(1);
+        }
+        // Round E3, 2026-09-03 (finding, high) — `servesHome: false` used to
+        // be treated as "safe to proceed" outright, including when it was
+        // false only because a stale/rejected CLI token made the preflight
+        // unable to confirm a LIVE same-home daemon. Reproduced with real
+        // LanceDB corruption: a stale token → servesHome:false →
+        // table.optimize() ran straight into a table the daemon was
+        // concurrently writing to. `otherDaemonReachable` is "not proven
+        // ours", not "proven safe" — refuse unless the operator overrides.
+        if (probe.otherDaemonReachable) {
+            console.error(otherDaemonRefuseMessage('lore compact'));
+            process.exit(1);
+        }
+
+        // Second layer, regardless of the port probe's outcome above: this
+        // command never opens the graph store itself, so unlike
+        // openGraphForCli's 18 callers it never falls through to a real
+        // on-disk lock attempt as a fallback safety net. A daemon holds a
+        // workspace's SurrealDB graph store open whenever it holds ANY of
+        // that workspace's substrates open (including LanceDB), so probing
+        // the graph store's own lock catches a holder the HTTP probe missed
+        // entirely (wrong port, timed-out probe, no `auth.token` to send).
+        //
+        // Round E4, 2026-09-03 (finding, high) — probeSurrealLock's own doc
+        // comment says an ABSENT store directory reports `free: true` BY
+        // DESIGN (probing would CREATE the store, wrong for a restore
+        // destination) — but that same fast path made a workspace whose
+        // LanceDB tables were populated by something that never touched the
+        // graph store (bypassing the daemon's routing, which resolves the
+        // graph handle before every LanceDB write) indistinguishable from
+        // "nothing here at all". With no graph store to probe, this CLI has
+        // no way to prove nothing else is writing to lancedb/ — and there is
+        // no LanceDB-native lock to fall back on — so refuse rather than
+        // assume safety.
+        if (!fs.existsSync(surrealDataPath(wsPath))) {
+            console.error(`lore compact: no graph store to probe for workspace "${workspace}" (${wsPath}); cannot verify nothing else is writing to lancedb/.`);
+            console.error('Pass --force if you are CERTAIN nothing else is writing to this workspace.');
+            process.exit(1);
+        }
+        const lock = await probeSurrealLock(wsPath);
+        if (!lock.free) {
+            console.error(`lore compact: the graph store for workspace "${workspace}" (${wsPath}) is locked by another process.`);
+            console.error(`  detail: ${lock.detail}`);
+            console.error('');
+            console.error('While something else holds it, compacting LanceDB risks racing a live writer on the same');
+            console.error('workspace and corrupting it. Stop whatever holds it and retry, or pass --force if you are');
+            console.error('CERTAIN nothing is writing to this workspace.');
+            process.exit(1);
+        }
+    }
+
     const report: CompactReport = {
         workspace,
         lancedb: { ran: false, tables: [], totalReclaimedBytes: 0 },
@@ -118,7 +182,18 @@ export async function compactCommand(args: string[]): Promise<void> {
                 // every tombstoned file becomes eligible. Defaults to
                 // 7 days, which is too conservative when an operator
                 // explicitly asks to reclaim space.
-                await table.optimize({ cleanupOlderThan: new Date() });
+                //
+                // retryOptimizeOnConflict (round E3, 2026-09-03): the same
+                // LanceDB-native retry `lore maintain`'s LanceMaintainer
+                // already uses — a benign "retryable commit conflict" /
+                // "transaction was preempted" from a genuine concurrent
+                // writer gets a bounded checkoutLatest()+retry instead of
+                // failing outright on the first overlap. It does NOT paper
+                // over the corruption case the lock probe above exists to
+                // prevent (e.g. a "Not Found: …_deletions/….arrow" from a
+                // file removed mid-optimize is not in its retryable set —
+                // see isRetryableLanceConflict).
+                await retryOptimizeOnConflict(table, { cleanupOlderThan: new Date() });
             } catch (err) {
                 console.error(`  ${name}: optimize failed — ${(err as Error).message}`);
                 continue;

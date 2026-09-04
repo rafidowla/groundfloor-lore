@@ -83,7 +83,7 @@ export interface ReconnectOptions {
      * embedded path has no outer backstop at all — see pendingAutolink.ts
      * property 2). Registering the sweep on a tracker makes shutdown WAIT for
      * it; only this makes shutdown able to wait SUCCESSFULLY. Without it the
-     * drain times out and step 10 closes Kùzu + LanceDB underneath a sweep that
+     * drain times out and step 10 closes the graph store + LanceDB underneath a sweep that
      * is still running — the exact use-after-close the registration existed to
      * prevent.
      *

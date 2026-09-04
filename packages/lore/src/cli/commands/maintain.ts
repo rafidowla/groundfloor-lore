@@ -12,7 +12,7 @@
  *
  * Safety:
  *   Like `lore compact`, this refuses to run while the daemon is up,
- *   because opening a second Kùzu handle (single-writer) risks
+ *   because opening a second graph handle (single-writer) risks
  *   corruption. For ONLINE maintenance, use the in-process MCP `maintain`
  *   tool instead — it runs inside the daemon and is online-safe.
  *   `--force` bypasses the preflight (tests only).
@@ -35,10 +35,14 @@
  *   --force
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { getWorkspacePath, listWorkspaceNames, getActiveWorkspaceName } from '../../config/workspaces.js';
-import { isDaemonUp, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
+import { loreHome } from '../../config/loreHome.js';
+import { isDaemonServingHome, daemonRefuseMessage, otherDaemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
+import { probeSurrealLock } from '../../engines/surreal/surrealSettle.js';
+import { surrealDataPath } from '../../engines/surreal/surrealConnection.js';
 import {
     resolveMaintainPolicy,
     runMaintenance,
@@ -152,12 +156,36 @@ export async function maintainCommand(args: string[]): Promise<void> {
     }
 
     // Preflight: a running daemon is a second writer — refuse (offline tool).
-    // RA2-reaudit2 — dry-run ALSO opens a Kùzu write handle (to compute the
+    // RA2-reaudit2 — dry-run ALSO opens a graph write handle (to compute the
     // plan), so it conflicts with a running daemon too; preflight regardless of
     // dryRun. For online maintenance use the in-daemon MCP `maintain` tool.
-    if (!force) {
-        if (await isDaemonUp()) {
+    if (force) {
+        // Round E4, 2026-09-03 (finding, low) — --force silently skipped
+        // every check below (this preflight and the per-workspace graph
+        // store check further down) with no signal at the moment it did
+        // so. Print the bypass itself, once, for the whole run.
+        console.error('proceeding with --force; daemon/lock checks skipped');
+    } else {
+        // Round E2, 2026-09-03 — isDaemonUp() alone refused whenever ANY
+        // process answered 200 on the port, never checking it served THIS
+        // home; isDaemonServingHome() only reports true when the daemon's
+        // own Bearer-authenticated /api/health confirms it.
+        const probe = await isDaemonServingHome(loreHome());
+        if (probe.servesHome) {
             console.error(daemonRefuseMessage('lore maintain'));
+            console.error('For online maintenance, call the MCP `maintain` tool (runs inside the daemon).');
+            process.exit(1);
+            return;
+        }
+        // Round E3, 2026-09-03 (finding, high, shared with `lore compact`) —
+        // `servesHome: false` was treated as "safe to proceed" even when it
+        // was false only because a stale/rejected CLI token kept this
+        // preflight from confirming a LIVE same-home daemon.
+        // `otherDaemonReachable` means "not proven ours", not "proven
+        // safe" — refuse the same as a confirmed same-home daemon unless
+        // overridden.
+        if (probe.otherDaemonReachable) {
+            console.error(otherDaemonRefuseMessage('lore maintain'));
             console.error('For online maintenance, call the MCP `maintain` tool (runs inside the daemon).');
             process.exit(1);
             return;
@@ -168,8 +196,8 @@ export async function maintainCommand(args: string[]): Promise<void> {
     const reports: MaintainReport[] = [];
 
     // Per-workspace: LanceDB + node retention (ephemeral expiry handled once below).
-    // Open the Kùzu graph ONLY when node retention is actually requested — otherwise
-    // a LanceDB-only run would race the daemon's single-writer Kùzu handle (the
+    // Open the graph ONLY when node retention is actually requested — otherwise
+    // a LanceDB-only run would race the daemon's single-writer graph handle (the
     // exact case dry-run users hit while the daemon is up).
     const needGraph = policy.enabled.nodeRetention;
     for (const name of targets) {
@@ -180,6 +208,51 @@ export async function maintainCommand(args: string[]): Promise<void> {
             console.error(`[maintain] ${(err as Error).message}`);
             continue;
         }
+
+        // Second layer, regardless of needGraph (finding, high, round E3,
+        // 2026-09-03): the preflight above is one LORE_PORT probe for the
+        // whole command and can miss a real holder (stale/rejected token,
+        // wrong port, a probe timeout). When node retention is on,
+        // `openWorkspaceGraph(...).initialize()` below opens the graph
+        // store directly and would hit that holder's real on-disk lock as
+        // a fallback — but on the needGraph=false path (compaction,
+        // version cleanup, ephemeral expiry with node retention off)
+        // nothing else opens anything before LanceDB compaction runs. A
+        // daemon holds this workspace's SurrealDB graph store open
+        // whenever it holds ANY of the workspace's substrates (including
+        // LanceDB), so probing the graph store's own lock catches a
+        // holder the port probe missed, before compaction/version-cleanup
+        // touches a table it might be writing to.
+        //
+        // Round E4, 2026-09-03 (finding, high, LanceDB-only path only —
+        // when needGraph is true, openWorkspaceGraph(...).initialize()
+        // below opens/creates the graph store directly right after this,
+        // which is the real safety net for that path): probeSurrealLock's
+        // absent-directory fast path reports `free: true` BY DESIGN
+        // (probing would CREATE the store) — but on the needGraph=false
+        // path that made a workspace whose LanceDB tables were populated
+        // by something that never touched the graph store (bypassing the
+        // daemon's routing entirely) indistinguishable from "nothing here
+        // at all". With no graph store to probe and nothing about to open
+        // one, this CLI has no way to prove nothing else is writing to
+        // lancedb/ — refuse rather than assume safety.
+        if (!force) {
+            if (!needGraph && !fs.existsSync(surrealDataPath(wsPath))) {
+                console.error(`[maintain] no graph store to probe for workspace "${name}" (${wsPath}); cannot verify nothing else is writing to lancedb/ — skipping.`);
+                console.error('  Pass --force if you are CERTAIN nothing else is writing to this workspace.');
+                continue;
+            }
+            const lock = await probeSurrealLock(wsPath);
+            if (!lock.free) {
+                console.error(`[maintain] the graph store for workspace "${name}" (${wsPath}) is locked by another process — skipping.`);
+                console.error(`  detail: ${lock.detail}`);
+                console.error('  While something else holds it, LanceDB compaction/version-cleanup risks racing a live writer');
+                console.error('  and corrupting the store. Stop whatever holds it and retry, or pass --force if you are');
+                console.error('  CERTAIN nothing is writing to this workspace.');
+                continue;
+            }
+        }
+
         const graph = needGraph ? openWorkspaceGraph(wsPath, { workspaceId: name }) : null;
         try {
             if (graph) await graph.initialize();

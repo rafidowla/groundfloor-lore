@@ -37,7 +37,7 @@
  *
  * Cloud-portability:
  *   IFreshnessGraph is satisfied by both LocalGraph and DataplaneGraph.
- *   No Kùzu-specific API is used here.
+ *   No engine-specific API is used here.
  */
 
 import type { LoreNode } from '../providers/types.js';
@@ -68,8 +68,8 @@ export interface IFreshnessGraph {
      * materializing every node's full content. Absent on fakes/DataplaneGraph
      * → unbounded fallback.
      *
-     * 2026-08-21: this used to be `getGraphContext?()`, i.e. a raw Kùzu Cypher
-     * runner, which made the bounded walk Kùzu-only — a Surreal-backed
+     * 2026-08-21: this used to be `getGraphContext?()`, i.e. a raw Cypher
+     * runner, which made the bounded walk single-engine-only — a Surreal-backed
      * workspace silently took the unbounded fallback. `bulkListProjected` is
      * the same walk as an engine-agnostic operation; both engines implement it
      * (same swap diagnostics/consistency.ts made on 2026-08-06).

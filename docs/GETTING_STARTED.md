@@ -10,8 +10,8 @@ lore setup
 ```
 
 That's it. `lore setup` will:
-- Initialize the local graph (SurrealDB by default; Kùzu remains supported
-  per workspace via `graphEngine: 'kuzu'`) under `~/.groundfloor/.lore/`
+- Initialize the local graph (SurrealDB, the only graph engine) under
+  `~/.groundfloor/.lore/`
 - Install and start the Lore daemon (background service on port 3847)
 - Detect your IDE (Cursor, Antigravity, Claude Code) and configure MCP automatically
 
@@ -37,8 +37,8 @@ hosted Dataplane.
 │  Lore Daemon (port 3847)                                     │
 │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌────────────┐ │
 │  │  Graph    │  │  Vector   │  │ Relational│  │   Sync     │ │
-│  │(SurrealDB/│  │ (LanceDB) │  │  (SQLite) │  │  Engine →  │ │
-│  │  Kùzu)    │  │ embeddings│  │ outbox,   │  │  Dataplane │ │
+│  │(SurrealDB)│  │ (LanceDB) │  │  (SQLite) │  │  Engine →  │ │
+│  │           │  │ embeddings│  │ outbox,   │  │  Dataplane │ │
 │  │ nodes+    │  │ + recall  │  │ migrations│  │ (TS-SDK)   │ │
 │  │ edges     │  │           │  │ audit,auth│  │            │ │
 │  └───────────┘  └───────────┘  └───────────┘  └────────────┘ │
@@ -52,8 +52,9 @@ hosted Dataplane.
                                  └─────────┘  └─────────────┘
 ```
 
-- **Three substrates:** SurrealDB (graph: nodes + edges + traversal — Kùzu
-  was fully removed 2026-08-21, see `docs/KUZU_REMOVAL.md`), LanceDB
+- **Three substrates:** SurrealDB (graph: nodes + edges + traversal — the
+  prior local graph engine was fully removed 2026-08-21, see
+  `docs/KUZU_REMOVAL.md`), LanceDB
   (vector: embeddings for semantic recall), SQLite (relational: outbox,
   migrations, audit, auth, plus tabular collections + SQL aggregates). All
   writes go through `LoreStorageClient`.
@@ -316,7 +317,7 @@ await loreB.dispose();
 |---|---|
 | No port | `createLore({ deploymentMode: 'embedded' })` binds no TCP socket. |
 | No process handlers | No `SIGINT`/`SIGTERM`, `uncaughtException`, or `unhandledRejection` listeners are installed on the host process. |
-| Isolated data | Two instances with different `dataDir` values have fully separate on-disk graphs (SurrealDB or Kùzu + LanceDB). |
+| Isolated data | Two instances with different `dataDir` values have fully separate on-disk graphs (SurrealDB + LanceDB). |
 | Clean dispose | `dispose()` drains the outbox, closes all handles, and returns. It never calls `process.exit`. |
 | In-process replication | Outbox replication (embedding / semantic recall) runs in-process — no background daemon is needed for `search`/`recall` to find newly written nodes. |
 
@@ -324,8 +325,8 @@ await loreB.dispose();
 
 | `deploymentMode` | Substrates | Transport | Typical use |
 |---|---|---|---|
-| `'embedded'` | SurrealDB or Kùzu + LanceDB (local) | None (in-process) | Library / test / serverless |
-| `'local'` | SurrealDB or Kùzu + LanceDB (local) | stdio or HTTP daemon | Single-user IDE / desktop |
+| `'embedded'` | SurrealDB + LanceDB (local) | None (in-process) | Library / test / serverless |
+| `'local'` | SurrealDB + LanceDB (local) | stdio or HTTP daemon | Single-user IDE / desktop |
 | `'cloud'` | Dataplane (remote) | HTTP daemon | Multi-tenant cloud |
 
 See [docs/API_REFERENCE.md](API_REFERENCE.md#embedded-mode-in-process-api) for

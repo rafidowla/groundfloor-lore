@@ -26,17 +26,17 @@ export function makeWorkspaceAnalyticalResolver(
 ): ((workspace: string) => Promise<IAnalyticalStorage | null>) | undefined {
     if (deploymentMode === 'cloud' || !graphRegistry) return undefined;
     return async (workspace: string): Promise<IAnalyticalStorage | null> => {
-        // Built FROM the workspace's table store, not from a Kùzu connection.
-        // This resolver used to reach `getGraphContext().storage` — the Kùzu
-        // collection path — and aggregate there, while collections have been
-        // written to SQLite since 061e189. Every aggregate therefore threw
-        // `Table <name> does not exist` for twelve weeks on an exposed tool
-        // surface. Deriving the analytical store from the table store makes the
-        // two incapable of naming different substrates.
+        // Built FROM the workspace's table store, not from a graph connection.
+        // This resolver used to reach `getGraphContext().storage` — the
+        // graph-backed collection path — and aggregate there, while collections
+        // have been written to SQLite since 061e189. Every aggregate therefore
+        // threw `Table <name> does not exist` for twelve weeks on an exposed
+        // tool surface. Deriving the analytical store from the table store
+        // makes the two incapable of naming different substrates.
         // From the REGISTRY, not the graph: table storage is a SQLite file
         // keyed on the workspace PATH, and reaching it through
-        // `graph.getTableStorage()` silently required the workspace to be
-        // Kùzu-backed — the analytical tools then threw on a Surreal one.
+        // `graph.getTableStorage()` silently required the workspace to be on a
+        // specific graph engine — the analytical tools then threw on any other one.
         // `tableStorageFor` memoises per workspace (one handle, one schema
         // sidecar owner), which is the invariant a second store would break.
         return createAnalyticalStorage(await graphRegistry.tableStorageFor(workspace));

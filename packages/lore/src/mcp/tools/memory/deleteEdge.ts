@@ -14,6 +14,7 @@ import type { MemoryToolsDeps } from './types.js';
 import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
+import { withEdgeLock } from '../../../core/nodeWriteLock.js';
 
 export function registerDeleteEdgeTool(mcpServer: McpServer, deps: MemoryToolsDeps): void {
     mcpServer.tool(
@@ -61,30 +62,51 @@ export function registerDeleteEdgeTool(mcpServer: McpServer, deps: MemoryToolsDe
                         isError: true,
                     };
                 }
-                // 2.3 (2026-08-17) — outbox-first edge.delete, mirroring
-                // DELETE /api/edge (http/routes/edges.ts). edge.upsert and
-                // edge.delete are ONE cross-superseding family
-                // (outbox/supersession.ts) precisely so this row supersedes a
-                // still-pending edge.upsert from a recent store_edge. Without
-                // it the replicator replayed that pending upsert a few hundred
-                // ms later and silently RESURRECTED the edge this tool had
-                // just reported deleted.
-                if (deps.outboxStore) {
-                    await recordHotWrite(deps.outboxStore, {
-                        workspace: resolved.resolvedWorkspace,
-                        operationKind: 'edge.delete',
-                        payload: { sourceId: source_id, targetId: target_id, relation },
-                        initiator: 'mcp:delete_edge',
-                        operation: 'edge.delete',
-                    });
-                }
-                // Capture the narrowed function bound to its receiver — a
-                // bare `delGraph.deleteEdge` reference loses `this` when
-                // invoked through the retry closure below (deleteEdge's own
-                // implementation calls `this.initialize()`), throwing
-                // "Cannot read properties of undefined" on every retry.
-                const doDeleteEdge = delGraph.deleteEdge.bind(delGraph);
-                const deleted = await withTransactionConflictRetry(() => doDeleteEdge(source_id, target_id, relation));
+                // Round-E X-edges — the outbox record + substrate delete +
+                // WAL append now run under the SAME per-triple lock
+                // `store_edge` takes (core/nodeWriteLock.ts `withEdgeLock`).
+                // Unlocked, a concurrent store_edge for the same triple could
+                // record its edge.upsert row and land its graph write
+                // between this call's outbox record and its graph delete,
+                // leaving the outbox order (delete-then-upsert) contradict
+                // what the substrate actually holds after both calls settle.
+                const deleted = await withEdgeLock(resolved.resolvedWorkspace, source_id, target_id, relation, async () => {
+                    // 2.3 (2026-08-17) — outbox-first edge.delete, mirroring
+                    // DELETE /api/edge (http/routes/edges.ts). edge.upsert and
+                    // edge.delete are ONE cross-superseding family
+                    // (outbox/supersession.ts) precisely so this row supersedes a
+                    // still-pending edge.upsert from a recent store_edge. Without
+                    // it the replicator replayed that pending upsert a few hundred
+                    // ms later and silently RESURRECTED the edge this tool had
+                    // just reported deleted.
+                    if (deps.outboxStore) {
+                        await recordHotWrite(deps.outboxStore, {
+                            workspace: resolved.resolvedWorkspace,
+                            operationKind: 'edge.delete',
+                            payload: { sourceId: source_id, targetId: target_id, relation },
+                            initiator: 'mcp:delete_edge',
+                            operation: 'edge.delete',
+                        });
+                    }
+                    // Capture the narrowed function bound to its receiver — a
+                    // bare `delGraph.deleteEdge` reference loses `this` when
+                    // invoked through the retry closure below (deleteEdge's own
+                    // implementation calls `this.initialize()`), throwing
+                    // "Cannot read properties of undefined" on every retry.
+                    const doDeleteEdge = delGraph.deleteEdge!.bind(delGraph);
+                    const removed = await withTransactionConflictRetry(() => doDeleteEdge(source_id, target_id, relation));
+                    // Round-E X-edges finding (3) — no WAL op existed for an
+                    // edge delete (only 'add_edge' did), so a sync push never
+                    // learned a locally-deleted edge should be removed
+                    // remotely. Gated the same way store_edge's 'add_edge'
+                    // append is (active-workspace only), and only on an
+                    // actual removal (idempotent no-match deletes need not
+                    // buffer a delete for something that was never pushed).
+                    if (removed > 0 && resolved.isActive) {
+                        deps.getWal().append('delete_edge', { sourceId: source_id, targetId: target_id, relation });
+                    }
+                    return removed;
+                });
                 deps.auditLog.log({
                     toolName: 'delete_edge',
                     args: { source_id, target_id, relation, workspace: workspace ?? null },

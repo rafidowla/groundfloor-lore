@@ -13,12 +13,12 @@
     },
     {
       "path": "packages/lore/src/engines/syncEngine.ts",
-      "lines": 1170,
+      "lines": 1236,
       "justification": "pre-existing"
     },
     {
       "path": "packages/lore/src/engines/dataplaneGraph.ts",
-      "lines": 975,
+      "lines": 984,
       "justification": "pre-existing"
     },
     {

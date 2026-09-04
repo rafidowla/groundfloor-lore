@@ -48,6 +48,18 @@
       "args": { "workspace": "default", "type": "decision" },
       "cap_bytes": 64000,
       "rationale": "Re-enabled by Sprint 7 (2026-05-24). list_nodes now cursor-paginates with default limit=100; first-page response on the default workspace's 144 decision nodes fits well under the 64 KB cap (each entry carries id+type+label+tags+project+updatedAt only, ~170-450B/node). Callers wanting more nodes pass `cursor` from the prior response. Pre-Sprint-7 the tool returned every match in one shot (observed 2.4 MB = 38× the cap); the fixture sat in _deferred_fixtures with that observation noted."
+    },
+    {
+      "tool": "collection_schema_list",
+      "args": { "workspace": "default" },
+      "cap_bytes": 64000,
+      "rationale": "QA finding B3 (round E, 2026-09-03) — added with the pagination fix; had NO fixture at all before this (confirmed via grep), so a 2000-collection workspace's ~1.2MiB unbounded response would have silently passed CI. Default call now cursor-paginates at DEFAULT_SCHEMA_LIST_LIMIT=100 entries with rowCount omitted (withCounts defaults false) — same shape/cap story as list_nodes above, which this mirrors: each entry is name+columns+primaryKey only, well under 64KB for 100 entries regardless of how many collections the workspace actually has declared. Callers wanting more pass the response's nextCursor. If this workspace has fewer than 100 collections declared, the measured size will be much smaller than the cap; the cap exists to catch the default page ever growing unbounded again, not to pin today's exact size."
+    },
+    {
+      "tool": "collection_schema_get",
+      "args": { "workspace": "default", "name": "collection_schema_get__byte_cap_probe__does_not_exist" },
+      "cap_bytes": 200,
+      "rationale": "QA finding B3 (round E, 2026-09-03) — added alongside collection_schema_list; also had no fixture. Deliberately probes a collection name that (almost certainly) doesn't exist so the response is the fixed-shape `null` regardless of what any given developer's default workspace has declared (mirrors the 'no keyword matches' negative-evidence pattern used for the `search` fixture above) — a real hit would return the full CollectionSchema (name+fields[]), which is workspace-dependent and not a stable regression target the way the not-found shape is."
     }
   ],
 

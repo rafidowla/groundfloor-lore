@@ -17,10 +17,11 @@
 
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type {
-    IAnalyticalStorage,
-    AggregationType,
-    TimeBucket,
+import {
+    AnalyticalScanCapExceeded,
+    type IAnalyticalStorage,
+    type AggregationType,
+    type TimeBucket,
 } from '../../contracts/index.js';
 import type { Filter } from '../../engines/collectionStorage.js';
 import { redactError } from '../../security/logRedact.js';
@@ -54,13 +55,36 @@ function notWired(tool: string) {
     };
 }
 
+/**
+ * Structured tool error for a LORE_ANALYTICAL_SCAN_CAP refusal — mirrors the
+ * `collectionValidationEnvelope` pattern in tools/collections.ts (a machine-
+ * readable `error` code plus the fields a caller needs to react: `cap` and
+ * `matched`) rather than letting it fall into the generic catch-all's plain
+ * message string.
+ */
+function scanCapEnvelope(e: AnalyticalScanCapExceeded, tool: string) {
+    return {
+        content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+                error: 'analytical_scan_cap_exceeded',
+                tool,
+                cap: e.cap,
+                matched: e.matched,
+                message: e.message,
+            }),
+        }],
+        isError: true,
+    };
+}
+
 export function registerAnalyticalTools(mcpServer: McpServer, deps: AnalyticalToolsDeps): void {
     /* ─── aggregate ──────────────────────────────────────────── */
     mcpServer.tool(
         'aggregate',
         'Run an aggregation (count/sum/avg/min/max/groupBy/distinct) over a collection. Universal across local + cloud (cloud lands in step #6).',
         {
-            collection: z.string().describe('Collection name (Kùzu node-table or declared collection).'),
+            collection: z.string().describe('Collection name (SQLite table or declared collection).'),
             aggregation: z.enum(AGGREGATIONS).describe('Operation to apply.'),
             field: z.string().optional().describe('Field to aggregate. Required for sum/avg/min/max; ignored for count.'),
             groupBy: z.string().optional().describe('Group results by this field. When set, returns per-group rows.'),
@@ -116,6 +140,7 @@ export function registerAnalyticalTools(mcpServer: McpServer, deps: AnalyticalTo
                 }
                 return { content: [{ type: 'text', text: JSON.stringify({ value }) }] };
             } catch (err) {
+                if (err instanceof AnalyticalScanCapExceeded) return scanCapEnvelope(err, 'aggregate');
                 return { content: [{ type: 'text', text: `aggregate failed: ${redactError(err)}` }], isError: true };
             }
         },
@@ -126,7 +151,7 @@ export function registerAnalyticalTools(mcpServer: McpServer, deps: AnalyticalTo
         'time_series',
         'Bucket rows by a time field and aggregate. Bucket sizes: minute/hour/day/week/month/quarter/year. Universal across local + cloud (cloud lands in step #6).',
         {
-            collection: z.string().describe('Collection name (Kùzu node-table or declared collection).'),
+            collection: z.string().describe('Collection name (SQLite table or declared collection).'),
             timeField: z.string().describe('Field holding the timestamp (string/Date/number).'),
             bucket: z.enum(BUCKETS).describe('Bucket size.'),
             aggregation: z.enum(AGGREGATIONS).describe('Operation to apply per bucket.'),
@@ -155,6 +180,7 @@ export function registerAnalyticalTools(mcpServer: McpServer, deps: AnalyticalTo
                 );
                 return { content: [{ type: 'text', text: JSON.stringify({ points }) }] };
             } catch (err) {
+                if (err instanceof AnalyticalScanCapExceeded) return scanCapEnvelope(err, 'time_series');
                 return { content: [{ type: 'text', text: `time_series failed: ${redactError(err)}` }], isError: true };
             }
         },

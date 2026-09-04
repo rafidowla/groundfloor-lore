@@ -50,7 +50,7 @@ test('crash between graph upsert and vector mirror → next-boot recovery comple
     const t = mkTmp();
     try {
         // === Process 1 "alive" — writes graph, marks done, then dies ===
-        const graphRows = new Set<string>(); // simulates Kuzu
+        const graphRows = new Set<string>(); // simulates the legacy graph engine
         const vectorRows = new Set<string>(); // simulates LanceDB
 
         const store1 = new FileOutboxStore(t.loreDir);

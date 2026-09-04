@@ -11,7 +11,7 @@
  * (see providers/types.ts `LoreNode`).
  *
  * Deliberately engine-agnostic: built on `GraphProvider.listNodes`, which
- * every backend (LocalGraph/Kùzu, SurrealGraph, DataplaneGraph) already
+ * every backend (SurrealGraph, DataplaneGraph) already
  * implements identically, so this file needs no engine-specific query code
  * and inherits `listNodes`' existing filters, caps, and cross-engine parity
  * for free. The filter itself runs in JS over the candidate page rather than

@@ -66,28 +66,29 @@ export async function tryInspectRoutes(
                     nodes: stats.nodeCount,
                     edges: stats.edgeCount,
                     verbatimDocs: verbatimCount,
-                    // BUGFIX (Kùzu removal step 2): this used to read
-                    // `deps.store.loreGraph instanceof LocalGraph`, which is
-                    // the BOOT handle — it printed "kùzu + lancedb (local)"
-                    // even when `detectedScope.workspace` declares
-                    // `graphEngine: 'surreal'` in workspaces.json, because a
-                    // Surreal-backed workspace's Kùzu database still exists
-                    // (just empty). Ask the registry which engine actually
-                    // backs THIS workspace instead of instanceof-sniffing
-                    // the wrong handle.
+                    // BUGFIX: this used to read `deps.store.loreGraph
+                    // instanceof LocalGraph`, which is the BOOT handle — it
+                    // reported the boot engine even when
+                    // `detectedScope.workspace` declares a different engine
+                    // in workspaces.json, because the boot workspace's
+                    // database for the other engine still exists (just
+                    // empty). Ask the registry which engine actually backs
+                    // THIS workspace instead of instanceof-sniffing the
+                    // wrong handle.
                     engine: (() => {
                         if (deps.deploymentMode === 'cloud') return 'dataplane (cloud)';
                         // Ask the declared engine, never instanceof-sniff the
-                        // boot handle: a Kùzu `instanceof` was true even on a
-                        // Surreal-declared workspace (the boot Kùzu store
-                        // existed and was empty). With the registry present
-                        // this uses its home-scoped lookup; without it (legacy
-                        // single-workspace boot) the global selector resolves
-                        // the same declaration.
+                        // boot handle: an `instanceof` check on the boot
+                        // engine's class was true even on a
+                        // differently-declared workspace (the boot store for
+                        // that other engine existed and was empty). With the
+                        // registry present this uses its home-scoped lookup;
+                        // without it (legacy single-workspace boot) the
+                        // global selector resolves the same declaration.
                         const kind = deps.graphRegistry
                             ? deps.graphRegistry.graphEngineFor(deps.detectedScope.workspace)
                             : resolveWorkspaceGraphEngine(deps.detectedScope.workspace);
-                        return kind === 'surreal' ? 'surrealdb + lancedb (local)' : 'kùzu + lancedb (local)';
+                        return kind === 'surreal' ? 'surrealdb + lancedb (local)' : 'legacy graph engine + lancedb (local)';
                     })(),
                 },
                 capabilities: {

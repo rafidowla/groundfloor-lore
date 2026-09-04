@@ -97,8 +97,9 @@ become advisory at best. Lore should compute, from the proposal diff
    current write throughput."
 5. **Substrate constraint flag.** "This engine does not support online
    column-type change; this would require offline rebuild of
-   `customers` (~12 hours of downtime)." *(Original example named Kùzu
-   specifically — historical; Kùzu was fully removed 2026-08-21. The
+   `customers` (~12 hours of downtime)." *(Original example named the
+   prior local graph engine specifically — historical; that engine was
+   fully removed 2026-08-21, see `docs/KUZU_REMOVAL.md`. The
    general point — some local engines can't do online DDL and need this
    flag — still holds; see the historical note under "Per-substrate
    reality" below.)*
@@ -110,10 +111,10 @@ the human reading the request.
 
 ## Per-substrate reality
 
-> **Historical note (2026-08-21):** Kùzu was fully removed as a graph
-> engine — the local stack now runs SurrealDB only, see
-> `docs/KUZU_REMOVAL.md`. The Kùzu-specific comparisons in the table and
-> bullets below (written 2026-05-15, when Kùzu was still a live
+> **Historical note (2026-08-21):** the prior local graph engine was
+> fully removed — the local stack now runs SurrealDB only, see
+> `docs/KUZU_REMOVAL.md`. The comparisons naming that engine in the table
+> and bullets below (written 2026-05-15, when it was still a live
 > per-workspace option) are kept as the original migration-strategy
 > reasoning record, not as a description of a currently-selectable
 > engine. SurrealDB's own online-DDL story is a separate, current topic
@@ -122,8 +123,9 @@ the human reading the request.
 
 The cloud Dataplane stack is **multi-substrate**: ArangoDB for the
 graph, Zilliz / Qdrant for vector, Postgres for relational. The
-local stack is SurrealDB (graph — the only graph engine, Kùzu was
-fully removed 2026-08-21, see `docs/KUZU_REMOVAL.md`) and LanceDB
+local stack is SurrealDB (graph — the only graph engine; the prior
+local graph engine was fully removed 2026-08-21, see
+`docs/KUZU_REMOVAL.md`) and LanceDB
 (vector). The schema-change story is **not symmetric** across these:
 
 | Substrate | Strength | Weakness |
@@ -131,17 +133,18 @@ fully removed 2026-08-21, see `docs/KUZU_REMOVAL.md`) and LanceDB
 | Postgres (cloud relational) | Online DDL is well-understood. Adding nullable columns is cheap. Backfill via batched updates is routine. Rollback via pg_dump or PITR. | Long-running ALTER on huge tables can still take real lock time; needs care. |
 | ArangoDB (cloud graph) | Schema-flexible by design. Adding new edge collections is cheap. | Cross-collection consistency on schema change requires app-level coordination. |
 | Zilliz / Qdrant (cloud vector) | Adding payload fields is cheap. Index dimension changes are expensive. | Re-embedding to a new model dimension is effectively a full rebuild. |
-| Kùzu (REMOVED 2026-08-21 — row kept for historical comparison only, not a selectable engine) | Fast embedded operation. | Weak online-DDL story — column-type change on a node table = "snapshot, transform offline, swap." Single-writer constraint forces serialized migration. |
+| Prior local graph engine (REMOVED 2026-08-21, see `docs/KUZU_REMOVAL.md` — row kept for historical comparison only, not a selectable engine) | Fast embedded operation. | Weak online-DDL story — column-type change on a node table = "snapshot, transform offline, swap." Single-writer constraint forces serialized migration. |
 | LanceDB (local vector) | Embedded, fast, no daemon. | Similar re-embedding story to Zilliz/Qdrant. |
 
 Implications:
 - The **migration runner needs substrate-aware backends.** A "backfill
   column" in Postgres is `UPDATE ... WHERE id BETWEEN ... AND ...`
-  batched. The same in Kùzu is "export, transform, drop, recreate,
-  import." These are not the same code path.
+  batched. The same on the prior local graph engine was "export,
+  transform, drop, recreate, import." These are not the same code path.
 - **Some changes that are safe in cloud are unsafe locally.** A
-  column type change on a 1M-row Kùzu table is a non-event in
-  Postgres but a multi-minute lock on Kùzu. Lore should detect this
+  column type change on a 1M-row table was a non-event in
+  Postgres but a multi-minute lock on that engine (see
+  `docs/KUZU_REMOVAL.md`). Lore should detect this
   and downgrade the tier accordingly (or refuse, with a clear
   explanation).
 - **Cloud destructive ops need PITR coordination.** "Drop column"
@@ -184,21 +187,25 @@ on Phase A:
    human submits "rename X to Y," return a three-phase plan instead of
    executing it. Each phase becomes its own proposal id.
 4. **Build the migration runner.** Postgres backend first (lowest
-   risk, biggest payoff). Kùzu second, with snapshot-and-rebuild
-   semantics *(moot — Kùzu was fully removed 2026-08-21; this ordering
+   risk, biggest payoff). The prior local graph engine second, with
+   snapshot-and-rebuild semantics *(moot — that engine was fully removed
+   2026-08-21, see `docs/KUZU_REMOVAL.md`; this ordering
    is historical)*. Vector substrates last (re-embedding is the
    highest-cost case).
    *(Landed for the local graph engine since this memo was written:
    schema migration now runs through `SchemaGraphOpsMigrationBackend`,
    built on the `SchemaGraphOps` port (`schemas/substrate/schemaGraphOps.ts`).
    It was originally engine-agnostic by design — `buildGraphReaders()`
-   (`mcp/bootSteps.ts`) picks `KuzuSchemaGraphOps` when the boot graph
+   (`mcp/bootSteps.ts`) picks the stub class for the prior local graph
+   engine's schema ops when the boot graph
    exposes the raw-Cypher `getGraphContext()` hatch, `SurrealSchemaGraphOps`
-   when it exposes `getSchemaGraphOps()` directly. Since Kùzu's removal
-   2026-08-21, no workspace can boot with a Kùzu graph
-   (`graphEngineSelector.ts` throws `KuzuEngineRemovedError` for
-   `graphEngine: 'kuzu'`), so in practice this always resolves to
-   `SurrealSchemaGraphOps` today — **but `KuzuSchemaGraphOps` itself is
+   when it exposes `getSchemaGraphOps()` directly. Since that engine's
+   removal 2026-08-21, no workspace can boot with it as the graph
+   (`graphEngineSelector.ts` throws a dedicated removal error for
+   a workspace still declaring the legacy graph-engine config value; see
+   `docs/KUZU_REMOVAL.md` for the exact config value and error name), so
+   in practice this always resolves to
+   `SurrealSchemaGraphOps` today — **but that stub class itself is
    still present in the codebase, not yet deleted**; it's dead code
    reachable only if some future graph handle re-exposes
    `getGraphContext()`, not a currently-live dispatch target. Flagged as

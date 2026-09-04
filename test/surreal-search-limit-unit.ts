@@ -4,10 +4,10 @@
  * on the SurrealDB engine alone.
  *
  * History: this began life as test/search-limit-parity-unit.ts (Phase 6
- * item 3), which built a Kùzu LocalGraph and a SurrealGraph
+ * item 3), which built a legacy-engine LocalGraph and a SurrealGraph
  * INDEPENDENTLY from the same fixture and asserted the two engines
- * agreed on the exact ordered top-N at every limit. The Kùzu-removal
- * engagement (Phase 3f, 2026-08) dropped the Kùzu half of the
+ * agreed on the exact ordered top-N at every limit. The legacy-engine-removal
+ * engagement (Phase 3f, 2026-08) dropped the legacy-engine half of the
  * comparison and kept the SurrealDB-side assertions as a standalone
  * correctness pin; the parity framing is gone, the coverage remains.
  *

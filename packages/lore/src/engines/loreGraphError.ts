@@ -9,9 +9,9 @@
 /**
  * LoreGraphError — generic error type for graph operations, wrapping the
  * underlying engine's error with context about the operation that failed.
- * Engine-agnostic despite the name's Kùzu-era origin — used identically by
- * every graph engine (Kùzu and SurrealDB alike). Do not delete this file
- * when Kùzu goes; it is shared infrastructure, not a Kùzu-only wrapper.
+ * Engine-agnostic despite the name's origin in the graph engine that
+ * preceded SurrealDB — used identically by every graph engine. This file
+ * is shared infrastructure, not a wrapper for one engine only.
  */
 export class LoreGraphError extends Error {
     constructor(
@@ -21,7 +21,7 @@ export class LoreGraphError extends Error {
     ) {
         // NW-BULK — surface the underlying cause in the message, not just on
         // `.cause`. Callers (Atlas, CLI, logs) read `.message`; hiding the
-        // real Kùzu error (e.g. "KuzuConnectionPool: waiter queue full") behind
+        // real underlying engine error (e.g. "connection pool: waiter queue full") behind
         // a generic "Failed to upsert" wrapper turned a diagnosable backpressure
         // signal into an opaque failure. The cause is now visible everywhere a
         // LoreGraphError surfaces, while `.cause` stays available for

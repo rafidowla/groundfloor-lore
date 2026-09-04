@@ -12,7 +12,7 @@
  *
  * What was missing is the other half of that bargain: nothing tracked the
  * fired promises, so a caller that wrote a burst of nodes and then called
- * `dispose()` raced them. The drain closed Kùzu + LanceDB (shutdownDrain step
+ * `dispose()` raced them. The drain closed the graph store + LanceDB (shutdownDrain step
  * 10) while reconnect writes were still in flight, and those writes died
  * against closed handles inside `reconnectOneNode`'s own `catch { }` — edges
  * silently missing, with no signal to the caller that anything was dropped.
@@ -91,7 +91,7 @@ export const DEFAULT_AUTOLINK_DRAIN_TIMEOUT_MS = 5000;
  *
  *   1. `reconnectGraph` re-embeds and searches the whole corpus and runs for
  *      MINUTES, so it could never finish inside the ingest tracker's 5s. The
- *      drain timed out and step 10 closed Kùzu + LanceDB underneath the
+ *      drain timed out and step 10 closed the graph store + LanceDB underneath the
  *      still-running sweep — the exact use-after-close the registration was
  *      added to prevent. Drain-VISIBLE is not drain-PROTECTED.
  *   2. The timeout log talks about "ingest autolink hook(s) ... their

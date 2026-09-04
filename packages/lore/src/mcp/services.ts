@@ -59,9 +59,10 @@ import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 // vector substrate unions shared with server.ts (the two files central to the
 // embeddable refactor). server.ts imports these instead of re-declaring them.
 // (The broader 29-file alias proliferation is cq-lore-graph-alias-proliferation.)
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 export type LoreGraph = LoreGraphHandle;
 export type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
 
@@ -151,12 +152,13 @@ export interface CreateGraphOpts {
  *
  * ── WHY THE LOCAL BRANCH IS NOT `new LocalGraph(...)` ANY MORE ──────────────
  *
- * It was, unconditionally, and that made the whole daemon Kùzu-only no matter
- * what a workspace declared. `graphEngine: 'surreal'` was reachable from the
- * CLI (`openWorkspaceGraph`) and from `lore migrate engine`
- * (`LocalGraphRegistry.getGraphHandle`) and from nowhere else — every daemon
- * read and write went to the real-but-EMPTY Kùzu database such a workspace
- * still carries, and returned success. This is the boot half of that fix; the
+ * It was, unconditionally, and that locked the whole daemon onto one graph
+ * engine no matter what a workspace declared. `graphEngine: 'surreal'` was
+ * reachable from the CLI (`openWorkspaceGraph`) and from `lore migrate
+ * engine` (`LocalGraphRegistry.getGraphHandle`) and from nowhere else —
+ * every daemon read and write went to the real-but-EMPTY database such a
+ * workspace still carries under the other engine, and returned success.
+ * This is the boot half of that fix; the
  * per-request half is every resolver moving from `getOrOpen` to
  * `getGraphHandle`.
  *
@@ -510,8 +512,8 @@ export interface StorageBundle {
      * Carried on the bundle so path-backed subsystems (the approval queue) can
      * be constructed WITHOUT a LocalGraph. `createPendingOpsStore` used to
      * reach `requireLocalGraph(...).getGraphContext().storage.getConnection()`
-     * purely to obtain somewhere to persist, which made a Kùzu connection a
-     * precondition for human approvals.
+     * purely to obtain somewhere to persist, which made an active graph
+     * connection a precondition for human approvals.
      */
     graphBasePath: string;
     /**
@@ -587,9 +589,9 @@ export function createPendingOpsStore(bundle: StorageBundle): PendingOpsStore {
         return new InMemoryPendingOpsStore();
     }
     // Local mode: its own SQLite file under the workspace's `.lore/`. The
-    // queue is row-shaped and never stored an edge, so the Kùzu node table it
-    // used to live in bought it nothing — while making a Kùzu connection a
-    // precondition for approving anything.
+    // queue is row-shaped and never stored an edge, so the graph node table
+    // it used to live in bought it nothing — while making an active graph
+    // connection a precondition for approving anything.
     return new SqlitePendingOpsStore(path.join(bundle.graphBasePath, '.lore', 'pending-ops.sqlite'));
 }
 

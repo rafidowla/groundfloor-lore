@@ -1,7 +1,7 @@
 /**
  * test/recall-benchmarks/runBenchmarks.ts — Sprint R benchmark harness.
  *
- * Drives the ranking pipeline in-process (no daemon, no Kùzu, no
+ * Drives the ranking pipeline in-process (no daemon, no legacy graph engine, no
  * LanceDB) against a synthetic corpus that mirrors the Day-1 dogfood
  * failure pattern: each operator-curated "decision" / "convention" etc.
  * node is buried under ~5–10 noisy `code-symbol` nodes with comparable

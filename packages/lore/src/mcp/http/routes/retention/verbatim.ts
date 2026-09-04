@@ -13,7 +13,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { VerbatimStore } from '../../../../engines/verbatimStore.js';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
-import { isPayloadTooLarge, writeOversizeError, writeError } from '../../helpers.js';
+import { isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { resolveTargetGraph } from '../../../tools/workspaceResolve.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../../security/routeWorkspaceBinding.js';
 import { type RetentionDeps, readBody } from './shared.js';
@@ -52,7 +52,7 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
             return true;
         }
         try {
-            const parsed = JSON.parse(body || '{}') as { apply?: boolean; prefix?: string };
+            const parsed = parseJsonBody(body) as { apply?: boolean; prefix?: string };
             const prefix = parsed.prefix ?? 'lore:';
             const apply = parsed.apply === true;
             const store = deps.store.loreVerbatim as unknown as {
@@ -127,6 +127,10 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
                 ...(reapTruncated ? { truncated: true, totalIds: rawIds.length } : {}),
             }));
         } catch (reapErr) {
+            // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+            // through to 500 here; parseJsonBody's tagged error is caught
+            // first now.
+            if (isInvalidJsonBody(reapErr)) { writeInvalidJson(res, reapErr); return true; }
             writeError(res, 500, 'internal_error', redactError(reapErr));
         }
         return true;
@@ -160,7 +164,7 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
             return true;
         }
         try {
-            const parsed = JSON.parse(body || '{}') as { id?: string; reason?: string };
+            const parsed = parseJsonBody(body) as { id?: string; reason?: string };
             if (!parsed.id) {
                 writeError(res, 400, 'invalid_request', '`id` is required in POST body');
                 return true;
@@ -174,6 +178,8 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true, id: parsed.id }));
         } catch (tsErr) {
+            // X-json400 (2026-09-03 audit) — see the reap handler above.
+            if (isInvalidJsonBody(tsErr)) { writeInvalidJson(res, tsErr); return true; }
             writeError(res, 500, 'internal_error', redactError(tsErr));
         }
         return true;
@@ -296,7 +302,7 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
             return true;
         }
         try {
-            const p = JSON.parse(body || '{}') as {
+            const p = parseJsonBody(body) as {
                 id?: string; text?: string; workspace?: string;
                 source?: string; label?: string; tags?: string; sourceCreatedAt?: string;
             };
@@ -345,6 +351,8 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true, id: p.id }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — see the reap handler above.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 500, 'internal_error', redactError(err));
         }
         return true;

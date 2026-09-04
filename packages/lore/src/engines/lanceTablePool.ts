@@ -27,7 +27,7 @@
  *     reads observe writes made between opens.
  *
  * Sizing:
- *   Default 4 (matches Kùzu pool, fits the burst profile). Configurable
+ *   Default 4, fits the burst profile. Configurable
  *   via LORE_LANCE_POOL_SIZE, clamped to [1, 32].
  */
 
@@ -73,7 +73,7 @@ export function resolveLancePoolSize(envValue: string | undefined = process.env.
  * (e.g. an async callback firing after a Table is mid-close).
  *
  * The handler-install has moved to the shared `nativePoolSafetyNet`
- * module so the Kùzu and Lance pools share ONE listener pair under ONE
+ * module so every native pool shares ONE listener pair under ONE
  * policy. The policy is SURVIVE — log via the structured logger and
  * keep the daemon alive (matches the SW-19 / E1b daemon-resilience
  * contract). Previously this pool installed its own listener that

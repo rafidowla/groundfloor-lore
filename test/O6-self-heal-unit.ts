@@ -37,10 +37,10 @@
  *         (not a hand-fed fake) returns TRUE for an edge that exists on a
  *         Surreal-SHAPED graph handle — i.e. one that implements
  *         `queryEdges` (the portable, LoreGraphHandle contract) but NOT
- *         the Kùzu-only `getGraphContext()` escape hatch. Before the fix,
- *         `hasEdge` reached for `getGraphContext()` unconditionally and
+ *         the legacy engine's `getGraphContext()` escape hatch. Before the
+ *         fix, `hasEdge` reached for `getGraphContext()` unconditionally and
  *         returned false whenever it was absent, so self-heal could never
- *         confirm a real edge on a non-Kùzu (e.g. SurrealDB-backed)
+ *         confirm a real edge on a non-legacy-engine (e.g. SurrealDB-backed)
  *         workspace.
  */
 
@@ -292,8 +292,8 @@ test('T15 workspace filter threads through to store', async () => {
 /**
  * A graph handle shaped like `SurrealGraph`: it implements `queryEdges`
  * (the portable `LoreGraphHandle` contract every engine has) but
- * deliberately has NO `getGraphContext` — the Kùzu-only escape hatch the
- * pre-fix `hasEdge` unconditionally reached for. Filter semantics mirror
+ * deliberately has NO `getGraphContext` — the legacy engine's escape hatch
+ * the pre-fix `hasEdge` unconditionally reached for. Filter semantics mirror
  * `graphEdges.queryEdges` / `surrealGraphAggregates.queryEdges`: exact
  * match on source id, target id, and relation.
  */
@@ -339,8 +339,8 @@ test('T16 wireOutbox hasEdge returns TRUE via queryEdges on a Surreal-shaped han
 });
 
 test('T17 1.3 regression: a throwing substrate probe does NOT self-heal-confirm a delete', async () => {
-    // A graph whose getNode throws — a transient Kùzu error during a self-heal
-    // sweep. Pre-fix, wireOutbox's hasNode swallowed the error into `false`,
+    // A graph whose getNode throws — a transient graph-store error during a
+    // self-heal sweep. Pre-fix, wireOutbox's hasNode swallowed the error into `false`,
     // which the node.delete verifier read as "confirmed absent" and marked the
     // failed delete 'replicated' (permanent loss of a delete that never ran).
     const throwingGraph = {

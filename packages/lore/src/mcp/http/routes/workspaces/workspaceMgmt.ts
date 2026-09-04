@@ -10,8 +10,17 @@
  *   GET    /api/workspaces/:name/retention     — read retention policy
  *
  * Order is preserved from the pre-split handler: the exact /switch and
- * /rename matches MUST precede the `url.startsWith('/api/workspaces/')`
+ * /rename matches MUST precede the `pathname.startsWith('/api/workspaces/')`
  * DELETE/retention checks.
+ *
+ * F-DEL8 — the DELETE/retention checks below match and slice on
+ * `pathname` (query-stripped), not the raw `url`. They used to match
+ * on `url`, so `DELETE /api/workspaces/foo?workspace=x` sliced the
+ * name as `foo?workspace=x` (mangled into an unknown-workspace 400)
+ * and any `?query` on the retention routes broke the `url.endsWith
+ * ('/retention')` match outright. `url` (with its query string) is
+ * still accepted as a parameter here in case a future route needs it,
+ * but nothing in this file should slice a workspace name out of it.
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -28,7 +37,7 @@ import {
 } from '../../../../config/workspaces.js';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
-import { isPayloadTooLarge, writeOversizeError, writeError } from '../../helpers.js';
+import { isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { requestShutdown } from '../../../shutdownCoordinator.js';
 import { bindDaemonOperatorLane, bindRouteTarget } from '../../../../security/routeWorkspaceBinding.js';
 import { type WorkspacesDeps, readBody } from './shared.js';
@@ -88,7 +97,7 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
             return true;
         }
         try {
-            const { name: rawName, label, mode, template } = JSON.parse(body || '{}') as {
+            const { name: rawName, label, mode, template } = parseJsonBody(body) as {
                 name?: string;
                 label?: string;
                 mode?: string;
@@ -120,6 +129,10 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
             res.writeHead(201, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ created: entry, workspaces: loadWorkspaces() }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — already 400, but redactError
+            // garbled the JSON.parse diagnostic; route through
+            // writeInvalidJson for a clean, non-hashed message instead.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'invalid_request', redactError(err));
         }
         return true;
@@ -143,7 +156,7 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
             return true;
         }
         try {
-            const { name } = JSON.parse(body || '{}') as { name?: string };
+            const { name } = parseJsonBody(body) as { name?: string };
             if (!name) {
                 writeError(res, 400, 'name_required', 'name required');
                 return true;
@@ -160,14 +173,18 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
             res.end(JSON.stringify({ active: name, restarting: true }));
             // SP-02 — respond first, THEN run the same ordered drain
             // SIGTERM uses (await outbox replicator, embed queue, sync
-            // poller, session cache, consistency sweep, then close
-            // Kùzu/LanceDB) before exit. Previously setTimeout(process.exit,
-            // 150) hard-killed every in-flight write — a half-applied Kùzu
-            // transaction could wedge the next boot. launchd KeepAlive=true
+            // poller, session cache, consistency sweep, then close the
+            // graph engine/LanceDB) before exit. Previously
+            // setTimeout(process.exit, 150) hard-killed every in-flight
+            // write — a half-applied graph transaction could wedge the
+            // next boot. launchd KeepAlive=true
             // relaunches and binds the new workspace on the next boot.
             console.error(`[Lore MCP] Workspace switched to "${name}" — draining for restart.`);
             void requestShutdown('workspace-switch');
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — see the create-workspace
+            // handler above for why the JSON-parse case bypasses redactError.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'invalid_request', redactError(err));
         }
         return true;
@@ -196,7 +213,7 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
         }
         const startMs = Date.now();
         try {
-            const { oldName, newName } = JSON.parse(body || '{}') as { oldName?: string; newName?: string };
+            const { oldName, newName } = parseJsonBody(body) as { oldName?: string; newName?: string };
             if (!oldName || !newName) {
                 writeError(res, 400, 'names_required', 'oldName and newName required');
                 return true;
@@ -220,12 +237,15 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
                 resultDetail: (err as Error).message,
                 durationMs: Date.now() - startMs,
             });
+            // X-json400 (2026-09-03 audit) — see the create-workspace
+            // handler above for why the JSON-parse case bypasses redactError.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'invalid_request', redactError(err));
         }
         return true;
     }
 
-    if (url.startsWith('/api/workspaces/') && req.method === 'DELETE') {
+    if (pathname.startsWith('/api/workspaces/') && req.method === 'DELETE') {
         const gate = await gateRoute(
             { deploymentMode: deps.deploymentMode, dataplane: deps.dataplane },
             { permission: 'delete' },
@@ -234,7 +254,7 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
         // L-068 — per-token write-scope gate: gateRoute above is a no-op in local
         // mode, so without this a read-only app token could invoke this mutating
         // route. Null principal = local/legacy bypass (preserved).
-        const raw = decodeURIComponent(url.slice('/api/workspaces/'.length));
+        const raw = decodeURIComponent(pathname.slice('/api/workspaces/'.length));
         // C6 — workspace deletion is destructive: audit every attempt
         // regardless of outcome.
         const startMs = Date.now();
@@ -265,7 +285,7 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
     }
 
     // PATCH /api/workspaces/:name/retention  body: Partial<WorkspaceRetentionPolicy>
-    if (url.startsWith('/api/workspaces/') && url.endsWith('/retention') && req.method === 'PATCH') {
+    if (pathname.startsWith('/api/workspaces/') && pathname.endsWith('/retention') && req.method === 'PATCH') {
         const gate = await gateRoute(
             { deploymentMode: deps.deploymentMode, dataplane: deps.dataplane },
             { permission: 'write' },
@@ -274,7 +294,7 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
         // L-068 — per-token write-scope gate: gateRoute above is a no-op in local
         // mode, so without this a read-only app token could invoke this mutating
         // route. Null principal = local/legacy bypass (preserved).
-        const namePart = decodeURIComponent(url.slice('/api/workspaces/'.length, -'/retention'.length));
+        const namePart = decodeURIComponent(pathname.slice('/api/workspaces/'.length, -'/retention'.length));
         // F-B3 — gate on the workspace whose retention policy is being mutated.
         if (denyWorkspaceMutation(res, namePart)) return true;
         let body: string;
@@ -286,24 +306,27 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
             return true;
         }
         try {
-            const patch = JSON.parse(body || '{}') as Record<string, unknown>;
+            const patch = parseJsonBody(body) as Record<string, unknown>;
             const updated = setWorkspaceRetention(namePart, patch);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(updated));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — see the create-workspace
+            // handler above for why the JSON-parse case bypasses redactError.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'invalid_request', redactError(err));
         }
         return true;
     }
 
     // GET /api/workspaces/:name/retention
-    if (url.startsWith('/api/workspaces/') && url.endsWith('/retention') && req.method === 'GET') {
+    if (pathname.startsWith('/api/workspaces/') && pathname.endsWith('/retention') && req.method === 'GET') {
         const gate = await gateRoute(
             { deploymentMode: deps.deploymentMode, dataplane: deps.dataplane },
             { permission: 'read' },
         );
         if (!gate.allowed) { writePermissionDenied(res, gate); return true; }
-        const namePart = decodeURIComponent(url.slice('/api/workspaces/'.length, -'/retention'.length));
+        const namePart = decodeURIComponent(pathname.slice('/api/workspaces/'.length, -'/retention'.length));
         // D2-authz-2/D-021 — gateRoute('read') is a no-op in local mode, so an
         // app token bound to ws-A could read ws-B's retention policy (IDOR).
         // Bind to the workspace named in the URL, mirroring the PATCH sibling.

@@ -35,8 +35,8 @@
  *
  * | `deploymentMode` | Substrates | Transport | Use case |
  * |---|---|---|---|
- * | `'embedded'` | Kùzu + LanceDB (local) | None (in-process) | Library / test / serverless |
- * | `'local'`    | Kùzu + LanceDB (local) | stdio or HTTP daemon | Single-user daemon |
+ * | `'embedded'` | SurrealDB + LanceDB (local) | None (in-process) | Library / test / serverless |
+ * | `'local'`    | SurrealDB + LanceDB (local) | stdio or HTTP daemon | Single-user daemon |
  * | `'cloud'`    | Dataplane (remote)     | HTTP daemon          | Multi-tenant cloud |
  *
  * # Contract guarantees (embedded mode)

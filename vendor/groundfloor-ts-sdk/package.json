@@ -1,7 +1,6 @@
 {
   "name": "groundfloor-ts-sdk",
   "version": "1.2.0",
-  "description": "Vendored type declarations only, for build-time type-checking. Lore only ever type-imports this package or reaches it via a guarded dynamic import() at runtime (see test/tw1b-sdk-optional-unit.ts) — no .js implementation is needed or included here.",
-  "types": "dist/index.d.ts",
-  "main": "dist/index.js"
+  "description": "Vendored type declarations only, for build-time type-checking. Lore only ever type-imports this package or reaches it via a guarded dynamic import() at runtime (see test/tw1b-sdk-optional-unit.ts) — no .js implementation is needed or included here. Deliberately has NO \"main\" entry point: `npm ci` resolving this vendor copy (instead of a real sibling checkout with compiled JS) must fail resolution cleanly on `import('groundfloor-ts-sdk')`, not point at a dist/index.js that doesn't exist (finding #10, 2026-09-03). test/sw05-org-isolation-unit.ts probes that import and skips its one runtime-dependent assertion when it fails.",
+  "types": "dist/index.d.ts"
 }

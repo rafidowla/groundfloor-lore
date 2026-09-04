@@ -10,7 +10,7 @@ against it end to end.
 No mocks — this spawns the real `lore serve --http` process (via tsx against
 the repo's TypeScript source, same as live-daemon.ts) in an isolated HOME on
 a free port, so it needs:
-  - the repo's `node_modules` installed (native Kùzu/LanceDB/better-sqlite3
+  - the repo's `node_modules` installed (native SurrealDB/LanceDB/better-sqlite3
     bindings included)
   - a Node 22 binary reachable per `lore_client.sidecar._default_node_bin()`
     (PATH, `LORE_NODE_BIN`, or an nvm-managed v22.x install)

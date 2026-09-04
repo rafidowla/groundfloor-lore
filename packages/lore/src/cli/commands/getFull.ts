@@ -1,5 +1,4 @@
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
-import { resolveGraphBasePath } from './shared.js';
+import { resolveGraphBasePath, openGraphForCli } from './shared.js';
 import { tryHttpGetFull } from './recall.js';
 
 export async function getFullCommand(args: string[]): Promise<void> {
@@ -44,7 +43,14 @@ export async function getFullCommand(args: string[]): Promise<void> {
 
     const stripped = id.startsWith('lore:') ? id.slice(5) : id;
     const basePath = resolveGraphBasePath();
-    const graph = openWorkspaceGraph(basePath);
+    // Finding 11 (round E) — the HTTP attempt above already tried the
+    // daemon; this direct-open fallback is what used to sit in the ~15s
+    // openSurreal retry storm. tryHttpGetFull() (recall.ts) now resolves
+    // DEFAULT_PORT (LORE_PORT-aware) instead of a hardcoded 3847, so this
+    // fallback fires only when the HTTP attempt genuinely misses the daemon
+    // (daemon down, timeout, not-found). Refuse fast with a clear message
+    // instead of the raw driver error.
+    const graph = await openGraphForCli(basePath);
     try {
         const node = await graph.getNode(stripped);
         if (!node) {

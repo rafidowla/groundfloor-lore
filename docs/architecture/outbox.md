@@ -5,8 +5,8 @@ write path through Lore. Every API write — hot single-node, bulk,
 edge, delete — first commits a row to the durable outbox, then
 returns success to the caller. A background replicator drains the
 outbox and fans out to substrate stores (the graph substrate —
-SurrealDB by default as of v3.13.0, Kùzu supported per workspace —
-LanceDB vectors, verbatim docs, SQLite). This document describes the
+SurrealDB, the only graph engine — LanceDB vectors, verbatim docs,
+SQLite). This document describes the
 contract, the runtime, and the operator runbook.
 
 Audience: Lore daemon engineers + operators who need to debug an
@@ -24,7 +24,7 @@ by a gate test case in `test/sprint-O-outbox-property.ts`
 >
 > 1. Every write — hot single-store, bulk, and any future warm/cool/bulk lanes — commits to the outbox table BEFORE returning success to the caller.
 > 2. The outbox commit carries: `(operation_type, workspace, payload_blob, monotonic_sequence_id, created_at, status='pending')`.
-> 3. The replicator service is the only component that reads the outbox and writes to substrate mirrors (the graph substrate — SurrealDB or Kùzu, per workspace — LanceDB vectors, SQLite tables, verbatim docs).
+> 3. The replicator service is the only component that reads the outbox and writes to substrate mirrors (the graph substrate — SurrealDB, the only graph engine — LanceDB vectors, SQLite tables, verbatim docs).
 > 4. Replication is per-workspace — one slow workspace doesn't block others.
 > 5. API write returns success the moment the outbox commit lands (sub-100 ms in steady state).
 > 6. When outbox lag exceeds the configurable threshold, write endpoints return `503 outbox_lag` with `Retry-After` header.
@@ -63,7 +63,7 @@ HTTP POST /api/node  (or /api/nodes/bulk)
          │        advance lastReplicatedSeq cursor
          │
          ▼
-  graph (SurrealDB or Kùzu, per workspace) / LanceDB / verbatim store
+  graph (SurrealDB) / LanceDB / verbatim store
 ```
 
 Key files:
@@ -182,10 +182,9 @@ rows whose `sequenceId` is strictly greater.
 crashed after the substrate write but before
 `markEntryStatus('replicated')` landed. Therefore every substrate
 writer wired into the dispatcher must be idempotent under repeat
-calls with the same payload. Both graph engines satisfy this by
-construction — SurrealDB's `upsertNode` (default as of v3.13.0) and
-per-triple-deduped `addEdge`, and Kùzu's `MERGE`-based upsert (still
-supported per workspace). LanceDB vector mirror is
+calls with the same payload. The graph engine satisfies this by
+construction — SurrealDB's `upsertNode` and per-triple-deduped
+`addEdge`. LanceDB vector mirror is
 idempotent on `(node_id, embedding_version)`. New `operationKind`
 handlers added to the dispatcher MUST satisfy the same property
 or pass a `sequenceId`-aware upsert path (Option B from the O0
@@ -327,8 +326,13 @@ short-circuits.
 
 ### Step 1 — confirm the alert is real
 
+`outbox` / `perWorkspaceOutbox` are on the authenticated (full) `/api/health`
+body only (see `docs/OPERATIONS.md`'s "GET /api/health" section) — an
+anonymous call gets the lite body back with neither field, so pass a Bearer:
+
 ```
-curl -s http://localhost:3847/api/health | jq '.outbox, .perWorkspaceOutbox'
+curl -s -H "Authorization: Bearer $(cat ~/.groundfloor/auth.token)" \
+     http://localhost:3847/api/health | jq '.outbox, .perWorkspaceOutbox'
 ```
 
 You should see:
@@ -362,7 +366,7 @@ The replicator's fan-out target is the bottleneck. Common causes:
 | `lagSeconds` rising but `replicated` count in logs also rising | Substrate is slow but progressing | Wait for drain; do not restart |
 | `lagSeconds` rising, no `[outbox replicator]` log lines | Replicator hung or unwired | Restart daemon; check `/api/health` shows the replicator stats block |
 | `dead > 0` | Rows failed `maxAttempts` times — substrate is broken or producer wrote a bad payload | Inspect dead rows: `sqlite3 .lore/outbox.sqlite "SELECT id, operationKind, lastError FROM outbox_entries WHERE status='dead'"` |
-| All workspaces lag | Disk full, fsync pathology, or process-wide graph-substrate lock contention (SurrealDB or Kùzu) | Check disk space; check graph substrate logs; restart daemon |
+| All workspaces lag | Disk full, fsync pathology, or process-wide graph-substrate lock contention (SurrealDB) | Check disk space; check graph substrate logs; restart daemon |
 
 ### Step 4 — options
 
@@ -380,7 +384,7 @@ The replicator's fan-out target is the bottleneck. Common causes:
   daemon restart required. See "Self-heal + drain" below.
 - **Drain a single dead row manually.** Pre-O6 fallback only.
   Use when `lore outbox drain-failed --workspace <ws>` cannot reach
-  the substrate (e.g. the graph substrate — SurrealDB or Kùzu — is down) and you need to evict a poison
+  the substrate (e.g. the graph substrate — SurrealDB — is down) and you need to evict a poison
   row to unblock the queue:
   ```
   sqlite3 .lore/outbox.sqlite \
@@ -388,7 +392,7 @@ The replicator's fan-out target is the bottleneck. Common causes:
   ```
   Skips the replicator's fan-out for that row. Substrate state
   must be checked manually afterwards.
-- **Scale the substrate.** If the graph substrate (SurrealDB or Kùzu) / LanceDB sustainably can't
+- **Scale the substrate.** If the graph substrate (SurrealDB) / LanceDB sustainably can't
   keep up, the long-term fix is on the substrate side. The
   outbox protects correctness, not throughput.
 
@@ -470,8 +474,9 @@ lore embed reembed --workspace default --dry-run
 # Restrict by type / tag
 lore embed reembed --workspace atlas --type AtlasNode --batch-size 512
 
-# Watch progress on the daemon side
-curl -s http://localhost:3847/api/health | jq .outbox
+# Watch progress on the daemon side (outbox is full-body-only — needs a Bearer)
+curl -s -H "Authorization: Bearer $(cat ~/.groundfloor/auth.token)" \
+     http://localhost:3847/api/health | jq .outbox
 ```
 
 The CLI does not require the daemon to be running. Rows sit in

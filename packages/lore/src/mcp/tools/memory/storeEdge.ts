@@ -15,6 +15,7 @@ import { mcpToolError } from '../mcpToolError.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import { redactError } from '../../../security/logRedact.js';
 import { checkWorkspaceQuota } from '../../../security/workspaceQuota.js';
+import { withEdgeLocks, type EdgeLockTriple } from '../../../core/nodeWriteLock.js';
 
 export function registerStoreEdgeTool(mcpServer: McpServer, deps: MemoryToolsDeps): void {
     mcpServer.tool(
@@ -123,83 +124,112 @@ export function registerStoreEdgeTool(mcpServer: McpServer, deps: MemoryToolsDep
                 __auditCtx.workspace = resolvedEdge.resolvedWorkspace;
                 __auditCtx.entityId = `${sourceId}->${targetId}:${relation}`;
 
-                // SP-F3 — outbox-first hot write, mirroring REST edges.ts.
-                // Record the edge.upsert row BEFORE the substrate write so
-                // MCP-originated edges get the same durability +
-                // crash-recovery-replay + per-workspace replication the REST
-                // surface has. Only when an outbox is wired; otherwise keep
-                // the prior direct-write behavior (tests / cloud mode).
-                //
-                // Capture the entry id so the endpoint-missing path below can
-                // RETRACT the row (see the catch under the graph write).
-                let edgeUpsertOutboxEntryId: string | null = null;
-                if (deps.outboxStore) {
-                    const edgeUpsertEntry = await recordHotWrite(deps.outboxStore, {
-                        workspace: resolvedEdge.resolvedWorkspace,
-                        operationKind: 'edge.upsert',
-                        payload: { ...edge, bidirectional: useBidirectional },
-                        initiator: 'mcp:store_edge',
-                        operation: 'edge.upsert',
-                    });
-                    edgeUpsertOutboxEntryId = edgeUpsertEntry.id;
-                }
+                // Round-E X-edges — the outbox record, the substrate write
+                // (and its endpoint-missing retraction), and the WAL append
+                // now all run under ONE per-triple lock (core/nodeWriteLock.ts
+                // `withEdgeLocks`), same shape as nodeUpsert's `withNodeLock`.
+                // Unlocked, a concurrent store_edge/delete_edge/REST edge
+                // write for the SAME (sourceId, targetId, relation) could
+                // record its outbox row and land its graph write in the
+                // opposite relative order — the outbox then replays a
+                // sequence that contradicts what the substrate actually did.
+                // Bidirectional writes lock BOTH the forward and reverse
+                // triple together (never two nested single-triple locks —
+                // see the re-entrancy rule in nodeWriteLock.ts) so nothing
+                // can slip in between the forward and reverse edge writes.
+                const lockTriples: EdgeLockTriple[] = useBidirectional
+                    ? [{ sourceId, targetId, relation }, { sourceId: targetId, targetId: sourceId, relation }]
+                    : [{ sourceId, targetId, relation }];
 
-                try {
-                    // 1.1 — conflict retry for Surreal optimistic-concurrency
-                    // errors under concurrent edge writes.
-                    if (useBidirectional) {
-                        await withTransactionConflictRetry(() => edgeGraph.addBidirectionalEdge(edge));
-                    } else {
-                        await withTransactionConflictRetry(() => edgeGraph.addEdge(edge));
+                await withEdgeLocks(resolvedEdge.resolvedWorkspace, lockTriples, async () => {
+                    // SP-F3 — outbox-first hot write, mirroring REST edges.ts.
+                    // Record the edge.upsert row BEFORE the substrate write so
+                    // MCP-originated edges get the same durability +
+                    // crash-recovery-replay + per-workspace replication the REST
+                    // surface has. Only when an outbox is wired; otherwise keep
+                    // the prior direct-write behavior (tests / cloud mode).
+                    //
+                    // Capture the entry id so the endpoint-missing path below can
+                    // RETRACT the row (see the catch under the graph write).
+                    let edgeUpsertOutboxEntryId: string | null = null;
+                    if (deps.outboxStore) {
+                        const edgeUpsertEntry = await recordHotWrite(deps.outboxStore, {
+                            workspace: resolvedEdge.resolvedWorkspace,
+                            operationKind: 'edge.upsert',
+                            payload: { ...edge, bidirectional: useBidirectional },
+                            initiator: 'mcp:store_edge',
+                            operation: 'edge.upsert',
+                        });
+                        edgeUpsertOutboxEntryId = edgeUpsertEntry.id;
                     }
-                } catch (edgeErr) {
-                    // Medium (2026-08-17 functional-correctness) — when the
-                    // write fails with edge_endpoint_missing the caller gets
-                    // isError, but the already-recorded edge.upsert row stayed
-                    // pending and the replicator kept retrying it, so the
-                    // 'failed' edge silently appeared later once the endpoint
-                    // node happened to be created. Retract the row the same
-                    // way nodeService's rollbackPartialWrite does (C-R2-03):
-                    // conditional removeIfPending while the row is still
-                    // pending; if the replicator already claimed it, record a
-                    // compensating edge.delete (a LATER sequenceId in the same
-                    // cross-superseding family) that lands after the replay
-                    // and converges back to "no edge". A retraction failure
-                    // must NOT mask the original endpoint error.
-                    if (edgeUpsertOutboxEntryId && deps.outboxStore
-                        && /edge_endpoint_missing/i.test((edgeErr as Error)?.message ?? '')) {
-                        try {
-                            let removed: boolean;
-                            if (deps.outboxStore.removeIfPending) {
-                                removed = await deps.outboxStore.removeIfPending(edgeUpsertOutboxEntryId);
-                            } else {
-                                await deps.outboxStore.remove(edgeUpsertOutboxEntryId);
-                                removed = true;
+
+                    try {
+                        // 1.1 — conflict retry for Surreal optimistic-concurrency
+                        // errors under concurrent edge writes.
+                        if (useBidirectional) {
+                            await withTransactionConflictRetry(() => edgeGraph.addBidirectionalEdge(edge));
+                        } else {
+                            await withTransactionConflictRetry(() => edgeGraph.addEdge(edge));
+                        }
+                    } catch (edgeErr) {
+                        // Medium (2026-08-17 functional-correctness) — when the
+                        // write fails with edge_endpoint_missing the caller gets
+                        // isError, but the already-recorded edge.upsert row stayed
+                        // pending and the replicator kept retrying it, so the
+                        // 'failed' edge silently appeared later once the endpoint
+                        // node happened to be created. Retract the row the same
+                        // way nodeService's rollbackPartialWrite does (C-R2-03):
+                        // conditional removeIfPending while the row is still
+                        // pending; if the replicator already claimed it, record a
+                        // compensating edge.delete (a LATER sequenceId in the same
+                        // cross-superseding family) that lands after the replay
+                        // and converges back to "no edge". A retraction failure
+                        // must NOT mask the original endpoint error.
+                        if (edgeUpsertOutboxEntryId && deps.outboxStore
+                            && /edge_endpoint_missing/i.test((edgeErr as Error)?.message ?? '')) {
+                            try {
+                                let removed: boolean;
+                                if (deps.outboxStore.removeIfPending) {
+                                    removed = await deps.outboxStore.removeIfPending(edgeUpsertOutboxEntryId);
+                                } else {
+                                    await deps.outboxStore.remove(edgeUpsertOutboxEntryId);
+                                    removed = true;
+                                }
+                                if (!removed) {
+                                    await recordHotWrite(deps.outboxStore, {
+                                        workspace: resolvedEdge.resolvedWorkspace,
+                                        operationKind: 'edge.delete',
+                                        payload: { sourceId, targetId, relation },
+                                        initiator: 'mcp:store_edge',
+                                        operation: 'edge.delete',
+                                    });
+                                    log.warn(`[Lore MCP] store_edge: edge.upsert row for ${sourceId}->${targetId}:${relation} was already claimed by the replicator; recorded a compensating edge.delete so the endpoint-missing edge cannot silently appear later`);
+                                }
+                            } catch (retractErr) {
+                                log.error(`[Lore MCP] store_edge: failed to retract the edge.upsert outbox row after edge_endpoint_missing: ${redactError(retractErr)} — the replicator may apply the edge later even though this call failed`);
                             }
-                            if (!removed) {
-                                await recordHotWrite(deps.outboxStore, {
-                                    workspace: resolvedEdge.resolvedWorkspace,
-                                    operationKind: 'edge.delete',
-                                    payload: { sourceId, targetId, relation },
-                                    initiator: 'mcp:store_edge',
-                                    operation: 'edge.delete',
-                                });
-                                log.warn(`[Lore MCP] store_edge: edge.upsert row for ${sourceId}->${targetId}:${relation} was already claimed by the replicator; recorded a compensating edge.delete so the endpoint-missing edge cannot silently appear later`);
-                            }
-                        } catch (retractErr) {
-                            log.error(`[Lore MCP] store_edge: failed to retract the edge.upsert outbox row after edge_endpoint_missing: ${redactError(retractErr)} — the replicator may apply the edge later even though this call failed`);
+                        }
+                        throw edgeErr;
+                    }
+
+                    // Buffer write to WAL for async sync. P1.C: same
+                    // active-only guard as store_node — non-active
+                    // workspace writes are out of WAL scope until per-
+                    // workspace WAL ships.
+                    //
+                    // Round-E X-edges finding (3) — a bidirectional write
+                    // creates TWO edges (forward + reverse) but only the
+                    // forward direction was ever appended to the WAL, so
+                    // `pushPendingInner` never learned about the reverse
+                    // edge and a sync push silently dropped it. Append both
+                    // directions when bidirectional.
+                    if (resolvedEdge.isActive) {
+                        deps.getWal().append('add_edge', { sourceId, targetId, relation, confidence: conf, confidenceScore: score });
+                        if (useBidirectional) {
+                            deps.getWal().append('add_edge', { sourceId: targetId, targetId: sourceId, relation, confidence: conf, confidenceScore: score });
                         }
                     }
-                    throw edgeErr;
-                }
-
-                // Buffer write to WAL for async sync. P1.C: same
-                // active-only guard as store_node — non-active
-                // workspace writes are out of WAL scope until per-
-                // workspace WAL ships.
-                if (resolvedEdge.isActive) {
-                    deps.getWal().append('add_edge', { sourceId, targetId, relation, confidence: conf, confidenceScore: score });
-                }
+                });
 
                 return {
                     content: [{

@@ -572,11 +572,11 @@ function scanSurrealLicenceBoundary() {
  * D-023 (2026-08-05) — GRAPH-STORED ReBAC HAS NO PRODUCTION CONSUMERS.
  *
  * DEC-SURREAL-REBAC decided that graph-stored ReBAC (security/rebac.ts L1 +
- * security/rebacEvaluator.ts L2) stays on Kùzu and is not ported to SurrealDB.
+ * security/rebacEvaluator.ts L2) stays on the legacy graph engine and is not ported to SurrealDB.
  * That decision is safe for exactly one reason: nothing in production calls it.
  *
  * The reason matters, because ReBAC anchors every query on `LoreNode` endpoint
- * ids. On a Surreal-backed workspace the Kùzu `LoreNode` table is present and
+ * ids. On a Surreal-backed workspace the legacy engine's `LoreNode` table is present and
  * EMPTY, so graph-stored ReBAC there is non-functional — reads return
  * false/[] and, before the item-A fix, `grant()` returned a phantom `true`.
  * The moment someone wires it to a route or tool, "no ACLs on a Surreal
@@ -636,21 +636,23 @@ function scanRebacConsumers() {
 }
 
 /**
- * D-024 (2026-08-06, completed 2026-08-21) — KÙZU IMPORTS BANNED OUTRIGHT.
+ * D-024 (2026-08-06, completed 2026-08-21) — LEGACY GRAPH-ENGINE IMPORTS
+ * BANNED OUTRIGHT.
  *
- * Kùzu removal finished (Phase 3d, docs/KUZU_REMOVAL.md): LocalGraph and
- * every Kùzu-only module were deleted, and the baseline below was emptied
- * by the same change — the ratchet closed to zero. What was a ratchet (a
- * shrinking allowlist of importers) is now a flat ban: any file that
- * imports `@kineviz/kuzu-lite` is a violation, no exceptions, and adding
- * an allowlist entry requires a DECISIONS.md entry first.
+ * The legacy graph-engine removal finished (Phase 3d, docs/KUZU_REMOVAL.md):
+ * LocalGraph and every legacy-engine-only module were deleted, and the
+ * baseline below was emptied by the same change — the ratchet closed to
+ * zero. What was a ratchet (a shrinking allowlist of importers) is now a
+ * flat ban: any file that imports the removed `@kineviz/kuzu-lite` package
+ * is a violation, no exceptions, and adding an allowlist entry requires a
+ * DECISIONS.md entry first.
  */
-const D024_KUZU_IMPORTERS = new Set([
+const D024_LEGACY_ENGINE_IMPORTERS = new Set([
 ]);
 
 const D024_IMPORT_RE = /from\s+['"]@kineviz\/kuzu-lite['"]/;
 
-function scanKuzuImportRatchet() {
+function scanLegacyEngineImportRatchet() {
     const out = [];
     const loreSrc = path.join(srcRoot, 'lore/src');
     const seen = new Set();
@@ -662,23 +664,23 @@ function scanKuzuImportRatchet() {
         const stripped = stripCommentsAndTemplates(fs.readFileSync(abs, 'utf8'));
         if (!D024_IMPORT_RE.test(stripped)) continue;
         seen.add(relPath);
-        if (!D024_KUZU_IMPORTERS.has(relPath)) {
+        if (!D024_LEGACY_ENGINE_IMPORTERS.has(relPath)) {
             out.push({
-                rule: 'kuzu-imports-ratchet',
+                rule: 'legacy-engine-imports-ratchet',
                 file: relPath,
-                token: 'NEW @kineviz/kuzu-lite import — Kùzu surface may only shrink (D-024, docs/KUZU_REMOVAL.md)',
+                token: 'NEW @kineviz/kuzu-lite import — the legacy graph-engine surface may only shrink (D-024, docs/KUZU_REMOVAL.md)',
             });
         }
     }
 
     // Baseline entries that have been cleaned up must be removed from the set,
     // otherwise the rule silently permits a file to regain the import later.
-    for (const rel of D024_KUZU_IMPORTERS) {
+    for (const rel of D024_LEGACY_ENGINE_IMPORTERS) {
         if (!seen.has(rel)) {
             out.push({
-                rule: 'kuzu-imports-ratchet',
+                rule: 'legacy-engine-imports-ratchet',
                 file: rel,
-                token: 'no longer imports kuzu-lite — delete it from D024_KUZU_IMPORTERS to tighten the ratchet',
+                token: 'no longer imports the legacy graph engine — delete it from D024_LEGACY_ENGINE_IMPORTERS to tighten the ratchet',
             });
         }
     }
@@ -846,12 +848,12 @@ const violations = scanAll()
     .concat(scanRouteHeadersSentDiscriminator())
     .concat(scanSurrealLicenceBoundary())
     .concat(scanRebacConsumers())
-    .concat(scanKuzuImportRatchet())
+    .concat(scanLegacyEngineImportRatchet())
     .concat(scanInjectBoundary())
     .concat(scanSchemaApproveCallers());
 
 if (violations.length === 0) {
-    console.log('✓ Architecture test passed (no forbidden cloud-DB drivers; no plugin vocab on storage surface; no direct graph upserts outside facade; no literal-undefined workspace scope gates; no raw scope-guard imports or boot-default lookups in HTTP routes; no res.headersSent bindRouteTarget discriminators in HTTP routes; SurrealDB engine unreachable from cloud-mode code; graph-stored ReBAC has no production consumers; Kùzu imports banned outright (zero baseline); inject/ import boundary is one-way; SchemaAuthoringStore.approve() has exactly the 3 known-safe callers).');
+    console.log('✓ Architecture test passed (no forbidden cloud-DB drivers; no plugin vocab on storage surface; no direct graph upserts outside facade; no literal-undefined workspace scope gates; no raw scope-guard imports or boot-default lookups in HTTP routes; no res.headersSent bindRouteTarget discriminators in HTTP routes; SurrealDB engine unreachable from cloud-mode code; graph-stored ReBAC has no production consumers; legacy graph-engine imports banned outright (zero baseline); inject/ import boundary is one-way; SchemaAuthoringStore.approve() has exactly the 3 known-safe callers).');
     process.exit(0);
 }
 
@@ -910,9 +912,9 @@ console.error(
     '  Per D-023 (DEC-SURREAL-REBAC, DECISIONS.md 2026-08-05), graph-stored ReBAC\n' +
     '  (security/rebac.ts + security/rebacEvaluator.ts) has NO production\n' +
     '  consumers today, and that fact is the ONLY reason it was allowed to stay\n' +
-    '  on Kùzu while the graph substrate became pluggable. Every ReBAC query\n' +
+    '  on the legacy graph engine while the graph substrate became pluggable. Every ReBAC query\n' +
     '  anchors on LoreNode endpoint ids, so on a Surreal-backed workspace — where\n' +
-    '  the Kùzu LoreNode table is present and EMPTY — it is non-functional: reads\n' +
+    "  the legacy engine's LoreNode table is present and EMPTY — it is non-functional: reads\n" +
     '  return false/[] and writes grant nothing.\n' +
     '  This is a SPEED BUMP, NOT A WALL. Wiring ReBAC up is legitimate; it just\n' +
     '  cannot happen by accident. Read DEC-SURREAL-REBAC, decide what a\n' +

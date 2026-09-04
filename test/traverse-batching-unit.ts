@@ -3,7 +3,7 @@
  * traverse-batching-unit.ts — `traverse` batches the BFS frontier, and must
  * return exactly what the per-node walk returned.
  *
- * Why the change exists: the original Kùzu engine issued TWO prepared-
+ * Why the change exists: the original the legacy graph engine issued TWO prepared-
  * statement executions per frontier NODE per depth, while the SurrealDB
  * engine issued one query per DEPTH for the whole frontier. Batching closed
  * that gap; both engines now walk the frontier in 256-wide chunks, so the

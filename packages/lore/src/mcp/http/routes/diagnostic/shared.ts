@@ -13,9 +13,10 @@ import type { RateLimiter } from '../../../../security/rateLimit.js';
 import type { OutboxAggregateStats } from '../../../../outbox/types.js';
 import type { LoreGraphHandle } from '../../../../storage/loreStorageClient.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 export type LoreGraph = LoreGraphHandle;
 export type DataplaneState = 'unknown' | 'offline' | 'opted-out' | 'bound' | 'error';
 
@@ -59,7 +60,7 @@ export interface DiagnosticDeps {
 /**
  * Sprint L2 / L5b-final — narrow stats helper. Reads counts off the
  * workspace-specific LocalGraph. Pre-L5b, each workspace had its own
- * Kùzu file so graph.getStats() WAS the per-workspace count. After
+ * graph file so graph.getStats() WAS the per-workspace count. After
  * L5b-final, alias workspaces (`atlas`) share an on-disk path with
  * another workspace (`default`); within that shared graph the rows are
  * separated by their `n.project` tag, so we pass `workspaceName` as a

@@ -17,18 +17,20 @@ import type { VersionStore } from '../../../outbox/versionStore.js';
 import type { LocalGraphRegistry } from '../../../engines/localGraphRegistry.js';
 import type { LoreNode } from '../../../providers/types.js';
 import { gateRoute } from '../../../security/routeGate.js';
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 import { writePermissionDenied } from '../../../security/rebacGate.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError } from '../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../security/routeWorkspaceBinding.js';
 import { resolveTargetGraph } from '../../tools/workspaceResolve.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { OutboxStore } from '../../../outbox/types.js';
 import type { VerbatimStore } from '../../../engines/verbatimStore.js';
+import type { WriteAheadLog } from '../../../engines/syncEngine.js';
 // 1.M7 (2026-08-17 audit) — changeset commit/rollback write through the
 // shared orchestration (outbox + verbatim + embed), not raw graph writes.
 import { applyChangesetUpsert, applyChangesetDelete, type ChangesetWriteDeps } from '../../changesetWrite.js';
@@ -44,6 +46,10 @@ export interface VersioningRouteDeps {
     outboxStore?: OutboxStore;
     embedQueue?: { enqueue: (nodeId: string, text: string, workspace?: string) => void };
     workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<VerbatimStore> };
+    /** ITEM X-walnode (2026-09-03) — threaded into ChangesetWriteDeps so
+     *  changeset delete can append a `delete_node` WAL entry. Optional:
+     *  absent (cloud / tests) keeps prior no-WAL behavior. */
+    getWal?: () => WriteAheadLog;
 }
 
 /** 1.M7 — build the shared changeset-write deps for one initiator label. */
@@ -56,6 +62,7 @@ function changesetWriteDeps(deps: VersioningRouteDeps, workspace: string, initia
         bootVerbatim: deps.store.loreVerbatim,
         activeWorkspace: workspace,
         initiator,
+        getWal: deps.getWal,
     };
 }
 
@@ -156,7 +163,7 @@ export async function tryVersioningRoutes(
             return true;
         }
         try {
-            const parsed = JSON.parse(body || '{}') as { workspace?: string };
+            const parsed = parseJsonBody(body) as { workspace?: string };
             if (!parsed.workspace || typeof parsed.workspace !== 'string') {
                 writeError(res, 400, 'invalid_request', '`workspace` is required in POST body');
                 return true;
@@ -173,6 +180,10 @@ export async function tryVersioningRoutes(
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ changeset_id: changesetId, workspace: parsed.workspace, status: 'open' }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+            // through to 500 here; parseJsonBody's tagged error is caught
+            // first now.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 500, 'internal_error', redactError(err));
         }
         return true;

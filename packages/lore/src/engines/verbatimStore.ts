@@ -1320,7 +1320,7 @@ export class VerbatimStore implements VectorProvider {
     /**
      * F2b (Phase 7a): list every stored id, optionally filtered by prefix.
      * The orphan-embedding reaper uses `listIds('lore:')` to find
-     * verbatim rows whose corresponding Kùzu node no longer exists.
+     * verbatim rows whose corresponding graph node no longer exists.
      *
      * `opts.project` (2026-06-09) — workspace-scoping filter. Required for
      * the consistency diagnostic when multiple workspaces alias the same
@@ -1583,7 +1583,7 @@ export class VerbatimStore implements VectorProvider {
      * Tries LanceDB's native full-text search (FTS) first — indexed when an
      * index exists, or an unindexed brute-force scan otherwise; both are
      * ranked. Falls back to a substring scan against the `text` column
-     * (same coverage as the old Kùzu CONTAINS path) ONLY when native FTS
+     * (same coverage as the old graph-engine CONTAINS path) ONLY when native FTS
      * itself errors (corrupt/unsupported index) — never merely because a
      * query legitimately found zero matches. A genuine no-match query
      * returns `{ hits: [], ranked: true }` directly; see

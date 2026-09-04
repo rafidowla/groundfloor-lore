@@ -9,7 +9,7 @@
  * out specifically because a stub throw there would be invisible until
  * something in production called it.
  *
- * The traversal cases are the point of the whole evaluation: Kùzu 0.11.3
+ * The traversal cases are the point of the whole evaluation: the legacy graph engine 0.11.3
  * cannot parse recursive Cypher, so multi-hop is a JS loop there today. Here
  * 3-hop and 5-hop are asserted to return the right nodes at the right DEPTH,
  * because "it returned something" is not the contract — per-node hop distance,
@@ -106,7 +106,7 @@ await test('upsertNode creates, getNode round-trips every declared field', async
         assert.equal(read.status, 'active');
         assert.equal(read.classification, 'tactical');
         // Empty-string storage conventions must surface as null, exactly as
-        // the Kùzu engine's shared mapper does.
+        // the legacy graph engine's shared mapper does.
         assert.equal(read.syncedAt, null);
         assert.equal(read.supersededBy, null);
         assert.equal(read.supersededAt, null);

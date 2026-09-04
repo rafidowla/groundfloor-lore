@@ -38,10 +38,10 @@ import { assertSafeLanceId } from '../engines/verbatimHistory.js';
 import { reconnectOneNode } from '../engines/reconnect.js';
 import { defaultAutolinkTracker, PendingAutolinkTracker } from '../engines/pendingAutolink.js';
 import { redactId, redactError } from '../security/logRedact.js';
-import { CAPPED_NODE_TEXT_FIELDS, MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../engines/nodeFieldLimits.js';
+import { CAPPED_NODE_TEXT_FIELDS, MAX_NODE_FIELD_BYTES, SUPERSEDE_LIFECYCLE_FIELDS, exceedsNodeFieldCap } from '../engines/nodeFieldLimits.js';
 import { log } from '../logger.js';
 import { recordHotWrite } from '../outbox/hotLane.js';
-import { KeyedMutex } from '../engines/writeQueue.js';
+import { withNodeLock } from './nodeWriteLock.js';
 import { applyVerbatimFanout, rollbackPartialWrite } from './nodeServiceVerbatim.js';
 import {
     checkVocab,
@@ -228,7 +228,7 @@ export type NodeWriteResult =
     | {
           ok: false;
           /** Stable, branchable failure code. */
-          code: 'verbatim_unavailable' | 'invalid_node_id' | 'field_too_large' | 'write_failed';
+          code: 'verbatim_unavailable' | 'invalid_node_id' | 'field_too_large' | 'protected_field' | 'write_failed';
           /** Underlying error (already logged + rolled back here). */
           error: Error;
       };
@@ -279,13 +279,22 @@ export function resolveVocabVerdict(input: {
 /**
  * Per-(workspace,id) write-ordering lock for `nodeUpsert`'s externally
  * visible write sequence (outbox `node.upsert` record → graph upsert →
- * verbatim/vector fan-out — steps 1-3 below). MUST be a module-level
- * singleton: constructing a fresh `KeyedMutex` per call is a no-op lock
- * (nothing to chain against). Keyed by `workspace + id`, not `id` alone,
- * so concurrent writes to the SAME id in DIFFERENT workspaces never
- * contend with each other — this matters because `DataplaneGraph` (cloud)
- * is one shared instance routing many tenants via AsyncLocalStorage, not
- * one instance per workspace the way `SurrealGraph` is.
+ * verbatim/vector fan-out — steps 1-3 below).
+ *
+ * The mutex itself now lives in `core/nodeWriteLock.ts` (`withNodeLock`) —
+ * SAME `KeyedMutex`, SAME `workspace + id` key format, just no longer
+ * private to this module. It was private, so every OTHER node-mutating
+ * path (delete_node, DELETE /api/node/:id, the bulk routes, changeset
+ * delete, prune/restore, the outbox replay) ran its own outbox → graph →
+ * verbatim sequence unserialized against this one; see nodeWriteLock.ts
+ * for that root-cause account and for the re-entrancy rule that governs
+ * every wrapped call site.
+ *
+ * Keyed by `workspace + id`, not `id` alone, so concurrent writes to the
+ * SAME id in DIFFERENT workspaces never contend — this matters because
+ * `DataplaneGraph` (cloud) is one shared instance routing many tenants via
+ * AsyncLocalStorage, not one instance per workspace the way `SurrealGraph`
+ * is.
  *
  * Root cause this closes: before this lock, only step 2
  * (`targetGraph.upsertNode`) was serialized per id — and only on
@@ -299,11 +308,9 @@ export function resolveVocabVerdict(input: {
  * cover the whole step 1-3 sequence forces one strict, shared order across
  * all three substrates for a given id. `SurrealGraph.nodeWriteChain` stays
  * in place underneath as harmless defense-in-depth for callers that reach
- * `upsertNode`/`deleteNode` directly without going through this
- * orchestration (e.g. `bulkUpsertNodes` — a separate, NOT-yet-covered
- * write surface; see bulkWrite.ts / bulkLoader/surrealAdapter.ts).
+ * `upsertNode`/`deleteNode` directly (edges, `mark_stale`, the bulk-loader
+ * and maintain adapters — the surfaces still outside `withNodeLock`).
  */
-const nodeUpsertLock = new KeyedMutex();
 
 /**
  * nodeUpsert — outbox-first guarded node write shared by store_node (MCP)
@@ -347,6 +354,49 @@ export async function nodeUpsert(
         assertSafeLanceId(id, 'nodeService.nodeUpsert');
     } catch (e) {
         return { ok: false, code: 'invalid_node_id', error: e as Error };
+    }
+
+    // 0a-2. Reject an ordinary upsert that tries to CHANGE a supersession-
+    //       lifecycle field (QA finding 1, A4 round E, 2026-09-03). MCP
+    //       store_node / REST postNode already reject these via
+    //       checkUnknownFields BEFORE reaching this chokepoint, so this is a
+    //       no-op for them; it is the ONLY guard for the embedded library's
+    //       bulkIngest() (mcp/bulkIngest.ts), which builds `nodeData` from
+    //       caller input with no schema in front of it at all and calls THIS
+    //       function directly. Without it, a caller could set
+    //       `supersededReason` via an ordinary upsert and bypass
+    //       supersede_node's MAX_NODE_FIELD_BYTES cap entirely (the same
+    //       class of bug as the bulk-write HTTP route's missing denylist
+    //       entry, fixed alongside this in mcp/http/routes/bulkWrite.ts).
+    //
+    //       This compares against `hooks.previousState` rather than
+    //       rejecting the field outright, because bulkIngest's own cooperative-
+    //       cancel rollback (mcp/bulkIngestCancel.ts rollbackCancelledNode)
+    //       is a LEGITIMATE caller that restores a node by round-tripping the
+    //       exact previous snapshot — including these fields — back through
+    //       this same chokepoint, and bulkIngest always resolves
+    //       `previousState` itself (Step 1a; a fetch failure/no prior node
+    //       becomes `null`), never leaves it caller-forgeable. A value that
+    //       matches the node's own last-read state is a restore, not a new
+    //       assertion, so it cannot be used to smuggle in an uncapped value —
+    //       an uncapped value could never have been read back from the graph
+    //       in the first place. Any mismatch — including "no previousState
+    //       supplied at all" — is treated as an attempted SET and rejected.
+    for (const field of SUPERSEDE_LIFECYCLE_FIELDS) {
+        if (!(field in nodeData)) continue;
+        const normalize = (v: unknown): unknown => (v === undefined || v === null || v === '' ? null : v);
+        const prior = hooks.previousState
+            ? (hooks.previousState as unknown as Record<string, unknown>)[field]
+            : undefined;
+        if (normalize(nodeData[field]) !== normalize(prior)) {
+            return {
+                ok: false,
+                code: 'protected_field',
+                error: new Error(
+                    `node field '${field}' is server-managed — set it via supersede_node / unsupersede_node, not an upsert`,
+                ),
+            };
+        }
     }
 
     // 0b. Per-field size cap (audit fix #2). Every transport lands here —
@@ -493,12 +543,11 @@ export async function nodeUpsert(
     // 1-3. Outbox `node.upsert` record → substrate graph upsert →
     //      verbatim/vector fan-out. These are the three externally-visible
     //      writes of a node write; they now run under ONE per-(workspace,id)
-    //      lock (`nodeUpsertLock`, defined above) so two concurrent calls
+    //      lock (`withNodeLock` — see the note above) so two concurrent calls
     //      for the same id cannot land their graph and verbatim/vector
     //      writes in different relative orders (split-brain — see the lock's
     //      doc comment for the full root-cause account).
-    const lockKey = `${workspace}\u0000${id}`;
-    const writeOutcome = await nodeUpsertLock.run(lockKey, async (): Promise<{ node: LoreNode } | { verbatimError: Error }> => {
+    const writeOutcome = await withNodeLock(workspace, id, async (): Promise<{ node: LoreNode } | { verbatimError: Error }> => {
         // 1. Outbox-first node.upsert (durability + replay + per-workspace replication).
         //    TW-4a — capture the recorded entry so the verbatim-failure rollback
         //    below can RETRACT it. Without this, deleting the graph node on a
@@ -620,7 +669,7 @@ export async function nodeUpsert(
     // per node, and putting that on the synchronous write path is the exact
     // regression bulkIngest.ts exists to avoid. But the promise is now TRACKED
     // on the owning instance's PendingAutolinkTracker so the ordered shutdown
-    // drain can await it before Kùzu/LanceDB close. Untracked, a burst of
+    // drain can await it before the graph engine/LanceDB close. Untracked, a burst of
     // writes followed by dispose() raced the close: reconnect writes died
     // against closed handles inside reconnectOneNode's own swallow-catch and
     // the edges vanished silently.

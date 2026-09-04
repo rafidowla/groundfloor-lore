@@ -16,7 +16,7 @@
  * (audit Section 5). New operationKinds (node.upsert, edge.upsert)
  * rely on the same upsertNode / addEdge writers — same guarantee.
  *
- * If a kuzu MERGE edge case surfaces during O2/O3, the fallback is
+ * If a substrate MERGE edge case surfaces during O2/O3, the fallback is
  * Option B (sequenced upserts with `lastSequenceId` column on
  * LoreNode). That change would land here as a per-kind branch that
  * passes `sequenceId` to the writer.
@@ -81,10 +81,20 @@ export interface DispatcherSubstrates {
     addEdge?: (payload: Record<string, unknown>, workspace?: string) => Promise<void>;
     /** Calls `localGraph.deleteNode(id)` on the workspace's graph. */
     deleteNode?: (id: string, workspace?: string) => Promise<void>;
+    /** 2026-09-03 (X-markstale audit fix) — calls `graph.markStaleByIds(ids)`
+     *  on the workspace's graph for the row's already-resolved id chunk
+     *  (see outbox/types.ts `node.mark_stale`). */
+    markStale?: (ids: string[], workspace?: string) => Promise<void>;
     /** Calls `localGraph.deleteEdge(source, target, relation)` on the workspace's graph. */
     deleteEdge?: (payload: { sourceId: string; targetId: string; relation: string }, workspace?: string) => Promise<void>;
     /** Calls `verbatimStore.store({...})` on the workspace's verbatim store. */
     upsertVerbatim?: (payload: Record<string, unknown>, workspace?: string) => Promise<void>;
+    /** 2026-09-03 (A2 finding 2 fix) — calls `verbatimStore.tombstone(id, reason)`
+     *  on the workspace's verbatim store. Every node-delete path records a
+     *  `verbatim.tombstone` row AFTER its `node.delete` row so a replay of a
+     *  stale `verbatim.upsert` from an earlier create can't outlive the
+     *  delete and resurrect tombstoned content — see outbox/types.ts. */
+    tombstoneVerbatim?: (id: string, reason: string, workspace?: string) => Promise<void>;
     /** SP-13 — batched verbatim upsert. The replicator consolidates a run
      *  of adjacent `verbatim.upsert` outbox rows into ONE
      *  `verbatim.upsert.batch` dispatch so the underlying
@@ -153,15 +163,15 @@ export interface DispatcherSubstrates {
     // by sub-chains that don't wire self-heal (test fakes).
     //
     // Convention: each returns true iff substrate has the row's effect.
-    // - node.upsert      → kuzu has node with this id
-    // - edge.upsert      → kuzu has edge (src, tgt, relation)
-    // - node.delete      → kuzu does NOT have node with this id
+    // - node.upsert      → graph has node with this id
+    // - edge.upsert      → graph has edge (src, tgt, relation)
+    // - node.delete      → graph does NOT have node with this id
     // - verbatim.upsert  → verbatim store has row with this id
     // - embed.batch      → every targetNodeId has a vector
 
-    /** Does the workspace's kuzu hold a LoreNode with this id? */
+    /** Does the workspace's graph hold a LoreNode with this id? */
     hasNode?: (id: string, workspace?: string) => Promise<boolean>;
-    /** Does the workspace's kuzu hold a (src, tgt, relation) edge? */
+    /** Does the workspace's graph hold a (src, tgt, relation) edge? */
     hasEdge?: (payload: { sourceId: string; targetId: string; relation: string }, workspace?: string) => Promise<boolean>;
     /** Does the workspace's verbatim store hold a row with this id? */
     hasVerbatim?: (id: string, workspace?: string) => Promise<boolean>;
@@ -317,9 +327,29 @@ export async function dispatch(
             await substrates.deleteEdge({ sourceId, targetId, relation }, ws);
             return;
         }
+        case 'node.mark_stale': {
+            // 2026-09-03 (X-markstale audit fix). Payload: { ids: string[] } —
+            // the chunk's already-resolved ids (outbox/types.ts).
+            if (!substrates.markStale) throw new UnwiredOperationKindError(kind);
+            const rawIds = (payload as { ids?: unknown }).ids;
+            if (!Array.isArray(rawIds)) throw new MissingPayloadError(kind, 'ids');
+            const ids = rawIds.filter((x): x is string => typeof x === 'string' && x.length > 0);
+            if (ids.length === 0) return;
+            await substrates.markStale(ids, ws);
+            return;
+        }
         case 'verbatim.upsert': {
             if (!substrates.upsertVerbatim) throw new UnwiredOperationKindError(kind);
             await substrates.upsertVerbatim(payload, ws);
+            return;
+        }
+        case 'verbatim.tombstone': {
+            // 2026-09-03 (A2 finding 2 fix). Payload: { id: 'lore:<id>', reason }.
+            if (!substrates.tombstoneVerbatim) throw new UnwiredOperationKindError(kind);
+            const id = payload['id'];
+            if (typeof id !== 'string' || !id) throw new MissingPayloadError(kind, 'id');
+            const reason = typeof payload['reason'] === 'string' ? payload['reason'] : 'graph node deleted (outbox replay)';
+            await substrates.tombstoneVerbatim(id, reason, ws);
             return;
         }
         case 'verbatim.upsert.batch': {
@@ -542,6 +572,24 @@ export async function verifyApplied(
                 const present = await substrates.hasEdge({ sourceId, targetId, relation }, ws);
                 return { verified: !present, reason: present ? 'substrate-still-has-edge' : 'substrate-confirms-edge-deleted' };
             }
+            case 'node.mark_stale': {
+                // 2026-09-03 (X-markstale audit fix) — verified when EVERY id in
+                // the chunk is either stale=true or absent (deleted since the
+                // row was recorded — nothing left to mark, not a failure).
+                // Reuses the existing content-witness `getNode` hook rather than
+                // adding a new verifier — no new substrate surface needed.
+                const rawIds = (payload as { ids?: unknown }).ids;
+                const ids = Array.isArray(rawIds) ? rawIds.filter((x): x is string => typeof x === 'string' && x.length > 0) : [];
+                if (ids.length === 0) return { verified: false, reason: 'missing-ids' };
+                if (!substrates.getNode) return { verified: false, reason: 'content-witness-unwired' };
+                for (const id of ids) {
+                    const node = await substrates.getNode(id, ws);
+                    if (node && node['stale'] !== true) {
+                        return { verified: false, reason: 'substrate-not-stale' };
+                    }
+                }
+                return { verified: true, reason: 'substrate-marked-stale-or-absent' };
+            }
             case 'verbatim.upsert': {
                 const id = payload['id'];
                 if (typeof id !== 'string' || !id) return { verified: false, reason: 'missing-id' };
@@ -560,6 +608,19 @@ export async function verifyApplied(
                 if (!substrates.hasVerbatim) return { verified: false, reason: 'no-verifier-wired' };
                 const ok = await substrates.hasVerbatim(id, ws);
                 return { verified: ok, reason: ok ? 'substrate-has-verbatim' : 'substrate-missing-verbatim' };
+            }
+            case 'verbatim.tombstone': {
+                // 2026-09-03 (A2 finding 2 fix). Verified when the substrate
+                // row is either absent (physically reaped elsewhere) or
+                // carries the '[TOMBSTONED' marker `VerbatimStore.tombstone`
+                // writes — mirrors node.delete's "verified iff absent" shape.
+                const id = payload['id'];
+                if (typeof id !== 'string' || !id) return { verified: false, reason: 'missing-id' };
+                if (!substrates.getVerbatim) return { verified: false, reason: 'content-witness-unwired' };
+                const row = await substrates.getVerbatim(id, ws);
+                if (!row) return { verified: true, reason: 'substrate-missing-verbatim' };
+                const tombstoned = typeof row.text === 'string' && row.text.startsWith('[TOMBSTONED');
+                return { verified: tombstoned, reason: tombstoned ? 'substrate-tombstoned' : 'substrate-still-live' };
             }
             case 'verbatim.upsert.batch': {
                 // SP-13 — self-heal a consolidated verbatim batch by probing

@@ -187,14 +187,17 @@ export async function retentionCommand(args: string[]): Promise<void> {
             process.exit(1);
             return;
         }
-        const { openWorkspaceGraph } = await import('../../engines/openWorkspaceGraph.js');
+        const { openGraphForCli } = await import('./shared.js');
         // RA2-reaudit2 — both engines take the WORKSPACE BASE path (each
         // appends its own store subdirectory); passing the store subdir
         // pointed at the wrong location (empty/never-initialized → preview
         // always 0 nodes). Also initialize() before reading.
-        const graph = openWorkspaceGraph(entry.path, { workspaceId: wsName });
+        //
+        // Finding 11 (round E) — refuse fast with a clear message when a
+        // running daemon holds this store's lock, instead of the old ~15s
+        // openSurreal retry storm ending in a raw driver error.
+        const graph = await openGraphForCli(entry.path, { workspaceId: wsName });
         try {
-            await graph.initialize();
             const allNodes = await graph.listNodes(undefined, undefined, '*', '*', 10000);
             const candidates: RetentionCandidate[] = allNodes.map((n) => ({
                 id: n.id,

@@ -13,7 +13,7 @@
  *
  * This test pins the behavior through the real SurrealGraph.addEdge entry
  * point (the one store_edge routes to in embedded mode) — the contract is
- * engine-agnostic, so there is nothing Kùzu-specific left to pin here.
+ * engine-agnostic, so there is nothing legacy-specific left to pin here.
  *
  * Run: npx tsx test/audit-5b-addedge-upsert-unit.ts
  */

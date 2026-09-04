@@ -6,7 +6,7 @@
  *   get_node_outcomes  — retrieve outcome history + confirmation score
  *
  * Outcome counters (success_count, failure_count, partial_count,
- * confirmation_score) are denormalized onto the LoreNode in Kùzu so
+ * confirmation_score) are denormalized onto the LoreNode in the graph so
  * recall ranking can boost high-confidence nodes without joining.
  * The raw outcome rows live in AuxStore's node_outcomes table for
  * audit / drill-down access.
@@ -31,7 +31,7 @@ export interface OutcomeDeps {
     /** Feature 8: optional version store. When wired, record_outcome writes create version records. */
     versionStore?: VersionStore;
     /**
-     * Local-mode multi-workspace registry. When wired, record_outcome's Kùzu
+     * Local-mode multi-workspace registry. When wired, record_outcome's graph
      * counter denormalization resolves the requested workspace's graph instead
      * of the boot/active store, so the denormalized counters land in the same
      * workspace as the authoritative SQLite/AuxStore rows. Optional so
@@ -68,7 +68,7 @@ export function registerOutcomeTools(server: McpServer, deps: OutcomeDeps): void
                 // SP-01 — enforce bound-principal workspace scope (write).
                 const scopeDenied = assertMcpScope(workspace, 'write');
                 if (scopeDenied) return scopeDenied;
-                // Local-mode routing: the Kùzu counter denormalization must
+                // Local-mode routing: the graph counter denormalization must
                 // land in the REQUESTED workspace's graph, not the boot/active
                 // store. (The AuxStore/SQLite side below is already workspace-
                 // scoped by its `workspace` column.) When no registry is wired
@@ -110,7 +110,7 @@ export function registerOutcomeTools(server: McpServer, deps: OutcomeDeps): void
                 const counts = deps.auxStore.getOutcomeCount(node_id, workspace);
                 const newScore = calcConfirmationScore(counts.success, counts.failure, counts.partial);
 
-                // Update Kùzu node with new counters + score.
+                // Update the graph node with new counters + score.
                 await withTransactionConflictRetry(() => graph.upsertNode({
                     ...node,
                     success_count:      counts.success,

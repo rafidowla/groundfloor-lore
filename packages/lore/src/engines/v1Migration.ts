@@ -1,7 +1,7 @@
 /**
  * v1Migration.ts — One-time migration from V1.0 SQLite knowledge.db
- * into the V2.x graph — whichever engine (Kùzu or SurrealDB) the target
- * workspace declares (Phase 7a; made engine-agnostic in the Kùzu-removal work).
+ * into the V2.x graph — whichever graph engine the target
+ * workspace declares (Phase 7a; made engine-agnostic during the legacy graph engine removal work).
  *
  * What this migrates:
  *   - nodes  table → LoreNode
@@ -289,15 +289,16 @@ export async function migrateV1Sqlite(
 
     // Edge dedup: canonical key = `${source}|${target}|${relation}`.
     //
-    // Was one atomic Kùzu-only Cypher MATCH against the raw Kùzu connection.
-    // Can't replace it with "attempt addEdge, treat a thrown duplicate as
-    // already-existing" (the migrateWorkspaceToWorkspace.ts idiom) — addEdge is
-    // silently idempotent on BOTH engines, not throw-on-duplicate: graphEdges.ts
-    // :112-186 (Kùzu) resolves outcome='exists' and falls straight through to
-    // bumpWriteEpoch()+return, no throw; surrealGraphWrites.ts:204-251 (Surreal)
-    // hits its outgoing-adjacency dedup scan and does a bare `return`. Neither
-    // engine can signal "that was a no-op" back to the caller, so a catch-based
-    // scheme would leave edgesSkippedAlreadyExists permanently 0 — the CLI
+    // Was one atomic single-engine-only Cypher MATCH against the raw graph
+    // connection. Can't replace it with "attempt addEdge, treat a thrown
+    // duplicate as already-existing" (the migrateWorkspaceToWorkspace.ts idiom)
+    // — addEdge is silently idempotent on BOTH engines, not throw-on-duplicate:
+    // surrealGraphWrites.ts:204-251 (Surreal) hits its outgoing-adjacency dedup
+    // scan and does a bare `return`; the equivalent local-graph path resolved
+    // outcome='exists' and fell straight through to bumpWriteEpoch()+return, no
+    // throw. Neither engine can signal "that was a no-op" back to the caller,
+    // so a catch-based scheme would leave edgesSkippedAlreadyExists permanently
+    // 0 — the CLI
     // prints edgesImported and edgesSkippedAlreadyExists as two separate,
     // load-bearing counters, so that distinction has to survive.
     //

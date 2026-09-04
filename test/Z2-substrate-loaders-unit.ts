@@ -3,7 +3,7 @@
  * test/Z2-substrate-loaders-unit.ts — Sprint Z2 unit tests.
  *
  * Drives each substrate adapter + the dispatcher + the runner with
- * in-process fixtures (no live daemon, no Kuzu, no LanceDB). Covers:
+ * in-process fixtures (no live daemon, no legacy graph engine, no LanceDB). Covers:
  *
  *   - SqliteBulkLoaderAdapter: 1000 rows in one txn; correct row count;
  *     workspace_mismatch row is reported + skipped; missing_id reported

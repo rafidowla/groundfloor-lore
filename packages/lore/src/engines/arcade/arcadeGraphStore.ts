@@ -635,6 +635,18 @@ export class ArcadeGraphStore {
     return maint.markStaleByTags(this.tenantDb, this.http, tags);
   }
 
+  /** 2026-09-03 (X-markstale audit fix) — read-only tag resolution; see LoreGraphHandle's doc comment. */
+  async findNodeIdsByTags(tags: string[]): Promise<string[]> {
+    await this.initialize();
+    return maint.findNodeIdsByTags(this.tenantDb, this.http, tags);
+  }
+
+  /** 2026-09-03 (X-markstale audit fix) — mark stale exactly the given ids; returns count actually marked. */
+  async markStaleByIds(ids: string[]): Promise<number> {
+    await this.initialize();
+    return maint.markStaleByIds(this.tenantDb, this.http, ids);
+  }
+
   /** pruneEphemeralNodes — delete expired ephemeral nodes (client-side expiry math); returns count. */
   async pruneEphemeralNodes(defaultTtlMs = 3_600_000): Promise<number> {
     await this.initialize();
@@ -659,7 +671,7 @@ export class ArcadeGraphStore {
   /**
    * getGraphContext — daemon-internal escape hatch: a thin cell-bound SQL
    * passthrough. NEVER HTTP-exposed in arcade mode (reach stays 403-walled by
-   * the per-db user). Callers expecting Cypher (schema authoring, Kùzu
+   * the per-db user). Callers expecting Cypher (schema authoring, legacy-engine
    * migrations) remain unsupported — their routes aren't registered in arcade
    * mode. Only queryRows/executeQuery are provided.
    */

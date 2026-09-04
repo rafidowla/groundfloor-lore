@@ -1,7 +1,8 @@
 #!/usr/bin/env tsx
 /**
- * wal-memory.ts — item 2 of docs/SURREALDB_PHASE6.md: does the write-ahead-log
- * replay spike belong to Kùzu, to SurrealDB, or to both?
+ * wal-memory.ts — item 2 of docs/SURREALDB_PHASE6.md: how big is the
+ * write-ahead-log replay spike on SurrealDB, the only graph engine since the
+ * legacy engine's removal (2026-08-21, see docs/KUZU_REMOVAL.md)?
  *
  * Phase 5 measured 12,567 MB peak inside `initialize()` opening a workspace that
  * carried a 12,976,690-byte `graph.wal`, and 516 MB on every open after. That
@@ -9,15 +10,16 @@
  * 1000× the WAL size") is doing a lot of load-bearing work. This harness exists
  * to confirm or break it.
  *
- * ONE STAGE PER PROCESS, deliberately — kuzu-lite SIGSEGVs after roughly a dozen
- * database open/close cycles in one process (documented atop
- * `test/rebac-l1-unit.ts`, hit in Phase 4 at the twelfth). Every `open` stage is
- * also therefore a cold, uncontaminated peak-RSS reading; run it under
- * `/usr/bin/time -l` for the authoritative figure.
+ * ONE STAGE PER PROCESS, deliberately, so every `open` stage is a cold,
+ * uncontaminated peak-RSS reading; run it under `/usr/bin/time -l` for the
+ * authoritative figure. `WAL_ENGINE` also still accepts the legacy graph
+ * engine's sentinel value (`GraphEngineKind`, engines/graphEngineSelector.ts),
+ * purely to confirm the engine-removed guard rejects it loudly rather than
+ * silently falling back to something else.
  *
- *   WAL_DIR=<dir> WAL_ENGINE=kuzu|surreal WAL_NODES=<n> WAL_EXIT=clean|kill \
+ *   WAL_DIR=<dir> WAL_ENGINE=surreal WAL_NODES=<n> WAL_EXIT=clean|kill \
  *     tsx scripts/diagnostics/wal-memory.ts gen
- *   WAL_DIR=<dir> WAL_ENGINE=kuzu|surreal tsx scripts/diagnostics/wal-memory.ts open
+ *   WAL_DIR=<dir> WAL_ENGINE=surreal tsx scripts/diagnostics/wal-memory.ts open
  *   WAL_DIR=<dir> tsx scripts/diagnostics/wal-memory.ts sizes
  *
  * `gen` builds a workspace, writes a representative workload, and either closes
@@ -28,11 +30,15 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { LocalGraphRegistry } from '../../packages/lore/src/engines/localGraphRegistry.js';
+import type { GraphEngineKind } from '../../packages/lore/src/engines/graphEngineSelector.js';
 import type { LoreNode } from '../../packages/lore/src/providers/types.js';
 
 const DIR = process.env['WAL_DIR'];
 if (!DIR) throw new Error('wal-memory: WAL_DIR is required');
-const ENGINE = (process.env['WAL_ENGINE'] ?? 'kuzu') as 'kuzu' | 'surreal';
+// Cast through the sentinel file's own exported type rather than a locally
+// re-declared literal union, so this script exercises the SAME vocabulary
+// the engine-removed guard checks against instead of a copy of it.
+const ENGINE = (process.env['WAL_ENGINE'] ?? 'surreal') as GraphEngineKind;
 const NODES = Number(process.env['WAL_NODES'] ?? '2000');
 const EXIT_MODE = (process.env['WAL_EXIT'] ?? 'clean') as 'clean' | 'kill';
 const EDGES_PER_NODE = Number(process.env['WAL_EDGES_PER_NODE'] ?? '2');
@@ -76,8 +82,8 @@ function dirSize(d: string): number {
 function storeSizes(): Record<string, number> {
     const lore = path.join(WS, '.lore');
     return {
-        kuzuGraphBytes: fileSize(path.join(lore, 'graph')),
-        kuzuWalBytes: fileSize(path.join(lore, 'graph.wal')),
+        legacyGraphBytes: fileSize(path.join(lore, 'graph')),
+        legacyWalBytes: fileSize(path.join(lore, 'graph.wal')),
         surrealBytes: dirSize(path.join(lore, 'surreal')),
     };
 }
@@ -143,8 +149,8 @@ if (stage === 'open') {
     const baseline = rssMb();
     const registry = new LocalGraphRegistry({ home: HOME });
     const t0 = Date.now();
-    // getGraphHandle on a surreal workspace opens BOTH engines, which is the
-    // shape the runtime actually uses; on kuzu it is the single LocalGraph.
+    // getGraphHandle opens the SurrealGraph, which is the shape the runtime
+    // actually uses.
     const graph = await registry.getGraphHandle('w');
     const afterOpenMb = rssMb();
     const openMs = Date.now() - t0;
@@ -152,7 +158,7 @@ if (stage === 'open') {
     const afterStats = rssMb();
     console.log(JSON.stringify({
         stage: 'open', engine: ENGINE,
-        walBytesBeforeOpen: before.kuzuWalBytes,
+        walBytesBeforeOpen: before.legacyWalBytes,
         surrealBytesBeforeOpen: before.surrealBytes,
         openMs, baselineRssMb: baseline,
         afterOpenRssMb: afterOpenMb, afterStatsRssMb: afterStats,

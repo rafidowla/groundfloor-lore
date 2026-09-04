@@ -1,10 +1,10 @@
 #!/usr/bin/env tsx
 /**
  * audit-close-drains-writes-unit.ts — R3 audit #4 (high), carried across the
- * Kùzu→SurrealDB migration. Originally: LocalGraph.close() drained the
+ * the legacy graph engine→SurrealDB migration. Originally: LocalGraph.close() drained the
  * connection POOL (NW-1e, in-flight reads) but NOT the globalWriteQueue, so a
  * queued/in-flight write could fire after database.close() against a freed
- * native Kùzu handle — an intermittent use-after-free SIGSEGV/SIGABRT.
+ * native the legacy graph engine handle — an intermittent use-after-free SIGSEGV/SIGABRT.
  *
  * The invariant survives the engine swap: close() racing in-flight writes must
  * (a) complete, (b) leave every write promise settled (loud JS errors are

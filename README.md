@@ -168,7 +168,7 @@ now refused outright instead of splitting the write across substrates.
 | Mode | How to select | What runs |
 |---|---|---|
 | `'embedded'` | `createLore({ deploymentMode: 'embedded' })` | In-process only; no daemon, no port. |
-| `'local'` | `createLore()` or `LORE_DEPLOYMENT_MODE=local` | Daemon (stdio or `--http`), SurrealDB (default) or Kùzu + LanceDB. |
+| `'local'` | `createLore()` or `LORE_DEPLOYMENT_MODE=local` | Daemon (stdio or `--http`), SurrealDB + LanceDB. |
 | `'cloud'` | `createLore({ deploymentMode: 'cloud' })` | Daemon routing through Dataplane, our optional hosted multi-tenant backend. Not required to use Lore, and not part of this release. |
 
 ### Embedded-mode contracts
@@ -184,7 +184,9 @@ now refused outright instead of splitting the write across substrates.
 
 See [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md#embedded-mode-library--in-process) and
 [docs/API_REFERENCE.md](docs/API_REFERENCE.md#embedded-mode-in-process-api)
-for the full API surface and configuration options.
+for the full API surface and configuration options. See
+[docs/DATA_CONTRACT.md](docs/DATA_CONTRACT.md) for what Lore does with the
+text you give it — persisted verbatim, sanitization is the caller's job.
 
 ---
 
@@ -220,9 +222,9 @@ rationale.
 
 Three substrates, all first-class:
 
-- **Graph** — embedded [SurrealDB](https://surrealdb.com/). Kùzu was fully
-  removed 2026-08-21 (see [docs/KUZU_REMOVAL.md](docs/KUZU_REMOVAL.md)).
-  Nodes, edges, traversal.
+- **Graph** — embedded [SurrealDB](https://surrealdb.com/) (the prior local
+  graph engine was fully removed 2026-08-21; see
+  [docs/KUZU_REMOVAL.md](docs/KUZU_REMOVAL.md)). Nodes, edges, traversal.
 - **Vector** — embedded [LanceDB](https://lancedb.com/). Embeddings for
   semantic recall, generated locally with no API key and no network.
 - **Relational** — SQLite. Outbox, migrations, audit log, auth, plus a
@@ -327,8 +329,7 @@ frequent releases. Development is currently solo, with commits landing on
 This project builds on the work of several open-source projects:
 
 | Project | Author / Maintainer | License | Role |
-| [Kùzu](https://kuzudb.com/) | Kùzu Inc. (Semih Salihoğlu et al.) | MIT | Embedded graph database — the original local engine through v3.x; fully removed 2026-08-21 in favor of SurrealDB (see [docs/KUZU_REMOVAL.md](docs/KUZU_REMOVAL.md)) |
-| [SurrealDB](https://surrealdb.com/) | SurrealDB Ltd. | BSL 1.1 | Embedded graph database (default local engine). BSL permits embedding SurrealDB in a product; it does not permit offering SurrealDB itself as a hosted service — Lore does not do the latter. |
+| [SurrealDB](https://surrealdb.com/) | SurrealDB Ltd. | BSL 1.1 | Embedded graph database (the only local graph engine). BSL permits embedding SurrealDB in a product; it does not permit offering SurrealDB itself as a hosted service — Lore does not do the latter. |
 | [LanceDB](https://lancedb.com/) | LanceDB Inc. | Apache 2.0 | Embedded vector store for semantic recall |
 | [Model Context Protocol](https://modelcontextprotocol.io/) | Anthropic | MIT | Protocol standard for AI tool integration |
 | [TypeScript](https://www.typescriptlang.org/) | Microsoft | Apache 2.0 | Language runtime |

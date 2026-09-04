@@ -1,9 +1,9 @@
 import fs from 'fs';
 import http from 'http';
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { loreHomePath } from '../../config/loreHome.js';
 import { readWorkspaceRegistry } from '../../config/workspaceRegistry.js';
-import { resolveGraphBasePath } from './shared.js';
+import { resolveGraphBasePath, openGraphForCli } from './shared.js';
+import { DEFAULT_PORT } from './migrateWorkspaceToWorkspaceShared.js';
 
 interface HttpRecallResult {
     topic: string;
@@ -17,7 +17,7 @@ export async function tryHttpGetFull(id: string): Promise<unknown | null> {
     return new Promise((resolve) => {
         const params = new URLSearchParams({ id });
         const req = http.get(
-            `http://127.0.0.1:3847/api/node-full?${params.toString()}`,
+            `http://127.0.0.1:${DEFAULT_PORT}/api/node-full?${params.toString()}`,
             { timeout: 2000 },
             (res) => {
                 if (res.statusCode !== 200) {
@@ -70,7 +70,7 @@ async function tryHttpRecall(topic: string, crossProject: boolean, maxHits: numb
             workspace,
         });
         const req = http.get(
-            `http://127.0.0.1:3847/api/recall?${params.toString()}`,
+            `http://127.0.0.1:${DEFAULT_PORT}/api/recall?${params.toString()}`,
             { timeout: 2000, headers: { Authorization: `Bearer ${token}` } },
             (res) => {
                 if (res.statusCode !== 200) {
@@ -145,7 +145,14 @@ export async function recallCommand(args: string[]): Promise<void> {
     }
 
     const basePath = resolveGraphBasePath();
-    const graph = openWorkspaceGraph(basePath);
+    // Finding 11 (round E) — the HTTP attempt above already tried the
+    // daemon; this direct-open fallback is what used to sit in the ~15s
+    // openSurreal retry storm. tryHttpRecall() above now resolves
+    // DEFAULT_PORT (LORE_PORT-aware) instead of a hardcoded 3847, so this
+    // fallback fires only when the HTTP attempt genuinely misses the daemon
+    // (missing/stale auth token, daemon down, timeout). Refuse fast with a
+    // clear message instead of the raw driver error.
+    const graph = await openGraphForCli(basePath);
     try {
         let projectName = '*';
         let ecosystem = '*';

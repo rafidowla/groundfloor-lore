@@ -3,14 +3,14 @@
  *
  * Single source of truth for turning a substrate-portable `Filter` into a
  * parameterised WHERE clause. Replaces four copy-pasted `buildWhereClause`
- * implementations (kuzuAnalyticalStorage, kuzuCollectionStorage,
- * kuzuTableStorage, sqliteTableStorage) — three of which skipped the
+ * implementations across the legacy graph/analytical/table storage adapters
+ * and `sqliteTableStorage` — three of which skipped the
  * identifier guard, leaving Cypher-injection vectors A1/A2/A3 open
  * (a hostile filter KEY or field name could break out of the clause and
  * append `DETACH DELETE n`).
  *
  * SECURITY — why the guard lives here:
- *   Neither Kùzu nor SQLite has a parameter slot for *identifiers*. VALUES
+ *   Neither the Cypher dialect nor SQLite has a parameter slot for *identifiers*. VALUES
  *   bind through `$param` / `?`, but filter KEYS (column names), sort keys,
  *   key fields, and table/rel labels are always string-interpolated. The
  *   only safe interpolation is one whose input has been validated against a
@@ -19,9 +19,34 @@
  *
  * Dialect is parameterised:
  *   - 'cypher' → value placeholders are `$p0`, `$p1`, … and params is a
- *     keyed object (Kùzu's prepared-statement shape).
+ *     keyed object (the Cypher dialect's prepared-statement shape).
  *   - 'sqlite' → value placeholders are positional `?` and params is an
  *     ordered array (better-sqlite3's shape).
+ *
+ * LAYERING — who owns which decision (F-COL5, 2026-09-03):
+ *   This compiler owns SQL WELL-FORMEDNESS ONLY. It compiles every filter
+ *   the type system admits into valid, parameterised SQL — including the
+ *   two constant clauses below — and throws only on shapes that have no
+ *   SQL rendering at all (an `and`/`or` with no branches, nesting past
+ *   MAX_FILTER_NESTING).
+ *
+ *     - an empty leaf (`{}` / `{eq:{}}`) is the constant TRUE. At the top
+ *       level it stays '' (no WHERE), which the engine's own
+ *       update/delete backstop reads as "unscoped" and refuses; INSIDE a
+ *       boolean node it must be spelled out as `1 = 1` or the join emits
+ *       malformed SQL like `()` / `( OR "id" = ?)`.
+ *     - an empty IN list (`in: {id: []}`) is the constant FALSE `0 = 1`.
+ *       Kept (rather than refused) because an empty candidate list is a
+ *       legitimate read query that should return zero rows.
+ *
+ *   WHETHER a well-formed clause is SAFE for a destructive op is NOT
+ *   decided here. That is `classifyFilterScope` in
+ *   `mcp/tools/collections.ts`, which is the single source of truth for
+ *   the unscoped-write guard: it classifies the same tree as
+ *   ALL/NONE/SCOPED/INVALID under the same rules as this file, so
+ *   `NOT (0 = 1)` — a tautology built out of two constants — is caught as
+ *   ALL and refused without `all: true`. Change the constants here and you
+ *   must change that classifier in the same commit.
  */
 
 import {
@@ -81,7 +106,7 @@ function escapeLike(s: string): string {
 }
 
 /**
- * Build a Cypher WHERE clause (Kùzu). Every filter key is validated through
+ * Build a Cypher WHERE clause. Every filter key is validated through
  * `assertIdent` before interpolation; values bind to `${paramPrefix}<n>`.
  */
 export function buildCypherWhere(
@@ -153,6 +178,22 @@ export function buildSqliteWhere(
     };
 }
 
+/**
+ * The constant TRUE. An empty leaf compiles to no clauses at all, which is
+ * correct at the top level ('' → no WHERE) but malformed once it is a
+ * branch of a boolean node: `{and:[{eq:{}}]}` produced `()` and
+ * `{or:[{eq:{}},{eq:{id:'x'}}]}` produced `( OR "id" = ?)`, both SQLite
+ * syntax errors. Spelling the branch out as `1 = 1` keeps the emitted SQL
+ * valid AND semantically honest — an empty leaf really does match every
+ * row, which is exactly what `classifyFilterScope` reports as ALL.
+ */
+const SQLITE_TRUE = '1 = 1';
+
+/** Render a compiled child as a boolean branch, never as empty text. */
+function branchSql(part: { sql: string }): string {
+    return part.sql.length > 0 ? part.sql : SQLITE_TRUE;
+}
+
 function compileSqliteNode(
     node: FilterNode,
     depth: number,
@@ -167,7 +208,7 @@ function compileSqliteNode(
         }
         const parts = node.and.map(child => compileSqliteNode(child, depth + 1, opts));
         return {
-            sql: `(${parts.map(part => part.sql).join(' AND ')})`,
+            sql: `(${parts.map(branchSql).join(' AND ')})`,
             params: parts.flatMap(part => part.params),
         };
     }
@@ -177,16 +218,17 @@ function compileSqliteNode(
         }
         const parts = node.or.map(child => compileSqliteNode(child, depth + 1, opts));
         return {
-            sql: `(${parts.map(part => part.sql).join(' OR ')})`,
+            sql: `(${parts.map(branchSql).join(' OR ')})`,
             params: parts.flatMap(part => part.params),
         };
     }
     if (isFilterNot(node)) {
+        // `{not:{}}` used to throw while the equivalent `{not:{and:[{eq:{}}]}}`
+        // compiled — two renderings of the same filter. Both are now
+        // `NOT (1 = 1)`, i.e. matches nothing, which is what the guard's
+        // NONE classification says they mean.
         const inner = compileSqliteNode(node.not, depth + 1, opts);
-        if (!inner.sql) {
-            throw new Error('empty not is not allowed');
-        }
-        return { sql: `NOT (${inner.sql})`, params: inner.params };
+        return { sql: `NOT (${branchSql(inner)})`, params: inner.params };
     }
     return compileSqliteLeaf(node, opts);
 }
@@ -232,7 +274,11 @@ function compileSqliteLeaf(
     for (const [k, values] of Object.entries(filter.in ?? {})) {
         const vals = values as unknown[];
         if (vals.length === 0) {
-            void col(k);
+            // Constant FALSE — an empty candidate list matches nothing. Kept
+            // (not refused) so a read query built from an empty list works.
+            // `classifyFilterScope` mirrors this as NONE so its negation is
+            // caught as ALL rather than sailing past the write guard (F-COL5).
+            void col(k); // validate the identifier even though it is unused
             clauses.push('0 = 1');
             continue;
         }

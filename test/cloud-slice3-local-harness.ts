@@ -131,7 +131,7 @@ export async function openLocalWorkspace(
  *
  *  getGraphHandle is implemented alongside the legacy getOrOpen: the route
  *  families this harness drives resolve their graph via the engine-aware
- *  `graphRegistry.getGraphHandle(...)`, not the Kùzu-only `getOrOpen` — a
+ *  `graphRegistry.getGraphHandle(...)`, not the legacy-only `getOrOpen` — a
  *  shim exposing only the latter throws `TypeError: ...getGraphHandle is not
  *  a function` the moment any driven route reaches it. */
 function registryShim(handle: LocalWorkspaceHandle): LocalGraphRegistry {
@@ -183,7 +183,7 @@ export interface LocalDataDeps {
  * (no cell slot — local mode has none), then delegates to the SAME local
  * route families arcadeData.ts calls. This is deliberately the closest
  * possible parallel: same principal shape, same route functions, same
- * allowlist surface — only the underlying substrate (real Kùzu/LanceDB
+ * allowlist surface — only the underlying substrate (real the legacy graph engine/LanceDB
  * instead of ArcadeDB) differs.
  */
 export async function tryLocalDataRoutes(

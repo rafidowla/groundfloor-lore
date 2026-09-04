@@ -3,7 +3,9 @@
  *
  *   GET /health                   — minimal liveness probe (no graph touch)
  *   GET /api/diagnose/consistency — tri-substrate consistency report
- *   GET /api/health               — full daemon health snapshot
+ *   GET /api/health               — anonymous: the lite liveness body;
+ *                                    Bearer-authenticated: full daemon
+ *                                    health snapshot (FINDING 4, 2026-09-03)
  */
 
 import type { ServerResponse } from 'node:http';
@@ -246,6 +248,21 @@ export async function handleConsistencyCleanup(res: ServerResponse, url: string,
 
 export async function handleHealth(res: ServerResponse, url: string, deps: DiagnosticDeps): Promise<void> {
     try {
+        // FINDING 4 (2026-09-03, Rafi DECISION) — /api/health is on
+        // PUBLIC_API_PATHS (no Bearer required) so uptime monitors keep
+        // working token-free, but the FULL body below leaks per-workspace
+        // node/edge counts, loreHome, outbox depth, and the live rate-limit
+        // config to ANY local process. An anonymous caller now gets exactly
+        // the handleHealthLite body instead; only a request that resolved a
+        // real principal (a valid Bearer matched a known token — see
+        // middleware.ts's principal resolution) gets the rich snapshot.
+        // Reuses the same "authenticated?" signal the ?workspaces=all
+        // downgrade above already relies on (getCurrentPrincipal() !== null
+        // on this public route whenever a valid token was presented).
+        if (getCurrentPrincipal() === null) {
+            handleHealthLite(res, deps);
+            return;
+        }
         const cfg = deps.configManager.read();
         const orphanState = { blocking: false, orphans: [] as string[] };
 
@@ -298,15 +315,13 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
         // not be able to drive expensive work. The old loop force-opened
         // EVERY known workspace via getOrOpen; with MAX_OPEN_WORKSPACES=8 and
         // 100 registered workspaces, each call evicted + physically closed
-        // 92 Kùzu mmaps + LanceDB handles in lockstep (LRU thrash). Default
+        // 92 graph engine + LanceDB handles in lockstep (LRU thrash). Default
         // now measures ONLY workspaces already cached in the registry — every
         // getGraphHandle below is then a cache hit (no open, no eviction);
-        // Kùzu-removal step2 commit 8 — getGraphHandle replaced getOrOpen
-        // here so a Surreal-backed workspace resolves its OWN engine instead
-        // of Kùzu's, but it still opens Kùzu first internally, so this
-        // cache-hit argument is unchanged. Pass ?workspaces=all for the
-        // explicit full force-open scan when an operator genuinely wants
-        // every workspace's counts.
+        // getGraphHandle replaced getOrOpen here so a workspace resolves its
+        // OWN declared engine, but this cache-hit argument is unchanged.
+        // Pass ?workspaces=all for the explicit full force-open scan when an
+        // operator genuinely wants every workspace's counts.
         //
         // Audit #6 — but ?workspaces=all is the EXPENSIVE path (getGraphHandle
         // every known workspace → evict/close thrash), and /api/health is public +
@@ -340,21 +355,22 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
                     const g = await deps.graphRegistry.getGraphHandle(name);
                     const s = await readWorkspaceStats(g, name);
                     // Per-workspace write queue depth + head-of-line wait.
-                    // Surfaces Kùzu single-writer backpressure so operators
-                    // can see which workspace is queueing without grepping
-                    // logs. globalWriteQueue is a Kùzu-specific single-writer
-                    // queue with no SurrealDB/Dataplane analogue — it is not
-                    // on WorkspaceGraph's declared surface for exactly that
-                    // reason. Named cast (not inline): `g` is genuinely a
-                    // concrete engine instance at runtime, and this reads a
+                    // Surfaces single-writer backpressure so operators can
+                    // see which workspace is queueing without grepping logs.
+                    // globalWriteQueue was a single-writer queue belonging to
+                    // the former local graph engine, with no SurrealDB/
+                    // Dataplane analogue — it is not on WorkspaceGraph's
+                    // declared surface for exactly that reason. Named cast
+                    // (not inline): `g` is genuinely a concrete engine
+                    // instance at runtime, and this reads a
                     // known-but-undeclared field the compiler can't see.
-                    // Optional-chained: a Surreal-backed (or cloud) workspace
-                    // genuinely has no write-queue concept, so `writeQueue`
-                    // stays `undefined` and the spread below OMITS the key
-                    // entirely — the response reports "no such metric here",
-                    // never a fabricated zero-depth queue.
-                    const kuzuOnlyGraph = g as { globalWriteQueue?: { stats(): WriteQueueStats } };
-                    const writeQueue = kuzuOnlyGraph.globalWriteQueue?.stats();
+                    // Optional-chained: no current engine has a write-queue
+                    // concept, so `writeQueue` stays `undefined` and the
+                    // spread below OMITS the key entirely — the response
+                    // reports "no such metric here", never a fabricated
+                    // zero-depth queue.
+                    const legacyOnlyGraph = g as { globalWriteQueue?: { stats(): WriteQueueStats } };
+                    const writeQueue = legacyOnlyGraph.globalWriteQueue?.stats();
                     perWorkspaceStats[name] = { nodeCount: s.nodeCount, edgeCount: s.edgeCount, ...(writeQueue ? { writeQueue } : {}) };
                     globalNodes += s.nodeCount;
                     globalEdges += s.edgeCount;

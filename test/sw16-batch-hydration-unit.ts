@@ -140,7 +140,7 @@ function makeRegistry(graphs: Record<string, unknown>) {
     };
     // Both accessors resolve to the same fake. Production reads graphs through
     // getGraphHandle (the workspace's DECLARED engine) and keeps getOrOpen as
-    // the Kùzu-substrate accessor; this test is about batch hydration, so it
+    // the legacy-substrate accessor; this test is about batch hydration, so it
     // answers either.
     return { getOrOpen: open, getGraphHandle: open };
 }

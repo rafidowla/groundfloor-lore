@@ -83,7 +83,7 @@ export async function writeGraphReport(
     // Tie-break on type name. `getStats().typeBreakdown` is an object whose key
     // order is whatever each engine's aggregate query returned, so a bare
     // `count DESC` left every tie to the storage engine — the same section
-    // rendered in a different row order on Kùzu and on SurrealDB for identical
+    // rendered in a different row order across graph engines for identical
     // data. Pre-existing (the sort has always lived in the formatter, not in
     // the Cypher); surfaced by the cross-engine document comparison in
     // test/cli-engine-parity-unit.ts, which failed on the third consecutive

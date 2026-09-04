@@ -16,13 +16,13 @@
  *   on this file being the process entrypoint.
  *
  *   Uses @modelcontextprotocol/sdk for transport (stdio or HTTP).
- *   Delegates storage to LocalGraph (Kùzu embedded graph).
+ *   Delegates storage to LocalGraph (the embedded SurrealDB graph).
  *   Each tool maps to one or more graph operations.
  *
  * Transport:
  *   Default: stdio (stdin/stdout) — one IDE spawns one process.
  *   --http:  Streamable HTTP daemon on port 3847 — multiple IDEs share one process.
- *   The HTTP mode solves Kùzu's single-writer file lock constraint.
+ *   The HTTP mode solves the graph engine's single-writer file lock constraint.
  *
  * Error Behavior: Returns MCP error responses; does not crash the server.
  * Side Effects: Reads/writes .lore/graph/ via LocalGraph.
@@ -121,7 +121,7 @@ import { nodeUpsert as nodeServiceUpsert, resolveAutolinkHandles, type NodeWrite
 // 1.1 (2026-08-17 functional-correctness audit) — SurrealDB's optimistic
 // concurrency drops writes under overlapping-key contention; the retry
 // wrapper (previously wired ONLY into bulkIngest) now covers the embedded
-// single/batch upsert paths too. No-op on Kùzu (writes serialize internally).
+// single/batch upsert paths too. No-op for engines that serialize writes internally.
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
 import { recordHotWriteBatch } from '../outbox/hotLane.js';
 import { setTimeout as delayMs } from 'node:timers/promises';
@@ -304,7 +304,7 @@ export interface LoreInstance {
     /** P2/Atlas — vector+keyword node search. Thin wrapper over storageClient.search(); workspace/ecosystem default to '*'. */
     search(query: string, limit?: number, workspace?: string, ecosystem?: string): Promise<import('../providers/types.js').LoreNode[]>;
     /** Ordered async graceful-shutdown drain; does NOT close any HTTP server or call process.exit (daemon owns those).
-     *  TW-7b: closes Kùzu+LanceDB handles deterministically LAST, so an embedder awaiting dispose() exits NATURALLY without process.exit() (no native SIGSEGV; idempotent). See test/nw7e-kuzu-native-teardown-unit.ts. */
+     *  TW-7b: closes the graph engine + LanceDB handles deterministically LAST, so an embedder awaiting dispose() exits NATURALLY without process.exit() (no native SIGSEGV; idempotent). See test/tw2a-embedded-lifecycle-unit.ts. */
     dispose(reason?: string): Promise<void>;
     /**
      * cq-daemon-wiring-leaks-into-public-interface /
@@ -473,11 +473,11 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
 
     // ARCADE-MODE (spike/arcadedb-multitenant, slice 2 W1) — the db-per-app
     // ArcadeDB cloud backend boots down a SEPARATE path that never brings up
-    // Kùzu/LanceDB/LocalGraphRegistry/sync/watchers. It builds ONLY the
-    // daemon-local SQLite relational lane (outbox + audit + provisioning
-    // registry) plus the operator control-plane + bounded data-plane HTTP
-    // surface. Delegated to mcp/arcadeBoot.ts so server.ts does not grow and
-    // the local/cloud substrate path below is provably untouched (additive).
+    // the local graph engine/LanceDB/LocalGraphRegistry/sync/watchers. It
+    // builds ONLY the daemon-local SQLite relational lane (outbox + audit +
+    // provisioning registry) plus the operator control-plane + bounded
+    // data-plane HTTP surface. Delegated to mcp/arcadeBoot.ts so server.ts
+    // does not grow and the local/cloud substrate path below is provably untouched (additive).
     if (effectiveMode === 'arcade') {
         const { createArcadeInstance } = await import('./arcadeBoot.js');
         return createArcadeInstance({ dataHome, loreDir });
@@ -485,11 +485,11 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
 
     // `deploymentMode` is the SUBSTRATE mode threaded through every downstream
     // consumer (storage client, services, route gates). 'embedded' builds the
-    // SAME local Kùzu/LanceDB substrates as 'local' — it differs only in the
-    // transport/lifecycle decision the daemon makes (no listener, no signal
-    // handlers, host-owned dispose()). Cloud stays first-class and switchable
-    // (cloud_invariant). The cloud-mode boot preflight (adapter presence) runs
-    // inside main() below, after the keychain upgrade.
+    // SAME local graph engine/LanceDB substrates as 'local' — it differs
+    // only in the transport/lifecycle decision the daemon makes (no
+    // listener, no signal handlers, host-owned dispose()). Cloud stays
+    // first-class and switchable (cloud_invariant). The cloud-mode boot
+    // preflight (adapter presence) runs inside main() below, after the keychain upgrade.
     const deploymentMode: 'local' | 'cloud' =
         effectiveMode === 'cloud' ? 'cloud' : 'local';
 
@@ -620,7 +620,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     // TW-2a — in embedded mode the host's in-process write applies the graph
     // node SYNCHRONOUSLY before the replicator sees the outbox row, so the
     // replicator's node.upsert re-apply is redundant AND races concurrent host
-    // graph writes (Kùzu single-writer). Wrap the graph the embedded outbox
+    // graph writes (single-writer graph engine). Wrap the graph the embedded outbox
     // writes through so an already-applied node.upsert becomes a no-op (boot
     // recovery of genuinely-unapplied prior-run rows still applies). Daemon /
     // local / cloud are untouched — only effectiveMode==='embedded' wraps.
@@ -645,7 +645,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     const outboxGetEmbedder = isLocal ? () => embeddingProvider : undefined;
     const outboxGetGraphForWorkspace = isLocal
         ? () =>
-              // Was getOrOpen() (hardcoded LocalGraph/Kùzu) — replicated writes for a Surreal workspace leaked into Kùzu.
+              // Was getOrOpen() (hardcoded to a single local graph implementation) — replicated writes for a Surreal workspace leaked into the wrong workspace's graph.
               graphRegistry
                   ? (ws: string) => graphRegistry!.getGraphHandle(ws).then(guardEmbeddedGraph)
                   : undefined
@@ -1071,9 +1071,9 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
             let error: unknown;
             try {
                 const isActive = args.workspace === (graphRegistry?.activeName() ?? detectedScope.workspace);
-                // getGraphHandle, not getOrOpen: the latter always returns the
-                // workspace's KÙZU graph — an embedded write to a Surreal
-                // workspace landed where nothing reads.
+                // getGraphHandle resolves the target workspace's own declared
+                // engine — resolving the wrong graph here would land an
+                // embedded write where nothing reads it.
                 const targetGraph: LoreGraph = graphRegistry ? await graphRegistry.getGraphHandle(args.workspace) : graph;
                 const previousState = versionStore ? await targetGraph.getNode(args.id) : null;
                 // Audit fix #5: route the autolink (reconnect) hook to the TARGET
@@ -1110,7 +1110,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         },
         async nodeUpsertBatch(nodes) {
             // 4.4 (2026-08-17) — bound the fan-out: an unchunked Promise.all
-            // overflowed the Kùzu pool waiter queue (200/200) past ~200 nodes.
+            // overflowed the previous graph engine's native connection-pool waiter queue (200/200) past ~200 nodes.
             // 16 matches bulkIngest's proven BULK_INGEST_CONCURRENCY.
             const results = await mapLimit(nodes, 16, async (n) => {
                 const startedAt = Date.now();
@@ -1262,8 +1262,8 @@ const LOG_ROTATION_MS = (() => {
  * process.exit — the embedding host owns the lifecycle and calls dispose().
  * The local AND cloud branches below are untouched (cloud_invariant).
  *
- * Side Effects: Opens Kùzu database; for local/cloud also starts a listener
- *   (stdio or HTTP) and signal handlers. Embedded opens no listener.
+ * Side Effects: Opens the graph database; for local/cloud also starts a
+ *   listener (stdio or HTTP) and signal handlers. Embedded opens no listener.
  * Error Behavior: Exits process with code 1 (or 78) on fatal startup error
  *   (local/cloud only — embedded never calls process.exit).
  */
@@ -1372,8 +1372,8 @@ async function main(): Promise<LoreInstance | void> {
             buildDispatcherDeps: async (_job) => {
                 const localVerbatim = deploymentMode === 'cloud' ? null : (verbatimStore as unknown as VerbatimStore);
                 const sqlite = new SqliteBulkLoaderAdapter({ loreDir });
-                // Phase 3c (Kuzu removal) — see selectGraphAdapter.ts for why
-                // the graph adapter is chosen by capability, not by class.
+                // See selectGraphAdapter.ts for why the graph adapter is
+                // chosen by capability, not by class.
                 const handle = d.getGraph() as GraphBulkLoadHandle;
                 const { surreal } = selectGraphBulkLoaderAdapter(handle);
                 let lance: LanceBulkLoaderAdapter | undefined;
@@ -1490,7 +1490,7 @@ async function main(): Promise<LoreInstance | void> {
     // v1.1 background first-install reconnect (2026-04-30). Skipped in cloud mode.
     if (deploymentMode === 'local') {
         // requireWorkspaceGraph, not requireLocalGraph: needs a local ENGINE,
-        // not the Kùzu class, which would now refuse a Surreal boot workspace.
+        // not the removed LocalGraph class, which would now refuse a Surreal boot workspace.
         const localGraph = requireWorkspaceGraph(d.getGraph(), 'backgroundReconnect', 'local-mode boot path');
         if (!(verbatimStore instanceof VerbatimStore)) {
             throw new Error('backgroundReconnect: local mode requires VerbatimStore');
@@ -1689,8 +1689,8 @@ if (isProcessEntrypoint()) {
         const err = startupError as Error;
         const msg = err?.message ?? String(startupError);
         // Turn the cryptic native-ABI mismatch into an actionable message: it
-        // means a prebuilt native module (Kùzu / LanceDB / better-sqlite3) was
-        // compiled for a different Node.js major than the one now running.
+        // means a prebuilt native module (SurrealDB / LanceDB / better-sqlite3)
+        // was compiled for a different Node.js major than the one now running.
         if (/NODE_MODULE_VERSION/.test(msg)) {
             log.error(
                 `[Lore MCP] Failed to start — a native module was built for a DIFFERENT Node.js version than the one running.\n` +

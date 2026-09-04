@@ -4,11 +4,11 @@
  *
  * This is what lets blast radius, the pre-destructive-change snapshot, and the
  * migration runner work on a SurrealDB-backed workspace. Before it existed the
- * whole subsystem was refused there (`assertKuzuGraphSubstrate`), because the
- * Kùzu code path would have read an EMPTY Kùzu `LoreNode` table and reported a
- * confident zero — an empty snapshot, a blast radius of nothing, a destructive
- * change waved through. The refusal was correct; this is the fix it was
- * holding the door for.
+ * whole subsystem was refused there, because the raw-Cypher-only code path
+ * would have read an EMPTY `LoreNode` table under the prior engine's schema
+ * and reported a confident zero — an empty snapshot, a blast radius of
+ * nothing, a destructive change waved through. The refusal was correct; this
+ * is the fix it was holding the door for.
  *
  * Two rules this file must keep:
  *
@@ -21,7 +21,7 @@
  *     helper in this engine and this file does not introduce one.
  *
  * Paging note: `pageNodesByType` orders by record id ASC, not by the raw Lore
- * id string the Kùzu implementation orders on. Both are deterministic and
+ * id string the prior implementation ordered on. Both are deterministic and
  * strictly increasing, which is all the migration cursor requires (it needs
  * "resume exactly where the last batch stopped", not cross-engine identical
  * ordering — a workspace lives on one engine).
@@ -263,7 +263,7 @@ export class SurrealSchemaGraphOps implements SchemaGraphOps {
     async setNodeMetadata(id: string, metadata: Record<string, unknown>): Promise<void> {
         try {
             // Metadata is stored as a JSON STRING on this engine too, matching
-            // the Kùzu column, so a snapshot round-trips byte-identically.
+            // the prior engine's column, so a snapshot round-trips byte-identically.
             await this.query('UPDATE $rid SET metadata = $json', {
                 rid: toNodeRid(id, 'setNodeMetadata'),
                 json: JSON.stringify(metadata),
@@ -289,10 +289,10 @@ export class SurrealSchemaGraphOps implements SchemaGraphOps {
      * metadata and edge-safety handling), then repair the two fields
      * `upsertNode` cannot accept directly (`createdAt`/`syncedAt` are
      * excluded from its signature — a normal write always stamps fresh
-     * values there). Matches `KuzuSchemaGraphOps.restoreNode`'s 13-field
+     * values there). Matches `LegacySchemaGraphOps.restoreNode`'s 13-field
      * MERGE exactly, field for field, with ONE deliberate difference:
      * `updatedAt` is NOT restored from the snapshot — `upsertNode` stamps
-     * it fresh, same as the Kùzu reference does explicitly
+     * it fresh, same as the `LegacySchemaGraphOps` reference does explicitly
      * (`updatedAt: new Date().toISOString()`). A rollback is a real write
      * happening now; `createdAt` is identity/history and gets restored,
      * `updatedAt` reflects when THIS write happened.

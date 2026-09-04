@@ -48,7 +48,7 @@
  *
  * No LRU cap (unlike LocalGraphRegistry's MAX_OPEN_WORKSPACES): a SyncEngine
  * is a thin wrapper (WAL path strings + cursor file paths + an in-memory
- * push-serialization chain), not a Kùzu mmap/connection-pool/LanceDB handle.
+ * push-serialization chain), not a native mmap/connection-pool/LanceDB handle.
  * `evictOnInvalidate` still drops entries when workspaces.json moves a
  * workspace's on-disk path, mirroring the graph registry's cache-correctness
  * contract.
@@ -138,8 +138,8 @@ export class SyncEngineRegistry {
      */
     async getOrOpen(workspace: string): Promise<SyncEngine> {
         // getGraphHandle, not getOrOpen: SyncEngine WRITES pulled nodes into
-        // this graph, so on a Surreal-backed workspace the Kùzu accessor sent
-        // every synced node to the database nothing reads. It still delegates
+        // this graph, so on a Surreal-backed workspace a single-engine-only
+        // accessor sent every synced node to the database nothing reads. It still delegates
         // to getOrOpen internally, so the Wave 4.1 confinement guard described
         // above continues to cover this open.
         const graph = await this.deps.graphRegistry.getGraphHandle(workspace);

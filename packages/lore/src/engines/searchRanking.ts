@@ -24,7 +24,7 @@
  * Determinism: the comparator adds a final `id` ascending tiebreak so two
  * nodes with the same score AND updatedAt still sort identically across
  * backends (Array.prototype.sort is not stable for our purposes here because
- * the candidate scan order differs between Kùzu and the Dataplane SDK).
+ * the candidate scan order differs between the local graph engine and the Dataplane SDK).
  */
 
 import type { LoreNode } from '../providers/types.js';

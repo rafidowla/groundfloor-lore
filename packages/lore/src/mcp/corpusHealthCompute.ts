@@ -18,9 +18,10 @@ import type { AuxStore } from '../outbox/auxStore.js';
 import { forEachNodePage, type NodePager } from '../engines/nodePager.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 
 export interface CorpusHealthReport {
@@ -61,7 +62,7 @@ export async function computeCorpusHealth(
     let totalScore = 0, scoredNodes = 0;
 
     // Fold one node's health-relevant fields into the running counters. Takes
-    // the coerced field values so both the paged (raw Kùzu row) and the
+    // the coerced field values so both the paged (raw graph row) and the
     // unbounded-fallback (LoreNode) paths produce byte-identical counts.
     const fold = (
         status: string,
@@ -88,7 +89,7 @@ export async function computeCorpusHealth(
 
     // P1 scale fix — page the walk projecting only the health columns (no
     // `content`), folding each bounded page. Peak heap is one page. Coerce raw
-    // Kùzu values to match rowToLoreNode's defaults (status '' → 'active',
+    // graph values to match rowToLoreNode's defaults (status '' → 'active',
     // classification '' → 'tactical', numeric confirmation_score). Fakes /
     // cloud graphs without getGraphContext fall back to the unbounded scan.
     const pager = (graph as { bulkListProjected?: NodePager }).bulkListProjected?.bind(graph);

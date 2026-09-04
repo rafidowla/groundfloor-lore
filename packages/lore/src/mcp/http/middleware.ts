@@ -30,7 +30,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { validateRequest, writeAuthFailure } from '../../security/httpAuth.js';
+import { validateRequest, writeAuthFailure, requiresBearerAuth } from '../../security/httpAuth.js';
 import { type RateLimiter, classifyRequest } from '../../security/rateLimit.js';
 import { runWithWorkspace } from '../../security/workspaceContext.js';
 import { resolveByPlaintext, touchLastUsed, isPlausibleToken } from '../../auth/tokens.js';
@@ -40,6 +40,7 @@ import { ClerkAuthError } from '../../security/clerkAuth.js';
 import { runWithRouteBindingSlot } from '../../security/routeWorkspaceBinding.js';
 import { AUTH_REQUIRED, TOKEN_EXPIRED, INVALID_ACTOR_TOKEN } from './errorCodes.js';
 import { consumeBootstrapNonce } from '../../security/authToken.js';
+import { applySecurityHeaders } from './helpers.js';
 
 /**
  * L-030 — resolves the per-request actor identity (Clerk JWT → operator
@@ -163,6 +164,13 @@ export async function runHttpGates(
     res: ServerResponse,
     deps: HttpGateDeps,
 ): Promise<HttpGateResult> {
+    // Security checklist #12 — baseline browser-hardening headers on EVERY
+    // response. Must run FIRST, before any gate below (or any route
+    // reached after this function returns) writes a byte — see
+    // helpers.ts's applySecurityHeaders for why this one call site is a
+    // true chokepoint and how the merge-with-writeHead() semantics work.
+    applySecurityHeaders(res);
+
     // Historical handlers stored `req.url` in `url` and did both
     // route matching and query-param parsing off it. Strict-equality
     // matches (previously `url === '/api/topology'`) silently 404 when the
@@ -172,7 +180,24 @@ export async function runHttpGates(
     // `new URL(url, 'http://localhost').searchParams` calls still
     // work, and add a dedicated `pathname` for strict route matches.
     const url = req.url ?? '';
-    const pathname = url.split('?', 1)[0];
+    let pathname = url.split('?', 1)[0];
+
+    // F-DEL8 — normalize the query-string form of node delete
+    // (`DELETE /api/node?id=X`) onto the path form (`DELETE
+    // /api/node/<id>`) that nodes-delete.ts already implements. GET
+    // /api/node has always accepted `id` as a query param (nodes.ts /
+    // getNode.ts); DELETE only ever matched the path form, so the
+    // query-string shape 404'd even though it's documented alongside
+    // the GET sibling. This only rewrites `pathname` for route
+    // matching — `url` (and its query string, which nodes-delete.ts
+    // still reads for `?workspace=`) is untouched, so the handler
+    // there runs completely unchanged.
+    if (req.method === 'DELETE' && pathname === '/api/node') {
+        const qsId = new URL(url, 'http://localhost').searchParams;
+        if (qsId.has('id')) {
+            pathname = '/api/node/' + encodeURIComponent(qsId.get('id') ?? '');
+        }
+    }
 
     // ── CORS for localhost origins ──
     // Set ACAO/ACAH/ACAM headers up-front so even auth-failure responses
@@ -289,36 +314,50 @@ export async function runHttpGates(
             // TTL) get an actionable 401 token_expired instead of a
             // generic auth required.
             const outcome = resolveByPlaintext(bearerRaw);
-            if (outcome.kind === 'expired') {
-                writeAuthFailure(res, { ok: false, status: 401, message: TOKEN_EXPIRED });
-                return { handled: true };
-            }
             if (outcome.kind !== 'ok') {
-                writeAuthFailure(res, { ok: false, status: 401, message: AUTH_REQUIRED });
-                return { handled: true };
+                // B1 — a plausible-shaped app token that doesn't resolve
+                // (missing/revoked/expired) must not turn a PUBLIC path
+                // (/api/health, /health, /api/auth/bootstrap, /metrics)
+                // into a 401: those paths don't require a Bearer at all,
+                // so sending a stale/garbage one shouldn't be worse than
+                // sending none — fall back to anonymous exactly like an
+                // absent bearer would (see docs/OPERATIONS.md's "no
+                // Bearer, or an invalid one" contract for /api/health).
+                // Paths that DO require a Bearer keep the existing
+                // fail-closed 401 behavior below.
+                if (requiresBearerAuth(url)) {
+                    if (outcome.kind === 'expired') {
+                        writeAuthFailure(res, { ok: false, status: 401, message: TOKEN_EXPIRED });
+                        return { handled: true };
+                    }
+                    writeAuthFailure(res, { ok: false, status: 401, message: AUTH_REQUIRED });
+                    return { handled: true };
+                }
+                // else: fall through with principal left null (anonymous).
+            } else {
+                const record = outcome.record;
+                principal = {
+                    kind: 'app',
+                    workspace: record.workspace,
+                    scopes: record.scopes,
+                    // RA2-reaudit2 — identify the principal by a per-token hash
+                    // fragment, NOT record.prefix. The plaintext is
+                    // `gf_<workspace>_<random>`, so prefix = slice(0,12) is
+                    // WORKSPACE-DERIVED and collides across all tokens of one
+                    // workspace (fully, for names >= 9 chars) — distinct tokens then
+                    // shared a rate-limit bucket (burst starvation) and were
+                    // indistinguishable in the audit/429 log. record.hash is the
+                    // sha256 of the full plaintext: unique per token + non-secret.
+                    label: record.hash.slice(0, 12),
+                    // TW-3a — an app token is authorized for exactly the
+                    // workspace it was issued against. A tenant header for any
+                    // other workspace requires a cross-workspace scope (which
+                    // the registry record may grant); otherwise it 403s.
+                    allowedWorkspaces: [record.workspace],
+                };
+                // Best-effort lastUsed bookkeeping (single writer, idempotent).
+                try { touchLastUsed(bearerRaw); } catch { /* non-fatal */ }
             }
-            const record = outcome.record;
-            principal = {
-                kind: 'app',
-                workspace: record.workspace,
-                scopes: record.scopes,
-                // RA2-reaudit2 — identify the principal by a per-token hash
-                // fragment, NOT record.prefix. The plaintext is
-                // `gf_<workspace>_<random>`, so prefix = slice(0,12) is
-                // WORKSPACE-DERIVED and collides across all tokens of one
-                // workspace (fully, for names >= 9 chars) — distinct tokens then
-                // shared a rate-limit bucket (burst starvation) and were
-                // indistinguishable in the audit/429 log. record.hash is the
-                // sha256 of the full plaintext: unique per token + non-secret.
-                label: record.hash.slice(0, 12),
-                // TW-3a — an app token is authorized for exactly the
-                // workspace it was issued against. A tenant header for any
-                // other workspace requires a cross-workspace scope (which
-                // the registry record may grant); otherwise it 403s.
-                allowedWorkspaces: [record.workspace],
-            };
-            // Best-effort lastUsed bookkeeping (single writer, idempotent).
-            try { touchLastUsed(bearerRaw); } catch { /* non-fatal */ }
         }
     }
 

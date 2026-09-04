@@ -13,11 +13,22 @@ import { probeFullCapabilities } from '../../../../engines/extractors/qualityAdv
 import { getActiveWorkspaceName, listWorkspaceNames } from '../../../../config/workspaces.js';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
-import { writeWorkspaceRequired, extractWorkspace, writeError } from '../../helpers.js';
+import { writeWorkspaceRequired, extractWorkspace, writeError, writeGraphEngineError } from '../../helpers.js';
 import { type DiagnosticDeps, type LoreGraph, readWorkspaceStats } from './shared.js';
 import { redactError } from '../../../../security/logRedact.js';
 import { hasLanguageBreakdown } from '../../../tools/search/helpers.js';
 import { CloudModeUnsupportedError } from '../../../../engines/cloudModeUnsupportedError.js';
+
+/**
+ * One workspace's entry in `/api/admin/stats`'s `byWorkspace` map. Healthy
+ * workspaces (and the registry-race `workspace_not_found` case) keep the
+ * original numeric-counts shape; any other error (e.g.
+ * `LegacyGraphEngineRemovedError`) carries null counts plus `error` instead
+ * of being silently zeroed — see the `errors` catch block below.
+ */
+type AdminStatsWorkspaceEntry =
+    | { nodeCount: number; edgeCount: number }
+    | { nodeCount: null; edgeCount: null; error: { code: string; message: string } };
 
 /**
  * Read the corpus language breakdown from whatever graph we were handed.
@@ -73,9 +84,10 @@ export async function handleAdminStats(res: ServerResponse, deps: DiagnosticDeps
         // iterate every known workspace name and read stats off its
         // own LocalGraph. Cloud mode (no registry) returns just the
         // active-workspace numbers under the active name.
-        const byWorkspace: Record<string, { nodeCount: number; edgeCount: number }> = {};
+        const byWorkspace: Record<string, AdminStatsWorkspaceEntry> = {};
         let totalNodes = 0;
         let totalEdges = 0;
+        let errorCount = 0;
         if (deps.graphRegistry) {
             const names = listWorkspaceNames();
             for (const name of names) {
@@ -85,10 +97,30 @@ export async function handleAdminStats(res: ServerResponse, deps: DiagnosticDeps
                     byWorkspace[name] = { nodeCount: s.nodeCount, edgeCount: s.edgeCount };
                     totalNodes += s.nodeCount;
                     totalEdges += s.edgeCount;
-                } catch {
-                    // workspace_not_found mid-iteration (workspaces.json
-                    // edit race) — surface as zeros, don't fail the call.
-                    byWorkspace[name] = { nodeCount: 0, edgeCount: 0 };
+                } catch (err) {
+                    if (err instanceof WorkspaceNotFoundError) {
+                        // workspace_not_found mid-iteration (workspaces.json
+                        // edit race) — surface as zeros, don't fail the call.
+                        byWorkspace[name] = { nodeCount: 0, edgeCount: 0 };
+                        continue;
+                    }
+                    // Round-E fix (2026-09-04) — any other error (most
+                    // notably LegacyGraphEngineRemovedError: a workspace
+                    // whose workspaces.json still declares the removed
+                    // legacy graph engine, see graphEngineSelector.ts) must
+                    // NOT be reported as an empty workspace — that hides a
+                    // workspace with real data behind a false all-zero
+                    // reading. Surface it as a per-workspace error entry
+                    // (null counts, redacted message) and bump the
+                    // top-level `errors` count so a caller scanning
+                    // byWorkspace for zeros can't miss it.
+                    errorCount++;
+                    const code = (err as { code?: unknown }).code;
+                    byWorkspace[name] = {
+                        nodeCount: null,
+                        edgeCount: null,
+                        error: { code: typeof code === 'string' ? code : 'internal_error', message: redactError(err) },
+                    };
                 }
             }
         } else {
@@ -105,6 +137,7 @@ export async function handleAdminStats(res: ServerResponse, deps: DiagnosticDeps
             verbatimDocuments,
             languageBreakdown,
             byWorkspace,
+            errors: errorCount,
             globalTotals: { nodeCount: totalNodes, edgeCount: totalEdges },
         }));
     } catch (statsErr) {
@@ -138,6 +171,11 @@ export async function handleStats(res: ServerResponse, url: string, deps: Diagno
                     writeError(res, 404, 'workspace_not_found', `workspace "${err.requested}" not found`, { requested: err.requested, known: err.known });
                     return;
                 }
+                // Round-S fix (2026-09-04, finding 3 addendum) — see
+                // writeGraphEngineError (mcp/http/helpers.ts): a legacy
+                // graphEngine declaration used to fall through to this
+                // handler's own generic 500, losing its 501 status/code.
+                if (writeGraphEngineError(res, err)) return;
                 throw err;
             }
         }

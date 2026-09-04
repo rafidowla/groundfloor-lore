@@ -33,6 +33,7 @@ import type {
     TableOp,
     TableOpResult,
     TableSchema,
+    TableSchemaSummary,
 } from '../packages/lore/src/contracts/tables.js';
 import type { Filter, FilterNode, FindOptions } from '../packages/lore/src/engines/collectionStorage.js';
 
@@ -53,6 +54,14 @@ class FakeTableStorage implements ITableStorage {
     async createTable(schema: TableSchema): Promise<void> {
         this.schemas.set(schema.name, schema);
         if (!this.rows.has(schema.name)) this.rows.set(schema.name, new Map());
+    }
+    async listTables(): Promise<TableSchemaSummary[]> {
+        return Array.from(this.schemas.values()).map((schema) => ({
+            name: schema.name,
+            columns: schema.columns,
+            primaryKey: schema.columns.find(c => c.primary)?.name ?? '',
+            rowCount: this.rows.get(schema.name)?.size ?? 0,
+        }));
     }
     private requireSchema(table: string, op: string): TableSchema {
         const s = this.schemas.get(table);

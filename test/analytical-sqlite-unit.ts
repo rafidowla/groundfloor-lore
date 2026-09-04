@@ -5,8 +5,8 @@
  *
  * ── THE GAP THIS GUARDS ─────────────────────────────────────────────────────
  *
- * Collections moved to SQLite in 061e189 (2026-05-16). `KuzuAnalyticalStorage`
- * kept issuing `MATCH (n:<table>) RETURN count(n)` against Kùzu node tables, so
+ * Collections moved to SQLite in 061e189 (2026-05-16). `LegacyAnalyticalStorage`
+ * kept issuing `MATCH (n:<table>) RETURN count(n)` against the legacy graph engine node tables, so
  * for twelve weeks every aggregate over a modern collection threw
  * `Binder exception: Table <name> does not exist` — on an exposed MCP tool
  * surface (count/sum/avg/min/max/groupBy/distinct/timeSeries).
@@ -21,7 +21,7 @@
  * backend by hand, so they cannot pick different ones.
  *
  * These fail on a993d82: `createAnalyticalStorage` does not exist there, and
- * the Kùzu store they would otherwise reach throws on every one of them.
+ * the legacy graph engine store they would otherwise reach throws on every one of them.
  *
  * Run: npx tsx test/analytical-sqlite-unit.ts
  */
@@ -60,7 +60,7 @@ console.log('Analytical aggregates over the live collection backend');
 
 await test('the factory pair agrees on a backend without either side naming one', () => {
     // The twelve-week defect in one assertion: production picked SQLite for
-    // writes and Kùzu for aggregates, and nothing checked they matched.
+    // writes and the legacy graph engine for aggregates, and nothing checked they matched.
     assert.equal(tables.constructor.name, 'SqliteTableStorage');
     assert.ok(analytical, 'an analytical store exists for the live table backend');
     assert.equal(analytical!.constructor.name, 'SqliteAnalyticalStorage');
@@ -136,8 +136,8 @@ await test('distinct is deduplicated and ordered', async () => {
     assert.deepEqual(await analytical!.distinct<string>('invoice', 'status'), ['open', 'paid', 'void']);
 });
 
-await test('timeSeries buckets by calendar period — never implemented on Kùzu', async () => {
-    // The Kùzu store documents this as "stubbed pending verification of Kùzu's
+await test('timeSeries buckets by calendar period — never implemented on the legacy graph engine', async () => {
+    // The legacy graph engine store documents this as "stubbed pending verification of the legacy engine's
     // date-bucketing functions", so this is a first implementation rather than
     // a port. SQLite's strftime does it natively.
     const byMonth = await analytical!.timeSeries<string>('invoice', 'created', 'month', 'count', null);

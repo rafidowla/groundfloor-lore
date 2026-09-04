@@ -74,7 +74,7 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
         async (args) => {
             try {
                 if (deps.deploymentMode === 'cloud') {
-                    return { content: [{ type: 'text', text: JSON.stringify({ error: 'maintain_local_only', hint: 'maintain operates on local-disk substrates (LanceDB/Kùzu); not applicable in cloud mode.' }) }], isError: true };
+                    return { content: [{ type: 'text', text: JSON.stringify({ error: 'maintain_local_only', hint: 'maintain operates on local-disk substrates (LanceDB/SurrealDB); not applicable in cloud mode.' }) }], isError: true };
                 }
                 // SP-01 — destructive maintenance against a workspace's
                 // substrates. Enforce bound-principal write scope. When

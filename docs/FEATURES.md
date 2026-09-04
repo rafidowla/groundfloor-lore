@@ -41,7 +41,7 @@ Lore stores data in three physically distinct stores, each chosen for its job. T
 
 | Substrate | Engine (local) | Cloud equivalent | What lives there |
 |---|---|---|---|
-| **Graph** | SurrealDB (default) or Kùzu (legacy, per-workspace) | ArangoDB | Nodes + edges. Relationships, traversals, "what's connected to this?" queries. |
+| **Graph** | SurrealDB | ArangoDB | Nodes + edges. Relationships, traversals, "what's connected to this?" queries. |
 | **Vector** | LanceDB | Zilliz / Qdrant | Embeddings for semantic search. "Find similar things to this." |
 | **Relational** | SQLite | Postgres | Application tabular data — event logs, projections, dictionaries. |
 
@@ -106,6 +106,7 @@ These are the tools available to AI agents over MCP. Categories below.
 | `collection_count` | Count rows matching a filter. |
 | `collection_truncate` | Wipe all rows preserving schema. |
 | `collection_schema_get` | Introspection. |
+| `collection_schema_list` | List declared collections (name, columns, primary key), cursor-paginated (default 100/page, max 1000; `withCounts:true` adds row count per collection). `cursor` is a keyset (stable across concurrent creates/drops); the legacy `offset` param is best-effort only. |
 
 ### Analytical
 
@@ -191,7 +192,7 @@ Same daemon, REST shape.
 | **Topology** | `GET /api/topology`, `GET /api/topology/overview` | Graph topology snapshot for visualization |
 | **Import + ingest** | `POST /api/import` (csv/xlsx/json/jsonl in body), `POST /api/import/preview`, `POST /api/graph/ingest-files`, `POST /api/graph/reconnect`, `POST /api/graph/reconsume` | Bulk imports with async-embed via queue + reconnect/reconsume |
 | **Extract + language** | `POST /api/extract`, `POST /api/language/detect` | Text-from-file extraction + language detection |
-| **Collections** | `GET /v1/schema`, `GET /v1/schema/{name}`, `GET/POST/PATCH/DELETE /v1/{collection}` (+ bulk variants) | SDK-aligned tabular CRUD |
+| **Collections** | `POST /v1/schema`, `GET /v1/schema`, `GET /v1/schema/{name}`, `GET/POST/PUT/DELETE /v1/{collection}` (+ bulk variants) | SDK-aligned tabular CRUD |
 | **Schema authoring** | `GET /api/schema`, `GET /api/schema/summary`, `GET/POST /api/schema/proposals`, `GET /api/schema/proposals/{id}`, `POST /api/schema/proposals/{id}/approve`, `POST /api/schema/proposals/{id}/reject`, `GET /api/schema/history`, `POST /api/schema/history/{file}/rollback`, `GET /api/schema/audit/changes`, `GET /api/schema/audit/classifications`, `GET /api/schema/exceptions`, `POST /api/schema/exceptions/{id}/resolve`, `GET /api/schema/sync/policies`, `GET /api/schema/sync/conflicts` | Full Phase A surface |
 | **Migrations** | `POST /api/schema/migrations/dry-run`, `POST /api/schema/migrations/execute`, `GET/DELETE /api/schema/migrations/in-flight`, `POST /api/schema/migrations/resume`, `POST /api/schema/migrations/rollback`, `POST /api/schema/migrations/decompose` | Migration runner + Phase 4 decomposition |
 | **Orchestrations** | `GET/POST /api/schema/orchestrations`, `GET /api/schema/orchestrations/{id}`, `POST /api/schema/orchestrations/{id}/tick`, `POST /api/schema/orchestrations/{id}/abort` | Auto-orchestrated decomposed plans (Phase 4 item 4) |

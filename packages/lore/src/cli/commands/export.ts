@@ -1,10 +1,11 @@
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { loreHome, loreHomePath } from '../../config/loreHome.js';
 import { getActiveWorkspaceName } from '../../config/workspaces.js';
 import { exportGraphAsHtml } from '../../engines/htmlExport.js';
+import { openGraphForCli } from './shared.js';
+import { DEFAULT_PORT } from './migrateWorkspaceToWorkspaceShared.js';
 
 export async function exportCommand(args: string[]): Promise<void> {
     if (args[0] !== 'html') {
@@ -41,8 +42,15 @@ export async function exportCommand(args: string[]): Promise<void> {
     }
     if (html == null) {
         const basePath = loreHome();
-        const graph = openWorkspaceGraph(basePath);
-        await graph.initialize();
+        // Finding 11 (round E) — the HTTP attempt above already tried the
+        // daemon; this direct-open fallback is what used to sit in the
+        // ~15s openSurreal retry storm. fetchHtmlExportViaDaemon() above
+        // now resolves DEFAULT_PORT (LORE_PORT-aware) instead of a
+        // hardcoded 3847, so this fallback fires only when the HTTP
+        // attempt genuinely misses the daemon (no auth token, daemon
+        // down, timeout). Refuse fast with a clear message instead of the
+        // raw driver error.
+        const graph = await openGraphForCli(basePath);
         html = await exportGraphAsHtml(graph, { project, maxNodes, title });
         await graph.close();
     }
@@ -65,7 +73,7 @@ async function fetchHtmlExportViaDaemon(opts: { project?: string; maxNodes?: num
     const pathQs = qs.toString() ? `/api/export/html?${qs.toString()}` : '/api/export/html';
     return await new Promise<string>((resolve, reject) => {
         const req = http.request({
-            host: '127.0.0.1', port: 3847, method: 'GET', path: pathQs,
+            host: '127.0.0.1', port: DEFAULT_PORT, method: 'GET', path: pathQs,
             headers: { Authorization: `Bearer ${token}` }, timeout: 15_000,
         }, (res) => {
             let body = '';

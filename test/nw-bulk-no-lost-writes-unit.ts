@@ -8,8 +8,8 @@
  *
  *   1. runBulkIngest fanned out an unbounded Promise.all of upserts. Each
  *      upsert's read-decide-write getNode borrows an engine connection;
- *      thousands at once overflowed the pool (on Kùzu:
- *      `KuzuConnectionPool: waiter queue full (200/200)`) and the writes
+ *      thousands at once overflowed the pool (on the legacy graph engine:
+ *      `LegacyConnectionPool: waiter queue full (200/200)`) and the writes
  *      FAILED. Fixed by bounding the fan-out (LORE_BULK_INGEST_CONCURRENCY) —
  *      an engine-agnostic fix, verified here against SurrealGraph.
  *

@@ -25,7 +25,8 @@ behind.
 
 Two backends sit behind the facade:
 - **Local mode** — `LoreStorageClient.fromLocal(...)` over SurrealDB (graph —
-  Kùzu was fully removed 2026-08-21, see `docs/KUZU_REMOVAL.md`) + LanceDB
+  the prior local graph engine was fully removed 2026-08-21, see
+  `docs/KUZU_REMOVAL.md`) + LanceDB
   (vector) + SQLite (relational/outbox/analytical) + `VerbatimStore`. This
   is the default and the only fully-wired backend today.
 - **Cloud mode** — `LoreStorageClient.fromDataplane(sdk)` over `groundfloor-ts-sdk` →
@@ -43,10 +44,10 @@ do (possibly slower at scale).
 
 | Surface | What | Local backing | Cloud backing |
 |---|---|---|---|
-| **Graph** | Nodes, edges, embeddings, vector search | SurrealDB (default) or Kùzu (per-workspace legacy) + LanceDB | ArangoDB + Qdrant |
+| **Graph** | Nodes, edges, embeddings, vector search | SurrealDB (the only graph engine) + LanceDB | ArangoDB + Qdrant |
 | **Verbatim** | Original document content + provenance + hybrid BM25/vector search | `engines/verbatimStore.ts` (`IVerbatimStore` in `contracts/verbatim.ts`) | Dataplane verbatim collection |
 | **Analytical** | `count`, `sum`, `avg`, `min`, `max`, `groupBy`, `distinct`, `timeSeries` | SQLite SQL aggregates (`engines/sqliteAnalyticalStorage.ts`) | Postgres |
-| **Tables** | Schema-agnostic tabular CRUD + filter/sort/limit | SQLite (`engines/sqliteTableStorage.ts`, the only backend — the legacy `LORE_TABLE_BACKEND=kuzu` path was removed with Kùzu) | Postgres |
+| **Tables** | Schema-agnostic tabular CRUD + filter/sort/limit | SQLite (`engines/sqliteTableStorage.ts`, the only backend — the legacy table-backend env-var path selecting the prior local graph engine was removed along with it; see `docs/KUZU_REMOVAL.md`) | Postgres |
 
 ## How the runtime actually composes storage
 
@@ -96,7 +97,7 @@ query translations straightforward and forces consumers toward shapes that perfo
 well across substrates. (Filter KEYS are allowlist-validated and filter VALUES are
 escaped/parameterized at the substrate boundary — see the shared guards in
 `engines/whereClause.ts` (`assertIdent` + the SQLite WHERE builder), used by
-`sqliteTableStorage.ts` — the only table backend since Kùzu's removal.)
+`sqliteTableStorage.ts` — the only table backend since the prior local graph engine's removal.)
 
 ## What's NOT in the contract
 

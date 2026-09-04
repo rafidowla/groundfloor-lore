@@ -68,7 +68,7 @@ Core commands:
   report         Write/print GRAPH_REPORT.md — human-readable graph digest
   export html    Write a standalone HTML graph snapshot (offline-viewable)
   snapshot       One-shot folder scan → HTML snapshot (no workspace ingest)
-  migrate        One-off migrations (v1-sqlite → Kùzu, embedding-model swap)
+  migrate        One-off migrations (v1-sqlite → graph, embedding-model swap)
   verbatim       LanceDB verbatim store tools (today: reap orphan embeddings)
   maintain       Config-driven capacity maintenance (compaction, version cleanup, retention, ephemeral expiry)
   models         Manage cached LLM models (today: prune unused ONNX weights)
@@ -224,11 +224,11 @@ async function main(): Promise<void> {
     }
 
     // Deliberate explicit exit (non-'serve' commands only). Originally a
-    // workaround for the @kineviz/kuzu-lite native addon segfaulting during
-    // GC-on-exit cleanup; kuzu-lite was removed 2026-08-21, but the CLI now
-    // loads other native addons (@surrealdb/node, better-sqlite3,
-    // @lancedb/lancedb) and this exit guarantees no lingering native handle
-    // can hang the process after data is committed.
+    // workaround for the removed legacy graph engine's native addon
+    // segfaulting during GC-on-exit cleanup; that engine was removed
+    // 2026-08-21, but the CLI now loads other native addons (@surrealdb/node,
+    // better-sqlite3, @lancedb/lancedb) and this exit guarantees no lingering
+    // native handle can hang the process after data is committed.
     if (command !== 'serve') {
         process.exit(0);
     }

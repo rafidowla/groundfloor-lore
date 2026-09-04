@@ -10,7 +10,7 @@
  * work: one is a SQLite file, the other a JSON file, and both are keyed on the
  * workspace path alone. Because they lived there, every consumer reached them
  * by casting a graph handle — which silently required the workspace to be
- * Kùzu-backed, on code paths (consistency sweeps, health checks, collection
+ * legacy-engine-backed, on code paths (consistency sweeps, health checks, collection
  * routing, hot context) that have nothing to do with which engine holds nodes.
  *
  * `LocalGraphRegistry` owns them now. It is the per-daemon, per-workspace owner

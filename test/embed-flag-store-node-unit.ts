@@ -230,7 +230,7 @@ test('T2 embed:false — no verbatim.upsert enqueued, no lancedb row', async () 
         workspace: 'w1-fixture',
     });
     assert.equal(res._status, 200, `expected 200 OK; got ${res._status}: ${res._body}`);
-    assert.equal(upsertCalls.length, 1, 'graph upsert MUST still fire (node lives in kuzu)');
+    assert.equal(upsertCalls.length, 1, 'graph upsert MUST still fire (node lives in the legacy graph engine)');
     assert.equal(verbatimUpsertEntries(recorded).length, 0, `embed:false MUST skip verbatim.upsert; saw ${verbatimUpsertEntries(recorded).length}`);
 });
 

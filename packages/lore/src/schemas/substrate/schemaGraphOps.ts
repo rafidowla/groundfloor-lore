@@ -6,18 +6,19 @@
  * ---------------
  * Blast radius, the pre-destructive-change data snapshot, and the migration
  * runner all need the same handful of graph operations: count rows of a type,
- * dump them, page through them, delete them, re-insert them. Until now all
- * three spoke raw Kùzu Cypher through a `queryRows`/`executeWrite` escape
- * hatch, which is why `engines/graphEngineSelector.ts` had to refuse the whole
- * subsystem on a SurrealDB-backed workspace: the Kùzu `LoreNode` table exists
- * there and is EMPTY, so raw Cypher does not fail — it succeeds and returns
- * nothing. A blast radius of zero, an empty snapshot file, and a destructive
- * change waved through.
+ * dump them, page through them, delete them, re-insert them. These used to
+ * speak raw Cypher through a `queryRows`/`executeWrite` escape hatch tied to
+ * a single local graph engine, which is why `engines/graphEngineSelector.ts`
+ * had to refuse the whole subsystem on a SurrealDB-backed workspace: that
+ * engine's `LoreNode` table existed there and was EMPTY, so raw Cypher did
+ * not fail — it succeeded and returned nothing. A blast radius of zero, an
+ * empty snapshot file, and a destructive change waved through.
  *
  * Naming the operations semantically instead of as Cypher strings lets each
  * engine answer them natively. The refusal stays for anything NOT expressed
- * here — see `assertKuzuGraphSubstrate` — because the failure mode it guards
- * against (a silently wrong answer on a safety mechanism) has not changed.
+ * here — see `GraphSubstrateUnsupportedError` (`mcp/bootSteps.ts`) — because
+ * the failure mode it guards against (a silently wrong answer on a safety
+ * mechanism) has not changed.
  *
  * Contract notes that both implementations must honour:
  *   - `listNodesByType` returns RAW row records, because the snapshot writes
@@ -33,9 +34,9 @@
 import { tagsToArray } from '../../engines/normalizeTags.js';
 
 /**
- * Raw Cypher escape hatch KuzuSchemaGraphOps talks through. Relocated here
- * (Kuzu removal Phase 3f) from the now-deleted migration/kuzuBackend.ts,
- * whose only other consumer (KuzuMigrationBackend) died with it.
+ * Raw Cypher escape hatch LegacySchemaGraphOps talks through. Relocated here
+ * from a now-deleted module, whose only other consumer (the former
+ * graph-native MigrationBackend) was deleted along with it.
  */
 interface GraphReader {
     queryRows(
@@ -62,7 +63,9 @@ export interface NodeMetaRow {
 }
 
 export interface SchemaGraphOps {
-    /** Which engine is answering. Used for error messages and reporting. */
+    /** Which engine is answering. Used for error messages and reporting.
+     *  'kuzu' is the legacy graph-engine sentinel — kept to match archived
+     *  data/manifests, never a live engine choice. */
     readonly engine: 'kuzu' | 'surreal';
 
     /* ── counts (blast radius) ─────────────────────────────────────── */
@@ -102,16 +105,19 @@ export interface SchemaGraphOps {
 }
 
 /* ══════════════════════════════════════════════════════════════════ */
-/*  Kùzu implementation — the incumbent queries, moved behind the port */
+/*  LegacySchemaGraphOps — the incumbent raw-Cypher queries, moved behind */
+/*  the port                                                           */
 /* ══════════════════════════════════════════════════════════════════ */
 
 /**
  * Wraps the same `GraphReader & GraphWriter` escape hatch the subsystem has
  * always used, issuing the SAME Cypher it always issued. This is deliberately
- * a transcription, not a rewrite: the Kùzu behaviour is the reference the
- * SurrealDB implementation is tested against, so it must not drift here.
+ * a transcription, not a rewrite: this class's original behaviour is the
+ * reference the SurrealDB implementation is tested against, so it must not
+ * drift here.
  */
-export class KuzuSchemaGraphOps implements SchemaGraphOps {
+export class LegacySchemaGraphOps implements SchemaGraphOps {
+    /** Legacy graph-engine sentinel value — see SchemaGraphOps.engine above. */
     public readonly engine = 'kuzu' as const;
 
     constructor(private readonly graph: GraphReader & GraphWriter) {}

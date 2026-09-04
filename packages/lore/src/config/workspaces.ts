@@ -2,7 +2,7 @@
  * workspaces.ts — Multi-workspace registry for Lore V2.1.
  *
  * Model:
- *   Each workspace is a completely separate Kùzu graph + LanceDB verbatim
+ *   Each workspace is a completely separate graph + LanceDB verbatim
  *   store + .lore/config.json. Switching workspaces is a hard context
  *   switch — like Slack teams or Claude app accounts. Graphs never
  *   cross-query; plugins listed in one workspace's config are invisible
@@ -119,8 +119,10 @@ export interface WorkspaceEntry {
      * Phase 3 (docs/SURREALDB_BUILD_PLAN.md) — which engine backs this
      * workspace's GRAPH substrate (nodes + edges).
      *
-     * Absent or `'kuzu'` = the incumbent embedded Kùzu graph. `'surreal'` =
-     * the embedded SurrealDB engine (`engines/surrealGraph.ts`).
+     * Absent (default) = the embedded SurrealDB engine
+     * (`engines/surrealGraph.ts`). A legacy `'kuzu'` value is rejected with a
+     * loud refusal at open time rather than silently defaulting — that
+     * graph engine was fully removed.
      *
      * This selects ONE substrate, not the whole workspace. A `'surreal'`
      * workspace keeps LanceDB for vectors, and SQLite for collections/table
@@ -128,8 +130,9 @@ export interface WorkspaceEntry {
      * are affected by this field.
      *
      * Corrected 2026-08-06 (DEC-KUZU-REMOVAL-STEP1): this used to say those
-     * four subsystems stayed in Kùzu, which was true when written and is not
-     * now — they are SQLite, and none of them consults this field.
+     * four subsystems stayed on the graph engine, which was true when
+     * written and is not now — they are SQLite, and none of them consults
+     * this field.
      *
      * Absent is the default on purpose: an existing workspace must never
      * change substrate because a field was added.
@@ -182,7 +185,7 @@ export interface WorkspaceEntry {
     };
     /**
      * Feature 1 — when true, prune_nodes may hard-delete nodes
-     * (permanent removal from Kùzu). Default false = soft archive only.
+     * (permanent removal from the graph). Default false = soft archive only.
      */
     allowHardDelete?: boolean;
     /**
@@ -327,7 +330,7 @@ export function createWorkspace(
  * registerWorkspaceAlias — Register a workspace entry that points at an
  * EXISTING on-disk path (typically another workspace's `.lore` parent).
  * Used to expose a subset of rows (e.g. tagged with a particular
- * `project` value, physically inside an existing workspace's kuzu graph)
+ * `project` value, physically inside an existing workspace's graph)
  * under a separate addressable workspace name.
  *
  * Differs from createWorkspace:
@@ -338,7 +341,7 @@ export function createWorkspace(
  *
  * The LocalGraphRegistry's path-dedup logic (also Sprint L5b-final) is
  * what makes querying the alias workspace return the in-place tagged
- * rows without opening a second Kùzu handle on the same graph dir.
+ * rows without opening a second graph handle on the same graph dir.
  */
 export function registerWorkspaceAlias(
     rawName: string,

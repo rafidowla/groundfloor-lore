@@ -5,7 +5,7 @@
  *
  * Round 2 gave `reconnectGraph` cooperative cancellation (`shouldAbort` +
  * `aborted: true`) so the shutdown drain could stop a multi-minute sweep
- * instead of closing Kùzu/LanceDB underneath it. What it did not do was tell
+ * instead of closing the legacy graph engine/LanceDB underneath it. What it did not do was tell
  * the three CURSOR WRITERS about the new outcome, and every one of them treats
  * "the call returned" as "the sweep finished":
  *

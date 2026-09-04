@@ -23,7 +23,7 @@
  *       outbox to depth 0 (depends solely on the embedded replicator running —
  *       never started on base) and then recall the node through its EMBEDDING:
  *       a semantic query that shares NO substring with the node's label/content/
- *       tags. The query is chosen so the keyword path (Kùzu lower(...) CONTAINS)
+ *       tags. The query is chosen so the keyword path (the legacy graph engine lower(...) CONTAINS)
  *       returns NOTHING — we assert that too — so the verbatim hit can ONLY have
  *       come from a replicated vector. If replication were skipped, the vector
  *       never lands and this section FAILS (the exact bug TW-2a fixed).
@@ -37,7 +37,7 @@
  *   (4) CLEAN LIFECYCLE + NATURAL EXIT (TW-7b). dispose() drains both instances
  *       without throwing and is idempotent. The natural-exit proof — that an
  *       embedder can create → use → dispose → let Node exit on its own with NO
- *       process.exit and NO native-Kùzu teardown SIGSEGV — is verified by
+ *       process.exit and NO native legacy-graph-engine teardown SIGSEGV — is verified by
  *       spawning a child (`--child`) that does the full flow and exits NATURALLY;
  *       the parent asserts the child's exit code is exactly 0 (signal === null).
  *       The parent ITSELF also disposes everything and returns to a NATURAL exit
@@ -98,7 +98,7 @@ function freshHome(tag: string): string {
 // CHILD MODE — the natural-exit proof for §4 (TW-7b).
 // create → write (with real embedding) → dispose (×2, idempotent) → NATURAL
 // EXIT. NO process.exit anywhere on the success path; NO signal handlers. If
-// the native Kùzu/LanceDB finalizers double-free during V8 GC-on-exit, this
+// the native the legacy graph engine/LanceDB finalizers double-free during V8 GC-on-exit, this
 // child crashes (code 139 / SIGSEGV) and the parent observes it.
 // ════════════════════════════════════════════════════════════════════════════
 async function runChildNaturalExit(): Promise<void> {
@@ -306,7 +306,7 @@ async function runParent(): Promise<void> {
     const NODE_CONTENT = 'A luminous celestial body emits radiant heat across the dark void of outer space.';
     const NODE_TAGS = 'cosmos';
     // Semantically near "the sun / a star shining in space" but shares NO
-    // substring with label/content/tags → Kùzu CONTAINS cannot match it; only
+    // substring with label/content/tags → the legacy graph engine CONTAINS cannot match it; only
     // an embedding can. (Verified explicitly by the keyword-miss assertion.)
     const SEMANTIC_QUERY = 'our nearest bright stellar furnace glowing in the galaxy';
 
@@ -344,7 +344,7 @@ async function runParent(): Promise<void> {
     });
 
     await check('(2) keyword search MISSES the semantic query (proves no keyword fallback)', async () => {
-        // Kùzu lower(label|content|tags) CONTAINS <query>. The query shares no
+        // the legacy graph engine lower(label|content|tags) CONTAINS <query>. The query shares no
         // substring with the node, so the keyword path returns nothing. This is
         // what makes the verbatim hit below attributable ONLY to the embedding.
         const kw = await loreA.store.storageClient.search(SEMANTIC_QUERY, 10, '*', '*');
@@ -384,7 +384,7 @@ async function runParent(): Promise<void> {
         const regA = loreA._daemon.getGraphRegistry();
         const regB = loreB._daemon.getGraphRegistry();
         assert.ok(regA && regB, 'both embedded instances expose a graph registry');
-        // getGraphHandle (not getOrOpen, which is hardcoded Kùzu) — the
+        // getGraphHandle (not getOrOpen, which is hardcoded the legacy graph engine) — the
         // engine-aware accessor, matching how every other read/write path
         // resolves a workspace's actual graphEngine (surreal by default).
         const gA = await regA!.getGraphHandle('default');
@@ -411,18 +411,18 @@ async function runParent(): Promise<void> {
     });
 
     await check('(3) the two graphs live in SEPARATE on-disk dirs', () => {
-        // .lore/surreal, not .lore/graph (Kùzu) — new workspaces default to
-        // SurrealDB, and no Kùzu file should exist at all for one (confirmed
+        // .lore/surreal, not .lore/graph (the legacy graph engine) — new workspaces default to
+        // SurrealDB, and no legacy graph engine file should exist at all for one (confirmed
         // 2026-08-13, see the outboxGetGraphForWorkspace fix in server.ts).
         const graphA = path.join(homeA, '.lore', 'surreal');
         const graphB = path.join(homeB, '.lore', 'surreal');
         assert.notEqual(graphA, graphB, 'paths differ');
         assert.ok(fs.existsSync(graphA), `A graph dir exists on disk: ${graphA}`);
         assert.ok(fs.existsSync(graphB), `B graph dir exists on disk: ${graphB}`);
-        const kuzuLeakA = path.join(homeA, '.lore', 'graph');
-        const kuzuLeakB = path.join(homeB, '.lore', 'graph');
-        assert.ok(!fs.existsSync(kuzuLeakA), `A must have NO Kùzu file at all on a Surreal-backed workspace: ${kuzuLeakA}`);
-        assert.ok(!fs.existsSync(kuzuLeakB), `B must have NO Kùzu file at all on a Surreal-backed workspace: ${kuzuLeakB}`);
+        const legacyLeakA = path.join(homeA, '.lore', 'graph');
+        const legacyLeakB = path.join(homeB, '.lore', 'graph');
+        assert.ok(!fs.existsSync(legacyLeakA), `A must have NO the legacy graph engine file at all on a Surreal-backed workspace: ${legacyLeakA}`);
+        assert.ok(!fs.existsSync(legacyLeakB), `B must have NO the legacy graph engine file at all on a Surreal-backed workspace: ${legacyLeakB}`);
     });
 
     // ════════════════════════════════════════════════════════════════════════
@@ -492,12 +492,12 @@ async function runParent(): Promise<void> {
             cwd: REPO_ROOT,
             env: { ...process.env },
             stdio: ['ignore', 'inherit', 'inherit'],
-            timeout: 120_000, // model load + Kùzu init + replication take a few seconds
+            timeout: 120_000, // model load + legacy-engine init + replication take a few seconds
         });
         assert.equal(
             res.signal,
             null,
-            `child terminated by signal ${res.signal} — a native Kùzu/LanceDB teardown crash (SIGSEGV) on natural exit`,
+            `child terminated by signal ${res.signal} — a native legacy-engine/LanceDB teardown crash (SIGSEGV) on natural exit`,
         );
         assert.equal(res.status, 0, `child exited ${res.status}, expected 0 (clean natural teardown, no process.exit)`);
     });
@@ -514,7 +514,7 @@ async function runParent(): Promise<void> {
         console.log('CAPSTONE PASSED — embedded: portless, no global handlers, replication+recall, dataDir-isolated, clean+natural teardown ✓');
     }
 
-    // NATURAL EXIT (TW-7b): the parent disposed every Kùzu/LanceDB handle it
+    // NATURAL EXIT (TW-7b): the parent disposed every the legacy graph engine/LanceDB handle it
     // opened, so it returns to a natural process exit too. We set process.exitCode
     // instead of calling process.exit — even this runner proves the contract it
     // tests (no process.exit mask; a teardown SIGSEGV here would be a real crash).

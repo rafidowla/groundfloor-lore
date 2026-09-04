@@ -203,10 +203,9 @@ What is **NOT** done today (updated for TW-6c, 2026-06-15):
   that the live graph or verbatim store is encrypted. The primitives do NOT
   exist as dead code; they will be reintroduced alongside the call site that
   uses them, not before.
-- The live graph store (SurrealDB by default as of v3.13.0; Kùzu for legacy
-  per-workspace `graphEngine: kuzu`), the LanceDB vector store, and the
-  SQLite relational store are **not** transparently encrypted by Lore at the
-  application layer.
+- The live graph store (SurrealDB, the only graph engine), the LanceDB
+  vector store, and the SQLite relational store are **not** transparently
+  encrypted by Lore at the application layer.
 - Encrypting a searchable text column breaks `CONTAINS` / full-text search;
   resolving that trade-off is an explicitly deferred decision.
 

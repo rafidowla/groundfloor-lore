@@ -93,13 +93,14 @@ export interface LoreConfig {
      * Q2.1 — Deployment mode switch (Path A consolidation, 2026-04-20).
      *
      *   'embedded'         In-process library mode (W3-EMBEDDED-MODE). Builds
-     *                      the SAME local Kùzu/LanceDB substrates as 'local'
-     *                      but opens NO transport (no stdio, no HTTP port) and
-     *                      registers NO signal handlers — the embedding host
-     *                      owns the lifecycle and calls `dispose()` explicitly.
-     *                      Publisher/config-time only; never runtime-detected.
+     *                      the SAME local graph engine/LanceDB substrates as
+     *                      'local' but opens NO transport (no stdio, no HTTP
+     *                      port) and registers NO signal handlers — the
+     *                      embedding host owns the lifecycle and calls
+     *                      `dispose()` explicitly. Publisher/config-time
+     *                      only; never runtime-detected.
      *   'local' (default)  Single-user daemon on one workstation. Uses the
-     *                      embedded Kùzu graph under the active workspace
+     *                      embedded graph engine under the active workspace
      *                      directory, no Dataplane dependency required.
      *   'cloud'            Multi-tenant server mode. Boot REFUSES without
      *                      a Dataplane credential (keychain `dataplane`

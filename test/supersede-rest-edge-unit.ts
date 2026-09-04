@@ -66,7 +66,7 @@ const { LoreStorageClient } = await import('../packages/lore/src/storage/loreSto
 
 const registry = new LocalGraphRegistry();
 // getGraphHandle honours the workspace's declared engine ('surreal' above) —
-// getOrOpen is the Kùzu-only substrate accessor. The route and the MCP tool
+// getOrOpen is the legacy-only substrate accessor. The route and the MCP tool
 // resolve the same cached handle, so seeds and assertions see one graph.
 const graph = await registry.getGraphHandle(WS);
 

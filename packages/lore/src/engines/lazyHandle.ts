@@ -3,7 +3,7 @@
  * (architecture gap #7).
  *
  * Problem: 1000 workspaces = 3000 substrate file handles open
- * eagerly (one Kùzu DB + one SQLite DB + one LanceDB dir per
+ * eagerly (one graph-engine DB + one SQLite DB + one LanceDB dir per
  * workspace). Hits OS file-descriptor limits + mmap pressure long
  * before disk capacity. Most users only touch 1-5 workspaces in a
  * session.

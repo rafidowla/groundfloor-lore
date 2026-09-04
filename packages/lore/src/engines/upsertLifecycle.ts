@@ -6,7 +6,7 @@
  * anchor_stale/security_scopes) when the caller omits them — the two primary
  * write surfaces (store_node, POST /api/node) build nodeData WITHOUT them, so
  * a full-row overwrite used to reset an archived node back to 'active' (etc.).
- * The Kùzu `RETURN` projection and its row→typed coercion live here so
+ * The graph engine's `RETURN` projection and its row→typed coercion live here so
  * localGraph.ts (already past the file-size cap) doesn't grow.
  *
  * 2026-08-17 functional-correctness finding 4.2 (fresh sibling, same day):
@@ -39,12 +39,12 @@ export interface ExistingLifecycle {
     supersededReason?: string;
 }
 
-/** Kùzu `RETURN` projection (with `AS` aliases so the column names match the
+/** Graph engine `RETURN` projection (with `AS` aliases so the column names match the
  *  `rowToExistingLifecycle` reads below). */
 export const LIFECYCLE_RETURN_CLAUSE =
     'n.createdAt AS createdAt, n.status AS status, n.classification AS classification, n.security_scopes AS security_scopes, n.stale AS stale, n.anchor_stale AS anchor_stale, n.anchor_stale_since AS anchor_stale_since, n.language AS language, n.ephemeral AS ephemeral, n.ttl_ms AS ttl_ms, n.supersededBy AS supersededBy, n.supersededAt AS supersededAt, n.supersededReason AS supersededReason';
 
-/** Coerce a raw Kùzu RETURN row into typed lifecycle fields. */
+/** Coerce a raw graph engine RETURN row into typed lifecycle fields. */
 export function rowToExistingLifecycle(r: Record<string, unknown>): ExistingLifecycle {
     return {
         createdAt: String(r['createdAt'] ?? ''),

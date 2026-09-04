@@ -9,12 +9,13 @@
  *
  * Edge model (cloud):
  *   Edges live in plain collections with `source_id` / `target_id`
- *   string columns. Unlike Kùzu, there's no MATCH-on-REL syntax to
- *   honor — `traverse` is a plain `query` with `source_id_eq` (out),
- *   `target_id_eq` (in), or two queries unioned (both). The
- *   EdgeShapeHint argument is therefore ignored. We accept it on the
- *   interface to keep KuzuCollectionStorage and DataplaneCollectionStorage
- *   substitutable; slice 5c removes the hint entirely.
+ *   string columns. Unlike a Cypher-based graph engine, there's no
+ *   MATCH-on-REL syntax to honor — `traverse` is a plain `query` with
+ *   `source_id_eq` (out), `target_id_eq` (in), or two queries unioned
+ *   (both). The EdgeShapeHint argument is therefore ignored. We accept
+ *   it on the interface to keep the local collection storage and
+ *   DataplaneCollectionStorage substitutable; slice 5c removes the hint
+ *   entirely.
  *
  * Tenant routing:
  *   Like DataplaneGraph, this adapter calls `tenantProvider()` per op.
@@ -243,7 +244,7 @@ export class DataplaneCollectionStorage implements CollectionStorage {
         _hint?: EdgeShapeHint,
     ): Promise<void> {
         // Cloud edges are plain rows in a regular collection. The hint
-        // is ignored — kept on the interface for Kùzu parity (and as a
+        // is ignored — kept on the interface for local-engine parity (and as a
         // legacy override for undeclared collections); slice 5c plugins
         // pass nothing here.
         const tenantId = this.tenantProvider();

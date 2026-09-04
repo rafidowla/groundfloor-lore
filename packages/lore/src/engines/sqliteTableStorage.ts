@@ -1,12 +1,12 @@
 /**
  * sqliteTableStorage.ts — ITableStorage backed by SQLite (better-sqlite3).
  *
- * Why a second backend exists alongside KuzuTableStorage:
+ * Why a dedicated relational backend exists:
  *   Lore's local engine is conceptually tri-substrate (graph + vector +
- *   relational). Hosting all three on Kùzu was a convenience — Kùzu node
- *   tables ARE relational rows behind a Cypher veneer — but it confused
- *   the mental model and meant Kùzu carried double duty. Splitting the
- *   relational store out into SQLite makes the layout match the cloud's
+ *   relational). Hosting all three on the graph engine was a convenience —
+ *   its node tables ARE relational rows behind a Cypher veneer — but it
+ *   confused the mental model and meant the graph engine carried double
+ *   duty. Splitting the relational store out into SQLite makes the layout match the cloud's
  *   shape (Postgres for relational, ArangoDB for graph, Zilliz/Qdrant
  *   for vector) and makes "which substrate is this on?" answerable by
  *   looking at the file name on disk.
@@ -22,7 +22,7 @@
  * is async) is satisfied without giving up better-sqlite3's perf
  * advantage on the local-mode hot path.
  *
- * The same schema-cache-persistence story as KuzuTableStorage applies:
+ * The same schema-cache-persistence approach applies here:
  * `createTable` is idempotent and the in-memory `schemas` map is the
  * source for `getByKey` (needs the pk column name) and for
  * `collection_schema_get`. Schemas are persisted to a sidecar JSON
@@ -43,18 +43,22 @@ import {
     updateSqliteTableRows,
     type SqliteTableMutationContext,
 } from './sqliteTableTransaction.js';
+import { listSqliteTables } from './sqliteTableList.js';
 import {
     MAX_JOIN_HOPS,
     type ColumnDecl,
     type ColumnType,
+    type DestructiveWriteOptions,
     type EvolutionStep,
     type JoinHop,
     type JoinQuery,
     type JoinSpec,
+    type ListTablesOptions,
     type Row,
     type TableOp,
     type TableOpResult,
     type TableSchema,
+    type TableSchemaSummary,
 } from '../contracts/tables.js';
 import type { RelationalProvider } from '../providers/relationalTypes.js';
 
@@ -218,7 +222,7 @@ export class SqliteTableStorage implements RelationalProvider {
     }
 
     /**
-     * Public handle accessor — mirrors `KuzuCollectionStorage.getConnection()`.
+     * Public handle accessor.
      *
      * Needed so `SqliteAnalyticalStorage` can run aggregates over the SAME
      * database and connection this store writes through, rather than opening a
@@ -234,7 +238,7 @@ export class SqliteTableStorage implements RelationalProvider {
      * Collection name → physical table name. Identity here: this store creates
      * tables under the declared collection name. Exposed so the analytical
      * store shares ONE resolver with its table store instead of assuming the
-     * mapping, which is what let the Kùzu pair drift apart.
+     * mapping, which is what let a split resolver pair drift apart before.
      */
     resolveCollectionTable(coll: string): string {
         return coll;
@@ -371,6 +375,19 @@ export class SqliteTableStorage implements RelationalProvider {
         this.persistSchemaCache();
     }
 
+    /**
+     * Finding #7 / finding B3 (round E) — see sqliteTableList.ts (file-size
+     * split) for the pagination + `withCounts` fan-out-bounding rationale.
+     */
+    async listTables(opts: ListTablesOptions = {}): Promise<TableSchemaSummary[]> {
+        this.loadSchemaCacheOnce();
+        return listSqliteTables({
+            schemas: this.schemas,
+            count: (table) => this.count(table),
+            pickPrimary,
+        }, opts);
+    }
+
     async insert(table: string, row: Row): Promise<void> {
         this.loadSchemaCacheOnce();
         insertSqliteTableRow(this.mutationContext(), table, row);
@@ -425,14 +442,19 @@ export class SqliteTableStorage implements RelationalProvider {
         return this.decodeRow(row, schema) as T;
     }
 
-    async update(table: string, filter: FilterNode, patch: Partial<Row>): Promise<number> {
+    async update(
+        table: string,
+        filter: FilterNode,
+        patch: Partial<Row>,
+        opts?: DestructiveWriteOptions,
+    ): Promise<number> {
         this.loadSchemaCacheOnce();
-        return updateSqliteTableRows(this.mutationContext(), table, filter, patch);
+        return updateSqliteTableRows(this.mutationContext(), table, filter, patch, 'update', opts);
     }
 
-    async delete(table: string, filter: FilterNode): Promise<number> {
+    async delete(table: string, filter: FilterNode, opts?: DestructiveWriteOptions): Promise<number> {
         this.loadSchemaCacheOnce();
-        return deleteSqliteTableRows(this.mutationContext(), table, filter);
+        return deleteSqliteTableRows(this.mutationContext(), table, filter, 'delete', opts);
     }
 
     async count(table: string, filter?: FilterNode): Promise<number> {

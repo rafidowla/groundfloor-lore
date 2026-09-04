@@ -140,10 +140,12 @@ authoritative, sync is collaboration.
 ### The technical decision
 
 Lore's local storage is SurrealDB (graph) + LanceDB (vectors) + SQLite
-(relational). Kùzu was fully removed 2026-08-21 (see
-`docs/KUZU_REMOVAL.md`) — a workspace whose `workspaces.json` still
-declares `graphEngine: 'kuzu'` throws `KuzuEngineRemovedError` rather than
-silently opening an empty store. All three engines here are embedded
+(relational). The prior local graph engine was fully removed 2026-08-21
+(see `docs/KUZU_REMOVAL.md`) — a workspace whose `workspaces.json` still
+declares the legacy graph-engine config value throws a dedicated removal
+error rather than silently opening an empty store (see
+`docs/KUZU_REMOVAL.md` for the exact config value and error name). All
+three engines here are embedded
 databases: one process opens them exclusively.
 
 - **Every embedded store here is single-process-exclusive per
@@ -156,10 +158,11 @@ databases: one process opens them exclusively.
 - **In-process, SurrealDB supports concurrent write transactions** — Lore
   serializes per node id / per edge triple (`engines/writeQueue.ts`'s
   `KeyedMutex`, wired up in `engines/surrealGraph.ts`) for read-decide-write
-  atomicity, not because the substrate demands it. This is looser than
-  Kùzu's constraint was: Kùzu (removed 2026-08-21 — see
-  `docs/KUZU_REMOVAL.md`) allowed exactly one active write transaction at a
-  time process-wide, and required every write to serialize through one
+  atomicity, not because the substrate demands it. This is looser than the
+  prior local graph engine's constraint was: that engine (removed
+  2026-08-21; see `docs/KUZU_REMOVAL.md`) allowed exactly one
+  active write transaction at a time process-wide, and required every
+  write to serialize through one
   global queue (`engines/writeQueue.ts`'s `WriteQueue`) because concurrent
   write transactions corrupted native memory and crashed the process. That
   history is why the write-serialization machinery here is split into two
@@ -183,9 +186,8 @@ inside the local daemon:
 - Push reads pending WAL entries into memory, ships them over HTTP. No
   graph-engine write lock held across network I/O.
 - Pull applies remote nodes/edges per-entry, releasing the write
-  lock/slot between each upsert (the `globalWriteQueue` slot on a
-  Kùzu-backed workspace, the per-key `KeyedMutex` slot on a
-  SurrealDB-backed one). Other MCP calls interleave normally.
+  lock/slot between each upsert (the per-key `KeyedMutex` slot on the
+  SurrealDB-backed graph). Other MCP calls interleave normally.
 - Conflict resolution is last-writer-wins on `updatedAt`, resolved
   per-node during the pull loop. No special lock ceremony.
 - Runs every 30 seconds in the background. A user-visible yield during
@@ -247,7 +249,7 @@ core.
 
 - `docs/architecture.md` — full V2 architecture (engines, MCP tools,
   plugin model).
-- `DECISIONS.md` — architectural decisions log, including the Kùzu
-  lite-vs-upstream comparison and the sync adapter migration.
+- `DECISIONS.md` — architectural decisions log, including the prior local
+  graph engine's lite-vs-upstream comparison and the sync adapter migration.
 - `docs/V2.1_status.md` — ongoing session snapshot, current phase,
   deferred items.

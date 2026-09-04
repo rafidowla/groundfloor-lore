@@ -40,9 +40,10 @@ import { redactError } from '../../../security/logRedact.js';
 import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 
 /**
@@ -174,7 +175,7 @@ export async function tryTopologyRoutes(
     //     contributions are flagged truncated via the heuristic
     //     "client returned exactly limit" since contributeTopology does
     //     not expose a count surface
-    //   - ordering: Kùzu's natural order for now; most-recent ORDER BY
+    //   - ordering: the graph engine's natural order for now; most-recent ORDER BY
     //     would touch getTopology internals and the other 4 call sites.
     //     Deferred to a follow-up when a second pass on topology
     //     sampling is warranted.
@@ -185,7 +186,7 @@ export async function tryTopologyRoutes(
         );
         if (!gate.allowed) { writePermissionDenied(res, gate); return true; }
         try {
-            const TOPOLOGY_RENDER_HARD_CAP = 20000; // render-only — Kùzu storage is uncapped
+            const TOPOLOGY_RENDER_HARD_CAP = 20000; // render-only — graph storage is uncapped
             const TOPOLOGY_RENDER_MIN = 1000;
             const TOPOLOGY_RENDER_DEFAULT = 10000;
             const urlObj = new URL(req.url ?? '/api/topology', 'http://local');
@@ -246,7 +247,7 @@ export async function tryTopologyRoutes(
 
     // Q1.9 — Semantic-zoom overview. Returns one aggregate blob per
     // project + cross-project edge bundle counts. Aggregation runs on
-    // local Kùzu via graph.getTopologyOverview() — no network, no
+    // the local graph via graph.getTopologyOverview() — no network, no
     // external vocab leaked (grouping is on the opaque `project` string
     // that every LoreNode carries).
     //

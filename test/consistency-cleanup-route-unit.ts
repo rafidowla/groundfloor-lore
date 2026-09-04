@@ -108,7 +108,7 @@ function makeMultiWsDeps(active: string, wsB: string, opts?: { wireResolver?: bo
     const graphRegistry = {
         async getOrOpen(ws: string) { return ws === wsB ? B.graph : A.graph; },
         // The route resolves graphs through getGraphHandle (the workspace's
-        // DECLARED engine); getOrOpen stays the Kùzu-substrate accessor. Both
+        // DECLARED engine); getOrOpen stays the legacy-substrate accessor. Both
         // point at the same fake here — this test is about workspace routing,
         // not engine selection.
         async getGraphHandle(ws: string) { return ws === wsB ? B.graph : A.graph; },

@@ -198,13 +198,14 @@ async function writePrebuiltRowsPerWorkspace(
 }
 
 /**
- * NW-BULK — max concurrent in-flight graph ops during a bulk ingest. Each
- * upsert borrows a Kùzu pool connection for its read-decide-write `getNode`;
- * fanning out thousands at once with `Promise.all` overflowed the pool's
- * waiter cap (`KuzuConnectionPool: waiter queue full (200/200)`), failing the
- * writes — which then left edges with missing endpoints. Writes are already
- * serialized by LocalGraph's globalWriteQueue, so bounding the JS fan-out
- * costs no write throughput; it only keeps concurrent pool borrows under the
+ * NW-BULK — max concurrent in-flight graph ops during a bulk ingest. On the
+ * former local graph engine, each upsert borrowed a native pool connection
+ * for its read-decide-write `getNode`; fanning out thousands at once with
+ * `Promise.all` overflowed the pool's waiter cap
+ * (a native connection-pool "waiter queue full (200/200)" error), failing the writes —
+ * which then left edges with missing endpoints. Writes were already
+ * serialized by that engine's globalWriteQueue, so bounding the JS fan-out
+ * cost no write throughput; it only kept concurrent pool borrows under the
  * cap. Default 16; override via LORE_BULK_INGEST_CONCURRENCY.
  */
 const BULK_INGEST_CONCURRENCY: number = (() => {
@@ -283,12 +284,13 @@ export async function runBulkIngest(
     };
 
     // ── Step 1a: Pre-fetch previousStates (pure reads, no write transactions) ──
-    // MUST complete before any writes start. Kùzu allows exactly one active write
-    // transaction at a time. The prior implementation mixed getNode reads and
-    // nodeServiceUpsert writes in the same Promise.all — when write #1 held the
-    // Kùzu write lock, concurrent reads on other connections threw, causing ~10%
-    // of nodes to fail on cold start with "Failed to get node". Separating the
-    // read phase eliminates the read-write contention entirely.
+    // MUST complete before any writes start. The former local graph engine
+    // allowed exactly one active write transaction at a time. The prior
+    // implementation mixed getNode reads and nodeServiceUpsert writes in the
+    // same Promise.all — when write #1 held that engine's write lock,
+    // concurrent reads on other connections threw, causing ~10% of nodes to
+    // fail on cold start with "Failed to get node". Separating the read
+    // phase eliminates the read-write contention entirely.
     // R5 #3 — resolve each node's target graph PER NODE and isolate a resolve
     // failure into results[], honoring the documented per-node-isolation
     // contract. A bare Promise.all over getOrOpen rejected the WHOLE batch when
@@ -339,9 +341,10 @@ export async function runBulkIngest(
     }
 
     // ── Step 1b: Graph writes (bounded, skipEmbed=true) ──────────────────────
-    // Writes are serialized at the Kùzu level via LocalGraph's globalWriteQueue;
-    // but each upsert's read-decide-write getNode borrows a pool connection, so
-    // the JS fan-out is bounded (NW-BULK) to keep concurrent borrows under the
+    // On the former local graph engine, writes were serialized via
+    // LocalGraph's globalWriteQueue; but each upsert's read-decide-write
+    // getNode borrows a pool connection, so the JS fan-out is bounded
+    // (NW-BULK) to keep concurrent borrows under the
     // pool cap. skipEmbed=true: nodeService writes the graph row + WAL + version
     // but skips the outbox verbatim entry (vector writes handled in step 3).
     await mapLimit(nodes, BULK_INGEST_CONCURRENCY, async (node, i) => {

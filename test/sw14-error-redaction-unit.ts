@@ -5,11 +5,11 @@
  * Covers findings A4 and A6 from AUDIT_FINDINGS.md:
  *
  *   A4: analytics.ts catch blocks returned raw (err as Error).message to the
- *       HTTP client, leaking Kùzu query internals and turning a blind injection
+ *       HTTP client, leaking the legacy graph engine query internals and turning a blind injection
  *       into an oracle. Fixed: catch blocks now log via redactError() and return
  *       a generic 'internal_error' / 'invalid_request_body' body to the client.
  *
- *   A6: kuzuTableStorage.ts called assertIdent(schema.name) for its side-effect
+ *   A6: legacyTableStorage.ts called assertIdent(schema.name) for its side-effect
  *       only (throws on invalid input), but the DDL still interpolated the raw
  *       schema.name. Fixed: DDL now uses the *return value* of assertIdent()
  *       (safeName) so a refactor can never silently drop the guard.
@@ -41,13 +41,13 @@ function test(name: string, fn: () => Promise<void> | void): void {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/** The substring that a Kùzu engine would echo back in a real error. */
+/** The substring that a legacy graph engine would echo back in a real error. */
 const LEAK_SENTINEL = 'MATCH (n:LoreNodes) WHERE n.secret = $injected RETURN n';
 
 /** Build a minimal mock IAnalyticalStorage that throws an error containing the leak sentinel. */
 function makeLeakyAnalytical(): IAnalyticalStorage {
     const boom = (): never => {
-        throw new Error(`Kùzu query failed: ${LEAK_SENTINEL}`);
+        throw new Error(`the legacy graph engine query failed: ${LEAK_SENTINEL}`);
     };
     return {
         timeSeries: boom,
@@ -96,7 +96,7 @@ function makeMockRes(): MockResponse {
 
 // ── A4 tests: analytics route error redaction ─────────────────────────────────
 
-test('A4 — /api/time-series Kùzu error: response body does NOT contain raw query', async () => {
+test('A4 — /api/time-series the legacy graph engine error: response body does NOT contain raw query', async () => {
     const req = makeMockReq({
         workspace: 'test-ws',
         collection: 'events',
@@ -119,7 +119,7 @@ test('A4 — /api/time-series Kùzu error: response body does NOT contain raw qu
     assert.equal(mock.statusCode, 500, 'Must respond with 500');
 });
 
-test('A4 — /api/aggregate Kùzu error: response body does NOT contain raw query', async () => {
+test('A4 — /api/aggregate the legacy graph engine error: response body does NOT contain raw query', async () => {
     const req = makeMockReq({
         workspace: 'test-ws',
         collection: 'events',

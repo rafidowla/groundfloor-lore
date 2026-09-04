@@ -1,6 +1,6 @@
 /**
- * nativePoolSafetyNet.ts — single shared process-level safety net for the
- * native (Kùzu + LanceDB) pools.
+ * nativePoolSafetyNet.ts — single shared process-level safety net for
+ * native (e.g. LanceDB) pools.
  *
  * Policy: SURVIVE.
  * ─────────────────
@@ -14,9 +14,10 @@
  *
  * Why this module exists (NW-1c — audit cluster HIGH-ERR-A)
  * ─────────────────────────────────────────────────────────
- * Before this module the two pools each installed their OWN
- * `process.on('uncaughtException', …)` listener. Kùzu's logged and
- * returned (survive). Lance's logged and called `process.exit(1)`. Node
+ * Before this module the native pools each installed their OWN
+ * `process.on('uncaughtException', …)` listener, with different policies:
+ * one logged and returned (survive), another logged and called
+ * `process.exit(1)`. Node
  * fires every registered listener for the event, so on a single native
  * fault BOTH ran — and the one that calls `process.exit` wins. Net
  * effect: the documented survive-policy was silently defeated, and the
@@ -52,12 +53,11 @@
  *
  * Scope
  * ─────
- * The listener cannot reliably filter for "is this fault from kuzu vs
- * lance vs unrelated code" — that signal is not stable across native
- * bindings. The cost is logging unrelated escapes we'd otherwise have
+ * The listener cannot reliably filter for "is this fault from one native
+ * pool vs another vs unrelated code" — that signal is not stable across
+ * native bindings. The cost is logging unrelated escapes we'd otherwise have
  * crashed on; the benefit is the daemon survives a native-pool
- * anomaly. This is the same tradeoff the original Kùzu safety net
- * already documented. Because it suppresses ALL uncaught faults
+ * anomaly. Because it suppresses ALL uncaught faults
  * process-wide, it is precisely the behavior a non-owning embedder must
  * never inherit — hence the opt-in gate.
  */

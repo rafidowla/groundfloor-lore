@@ -9,7 +9,7 @@
  *   {
  *     "id": "20260524-add-priority-column",
  *     "kind": "add_column",            // add_column | add_table | add_index
- *     "substrate": "sqlite",           // sqlite | kuzu | lance
+ *     "substrate": "sqlite",           // see SubstrateName (migration/types.ts)
  *     "target": "load_jobs",
  *     "workspace": "default",
  *     "params": { "column": "priority INTEGER DEFAULT 0" }
@@ -19,7 +19,7 @@
  * loreDir's migrations.sqlite — no daemon required. The substrate
  * adapter wiring is connection-specific: for `sqlite` substrate the
  * CLI accepts `--db-path <file>` (defaults to the local outbox.sqlite
- * for demo purposes); for `kuzu` and `lance` the CLI emits a
+ * for demo purposes); for a non-sqlite substrate the CLI emits a
  * "operator-must-supply-handle" notice today since wiring those into
  * a running daemon's open handle is the H1.next step (the daemon-side
  * wiring is exercised via test fixtures + the in-process unit suite).

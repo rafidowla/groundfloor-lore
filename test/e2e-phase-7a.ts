@@ -163,7 +163,7 @@ async function testF1Traverse(client: Client): Promise<void> {
     console.log('\n─── F1: traverse returns real neighbors ───');
 
     // F1 fix: traverse() was throwing a Parser exception for any node
-    // (Kùzu 0.11.x rejected the recursive Cypher pattern `e[length(e)-1]`).
+    // (the legacy graph engine 0.11.x rejected the recursive Cypher pattern `e[length(e)-1]`).
     // The fix rewrote traverse to iterative BFS. The test verifies:
     //   a) traverse returns a well-formed response (no parser exception)
     //   b) results array is present (even if empty — isolated node is valid)
@@ -272,7 +272,7 @@ async function testF2bReaperListsOrphans(client: Client): Promise<void> {
     record('recall tool reachable', results != null, 'daemon routed recall');
 
     // The reaper itself is CLI-only; it cannot run while the daemon holds
-    // the Kùzu lock. Verification of the reaper logic lives in
+    // the legacy graph engine lock. Verification of the reaper logic lives in
     // manual-verified commit f2a5d81. Here we just confirm the MCP
     // surface stays stable after the F2a round-trip.
     const stats = await callTool(client, 'stats', { workspace: 'default' }) as { nodeCount?: number } | null;

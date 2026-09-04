@@ -371,7 +371,7 @@ test('all-in-sync workspace yields zero-action report', async () => {
 });
 
 test('1.1 regression: graph scan failure REFUSES the orphan delete pass (no mass wipe)', async () => {
-    // A graph whose node walk throws simulates a transient Kùzu page error.
+    // A graph whose node walk throws simulates a transient the legacy graph engine page error.
     // Pre-fix, diagnoseConsistency swallowed it, computed orphans = vector -
     // (empty graph set) = the WHOLE corpus, and the sweep deleted every row.
     const throwingGraph = {

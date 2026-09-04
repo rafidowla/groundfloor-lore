@@ -14,7 +14,7 @@
  * envelope) lives in the call sites (HTTP route + MCP tool).
  *
  * No external state. Tests can call these directly with literal
- * arguments — no daemon, no Kùzu.
+ * arguments — no daemon, no graph engine.
  */
 
 import type { WorkspaceVocabPolicy } from '../config/workspaces.js';
@@ -43,7 +43,7 @@ export const STORE_NODE_KNOWN_FIELDS: ReadonlyArray<string> = Object.freeze([
     'ttl_ms',
     'async_embed',
     // W1 (Sprint W) — opt-out of embedding entirely. Default true =
-    // current behavior (kuzu write + lancedb embed). `embed: false`
+    // current behavior (graph write + lancedb embed). `embed: false`
     // writes the graph row only; no lancedb row, no recall surface.
     // Distinct from `async_embed` which still writes (just later).
     'embed',

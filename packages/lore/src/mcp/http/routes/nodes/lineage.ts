@@ -6,7 +6,7 @@
  * several nodes with one successor) plus every successor (walk forward),
  * ordered oldest → newest. Capability-probed, not LocalGraph-only: it runs
  * on any backend whose graph handle implements the supersededBy back-walk
- * (`findSupersededByPredecessors`) — Kùzu's LocalGraph and SurrealGraph both
+ * (`findSupersededByPredecessors`) — LocalGraph and SurrealGraph both
  * qualify. A backend that doesn't implement it gets a structured 501.
  */
 

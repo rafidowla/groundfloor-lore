@@ -2,7 +2,7 @@
  * ports.ts — Dependency interfaces for the maintain orchestrator.
  *
  * The orchestrator (maintain.ts) depends ONLY on these narrow ports, not
- * on LanceDB / Kùzu / the workspaces module directly. Real adapters live
+ * on LanceDB / the graph engine / the workspaces module directly. Real adapters live
  * in adapters.ts; tests inject fakes. This is what makes "dry-run does
  * zero writes" and "per-table error isolation" testable without a live
  * store.
@@ -65,6 +65,18 @@ export interface NodeStorePort {
     delete(id: string): Promise<void>;
 }
 
+/** One leftover `.pending-delete-*` sideline directory, as reported by `lore maintain`. */
+export interface PendingSidelineInfo {
+    /** The workspace name parsed out of the sideline's directory name. */
+    name: string;
+    /** The sideline directory's own basename (workspacesDir-relative). */
+    dirName: string;
+    /** Milliseconds since the sideline was created (parsed from its name), or -1 if unparseable. */
+    ageMs: number;
+    /** On-disk bytes still occupied by the leftover sideline. */
+    bytes: number;
+}
+
 /** Workspace registry port — list + delete ephemeral workspaces. */
 export interface WorkspaceRegistryPort {
     list(): WorkspaceForSelection[];
@@ -73,6 +85,16 @@ export interface WorkspaceRegistryPort {
     /** Remove from the registry AND delete the on-disk data dir. Async: closes
      *  any cached graph handle before deleting the dir (re-audit 2026-06-25). */
     delete(name: string): Promise<{ bytesFreed: number }>;
+    /**
+     * QA round 4, finding 3 — leftover `.pending-delete-*` sidelines from a
+     * `delete()` whose final `rmSync` failed are never reported anywhere;
+     * they only get retried if a later `delete()` call targets that exact
+     * workspace name again. Optional (not `?? []`'d away) so existing
+     * fakes without a real workspacesDir to scan keep compiling unchanged;
+     * `runMaintenance` treats a missing implementation the same as "none
+     * found".
+     */
+    pendingSidelines?(): PendingSidelineInfo[];
 }
 
 /**

@@ -9,7 +9,7 @@
  * EVERY page. Enumerating 51,934 edges in 1,000-row pages spent ~150 ms per
  * page re-sorting the same rows: 9,227 ms total, against 469 ms without it.
  * That single sort was most of the reason a SurrealDB-backed workspace looked
- * 10× slower than Kùzu for Atlas, whose every graph surface enumerates all
+ * 10× slower than the legacy graph engine for Atlas, whose every graph surface enumerates all
  * edges.
  *
  * Removing a sort from a paginated query is exactly the change that silently

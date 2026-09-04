@@ -1,26 +1,24 @@
 /**
  * migration/schemaGraphOpsBackend.ts — engine-agnostic MigrationBackend.
  *
- * Same MVP scope as the former `KuzuMigrationBackend` (`schemas/migration/
- * kuzuBackend.ts`, deleted Kuzu-removal Phase 3f once this class and
- * `SurrealSchemaGraphOps` fully superseded it) — the class this one was
- * derived from, line-for-line, op by op:
+ * Same MVP scope as the former graph-native MigrationBackend (deleted once
+ * this class and `SurrealSchemaGraphOps` fully superseded it) — the class
+ * this one was derived from, line-for-line, op by op:
  * `node_type.removed`, `node_type.renamed`, `node_type.kind_changed`,
  * `field.removed`, `field.type_changed`, `field.sensitivity_flipped`,
  * `edge_type.removed`, `permission.changed`, `permission.removed`.
  *
  * Built on `SchemaGraphOps` (`schemas/substrate/schemaGraphOps.ts`) instead
- * of raw Kùzu Cypher, so it runs unmodified against either engine's
- * implementation — `KuzuSchemaGraphOps` (a verbatim transcription of
- * `KuzuMigrationBackend`'s own Cypher, so behaviour on a Kùzu-backed
- * workspace is unchanged) or `SurrealSchemaGraphOps`. Selected in
- * `schemas/orchestration/wiring.ts`, which picks the ops instance for the
- * boot workspace's actual engine.
+ * of raw Cypher, so it runs unmodified against either engine's
+ * implementation — `LegacySchemaGraphOps` (a verbatim transcription of the
+ * former backend's own Cypher, so behaviour there is unchanged) or
+ * `SurrealSchemaGraphOps`. Selected in `schemas/orchestration/wiring.ts`,
+ * which picks the ops instance for the boot workspace's actual engine.
  *
  * One real behavioural difference from the port's primitives:
  * `dryRunFieldRemoved` needs an EXACT affected-row count over the entire
  * population of a type, but `SchemaGraphOps` only exposes bounded paging
- * (`pageNodesByType`), not an unbounded dump — the old Kùzu backend's single
+ * (`pageNodesByType`), not an unbounded dump — the former backend's single
  * unbounded Cypher query has no port equivalent by design (the port's
  * contract is deliberately bounded everywhere else). This class pages to
  * exhaustion instead: more round trips than one query, functionally

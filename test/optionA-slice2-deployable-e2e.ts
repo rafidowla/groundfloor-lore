@@ -12,7 +12,7 @@
  *   - W1: 'arcade' is a first-class deployment mode (configManager +
  *     mcp/arcadeBoot.ts). createArcadeInstance boots the relational lane
  *     (SQLite outbox + hash-chained audit) + the operator control-plane HTTP
- *     listener, and NEVER opens Kùzu/LanceDB/sync/watchers/maintenance timers.
+ *     listener, and NEVER opens the legacy graph engine/LanceDB/sync/watchers/maintenance timers.
  *   - W2: operator-only control-plane routes (mcp/http/routes/arcadeAdmin.ts)
  *     over real HTTP: provision / list / issue-token / list-tokens / revoke /
  *     disable / destroy, each gated by bindDaemonOperatorLane; a non-operator
@@ -744,7 +744,7 @@ async function testIsolationRegression(): Promise<void> {
 
   // ── NO LOCAL SUBSTRATE: after a full data-plane run, LORE_HOME must contain
   //    the relational lane only (SQLite registry/outbox + audit.jsonl) — never
-  //    a Kùzu `graph` DB or a `lancedb/` vector store. Arcade mode's tenant
+  //    a legacy graph engine `graph` DB or a `lancedb/` vector store. Arcade mode's tenant
   //    substrate is 100% in ArcadeDB (release criterion 1).
   const walk = (dir: string, acc: string[] = []): string[] => {
     for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -755,8 +755,8 @@ async function testIsolationRegression(): Promise<void> {
     return acc;
   };
   const homeFiles = walk(RUN_HOME).map((f) => path.relative(RUN_HOME, f));
-  const kuzuOrLance = homeFiles.filter((f) => /(^|\/)(graph|lancedb)(\/|$)|\.kuzu|lance/i.test(f));
-  check('ISOLATION', 'no Kùzu/LanceDB substrate file created under LORE_HOME', kuzuOrLance.length === 0, `offenders=${kuzuOrLance.join(', ')}`);
+  const legacyOrLance = homeFiles.filter((f) => /(^|\/)(graph|lancedb)(\/|$)|\.the legacy graph engine|lance/i.test(f));
+  check('ISOLATION', 'no legacy graph engine/LanceDB substrate file created under LORE_HOME', legacyOrLance.length === 0, `offenders=${legacyOrLance.join(', ')}`);
   const hasRelational = homeFiles.some((f) => /arcade-provisioning\.sqlite/.test(f)) && homeFiles.some((f) => /audit\.jsonl/.test(f));
   check('ISOLATION', 'LORE_HOME holds the relational lane (registry + audit)', hasRelational, `files=${homeFiles.join(', ')}`);
 }

@@ -2,7 +2,7 @@
  * syncEngine.ts — Offline-First Sync Engine with WAL.
  *
  * Purpose:
- *   Provides offline-first synchronization between the local Kùzu graph
+ *   Provides offline-first synchronization between the local graph
  *   and a remote backend (the hosted Dataplane). Uses a Write-Ahead Log
  *   (WAL) to buffer writes locally, then pushes them asynchronously when
  *   the remote backend is reachable.
@@ -256,6 +256,28 @@ export interface SyncAdapter {
     pushDeletes?(ids: string[]): Promise<SyncResult>;
 
     /**
+     * pushEdgeDeletes — Propagate local edge deletions to the remote backend.
+     *
+     * Round-E X-edges — edge-side counterpart of `pushDeletes`. `delete_edge`
+     * WAL entries (from MCP delete_edge / REST DELETE /api/edge) used to have
+     * NO consumer at all — pushPendingInner didn't even have a case for the
+     * op, so it fell into the `default` (unrecognized) bucket and stayed in
+     * the WAL forever, never reaching this hook.
+     *
+     * Optional: adapters predating edge-delete-sync may omit it. When
+     * absent, the engine leaves `delete_edge` entries in the WAL (does NOT
+     * truncate them) so no delete is silently lost — identical contract to
+     * `pushDeletes`.
+     *
+     * @param edges - (sourceId, targetId, relation) triples to delete remotely.
+     * @returns Summary; `failures > 0` keeps the delete entries in the WAL.
+     *
+     * Side Effects: Deletes from remote storage.
+     * Idempotency: Yes — deleting an already-absent edge is a no-op.
+     */
+    pushEdgeDeletes?(edges: Array<{ sourceId: string; targetId: string; relation: string }>): Promise<SyncResult>;
+
+    /**
      * pull — Fetch remote changes since a given timestamp.
      *
      * @param since - ISO 8601 timestamp. Fetch changes after this time.
@@ -319,7 +341,7 @@ export interface SyncAdapter {
  *   conflicts using last-writer-wins (by updatedAt timestamp).
  *
  * Inputs:
- *   - localGraph: The Kùzu graph for reading/writing local data.
+ *   - localGraph: The local graph for reading/writing local data.
  *   - adapter: The remote backend adapter (nullable — runs offline).
  *   - loreDir: Path to .lore/ directory for WAL and sync markers.
  *
@@ -328,7 +350,7 @@ export interface SyncAdapter {
  *   - Reads/writes .lore/.last-sync.push (push cursor — advanced by push acks).
  *   - Reads/writes .lore/.last-sync.pull (pull cursor — advanced by pull acks).
  *   - Network calls via SyncAdapter (when connected).
- *   - Upserts to local Kùzu graph (on pull).
+ *   - Upserts to local graph (on pull).
  *
  * Error Behavior:
  *   - Network failures are caught and logged, never crash.
@@ -368,7 +390,7 @@ export class SyncEngine {
     private pushChain: Promise<unknown> = Promise.resolve();
 
     /**
-     * @param localGraph - The graph instance. Local mode (Kùzu) is the
+     * @param localGraph - The graph instance. Local mode (SurrealDB) is the
      *   primary use case; cloud-mode SyncEngine constructs without
      *   crashing but is effectively a no-op (the cloud daemon writes
      *   directly via Dataplane, so there is no local WAL to push).
@@ -395,7 +417,7 @@ export class SyncEngine {
     private storageClient: LoreStorageClient | null;
 
     constructor(
-        // Handle, not LocalGraph — naming the Kùzu class made sync Kùzu-only.
+        // Handle, not LocalGraph — naming the concrete class made sync engine-specific.
         localGraph: LoreGraphHandle,
         loreDir: string,
         adapter: SyncAdapter | null = null,
@@ -450,12 +472,12 @@ export class SyncEngine {
      * pushPending — Push buffered WAL entries to the remote backend.
      *
      * Reads all pending WAL entries, groups them by type (nodes vs edges),
-     * pushes to the remote backend, marks nodes as synced in Kùzu,
+     * pushes to the remote backend, marks nodes as synced locally,
      * and truncates the WAL on success.
      *
      * @returns SyncResult with push statistics.
      *
-     * Side Effects: Network push, WAL truncation, Kùzu markSynced.
+     * Side Effects: Network push, WAL truncation, local markSynced.
      * Error Behavior: Returns result with failure count on partial failure.
      *   WAL is only truncated if ALL entries succeed.
      */
@@ -495,12 +517,16 @@ export class SyncEngine {
         }
 
         // Group entries by type. Core recognizes upsert_node / add_edge /
-        // delete_node. Any other op is unrecognized: there is no live
-        // producer of such ops (the plugin system was removed in v3.11.0),
-        // so they are retained in the WAL rather than pushed or dropped.
+        // delete_node / delete_edge. Any other op is unrecognized: there is
+        // no live producer of such ops (the plugin system was removed in
+        // v3.11.0), so they are retained in the WAL rather than pushed or
+        // dropped.
         const nodes: LoreNode[] = [];
         const edges: LoreEdge[] = [];
         const deletedIds: string[] = [];
+        // Round-E X-edges — 'delete_edge' entries, pushed via the adapter's
+        // (optional) pushEdgeDeletes hook, mirroring deletedIds/pushDeletes.
+        const deletedEdges: Array<{ sourceId: string; targetId: string; relation: string }> = [];
 
         // SW-02: track which WAL entryIds belong to each category so we can
         // truncate ONLY the entries that were actually pushed+acked. Entries
@@ -509,6 +535,7 @@ export class SyncEngine {
         const nodeEntryIds: string[] = [];
         const edgeEntryIds: string[] = [];
         const deleteEntryIds: string[] = [];
+        const deleteEdgeEntryIds: string[] = [];
         const unrecognizedEntryIds: string[] = []; // B3 — kept, never truncated away
 
         for (const entry of entries) {
@@ -524,6 +551,10 @@ export class SyncEngine {
                 case 'delete_node':
                     deletedIds.push(entry.data['id'] as string);
                     deleteEntryIds.push(entry.entryId);
+                    break;
+                case 'delete_edge':
+                    deletedEdges.push(entry.data as unknown as { sourceId: string; targetId: string; relation: string });
+                    deleteEdgeEntryIds.push(entry.entryId);
                     break;
                 default:
                     // SW-02 (B3): an op core doesn't recognize is NOT data we
@@ -583,6 +614,41 @@ export class SyncEngine {
                     // the deletes; they remain in the WAL for a capable adapter.
                     deleteFailures = deletedIds.length;
                     deleteErrors.push(`Adapter does not support pushDeletes — ${deletedIds.length} delete(s) retained in WAL`);
+                }
+            }
+
+            // Round-E X-edges — edge-side counterpart of the delete_node
+            // block above. Before this fix `delete_edge` entries had no
+            // consumer at all (they fell into the `default` unrecognized
+            // bucket), so a locally-deleted edge was never propagated by
+            // sync and never truncated from the WAL by design (B3 keeps
+            // unrecognized entries) — this closes that gap the same way B2
+            // closed it for node deletes: push via the adapter's (optional)
+            // `pushEdgeDeletes`, only mark truncated on a clean ack, and
+            // leave the entries in the WAL when the adapter can't or won't.
+            let edgeDeletesPushed = 0;
+            let edgeDeleteFailures = 0;
+            const edgeDeleteErrors: string[] = [];
+            if (deletedEdges.length > 0) {
+                if (typeof this.adapter.pushEdgeDeletes === 'function') {
+                    try {
+                        const der = await this.adapter.pushEdgeDeletes(deletedEdges);
+                        edgeDeletesPushed = der.nodesPushed;
+                        edgeDeleteFailures = der.failures;
+                        edgeDeleteErrors.push(...der.errors);
+                        if (der.failures === 0) {
+                            for (const id of deleteEdgeEntryIds) pushedEntryIds.add(id);
+                        }
+                    } catch (edgeDeleteErr) {
+                        edgeDeleteFailures = deletedEdges.length;
+                        edgeDeleteErrors.push(`Edge deletes: ${(edgeDeleteErr as Error).message}`);
+                    }
+                } else {
+                    // Adapter predates edge-delete-sync — surface it but
+                    // DON'T drop the deletes; they remain in the WAL for a
+                    // capable adapter.
+                    edgeDeleteFailures = deletedEdges.length;
+                    edgeDeleteErrors.push(`Adapter does not support pushEdgeDeletes — ${deletedEdges.length} edge delete(s) retained in WAL`);
                 }
             }
 
@@ -657,7 +723,7 @@ export class SyncEngine {
             // the previous sync and this push completion.
             const fullySucceeded =
                 result.failures === 0 &&
-                deleteFailures === 0 && unrecognizedEntryIds.length === 0;
+                deleteFailures === 0 && edgeDeleteFailures === 0 && unrecognizedEntryIds.length === 0;
             if (pushedEntryIds.size > 0) {
                 this.wal.truncatePushed(pushedEntryIds);
             }
@@ -667,9 +733,9 @@ export class SyncEngine {
 
             return {
                 nodesPushed: result.nodesPushed + deletesPushed,
-                edgesPushed: result.edgesPushed,
-                failures: result.failures + deleteFailures,
-                errors: [...result.errors, ...deleteErrors],
+                edgesPushed: result.edgesPushed + edgeDeletesPushed,
+                failures: result.failures + deleteFailures + edgeDeleteFailures,
+                errors: [...result.errors, ...deleteErrors, ...edgeDeleteErrors],
             };
         } catch (pushError) {
             return {
@@ -682,14 +748,14 @@ export class SyncEngine {
     }
 
     /**
-     * pullRemote — Pull changes from the remote backend into local Kùzu.
+     * pullRemote — Pull changes from the remote backend into the local graph.
      *
      * Fetches all changes since the last sync timestamp, applies them
      * locally using last-writer-wins conflict resolution.
      *
      * @returns Summary of pulled changes.
      *
-     * Side Effects: Upserts to local Kùzu graph. Updates .last-sync.pull.
+     * Side Effects: Upserts to local graph. Updates .last-sync.pull.
      * Error Behavior: Returns empty result on network failure.
      *
      * NW-1b: reads + advances the PULL cursor only. The push cursor

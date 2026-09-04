@@ -14,7 +14,7 @@
  * prune racing same-id upserts produces no SILENT lost write and a coherent
  * graph.
  *
- * KNOWN GAP (2026-08-20, surfaced by the Kùzu→SurrealDB repoint, NOT papered
+ * KNOWN GAP (2026-08-20, surfaced by the legacy graph engine→SurrealDB repoint, NOT papered
  * over here): SurrealGraph's writes.upsertNode is the ONE composite write
  * verb without the engine-layer transaction-conflict retry — deleteNode,
  * supersedeNode, unsupersedeNode, markStaleByTags, pruneInferredLoreEdges
@@ -24,7 +24,7 @@
  * retried" straight out of upsertNode. The failure is LOUD (caller sees the
  * error; nodeUpsert retracts its outbox row), so the original audit's
  * silent-lost-write invariant holds — but the zero-rejection guarantee the
- * Kùzu engine's global write queue gave this race does not, until upsertNode
+ * the legacy graph engine's global write queue gave this race does not, until upsertNode
  * gets the same retry wrap. The smoke below therefore accepts ONLY that
  * documented conflict class as a rejection and still fails on any silent
  * loss, torn state, or ghost row.

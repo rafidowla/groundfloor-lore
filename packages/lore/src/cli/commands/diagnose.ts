@@ -14,7 +14,6 @@
  *   lore diagnose --json                    # only the JSON, no summary line
  */
 
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { createTableStorage } from '../../engines/tableStorageFactory.js';
 import type { RelationalProvider } from '../../providers/relationalTypes.js';
 import { VerbatimStore } from '../../engines/verbatimStore.js';
@@ -23,7 +22,7 @@ import {
     summarizeReport,
     type SqliteOrphanCheck,
 } from '../../diagnostics/consistency.js';
-import { resolveGraphBasePath } from './shared.js';
+import { resolveGraphBasePath, openGraphForCli } from './shared.js';
 import { getActiveWorkspaceName } from '../../config/workspaces.js';
 
 export async function diagnoseCommand(args: string[]): Promise<void> {
@@ -31,8 +30,10 @@ export async function diagnoseCommand(args: string[]): Promise<void> {
     const workspace = flags.workspace ?? getActiveWorkspaceName();
 
     const basePath = resolveGraphBasePath();
-    const graph = openWorkspaceGraph(basePath, { workspaceId: workspace });
-    await graph.initialize();
+    // Finding 11 (round E) — refuse fast with a clear message when a
+    // running daemon holds this store's lock, instead of the old ~15s
+    // openSurreal retry storm ending in a raw driver error.
+    const graph = await openGraphForCli(basePath, { workspaceId: workspace });
     const verbatim = new VerbatimStore(basePath);
     await verbatim.initialize();
     const tableStorage = createTableStorage(basePath);

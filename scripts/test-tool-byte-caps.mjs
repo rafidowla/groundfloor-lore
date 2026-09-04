@@ -105,12 +105,21 @@ async function probeDaemon() {
  * cross-workspace-read gate (workspace_forbidden) on every call. We re-point
  * each fixture's workspace at the active one so the token can actually read it.
  * Returns null if it can't be determined (probes then fall back to skip-on-403).
+ *
+ * B1 (2026-09-03) — /api/health now serves the `workspace` field only to a
+ * Bearer-authenticated caller (anonymous gets the lite body with no
+ * per-workspace data, per the same finding this file's caller already reads
+ * `token` for). Pass it through so this probe still resolves the active
+ * workspace instead of silently always returning null post-split.
  */
-async function getActiveWorkspace() {
+async function getActiveWorkspace(token) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), DAEMON_PROBE_TIMEOUT_MS);
     try {
-        const r = await fetch(`${DAEMON_URL}/api/health`, { signal: ctrl.signal });
+        const r = await fetch(`${DAEMON_URL}/api/health`, {
+            signal: ctrl.signal,
+            headers: token ? { authorization: `Bearer ${token}` } : {},
+        });
         clearTimeout(timer);
         if (r.ok) {
             const body = await r.json();
@@ -319,7 +328,7 @@ async function main() {
     // Re-point fixture workspaces at the daemon's active workspace (see
     // getActiveWorkspace). Null = couldn't determine; we then rely on the
     // skip-on-scope-error branch below so a workspace mismatch never fails.
-    const activeWorkspace = await getActiveWorkspace();
+    const activeWorkspace = await getActiveWorkspace(token);
 
     let failed = 0;
     let passed = 0;

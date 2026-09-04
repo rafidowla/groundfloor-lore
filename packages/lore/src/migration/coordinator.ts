@@ -519,9 +519,9 @@ export class MigrationCoordinator {
                     // Fallback (drop_column, or adapters without the atomic
                     // verb): re-run the backfill immediately before dropOld
                     // so late writes reach the new column first. Back-to-
-                    // back, not atomic — for kuzu that narrows the loss
-                    // window from the whole Phase-2 span to between the two
-                    // statements.
+                    // back, not atomic — for a substrate without the atomic
+                    // verb that narrows the loss window from the whole
+                    // Phase-2 span to between the two statements.
                     let fallback: AdapterOpResult | undefined;
                     if (row.kind !== 'drop_column' && adapter.migrateData) {
                         const catchUp = await adapter.migrateData({
@@ -618,7 +618,7 @@ export class MigrationCoordinator {
             const toColumn = params['toColumn'] as string;
             const columnDdl = (params['columnDdl'] as string | undefined) ?? toColumn;
             // Reuse reverseAddColumn — it does the column existence probe
-            // + ALTER TABLE DROP COLUMN on SQLite; kuzu/lance return
+            // + ALTER TABLE DROP COLUMN on SQLite; other substrates return
             // structured failures we surface upward.
             const reverseResult = await adapter.reverseAddColumn({ table: row.target, column: columnDdl });
             if (!reverseResult.ok) {

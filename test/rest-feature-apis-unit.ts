@@ -6,7 +6,7 @@
  * verbatim/ingestion/inspect additions.
  *
  * Tests drive route handlers directly with in-memory fakes (no HTTP server,
- * no Kùzu, no SQLite on disk). Pattern matches rest-verbatim-get-unit.ts.
+ * no legacy graph engine, no SQLite on disk). Pattern matches rest-verbatim-get-unit.ts.
  *
  * Coverage:
  *   Lifecycle   — prune 400/404, restore happy/404, prune-job happy/404

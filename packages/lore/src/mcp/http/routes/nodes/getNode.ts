@@ -79,12 +79,12 @@ export async function handleGetNode(res: ServerResponse, url: string, deps: Node
         //
         // ONE implementation for every backend. `neighbors1Hop`
         // (engines/graphNeighbors.ts) is built from the portable `queryEdges` +
-        // `getNodesByIds` verbs, which Kùzu, SurrealDB and Arcade all have.
+        // `getNodesByIds` verbs, which SurrealDB and Arcade all have.
         //
         // This used to feature-detect a typed `neighbors1Hop` method and fall
         // back to raw Cypher when it was absent. The fallback was the bug: on a
-        // Surreal-backed workspace it ran against the Kùzu instance, whose node
-        // table is EMPTY there, and returned 200-with-no-neighbours. A route
+        // Surreal-backed workspace it ran against another engine's instance,
+        // whose node table is EMPTY there, and returned 200-with-no-neighbours. A route
         // that answers "no neighbours" for a node that has them is worse than
         // one that fails, so the fallback is gone rather than guarded.
         //

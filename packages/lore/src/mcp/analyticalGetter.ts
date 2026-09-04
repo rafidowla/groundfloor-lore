@@ -4,7 +4,7 @@
  * Extracted from server.ts to keep that file under the 800-line cap.
  * The HTTP /api/time-series + /api/aggregate routes (mcp/http/routes/
  * analytics.ts) consume IAnalyticalStorage through this getter so the
- * dispatcher doesn't need to know whether a local Kùzu backend exists.
+ * dispatcher doesn't need to know whether a local backend exists.
  *
  * Local mode: builds SqliteAnalyticalStorage on first call from the
  * bundle's table storage — same
@@ -20,7 +20,7 @@ import { createAnalyticalStorage } from '../engines/analyticalStorageFactory.js'
 
 /**
  * Returns a memoized getter. The first call attempts to build the
- * Kùzu-backed analytical storage; subsequent calls return the cached
+ * SQLite-backed analytical storage; subsequent calls return the cached
  * handle (or null if the build failed / cloud mode).
  */
 export function getAnalyticalCached(
@@ -33,7 +33,7 @@ export function getAnalyticalCached(
         if (deploymentMode !== 'local') { cached = null; return null; }
         try {
             // Derived from the bundle's TABLE storage, not from the graph's
-            // Kùzu collection connection. Reaching the latter is what made
+            // own collection connection. Reaching the latter is what made
             // every aggregate throw `Table <name> does not exist` for twelve
             // weeks after collections moved to SQLite in 061e189 — the two
             // halves named different substrates and nothing compared them.

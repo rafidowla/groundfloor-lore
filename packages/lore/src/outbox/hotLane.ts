@@ -162,3 +162,45 @@ export async function recordHotWriteBatch(
     }
     return entries;
 }
+
+/**
+ * Sprint E4 (QA A2 round-4, finding 2) — retract a single already-committed
+ * outbox row for an id whose downstream substrate write then failed, so a
+ * later replicator tick cannot replay a write the caller was just told
+ * failed. Mirrors `core/nodeService.ts`'s node.upsert retraction
+ * ("retracting the node.upsert outbox row so the replicator cannot replay
+ * a write the caller was told failed", `nodeServiceVerbatim.ts`'s
+ * `rollbackPartialWrite`) and `storeEdge.ts`'s edge.upsert retraction —
+ * same conditional-`removeIfPending`-else-compensate shape, factored out
+ * here for the bulk hot-lane call sites that need it (bulkWrite.ts,
+ * bulkWriteEdgesDelete.ts).
+ *
+ * `removeIfPending` (when the store implements it) atomically no-ops when
+ * the replicator already claimed the row between the commit and this call
+ * — in that case the row's effect already landed for real, so `compensating`
+ * (when supplied) records a follow-up write that undoes or reconciles it
+ * (e.g. a compensating `node.delete` for a resurrected node.upsert, or a
+ * `verbatim.tombstone` for a graph delete that raced ahead of its own
+ * tombstone). Pass `null` when no compensating write is needed (the "already
+ * claimed" case has no side effect left to reconcile).
+ *
+ * Throws if the store lacks `removeIfPending` and `remove` also throws, or
+ * if the compensating `recordHotWrite` fails — callers are expected to wrap
+ * this in a try/catch and log rather than let a retraction failure mask the
+ * original substrate error it's responding to.
+ */
+export async function retractHotWriteOrCompensate(
+    store: OutboxStore,
+    entryId: string,
+    compensating: HotWriteSpec | null,
+): Promise<void> {
+    let removed = true;
+    if (store.removeIfPending) {
+        removed = await store.removeIfPending(entryId);
+    } else {
+        await store.remove(entryId);
+    }
+    if (!removed && compensating) {
+        await recordHotWrite(store, compensating);
+    }
+}

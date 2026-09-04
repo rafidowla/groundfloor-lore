@@ -16,7 +16,7 @@
  * Substrate-agnostic by design — this module takes a `lookup` and
  * `upsert` function. The caller (LocalGraph or DataplaneGraph) supplies
  * the substrate-specific implementations. The dedupe engine never
- * touches Kùzu or Dataplane directly.
+ * touches SurrealDB or Dataplane directly.
  */
 
 import { createHash } from 'node:crypto';

@@ -3,8 +3,8 @@
  * sp05-topology-clamp-unit.ts — SP-05 regression: LIMIT sanitisation.
  *
  * The original half of this file asserted computeTopology's Cypher LIMIT
- * clauses through a stubbed Kùzu WithConnection; it died with graphTopology
- * .ts and the engine (Kùzu removal Phase 3d, 2026-08-21). What survives is
+ * clauses through a stubbed the legacy graph engine WithConnection; it died with graphTopology
+ * .ts and the engine (the legacy graph engine removal Phase 3d, 2026-08-21). What survives is
  * the engine-agnostic clampLimit/TOPOLOGY_LIMIT_CEILING half (re-pointed to
  * topologyOverviewFold.ts in Step 1): the same numeric-clamping contract the
  * Surreal path's overview fold relies on.

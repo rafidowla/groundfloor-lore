@@ -32,13 +32,14 @@ import {
     formatSelfConfirmError,
     type HumanApprovalPolicy,
 } from '../../../security/humanApproval.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError } from '../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 
 /**
@@ -116,7 +117,7 @@ export async function tryConfigRoutes(
             return true;
         }
         try {
-            const parsed = JSON.parse(body || '{}') as {
+            const parsed = parseJsonBody(body) as {
                 resource?: string;
                 plugin?: string; // legacy field — accepted for back-compat
                 decision?: 'keep' | 'drop' | 'reenable';
@@ -161,6 +162,12 @@ export async function tryConfigRoutes(
                 config: {},
             }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — this already answered 400, but
+            // redactError's quoted-token pass garbled the JSON.parse
+            // diagnostic (e.g. the bad token) into an unreadable `id#<hash>`
+            // fragment. That text is JSON-syntax metadata, not caller
+            // content, so route it through writeInvalidJson instead.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'invalid_request_body', redactError(err));
         }
         return true;
@@ -185,7 +192,7 @@ export async function tryConfigRoutes(
             return true;
         }
         try {
-            const parsedDrop = JSON.parse(body || '{}') as {
+            const parsedDrop = parseJsonBody(body) as {
                 resource?: string;
                 plugin?: string; // legacy field — accepted for back-compat
                 confirm?: string;
@@ -211,6 +218,9 @@ export async function tryConfigRoutes(
                 config: {},
             }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — see the /api/orphan handler
+            // above for why the JSON-parse case bypasses redactError.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'invalid_request_body', redactError(err));
         }
         return true;
@@ -259,7 +269,7 @@ export async function tryConfigRoutes(
             return true;
         }
         try {
-            const update = JSON.parse(body || '{}') as Record<string, unknown>;
+            const update = parseJsonBody(body) as Record<string, unknown>;
             // RC2 audit (2026-05-17): without this, an adversarial
             // caller sending `[1,2,3]` or `true` had the body coerced
             // through configManager.patch with no warning. Reject
@@ -294,6 +304,9 @@ export async function tryConfigRoutes(
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ...next, hasApiKey: hasKey, capability: getCapability(next.llmProvider, next.llmProvider === 'ollama' ? next.ollamaModel : undefined) }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — see the /api/orphan handler
+            // above for why the JSON-parse case bypasses redactError.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'invalid_request_body', redactError(err));
         }
         return true;
@@ -317,7 +330,7 @@ export async function tryConfigRoutes(
             return true;
         }
         try {
-            const payload = JSON.parse(body || '{}') as { text?: string; threshold?: number; minLength?: number };
+            const payload = parseJsonBody(body) as { text?: string; threshold?: number; minLength?: number };
             if (typeof payload.text !== 'string') {
                 writeError(res, 400, 'invalid_request_body', '`text` (string) is required');
                 return true;
@@ -330,6 +343,10 @@ export async function tryConfigRoutes(
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(result));
         } catch (detectErr) {
+            // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+            // through to 500 here; parseJsonBody's tagged error is caught
+            // first now.
+            if (isInvalidJsonBody(detectErr)) { writeInvalidJson(res, detectErr); return true; }
             writeError(res, 500, 'internal_error', redactError(detectErr));
         }
         return true;

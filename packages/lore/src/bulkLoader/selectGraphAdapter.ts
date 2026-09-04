@@ -1,19 +1,17 @@
 /**
- * bulkLoader/selectGraphAdapter.ts — Phase 3c (Kuzu removal) graph-adapter
- * selection for the bulk-load dispatcher.
+ * bulkLoader/selectGraphAdapter.ts — graph-adapter selection for the
+ * bulk-load dispatcher.
  *
  * Which bulk adapter the load-jobs wiring builds is decided by what the LIVE
  * graph handle actually exposes (the mcp/bootSteps.ts buildGraphReaders
- * capability pattern), not by an assumed class: the local/embedded graph
- * is SurrealGraph since the Kùzu removal, which carries `bulkUpsertNodes`
- * (`addEdge` is on the shared GraphProvider surface, so it discriminates
- * nothing). The Kùzu arm — LocalGraph's `withBulkConnection` (the raw-Cypher
- * bulk path) — died with bulkLoader/kuzuAdapter.ts in phase 3d. Cloud's
+ * capability pattern), not by an assumed class: the local/embedded graph is
+ * SurrealGraph, which carries `bulkUpsertNodes` (`addEdge` is on the shared
+ * GraphProvider surface, so it discriminates nothing). Cloud's
  * DataplaneGraph carries neither, which yields NO graph adapter — graph
  * rows then fail closed per-row in the dispatcher instead of being miscast
  * into a graph adapter (the bug this module originally fixed:
  * `d.getGraph() as LocalGraph` used to hand a SurrealGraph, which has no
- * `withBulkConnection`, to `KuzuBulkLoaderAdapter` — every
+ * `withBulkConnection`, to a loader that assumed one — every
  * graph.node/graph.edge bulk load on a Surreal-backed workspace silently
  * broke). Same intersect-the-handle pattern as bootSteps.ts's
  * SchemaOpsCapableGraph: capability, not class.
@@ -37,8 +35,7 @@ export interface GraphBulkLoaderAdapters {
 }
 
 /** Node row shape the SurrealBulkLoaderAdapter constructor accepts, without
- *  pulling in the Kuzu-named `KuzuNodeRow` type here (structurally
- *  identical). */
+ *  pulling in the `GraphNodeRow` type here (structurally identical). */
 type BulkUpsertNode = Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>;
 
 /**

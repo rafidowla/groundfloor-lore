@@ -2,7 +2,7 @@
 /**
  * F7-enterprise-features-unit.ts — Feature 1–7 unit tests (2026-05-26).
  *
- * Covers the seven enterprise features without spinning up Kùzu, LanceDB,
+ * Covers the seven enterprise features without spinning up the legacy graph engine, LanceDB,
  * or a live daemon. Pure in-memory / temp-dir testing.
  *
  * Tests:

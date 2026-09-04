@@ -3,15 +3,16 @@
  *
  * Two uses:
  *   1. Test fixtures — exercises the queue lifecycle without disk.
- *   2. Local-mode bootstrap before the Kùzu schema for `lore_pending_op`
- *      lands. Trades durability for "works today"; ops queued here are
- *      lost on daemon restart, which is acceptable because:
+ *   2. Cloud-mode placeholder, until the persistent Postgres-via-Dataplane
+ *      impl lands (see `mcp/services.ts`'s `createPendingOpsStore`). Trades
+ *      durability for "works today"; ops queued here are lost on daemon
+ *      restart, which is acceptable because:
  *        - second-party flows are rare-by-design; daemon restarts
  *          mid-flow get a refresh + the initiator re-submits.
  *        - the audit log captures the enqueue regardless, so nothing
  *          is silently dropped.
  *
- * The Kùzu-backed store (`kuzuPendingOpsStore.ts`, follow-up PR) drops
+ * Local mode uses the durable `SqlitePendingOpsStore` instead, which drops
  * straight in via the same `PendingOpsStore` interface.
  */
 

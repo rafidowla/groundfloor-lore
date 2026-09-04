@@ -34,6 +34,7 @@ import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
 import type { OutboxStore } from '../../outbox/types.js';
 import type { VerbatimStore } from '../../engines/verbatimStore.js';
+import type { WriteAheadLog } from '../../engines/syncEngine.js';
 // 1.M7 (2026-08-17 audit) — changeset commit/rollback write through the
 // shared orchestration (outbox + verbatim + embed), not raw graph writes.
 import { applyChangesetUpsert, applyChangesetDelete, type ChangesetWriteDeps } from '../changesetWrite.js';
@@ -57,6 +58,11 @@ export interface VersioningDeps {
     outboxStore?: OutboxStore;
     embedQueue?: { enqueue: (nodeId: string, text: string, workspace?: string) => void };
     workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<VerbatimStore> };
+    /** ITEM X-walnode (2026-09-03) — threaded into ChangesetWriteDeps so
+     *  changeset delete can append a `delete_node` WAL entry (same as
+     *  store_node / store_edge / delete_node). Optional: absent (cloud /
+     *  tests) keeps prior no-WAL behavior. */
+    getWal?: () => WriteAheadLog;
 }
 
 /** 1.M7 — build the shared changeset-write deps for one initiator label. */
@@ -69,6 +75,7 @@ function changesetWriteDeps(deps: VersioningDeps, initiator: string): ChangesetW
         bootVerbatim: deps.store.loreVerbatim,
         activeWorkspace: deps.detectedScope.workspace,
         initiator,
+        getWal: deps.getWal,
     };
 }
 

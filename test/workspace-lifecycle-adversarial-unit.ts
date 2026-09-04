@@ -453,7 +453,7 @@ async function run() {
         // baseline-workspace sweeps complete in <100ms. The broader property we
         // care about is that ANY mid-write SIGKILL doesn't leave the
         // workspace in a corrupt state — the substrate engines
-        // (Kùzu WAL, LanceDB MVCC, SQLite WAL) all advertise crash
+        // (the legacy graph engine WAL, LanceDB MVCC, SQLite WAL) all advertise crash
         // recovery, this test verifies the file-system-level claim:
         // no partial-write tmp files (.tmp, .partial, .lock) outside
         // documented WAL/manifest patterns.
@@ -668,7 +668,7 @@ async function run() {
         // Verifies the restored .lore/ has the same byte content as
         // the source — this is the "bit-identical" check the audit
         // goal calls for. Done at the filesystem level (not by
-        // opening Kùzu/LanceDB on both sides) because kuzu-lite native
+        // opening the legacy graph engine/LanceDB on both sides) because the legacy engine's native
         // bindings segfault on repeated open/close cycles in one
         // process; production never does that (each daemon is its
         // own process), but unit tests can't safely cycle. The file-
@@ -681,7 +681,7 @@ async function run() {
             const srcDir = path.join(tmp, 'src');
             const srcLore = path.join(srcDir, '.lore');
             fs.mkdirSync(srcLore, { recursive: true });
-            fs.writeFileSync(path.join(srcLore, 'graph'), Buffer.from('synthetic-kuzu-bytes-for-round-trip-AAA'));
+            fs.writeFileSync(path.join(srcLore, 'graph'), Buffer.from('synthetic-legacy-engine-bytes-for-round-trip-AAA'));
             fs.writeFileSync(path.join(srcLore, 'graph.wal'), Buffer.from('synthetic-wal-BBB'));
             // SQLite file: backup uses better-sqlite3's online .backup
             // API, so the file must be a valid SQLite db.
@@ -753,10 +753,10 @@ async function run() {
         // sibling before moving staged into place. The operator can
         // roll back manually if the restored data is wrong.
         //
-        // Synthetic substrate files (not real Kùzu/LanceDB) — the
+        // Synthetic substrate files (not real the legacy graph engine/LanceDB) — the
         // contract under test is restore.ts's sidelining logic, not
         // the substrates. Using real engines here would trigger the
-        // kuzu-lite repeated-open SIGSEGV (see round-trip test).
+        // the legacy engine repeated-open SIGSEGV (see round-trip test).
         const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-rc4-overlay-'));
         try {
             // 1) Build a source .lore/ + tarball.

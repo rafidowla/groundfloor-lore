@@ -12,7 +12,7 @@
  * pulls every edge in the workspace into memory instead. See the
  * `DirectedTraversalResult` doc in `providers/types.ts`.
  *
- * The SurrealDB shape differs from Kùzu's in ONE respect that is deliberate:
+ * The SurrealDB shape differs from the prior engine's in ONE respect that is deliberate:
  * it fetches a whole frontier level per query rather than one query per node
  * per direction. Same results, same order, fewer round trips — the ordering is
  * reconstructed by iterating the frontier in order and outgoing-before-incoming
@@ -27,7 +27,7 @@ import { DEFAULT_LIST_NODES_CAP } from '../loreNodeRow.js';
 import { shapeDepth, shapeLimit } from '../callTally.js';
 import { EDGE_TABLE, NODE_TABLE, ridToId, toNodeRid } from './surrealRecordId.js';
 
-/** Same bound and reason as the Kùzu side: a high-degree node. */
+/** Same bound and reason as the prior engine's side: a high-degree node. */
 const TRAVERSE_NODE_CAP = 10_000;
 /** Matches `surrealGraphReads`' own chunking of id lists. */
 const CHUNK_SIZE = 256;

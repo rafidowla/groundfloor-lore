@@ -92,14 +92,14 @@ export interface EdgeRow<TProps = Record<string, unknown>> {
 }
 
 /**
- * EdgeShapeHint — tells the Kùzu adapter the source/target node labels
+ * EdgeShapeHint — tells a local graph adapter the source/target node labels
  * for an edge collection. Cloud adapter ignores it. New code should use
  * `declareCollection` at boot instead.
  */
 export interface EdgeShapeHint {
-    /** Kùzu node-table label of the source side. */
+    /** Graph node-table label of the source side. */
     srcLabel?: string;
-    /** Kùzu node-table label of the target side. */
+    /** Graph node-table label of the target side. */
     tgtLabel?: string;
     /** Default id field for both sides (defaults to "id"). */
     idField?: string;
@@ -114,8 +114,9 @@ export interface EdgeShapeHint {
  * that don't map to core LoreNode/LoreEdge tables.
  */
 export interface CollectionStorage {
-    /** Substrate identifier — 'kuzu' for local, 'dataplane' for cloud. */
-    readonly mode: 'kuzu' | 'dataplane';
+    /** Substrate identifier — 'dataplane' for cloud; local implementations
+     *  are not required to declare a distinct value here. */
+    readonly mode: 'dataplane';
 
     /** Register a collection for automatic name/key resolution. Idempotent. */
     declareCollection(decl: CollectionDecl): void;
@@ -200,8 +201,8 @@ export interface NodeCollectionDecl {
     name: string;
     /** Primary key field name. Defaults to "id". */
     primaryKey?: string;
-    /** Kùzu NODE TABLE label. Defaults to `name`. */
-    kuzuTable?: string;
+    /** Legacy graph-engine NODE TABLE label. Defaults to `name`. */
+    legacyTable?: string;
     /** Cloud collection name. Defaults to `name`. */
     cloudCollection?: string;
 }
@@ -219,8 +220,8 @@ export interface EdgeCollectionDecl {
     source: string;
     /** Canonical name of the node collection on the target side. */
     target: string;
-    /** Kùzu REL TABLE label. Defaults to `name`. */
-    kuzuTable?: string;
+    /** Legacy graph-engine REL TABLE label. Defaults to `name`. */
+    legacyTable?: string;
     /** Cloud collection name. Defaults to `name`. */
     cloudCollection?: string;
 }

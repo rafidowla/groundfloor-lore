@@ -109,7 +109,7 @@ function makeFakeGraph() {
  *
  *  Both accessors return the same fake: routes now resolve graphs through
  *  `getGraphHandle` (the workspace's DECLARED engine), while `getOrOpen`
- *  stays the Kùzu-substrate accessor a few callers still use. The gate under
+ *  stays the legacy-substrate accessor a few callers still use. The gate under
  *  test runs inside the resolution either way. */
 function makeFakeRegistry(graph: ReturnType<typeof makeFakeGraph>) {
     return {

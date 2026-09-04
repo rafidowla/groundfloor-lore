@@ -6,10 +6,11 @@
  *
  * `assertLocalGraph.ts`'s `requireLocalGraph` asks `graph instanceof LocalGraph`.
  * That question had the right ANSWER for years only because it was never asked
- * of anything but Kùzu and Dataplane: the daemon's `createGraph` returns a
- * `LocalGraph` unconditionally in local mode, and every per-workspace resolver
- * went through `LocalGraphRegistry.getOrOpen`, which is the Kùzu substrate
- * accessor. Once those route through `getGraphHandle` and a Surreal-backed
+ * of anything but the sole local graph engine and Dataplane: the daemon's
+ * `createGraph` returns a `LocalGraph` unconditionally in local mode, and
+ * every per-workspace resolver went through `LocalGraphRegistry.getOrOpen`,
+ * which is the single-engine substrate accessor. Once those route through
+ * `getGraphHandle` and a Surreal-backed
  * workspace can actually reach a call site, `instanceof LocalGraph` starts
  * REFUSING a perfectly capable engine — the class is not the capability.
  *
@@ -34,7 +35,7 @@ import type { WorkspaceGraph } from './openWorkspaceGraph.js';
 import { CloudModeUnsupportedError } from './cloudModeUnsupportedError.js';
 
 /**
- * True when `graph` is a local graph engine — Kùzu or SurrealDB — rather than
+ * True when `graph` is a local graph engine (SurrealDB) rather than
  * the cloud adapter. Use when the caller genuinely should no-op in cloud mode;
  * prefer `requireWorkspaceGraph` in an HTTP route, where an explicit 501 beats
  * a silent skip.

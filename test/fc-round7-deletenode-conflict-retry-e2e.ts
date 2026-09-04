@@ -152,8 +152,12 @@ async function main() {
         graphRegistry: registry,
         detectedScope: { workspace: 'default', ecosystem: '*' },
         auditLog: { log: () => undefined },
-        // Tool-path only, mirrors triage-recommended-fixes-unit.ts shape.
-        getWal: () => { throw new Error('unused on the delete path'); },
+        // ITEM X-walnode (2026-09-03) — delete_node now DOES append to the
+        // WAL for an active-workspace delete (mirrors store_node/store_edge),
+        // so this can no longer throw "unused on the delete path". A cheap
+        // in-memory no-op keeps this load test's focus on transaction-conflict
+        // retries, not real disk WAL I/O.
+        getWal: () => ({ append: () => undefined }),
         domain: 'personal', edgeRelations: [], nodeTypesEnum: null, edgeRelationsEnum: null,
         nodeTypesDescription: '',
         configManager: null, outboxStore: undefined, embedQueue: undefined,

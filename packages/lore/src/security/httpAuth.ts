@@ -133,6 +133,34 @@ const BEARER_REQUIRED_NON_API_PATHS = [
     '/v1',
 ];
 
+/**
+ * requiresBearerAuth — true when `url` sits inside the Bearer-required
+ * surface that validateRequest's Layer 3 enforces below. Exported so
+ * mcp/http/middleware.ts can tell apart "this path never required a
+ * Bearer" (health, bootstrap, /metrics) from "this path required one."
+ *
+ * B1 — middleware.ts resolves a *plausible-shaped* app token
+ * (`lore_<workspace>_<43 chars>`) against the token registry for EVERY
+ * request, independent of this validator's pass/fail. Before this helper
+ * existed, a missing/revoked/expired-but-plausible token 401'd even on a
+ * public path like /api/health — turning a liveness probe holding a
+ * stale scoped token into an outage, and contradicting docs/OPERATIONS.md
+ * ("Anonymous request (no Bearer, or an invalid one): you get back
+ * exactly the /health lite body"). Middleware now calls this to fall
+ * back to anonymous on public paths instead of 401ing; non-public paths
+ * are untouched.
+ */
+export function requiresBearerAuth(url: string): boolean {
+    const isApi = url.startsWith('/api/');
+    const isPublic =
+        PUBLIC_API_PATHS.has(url.split('?')[0]) ||
+        NON_API_LOCAL_PATHS.some((p) => url === p || url.startsWith(p + '?') || url.startsWith(p + '/'));
+    const isBearerRequiredNonApi = BEARER_REQUIRED_NON_API_PATHS.some(
+        (p) => url === p || url.startsWith(p + '?') || url.startsWith(p + '/'),
+    );
+    return (isApi && !isPublic) || isBearerRequiredNonApi;
+}
+
 function isAllowedOrigin(origin: string | undefined): boolean {
     if (!origin) return true; // curl, CLI, native clients — no Origin header
     try {
@@ -194,14 +222,7 @@ export function validateRequest(
 
     // Layer 3: Bearer token, for /api/* except the public allowlist,
     // PLUS the explicit non-/api/ paths that carry write capability (/mcp).
-    const isApi = url.startsWith('/api/');
-    const isPublic =
-        PUBLIC_API_PATHS.has(url.split('?')[0]) ||
-        NON_API_LOCAL_PATHS.some((p) => url === p || url.startsWith(p + '?') || url.startsWith(p + '/'));
-    const isBearerRequiredNonApi =
-        BEARER_REQUIRED_NON_API_PATHS.some((p) => url === p || url.startsWith(p + '?') || url.startsWith(p + '/'));
-
-    if ((isApi && !isPublic) || isBearerRequiredNonApi) {
+    if (requiresBearerAuth(url)) {
         const auth = (req.headers.authorization ?? '') as string;
         const raw = auth.trim().replace(/^Bearer\s+/i, '');
         // Two accepted shapes:

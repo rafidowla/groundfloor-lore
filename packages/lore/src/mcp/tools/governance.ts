@@ -24,6 +24,7 @@ import {
     upsertWorkspaceMapping,
 } from '../../config/workspaceRegistry.js';
 import { loadWorkspaces } from '../../config/workspaces.js';
+import { resolveWorkspaceGraphEngine } from '../../engines/graphEngineSelector.js';
 import { assertMcpScope } from './mcpScope.js';
 import type { StorageBundle } from '../services.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
@@ -34,6 +35,10 @@ import {
 } from './workspaceResolve.js';
 import { mcpToolError } from './mcpToolError.js';
 import { log } from '../../logger.js';
+import { withNodeLock } from '../../core/nodeWriteLock.js';
+import { withTransactionConflictRetry } from '../../engines/transactionConflictRetry.js';
+import { recordHotWrite } from '../../outbox/hotLane.js';
+import type { OutboxStore } from '../../outbox/types.js';
 
 export interface GovernanceToolsDeps {
     store: StorageBundle;
@@ -56,6 +61,19 @@ export interface GovernanceToolsDeps {
      * routing is driven by the per-call `workspace` argument).
      */
     detectedScope?: { workspace: string; ecosystem: string };
+    /**
+     * ITEM X-pruneeph (2026-09-03) — `prune_ephemeral`'s per-node delete now
+     * goes through the same outbox-first discipline as `delete_node` /
+     * `prune_nodes` hard_delete: a `node.delete` row before the substrate
+     * delete and a `verbatim.tombstone` row after the vector tombstone.
+     * Optional so cloud mode / test fixtures without an outbox wired keep
+     * the prior direct-delete-only behavior.
+     */
+    outboxStore?: OutboxStore;
+    /** Per-workspace verbatim resolver — routes the ephemeral-node's
+     *  tombstone to the REQUESTED workspace's LanceDB, mirroring
+     *  prune_nodes/delete_node. Absent (cloud/tests) → deps.store.loreVerbatim. */
+    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<StorageBundle['loreVerbatim']> };
 }
 
 /** Shared `workspace_not_found` MCP envelope for the resolver's
@@ -196,7 +214,11 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                             lastSync: status.lastSync === '1970-01-01T00:00:00.000Z' ? 'never' : status.lastSync,
                             remoteConfigured: status.hasAdapter,
                             autoSyncing: status.isAutoSyncing,
-                            engine: 'kùzu',
+                            // Was hardcoded to the removed legacy graph engine's name
+                            // regardless of what actually backs the workspace — read
+                            // the real declared engine instead (defaults to 'surreal'
+                            // for an absent/unreadable declaration, same as the daemon).
+                            engine: resolveWorkspaceGraphEngine(workspace),
                         }, null, 2),
                     }],
                 };
@@ -398,12 +420,121 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                     if ('missing' in resolved) return workspaceRequiredEnvelope();
                     return workspaceNotFoundEnvelope(resolved.requested, resolved.known);
                 }
-                const pruner = resolved.graph as unknown as {
-                    pruneEphemeralNodes?: (ttlMs: number) => Promise<number>;
+                const graph = resolved.graph;
+                const ttl = defaultTtlMs ?? 3_600_000;
+
+                // ITEM X-pruneeph (2026-09-03) — SurrealGraph exposes a
+                // query-only listExpiredEphemeralNodeIds() so THIS caller
+                // can drive the per-node delete itself, through the exact
+                // nodeWriteLock / outbox / verbatim-tombstone discipline
+                // prune_nodes hard_delete uses (mcp/tools/lifecycle.ts).
+                // graph.pruneEphemeralNodes() itself is unchanged and calls
+                // deleteNode() directly with none of that — no lock, no
+                // outbox row, no verbatim tombstone — orphaning the LanceDB
+                // vector row and leaving the outbox blind to the delete.
+                // Engines that don't expose the safe query method
+                // (DataplaneGraph, ArcadeGraphStore) fall back to the
+                // pre-fix direct call below — out of scope for this item.
+                const lister = graph as unknown as {
+                    listExpiredEphemeralNodeIds?: (ttlMs: number) => Promise<string[]>;
                 };
-                const deleted = typeof pruner.pruneEphemeralNodes === 'function'
-                    ? await pruner.pruneEphemeralNodes(defaultTtlMs ?? 3_600_000)
-                    : await deps.store.storageClient.pruneEphemeralNodes(defaultTtlMs ?? 3_600_000);
+                if (typeof lister.listExpiredEphemeralNodeIds !== 'function') {
+                    const pruner = graph as unknown as {
+                        pruneEphemeralNodes?: (ttlMs: number) => Promise<number>;
+                    };
+                    const deleted = typeof pruner.pruneEphemeralNodes === 'function'
+                        ? await pruner.pruneEphemeralNodes(ttl)
+                        : await deps.store.storageClient.pruneEphemeralNodes(ttl);
+                    return {
+                        content: [{
+                            type: 'text' as const,
+                            text: JSON.stringify({
+                                ok: true,
+                                deleted,
+                                message: deleted > 0
+                                    ? `Pruned ${deleted} expired ephemeral node(s).`
+                                    : 'No expired ephemeral nodes found.',
+                            }, null, 2),
+                        }],
+                    };
+                }
+
+                const expiredIds = await lister.listExpiredEphemeralNodeIds(ttl);
+                let deleted = 0;
+                for (const id of expiredIds) {
+                    try {
+                        const applied = await withNodeLock(resolved.resolvedWorkspace, id, async (): Promise<boolean> => {
+                            // Re-read the node FRESH inside the lock and
+                            // re-verify it is still ephemeral AND still past
+                            // its TTL — a concurrent store_node upsert
+                            // between the query above and this id's turn in
+                            // the loop may have refreshed createdAt (TTL
+                            // renewal) or cleared `ephemeral` entirely.
+                            // Mirrors the stale-snapshot re-check prune_nodes
+                            // hard_delete does (QA A2 finding 1, 2026-09-03).
+                            const fresh = await graph.getNode(id);
+                            if (!fresh || !fresh.ephemeral) return false;
+                            const createdMs = new Date(fresh.createdAt).getTime();
+                            if (!Number.isFinite(createdMs)) return false;
+                            const nodeTtl = typeof fresh.ttl_ms === 'number' && fresh.ttl_ms > 0 ? fresh.ttl_ms : ttl;
+                            if (Date.now() - createdMs <= nodeTtl) return false;
+
+                            // Outbox-first — record node.delete BEFORE the
+                            // substrate delete, same pattern as delete_node /
+                            // prune_nodes hard_delete.
+                            if (deps.outboxStore) {
+                                await recordHotWrite(deps.outboxStore, {
+                                    workspace: resolved.resolvedWorkspace,
+                                    operationKind: 'node.delete',
+                                    payload: { id },
+                                    initiator: 'mcp:prune_ephemeral',
+                                    operation: 'node.delete',
+                                });
+                            }
+                            await withTransactionConflictRetry(() => graph.deleteNode(id));
+
+                            // Tombstone the LanceDB vector row so pruned
+                            // content doesn't stay semantically recallable
+                            // (mirrors delete_node F2a / prune_nodes
+                            // hard_delete). Non-fatal.
+                            try {
+                                const targetVerbatim = deps.workspaceVerbatimResolver
+                                    ? await deps.workspaceVerbatimResolver.getOrOpen(resolved.resolvedWorkspace)
+                                    : deps.store.loreVerbatim;
+                                const vstore = targetVerbatim as unknown as {
+                                    tombstone?: (id: string, reason: string) => Promise<void>;
+                                };
+                                const reason = 'ephemeral node pruned via prune_ephemeral';
+                                if (typeof vstore.tombstone === 'function') {
+                                    await vstore.tombstone(`lore:${id}`, reason);
+                                } else {
+                                    await deps.store.storageClient.verbatimDelete(`lore:${id}`);
+                                }
+                                // Record verbatim.tombstone AFTER the
+                                // node.delete row above, so a stale pending
+                                // verbatim.upsert from an earlier store_node
+                                // on this id can't replay after this
+                                // tombstone and resurrect the content.
+                                if (deps.outboxStore) {
+                                    await recordHotWrite(deps.outboxStore, {
+                                        workspace: resolved.resolvedWorkspace,
+                                        operationKind: 'verbatim.tombstone',
+                                        payload: { id: `lore:${id}`, reason },
+                                        initiator: 'mcp:prune_ephemeral',
+                                        operation: 'verbatim.tombstone',
+                                    });
+                                }
+                            } catch (vErr) {
+                                console.error(`[Lore MCP] prune_ephemeral verbatim tombstone failed for ${id}: ${(vErr as Error).message}`);
+                            }
+                            return true;
+                        });
+                        if (applied) deleted++;
+                    } catch (err) {
+                        console.error(`[Lore MCP] prune_ephemeral failed for node ${id} (non-fatal): ${(err as Error).message}`);
+                    }
+                }
+
                 return {
                     content: [{
                         type: 'text' as const,

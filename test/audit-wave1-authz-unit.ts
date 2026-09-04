@@ -21,6 +21,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tryWorkspaceMgmtRoutes } from '../packages/lore/src/mcp/http/routes/workspaces/workspaceMgmt.js';
 import { handleDecide } from '../packages/lore/src/mcp/http/routes/approvals.js';
 import { runWithPrincipal, type Principal } from '../packages/lore/src/auth/principal.js';
+import { createWorkspace, loadWorkspaces } from '../packages/lore/src/config/workspaces.js';
 
 let passed = 0, failed = 0;
 const test = async (name: string, fn: () => Promise<void>) => {
@@ -81,6 +82,50 @@ const BOOTSTRAP: Principal = { kind: 'bootstrap', workspace: 'ws-a', scopes: ['r
         // Bootstrap clears the gate; the deletion itself may then 200/400 depending on
         // config, but it must NOT be the 403 workspace_forbidden the app token hit.
         assert.doesNotMatch(res._body, /workspace_forbidden/, `bootstrap must pass the target gate; got ${res._status}: ${res._body}`);
+    });
+
+    // ── F-DEL8 ──────────────────────────────────────────────────────────────
+    // workspaceMgmt.ts's DELETE/retention routes used to match AND slice the
+    // workspace name off the RAW `url`, not the query-stripped `pathname`. A
+    // trailing `?query` therefore corrupted the parsed name (`DELETE
+    // /api/workspaces/foo?workspace=x` sliced "foo?workspace=x", a name that
+    // never exists → the wrong error) and broke the retention routes'
+    // `url.endsWith('/retention')` match outright (any `?query` made it 404
+    // instead of running). Fixed to match/slice on `pathname`.
+    await test('F-DEL8: DELETE /api/workspaces/:name?workspace=x deletes the PATH name, unaffected by the query string', async () => {
+        const fixtureName = 'f-del8-qstr-delete-fixture';
+        createWorkspace(fixtureName, {});
+        assert.ok(
+            loadWorkspaces().workspaces.some((w) => w.name === fixtureName),
+            'fixture workspace must exist before the test',
+        );
+
+        const res = fakeRes();
+        // The query string names a DIFFERENT workspace than the path — if the
+        // route parses the name off `url` instead of `pathname`, it looks for
+        // (and fails to find) "f-del8-qstr-delete-fixture?workspace=some-other-tenant".
+        const url = `/api/workspaces/${fixtureName}?workspace=some-other-tenant`;
+        const pathname = `/api/workspaces/${fixtureName}`;
+        await runWithPrincipal(BOOTSTRAP, () =>
+            tryWorkspaceMgmtRoutes(fakeReq('DELETE', url), res, url, pathname, wsDeps()),
+        );
+        assert.equal(res._status, 200, `expected 200, got ${res._status}: ${res._body}`);
+        assert.ok(
+            !loadWorkspaces().workspaces.some((w) => w.name === fixtureName),
+            'the fixture workspace (named in the PATH) must actually be gone',
+        );
+    });
+
+    await test('F-DEL8: GET /api/workspaces/:name/retention?x=1 still matches with a trailing query string', async () => {
+        const res = fakeRes();
+        const url = `/api/workspaces/${APP_A.workspace}/retention?x=1`;
+        const pathname = `/api/workspaces/${APP_A.workspace}/retention`;
+        await runWithPrincipal(APP_A, () =>
+            tryWorkspaceMgmtRoutes(fakeReq('GET', url), res, url, pathname, wsDeps()),
+        );
+        assert.equal(res._status, 200, `expected 200 (route must still match with ?x=1); got ${res._status}: ${res._body}`);
+        const body = JSON.parse(res._body) as { hideSupersededInRecall: boolean };
+        assert.equal(typeof body.hideSupersededInRecall, 'boolean');
     });
 
     // ── F-B1 ────────────────────────────────────────────────────────────────

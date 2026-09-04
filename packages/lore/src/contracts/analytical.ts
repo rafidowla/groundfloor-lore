@@ -3,7 +3,7 @@
  *
  * Per Lore decision `lore-analytical-primitive-universal-2026-05-09`,
  * the analytical surface is universal across both adapters. No
- * "cloud-only" returns; LocalAdapter (Kùzu Cypher aggregates) and
+ * "cloud-only" returns; LocalAdapter (`SqliteAnalyticalStorage`) and
  * DataplaneAdapter (Postgres) both implement the full contract.
  *
  * Performance characteristics differ — cloud handles bigger scale —
@@ -11,7 +11,7 @@
  * my mom' is universally available.
  *
  * Step #1 of BUILD_ORDER.md ships this interface stub. Step #2
- * implements it on KuzuCollectionStorage. Step #6 implements on
+ * implements it on `SqliteAnalyticalStorage`. Step #6 implements on
  * DataplaneCollectionStorage.
  *
  * Existing CollectionStorage already exposes `count` — that method MOVES
@@ -23,13 +23,46 @@
 import type { Filter } from '../engines/collectionStorage.js';
 
 /**
+ * Default LORE_ANALYTICAL_SCAN_CAP (docs/CONFIGURATION.md). Matches the
+ * prior legacy-engine-backed implementation's TIME_SERIES_SCAN_CAP_DEFAULT so the
+ * documented default is unchanged across the graph-engine removal
+ * (2026-08-21).
+ */
+export const ANALYTICAL_SCAN_CAP_DEFAULT = 200_000;
+
+/**
+ * AnalyticalScanCapExceeded — thrown by an IAnalyticalStorage implementation
+ * when honoring LORE_ANALYTICAL_SCAN_CAP (docs/CONFIGURATION.md) requires
+ * refusing an operation rather than scanning past the cap.
+ *
+ * Fail loud, not silently truncate: `timeSeries` buckets and `groupBy`
+ * groups the FULL matched set — a truncated scan would silently corrupt the
+ * aggregation (missing buckets/groups, wrong sums) instead of merely
+ * shrinking it. Callers must narrow the filter/time range or raise the cap.
+ */
+export class AnalyticalScanCapExceeded extends Error {
+    constructor(
+        public readonly method: string,
+        public readonly cap: number,
+        public readonly matched: number,
+    ) {
+        super(
+            `${method}: scan would exceed the ${cap}-row analytical scan cap ` +
+            `(matched ${matched} rows) — narrow the filter or time range, or ` +
+            `raise LORE_ANALYTICAL_SCAN_CAP to override.`,
+        );
+        this.name = 'AnalyticalScanCapExceeded';
+    }
+}
+
+/**
  * AggregationType — the operation to apply over the matching rows.
  */
 export type AggregationType = 'count' | 'sum' | 'avg' | 'min' | 'max';
 
 /**
  * Time bucket size for `timeSeries`. Adapter chooses substrate-native
- * bucketing (Kùzu uses date-truncation in Cypher; Postgres uses
+ * bucketing (SQLite uses `strftime`-based date-truncation; Postgres uses
  * `date_trunc`).
  */
 export type TimeBucket = 'minute' | 'hour' | 'day' | 'week' | 'month' | 'quarter' | 'year';
@@ -57,8 +90,8 @@ export interface TimeSeriesPoint<TKey = string> {
 /**
  * IAnalyticalStorage — universal analytical surface.
  *
- * All methods accept a `coll` (the declared collection / Kùzu node
- * table / Dataplane collection name) and a `Filter`. Filter semantics
+ * All methods accept a `coll` (the declared collection / SQLite table /
+ * Dataplane collection name) and a `Filter`. Filter semantics
  * match `CollectionStorage` — see `src/engines/collectionStorage.ts`.
  * D2-hygiene-2: stale plugins/storage.ts ref (moved v3.11.0).
  *

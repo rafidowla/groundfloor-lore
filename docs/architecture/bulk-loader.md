@@ -22,10 +22,9 @@ through Z-D11.
    body sizes limited only by configured max (default 10 GB).
 2. Returns `{job_id}` immediately; client polls
    `/api/load/jobs/<id>` or registers webhook for completion.
-3. Substrate-native loaders used per format (kuzu COPY / batched
-   MERGE for graph, SQLite prepared+transaction for relational,
-   LanceDB Arrow add for vectors); per-row INSERT explicitly
-   avoided.
+3. Substrate-native loaders used per format (batched bulk-upsert for
+   graph, SQLite prepared+transaction for relational, LanceDB Arrow
+   add for vectors); per-row INSERT explicitly avoided.
 4. Checkpoint every N rows (default 10k); kill → restart resumes
    from checkpoint.
 5. Per-item failures reported but don't fail the whole job; final
@@ -79,8 +78,6 @@ Query params (route owner: `packages/lore/src/mcp/http/routes/load.ts`):
   saturating the embed lane; the operator runs
   `lore embed reembed --workspace X --since <load_id>` to backfill
   vectors after the load.
-- `entityType` (optional) — for node loads, the entity type the
-  rows belong to. Used for kuzu table routing.
 
 Body size: capped at `LORE_LOAD_MAX_BYTES` (default 10 GB). Distinct
 from the 10 MB `MAX_BODY_BYTES` cap on every other JSON-body route.
@@ -156,17 +153,19 @@ substrate-native loader implements. Lifecycle:
 begin(opts)  →  writeBatch(rows) × N  →  checkpoint() × M  →  commit() | rollback()
 ```
 
-Three adapters shipped in Z2 (SQLite, kuzu, LanceDB); a fourth — the
-Surreal graph adapter — was added later, in the Kuzu-removal effort's
-Phase 3c, once SurrealDB became a workspace's graph-engine option.
-SQLite and LanceDB are unconditional (every workspace has exactly one of
-each). The **graph** row is different: `graph.node` / `graph.edge` rows
-route to whichever of the two graph adapters below matches the
-workspace's configured graph engine (SurrealDB by default as of
-v3.13.0, Kùzu supported per workspace) — `bulkLoader/selectGraphAdapter.ts`
-picks by a capability probe on the live graph handle, not by an assumed
-class, so a Surreal-backed workspace never gets miscast onto the Kùzu
-adapter.
+Three adapters shipped in Z2 (SQLite, the prior local graph engine's
+adapter, LanceDB). The Surreal graph
+adapter was added later, in that engine's removal effort's Phase 3c, once
+SurrealDB became a workspace's graph-engine option; the prior adapter
+itself was then deleted in Phase 3d, once that engine was removed entirely
+(2026-08-21, see `docs/KUZU_REMOVAL.md`). Three adapters exist today:
+SQLite, LanceDB, and Surreal (graph). SQLite and LanceDB are
+unconditional (every workspace has exactly one of each). The **graph**
+row routes to the Surreal adapter — `bulkLoader/selectGraphAdapter.ts`
+picks it by a capability probe on the live graph handle, not by an
+assumed class, so a graph handle exposing neither surface (e.g. cloud's
+`DataplaneGraph`) fails closed per-row instead of being miscast onto an
+adapter it doesn't support.
 
 ### SQLite (`bulkLoader/sqliteAdapter.ts`, 234 LOC)
 
@@ -187,33 +186,21 @@ Resume: `INSERT OR REPLACE` makes replay idempotent — a kill mid-batch
 leaves the SQLite WAL at the pre-transaction snapshot, and resume
 from `checkpoint_row` writes the same rows again with no duplicates.
 
-### kuzu (`bulkLoader/kuzuAdapter.ts`, 333 LOC)
-
-Used when the workspace's graph engine is `kuzu` — one of the two graph
-adapters `selectGraphAdapter.ts` can build; see "### surreal" below for
-the SurrealDB-backed graph engine's adapter.
-
-The `@kineviz/kuzu-lite` 0.11.3 binding doesn't advertise `COPY FROM`
-in its trimmed surface. The adapter probes at runtime:
-
-1. First attempt: write batch to
-   `<workspace>/.lore/tmp/bulk-<job_id>-<batch>.csv`, dispatch
-   `COPY LoreNode FROM '<path>' (HEADER=true)` via
-   `Connection.query()`.
-2. On `COPY` unsupported (kuzu-lite trimmed path): fall back to
-   prepared `MERGE (n:LoreNode {id: $id}) SET n += $props`
-   inside one connection-level transaction.
-
-Resume safety: MERGE is idempotent by graph PK. The temp CSV files
-are cleaned at checkpoint time.
+> **Historical note:** an adapter for the prior local graph engine (333
+> LOC, source file since deleted) shipped in Z2 alongside SQLite and
+> LanceDB, used when the workspace's graph engine was that one. It
+> probed for `COPY FROM` on that engine's embedded binding, falling back
+> to a prepared `MERGE (n:LoreNode {id: $id}) SET n += $props` when
+> unsupported. It was deleted in that engine's removal effort's Phase 3d
+> along with the rest of it (see `docs/KUZU_REMOVAL.md`); the Surreal
+> adapter below is the only graph adapter today.
 
 ### surreal (`bulkLoader/surrealAdapter.ts`, 242 LOC)
 
-Used when the workspace's graph engine is `surreal` (the default since
-v3.13.0). SurrealDB has no bulk `COPY`-equivalent this adapter needs to
-probe for — every SurrealDB build Lore supports has the same write
-verbs, so `begin()` is a no-op. Instead of hand-rolling SurrealQL, the
-adapter reuses the engine's own tested write path:
+The only graph adapter. SurrealDB has no bulk `COPY`-equivalent this
+adapter needs to probe for — every SurrealDB build Lore supports has
+the same write verbs, so `begin()` is a no-op. Instead of hand-rolling
+SurrealQL, the adapter reuses the engine's own tested write path:
 
 1. Nodes go through `SurrealGraph.bulkUpsertNodes` — batched, with
    per-node error isolation and conflict-retry.
@@ -224,22 +211,24 @@ adapter reuses the engine's own tested write path:
 Nodes are written before edges within a batch so an edge whose
 endpoints are node rows later in the *same* batch still resolves.
 
-One deliberate behavioral difference from kuzu: a dangling edge
-(missing endpoint) is a per-row **failure** here — `SurrealGraph.addEdge`
-refuses missing endpoints loudly, because SurrealDB's `RELATE` would
-otherwise create a dangling relation. Kùzu's `MERGE` silently no-ops the
-same row and counts it written. The Surreal behavior is stricter, not
-looser: the row lands in `errors[]` instead of vanishing while
-inflating `written`.
+A dangling edge (missing endpoint) is a per-row **failure** here —
+`SurrealGraph.addEdge` refuses missing endpoints loudly, because
+SurrealDB's `RELATE` would otherwise create a dangling relation. (This
+was a deliberate divergence from the deleted adapter for the prior
+local graph engine, whose `MERGE`
+used to silently no-op the same row and count it written — stricter,
+not looser: the row lands in `errors[]` instead of vanishing while
+inflating `written`.)
 
 Resume safety: `bulkUpsertNodes` is an UPSERT and `addEdge` is deduped
 per triple, so replay from any checkpoint is idempotent by construction
 — no temp files or transaction rollback needed.
 
-Graph-adapter selection (kuzu vs. surreal) is not part of this file: see
-`bulkLoader/selectGraphAdapter.ts`, which picks by capability probe on
-the live graph handle so a Surreal-backed workspace can never be handed
-to the Kùzu adapter (or vice versa).
+Graph-adapter selection is not part of this file: see
+`bulkLoader/selectGraphAdapter.ts`, which picks the Surreal adapter by
+capability probe on the live graph handle, so a handle exposing neither
+graph-write surface (e.g. cloud's `DataplaneGraph`) is never handed to
+an adapter it can't back.
 
 ### LanceDB (`bulkLoader/lanceAdapter.ts`, 288 LOC)
 
@@ -292,8 +281,8 @@ Crash recovery: on daemon boot,
 `loadJobsRunner.startupReconcileAndResume()` scans `load_jobs WHERE
 status='running'` and re-enters each job at row index =
 `checkpoint_row`. Idempotent substrate writes (SQLite `INSERT OR
-REPLACE`, kuzu `MERGE`, surreal node UPSERT + per-triple edge dedup,
-lance dedupe-by-id) make replay safe.
+REPLACE`, surreal node UPSERT + per-triple edge dedup, lance
+dedupe-by-id) make replay safe.
 
 Completion: a single `load.done` outbox row is committed when the
 job hits `complete`, carrying `{job_id, workspace, rows_processed,
@@ -413,7 +402,7 @@ lore embed reembed --workspace atlas --type cre_property
    ```sh
    tail -200 ~/Library/Logs/lore/lore-server.log | grep "loaderDispatcher\|substrate="
    ```
-   Look for `substrate=sqlite|kuzu|surreal|lance` lines. A `substrate=verbatim`
+   Look for `substrate=sqlite|surreal|lance` lines. A `substrate=verbatim`
    line on a node load indicates the dispatcher fell back to the
    per-row write path (file a bug).
 4. Check checkpoint cadence: every 10k rows the runner persists a
@@ -444,11 +433,9 @@ If the row count still doesn't advance after a restart, inspect
 the substrate directly:
 
 - SQLite: `sqlite3 <LORE_HOME>/workspaces/<ws>/.lore/outbox.sqlite '.schema load_jobs'`
-- graph (Kùzu-backed workspaces): check the per-workspace kuzu
-  database for an active write lock (`fuser` on the lock file)
-- graph (SurrealDB-backed workspaces, the default since v3.13.0): no
-  separate lock file — check the daemon log for the `surreal` bulk
-  adapter's per-row errors instead
+- graph (SurrealDB, the only graph engine): no separate lock file —
+  check the daemon log for the `surreal` bulk adapter's per-row
+  errors instead
 - lance: confirm `<workspace>/.lore/lance/*` is writable + no
   zombie writer process holds the version
 
@@ -469,7 +456,8 @@ See `docs/architecture/outbox.md` for the full outbox runbook.
 - **Z1** — streaming-upload endpoint + async job model + `load_jobs`
   SQLite table + workspace_required + outbox-lag backpressure.
   Flipped Z-D1, Z-D2, Z-D6, Z-D7, Z-D8, Z-D11.
-- **Z2** — three substrate-native adapters (SQLite / kuzu / lance) +
+- **Z2** — three substrate-native adapters (SQLite / the prior local
+  graph engine / lance) +
   dispatcher + runner + 100k perf gate. Flipped Z-D3, Z-D4, Z-D10.
 - **Z3** — checkpoint/resume helper (10k default) + per-workspace
   concurrency cap (default 3) + temp-file sweeper. Flipped Z-D5,
@@ -488,8 +476,7 @@ See `docs/architecture/outbox.md` for the full outbox runbook.
 | `packages/lore/src/bulkLoader/types.ts` | adapter interface | 143 |
 | `packages/lore/src/bulkLoader/loaderDispatcher.ts` | per-job dispatcher | 217 |
 | `packages/lore/src/bulkLoader/sqliteAdapter.ts` | SQLite adapter | 234 |
-| `packages/lore/src/bulkLoader/kuzuAdapter.ts` | kuzu graph adapter | 333 |
-| `packages/lore/src/bulkLoader/surrealAdapter.ts` | surreal graph adapter (Kuzu-removal Phase 3c) | 242 |
+| `packages/lore/src/bulkLoader/surrealAdapter.ts` | surreal graph adapter (the only graph adapter; added in the prior local graph engine's removal effort's Phase 3c — see `docs/KUZU_REMOVAL.md`) | 242 |
 | `packages/lore/src/bulkLoader/selectGraphAdapter.ts` | per-workspace graph-adapter selection by capability | 69 |
 | `packages/lore/src/bulkLoader/lanceAdapter.ts` | lance adapter | 288 |
 | `test/sprint-Z-bulk-loader-property.ts` | 11-case gate test | — |

@@ -4,11 +4,11 @@
  *
  * Closes audit cluster HIGH-ERR-A (findings `conc-dual-safety-net-exit`
  * + `err-contradictory-uncaught-handlers`). Both findings describe the
- * same defect from different angles: Kùzu's pool installed a SURVIVE
+ * same defect from different angles: the legacy engine's pool installed a SURVIVE
  * uncaughtException listener while Lance's installed an EXIT listener.
  * Node fires every registered listener, the exit one wins, and the
  * documented daemon-resilience contract (SW-19 / E1b) is silently
- * defeated. (Kùzu's pool was deleted with the engine — Phase 3d,
+ * defeated. (the legacy engine's pool was deleted with the engine — Phase 3d,
  * 2026-08-21; the shared survive-policy net it forced into existence
  * remains and is what this pins, via the surviving Lance pool.)
  *

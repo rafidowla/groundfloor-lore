@@ -14,9 +14,9 @@
  * No graph-substrate adapter: SurrealDB's node/edge tables are
  * SCHEMALESS by design (engines/surreal/surrealConnection.ts) — a node
  * gaining a field is a write, not a DDL event, so there is no ALTER-TABLE
- * ladder to migrate. The kuzu adapter this file used to register here
- * (KuzuMigrationAdapter, wrapping LocalGraph.withBulkConnection for
- * Cypher DDL) was removed with Kuzu itself (DEC-KUZU-REMOVAL-STEP1) —
+ * ladder to migrate. The DDL adapter this file used to register here for
+ * the former local graph engine (wrapping its Cypher bulk-connection for
+ * DDL) was removed along with that engine (DEC-KUZU-REMOVAL-STEP1) —
  * it had no SurrealDB equivalent to build because the capability it
  * covered doesn't apply to a schemaless substrate.
  *

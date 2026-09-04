@@ -3,9 +3,8 @@
 Python client for [Lore Core](../../README.md) — a local-first tri-substrate
 (graph + vector + relational) database for AI agent memory.
 
-Lore's storage engines (SurrealDB by default as of v3.13.0, Kùzu
-per workspace via `graphEngine: 'kuzu'`, LanceDB, better-sqlite3)
-are native Node.js bindings, so this package is **not** an
+Lore's storage engines (SurrealDB, LanceDB, better-sqlite3) are
+native Node.js bindings, so this package is **not** an
 in-process Python port. It's
 two things instead:
 
@@ -167,6 +166,16 @@ reading the route source):
   stats, background-reconnect state, ...) is large and evolves often; it
   wasn't worth locking into a pydantic model for a first pass. The other
   ~11 covered endpoints ARE fully typed.
+- **`health_full()` needs a `token` to get that full snapshot.** `GET
+  /api/health` is on the daemon's public-path allowlist, so the request
+  itself never 401s — but the BODY differs: a `LoreClient` constructed with
+  `token=...` gets the rich snapshot above, while a tokenless client
+  silently gets back the same lite body as `health()` (`status`, `version`,
+  `sessions`, `backgroundReconnect`, `embeddingBackend` only — no
+  `loreHome`, `workspace`, `outbox`, or `rateLimit`). `health_full()` emits
+  a `UserWarning` when called with no token so this doesn't fail silently.
+  See the main repo's `docs/OPERATIONS.md` ("GET /api/health") for the
+  full anonymous-vs-authenticated contract.
 - **REST surface coverage is partial by design** — see the table above.
   Edges, versioning/changesets, schema governance, sync, ingestion,
   verbatim-store, and collections routes aren't wrapped.

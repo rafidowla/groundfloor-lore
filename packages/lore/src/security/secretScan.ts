@@ -11,6 +11,18 @@
  *
  * Deliberately conservative — a false positive here silently degrades a real
  * document, so only well-known vendor token shapes are matched.
+ *
+ * DECISION (2026-09-03, see docs/DATA_CONTRACT.md): this is a BEST-EFFORT
+ * courtesy, not a security guarantee and not a general redaction layer. Lore
+ * does not sanitize free text — callers (Atlas, Loom, SDK users) are
+ * responsible for scrubbing secrets/PII before calling. This scan is applied
+ * at exactly three call sites, all on the vector/embed layer only
+ * (verbatimStore.ts store/storeBatch, verbatimSearchWorkerProxy.ts's
+ * parent-embeds branch) and matches only the five vendor shapes below — the
+ * outbox, bulkIngest sync mode, the Arcade vector store, sync/replication,
+ * and the graph substrate itself (including supersede_node's `reason`) all
+ * persist text unfiltered. See docs/DATA_CONTRACT.md for the full list of
+ * unredacted sinks and the reasoning.
  */
 
 /** High-signal, low-false-positive secret shapes. */

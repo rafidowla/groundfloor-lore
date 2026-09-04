@@ -1,8 +1,8 @@
 /**
  * migration/opValueHelpers.ts — engine-agnostic MigrationOp param/value
- * helpers, split out of the now-deleted kuzuBackend.ts (Kuzu removal Phase
- * 3f) so MigrationBackend implementations other than the Kùzu one can share
- * them without depending on a Cypher-specific module.
+ * helpers, split out of the now-deleted former graph-backend module so
+ * every MigrationBackend implementation can share them without depending
+ * on a Cypher-specific module.
  */
 
 import type { MigrationOp } from './types.js';

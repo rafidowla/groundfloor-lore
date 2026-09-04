@@ -34,7 +34,7 @@ A database, not a chat product. A regular app should store rows, documents, and 
 | Find where lookups actually spend time, then fix that stage (WP5) | Everyone who reads; measure before guessing | Done 2026-08-30 — hydrate is not the cost; stop (see WP5) |
 | Bulk ingest log noise — conflict retries logged as ERROR (WP6) | Anyone reading logs during a large load; false alarm, not data loss | Small — this plan, WP6. Its own tiny PR; do not fold it into WP3 just because both touch bulk ingest |
 
-> **Corrected:** the original roadmap draft carried a 6th "do next" item — "finish schema-change safety on the current graph engine (backup before a destructive change, then migrate)." **This already shipped** in v3.16.0 (2026-08-22, per CHANGELOG): the schema-safety subsystem is fully engine-agnostic and no longer refuses to run against a SurrealDB-backed workspace. Verified in source — `assertKuzuGraphSubstrate` only survives in stale comments. It's moved to "Already done" below. WP0 exists specifically to have you re-verify this on the live tree before you build anything else, rather than take this correction on faith.
+> **Corrected:** the original roadmap draft carried a 6th "do next" item — "finish schema-change safety on the current graph engine (backup before a destructive change, then migrate)." **This already shipped** in v3.16.0 (2026-08-22, per CHANGELOG): the schema-safety subsystem is fully engine-agnostic and no longer refuses to run against a SurrealDB-backed workspace. Verified in source — the prior local graph engine's substrate-assertion function (see `docs/KUZU_REMOVAL.md`) no longer exists in the live tree, not even in stale comments. It's moved to "Already done" below. WP0 exists specifically to have you re-verify this on the live tree before you build anything else, rather than take this correction on faith.
 
 ### Later — or trim the ambition
 
@@ -93,7 +93,7 @@ Yes: governed schema change, expand then migrate then contract, two-person confi
 | Migration uses the port | `packages/lore/src/schemas/migration/schemaGraphOpsBackend.ts` |
 | Live exact-value tests | `test/surreal-schema-graph-ops-unit.ts` (`npm run test:unit:surreal-schema-ops`) |
 
-**If those tests pass:** schema-safety WP is **done**. Do not touch it except comments that still say “Kùzu-only refuse.” Optional tiny follow-up (same PR only if you are already in those files): replace leftover “assertKuzuGraphSubstrate” comments with “GraphSubstrateUnsupportedError when neither hatch exists.”
+**If those tests pass:** schema-safety WP is **done**. Do not touch it except comments that still reference the prior local graph engine's now-removed refusal path (see `docs/KUZU_REMOVAL.md`). Optional tiny follow-up (same PR only if you are already in those files): replace any such leftover comments with “GraphSubstrateUnsupportedError when neither hatch exists.”
 
 **Do not** snapshot `ITableStorage` collections here (`dataSnapshot.ts` already says tables are out of scope). That is a later WP after Q1.10.
 
@@ -220,7 +220,7 @@ Keep `query(table, filter?: Filter, …)` working. Add overloads or widen `query
 - Leaves still use `assertIdent` + bound `?` values. **Never** concatenate user strings into SQL.
 - Cap nesting depth at **8**. Deeper → throw `filter_too_nested`.
 - Empty `and: []` / `or: []` → throw (do not match all rows).
-- Update `buildSqliteWhere` (used by `sqliteTableStorage.buildWhereClause`). Cypher `buildCypherWhere` is leftover for dead Kùzu paths — if still compiled, either leave leaf-only or add the same tree; do not spend a sprint on Cypher unless `tsc` requires it.
+- Update `buildSqliteWhere` (used by `sqliteTableStorage.buildWhereClause`). Cypher `buildCypherWhere` is leftover for dead paths on the prior local graph engine (see `docs/KUZU_REMOVAL.md`) — if still compiled, either leave leaf-only or add the same tree; do not spend a sprint on Cypher unless `tsc` requires it.
 
 **Zod:** `filterZ` needs a recursive (lazy `z.union`) variant for the nested tree. `packages/lore/src/mcp/tools/collections.ts` is already ~770 lines against the 800 hard cap — do **not** grow it with the new recursive schema. Put the new schema (e.g. `filterNodeZ`) in a new module (`packages/lore/src/mcp/tools/collectionsFilterSchema.ts` or similar) and import it into `collections.ts`, the same file-size discipline the plan already applies to the transaction handler in 1.3. REST uses the same parser as MCP if there is one; if REST trusts JSON, still run it through the same validate function.
 

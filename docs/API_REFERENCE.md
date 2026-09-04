@@ -64,13 +64,12 @@ Dataplane swap point.
 
 ### Collections (schema-driven tables)
 
-`collection_create`, `collection_schema_get`, `collection_insert`,
-`collection_get`, `collection_query`, `collection_update`,
+`collection_create`, `collection_schema_get`, `collection_schema_list`,
+`collection_insert`, `collection_get`, `collection_query`, `collection_update`,
 `collection_delete`, `collection_bulk_insert`, `collection_count`,
 `collection_update_by_query`, `collection_delete_by_query`,
 `collection_truncate` — CRUD + bulk + query over named collections backed by
-`ITableStorage` (SqliteTableStorage by default; KuzuTableStorage via the
-legacy `LORE_TABLE_BACKEND=kuzu` path).
+`ITableStorage` (`SqliteTableStorage`, the only implementation).
 
 ### Analytical
 
@@ -213,13 +212,81 @@ Two rules apply to the graph-walking surfaces (`DEC-SCOPE-REACHABILITY`):
   are folded in the engine) and answers **501 `ecosystem_scope_unsupported`**
   rather than ignoring the parameter.
 
+### DELETE routes at a glance
+
+Every DELETE route on this daemon, and exactly how it takes its target — a
+path segment, a query string, or a JSON body. There is no single convention
+across surfaces (the graph, collections, and workspace families each
+predate the others), so this table is the one place that answers "how do I
+delete an X" without hunting through every family's own table below.
+
+| Route | Shape | Notes |
+|---|---|---|
+| `DELETE /api/node/:id` | path segment | Also accepts `DELETE /api/node?id=<id>` — the query-string form is normalized onto the path form before routing, so both shapes hit the same handler and return the same body. `?workspace=` is still a query param either way. |
+| `DELETE /api/edge?sourceId=&targetId=&relation=` | query string | All three params required; 404 `edge_not_found` if no matching edge. |
+| `DELETE /api/workspaces/:name` | path segment | `?query` strings (e.g. a stray `?workspace=`) do not affect the name — it is parsed off the path only. |
+| `DELETE /api/schema/migrations/in-flight` | path suffix (no id) | Clears the in-flight migration marker for the workspace. |
+| `DELETE /v1/{collection}` | body `{ filter }` | Delete-by-query; refuses an empty/all filter (400 `all_filter_refused`) — this bare route never reads `body.all`, so there is no REST opt-in here (use `collection_delete` over MCP, or `delete-by-query`/`truncate` below). A structurally malformed or over-nested filter is refused separately (400 `filter_invalid`) regardless of `all` — that case is about the filter's shape, not whether it matches every row. |
+| `DELETE /v1/{collection}/{id}` | path segment | Delete-by-primary-key (mirrors `GET /v1/{collection}/{id}`); 404 `row_not_found` if absent. Same response shape as the filter-delete route above (`{ deleted: number }`). |
+| `DELETE /v1/{collection}/delete-by-query` | body `{ filter, all? }` | Same all-filter refusal as the bare route above, but `all: true` in the body IS honored here (X-allrows, 2026-09-03) — see "Unscoped-write guard" below. |
+
+> **Unscoped-write guard is two layers (X-allrows, 2026-09-03).** A
+> destructive `collection_update` / `collection_delete` /
+> `collection_update_by_query` / `collection_delete_by_query` /
+> `collection_transaction` call (and their REST equivalents `PUT`/`DELETE
+> /v1/{collection}`, `.../update-by-query`, `.../delete-by-query`,
+> `POST /v1/transaction`) is checked twice before it touches a row:
+>
+> 1. **Syntactic** (`classifyFilterScope`, `mcp/tools/collectionsFilterScope.ts`)
+>    — is the filter a tautology BY CONSTRUCTION (an absent/empty filter, an
+>    `{eq:{}}`, a `not` over a constant-false leaf, …)? This check never reads
+>    table data, so it deliberately answers SCOPED for `{gte:{id:0}}`,
+>    `{lte:{id:999999999}}`, `{not:{eq:{id:-1}}}` and similar shapes — they
+>    only match every row because of a particular table's data, not because
+>    of the filter's shape.
+> 2. **Data-aware** (`assertNotDataTautology`, `engines/sqliteTableTransaction.ts`)
+>    — inside the SAME SQL transaction as the mutation, `COUNT(*)` the whole
+>    table and `COUNT(*) WHERE <filter>`. If a table with MORE THAN ONE row
+>    has every row matching, the write is refused exactly like a syntactic
+>    ALL filter (400/error `all_filter_refused`) — closing the gap the
+>    syntactic layer leaves open by design. A 0- or 1-row table is exempt: a
+>    filter matching a table's only row is legitimately scoped, not an
+>    all-rows write in disguise.
+>
+> Both layers take the identical `all: true` opt-in — pass it once and both
+> are satisfied. `collection_update`/`collection_delete` (MCP) and their bare
+> `PUT`/`DELETE /v1/{collection}` REST routes only expose `all` on the MCP
+> side (REST has no `all` field on the bare routes — always refused, use
+> `collection_truncate`/`truncate` for an intentional full wipe instead).
+> `collection_update_by_query`/`collection_delete_by_query`/
+> `collection_transaction` and their REST equivalents (`.../update-by-query`,
+> `.../delete-by-query`, `POST /v1/transaction`) all accept `all: true` on
+> both MCP and REST. `collection_truncate`/`truncate()` remains the one
+> unconditional, un-gated full-wipe path.
+
+> **Collection filters are strict (QA round-3, 2026-09-03).** Every `filter`
+> accepted anywhere on the collections surface — MCP `collection_update` /
+> `collection_delete` / `collection_update_by_query` / `collection_delete_by_query`
+> / `collection_query` / `collection_count` / `collection_join_query`, and
+> their REST equivalents (`PUT`/`DELETE /v1/{collection}`, `.../update-by-query`,
+> `.../delete-by-query`, `.../query`, `.../count`) — is validated against a
+> `.strict()` schema: `eq`/`contains`/`startsWith`/`gt`/`gte`/`lt`/`lte`/`in`
+> leaves, optionally combined with `and`/`or`/`not`. An unrecognized top-level
+> key at ANY depth (a typo like `eqq`, a wrong case like `EQ`, or an
+> unsupported operator) rejects the whole filter with 400 `filter_invalid`
+> naming the offending key — it is never silently dropped
+> and never narrows the filter to a broader match than the caller wrote. This
+> applies uniformly across MCP and REST; before this fix, REST never
+> validated `filter` at all and a stripped MCP filter could silently mutate
+> more rows than intended.
+
 ### Nodes & edges
 
 | Method · Path | Purpose |
 |---|---|
 | `GET /api/node` | Node plus 1-hop neighbors (`?ecosystem=` scopes centre + neighbours) |
 | `POST /api/node` | Upsert a node (mirrors `store_node`) |
-| `DELETE /api/node/:id` | Delete a node (mirrors `delete_node`) |
+| `DELETE /api/node/:id` | Delete a node (mirrors `delete_node`); also accepts the query-string form `DELETE /api/node?id=<id>` |
 | `GET /api/node-full` | Node body alone (CLI `get-full`) |
 | `GET /api/node-list` | List nodes |
 | `GET /api/nodes` | Type-filtered `LoreNode` list for inspector renderers |
@@ -369,17 +436,58 @@ Response: `{ at, count, nodes: LoreNode[] }`. Embeddable-surface equivalent:
 | Method · Path | Purpose |
 |---|---|
 | `POST /v1/schema` | Create a collection |
+| `GET /v1/schema` | List collections, paginated (`{schemas: [...], nextCursor?}`, empty array when none exist) |
 | `GET /v1/schema/{name}` | Read a collection's schema |
 | `POST /v1/{collection}` | Insert a row |
 | `GET /v1/{collection}/{id}` | Get a row by primary key |
 | `POST /v1/{collection}/query` | Query rows (filter + opts) |
 | `PUT /v1/{collection}` | Update rows by query |
 | `DELETE /v1/{collection}` | Delete rows by query |
+| `DELETE /v1/{collection}/{id}` | Delete a row by primary key (mirrors the `GET` above) |
 | `POST /v1/{collection}/bulk` | Bulk insert |
 | `POST /v1/{collection}/count` | Count rows |
 | `PUT /v1/{collection}/update-by-query` | Update all rows matching a filter |
 | `DELETE /v1/{collection}/delete-by-query` | Delete all rows matching a filter |
 | `POST /v1/{collection}/truncate` | Truncate a collection (preserves schema) |
+
+> `GET /v1/schema` (finding #7, 2026-09-03) has no counterpart yet in the
+> vendored `groundfloor-ts-sdk` client (`create`/`get` only) — call it
+> directly or via the `collection_schema_list` MCP tool until the SDK
+> adds a `listCollections()` method. Out of scope here.
+>
+> **Pagination (finding B3, round E, 2026-09-03).** `GET /v1/schema` and
+> `collection_schema_list` take the same three params, as query params
+> on the HTTP route and as tool args on MCP:
+>   - `limit` — max entries per page. Default 100, max 1000 (values
+>     outside that range are clamped, not rejected).
+>   - `offset` / `cursor` — position in the (name-sorted) collection
+>     list. `cursor` is opaque — pass back a prior response's
+>     `nextCursor` verbatim; it takes precedence over `offset` when
+>     both are given.
+>   - `withCounts` — `true` to include a `rowCount` (one `COUNT(*)`)
+>     per returned collection. Default `false`.
+>
+> A response is `{schemas: [...]}` when everything fit on one page, or
+> `{schemas: [...], nextCursor: "..."}` when truncated — pass
+> `nextCursor` back as `cursor` to fetch the next page. Defaults were
+> unbounded before this fix: a large collection count returned
+> everything in one response with no size cap, and `rowCount` was
+> always computed via a synchronous `COUNT(*)` per table regardless of
+> how many tables existed.
+>
+> **`cursor` is a keyset, `offset` is a raw position (finding B3, round
+> E2, 2026-09-03).** `cursor` encodes the name of the last collection
+> returned and pages via "next name after this one" — stable no matter
+> what gets created or dropped elsewhere in the set while you walk.
+> `offset` is a plain index into the name-sorted list, re-derived fresh
+> on every call: creating a collection that sorts before your current
+> position shifts everything after it, so an `offset`-only walk across
+> multiple calls can return an entry twice or skip one. Prefer `cursor`
+> (follow `nextCursor`) for any walk spanning more than one call;
+> `offset` is fine for a one-off "jump near position N". A `cursor`
+> from before this fix (an `{offset}`-shaped payload) no longer
+> decodes — it's treated as malformed and falls back to `offset` (0 if
+> not given), the same as a garbage or truncated cursor.
 
 ### Diagnostics, admin & health
 
@@ -421,10 +529,10 @@ the `LoreInstance` handle returned by `createLore`.
 
 ### `createLore(opts?)` → `Promise<LoreInstance>`
 Factory function exported from `@groundfloor/lore`. Opens the local substrates
-(the graph engine — SurrealDB by default, Kùzu per workspace via `graphEngine:
-'kuzu'` — plus LanceDB and the SQLite outbox), starts in-process replication,
-and returns a `LoreInstance`. The process is not modified — no port, no signal
-handlers, no `uncaughtException`/`unhandledRejection` listeners.
+(SurrealDB for the graph engine, plus LanceDB and the SQLite outbox), starts
+in-process replication, and returns a `LoreInstance`. The process is not
+modified — no port, no signal handlers, no
+`uncaughtException`/`unhandledRejection` listeners.
 
 ```ts
 import { createLore } from '@groundfloor/lore';
@@ -557,7 +665,7 @@ the workspace graph, LanceDB vectors, and SQLite outbox).
 
 #### `lore.dispose(reason?)` → `Promise<void>`
 Ordered graceful-shutdown drain. Stops in-process replication, flushes the
-outbox, closes all graph (SurrealDB or Kùzu) and LanceDB handles, and returns.
+outbox, closes all graph (SurrealDB) and LanceDB handles, and returns.
 Never calls `process.exit`. Safe to call from any host — the process lifecycle
 remains entirely host-owned.
 

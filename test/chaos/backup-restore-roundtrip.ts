@@ -5,7 +5,7 @@
  * substrate state.
  *
  * Scenario: workspace has a real SQLite file with rows, a fake
- * Kùzu graph file, a fake LanceDB directory + a config sidecar.
+ * the legacy graph engine graph file, a fake LanceDB directory + a config sidecar.
  * Take a backup. Wipe the workspace. Restore from the tarball.
  * Verify: SQLite rows are queryable, files are present, sidelined-
  * prior-state path is correctly null (since we wiped).
@@ -41,7 +41,7 @@ function makeWorkspace(name: string, rows: Array<{ id: number; v: string }>): { 
     const outDir = path.join(dir, 'out');
     fs.mkdirSync(loreDir, { recursive: true });
     fs.mkdirSync(outDir, { recursive: true });
-    fs.writeFileSync(path.join(loreDir, 'graph'), 'kuzu-bytes');
+    fs.writeFileSync(path.join(loreDir, 'graph'), 'the legacy graph engine-bytes');
     fs.writeFileSync(path.join(loreDir, 'graph.wal'), 'wal');
     const db = new Database(path.join(loreDir, 'tables.sqlite'));
     db.exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`);

@@ -25,7 +25,7 @@
  * **Single-writer invariant**: only one in-flight plan at a time per
  * workspace. `execute()` refuses to start if an unrelated in-flight
  * plan is already on disk — caller must explicitly `resume(otherId)`
- * or clear the checkpoint first. This matches the Kùzu local-mode
+ * or clear the checkpoint first. This matches the local graph engine's
  * single-writer constraint.
  *
  * See docs/architecture/MIGRATION_RUNNER_DESIGN.md for design rationale and what's

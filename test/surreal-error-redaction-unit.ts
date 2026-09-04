@@ -5,7 +5,7 @@
  *
  * Companion to test/sw14-error-redaction-unit.ts, which covers the same
  * property for the analytics/DDL surface. SurrealDB deserves its own file
- * because it leaks in two shapes Kùzu does not:
+ * because it leaks in two shapes the legacy graph engine does not:
  *
  *   1. A parse failure echoes the FULL statement back inside an ASCII code
  *      frame — including any literal in it.

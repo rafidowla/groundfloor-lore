@@ -5,17 +5,18 @@
  *
  * Why this test is written the way it is
  * --------------------------------------
- * Phase 3c (Kuzu removal) made the bulk loader's graph-row target
- * engine-selected instead of always-Kùzu. The failure modes to rule out are
- * NOT "throws an error" — they are the quiet ones: graph rows silently
- * vanishing (the pre-3c dispatcher dropped them when no kuzu adapter was
- * wired), a Surreal load masquerading under Kùzu wiring (the old
+ * Phase 3c (legacy graph-engine removal) made the bulk loader's graph-row
+ * target engine-selected instead of always the legacy engine. The failure
+ * modes to rule out are NOT "throws an error" — they are the quiet ones:
+ * graph rows silently vanishing (the pre-3c dispatcher dropped them when no
+ * legacy-engine adapter was wired), a Surreal load masquerading under
+ * legacy-engine wiring (the old
  * `as LocalGraph` cast), or per-row failure isolation regressing into a
  * whole-batch abort.
  *
  * So every assertion is an exact value against the graph's real state AFTER
  * the load (rows are queried back via getNode / queryEdges), the validation
- * contract is asserted message-for-message against the Kùzu adapter's
+ * contract is asserted message-for-message against the legacy engine's adapter
  * (identical checks, identical strings), and the resume contract is proven
  * by re-running the SAME batch and asserting the edge count does not double.
  *
@@ -26,7 +27,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 
-import type { KuzuRow } from '../packages/lore/src/bulkLoader/types.js';
+import type { GraphRow } from '../packages/lore/src/bulkLoader/types.js';
 import type { WorkspaceGraph } from '../packages/lore/src/engines/openWorkspaceGraph.js';
 
 process.env['LORE_LOG_LEVEL'] ??= 'error';
@@ -55,7 +56,7 @@ const lore = await createLore({ deploymentMode: 'embedded', dataDir });
 // Unchecked cast, reason: LoreInstance._daemon deliberately exposes only a
 // tiny internal surface (LoreInternalHandles) without getGraph; the embedded
 // daemon it wraps always has one, and this names exactly the surface the
-// test drives — WorkspaceGraph plus the Kùzu-hatch probe.
+// test drives — WorkspaceGraph plus the legacy-hatch probe.
 const graph = (lore as unknown as {
     _daemon: { getGraph(): WorkspaceGraph & { withBulkConnection?: unknown } };
 })._daemon.getGraph();
@@ -64,7 +65,7 @@ try {
     /* ── 0. the wiring premise: capability, not class ──────────────── */
 
     check('handle exposes bulkUpsertNodes (surreal hatch)', typeof graph.bulkUpsertNodes, 'function');
-    check('handle lacks withBulkConnection (kuzu hatch)', typeof graph.withBulkConnection, 'undefined');
+    check('handle lacks withBulkConnection (legacy hatch)', typeof graph.withBulkConnection, 'undefined');
 
     /* ── 1. adapter direct: rows land, bad rows are isolated ───────── */
 
@@ -78,7 +79,7 @@ try {
     });
     check('substrate id', adapter.substrate, 'surreal');
 
-    const batch: KuzuRow[] = [
+    const batch: GraphRow[] = [
         { kind: 'node', row: { id: 'sb-1', type: 'doc', label: 'SB 1', content: 'first', tags: ['Alpha', 'Beta'], project: 'p', ecosystem: 'e1', metadata: '{"k":1}', workspace: 'default' } },
         { kind: 'node', row: { id: 'sb-2', type: 'doc', label: 'SB 2', content: 'second', tags: 'Solo,Tag', workspace: 'default' } },
         { kind: 'node', row: { id: '', type: 'doc', label: 'bad', content: 'x', workspace: 'default' } },
@@ -97,17 +98,17 @@ try {
     check('bad rows failed', r1.failed, 4);
     check('error rowIndexes are job-relative', r1.errors.map((e) => e.rowIndex).sort((a, b) => a - b), [2, 3, 6, 7]);
     check(
-        'missing id message matches kuzu contract',
+        'missing id message matches the legacy-engine contract',
         r1.errors.find((e) => e.rowIndex === 2)?.errorMessage,
         'missing_or_invalid_id',
     );
     check(
-        'workspace mismatch message matches kuzu contract',
+        'workspace mismatch message matches the legacy-engine contract',
         r1.errors.find((e) => e.rowIndex === 3)?.errorMessage,
         'workspace_mismatch (expected default, got other)',
     );
     check(
-        'edge missing fields message matches kuzu contract',
+        'edge missing fields message matches the legacy-engine contract',
         r1.errors.find((e) => e.rowIndex === 7)?.errorMessage,
         'edge_missing_fields',
     );

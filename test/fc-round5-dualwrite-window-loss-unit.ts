@@ -143,7 +143,7 @@ async function main() {
         f.db.exec('CREATE TABLE contacts (id TEXT PRIMARY KEY, phone TEXT)');
         f.db.prepare("INSERT INTO contacts (id, phone) VALUES ('a', '555-0100')").run();
 
-        // Strip the atomic verb — simulates kuzu/lance/test adapters that
+        // Strip the atomic verb — simulates the legacy graph engine/lance/test adapters that
         // only implement migrateData + dropOld.
         const full = new SqliteMigrationAdapter(f.db);
         const stripped = Object.create(full);

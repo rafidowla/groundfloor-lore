@@ -2,9 +2,10 @@
  * analyticalStorageFactory.ts — build the analytical store that matches where
  * collections actually live.
  *
- * There were four independent `new KuzuAnalyticalStorage(...)` sites
- * (`analyticalResolver`, `createLocalAdapter`, `analyticalGetter`,
- * `createMcpServer`), each deciding for itself. That is how the twelve-week
+ * There were four independent call sites each constructing their own
+ * analytical storage instance directly (`analyticalResolver`,
+ * `createLocalAdapter`, `analyticalGetter`, `createMcpServer`), each
+ * deciding for itself. That is how the twelve-week
  * defect survived: collections moved to SQLite in 061e189 and none of the four
  * followed, because none of them was the one obvious place to change.
  *
@@ -40,9 +41,9 @@ export function createAnalyticalStorage(tableStorage: ITableStorage): IAnalytica
             (table) => tableStorage.getColumnTypes(table),
         );
     }
-    // The Kùzu table backend keeps its own analytical implementation, reached
-    // only by callers that still hold a Kùzu connection. It is not constructed
-    // here because this factory is given a table store, not a connection — and
-    // because no workspace on this machine has ever used that backend.
+    // No other table backend currently exists — this branch is a defensive
+    // fallback for any future `ITableStorage` implementation that supplies
+    // its own analytical path, since this factory can only build one from a
+    // table store it recognizes.
     return null;
 }

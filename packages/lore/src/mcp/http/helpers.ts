@@ -8,6 +8,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { randomBytes } from 'node:crypto';
 
 /** Hard cap on inbound request body size. 10 MB. */
 export const MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -76,20 +77,74 @@ export async function readBoundedBody(req: IncomingMessage): Promise<string> {
 }
 
 /**
- * readJsonBody — Read the request body and JSON.parse it.
- *
- * Bounded at MAX_BODY_BYTES via readBoundedBody. Throws with
- * `{ code: PAYLOAD_TOO_LARGE }` on oversize and a plain Error on
- * malformed JSON so handlers can map each to 413 / 400 cleanly.
+ * X-json400 audit (2026-09-03): marker on errors thrown by parseJsonBody /
+ * readJsonBody when the body is present but not valid JSON. Mirrors the
+ * PAYLOAD_TOO_LARGE tagging pattern above — handlers match on `code` instead
+ * of message-sniffing (`/^invalid JSON body:/i.test(err.message)`), which
+ * several routes had already reinvented ad hoc (routes/collections.ts) and
+ * several others never checked at all, so a truncated/malformed body fell
+ * through their generic catch to a 500 (POST /api/node and ~20 sibling
+ * routes — see the X-json400 fix-note table). The tag also lets
+ * writeInvalidJson (below) recognize the error without inspecting text.
  */
-export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
-    const text = await readBoundedBody(req);
+export const INVALID_JSON_BODY = 'invalid_json_body';
+
+function isInvalidJsonBody(err: unknown): boolean {
+    return !!err
+        && typeof err === 'object'
+        && (err as { code?: string }).code === INVALID_JSON_BODY;
+}
+export { isInvalidJsonBody };
+
+/**
+ * parseJsonBody — JSON.parse with a tagged error on failure so a route that
+ * reads its own body (readBoundedBody + a manual parse, e.g. postNode.ts)
+ * gets the exact same detectable-by-callers shape readJsonBody produces
+ * below, instead of a bare Error indistinguishable from a real internal
+ * fault in a shared catch block. An empty body parses to `{}` (matches the
+ * long-standing readJsonBody convention several routes already depend on,
+ * e.g. import.ts's own readJsonBody reimplementation).
+ */
+export function parseJsonBody(text: string): unknown {
     if (!text) return {};
     try {
         return JSON.parse(text);
     } catch (err) {
-        throw new Error(`invalid JSON body: ${(err as Error).message}`);
+        const tagged = new Error(`invalid JSON body: ${(err as Error).message}`) as Error & { code?: string };
+        tagged.code = INVALID_JSON_BODY;
+        throw tagged;
     }
+}
+
+/**
+ * readJsonBody — Read the request body and JSON.parse it.
+ *
+ * Bounded at MAX_BODY_BYTES via readBoundedBody. Throws with
+ * `{ code: PAYLOAD_TOO_LARGE }` on oversize and `{ code: INVALID_JSON_BODY }`
+ * on malformed JSON so handlers can map each to 413 / 400 cleanly.
+ */
+export async function readJsonBody(req: IncomingMessage): Promise<unknown> {
+    const text = await readBoundedBody(req);
+    return parseJsonBody(text);
+}
+
+/**
+ * writeInvalidJson — clean 400 response for a parseJsonBody/readJsonBody
+ * failure (isInvalidJsonBody(err) === true).
+ *
+ * Deliberately does NOT run the error through redactError: redactError's
+ * quoted-token pass (security/logRedact.ts) is meant to scrub node-ID-shaped
+ * content out of substrate error messages, but a JSON.parse SyntaxError
+ * quotes its OWN diagnostic text (e.g. the bad token or the surrounding
+ * snippet), which is JSON-syntax metadata, not caller content. Running it
+ * through redactError mangled that diagnostic into an unreadable `id#<hash>`
+ * fragment (X-json400 audit finding) — worse than useless for a client
+ * trying to fix its own payload, and not a privacy win since the source
+ * text is bounded, already client-supplied, and never echoed back in full.
+ */
+export function writeInvalidJson(res: ServerResponse, err: unknown): void {
+    const message = err instanceof Error ? err.message : 'invalid JSON body';
+    writeError(res, 400, INVALID_JSON_BODY, message);
 }
 
 /**
@@ -149,6 +204,42 @@ export function writeError(
 ): void {
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ code, message, ...(extras ?? {}) }));
+}
+
+/**
+ * writeGraphEngineError — round-S fix (2026-09-04, finding 3 addendum).
+ *
+ * `LegacyGraphEngineRemovedError` (graphEngineSelector.ts — a workspace
+ * whose workspaces.json still declares the removed legacy graph engine)
+ * carries its own `.status`/`.code` (501 / `legacy_graph_engine_removed`),
+ * but every route that reaches it through a generic `catch (err) {
+ * writeError(res, 500, 'internal_error', redactError(err)) }` fallback
+ * (readGate.ts's `resolveReadGraph` — shared by /api/node, /api/subgraph,
+ * /api/node/lineage, /api/node-full, /api/node/as-of,
+ * /api/node/supersession-candidates — and diagnostic/stats.ts's
+ * `handleStats`) discarded that and answered a generic 500. `redactError`
+ * additionally hashes the quoted engine-name token out of the message, so a
+ * caller could not even grep the response for it — a legacy-engine
+ * refusal was indistinguishable from a real server fault.
+ *
+ * Call this FIRST in any such catch block; it writes the correct 501 +
+ * `legacy_graph_engine_removed` and returns true, or returns false
+ * (writing nothing) so the caller's own fallback still runs for every
+ * other error. Takes `err: unknown` and does its own `instanceof` check
+ * (rather than importing the class into every call site's type surface)
+ * so callers stay one line: `if (writeGraphEngineError(res, err)) return;`.
+ */
+export function writeGraphEngineError(res: ServerResponse, err: unknown): boolean {
+    if (
+        err instanceof Error
+        && (err as { code?: unknown }).code === 'legacy_graph_engine_removed'
+        && typeof (err as { status?: unknown }).status === 'number'
+    ) {
+        const e = err as Error & { code: string; status: number; workspace?: string | null };
+        writeError(res, e.status, e.code, e.message, { workspace: e.workspace ?? null });
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -271,6 +362,101 @@ export function writeOutboxBackpressure(
         outboxDepth,
         retryAfterSeconds: retryAfter,
     }));
+}
+
+/**
+ * Security checklist item #12 — browser security headers.
+ *
+ * Every HTTP response the daemon writes now carries a baseline set of
+ * browser-hardening headers. This is applied ONCE, at the true chokepoint
+ * every request passes through before any gate or route writes a byte:
+ * mcp/http/middleware.ts's runHttpGates calls this as its first statement.
+ * That single call site covers EVERY response — auth failures, rate-limit
+ * 429s, the bootstrap short-circuit, OPTIONS preflights, and every route —
+ * because none of those downstream writers construct their own response
+ * object; they all reuse the one `res` that already carries these headers.
+ *
+ * Headers are set via res.setHeader() rather than folded into a writeHead()
+ * call, so Node's own merge rule does the rest: a later
+ * `res.writeHead(status, { 'Content-Type': ... })` elsewhere ADDS to
+ * (doesn't replace) whatever was set with setHeader(), and only overrides a
+ * specific header when that call's own object repeats its name. Every
+ * existing route's writeHead() call sets Content-Type (and occasionally
+ * Retry-After / Connection / its own Cache-Control) — none of them name
+ * these five headers — so they inherit the defaults untouched. The one
+ * response that legitimately needs a DIFFERENT Content-Security-Policy is
+ * GET /api/export/html (routes/static.ts), which supplies its own CSP in
+ * its writeHead() call; see buildHtmlExportCsp below.
+ *
+ *   - X-Content-Type-Options: nosniff — stops a browser MIME-sniffing a
+ *     JSON (or any) response body into an executable content type.
+ *   - X-Frame-Options: DENY (paired with the default CSP's
+ *     frame-ancestors 'none' below) — this is a loopback API daemon with
+ *     no served UI; nothing should ever be able to frame it.
+ *   - Referrer-Policy: no-referrer — daemon URLs can carry workspace
+ *     names/ids in the path or query string; never leak them via Referer
+ *     on any outbound navigation/fetch a client makes from a rendered page.
+ *   - Cache-Control: no-store — every API response sits behind Bearer auth
+ *     and can carry live graph data; never let a shared or browser cache
+ *     retain it. A route with a different caching need (e.g. the streaming
+ *     NDJSON response's own no-cache/no-transform) overrides this per the
+ *     merge rule above.
+ *   - Content-Security-Policy: default-src 'none'; frame-ancestors 'none'
+ *     — the strict default for every non-HTML (JSON/NDJSON/SSE) response.
+ *
+ * No HSTS: the daemon only ever listens on loopback plain HTTP
+ * (127.0.0.1 / localhost / [::1] — see httpAuth.ts's isAllowedOrigin). HSTS
+ * exists to force a browser to upgrade future requests to HTTPS for a
+ * given origin; there is no HTTPS variant of this loopback origin to
+ * upgrade to, so the header would be inert at best and a foot-gun if this
+ * code were ever mistakenly fronted by a real hostname.
+ */
+export function applySecurityHeaders(res: ServerResponse): void {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+}
+
+/**
+ * generateCspNonce — cryptographically random per-response nonce for GET
+ * /api/export/html's inline <script>/<style> tags. 16 bytes (128 bits) of
+ * randomness, base64url-encoded so it drops cleanly into both an HTML
+ * attribute and a CSP directive value with no escaping.
+ */
+export function generateCspNonce(): string {
+    return randomBytes(16).toString('base64url');
+}
+
+/**
+ * buildHtmlExportCsp — the page-specific CSP for GET /api/export/html, the
+ * one daemon response that is actually rendered as a page in a browser
+ * (engines/htmlExport.ts's self-contained vis-network snapshot). Derived
+ * from exactly what that template loads, so it's tighter than the generic
+ * default-src 'none' every other response gets:
+ *
+ *   - script-src: the one inline <script> (the embedded graph DATA + the
+ *     vis.Network wiring) is allowed via its per-response `nonce`, never
+ *     'unsafe-inline'; the vis-network CDN build is allow-listed by origin
+ *     (its <script> tag already carries a pinned version + Subresource
+ *     Integrity hash — the CSP origin allow-list is defense in depth on
+ *     top of that, not a substitute for it).
+ *   - style-src: the one inline <style> block, same nonce.
+ *   - connect-src 'none': the export is a static snapshot; it must never
+ *     phone home.
+ *   - frame-ancestors 'none' / base-uri 'none': same framing/base-tag
+ *     hardening as the generic default.
+ */
+export function buildHtmlExportCsp(nonce: string): string {
+    return [
+        "default-src 'none'",
+        `script-src 'nonce-${nonce}' https://unpkg.com`,
+        `style-src 'nonce-${nonce}'`,
+        "connect-src 'none'",
+        "frame-ancestors 'none'",
+        "base-uri 'none'",
+    ].join('; ');
 }
 
 /**

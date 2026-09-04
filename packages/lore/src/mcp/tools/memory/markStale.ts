@@ -13,6 +13,8 @@ import type { MemoryToolsDeps } from './types.js';
 import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
 import { redactError } from '../../../security/logRedact.js';
+import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE } from '../../../core/nodeWriteLock.js';
+import { recordHotWrite } from '../../../outbox/hotLane.js';
 
 export function registerMarkStaleTool(mcpServer: McpServer, deps: MemoryToolsDeps): void {
     mcpServer.tool(
@@ -70,11 +72,47 @@ export function registerMarkStaleTool(mcpServer: McpServer, deps: MemoryToolsDep
                     };
                 }
                 __auditCtx.workspace = resolvedGraph.resolvedWorkspace;
-                const marked = await resolvedGraph.graph.markStaleByTags(tags);
+                const lockWorkspace = resolvedGraph.resolvedWorkspace;
+                // 2026-09-03 (X-markstale audit fix) — was a direct
+                // `graph.markStaleByTags(tags)` call: no outbox row, no
+                // per-node lock, so a crash between resolving the tag match
+                // and applying the flag lost the operation with nothing for
+                // replay/crash-recovery to see. Resolve the matched ids
+                // FIRST (read-only), then apply in per-chunk locked +
+                // outbox-recorded regions — mirrors bulkWriteEdgesDelete.ts's
+                // handleBulkDelete chunking (core/nodeWriteLock.ts
+                // BULK_LOCK_CHUNK_SIZE).
+                const matchedIds = await resolvedGraph.graph.findNodeIdsByTags(tags);
+                let marked = 0;
+                let anyOutboxCommitFailure = false;
+                for (const chunk of chunkForLocking(matchedIds, BULK_LOCK_CHUNK_SIZE)) {
+                    await withNodeLocks(lockWorkspace, chunk, async () => {
+                        if (deps.outboxStore) {
+                            try {
+                                await recordHotWrite(deps.outboxStore, {
+                                    workspace: lockWorkspace,
+                                    operationKind: 'node.mark_stale',
+                                    payload: { ids: chunk },
+                                    initiator: 'mcp:mark_stale',
+                                    operation: 'graph.markStaleByIds',
+                                });
+                            } catch (err) {
+                                anyOutboxCommitFailure = true;
+                                console.error(`[Lore MCP] mark_stale: outbox commit failed for a chunk of ${chunk.length} id(s): ${redactError(err)}`);
+                                return;
+                            }
+                        }
+                        marked += await resolvedGraph.graph.markStaleByIds(chunk);
+                    });
+                }
+                if (anyOutboxCommitFailure) {
+                    __auditCtx.errored = true;
+                    __auditCtx.resultDetail = 'outbox commit failed for one or more chunks';
+                }
                 return {
                     content: [{
                         type: 'text' as const,
-                        text: JSON.stringify({ marked, tags, ok: true }, null, 2),
+                        text: JSON.stringify({ marked, tags, ok: !anyOutboxCommitFailure }, null, 2),
                     }],
                 };
             } catch (error) {

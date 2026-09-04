@@ -1,5 +1,6 @@
 import path from 'path';
 import { loreHome } from '../../config/loreHome.js';
+import type { WorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 
 export async function migrateEmbeddingModelCommand(args: string[]): Promise<void> {
     const toIdx = args.indexOf('--to');
@@ -30,7 +31,7 @@ export async function migrateEmbeddingModelCommand(args: string[]): Promise<void
     const basePath = loreHome();
     const loreDir = path.join(basePath, '.lore');
 
-    const { openWorkspaceGraph } = await import('../../engines/openWorkspaceGraph.js');
+    const { openGraphForCli, CliDaemonLockError } = await import('./shared.js');
     const { LocalEmbeddingProvider } = await import('../../providers/localEmbeddingProvider.js');
     const { OpenAICompatEmbeddingProvider } = await import('../../providers/openAICompatEmbeddingProvider.js');
     const { migrateEmbeddingModel } = await import('../../engines/migrateEmbeddingModel.js');
@@ -53,11 +54,18 @@ export async function migrateEmbeddingModelCommand(args: string[]): Promise<void
         provider = new LocalEmbeddingProvider({ modelId: targetModelId, dimension: targetDimension });
     }
 
-    const graph = openWorkspaceGraph(basePath);
+    // Finding 11 (round E) — openGraphForCli's LORE_PORT-aware daemon
+    // preflight (+ shortened openSurreal budget on the residual lock-held
+    // case) replaces what used to be a bare `graph.initialize()` that sat
+    // through the full ~15s retry storm before landing in this catch. The
+    // launchctl recovery message below is unchanged either way.
+    let graph: WorkspaceGraph;
     try {
-        await graph.initialize();
+        graph = await openGraphForCli(basePath);
     } catch (err) {
-        const msg = (err as Error)?.message ?? '';
+        const msg = err instanceof CliDaemonLockError
+            ? err.message
+            : ((err as Error)?.message ?? '');
         console.error('');
         console.error(`Could not open the local graph: ${msg}`);
         console.error('');

@@ -2,13 +2,13 @@
  * corpusHealth.ts — Corpus health metrics (Feature 7, 2026-05-26).
  *
  * Tools:
- *   corpus_health  — per-workspace health overview combining live Kùzu
+ *   corpus_health  — per-workspace health overview combining live graph
  *                    aggregates with pre-aggregated AuxStore counters.
  *   check_freshness — data-freshness report: how many nodes have a recent
  *                     syncedAt vs how many are past the TTL threshold.
  *
- * All Kùzu counts are derived from listNodes + in-JS aggregation so
- * no new Kùzu query methods are needed. The call is non-blocking and
+ * All graph counts are derived from listNodes + in-JS aggregation so
+ * no new graph query methods are needed. The call is non-blocking and
  * returns in <500ms for graphs up to ~100k nodes.
  */
 
@@ -28,7 +28,7 @@ export interface CorpusHealthDeps {
     store: StorageBundle;
     auxStore: AuxStore;
     // Phase 6 P1 — per-workspace graph routing (Postgres model: each app's
-    // workspace is its own Kùzu). OPTIONAL: when absent (cloud / tests) the
+    // workspace is its own graph). OPTIONAL: when absent (cloud / tests) the
     // resolver returns the boot store, so behavior is unchanged.
     graphRegistry?: LocalGraphRegistry;
     detectedScope?: { workspace: string; ecosystem: string };

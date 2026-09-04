@@ -35,21 +35,24 @@ import { log } from '../../logger.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import type {
-    ColumnDecl,
-    ColumnType,
     ITableStorage,
     Row,
     TableSchema,
 } from '../../contracts/tables.js';
 import type { Filter, FilterNode, FindOptions } from '../../engines/collectionStorage.js';
-import { isFilterAnd, isFilterNot, isFilterOr } from '../../engines/collectionStorage.js';
+import { CollectionValidationError, validateRowAgainstSchema } from '../../engines/collectionRowValidation.js';
 import { assertMcpScope, type McpScopeMode } from './mcpScope.js';
 import type { StorageBundle } from '../services.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import { resolveTargetTableStorage, workspaceRequiredEnvelope as workspaceRequiredEnvelopeShared } from './workspaceResolve.js';
 import { registerCollectionTransactionTool } from './collectionsTransaction.js';
 import { registerCollectionJoinQueryTool } from './collectionsJoin.js';
-import { filterNodeZ, optionalFilterNodeZ } from './collectionsFilterSchema.js';
+import { registerCollectionByQueryTools } from './collectionsByQuery.js'; // X-allrows split (800-line cap)
+import { filterNodeZ, optionalFilterNodeZ, filterInvalidMcpEnvelope } from './collectionsFilterSchema.js';
+// F-COL5 split — the write-guard classifier lives in collectionsFilterScope.ts.
+// Re-export so existing consumers keep their import path.
+export { isAllFilter, classifyFilterScope, type FilterScope } from './collectionsFilterScope.js';
+import { assertValidFilter } from './collectionsFilterScope.js';
 // 1.M6 split (file-size cap) — query/count handlers live in collectionsQuery.ts.
 // Re-export so existing consumers keep their import path.
 export { handleQuery, handleCount, type QueryResultShape, type CountResultShape } from './collectionsQuery.js';
@@ -58,81 +61,21 @@ import { handleQuery, handleCount } from './collectionsQuery.js';
 /* ------------------------------------------------------------------ */
 /*  SDK ↔ Lore translation                                             */
 /* ------------------------------------------------------------------ */
-
-/**
- * SDK FieldSchema (from v3/groundfloor-ts-sdk/src/types.ts) — exposed
- * directly in the MCP tool input schemas so external callers see the
- * SDK names, not Lore's internal names.
- */
-export interface SdkFieldSchema {
-    name: string;
-    field_type: ColumnType;
-    required?: boolean;
-    indexed?: boolean;
-    unique?: boolean;
-    primary_key?: boolean;
-}
-
-export interface SdkCollectionSchema {
-    name: string;
-    fields: SdkFieldSchema[];
-    description?: string;
-    metadata?: Record<string, string>;
-}
-
-export function sdkToInternalSchema(schema: SdkCollectionSchema): TableSchema {
-    return {
-        name: schema.name,
-        description: schema.description,
-        columns: schema.fields.map((f): ColumnDecl => ({
-            name: f.name,
-            type: f.field_type,
-            primary: f.primary_key,
-            required: f.required,
-            unique: f.unique,
-            indexed: f.indexed,
-        })),
-    };
-}
-
-export function internalToSdkSchema(schema: TableSchema): SdkCollectionSchema {
-    return {
-        name: schema.name,
-        description: schema.description,
-        fields: schema.columns.map((c): SdkFieldSchema => ({
-            name: c.name,
-            field_type: c.type,
-            required: c.required,
-            indexed: c.indexed,
-            unique: c.unique,
-            primary_key: c.primary,
-        })),
-    };
-}
-
-/* ------------------------------------------------------------------ */
-/*  Zod schemas (shared between MCP tools and REST routes)             */
-/* ------------------------------------------------------------------ */
-
-const COLUMN_TYPE_ENUM = z.enum([
-    'string', 'integer', 'float', 'boolean', 'date', 'datetime', 'json',
-]);
-
-const sdkFieldSchemaZ = z.object({
-    name: z.string(),
-    field_type: COLUMN_TYPE_ENUM,
-    required: z.boolean().optional(),
-    indexed: z.boolean().optional(),
-    unique: z.boolean().optional(),
-    primary_key: z.boolean().optional(),
-});
-
-const sdkCollectionSchemaZ = z.object({
-    name: z.string(),
-    fields: z.array(sdkFieldSchemaZ),
-    description: z.string().optional(),
-    metadata: z.record(z.string(), z.string()).optional(),
-});
+// F-COL6 split (file-size cap) — the SDK↔Lore schema vocabulary boundary
+// and its zod mirrors live in collectionsSchemaTranslate.ts. Re-export so
+// existing consumers keep their import path.
+export {
+    sdkToInternalSchema,
+    internalToSdkSchema,
+    type SdkFieldSchema,
+    type SdkCollectionSchema,
+} from './collectionsSchemaTranslate.js';
+import {
+    sdkToInternalSchema,
+    internalToSdkSchema,
+    sdkCollectionSchemaZ,
+} from './collectionsSchemaTranslate.js';
+import type { SdkCollectionSchema } from './collectionsSchemaTranslate.js';
 
 /**
  * Filter shape exposed to callers. Matches `Filter` from table storage.
@@ -180,26 +123,83 @@ export async function handleCreateCollection(
     return schema;
 }
 
+/**
+ * getIntrospectableSchema — same private-map side channel as
+ * `handleSchemaGet` (ITableStorage exposes no schema-get method), reused
+ * by the row-validation call sites below. Returns `undefined` when the
+ * adapter isn't introspectable — those callers skip pre-validation and
+ * behave exactly as before (fail open, never break an adapter that
+ * doesn't expose its schemas).
+ *
+ * Exported (not just module-private) so `collectionsTransaction.ts`'s
+ * `handleTransaction` can resolve the same schema for insert/update/upsert
+ * ops before calling `runTransaction` — QA finding B2 (2026-09-03):
+ * collection_transaction / POST /v1/transaction bypassed
+ * collectionRowValidation.ts entirely, silently coercing rows that every
+ * other write path (insert/update/bulk_insert/update_by_query) rejects.
+ */
+export function getIntrospectableSchema(deps: CollectionsDeps, name: string): TableSchema | undefined {
+    const introspectable = deps.tableStorage as ITableStorage & {
+        schemas?: Map<string, TableSchema>;
+    };
+    return introspectable.schemas?.get(name);
+}
+
 export async function handleSchemaGet(
     deps: CollectionsDeps,
     name: string,
 ): Promise<SdkCollectionSchema | null> {
-    // ITableStorage exposes no schema-get method; KuzuTableStorage caches
+    // ITableStorage exposes no schema-get method; SqliteTableStorage caches
     // schemas on a private map. Read it via that side channel when present;
     // return null when the adapter isn't introspectable (treat as "not yet
     // introspectable", not "not found"). Future: a getSchema(name) method.
-    const introspectable = deps.tableStorage as ITableStorage & {
-        schemas?: Map<string, TableSchema>;
-    };
-    const internal = introspectable.schemas?.get(name);
+    const internal = getIntrospectableSchema(deps, name);
     return internal ? internalToSdkSchema(internal) : null;
 }
 
+// B3 split (round E, file-size cap) — collection_schema_list / GET /v1/schema's
+// paginated handler lives in collectionsSchemaList.ts (mirrors 1.M6 above).
+export {
+    handleSchemaListPaged, DEFAULT_SCHEMA_LIST_LIMIT, MAX_SCHEMA_LIST_LIMIT,
+    type SdkCollectionSchemaSummary, type SchemaListPageOptions, type SchemaListPageResult,
+} from './collectionsSchemaList.js';
+import {
+    handleSchemaListPaged, DEFAULT_SCHEMA_LIST_LIMIT, MAX_SCHEMA_LIST_LIMIT,
+    type SdkCollectionSchemaSummary,
+} from './collectionsSchemaList.js';
+
+/**
+ * Finding #7 (2026-09-03) — there was no way to enumerate collections
+ * short of already knowing a name. `rowCount` is surfaced when the
+ * backend reports one; adapters that can't produce it cheaply leave it
+ * undefined. Left exactly as it was pre-B3 (unpaginated, always
+ * counted) for existing direct callers/tests — the tool/route now call
+ * `handleSchemaListPaged` (collectionsSchemaList.ts) instead.
+ */
+export async function handleSchemaList(
+    deps: CollectionsDeps,
+): Promise<SdkCollectionSchemaSummary[]> {
+    const summaries = await deps.tableStorage.listTables();
+    return summaries.map((s): SdkCollectionSchemaSummary => ({
+        ...internalToSdkSchema(s),
+        rowCount: s.rowCount,
+    }));
+}
+
+/**
+ * F6 (2026-09-03 audit) — validate the row against its declared schema
+ * BEFORE calling into ITableStorage.insert, so an unknown column, a
+ * wrong-typed value, or an empty row is rejected as a clean 400/tool
+ * error (via CollectionValidationError) instead of surfacing as a 500
+ * from deep inside the SQLite engine. See collectionRowValidation.ts.
+ */
 export async function handleInsert(
     deps: CollectionsDeps,
     collection: string,
     record: Row,
 ): Promise<Row> {
+    const schema = getIntrospectableSchema(deps, collection);
+    if (schema) validateRowAgainstSchema(schema, record, 'insert');
     await deps.tableStorage.insert(collection, record);
     return record;
 }
@@ -212,13 +212,15 @@ export async function handleGet(
     return await deps.tableStorage.getByKey(collection, id);
 }
 
+
 /**
  * F-COL2: refuse an unscoped destructive op unless the caller explicitly
  * opts in with `all: true`. An absent/empty/all filter would otherwise
  * update or delete every row. Throws when the guard trips.
  */
 function assertScopedOrAllOptIn(op: string, filter: FilterNode | undefined, all: boolean | undefined): void {
-    if (all !== true && isAllFilter(filter)) {
+    const scope = assertValidFilter(op, filter); // F-COL5
+    if (all !== true && scope === 'ALL') {
         throw new Error(`${op} refuses an empty/all filter — pass all:true to confirm an unscoped ${op}, or use collection_truncate.`);
     }
 }
@@ -231,7 +233,11 @@ export async function handleUpdate(
     all?: boolean, // F-COL2
 ): Promise<{ updated: number }> {
     assertScopedOrAllOptIn('collection_update', filter, all); // F-COL2
-    const updated = await deps.tableStorage.update(collection, filter, patch);
+    // F6 — validate the supplied patch fields against the schema (partial:
+    // an update patch need not be non-empty or carry every required column).
+    const schema = getIntrospectableSchema(deps, collection);
+    if (schema) validateRowAgainstSchema(schema, patch, 'update');
+    const updated = await deps.tableStorage.update(collection, filter, patch, { all }); // X-allrows
     return { updated };
 }
 
@@ -242,7 +248,7 @@ export async function handleDelete(
     all?: boolean, // F-COL2
 ): Promise<{ deleted: number }> {
     assertScopedOrAllOptIn('collection_delete', filter, all); // F-COL2
-    const deleted = await deps.tableStorage.delete(collection, filter);
+    const deleted = await deps.tableStorage.delete(collection, filter, { all }); // X-allrows
     return { deleted };
 }
 
@@ -267,6 +273,12 @@ export async function handleBulkInsert(
     // (16 MiB) — refuse oversize before insert to bound memory/wall-time DoS.
     if (records.length > 1000) throw new Error(`at most 1000 records per call (got ${records.length})`);
     if (JSON.stringify(records).length > 16 * 1024 * 1024) throw new Error('records payload exceeds 16 MiB cap');
+    // F6 — validate every row against the schema BEFORE inserting any of
+    // them, naming the failing row's index so a bulk 400 is actionable.
+    const schema = getIntrospectableSchema(deps, collection);
+    if (schema) {
+        records.forEach((row, index) => validateRowAgainstSchema(schema, row, 'insert', index));
+    }
     await deps.tableStorage.insertBatch(collection, records);
     // Best-effort id capture: caller's records may carry an `id` field
     // (the SDK's CRM convention) — mirror that. Records without an
@@ -290,9 +302,13 @@ export async function handleUpdateByQuery(
     collection: string,
     filter: FilterNode,
     fields: Record<string, unknown>,
+    all?: boolean, // X-allrows — was hardcoded `undefined` (no opt-in existed)
 ): Promise<UpdateByQueryResultShape> {
-    assertScopedOrAllOptIn('collection_update_by_query', filter, undefined); // D2-data-4
-    const updated = await deps.tableStorage.update(collection, filter, fields);
+    assertScopedOrAllOptIn('collection_update_by_query', filter, all); // D2-data-4, X-allrows
+    // F6 — same partial-patch validation as handleUpdate.
+    const schema = getIntrospectableSchema(deps, collection);
+    if (schema) validateRowAgainstSchema(schema, fields, 'update');
+    const updated = await deps.tableStorage.update(collection, filter, fields, { all }); // X-allrows
     return { updated, collection };
 }
 
@@ -301,54 +317,17 @@ export interface DeleteByQueryResultShape {
     collection: string;
 }
 
-/**
- * F-COL1: a contains/startsWith/endsWith entry whose value is empty or
- * whitespace-only is NOT a real predicate — it compiles to LIKE '%%'
- * (matches every row), so it must NOT count as scoping or it sneaks past
- * isAllFilter and silently wipes the collection.
- */
-function isScopingTextGroup(g: Record<string, string> | undefined): boolean {
-    return !!g && Object.values(g).some(v => typeof v === 'string' && v.trim().length > 0);
-}
-
-/**
- * Returns true if the filter is "all" — every clause missing, empty, or
- * (for text predicates) an empty/whitespace value matching everything
- * (F-COL1). Rejected before destructive ops; use `truncate` to wipe.
- *
- * Nested and/or/not (WP2) must recurse rather than being treated as
- * automatically scoped:
- * - AND is unscoped only if every branch is unscoped — one real predicate
- *   narrows the whole AND, so `every` is correct.
- * - OR is unscoped if any branch is unscoped — one unscoped branch means
- *   the union already covers every row, so `some` is correct.
- * - NOT never counts as unscoped: negating an unscoped filter (matches
- *   everything) produces a filter matching NOTHING, not everything, so
- *   `not` is never the dangerous case and stays `false` unconditionally.
- */
-export function isAllFilter(filter: FilterNode | undefined): boolean {
-    if (!filter) return true;
-    if (isFilterNot(filter)) return false;
-    if (isFilterAnd(filter)) return filter.and.every(isAllFilter);
-    if (isFilterOr(filter)) return filter.or.some(isAllFilter);
-    const f = filter as Filter & { endsWith?: Record<string, string> };
-    // F-COL1: text predicates only scope when at least one value is non-empty.
-    if (isScopingTextGroup(filter.contains) || isScopingTextGroup(filter.startsWith) || isScopingTextGroup(f.endsWith)) return false;
-    const groups = [filter.eq, filter.gt, filter.gte, filter.lt, filter.lte, filter.in];
-    return groups.every(g => !g || Object.keys(g).length === 0);
-}
-
 export async function handleDeleteByQuery(
     deps: CollectionsDeps,
     collection: string,
     filter: FilterNode,
+    all?: boolean, // X-allrows — was unconditionally refused; no opt-in existed
 ): Promise<DeleteByQueryResultShape> {
-    if (isAllFilter(filter)) {
-        throw new Error(
-            'delete-by-query refuses an empty/all filter — use truncate to wipe a collection.',
-        );
+    const scope = assertValidFilter('delete-by-query', filter); // F-COL5
+    if (all !== true && scope === 'ALL') {
+        throw new Error('delete-by-query refuses an empty/all filter — pass all:true to confirm, or use truncate to wipe a collection.');
     }
-    const deleted = await deps.tableStorage.delete(collection, filter);
+    const deleted = await deps.tableStorage.delete(collection, filter, { all }); // X-allrows
     return { deleted, collection };
 }
 
@@ -373,6 +352,42 @@ function ok(payload: unknown) {
     return { content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }] };
 }
 
+/**
+ * F6 (2026-09-03 audit) — MCP envelope for a rejected row. Deliberately
+ * bypasses `mcpToolError`/`redactError`: redactError hashes every quoted
+ * string in a message (`'unknown column 'email'…'` → `'id#40ce4379'…`),
+ * which would destroy the exact field/table names this error exists to
+ * surface. table/field/row_index are read off the structured
+ * CollectionValidationError properties, not parsed out of prose, so
+ * nothing sensitive-looking needs to pass through the hash in the first
+ * place. Mirrors the existing `{error: '<code>', ...}` shape used by
+ * `workspaceRequiredEnvelope` above.
+ */
+function collectionValidationEnvelope(
+    e: CollectionValidationError,
+): { content: Array<{ type: 'text'; text: string }>; isError: true } {
+    return {
+        content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+                error: 'invalid_row',
+                table: e.table,
+                ...(e.field === undefined ? {} : { field: e.field }),
+                ...(e.rowIndex === undefined ? {} : { row_index: e.rowIndex }),
+                message: e.message,
+            }, null, 2),
+        }],
+        isError: true,
+    };
+}
+
+// X-allrows split — shared with collectionsByQuery.ts's collection_update_by_query/
+// collection_delete_by_query registrations, which moved out for the 800-line cap.
+export function filterOrRowOrGeneric(toolName: string, e: unknown) { // QA round-3 — shared catch for the 4 write tools below
+    if (e instanceof z.ZodError) return filterInvalidMcpEnvelope(e);
+    if (e instanceof CollectionValidationError) return collectionValidationEnvelope(e); // F6
+    return mcpToolError(toolName, e, log);
+}
 
 /**
  * Sprint L1e — workspace_required guard. Mirrors REST 400 shape.
@@ -471,9 +486,13 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
         gateWorkspace,
         resolveDeps: resolveDepsForWorkspace,
     });
+    registerCollectionByQueryTools(mcpServer, deps, { // X-allrows split (800-line cap)
+        gateWorkspace,
+        resolveDeps: resolveDepsForWorkspace,
+    });
     mcpServer.tool(
         'collection_create',
-        'Create a new collection (table). Mirrors GroundfloorClient.createCollection — uses SDK field names (field_type, primary_key). Local mode backs each collection with a Kùzu node table; cloud mode is not yet implemented.',
+        'Create a new collection (table). Mirrors GroundfloorClient.createCollection — uses SDK field names (field_type, primary_key). Local mode backs each collection with a SQLite table; cloud mode is not yet implemented.',
         { ...sdkCollectionSchemaZ.shape, workspace: workspaceFieldZ },
         async (args) => {
             try {
@@ -490,7 +509,7 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
 
     mcpServer.tool(
         'collection_schema_get',
-        'Read a defined collection\'s schema. Returns null if the adapter doesn\'t expose introspection (KuzuTableStorage caches schemas in-memory only — schema is visible after a same-process createTable, not across daemon restarts).',
+        'Read a defined collection\'s schema. Returns null if the adapter doesn\'t expose introspection (SqliteTableStorage caches schemas in-memory only — schema is visible after a same-process createTable, not across daemon restarts).',
         { name: z.string(), workspace: workspaceFieldZ },
         async (args) => {
             try {
@@ -501,6 +520,37 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                 const schema = await handleSchemaGet(routed.deps, args.name as string);
                 return ok(schema);
             } catch (e) { return mcpToolError('collection_schema_get', e, log); }
+        },
+    );
+
+    mcpServer.tool(
+        'collection_schema_list',
+        `List every collection (table) declared in this workspace's adapter. Complements collection_schema_get — use this to discover names first. Returns {schemas: []} when nothing has been created yet. Paginated (finding B3): defaults to the first ${DEFAULT_SCHEMA_LIST_LIMIT} entries (max ${MAX_SCHEMA_LIST_LIMIT} per call) with rowCount omitted; pass withCounts:true to include a per-collection row count, and follow the response's nextCursor (when present) to page through the rest.`,
+        {
+            workspace: workspaceFieldZ,
+            limit: z.number().int().positive().max(MAX_SCHEMA_LIST_LIMIT).optional()
+                .describe(`Max entries to return. Default ${DEFAULT_SCHEMA_LIST_LIMIT}, max ${MAX_SCHEMA_LIST_LIMIT}.`),
+            offset: z.number().int().nonnegative().optional()
+                .describe('Zero-based offset into the collection list. Ignored when `cursor` is given; unstable under concurrent creates/drops.'),
+            cursor: z.string().optional()
+                .describe('Opaque cursor from a prior response\'s nextCursor. Takes precedence over `offset`; stable under concurrent creates/drops.'),
+            withCounts: z.boolean().optional()
+                .describe('Compute a rowCount per returned collection (one COUNT(*) each). Default false.'),
+        },
+        async (args) => {
+            try {
+                const denied = gateWorkspace(args, 'read');
+                if (denied) return denied;
+                const routed = await resolveDepsForWorkspace(deps, args.workspace as string);
+                if (!routed.ok) return routed.envelope;
+                const result = await handleSchemaListPaged(routed.deps, {
+                    limit: args.limit as number | undefined,
+                    offset: args.offset as number | undefined,
+                    cursor: args.cursor as string | undefined,
+                    withCounts: args.withCounts as boolean | undefined,
+                });
+                return ok(result);
+            } catch (e) { return mcpToolError('collection_schema_list', e, log); }
         },
     );
 
@@ -524,7 +574,12 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                     args.record as Row,
                 );
                 return ok(inserted);
-            } catch (e) { return mcpToolError('collection_insert', e, log); }
+            } catch (e) {
+                // F6 — keep the field/table names readable; don't run them
+                // through mcpToolError's redactError hashing.
+                if (e instanceof CollectionValidationError) return collectionValidationEnvelope(e);
+                return mcpToolError('collection_insert', e, log);
+            }
         },
     );
 
@@ -593,12 +648,12 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                 const result = await handleUpdate(
                     routed.deps,
                     args.collection as string,
-                    args.filter as FilterNode,
+                    filterNodeZ.parse(args.filter), // QA round-3
                     args.updates as Record<string, unknown>,
                     args.all as boolean | undefined, // F-COL2
                 );
                 return ok(result);
-            } catch (e) { return mcpToolError('collection_update', e, log); }
+            } catch (e) { return filterOrRowOrGeneric('collection_update', e); }
         },
     );
 
@@ -620,11 +675,11 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                 const result = await handleDelete(
                     routed.deps,
                     args.collection as string,
-                    args.filter as FilterNode,
+                    filterNodeZ.parse(args.filter), // QA round-3
                     args.all as boolean | undefined, // F-COL2
                 );
                 return ok(result);
-            } catch (e) { return mcpToolError('collection_delete', e, log); }
+            } catch (e) { return filterOrRowOrGeneric('collection_delete', e); }
         },
     );
 
@@ -650,7 +705,10 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                     args.records as Row[],
                 );
                 return ok(result);
-            } catch (e) { return mcpToolError('collection_bulk_insert', e, log); }
+            } catch (e) {
+                if (e instanceof CollectionValidationError) return collectionValidationEnvelope(e); // F6
+                return mcpToolError('collection_bulk_insert', e, log);
+            }
         },
     );
 
@@ -675,56 +733,6 @@ export function registerCollectionTools(mcpServer: McpServer, deps: CollectionsD
                 );
                 return ok(result);
             } catch (e) { return mcpToolError('collection_count', e, log); }
-        },
-    );
-
-    mcpServer.tool(
-        'collection_update_by_query',
-        'Update all records matching a filter. Mirrors GroundfloorClient.updateByQuery. Distinct from collection_update only by SDK-shaped response: {updated, collection}.',
-        {
-            collection: z.string(),
-            filter: filterNodeZ,
-            fields: z.record(z.string(), z.unknown()),
-            workspace: workspaceFieldZ,
-        },
-        async (args) => {
-            try {
-                const denied = gateWorkspace(args, 'write');
-                if (denied) return denied;
-                const routed = await resolveDepsForWorkspace(deps, args.workspace as string);
-                if (!routed.ok) return routed.envelope;
-                const result = await handleUpdateByQuery(
-                    routed.deps,
-                    args.collection as string,
-                    args.filter as FilterNode,
-                    args.fields as Record<string, unknown>,
-                );
-                return ok(result);
-            } catch (e) { return mcpToolError('collection_update_by_query', e, log); }
-        },
-    );
-
-    mcpServer.tool(
-        'collection_delete_by_query',
-        'Delete all records matching a filter. Mirrors GroundfloorClient.deleteByQuery. Refuses empty/all filter (footgun guard) — use collection_truncate for full wipes. Returns {deleted, collection}.',
-        {
-            collection: z.string(),
-            filter: filterNodeZ,
-            workspace: workspaceFieldZ,
-        },
-        async (args) => {
-            try {
-                const denied = gateWorkspace(args, 'write');
-                if (denied) return denied;
-                const routed = await resolveDepsForWorkspace(deps, args.workspace as string);
-                if (!routed.ok) return routed.envelope;
-                const result = await handleDeleteByQuery(
-                    routed.deps,
-                    args.collection as string,
-                    args.filter as FilterNode,
-                );
-                return ok(result);
-            } catch (e) { return mcpToolError('collection_delete_by_query', e, log); }
         },
     );
 

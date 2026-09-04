@@ -67,14 +67,17 @@ export async function unsupersedeNode(ctx: MaintenanceCtx, id: string): Promise<
 }
 
 /**
- * markStaleByTags — flag stale=true on every node whose tags contain ANY of
- * the tags. Two phases — query per tag to collect ids (substring match), dedup,
- * then one updateByQuery per id so the count reflects unique nodes touched.
+ * findNodeIdsByTags — 2026-09-03 (X-markstale audit fix) read-only resolver:
+ * every node id carrying ANY of the tags. Factored out of `markStaleByTags`'s
+ * former phase-1 loop so the mark_stale entry points (mcp/tools/memory/
+ * markStale.ts, POST /api/mark-stale) can resolve the full matched id set
+ * BEFORE chunk-locking + outbox-recording + applying `markStaleByIds` — the
+ * read (tag scan) and the write (id-scoped, lockable, replayable) are now
+ * separate steps. Behavior unchanged from the old inline phase 1.
  */
-export async function markStaleByTags(ctx: MaintenanceCtx, tags: string[]): Promise<number> {
-    if (tags.length === 0) return 0;
+export async function findNodeIdsByTags(ctx: MaintenanceCtx, tags: string[]): Promise<string[]> {
     const lower = tags.map((t) => t.toLowerCase().trim()).filter(Boolean);
-    if (lower.length === 0) return 0;
+    if (lower.length === 0) return [];
     const tenantId = ctx.tenantProvider();
     await ctx.ensureTenantInitialized(tenantId);
 
@@ -91,10 +94,26 @@ export async function markStaleByTags(ctx: MaintenanceCtx, tags: string[]): Prom
             if (id) ids.add(id);
         }
     }
-    if (ids.size === 0) return 0;
+    return Array.from(ids);
+}
+
+/**
+ * markStaleByIds — 2026-09-03 (X-markstale audit fix) set stale=true on
+ * EXACTLY the given ids (no tag re-query) — one updateByQuery per id so the
+ * returned count reflects unique nodes actually touched, factored out of
+ * `markStaleByTags`'s former phase-2 loop. This is the substrate primitive
+ * the outbox dispatcher calls on `node.mark_stale` replay and that the live
+ * entry points call inside their own per-chunk lock — mirrors `deleteNode`'s
+ * role for `node.delete`.
+ */
+export async function markStaleByIds(ctx: MaintenanceCtx, ids: string[]): Promise<number> {
+    const unique = Array.from(new Set(ids.filter((id) => typeof id === 'string' && id.length > 0)));
+    if (unique.length === 0) return 0;
+    const tenantId = ctx.tenantProvider();
+    await ctx.ensureTenantInitialized(tenantId);
 
     let marked = 0;
-    for (const id of ids) {
+    for (const id of unique) {
         const res = await ctx.client.updateByQuery(
             tenantId,
             NODE_COLLECTION,
@@ -105,6 +124,20 @@ export async function markStaleByTags(ctx: MaintenanceCtx, tags: string[]): Prom
         if ((res?.updated ?? 0) > 0) marked++;
     }
     return marked;
+}
+
+/**
+ * markStaleByTags — flag stale=true on every node whose tags contain ANY of
+ * the tags. Unchanged public contract; now composed from `findNodeIdsByTags`
+ * (phase 1: resolve) + `markStaleByIds` (phase 2: apply) so the two phases
+ * have a single source of truth each, shared with the outbox-aware callers.
+ * Kept for the CLI's no-daemon direct-open fallback (cli/commands/
+ * markStale.ts), which has no outbox/replicator to record against anyway.
+ */
+export async function markStaleByTags(ctx: MaintenanceCtx, tags: string[]): Promise<number> {
+    const ids = await findNodeIdsByTags(ctx, tags);
+    if (ids.length === 0) return 0;
+    return markStaleByIds(ctx, ids);
 }
 
 /**

@@ -6,7 +6,7 @@
  *
  * ── WHY THIS IS NOT COVERED BY THE OTHER ROUNDTRIP TEST ─────────────────────
  *
- * `kuzu-free-backup-roundtrip-unit.ts` proves backup/restore works for a
+ * `surreal-backup-roundtrip-unit.ts` proves backup/restore works for a
  * Surreal-backed workspace whose path has no reserved URL characters — the
  * overwhelmingly common case, and the one `surrealDataPath()` is a no-op for.
  *

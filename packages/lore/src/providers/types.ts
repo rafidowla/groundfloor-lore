@@ -316,7 +316,7 @@ export const SEARCH_CONTRACT_VERSION = 1;
 
 /**
  * Abstract GraphProvider Interface
- * Defines the contract that ANY backend graph (Local Kùzu, Cloud Dataplane) must satisfy.
+ * Defines the contract that ANY backend graph (Local SurrealDB, Cloud Dataplane) must satisfy.
  */
 export interface GraphProvider {
     initialize(): Promise<void>;

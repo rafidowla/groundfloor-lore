@@ -1,7 +1,7 @@
 /**
  * diagnostics/consistency.ts — Tri-substrate consistency diagnostic.
  *
- * Walks the three local substrates (Kùzu graph, LanceDB vector store,
+ * Walks the three local substrates (the graph engine, LanceDB vector store,
  * optional SQLite tables) and reports inconsistencies that would
  * otherwise be invisible. Read-only — never writes, never deletes,
  * never repairs. Repair is a separate decision the operator makes
@@ -11,8 +11,8 @@
  *
  *   1. **missingEmbeddings** — graph nodes that have no matching
  *      embedding in the vector store. Cause: write that succeeded in
- *      Kùzu but failed in LanceDB (no transaction across substrates).
- *      Symptom: nodes invisible to semantic search.
+ *      the graph engine but failed in LanceDB (no transaction across
+ *      substrates). Symptom: nodes invisible to semantic search.
  *
  *   2. **orphanEmbeddings** — embeddings with no matching graph node.
  *      Cause: graph node was deleted but its embedding wasn't cleaned
@@ -70,10 +70,11 @@ export interface GraphReader {
      * fakes and DataplaneGraph, which fall back to the unbounded listNodes
      * scan (fine — those paths are small / not the ~1M-node local sweep).
      *
-     * 2026-08-06: this used to be `getGraphContext?()`, i.e. a raw Kùzu Cypher
-     * runner, which made the bounded walk Kùzu-only — a Surreal-backed
-     * workspace silently took the unbounded fallback. `bulkListProjected` is
-     * the same walk as an engine-agnostic operation; both engines implement it.
+     * 2026-08-06: this used to be `getGraphContext?()`, i.e. a raw Cypher
+     * runner tied to a single local engine, which made the bounded walk
+     * work on only that engine — a Surreal-backed workspace silently took
+     * the unbounded fallback. `bulkListProjected` is the same walk as an
+     * engine-agnostic operation; both engines implement it.
      */
     bulkListProjected?: NodePager;
 }
@@ -170,11 +171,12 @@ export async function diagnoseConsistency(
     let graphScanFailed = false;
     try {
         // Engine-agnostic: bulkListProjected is on both engines, so this no
-        // longer needs a Kùzu connection to walk the node table.
+        // longer needs a connection to a specific engine to walk the node
+        // table.
         const pager = graph.bulkListProjected?.bind(graph);
         if (pager) {
             // Bounded keyset walk: peak heap is one page of ids, not the whole
-            // node table with full content. `embed` is NOT a stored Kùzu column
+            // node table with full content. `embed` is NOT a stored graph column
             // (it's a write-time skip signal that rowToLoreNode never reads
             // back), so the pre-fix listNodes path always saw `undefined` here
             // and never populated graphIdsNonEmbeddable. We project only id and

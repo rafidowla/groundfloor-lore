@@ -4,7 +4,7 @@
  * diagnostic (gap #10 of the architecture backlog).
  *
  * All-in-memory fakes for graph + vector + table storage — keeps the
- * test substrate-independent and avoids Kùzu/LanceDB init cost. The
+ * test substrate-independent and avoids the legacy graph engine/LanceDB init cost. The
  * real implementations satisfy the same narrow interfaces the
  * diagnostic uses.
  */
@@ -239,7 +239,7 @@ test('summarizeReport produces a one-line digest', async () => {
 
 /* ---------- L5b workspace-aliasing (2026-06-09) ----------
  * Sprint L5b registers extra workspace names (e.g. `atlas`) that
- * physically share the default workspace's Kùzu+LanceDB store; per-
+ * physically share the default workspace's the legacy graph engine+LanceDB store; per-
  * workspace separation is via the `project` column. Pre-fix, the
  * diagnostic compared THIS workspace's graph nodes against the WHOLE
  * lance table — so every cross-aliased vector was reported as orphan.

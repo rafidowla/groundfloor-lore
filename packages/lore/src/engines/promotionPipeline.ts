@@ -67,7 +67,7 @@ const DEFAULT_THRESHOLD = 0.90;
 
 /**
  * Storage hooks the pipeline calls when auto-applying. Substrate-
- * agnostic — caller wires to LocalGraph (Kùzu) or DataplaneGraph.
+ * agnostic — caller wires to LocalGraph (SurrealDB) or DataplaneGraph.
  */
 export interface PromotionStorage {
     /**

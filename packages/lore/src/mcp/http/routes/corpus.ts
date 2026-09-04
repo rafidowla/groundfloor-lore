@@ -13,9 +13,10 @@ import type { AuxStore } from '../../../outbox/auxStore.js';
 import type { LocalGraphRegistry } from '../../../engines/localGraphRegistry.js';
 import { resolveTargetGraph } from '../../tools/workspaceResolve.js';
 import { gateRoute } from '../../../security/routeGate.js';
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';

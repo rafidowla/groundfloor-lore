@@ -3,7 +3,7 @@
  *
  * Audit fix #4. Before this, every MCP tool's catch block returned
  * `Error: ${(error as Error).message}` directly to the MCP client. The
- * underlying engines (Kùzu, LanceDB) frequently echo node ids, file
+ * underlying engines (SurrealDB, LanceDB) frequently echo node ids, file
  * paths, or fragments of node content in their exception strings, so a
  * prompt-injected agent (or any caller) could probe for internals via
  * the error text. The HTTP routes learned this lesson (SW-14: redactError

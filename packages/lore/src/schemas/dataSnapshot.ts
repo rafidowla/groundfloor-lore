@@ -22,7 +22,7 @@
  * Scope (Phase 1 MVP):
  *   Today the local graph stores node-type and edge-relation as
  *   *values* on the universal `LoreNode` / `LoreEdge` tables (not as
- *   separate Kùzu node tables). So the snapshot for almost every
+ *   separate node tables per type). So the snapshot for almost every
  *   destructive change kind reduces to "dump every LoreNode with
  *   `type = X`" or "dump every LoreEdge with `relation = R`". The
  *   single GraphReader.queryRows() escape hatch is enough.
@@ -38,7 +38,7 @@
  *
  *   Slashes and dots in the change target are replaced with `__` so
  *   the filename stays portable. JSONL is one row per line; rows are
- *   the raw Kùzu projection of the matching LoreNode / LoreEdge plus
+ *   the raw graph projection of the matching LoreNode / LoreEdge plus
  *   `_snapshotMetadata` describing the originating change.
  */
 

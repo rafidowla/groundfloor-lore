@@ -18,7 +18,7 @@
  */
 
 import type { MaintainPolicy, MaintainOperation } from './policy.js';
-import type { MaintainPorts, LanceTableResult } from './ports.js';
+import type { MaintainPorts, LanceTableResult, PendingSidelineInfo } from './ports.js';
 import { selectRetentionCandidates, selectEphemeralWorkspaces } from './selection.js';
 import type { NodeForSelection } from './selection.js';
 
@@ -70,6 +70,15 @@ export interface MaintainReport {
         tooYoung: number;
         expired: string[];
         bytesFreed: number;
+        /**
+         * QA round 4, finding 3 — leftover `.pending-delete-*` sidelines from
+         * a prior `delete()` whose final `rmSync` failed. Reported so an
+         * operator can see accumulating leftover bytes; nothing here cleans
+         * them up beyond the existing retry-on-next-delete-of-that-name path
+         * in `WorkspaceRegistry.delete()`. Empty when the wired port doesn't
+         * implement `pendingSidelines()`.
+         */
+        pendingSidelines: PendingSidelineInfo[];
     };
 }
 
@@ -83,7 +92,7 @@ function emptyReport(opts: RunMaintenanceOptions, now: number): MaintainReport {
         operations: [],
         lancedb: { tables: [], totalBytesReclaimed: 0, totalVersionsRemoved: 0, eligibleOldVersions: 0, reclaimableBytesEstimate: 0 },
         nodes: { inspected: 0, protectedSkipped: 0, recentSkipped: 0, archived: 0, deleted: 0, candidates: 0 },
-        workspaces: { inspected: 0, tooYoung: 0, expired: [], bytesFreed: 0 },
+        workspaces: { inspected: 0, tooYoung: 0, expired: [], bytesFreed: 0, pendingSidelines: [] },
     };
 }
 
@@ -278,6 +287,24 @@ export async function runMaintenance(
                 }
             } catch (err) {
                 st.errors.push((err as Error).message);
+            }
+        }
+
+        // QA round 4, finding 3 — leftover `.pending-delete-*` sidelines
+        // from a prior delete() whose final rmSync failed were never
+        // surfaced anywhere; an operator had no way to notice accumulating
+        // leftover bytes short of reading the workspaces directory by hand.
+        // Read-only reporting only — no cleanup beyond the existing
+        // retry-on-next-delete-of-that-name path in
+        // `WorkspaceRegistry.delete()`. Runs whenever the port is wired and
+        // implements it, independent of whether the destructive expiry op
+        // itself is enabled/blocked above, since listing leftovers is never
+        // destructive.
+        if (ports.workspaces?.pendingSidelines) {
+            try {
+                report.workspaces.pendingSidelines = ports.workspaces.pendingSidelines();
+            } catch (err) {
+                st.errors.push(`pendingSidelines scan: ${(err as Error).message}`);
             }
         }
     }

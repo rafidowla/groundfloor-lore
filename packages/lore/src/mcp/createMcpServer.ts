@@ -287,6 +287,11 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
         getSyncEngine: deps.getSyncEngine,
         graphRegistry: deps.graphRegistry,
         detectedScope: deps.detectedScope,
+        // ITEM X-pruneeph (2026-09-03) — prune_ephemeral's hard-delete path
+        // needs these to record outbox rows + tombstone the requested
+        // workspace's verbatim store (mirrors registerLifecycleTools below).
+        outboxStore: deps.outboxStore,
+        workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
     });
 
     registerSearchTools(mcpServer, {
@@ -329,7 +334,7 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
     });
 
     // Phase 2 item 4 — SDK-aligned collection_* MCP tools backed by
-    // ITableStorage (KuzuTableStorage in local mode; cloud-mode stub
+    // ITableStorage (SqliteTableStorage in local mode; cloud-mode stub
     // throws not-yet-implemented). See packages/lore/src/mcp/tools/
     // collections.ts and project_phase2_investigation_2026_05_15.
     registerCollectionTools(mcpServer, {
@@ -339,15 +344,13 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
         activeWorkspace: deps.detectedScope.workspace,
     });
 
-    // Build IAnalyticalStorage in local mode by sharing the Kùzu
-    // connection the graph already opened. Cloud mode (DataplaneAdapter)
-    // doesn't have an analytical implementation yet — registers a tool
-    // that surfaces a clear "not yet wired in cloud" error. Step #6
-    // fills this in.
-    // Built from the bundle's TABLE storage. This used to reach the graph's
-    // Kùzu collection connection while collections were being written to
-    // SQLite (061e189), so every aggregate threw. See
-    // engines/analyticalStorageFactory.ts.
+    // Build IAnalyticalStorage in local mode from the bundle's TABLE
+    // storage. Cloud mode (DataplaneAdapter) doesn't have an analytical
+    // implementation yet — registers a tool that surfaces a clear
+    // "not yet wired in cloud" error. Step #6 fills this in.
+    // This used to reach the graph's own collection connection while
+    // collections were being written to SQLite (061e189), so every
+    // aggregate threw. See engines/analyticalStorageFactory.ts.
     let analytical: IAnalyticalStorage | null = null;
     if (deps.deploymentMode === 'local') {
         analytical = createAnalyticalStorage(deps.store.tableStorage);
@@ -391,7 +394,7 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
 
     // Feature 1/2/4/6/7 — enterprise tools. auxStore optional.
     if (deps.auxStore) {
-        registerLifecycleTools(mcpServer, { store: deps.store, auxStore: deps.auxStore, versionStore: deps.versionStore, graphRegistry: deps.graphRegistry, detectedScope: deps.detectedScope, workspaceVerbatimResolver: deps.workspaceVerbatimResolver });
+        registerLifecycleTools(mcpServer, { store: deps.store, auxStore: deps.auxStore, versionStore: deps.versionStore, graphRegistry: deps.graphRegistry, detectedScope: deps.detectedScope, workspaceVerbatimResolver: deps.workspaceVerbatimResolver, outboxStore: deps.outboxStore, getWal: deps.getWal });
         registerOutcomeTools(mcpServer, { store: deps.store, auxStore: deps.auxStore, versionStore: deps.versionStore, graphRegistry: deps.graphRegistry, detectedScope: deps.detectedScope });
         registerCorpusHealthTools(mcpServer, { store: deps.store, auxStore: deps.auxStore, graphRegistry: deps.graphRegistry, detectedScope: deps.detectedScope });
     }
@@ -421,6 +424,8 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
             outboxStore: deps.outboxStore,
             embedQueue: deps.embedQueue,
             workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+            // ITEM X-walnode (2026-09-03) — changeset delete WAL append.
+            getWal: deps.getWal,
         });
     }
 

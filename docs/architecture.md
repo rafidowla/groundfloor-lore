@@ -10,14 +10,14 @@
 
 Lore Core is domain-agnostic. The same engine backs many **workspaces**, each with its own schema and vocabulary: engineering, IT/security, commercial real estate, sales, legal, or personal. Code intelligence is **not** built in — it lives in **Atlas**, one external client application for the software-development domain (see *External clients* below). For the broader product positioning across domains, see [MARKETING.md](MARKETING.md).
 
-The system operates as a **single MCP server** (`@groundfloor/lore`) over three local substrates: **SurrealDB or Kùzu** (embedded graph — SurrealDB by default as of v3.13.0, Kùzu remains fully supported per workspace), **LanceDB** (vector store for semantic recall), and **SQLite** (outbox, migrations, audit, auth, plus application-defined
+The system operates as a **single MCP server** (`@groundfloor/lore`) over three local substrates: **SurrealDB** (embedded graph, the only graph engine), **LanceDB** (vector store for semantic recall), and **SQLite** (outbox, migrations, audit, auth, plus application-defined
 tabular collections with SQL aggregates). Team-shared knowledge syncs to a hosted **Dataplane** via the Groundfloor TS-SDK.
 
 **Current Status:**
 
 | Component | Status | Details |
 |---|---|---|
-| Graph substrate (SurrealDB default, Kùzu supported) | ✅ Built | `LoreNode` / `LoreEdge` tables (`engines/surrealGraph.ts`, `engines/localGraph.ts`) |
+| Graph substrate (SurrealDB) | ✅ Built | `LoreNode` / `LoreEdge` tables (`engines/surrealGraph.ts`) |
 | Vector substrate (LanceDB) | ✅ Built | Embeddings + semantic recall (`engines/verbatimStore.ts`, `dataplaneVectorStore.ts`) |
 | Relational substrate (SQLite) | ✅ Built | Outbox, migrations, audit, auth, plus tabular collections + SQL aggregates |
 | `LoreStorageClient` facade | ✅ Built | Single write path; local ↔ Dataplane swap point (`storage/loreStorageClient.ts`) |
@@ -36,7 +36,7 @@ tabular collections with SQL aggregates). Team-shared knowledge syncs to a hoste
 ## Architecture: Tri-Substrate Database with Local-First Sync
 
 > **Design Decision:** Lore Core is a schema-agnostic database over three
-> local substrates — SurrealDB or Kùzu (graph), LanceDB (vector), SQLite (relational) —
+> local substrates — SurrealDB (graph), LanceDB (vector), SQLite (relational) —
 > fronted by a single MCP daemon. All writes route through `LoreStorageClient`,
 > which is also the cloud-swap point. Team-shared knowledge syncs to a hosted
 > Dataplane via the Groundfloor TS-SDK. Local-first: reads are served from
@@ -54,17 +54,17 @@ graph TB
             SY["sync_now()"]
         end
         subgraph "LoreStorageClient (facade — single write path)"
-            KZ["SurrealDB or Kùzu graph<br/>.lore/surreal/ or .lore/graph/<br/>LoreNode + LoreEdge"]
+            SG["SurrealDB graph<br/>.lore/surreal/<br/>LoreNode + LoreEdge"]
             LV["LanceDB<br/>.lore/lancedb/<br/>embeddings + semantic recall"]
             SQ["SQLite<br/>outbox · migrations · audit · auth · ReBAC"]
         end
         WAL["sync.wal<br/>(offline write buffer)"]
-        SN --> KZ
+        SN --> SG
         SN --> LV
         SN --> SQ
         SN --> WAL
         RC --> LV
-        TR --> KZ
+        TR --> SG
     end
 
     subgraph "Hosted (Optional)"
@@ -83,7 +83,7 @@ graph TB
 | Factor | Rationale |
 |---|---|
 | One process | One package, one port, one config — `npm i -g @groundfloor/lore && lore setup` |
-| Graph (SurrealDB default, Kùzu supported) | Native graph traversal over `LoreNode`/`LoreEdge` (Cypher on Kùzu, SurrealQL on SurrealDB) — "show everything connected to this entity" |
+| Graph (SurrealDB) | Native graph traversal over `LoreNode`/`LoreEdge` (SurrealQL) — "show everything connected to this entity" |
 | Vector (LanceDB) | Embedding-backed semantic recall without a separate vector service |
 | Relational (SQLite) | Durable outbox, schema migrations, audit log, and auth in one embedded engine |
 | Single write path | Every write goes through `LoreStorageClient`, the local ↔ Dataplane swap point |
@@ -158,7 +158,7 @@ You: "Remember: never use response.json() followed by response.text()"
 You: "Forget the caching decision, we changed our mind"
 ```
 
-### Data Model: Schema-Agnostic Graph (SurrealDB default, Kùzu supported)
+### Data Model: Schema-Agnostic Graph (SurrealDB)
 
 Lore Core declares **only** schema-agnostic node and edge tables. It never
 names domain- or application-specific tables (no `CodeSymbol`, no
@@ -219,7 +219,7 @@ cloud swap point:
 
 | Substrate | Engine | Holds | Source |
 |---|---|---|---|
-| **Graph** | SurrealDB (default) or Kùzu (embedded) | `LoreNode`, `LoreEdge`; graph traversal | `engines/surrealGraph.ts`, `engines/localGraph.ts` |
+| **Graph** | SurrealDB (embedded, the only graph engine) | `LoreNode`, `LoreEdge`; graph traversal | `engines/surrealGraph.ts` |
 | **Vector** | LanceDB | Per-node embeddings; powers semantic `recall`/`search` | `engines/verbatimStore.ts`, `dataplaneVectorStore.ts` |
 | **Relational** | SQLite | Outbox (durable write log), migrations, audit log, auth tokens, ReBAC permission edges | `outbox/`, `security/` |
 
@@ -251,8 +251,9 @@ interconnected knowledge nodes.
 
 ### Why These Substrates
 
-> **Design Decision:** Use an embedded graph engine (SurrealDB — Kùzu was
-> fully removed 2026-08-21, see `docs/KUZU_REMOVAL.md`) for the local
+> **Design Decision:** Use an embedded graph engine (SurrealDB — the prior
+> local graph engine was fully removed 2026-08-21, see
+> `docs/KUZU_REMOVAL.md`) for the local
 > knowledge graph, LanceDB for vectors, and SQLite for durable relational
 > state, all
 > behind `LoreStorageClient`. Sync team-shared knowledge to a hosted
@@ -261,7 +262,7 @@ interconnected knowledge nodes.
 
 | Component | Database | Rationale |
 |---|---|---|
-| **Graph** | SurrealDB (default) or Kùzu (embedded) | Zero-process, schema-agnostic node/edge model with native graph traversal |
+| **Graph** | SurrealDB (embedded, the only graph engine) | Zero-process, schema-agnostic node/edge model with native graph traversal |
 | **Vector** | LanceDB (embedded) | Embedding store for semantic recall without a separate service |
 | **Relational** | SQLite (embedded) | Outbox, migrations, audit, auth, plus tabular collections + SQL aggregates, in one durable engine |
 | **Team sync** | Dataplane via TS-SDK | `TsSdkAdapter` implements the `SyncAdapter` interface |
@@ -455,7 +456,7 @@ listMemoriesByTag(agentId: string, tag: string, orgId: string): Promise<MemoryEn
 
 | Directory | Purpose |
 |---|---|
-| `src/engines/` | Local graph engines: SurrealDB default (`surrealGraph.ts`), Kùzu supported (`localGraph.ts`) |
+| `src/engines/` | Local graph engine: SurrealDB (`surrealGraph.ts`), the only graph engine |
 | `src/mcp/` | MCP server implementation (`server.ts`) |
 | `src/types/` | Shared TypeScript types |
 | `scripts/` | Migration and utility scripts |
@@ -511,7 +512,7 @@ listMemoriesByTag(agentId: string, tag: string, orgId: string): Promise<MemoryEn
 
 | Step | What |
 |---|---|
-| 1 | Graph engine (SurrealDB default, Kùzu supported per workspace) with schema-agnostic `LoreNode` / `LoreEdge` tables (`engines/surrealGraph.ts`, `engines/localGraph.ts`) |
+| 1 | Graph engine (SurrealDB, the only graph engine) with schema-agnostic `LoreNode` / `LoreEdge` tables (`engines/surrealGraph.ts`) |
 | 2 | LanceDB vector store for embeddings + semantic recall |
 | 3 | SQLite for outbox, migrations, audit, and auth, plus tabular collections + SQL aggregates |
 | 4 | `LoreStorageClient` facade fronting all three as the single write path |
@@ -585,7 +586,7 @@ Optional environment variables for team sync are documented in the setup guide (
 | Date | Decision | Rationale |
 |---|---|---|
 | 2026-06-10 | Code intelligence is an external Atlas client, not a Core pillar (v3.11.0) | Lore Core stays a pure schema-agnostic database; Atlas writes knowledge over the public REST/MCP API |
-| 2026-03-26 | Single MCP daemon over three substrates (Kùzu + LanceDB + SQLite) | One package, one port, one config; each substrate fits its job |
+| 2026-03-26 | Single MCP daemon over three substrates (the local graph engine of the time, since removed — see `docs/KUZU_REMOVAL.md` — + LanceDB + SQLite) | One package, one port, one config; each substrate fits its job |
 | 2026-03-26 | All writes through `LoreStorageClient` facade | Single write path and the only local ↔ Dataplane swap point |
 | 2026-03-26 | Local-first / offline-resilient design | WAL buffers writes, local substrates serve all reads, network never blocks |
 | 2026-03-26 | Pluggable `SyncAdapter`; Dataplane via `TsSdkAdapter` | Swap team-sync backend without code changes; ships over `groundfloor-ts-sdk` |

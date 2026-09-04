@@ -135,16 +135,18 @@ async function reembedSubcommand(args: string[]): Promise<void> {
 
     // Lazy imports — avoids booting the graph stack on `--help` and
     // matches the pattern in commands/reconnect.ts.
-    const { openWorkspaceGraph } = await import('../../engines/openWorkspaceGraph.js');
     const { wireOutbox } = await import('../../outbox/wiring.js');
     const { runReEmbedJob, DEFAULT_REEMBED_CHUNK_SIZE } = await import('../../embed/reEmbedJob.js');
+    const { openGraphForCli } = await import('./shared.js');
 
     const basePath = loreHome();
     const loreDir = path.join(basePath, '.lore');
     const chunkSize = flags.batchSize ?? DEFAULT_REEMBED_CHUNK_SIZE;
 
-    const graph = openWorkspaceGraph(basePath);
-    await graph.initialize();
+    // Finding 11 (round E) — refuse fast with a clear message when a
+    // running daemon holds this store's lock, instead of the old ~15s
+    // openSurreal retry storm ending in a raw driver error.
+    const graph = await openGraphForCli(basePath);
 
     // wireOutbox returns the store + replicator; we want the store
     // alone (the daemon — if running — owns the replicator). We do
@@ -197,7 +199,11 @@ async function reembedSubcommand(args: string[]): Promise<void> {
         console.log('');
         console.log('  Rows are durable in the outbox. The daemon\'s replicator will drain');
         console.log('  them on its next tick. Monitor progress with:');
-        console.log('    curl -s http://localhost:3847/api/health | jq .outbox');
+        // FINDING 4 (2026-09-03) — /api/health's `outbox` block is now only
+        // in the Bearer-authenticated body; an anonymous curl here would
+        // silently jq to `null`. Show the token-bearing form.
+        console.log('    curl -s -H "Authorization: Bearer $(cat ~/.groundfloor/auth.token)" \\');
+        console.log('      http://localhost:3847/api/health | jq .outbox');
     }
 
     await graph.close();

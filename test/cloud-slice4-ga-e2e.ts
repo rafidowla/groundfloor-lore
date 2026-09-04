@@ -564,13 +564,13 @@ async function runMigrationSection(embedDim: number): Promise<void> {
   // export route's getWorkspacePath()-based resolvers find it — seeding a bare
   // off-registry graph is not enough to exercise the streaming export.
   //
-  // getGraphHandle, not getOrOpen: getOrOpen is the Kùzu-only substrate
+  // getGraphHandle, not getOrOpen: getOrOpen is the legacy-only substrate
   // accessor and ignores the workspace's declared/defaulted engine entirely.
   // createWorkspace below writes no `graphEngine`, which resolves to the
   // DEFAULT_GRAPH_ENGINE ('surreal' since 2026-08-11) — the same resolution
   // the real export route (workspaceExport.ts) uses via getGraphHandle.
   // Seeding through getOrOpen instead silently wrote into an empty, unrelated
-  // Kùzu store while export read the (also empty) Surreal one — the exact
+  // the legacy graph engine store while export read the (also empty) Surreal one — the exact
   // "daemon reads the wrong store" defect daemon-engine-routing-unit.ts
   // regresses, manifesting here as exported counts of 0 nodes / 0 edges.
   createWorkspace('migsrc', undefined, LORE_HOME);

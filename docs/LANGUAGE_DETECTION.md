@@ -28,8 +28,9 @@ honest.
 
 - ISO 639-1 code when known (`"en"`, `"es"`, `"ja"`, …)
 - `null` when unknown — not a bug, just the honest default
-- Stored in the graph schema (SurrealDB — the only graph engine, Kùzu was
-  fully removed 2026-08-21), returned on reads, accepted on writes
+- Stored in the graph schema (SurrealDB — the only graph engine; the prior
+  local graph engine was fully removed 2026-08-21, see
+  `docs/KUZU_REMOVAL.md`), returned on reads, accepted on writes
 
 ### 2. One core utility: `detectLanguage(text, opts?)`
 

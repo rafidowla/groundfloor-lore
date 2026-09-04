@@ -6,6 +6,585 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+## [3.18.0] — 2026-09-04
+
+**Highlights.** This release closes a batch of 13 verified findings from a
+2026-09-03 adversarial audit — three of them data-loss or data-integrity
+bugs (a restore/backup flush race, a write-guard tautology that could wipe
+a table, node deletes bypassing the write lock) — plus a cold
+re-verification pass that caught two more (`pruneEphemeralNodes` bypassing
+the write lock; data-dependent all-row filters slipping past the
+syntactic guard). It also tightens the collections write guard and schema
+validation, closes an unauthenticated `/api/health` information exposure,
+standardizes malformed-JSON handling to `400` across every route, adds a
+`lore restore` workspace-name safety check, and finishes removing the
+retired Kùzu graph engine's naming and error-code surface in favor of
+`legacy_graph_engine_removed`. The 2026-08-25/26 licensing change (Elastic
+License 2.0 for Core, Apache 2.0 for client SDKs) carries forward
+unchanged from 3.17.0.
+
+**Upgrade notes.**
+
+- Error code `kuzu_engine_removed` (and `KuzuEngineRemovedError`/
+  `kuzuEngineRemovedError`) is renamed to `legacy_graph_engine_removed`/
+  `LegacyGraphEngineRemovedError`/`legacyGraphEngineRemovedError`. This only
+  fires for a workspace whose `workspaces.json` still declares the removed
+  legacy graph engine, never for a live/default workspace; it is now also
+  surfaced as `501` over HTTP (`GET /api/node` and sibling read routes, `GET
+  /api/stats`) instead of a generic `500`.
+- `POST /v1/schema` now returns `400 invalid_schema` for an unknown field
+  type or the wrong type key (e.g. `type` instead of `field_type`) instead
+  of silently accepting the request and creating an unusable collection
+  that rejected every insert with a confusing `expected type 'undefined'`.
+- `all: true` is now honoured on a literal empty filter (`{}`/`{eq:{}}`) for
+  delete/update-by-query and `collection_transaction`/`POST /v1/transaction`
+  ops, matching every other all-matching filter shape. Behavior without
+  `all: true` is unchanged.
+- Anonymous `GET /api/health` now returns a reduced liveness body (`status`,
+  `version`, `sessions`, `backgroundReconnect`, `embeddingBackend`); the full
+  snapshot (per-workspace counts, `loreHome`, outbox state, rate-limit
+  config) requires a Bearer token. Any external health-probe integration
+  that reads the full body anonymously (for example a probe run by an
+  orchestration layer) must start sending a token.
+- Every route now returns `400 invalid_json_body` for a malformed or
+  truncated JSON request body instead of a generic `500 internal_error`.
+- `lore restore` now refuses when an archive's recorded workspace name
+  doesn't match the restore target, unless `--allow-name-mismatch` is
+  passed (an archive with no recorded workspace proceeds with a one-line
+  notice).
+- Destructive collection writes (`collection_delete`, delete/update-by-
+  query, transaction ops) now refuse a filter that matches every row on a
+  table with more than one row unless `all: true` is passed; 0/1-row tables
+  are exempt.
+- `sync_status`'s `engine` field now reports the workspace's real graph
+  engine instead of a hardcoded value.
+- `BulkLoaderAdapter`'s substrate id literal `'kuzu'` is renamed to
+  `'graph'` (the value was never actually produced by any adapter).
+- New in CI: `scripts/audit-dependencies.mjs` hard-fails on any new
+  high/critical dependency finding except the two tracked, already-
+  dispositioned advisories (see Known limitations in the release notes);
+  `LORE_ANALYTICAL_SCAN_CAP` enforcement (regressed by the Kùzu removal) is
+  restored on the SQLite analytical store; a case-insensitive drift guard
+  (`scripts/test-no-legacy-engine-refs.mjs`) keeps Kùzu-era naming from
+  creeping back into source, docs, or comments.
+
+### Fixed (2026-09-03) — 13 verified findings: data loss, write lock, write guard, health exposure, API consistency, CI
+
+- **Restore/backup flush race, daemon guard, restored-store verification (findings 1, 9, 12).** SurrealKV keeps flushing WAL→sstable for ~25 ms after `close()` returns and writes by path, so a restore that renamed the just-closed store aside and dropped the restored store at the same path could have its only WAL unlinked by the stale flush, silently opening an empty graph (the space-in-path test failure had this root cause, not the space handling). `SurrealGraph.close()` now settles the on-disk store (`engines/surreal/surrealSettle.ts`); `lore backup`/`lore restore` refuse while a daemon holds the store (`--force` to bypass) and restore refuses if the destination lock is held; backup copies the graph dir last after settling and re-verifies the staged copy's node count; restore reopens the restored store and verifies against the archive before reporting success. `test/surreal-space-path-backup-restore-unit.ts` is re-wired into `npm test` and a no-space race test was added. Full write quiesce during backup remains a documented limitation (docs/BACKUP_RESTORE.md).
+- Every mutating node path (`delete_node`, `DELETE /api/node/:id`,
+  `/api/nodes/bulk`, `/api/nodes/bulk-delete`, changeset delete,
+  prune/restore, outbox replay) now holds the same per-(workspace,id) write
+  lock as `nodeUpsert` (`packages/lore/src/core/nodeWriteLock.ts`). Two
+  fire-and-forget verbatim tombstones are now awaited inside the lock.
+  Previously a delete overlapping an upsert could leave graph and search
+  disagreeing with both callers told `ok`.
+- Collections write guard: `not` over a constant-false leaf
+  (`{not:{in:{id:[]}}}` and nested variants) compiled to a tautology and
+  could wipe a table without `all: true`. The guard is now an explicit
+  ALL/NONE/SCOPED/INVALID classifier
+  (`packages/lore/src/mcp/tools/collectionsFilterScope.ts`). Structurally
+  invalid filters (empty `and`/`or`, over-deep nesting) now 400 instead of
+  500, and an empty leaf inside a boolean node no longer emits malformed SQL.
+- Documented the Lore no-sanitization data contract (`docs/DATA_CONTRACT.md`,
+  linked from `README.md`) and capped `supersede_node`'s `reason` at
+  `MAX_NODE_FIELD_BYTES` on both the MCP tool and `POST /api/node/supersede`;
+  the REST route now validates `oldId`/`newId` types (was a raw 500).
+- `/api/health` no longer returns `loreHome`, per-workspace stats, outbox
+  depth, session count or rate-limit config to unauthenticated local callers:
+  anonymous callers get the same lite body as `GET /health`, a valid Bearer
+  gets the full snapshot. Same split in arcade-mode boot
+  (`packages/lore/src/mcp/arcadeBoot.ts`). The stale `/api/recall` public
+  entry is removed from `docs/SECURITY_MODEL.md`; cloud/remote health strategy
+  is noted there as a separate design item.
+- Collection insert/bulk-insert/update (REST and MCP) now validate rows
+  against the declared schema before storage
+  (`packages/lore/src/engines/collectionRowValidation.ts`) and return
+  `400 invalid_row` naming table/field/row-index instead of a generic 500; a
+  numeric string into an integer column is now rejected instead of silently
+  stored.
+- Added `ITableStorage.listTables()`, `GET /v1/schema` (REST) and
+  `collection_schema_list` (MCP) so collections can be enumerated; docs no
+  longer advertise the never-implemented `PATCH /v1/{collection}`.
+- DELETE URL shapes made consistent: `DELETE /v1/{collection}/{id}` (by
+  primary key, mirrors `GET`) added; `DELETE /api/node?id=X` now works
+  alongside `/api/node/:id`; `DELETE /api/workspaces/:name` and `/retention`
+  no longer mis-parse the name when a query string is present
+  (`packages/lore/src/mcp/http/middleware.ts`,
+  `packages/lore/src/mcp/http/routes/workspaces/workspaceMgmt.ts`).
+- `npm test` no longer aborts without the private `groundfloor-ts-sdk`
+  sibling (sw05 skips only its SDK-runtime assertion, with a clear reason; the
+  vendored package no longer advertises a `main` it lacks). `lore doctor` and
+  `lore status` honour `LORE_PORT` for daemon detection and report a clear
+  store-held-by-running-Lore message in seconds instead of a raw 15 s
+  SurrealDB error; `doctor --json` restores `console.log` on throw.
+- Data-contract decision recorded, not a code change: Lore does not sanitize
+  free text. Stored `label`/`content`/`tags`/`reason` are returned verbatim,
+  and escaping is the rendering consumer's responsibility — see
+  `docs/DATA_CONTRACT.md` for the full boundary and the byte caps that do
+  apply.
+
+#### Adversarial QA round (2026-09-03)
+
+Follow-up fixes from a second adversarial QA pass over the findings above
+(round E). Each item closes a hole a QA lens found in its own round-1 fix.
+
+- **A2 — prune stale-snapshot race + outbox tombstone resurrection.**
+  `prune_nodes` (MCP + REST) re-reads the node and re-checks eligibility
+  inside its per-id lock for both `archive` and `hard_delete`, closing a
+  stale-snapshot lost-update where a concurrent write could be silently
+  reverted. Every node-delete path (`delete_node`, `DELETE /api/node`,
+  bulk-delete, changeset delete, prune `hard_delete`) now records a
+  `verbatim.tombstone` outbox row after `node.delete`, so replicator/crash-
+  recovery replay converges to graph-absent + verbatim-tombstoned instead of
+  resurrecting deleted content. `nodeupsert-vs-delete-race-unit.ts`
+  type-check errors fixed.
+- **A3 — write-guard INVALID filters get their own error code.** Structurally
+  invalid filters (malformed `and`/`or`, nesting past `MAX_FILTER_NESTING`)
+  now return `400 filter_invalid` instead of being folded into
+  `all_filter_refused` with misleading truncate advice, on both REST and MCP;
+  `update-by-query` coverage added.
+- **A4 — supersede cap closed for bulk/CLI/embedded, made byte-based.** The
+  `supersede_node` reason cap is now measured in UTF-8 bytes (via
+  `engines/nodeFieldLimits.ts`) instead of UTF-16 length, at the MCP tool, the
+  REST route, and the `lore supersede` CLI's no-daemon fallback.
+  `POST /api/nodes/bulk` now rejects `supersededReason`/`supersededBy`/
+  `supersededAt` the same as the single-write path, and `nodeUpsert` refuses
+  caller-supplied supersede fields that differ from the previous graph state
+  (closes the embedded `bulkIngest` gap while keeping `bulkIngestCancel`
+  rollback working). `unsupersede` validates `id` type (400, not 500).
+  `docs/DATA_CONTRACT.md` line references corrected.
+- **B1 — anonymous fallback for unresolvable-but-plausible Bearer tokens.**
+  Public paths (`/health`, `/api/health`, `/api/auth/bootstrap`, `/metrics`)
+  now treat an app token that looks valid but doesn't resolve as anonymous
+  instead of 401 (`requiresBearerAuth` exported from `security/httpAuth.ts`,
+  reused by `middleware.ts`); non-public paths are unaffected. Remaining
+  anonymous `/api/health` consumers fixed: `scripts/test-tool-byte-caps.mjs`
+  now sends its token; the Python SDK's `health_full()` docs/warning updated;
+  `Bearer` added to the curl examples in `docs/BACKUP_RESTORE.md`,
+  `docs/architecture/outbox.md`, and `docs/UPGRADE.md`.
+- **B2 — collection_transaction wired into row/filter validation.**
+  `collection_transaction` / `POST /v1/transaction` now pre-validates every
+  operation against the schema (and refuses all-filter update/delete ops)
+  before running anything, returning `400 invalid_row` with
+  table/field/failed-op-index and applying nothing on failure. Malformed JSON
+  bodies now return `400 invalid_json_body` (was 500); an uncached schema now
+  returns `404 collection_not_found` (was 500 on `GET`/`DELETE` by id); `PUT`
+  update routes carry table/field extras; `NaN`/`Infinity` render literally
+  instead of `null`.
+- **B3 — collection_schema_list / GET /v1/schema paginated.** Both now
+  paginate (default limit 100, max 1000, cursor/offset) and only compute
+  `rowCount` when `withCounts=true`, bounding the previous unconditional
+  `COUNT(*)` fan-out across every table. New `engines/sqliteTableList.ts` and
+  `mcp/tools/collectionsSchemaList.ts` (file-size-cap splits);
+  `scripts/tool-byte-caps.json` fixtures added for
+  `collection_schema_list`/`collection_schema_get`.
+- **A1 (round E) — backup lock probe, honest unverified-graph reporting,
+  settle-timeout visibility, faster close/dispose.** `lore backup` now runs
+  the same direct `probeSurrealLock()` preflight as `restore` (port-independent,
+  catches a daemon on a non-default port or any non-daemon lock holder that
+  `isDaemonUp()` alone missed) and refuses with the lock message;
+  `BackupResult`/`RestoreResult` now carry `warnings` that the CLI prints. An
+  unverified graph (`graphNodeCount` null) is recorded with
+  `manifest.graphNodeCountReason` and makes backup exit non-zero and restore
+  refuse unless `--allow-unverified` (the old misleading
+  archive-predates-verification message is gone). `lore maintain`'s
+  ephemeral-workspace delete probes the store lock before `rmSync` on the CLI
+  path. `SurrealGraph.initialize()`'s schema-apply-failure branch now closes
+  via the shared `closeAndSettle()`. `settleSurrealStore` now trusts a store
+  whose on-disk tree is unchanged since before polling, cutting `close()` on
+  a reopened store from ~158 ms to ~27 ms, and
+  `LocalGraphRegistry.disposeAll`/`evictIdle` now close workspaces in
+  parallel (8 workspaces: 422 ms → ~120 ms). `lore init` no longer crashes on
+  a `LORE_HOME` containing spaces (`sync.wal` path).
+- **B5 — centralized CLI daemon-lock preflight; doctor `--json` safety net;
+  `?workspace=` on topology.** 18 more CLI commands (`recall`, `sync`,
+  `embed`, `verbatim`, `supersede`, `markStale`, `getFull`, `resolve`,
+  `export`, `reconnect`, `report`, `lint`, `diagnose`, `retention`, `setup`,
+  `init`, `migrateEmbedding`, `migrate`) now share the same LORE_PORT-aware
+  daemon-lock preflight via a new `openGraphForCli()` helper in
+  `cli/commands/shared.ts`, failing fast with a clear message instead of a
+  ~15s raw driver error when another process holds the store. `doctor` now
+  sends `?workspace=` on its `/api/topology` probe and reports real graph
+  counts instead of always hitting `workspace_required`; `doctor --json`
+  emits a valid `{ok:false, issues, fatal}` envelope on an unexpected throw
+  instead of no output; the WAL check degrades to a finding rather than
+  crashing the whole run. The `sw05` no-SDK skip guard is narrowed to
+  module-resolution failures only, so it can no longer mask a genuinely
+  broken SDK. `docs/OPERATIONS.md`'s `lore status` section documents the new
+  daemon-lock refusal.
+
+##### Round 2
+
+- **A1 — settle fast-path floor, restore reason allowlist, lock probe
+  EACCES.** `settleSurrealStore`'s fast path now requires two full poll
+  intervals and a 60 ms floor from the start of polling (close on an idle
+  reopened store ~80 ms); restore refuses on an allowlist of
+  `graphNodeCountReason` values instead of matching only `unreadable`;
+  `probeSurrealLock` distinguishes `ENOENT` (free) from `EACCES` etc.
+  (undeterminable, not free); `WorkspaceRegistry.delete` removes data before
+  the registry entry; `docs/CONFIGURATION.md` documents the three
+  `LORE_SURREAL_SETTLE_*` vars (sw24 guard green).
+- **B3 — schema-list cursor switched to keyset.** `collection_schema_list` /
+  `GET /v1/schema`'s cursor is now keyset (last returned name) instead of a
+  raw offset, so a collection created between pages no longer duplicates or
+  skips entries; offset remains supported but documented as unstable under
+  concurrent creates; old numeric cursors are ignored as malformed.
+- **A2 — node-delete outbox rows + arcade tombstone substrates.**
+  `prune_nodes` hard_delete (MCP + REST) and changeset delete now record a
+  `node.delete` outbox row before the substrate delete, so a pending
+  `node.upsert` can no longer replay and resurrect the node in the graph;
+  arcade/cloud outbox substrates gained `tombstoneVerbatim`
+  (→ `ArcadeVectorStore.delete`) and `getVerbatim` (→ `getById`) so a delete
+  no longer dead-letters with `UnwiredOperationKindError`; cross-kind
+  supersession covers `verbatim.upsert` ↔ `verbatim.tombstone`; prune
+  hard_delete race covered by test.
+- **A3 — strict transaction filters, readable filter_invalid, transaction
+  error taxonomy.** Transaction op filters are now strict: unsupported
+  and/or/not or unknown keys are rejected (400 `filter_invalid` naming op
+  index and key) instead of silently stripped and the surviving leaf applied
+  to more rows; the structurally-invalid-filter message no longer
+  single-quotes and/or so the MCP error surface is not hash-redacted;
+  `POST /v1/transaction` returns 400 `invalid_json_body` for malformed JSON
+  and 413 for oversized bodies; an upsert taking the fresh-insert branch gets
+  the insert required-column pre-check.
+- **B5 — CLI daemon preflight is home-aware.** `isDaemonServingHome()` checks
+  `<LORE_HOME>/auth.token` and the Bearer health body's `loreHome` before
+  refusing, so an unrelated daemon answering on `LORE_PORT` no longer blocks
+  `lore init`/`recall`/etc. on an unlocked home; a locked store with a
+  mismatched daemon now gets an honest message instead of a false refusal.
+  Used by `openGraphForCli` and by `status`/`backup`/`restore`/`maintain`/
+  `compact`/`migrate`. `doctor` now reports `/api/topology` 400/403 responses
+  distinctly instead of collapsing every non-200 into "unexpected shape".
+
+##### Round 3
+
+- **A1 — atomic workspace delete, manifest consistency checks.**
+  `WorkspaceRegistry.delete()` renames the workspace aside atomically before
+  removing it, so a partial permission failure never leaves the registered
+  path half-emptied and a retry clears the sideline; restore refuses
+  internally inconsistent manifests (verified with a null count, or
+  no-store/unreadable with a count) and warns when a no-store archive
+  actually contains a store; stray `CONFIGURATION.md` Source line removed.
+
+- **A2 — bulk write outbox rows committed under the multi-id lock.**
+  `POST /api/nodes/bulk-delete` and `POST /api/nodes/bulk` (both branches) now
+  commit their batch outbox rows inside `withNodeLocks` over all ids (sorted
+  acquisition), so the outbox order can no longer precede lock acquisition and
+  contradict the end state; per-id locks inside those loops removed as
+  re-entrant; no throughput regression (E2-perf-1000-bulk median 5 ms).
+
+- **A3 — strict collection filter schema on MCP and REST.** Collection
+  filters are strict everywhere: `collectionsFilterSchema.ts` leaf and node
+  schemas reject unknown or miscased operator keys (400 `filter_invalid`
+  naming the key) on all four MCP mutate tools and, newly validated, on REST
+  PUT/DELETE, update-by-query, delete-by-query, query and count, so a typo
+  can no longer silently widen an update or delete; `join_query` inherits it;
+  `describeTransactionFailure` reports `all_filter_refused` with the real
+  message.
+
+- **B5 — compact/maintain second-layer lock guard, credential-rejected
+  messaging.** `lore compact` and the LanceDB-only path of `lore maintain`
+  now refuse when a Lore on `LORE_PORT` rejected the CLI credential (stale
+  token) unless `--force`, and independently probe the workspace's
+  SurrealDB store lock before touching LanceDB as a second, HTTP-independent
+  layer — closing a reproduced LanceDB corruption path where a rejected
+  token was treated as "safe to proceed"; `compact` gains retry-on-conflict
+  for `optimize()`; the daemon-lock message now says a credential was
+  rejected instead of claiming a different home.
+
+##### Round 4
+
+- **A1 — refuse symlink/mount-point workspace delete, clear all sidelines,
+  report leftovers.** `WorkspaceRegistry.delete()` refuses a workspace path
+  that is a symlink or a mount point (checked before any rename), clears
+  every leftover `pending-delete-*` sideline for the name before
+  deregistering and keeps the entry if any remains; `lore maintain` reports
+  leftover sidelines (name, age, bytes); `lore restore` annotates a
+  no-store reason correctly instead of claiming the archive predates the
+  recorded count.
+- **A2 — chunked bulk locks, outbox retraction on per-item failure.** Bulk
+  node upsert and bulk delete now take the per-id write locks in chunks of
+  `BULK_LOCK_CHUNK_SIZE` (50): each chunk commits its outbox rows first under
+  its own locks, preserving the ordering invariant while cutting the wait of
+  a concurrent single write under a 1000-id bulk from ~10 s to ~250 ms; a
+  per-node substrate failure inside a bulk upsert or bulk delete now retracts
+  (or compensates) the outbox rows of that id via `retractHotWriteOrCompensate`,
+  so replay no longer creates ghost nodes or phantom deletes.
+- **B5 — refuse compact/maintain without a graph store to probe, `--force`
+  notice.** `lore compact` (always) and `lore maintain` (LanceDB-only path)
+  refuse when the workspace has no graph store to probe, since safety cannot
+  be verified, unless `--force`; `--force` now prints a one-line notice that
+  daemon/lock checks were skipped; a real-daemon regression case covers the
+  200 lite-body stale-token shape.
+
+##### Round 5
+
+- **A2 — retract outbox row on inline-embed failure in bulk upsert.** Bulk
+  upsert with inline embedding now retracts the `node.upsert` outbox row when
+  the per-node verbatim seed fails after the graph write (mirroring the
+  sibling failure branch), so replay no longer resurrects a graph-only orphan
+  the caller was told failed.
+
+### Verification audit (2026-09-03) — cold re-verification, security checklist, exploratory sweep, legacy-engine cleanup
+
+Cold re-verification of the 13 findings above: 11 closed cold; #2
+(`pruneEphemeralNodes` bypassing the write lock/outbox/tombstone) was only
+partial and is now fixed; #3 (data-dependent all-row filters slipping past
+the syntactic guard) was still open and is now fixed with the COUNT-match
+preflight and `all: true`.
+
+**Fixed**
+
+- `pruneEphemeralNodes` (`SurrealGraph`, reachable from `POST
+  /api/prune-ephemeral` and the `prune_ephemeral` MCP tool) now drives its
+  deletes through the same per-id `withNodeLock` discipline as
+  `prune_nodes` hard_delete — outbox row, verbatim tombstone, in-lock
+  re-check that the node is still ephemeral and past TTL — instead of
+  calling `deleteNode` directly (`packages/lore/src/engines/...`,
+  `mcp/http/routes/retention/policy.ts`, `mcp/tools/governance.ts`).
+- Destructive collection writes (`collection_delete`,
+  `DELETE .../delete-by-query`, `POST /v1/transaction`) now run a
+  same-transaction `COUNT(*)` vs `COUNT(*) WHERE <filter>` preflight in
+  `engines/sqliteTableTransaction.ts` before a non-empty-filter
+  update/delete; a filter that matches every row on a table with more than
+  one row is refused (`all_filter_refused`) unless the caller passes
+  `all: true` (0/1-row tables are exempt). Closes the case where
+  syntactically-scoped-looking filters like `{gte:{id:0}}` matched 100% of
+  a real table's rows and wiped it with no refusal. Structurally invalid
+  filters remain a distinct `filter_invalid` 400.
+- Edge writes (`store_edge`/`delete_edge`, `POST`/`DELETE /api/edge`,
+  `POST /api/edges/bulk`, and the outbox replicator's edge substrates) now
+  hold a per-(workspace, sourceId, targetId, relation) `withEdgeLock`/
+  `withEdgeLocks` (`core/nodeWriteLock.ts`), get outbox/audit coverage, and
+  `delete_edge` appends a WAL op — none of which edges had before, unlike
+  nodes.
+- `mark_stale` (MCP tool and `POST /api/mark-stale`) now resolves
+  tag-matched ids read-only, then applies them in per-chunk
+  `withNodeLocks`-protected, outbox-recorded regions via a new
+  `graph.markStaleByIds` primitive (outbox kind `node.mark_stale`) instead
+  of calling `graph.markStaleByTags` directly with no lock or outbox row.
+- Every node-delete path now appends a `delete_node` WAL entry inside the
+  same per-(workspace,id) lock the delete already runs under, mirroring
+  `upsert_node`'s WAL append (`engines/syncEngine.ts`'s `pushPendingInner`
+  already consumed `delete_node` entries but nothing produced them; the
+  push path itself remains unwired, so this closes a dormant gap, not a
+  live one).
+- Malformed/truncated JSON request bodies now map to `400
+  invalid_json_body` instead of falling through to a generic `500
+  internal_error` — starting from `POST /api/node` and generalized across
+  the other routes that parse their own body (`helpers.ts`:
+  `readJsonBody`/`parseJsonBody`/`isInvalidJsonBody`/`writeInvalidJson`).
+- `lore outbox drain-failed --check-substrate` (the default path) now gets
+  the same daemon/lock preflight as every other store-touching CLI command
+  instead of hanging through the ~15s `openSurreal` retry storm and dying
+  with a raw driver error; `--no-check-substrate` no longer opens the boot
+  graph unconditionally either.
+- `lore restore` now refuses when an archive's `backup-manifest.json`
+  `workspace` field doesn't match the restore target, naming both
+  workspaces, unless `--allow-name-mismatch` is passed (archives with no
+  recorded workspace field proceed with a one-line notice); adds `lore
+  restore --all <dir>`.
+- Every HTTP response now gets baseline browser security headers
+  (`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, `Cache-Control: no-store`) plus a strict
+  default `Content-Security-Policy: default-src 'none'; frame-ancestors
+  'none'`, applied once in `mcp/http/middleware.ts`'s `runHttpGates` chokepoint
+  ahead of every gate/route — closing security-checklist gap #12, including
+  on `GET /api/export/html`.
+- CI now runs `npm audit --omit=dev --audit-level=high` and fails on
+  high/critical production CVEs (security-checklist gap #18), with
+  `renovate.json` added for weekly dependency maintenance. Four transitive
+  deps (fast-uri, deepmerge-ts, qs, `@xmldom/xmldom`) were bumped
+  non-breaking to close 6 of 10 open findings. **Update (2026-09-04):** the
+  initial gate was a blanket `|| echo` soft-fail that would have also
+  waved through a genuinely new advisory; it's replaced by
+  `scripts/audit-dependencies.mjs`, which hard-fails on any high/critical
+  finding except the two tracked exceptions that need breaking major
+  bumps — adm-zip `GHSA-xcpc-8h2w-3j85` (via `@huggingface/transformers`)
+  and pdfjs-dist `GHSA-hq66-cqwq-w95j` — both already dispositioned in
+  `docs/SECURITY_ADVISORIES.md` and `docs/SECURITY_MODEL.md` §12.
+- Restored the access-time coldness signal on `SurrealGraph` (regressed by
+  the Kùzu removal) and restored `LORE_ANALYTICAL_SCAN_CAP` enforcement on
+  the SQLite analytical store.
+- CLI HTTP relay helpers now honour `LORE_PORT` via the shared port
+  resolver instead of hardcoding `3847`.
+- `lore status`/`lore doctor` gained the same daemon preflight as other
+  CLI commands (regression coverage added).
+- `sync_status`'s `engine` field (`mcp/tools/governance.ts`) was hardcoded
+  to `'kùzu'` regardless of what the workspace actually runs; it now reads
+  the real declared engine via `resolveWorkspaceGraphEngine(workspace)` —
+  `'surreal'` for the default/absent case, the real value for an explicit
+  legacy declaration.
+- Error code `kuzu_engine_removed` (and `KuzuEngineRemovedError`/
+  `kuzuEngineRemovedError`) renamed to `legacy_graph_engine_removed`/
+  `LegacyGraphEngineRemovedError`/`legacyGraphEngineRemovedError` — an
+  API-visible change, but the error is only ever thrown for an explicit
+  legacy `workspaces.json` declaration, never for a live/default workspace.
+- `BulkLoaderAdapter`'s substrate id literal `'kuzu'` renamed to `'graph'`
+  across `bulkLoader/types.ts` and its test fakes (the value was never
+  actually produced by any adapter).
+- `POST /v1/schema` (`mcp/http/routes/collections.ts`) now validates the
+  request body against `sdkCollectionSchemaZ` (the same schema
+  `collection_create` already used) instead of duck-typing `name`/`fields`
+  — a field using the wrong key (`type` instead of `field_type`) or an
+  unrecognized type (e.g. `text`, not in `COLUMN_TYPE_ENUM`) used to 201
+  with the type silently dropped to `undefined`, then reject every insert
+  with a confusing `expected type 'undefined'`; it now 400s
+  `invalid_schema` up front, naming the accepted types
+  (`collectionsSchemaTranslate.ts`'s new `describeSchemaZodError`).
+  `engines/collectionRowValidation.ts`'s `validateRowAgainstSchema` also
+  now skips (rather than rejects) a column with no recorded type, so a
+  pre-existing malformed schema can no longer produce that message either.
+- `all: true` was silently ignored by `DELETE .../delete-by-query`, `PUT
+  .../update-by-query`, `collection_update`/`collection_delete`, and
+  `POST /v1/transaction` when the filter was a literal empty object
+  (`{}`/`{eq:{}}`) — `engines/sqliteTableTransaction.ts`'s empty-`WHERE`
+  guard never checked `opts.all`, unlike every other all-matching filter
+  shape (`{gte:{id:0}}`, `{not:{in:{id:[]}}}`, etc.), which already
+  honoured it via `assertNotDataTautology`. `all: true` now applies
+  uniformly across all of these ops; behaviour without it is unchanged.
+- A workspace whose `workspaces.json` still declares the removed legacy
+  graph engine now gets `501 legacy_graph_engine_removed` from `GET
+  /api/node` (and the other routes sharing `readGate.ts`'s
+  `resolveReadGraph`: `/api/subgraph`, `/api/node/lineage`,
+  `/api/node-full`, `/api/node/as-of`,
+  `/api/node/supersession-candidates`) and from `GET /api/stats`
+  (`diagnostic/stats.ts`'s `handleStats`), instead of a generic,
+  redaction-mangled `500 internal_error` (new shared
+  `mcp/http/helpers.ts` helper `writeGraphEngineError`). `lore status`/
+  `lore doctor` already refused correctly for this case; a spawning
+  end-to-end test now pins them.
+- `POST /api/admin/stats`'s cross-workspace `byWorkspace` breakdown
+  (`diagnostic/stats.ts`'s `handleAdminStats`) reported a workspace with a
+  removed legacy graph engine (`LegacyGraphEngineRemovedError`) as an empty
+  workspace (`{ nodeCount: 0, edgeCount: 0 }`), the same shape used for the
+  benign `workspace_not_found` registry race the catch block was actually
+  written for — hiding real data behind a false zero reading. That case
+  (and any other per-workspace error) now gets `{ nodeCount: null,
+  edgeCount: null, error: { code, message } }` instead, plus a top-level
+  `errors` count; only the genuine `workspace_not_found` race keeps the
+  zeroed shape. The response stays `200` so one bad workspace doesn't hide
+  the others.
+
+**Tests**
+
+- 23 previously-defined-but-orphaned `test:unit:*` scripts wired into the
+  aggregate `npm test` chain (all passed as-is; wiring only, no fixture
+  rot) — the Agentic DBA schema-safety series (classification-audit,
+  schema-change-audit, dedupe, provenance, scope-resolver, exception-queue,
+  schema-authoring, phase-a-tools, schema-approve-embedded) plus
+  rate-limit-w9, rate-limit-bootstrap, mcp-tool-error-redaction,
+  audit-embedded-writes, audit-embedded-autolink-isolation,
+  embedded-nodeupsert-id-shape, audit-node-field-cap,
+  functional-correctness-cluster3, audit-node-upsert-batch-isolation,
+  tw4b-pull-cursor, tw4c-search-preorder, surreal-schema-ops,
+  temporal-valid-time, fix6-local-approval-identity.
+- New regression tests wired into `npm test` for this audit round:
+  `restore-name-mismatch`, `security-response-headers`,
+  `ci-dependency-audit`, `prune-ephemeral-outbox`, `mark-stale-outbox`,
+  `o6-drain-cli`, `wal-delete-node`, `edge-write-lock`,
+  `routes-invalid-json`, `access-coldness-surreal`,
+  `analytical-scan-cap`, plus a `lore status` daemon-preflight regression
+  case. `test:unit:sync-status-engine` and `test:unit:cli-relay-port` were
+  added as definitions (the former deliberately left out of the aggregate
+  chain per the round's script-addition convention).
+- `test:unit:admin-stats-legacy-engine-error` (new, for the `/api/admin/stats`
+  fix above) and `test:unit:l2-stats-workspace` (`test/L2-stats-workspace-unit.ts`
+  — 16 pre-existing `/api/stats`/`/api/admin/stats`/`/api/health` tests that
+  had never been wired into any script) are both now wired into the
+  aggregate `npm test` chain.
+- `E2-skip-on-write`'s fake graph now implements `bulkListProjected` /
+  `queryEdges` / `bulkUpsertNodes` so it satisfies `isWorkspaceGraph()` and
+  actually exercises the LOCAL batched branch its assertions are written
+  for, instead of silently falling through to the ARCADE per-id branch.
+- `test/local-adapter-unit.ts`'s "tables stub throws" assertion updated to
+  match the real production error message (production wording was
+  correct; the test was stale). `test/internal/sprint-H-online-migration-property.ts`'s
+  H-D6 assertion updated to strip the `docs/KUZU_REMOVAL.md` filename
+  token before checking for legacy-engine prose, so it still fails on real
+  prose but passes the doc's legitimate pointer to the removal record.
+- Added regression coverage for the three fixes above:
+  `collections-routes-unit.ts` (schema-type-validation live repro +
+  accepted-types message + no-regression case),
+  `collections-write-guard-holes-unit.ts` (`all:true` on a literal empty
+  filter, across the direct handlers, REST update-by-query/delete-by-query,
+  and `POST /v1/transaction`), `daemon-engine-routing-unit.ts` (`GET
+  /api/node`/`GET /api/stats` on a legacy-engine workspace answer 501, not
+  a generic 500), and new file `test/legacy-engine-cli-refusal-unit.ts`
+  (spawns the real `lore status`/`lore doctor` CLI against a throwaway
+  `LORE_HOME` declaring the legacy engine, asserting the refusal and that
+  no `.lore/surreal` directory gets created).
+
+**Legacy graph engine cleanup**
+
+- Renamed the remaining Kùzu-era identifiers: `KuzuRow`/`KuzuNodeRow`/
+  `KuzuEdgeRow` → `GraphRow`/`GraphNodeRow`/`GraphEdgeRow`
+  (`bulkLoader/types.ts`); `KuzuSchemaGraphOps` → `LegacySchemaGraphOps`
+  (`schemaGraphOps.ts`, behavior unchanged); `kuzuOnlyGraph` →
+  `legacyOnlyGraph` (`health.ts`); `hasKuzu` → `hasLegacyGraph`
+  (`backup.ts`); `kuzuTable` → `legacyTable` (`collectionStorage.ts`);
+  `graphStoresOnDisk().kuzu` → `.legacyGraph` (and its `doctor.ts`
+  consumer). Removed the dead `CollectionStorage.mode: 'kuzu'` union
+  member (never produced by any constructor).
+- Reworded remaining Kùzu mentions out of living docs, comments and CLI
+  help text (`docs/`, `packages/lore/src/`, README, package.json,
+  `cli/index.ts`'s postmortem comment) down to a generalized "the prior
+  local graph engine" phrasing, keeping only the sentinel literal `'kuzu'`
+  where it must still match a legacy `workspaces.json` declaration
+  (`config/workspaces.ts`, `schemaGraphOps.ts`, `bulkLoader/types.ts`,
+  `loaderDispatcher.ts`, `migration/types.ts`,
+  `migration/coordinator.ts`, restore/backup manifest engine value,
+  `graphEngineSelector.ts`/`localGraphRegistry.ts`/`openWorkspaceGraph.ts`)
+  and the `--kuzu` CLI back-compat flag (`compact.ts`).
+- `scripts/test-no-legacy-engine-refs.mjs` — a case-insensitive drift guard
+  for `kuzu`/`kùzu` across the repo — wired into `npm run test:arch`. Added
+  a `HISTORICAL_RECORDS` set of 15 exact-path whole-file exemptions for
+  dated audit/plan/log snapshots that must read verbatim (`BUILD_ORDER.md`,
+  `SPRINT_QUEUE.md`, `.swarm/manifest.json`, `.swarm/VERIFICATION.md`,
+  several dated `docs/architecture/*` audit briefs, `docs/CLOUD_GAP_AUDIT.md`,
+  `docs/post_v2_plan.md`, `docs/v3_roadmap_questions.md`,
+  `docs/proposals/memory-backbone-brief.md`,
+  `docs/SURREALDB_BUILD_PLAN.md`, a captured benchmark run log, and
+  `docs/KUZU_REMOVAL.md` itself), plus a global literal-allowance strip for
+  the `docs/KUZU_REMOVAL.md`/`KUZU_REMOVAL.md`/`DEC-KUZU-REMOVAL-STEP1`
+  filename/decision-id tokens so living docs can cite the removal record
+  by name anywhere without a per-file allowlist entry. Took the guard from
+  321 hits before the final rename pass, to 122 after identifier renames,
+  to a clean pass after the historical-record/filename-token allowances.
+- MIT attribution for the removed Kùzu engine moved into
+  `docs/KUZU_REMOVAL.md` (a dated table naming the original author/license/
+  role) so the credit isn't lost from `README.md` once the removal is
+  fully scrubbed there.
+
+**Known follow-ups**
+
+- `cli/commands/supersede.ts`'s `tryHttpSupersede` (and `recall`'s
+  `tryHttpRecall`) still hardcode `127.0.0.1:3847` instead of `LORE_PORT`
+  — UX-only, both paths remain cap-enforced.
+- Boot-time ephemeral prune in `mcp/server.ts` (~line 1479) still calls
+  the legacy `pruneEphemeralNodes` engine method directly (no outbox/
+  tombstone) — needs routing through the same per-id path as the
+  request-driven callers fixed above.
+- `SyncAdapter.pushEdgeDeletes` has no shipping adapter implementation, so
+  `delete_edge` WAL entries accumulate un-pushed until `tsSdkAdapter`/
+  dataplane add it (dormant — the WAL push path itself isn't wired yet).
+- Prune-ephemeral still needs its own `delete_node` WAL append once
+  X-walnode's pattern is extended to it — there's no `getWal` hook in the
+  dispatcher deps for that path today.
+- `handleBulkDelete`'s `getWal` hook is unwired from the dispatcher (REST
+  bulk-delete routes don't append WAL today) — wire it alongside WAL push.
+- `engines/arcade/arcadeGraphEdges.ts` was untouched by the edge-lock work.
+- `mcp/tools/collections.ts` and `collectionsByQuery.ts` still have a
+  two-way runtime import (verified safe today) — consider collapsing it to
+  a one-way registration shape later.
+- `analytics.ts`'s `parseFilter()` still 500s on malformed nested
+  `filterJson` on `/api/time-series` and `/api/aggregate`.
+- The analytical `groupBy` limit param is unbounded by default; the
+  historical default cap of 10000 was not ported.
+- `AccessTracker` `source=read` has zero callers (`getNode`/
+  `getNodesByIds`/`traverse` never stamp) — pre-existing, already
+  documented in FINDINGS-2026-08-17-opus-reaudit.
+
 ### Changed (2026-08-26) — client SDKs carved out as Apache 2.0
 
 The Python client SDK (`sdks/python/`) is now licensed Apache License 2.0

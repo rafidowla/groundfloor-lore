@@ -47,9 +47,10 @@ import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 
 export interface ImportDeps {
@@ -738,9 +739,9 @@ export async function tryImportRoutes(
     let targetGraph: LoreGraph = deps.store.loreGraph;
     if (deps.graphRegistry) {
         try {
-            // getGraphHandle honours the workspace's declared engine — getOrOpen
-            // is the Kùzu substrate accessor and would import every node into a
-            // Surreal workspace's unused, empty Kùzu graph. Still runs
+            // getGraphHandle honours the workspace's declared engine, so
+            // import lands in the requested workspace's own graph rather
+            // than an unused, empty one for the wrong engine. Still runs
             // assertWorkspaceOpenAllowed.
             targetGraph = await deps.graphRegistry.getGraphHandle(importWs);
         } catch (err) {

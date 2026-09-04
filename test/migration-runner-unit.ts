@@ -11,8 +11,8 @@
  * already-completed ops, foreign in-flight plan blocks a fresh
  * execute(), planId is generated when absent.
  *
- * Real Kùzu integration is covered separately in
- * test/migration-kuzu-backend-unit.ts.
+ * Real legacy-engine integration was covered separately in a
+ * legacy-engine-backed migration backend test, since removed.
  */
 
 import { strict as assert } from 'node:assert';
@@ -222,12 +222,12 @@ test('execute fail-fast: first batch error stops the op + subsequent ops, checkp
     await withTmpLoreDir(async loreDir => {
         const store = new CheckpointStore(loreDir);
         const be = fakeBackend({
-            executeBatchThrows: { 'node_type.removed|know.A': 'kuzu connection lost' },
+            executeBatchThrows: { 'node_type.removed|know.A': 'legacy-engine connection lost' },
         });
         const runner = new MigrationRunner(be, store);
         const report = await runner.execute(PLAN_TWO_OPS);
         assert.equal(report.succeeded, false);
-        assert.equal(report.ops[0].error, 'kuzu connection lost');
+        assert.equal(report.ops[0].error, 'legacy-engine connection lost');
         assert.match(report.ops[1].error ?? '', /skipped/);
         // Checkpoint must still be cleared (run is over).
         assert.equal(store.load(), null);

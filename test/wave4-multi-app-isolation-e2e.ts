@@ -106,7 +106,10 @@ async function main(): Promise<void> {
         const delReq = (token: string, p: string, extra: Record<string, string> = {}) =>
             fetch(`${base}${p}`, { method: 'DELETE', headers: hdr(token, extra) });
 
-        const health = await (await fetch(`${base}/api/health`, { headers: { Origin: origin } })).json() as { deploymentMode?: string };
+        // FINDING 4 (2026-09-03): deploymentMode is only in the Bearer-
+        // authenticated /api/health body — an anonymous probe now gets the
+        // lite liveness shape instead.
+        const health = await (await fetch(`${base}/api/health`, { headers: hdr(h.token) })).json() as { deploymentMode?: string };
         must(health.deploymentMode === 'local', `daemon booted in local mode (got ${health.deploymentMode})`);
 
         /* ── SETUP: two workspaces + two app tokens ────────────────────────

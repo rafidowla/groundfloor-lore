@@ -2,10 +2,10 @@
  * localGraphRegistry.ts — multi-workspace graph engine manager.
  *
  * Holds a lazy-opened Map of (workspace name → CacheEntry), each entry
- * holding that workspace's open SurrealDB `SurrealGraph`. (Kùzu `LocalGraph`
- * entries existed here until the Kùzu removal, Phase 3d 2026-08-21; a
- * workspace that still declares `graphEngine: 'kuzu'` now fails LOUDLY at
- * `getGraphHandle` — see `kuzuEngineRemovedError` — rather than silently
+ * holding that workspace's open SurrealDB `SurrealGraph`. (A prior local
+ * graph implementation's entries existed here until it was removed,
+ * 2026-08-21; a workspace that still declares `graphEngine: 'kuzu'` now fails LOUDLY at
+ * `getGraphHandle` — see `legacyGraphEngineRemovedError` — rather than silently
  * reading an empty store.) HTTP write handlers ask the registry for the
  * handle corresponding to the per-request `workspace` arg (or fall back to
  * the active workspace when omitted) before doing the upsertNode / addEdge /
@@ -36,7 +36,7 @@ import { SurrealGraph } from './surrealGraph.js';
 import type { WorkspaceGraph } from './openWorkspaceGraph.js';
 import {
     resolveWorkspaceGraphEngine,
-    kuzuEngineRemovedError,
+    legacyGraphEngineRemovedError,
     type GraphEngineKind,
 } from './graphEngineSelector.js';
 import {
@@ -204,18 +204,31 @@ export class LocalGraphRegistry {
 
     /** SP-11 — evict cached workspaces idle longer than `idleMs` relative
      *  to `nowMs`. Returns the number of entries dropped. Closes the
-     *  underlying SurrealGraph handles. Directly unit-testable. */
+     *  underlying SurrealGraph handles. Directly unit-testable.
+     *
+     *  The `closeEntry` calls below run concurrently (`Promise.allSettled`),
+     *  not one at a time: each workspace's store lives in its own directory
+     *  with its own lock, so there is no shared resource for a sequential
+     *  await to protect, and a settle-bound close (~25-150ms — see
+     *  surrealSettle.ts) otherwise taxes a daemon with many idle workspaces
+     *  once per workspace, serially. `closeEntry`'s alias-dedup (`cache.get`
+     *  / `cache.delete` / the scan over `cache.values()`) is entirely
+     *  synchronous ahead of its own `await`, so `Array.map` invoking every
+     *  call before any of them yields preserves the exact dedup ordering the
+     *  old sequential `for` loop had — only the awaited closes themselves now
+     *  overlap. */
     async evictIdle(nowMs: number, idleMs: number = IDLE_WORKSPACE_TTL_MS): Promise<number> {
         const stale: string[] = [];
         for (const [name, entry] of this.cache) {
             if (entry.pinned) continue; // never evict the boot graph
             if (nowMs - entry.lastAccessedAt > idleMs) stale.push(name);
         }
+        const results = await Promise.allSettled(stale.map((name) => this.closeEntry(name)));
         let closed = 0;
-        for (const name of stale) {
-            if (await this.closeEntry(name)) closed++;
-            else this.cache.delete(name);
-        }
+        results.forEach((result, i) => {
+            if (result.status === 'fulfilled' && result.value) closed++;
+            else this.cache.delete(stale[i]); // best-effort cleanup; closeEntry already deletes on every other path
+        });
         return closed;
     }
 
@@ -297,14 +310,15 @@ export class LocalGraphRegistry {
      * writes nodes and edges.
      *
      * An EXPLICIT `graphEngine: 'kuzu'` declaration fails LOUDLY
-     * (`KuzuEngineRemovedError`): Kùzu support was removed 2026-08-21, and
-     * silently substituting SurrealDB would read and write the WRONG store
-     * while the workspace's real Kùzu data sits in `.lore/graph` — the
-     * exact silent-fallback bug class behind the pm-scope-app incident.
+     * (`LegacyGraphEngineRemovedError` — a legacy graph engine declaration is no
+     * longer supported), and silently substituting SurrealDB would read and
+     * write the WRONG store while the workspace's real data sits in
+     * `.lore/graph` — the exact silent-fallback bug class behind the
+     * pm-scope-app incident.
      */
     async getGraphHandle(workspace: string): Promise<WorkspaceGraph> {
         if (resolveWorkspaceGraphEngine(workspace, this.home) === 'kuzu') {
-            kuzuEngineRemovedError(workspace, 'LocalGraphRegistry.getGraphHandle');
+            legacyGraphEngineRemovedError(workspace, 'LocalGraphRegistry.getGraphHandle');
         }
 
         const entry = await this.ensureEntry(workspace);
@@ -396,7 +410,7 @@ export class LocalGraphRegistry {
         // Recognising the concrete class is correct here and nowhere else:
         // this is the one seam that accepts an already-constructed engine
         // from outside and has to file it into the engine-specific slot.
-        // SurrealGraph is the only engine left (Kùzu removal Phase 3d).
+        // SurrealGraph is the only engine left.
         if (!(graph instanceof SurrealGraph)) {
             // Loudly, not silently: a no-op prime leaves the registry to open
             // its OWN handle on the same directory, which is a lock fight on
@@ -490,10 +504,23 @@ export class LocalGraphRegistry {
      *
      * await-able and idempotent. Each close is individually try/caught so one
      * failing handle can't strand the rest.
+     *
+     * The alias-dedup decision (which name owns the one close for a shared
+     * `SurrealGraph`) is made synchronously, up front, for every entry before
+     * any awaiting starts — exactly the ordering the old sequential `for`
+     * loop had, since none of `cache.get`/`delete`/`has`/`add` ever yield.
+     * Only the actual closes (native handle + session-cache flush + table
+     * storage) run concurrently afterwards, via `Promise.allSettled`: each
+     * lives in its own workspace directory with its own lock, so nothing here
+     * shares a resource a sequential await was protecting. This matters at
+     * scale — a settle-bound `SurrealGraph.close()` (~25-150ms, see
+     * surrealSettle.ts) otherwise serializes into seconds of daemon-shutdown
+     * latency once a workspace count gets into the dozens.
      */
     async disposeAll(): Promise<void> {
         this.stopEvictionSweep();
         const closedGraphs = new Set<SurrealGraph>();
+        const closes: Array<Promise<void>> = [];
         for (const [name, entry] of [...this.cache.entries()]) {
             if (entry.pinned) continue;          // boot graph closed by the drain
             // Alias dedup: getGraphHandle's path-dedup can map several names
@@ -506,15 +533,19 @@ export class LocalGraphRegistry {
                 closedGraphs.add(entry.surreal);
             }
             this.cache.delete(name);
-            if (entry.surreal) { try { await entry.surreal.close(); } catch { /* best-effort */ } }
-            // Flush before closing anything: an unflushed hot-session cache is
-            // silently lost work, which is what TW-7e was about.
-            if (entry.sessionCache) { try { entry.sessionCache.flushNow(); } catch { /* best-effort */ } }
-            if (entry.tableStorage) {
-                try { (entry.tableStorage as unknown as { close?: () => void }).close?.(); }
-                catch { /* best-effort */ }
-            }
+            const { surreal, sessionCache, tableStorage } = entry;
+            closes.push((async () => {
+                if (surreal) { try { await surreal.close(); } catch { /* best-effort */ } }
+                // Flush before closing anything: an unflushed hot-session cache is
+                // silently lost work, which is what TW-7e was about.
+                if (sessionCache) { try { sessionCache.flushNow(); } catch { /* best-effort */ } }
+                if (tableStorage) {
+                    try { (tableStorage as unknown as { close?: () => void }).close?.(); }
+                    catch { /* best-effort */ }
+                }
+            })());
         }
+        await Promise.allSettled(closes);
         this.cache.clear();
     }
 

@@ -26,10 +26,10 @@ import { writeError } from '../../helpers.js';
 /**
  * Can this graph serve `writeGraphReport`?
  *
- * The report is four aggregations over paged node/edge scans. Both LOCAL
- * engines implement that surface; `DataplaneGraph` does not. Detecting the
+ * The report is four aggregations over paged node/edge scans. The local
+ * engine implements that surface; `DataplaneGraph` does not. Detecting the
  * CAPABILITY rather than the class is what lets a Surreal-backed workspace
- * through on exactly the same footing as a Kùzu one.
+ * through without a hardcoded class check.
  */
 function supportsGraphReport(g: LoreGraph): g is LoreGraph & ReportGraph {
     const c = g as Partial<ReportGraph>;

@@ -7,7 +7,7 @@
  * two executions per frontier NODE per depth. This measures the gap so the
  * follow-up is justified by a number rather than by symmetry.
  *
- * One engine per process — kuzu-lite's open/close ceiling, and a cold reading.
+ * One workspace per process invocation, for a cold reading each time.
  *
  *   LORE_HOME=<home> BENCH_WS=src|dst tsx scripts/diagnostics/directed-traverse-bench.ts
  */

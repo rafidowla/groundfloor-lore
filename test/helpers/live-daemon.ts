@@ -55,12 +55,12 @@ export async function spawnDaemon(opts: { home?: string; port?: number } = {}): 
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, TMPDIR: os.tmpdir(), LORE_PORT: String(port) };
     // Spawn the daemon with THIS test runner's own Node (process.execPath) + the
     // tsx loader (`--import tsx` runs the .ts source directly, no build step). Using
-    // the same Node the tests run under keeps the prebuilt native addons (Kùzu /
+    // the same Node the tests run under keeps the prebuilt native addons (the legacy graph engine /
     // LanceDB / better-sqlite3) matched to the runtime — an `npx` wrapper can
     // resolve a different Node (e.g. a second nvm version) and hit a
     // NODE_MODULE_VERSION mismatch. detached:true puts the child in its own process
     // GROUP so killDaemon() can signal the whole group (no orphaned daemon holding
-    // Kùzu's on-disk lock across a restart).
+    // the legacy engine's on-disk lock across a restart).
     const proc = spawn(process.execPath, ['--import', 'tsx', SERVER_ENTRY, '--http'], { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     const log = { text: '' };
     proc.stdout.on('data', (c) => { log.text += c.toString(); });

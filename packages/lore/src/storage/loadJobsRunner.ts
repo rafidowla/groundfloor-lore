@@ -70,7 +70,7 @@ export const PROGRESS_INTERVAL_ROWS = 1_000;
  * Sprint Z3 — checkpoint persisted to load_jobs every N rows.
  * Default 10k per Sprint Z principle clause 4. Crash mid-load
  * loses at most this many rows; idempotent substrate writes (sqlite
- * INSERT OR REPLACE; kuzu MERGE; lance dedupe-by-id) make resume safe.
+ * INSERT OR REPLACE; surreal UPSERT; lance dedupe-by-id) make resume safe.
  */
 export const DEFAULT_CHECKPOINT_ROWS = 10_000;
 
@@ -291,7 +291,7 @@ export class LoadJobsRunner {
         // Sprint Z3 — resume support. If checkpoint_row > 0 we re-read
         // the temp file from the top but SKIP dispatches for row indices
         // strictly below checkpointRow. Substrate idempotency
-        // (SQLite INSERT OR REPLACE, kuzu MERGE, surreal UPSERT +
+        // (SQLite INSERT OR REPLACE, surreal UPSERT +
         // per-triple edge dedup, lance dedupe-by-id)
         // guarantees the boundary row is safe even if it was partially
         // written before the crash.
@@ -628,15 +628,13 @@ export class LoadJobsRunner {
                 status,
                 rowsProcessed,
                 rowsFailed,
-                // Phase 3c (Kuzu removal) — engine-neutral graph
-                // observability. This was `kuzuPath` (which internal path
-                // the Kùzu adapter took, 'copy'|'merge'); now it names
-                // WHICH graph engine loaded the rows. The kuzu arm died
-                // with bulkLoader/kuzuAdapter.ts (phase 3d) — a local load
-                // is Surreal-backed or graphless. No code reads these keys
-                // back — load.done is a notification-only outbox kind (see
-                // outbox/dispatcher.ts) — so the rename carries no compat
-                // surface.
+                // Engine-neutral graph observability: this field was once
+                // named after the legacy engine's own internal write-path
+                // field ('copy'|'merge'); now it names WHICH graph engine
+                // loaded the rows — a local load is Surreal-backed or
+                // graphless. No code reads these keys back — load.done is a
+                // notification-only outbox kind (see outbox/dispatcher.ts)
+                // — so the rename carries no compat surface.
                 graphEngine: deps.surreal ? 'surreal' : null,
                 graphPath: deps.surreal?.activePath ?? null,
             },

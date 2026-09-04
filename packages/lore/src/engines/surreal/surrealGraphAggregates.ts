@@ -10,7 +10,7 @@
  * Each function takes the engine's bound `SurrealQuery` runner and nothing
  * else, so none of them can reach into engine internals or lifecycle.
  *
- * Output shapes are pinned to their Kùzu counterparts field for field —
+ * Output shapes are pinned to their prior-engine counterparts field for field —
  * including the empty-string → null coercion on the supersession fields and
  * the `extracted` / `1.0` edge-confidence defaults — because these feed the
  * same routes regardless of which engine backs the workspace.
@@ -82,9 +82,9 @@ export async function queryEdges(query: SurrealQuery, q: EdgeQuery): Promise<Lor
  *   1. `nodeCount` is summed from the type breakdown, not counted separately.
  *      Two independent counts can disagree under a concurrent write, and a
  *      total that doesn't equal the sum of its parts reads as corruption.
- *      (Kùzu issues a separate `count(n)`; on a quiescent graph the values are
+ *      (the prior engine issued a separate `count(n)`; on a quiescent graph the values are
  *      identical, and the parity test asserts exactly that.)
- *   2. Nodes with an EMPTY type are excluded from the breakdown — Kùzu's
+ *   2. Nodes with an EMPTY type are excluded from the breakdown — the prior engine's
  *      `if (nodeType)` guard. Without this, a Surreal-backed workspace grows a
  *      phantom `""` bucket that no caller expects.
  *   3. A `projectFilter` scopes EDGES to those whose BOTH endpoints carry the
@@ -152,7 +152,7 @@ export async function getStats(
  *
  * When scoped to a project set, an edge is kept only if BOTH endpoints are in
  * the set (intra-set coupling), matching computeTopology. Filtering in JS
- * rather than in the query keeps that rule identical to the Kùzu path instead
+ * rather than in the query keeps that rule identical to the prior engine's path instead
  * of re-deriving it in a second dialect.
  */
 export async function getTopology(
@@ -222,9 +222,9 @@ export async function getTopology(
  * POST /api/nodes/bulk-list every internal field the engine happens to keep
  * (supersededBy/At/Reason, ephemeral, ttl_ms, stale, status, classification,
  * anchor_stale*, lastAccessedAt, last_retrieved_at, syncedAt, language,
- * outcome counters) — a wire shape that differs from the Kùzu-backed answer
+ * outcome counters) — a wire shape that differs from the prior engine's answer
  * for the same request. Callers would start depending on fields that vanish
- * the moment a workspace moves back to Kùzu.
+ * the moment a workspace moves to a different graph engine.
  */
 const BULK_LIST_COLUMNS = [
     'id', 'type', 'label', 'content', 'tags', 'metadata',
@@ -297,9 +297,9 @@ export async function bulkList(query: SurrealQuery, q: BulkListQuery): Promise<B
  * (consistency, corpus health, supersession candidates, the retention sweep and
  * `list_nodes`) walk every node in bounded pages, and every one of them did it
  * by reaching through `getGraphContext().queryRows` with hand-written Cypher —
- * which is why they were Kùzu-only.
+ * which is why they were single-engine-only.
  *
- * Same keyset contract as `bulkList` above and as the Kùzu implementation:
+ * Same keyset contract as `bulkList` above and as the prior implementation:
  * `ORDER BY updatedAt DESC, id ASC`, strict-after cursor, `LIMIT n + 1` to
  * detect a further page. It must match exactly, because the parity suite
  * compares the two engines page for page.

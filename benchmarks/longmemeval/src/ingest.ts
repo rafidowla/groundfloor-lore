@@ -32,7 +32,7 @@
  * `ecosystem: question_id` so `lore.recall()` scoped to that ecosystem only
  * ever searches within that question's own haystack — mirroring how a real
  * memory system serves one user/conversation at a time. All instances share
- * one Lore `workspace` ("longmemeval") to avoid paying Kùzu/LanceDB's
+ * one Lore `workspace` ("longmemeval") to avoid paying SurrealDB/LanceDB's
  * per-workspace directory cost 500 times over.
  */
 

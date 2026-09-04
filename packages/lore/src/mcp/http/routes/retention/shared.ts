@@ -8,6 +8,7 @@ import type { StorageBundle } from '../../../services.js';
 import type { AuditLog } from '../../../../security/audit.js';
 import type { LocalGraphRegistry } from '../../../../engines/localGraphRegistry.js';
 import type { WorkspaceVerbatimResolver } from '../../../../outbox/workspaceVerbatimResolver.js';
+import type { OutboxStore } from '../../../../outbox/types.js';
 import { readBoundedBody } from '../../helpers.js';
 
 export interface RetentionSweepResult {
@@ -42,6 +43,23 @@ export interface RetentionDeps {
      *  instead of the boot-active store. Optional; absent → boot store
      *  (deps.store.loreVerbatim), identical to today. */
     workspaceVerbatimResolver?: WorkspaceVerbatimResolver;
+    /**
+     * ITEM X-pruneeph (2026-09-03) — POST /api/prune-ephemeral's per-node
+     * delete now goes through the same outbox-first discipline as
+     * DELETE /api/node / POST /api/nodes/prune hard_delete: a `node.delete`
+     * row before the substrate delete and a `verbatim.tombstone` row after
+     * the vector tombstone. Optional so cloud mode / test fixtures without
+     * an outbox wired keep the prior direct-delete-only behavior.
+     *
+     * ITEM X-markstale (2026-09-03) — this same field is also used by
+     * POST /api/mark-stale, which records a `node.mark_stale` outbox row per
+     * locked chunk BEFORE applying the substrate update (mirrors the MCP
+     * mark_stale tool and the bulk-delete REST route). Optional so cloud
+     * mode + test fixtures that don't wire an outbox keep the prior
+     * direct-write behavior (no durability/replay coverage, same as before
+     * this fix).
+     */
+    outboxStore?: OutboxStore;
 }
 
 /**

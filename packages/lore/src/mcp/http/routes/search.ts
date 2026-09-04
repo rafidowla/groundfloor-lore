@@ -3,7 +3,8 @@
  *
  *   GET /api/recall   — compact recall, mirrors the MCP `recall` tool's
  *                       summary mode (used by `lore recall` CLI + the
- *                       UserPromptSubmit hook to avoid Kùzu lock fights)
+ *                       UserPromptSubmit hook to avoid graph engine lock
+ *                       fights)
  *   GET /api/search   — full-text content search for the UI dashboard
  *   GET /api/nodes    — type-filtered LoreNode list for inspector renderers
  *
@@ -43,9 +44,10 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
     try { return JSON.parse(data); } catch { return {}; }
 }
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 
 /** Retrieval mode shared by /api/search + /api/recall (parity with the MCP tools). */
@@ -141,9 +143,9 @@ export async function trySearchRoutes(
 ): Promise<boolean> {
     // Compact recall over HTTP. Same shape as the MCP recall tool's
     // summary mode. Used by `lore recall` CLI and the UserPromptSubmit
-    // hook so they don't have to open Kùzu (which would clash with the
-    // daemon's exclusive lock). GET-style with query params for trivial
-    // shell invocation.
+    // hook so they don't have to open the graph engine (which would clash
+    // with the daemon's exclusive lock). GET-style with query params for
+    // trivial shell invocation.
     if (pathname === '/api/recall' && req.method === 'GET') {
         const gate = await gateRoute(
             { deploymentMode: deps.deploymentMode, dataplane: deps.dataplane },
@@ -297,10 +299,10 @@ export async function trySearchRoutes(
                 throw wsErr;
             }
             const recallGraph = deps.graphRegistry
-                // getGraphHandle honours the workspace's declared engine —
-                // getOrOpen is the Kùzu substrate accessor and would recall
-                // against a Surreal workspace's unused, empty Kùzu graph. The
-                // `recallGraph as unknown as` cast below stays load-bearing:
+                // getGraphHandle honours the workspace's declared engine,
+                // so recall runs against that workspace's own graph rather
+                // than an unrelated one. The `recallGraph as unknown as`
+                // cast below stays load-bearing:
                 // `RecallGraph` needs getLanguageBreakdown, which is on neither
                 // LoreGraphHandle nor WorkspaceGraph (recallPreset.ts is out
                 // of this batch's scope).

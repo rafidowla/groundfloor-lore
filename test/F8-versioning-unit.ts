@@ -2,7 +2,7 @@
 /**
  * F8-versioning-unit.ts — Feature 8 unit tests (2026-05-26).
  *
- * Covers VersionStore and changeset mechanics without spinning up Kùzu,
+ * Covers VersionStore and changeset mechanics without spinning up the legacy graph engine,
  * LanceDB, or a live daemon.
  *
  * Tests:

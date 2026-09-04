@@ -86,25 +86,28 @@ export async function unsupersedeNode(
 }
 
 /**
- * markStaleByTags — mark stale every LoreNode whose tags include ANY of the
- * provided tags (EXACT membership, case-insensitive). Returns the count marked.
+ * findNodeIdsByTags — 2026-09-03 (X-markstale audit fix) read-only resolver:
+ * every LoreNode id whose tags include ANY of the provided tags (EXACT
+ * membership, case-insensitive). Factored out of `markStaleByTags`'s former
+ * steps 1-2 so the mark_stale entry points (mcp/tools/memory/markStale.ts,
+ * POST /api/mark-stale) can resolve the full matched id set BEFORE
+ * chunk-locking + outbox-recording + applying `markStaleByIds`.
  *
  * TWO-STEP to stay both trap-safe AND JSON-tags-correct (the plan's exact
  * shape): tags are stored as a JSON-encoded string[] text column, so a raw
  * `tags LIKE '%auth%'` would wrongly match "authentication". Step 1 issues a
  * bounded candidate SELECT per tag using the quoted-literal LIKE proxy
  * (`%"auth"%`) — a coarse prefilter. Step 2 parses each candidate's JSON tags
- * client-side and confirms EXACT membership before including it. Step 3 issues
- * ONE batched UPDATE ... WHERE id IN :ids. All plain scalar SQL — no
- * expand()/both(), so traps T1/T2 don't apply.
+ * client-side and confirms EXACT membership before including it. All plain
+ * scalar SQL — no expand()/both(), so traps T1/T2 don't apply.
  */
-export async function markStaleByTags(
+export async function findNodeIdsByTags(
   tenantDb: string,
   http: ArcadeHttp,
   tags: string[],
-): Promise<number> {
+): Promise<string[]> {
   const wanted = tags.map((t) => t.trim().toLowerCase()).filter(Boolean);
-  if (wanted.length === 0) return 0;
+  if (wanted.length === 0) return [];
   const wantedSet = new Set(wanted);
 
   // Step 1 — bounded candidate prefilter. One LIKE branch per tag ORed
@@ -140,16 +143,49 @@ export async function markStaleByTags(
     const rowTags = Array.isArray(parsed) ? parsed.map((x) => String(x).toLowerCase()) : [];
     if (rowTags.some((t) => wantedSet.has(t))) ids.push(id);
   }
-  if (ids.length === 0) return 0;
+  return ids;
+}
 
-  // Step 3 — one batched UPDATE over the confirmed id set.
+/**
+ * markStaleByIds — 2026-09-03 (X-markstale audit fix) set stale=true on
+ * EXACTLY the given ids (no tag re-query) via ONE batched UPDATE ... WHERE
+ * id IN :ids. Factored out of `markStaleByTags`'s former step 3 — this is
+ * the substrate primitive the outbox dispatcher calls on `node.mark_stale`
+ * replay and that the live entry points call inside their own per-chunk
+ * lock, mirroring `deleteNode`'s role for `node.delete`.
+ */
+export async function markStaleByIds(
+  tenantDb: string,
+  http: ArcadeHttp,
+  ids: string[],
+): Promise<number> {
+  const unique = Array.from(new Set(ids.filter((id) => typeof id === 'string' && id.length > 0)));
+  if (unique.length === 0) return 0;
   const at = new Date().toISOString();
   await http.command(
     tenantDb,
     `UPDATE ${NODE_TYPE} SET stale = true, staleAt = :at WHERE id IN :ids`,
-    { at, ids },
+    { at, ids: unique },
   );
-  return ids.length;
+  return unique.length;
+}
+
+/**
+ * markStaleByTags — mark stale every LoreNode whose tags include ANY of the
+ * provided tags (EXACT membership, case-insensitive). Returns the count
+ * marked. Unchanged public contract; now composed from `findNodeIdsByTags`
+ * (steps 1-2: resolve) + `markStaleByIds` (step 3: apply). Kept for the
+ * CLI's no-daemon direct-open fallback (cli/commands/markStale.ts), which
+ * has no outbox/replicator to record against anyway.
+ */
+export async function markStaleByTags(
+  tenantDb: string,
+  http: ArcadeHttp,
+  tags: string[],
+): Promise<number> {
+  const ids = await findNodeIdsByTags(tenantDb, http, tags);
+  if (ids.length === 0) return 0;
+  return markStaleByIds(tenantDb, http, ids);
 }
 
 /**

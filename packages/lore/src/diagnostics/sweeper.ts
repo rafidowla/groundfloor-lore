@@ -4,12 +4,12 @@
  *
  * ## Consistency model
  *
- * Lore's three local substrates (Kùzu graph + LanceDB vector +
+ * Lore's three local substrates (the graph engine + LanceDB vector +
  * SQLite relational) are **eventually consistent**. There is no
  * cross-substrate transaction; every write path performs each
  * step in sequence and the outbox (gap #1) keeps a durable trail
  * for crash recovery. Between writes, brief inconsistencies are
- * normal (a node may be in Kùzu but not yet in LanceDB).
+ * normal (a node may be in the graph but not yet in LanceDB).
  *
  * The reconciliation sweeper closes those gaps periodically:
  *
@@ -340,7 +340,7 @@ export async function runConsistencySweep(
     // 2026-08-17 (launch blocker): refuse the delete pass when the graph scan
     // failed. A partial/empty graphIds set makes EVERY vector look like an
     // orphan (vectorIds - graphIds), so deleting here would mass-wipe a
-    // healthy vector store on a transient Kùzu page error. Fail closed:
+    // healthy vector store on a transient graph page error. Fail closed:
     // report the orphans as observed-but-skipped instead of deleting them.
     if (deleteOrphans && !report.graphScanFailed && report.orphanEmbeddings.length > 0 && canDelete) {
         // The diagnostic strips the `lore:` prefix before adding to
@@ -406,7 +406,7 @@ export interface SweepScheduler {
     timer: NodeJS.Timeout;
     /**
      * SP-02 — graceful stop. Clears the interval and AWAITS any
-     * in-flight `run()` so a sweep mid-LanceDB-write / mid-Kùzu-delete
+     * in-flight `run()` so a sweep mid-LanceDB-write / mid-graph-delete
      * is never killed by `process.exit`. Idempotent.
      */
     stop(): Promise<void>;

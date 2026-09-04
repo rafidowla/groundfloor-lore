@@ -2,28 +2,24 @@
  * surrealGraph.ts — embedded SurrealDB graph engine for Lore.
  *
  * Purpose:
- *   A second, ADDITIVE local graph engine behind the same
- *   `LoreGraphHandle` contract LocalGraph (Kùzu) and DataplaneGraph (cloud)
- *   implement. Nothing calls it automatically — it exists, it is importable,
- *   and `LoreStorageClient.fromSurreal(...)` wires it up when a caller asks.
- *   See docs/SURREALDB_BUILD_PLAN.md.
+ *   The local graph engine behind the same `LoreGraphHandle` contract
+ *   DataplaneGraph (cloud) implements. `LoreStorageClient.fromSurreal(...)`
+ *   wires it up. See docs/SURREALDB_BUILD_PLAN.md.
  *
  * Why it exists:
- *   Kùzu (@kineviz/kuzu-lite 0.11.3) is a fork of an archived database that
- *   produced a real string-column corruption bug on 2026-08-03/04, and its
- *   parser rejects recursive Cypher — so multi-hop traversal currently runs as
- *   a JS BFS loop instead of in the database. This engine evaluates a
- *   replacement without touching the incumbent.
+ *   This engine replaced the prior local graph engine (a Cypher-based
+ *   embedded database and a fork of an archived project), which produced a
+ *   real string-column corruption bug on 2026-08-03/04, and whose parser
+ *   rejected recursive Cypher — so multi-hop traversal ran as a JS BFS loop
+ *   instead of in the database. That prior engine was fully removed
+ *   2026-08-21; this is now the only local graph engine.
  *
  * Architecture:
  *   Embedded, in-process, one instance per workspace directory
- *   (`.lore/surreal`), no port and no daemon — the same deployment shape Kùzu
- *   already has. Graph substrate ONLY: nodes and edges. Collections/tables,
- *   analytical storage, pending-ops and ReBAC are SQLite under `.lore/` on
- *   EVERY workspace, and vectors are LanceDB — none of them consult this
- *   engine. This block used to say those four stayed in Kùzu and that a
- *   Surreal-backed workspace still depended on a Kùzu database for them; both
- *   stopped being true in DEC-KUZU-REMOVAL-STEP1.
+ *   (`.lore/surreal`), no port and no daemon. Graph substrate ONLY: nodes
+ *   and edges. Collections/tables, analytical storage, pending-ops and ReBAC
+ *   are SQLite under `.lore/` on EVERY workspace, and vectors are LanceDB —
+ *   none of them consult this engine.
  *
  * Licence:
  *   SurrealDB core is BSL 1.1 — embedding is permitted, offering SurrealDB
@@ -54,6 +50,7 @@ import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 import { ReadCache, type CacheStats } from './cache.js';
 import { LoreGraphError } from './loreGraphError.js';
 import { KeyedMutex } from './writeQueue.js';
+import { log } from '../logger.js';
 import {
     applySurrealSchema,
     openSurreal,
@@ -62,6 +59,7 @@ import {
     type SurrealConnection,
     type SurrealFeatures,
 } from './surreal/surrealConnection.js';
+import { settleSurrealStore } from './surreal/surrealSettle.js';
 import {
     DEFAULT_LIST_NODES_CAP,
     getNode as readGetNode,
@@ -161,7 +159,7 @@ export class SurrealGraph implements LoreGraphHandle {
             try {
                 await applySurrealSchema(connection.db, connection.features);
             } catch (error) {
-                await connection.db.close().catch(() => undefined);
+                await this.closeAndSettle(connection);
                 throw error;
             }
             this.connection = connection;
@@ -174,16 +172,49 @@ export class SurrealGraph implements LoreGraphHandle {
     /**
      * close — release the native handle.
      *
-     * Kùzu has documented close/reopen segfault behaviour in this codebase
-     * (see cli/commands/migrateWorkspaceToWorkspace.ts). This engine is proven
+     * The prior local graph engine had documented close/reopen segfault
+     * behaviour in this codebase (see cli/commands/migrateWorkspaceToWorkspace.ts). This engine is proven
      * against the same scenario by test/surreal-crash-recovery-unit.ts:
      * repeated close/reopen in one process, and reopen after SIGKILL.
+     *
+     * `db.close()` is NOT the end of the store's on-disk life. The driver's
+     * `close()` only frees the engine handle; surrealkv's WAL→sstable flush
+     * runs ~10-25 ms LATER and writes by the path captured at open. Whoever
+     * renames this directory aside and puts another store at the same path
+     * inside that window — `lore restore` does exactly that — has the old
+     * store's deferred flush unlink the NEW store's `wal/…0.wal`, leaving a
+     * manifest that references no sstables: an empty graph, reported as
+     * success. So close is not finished until the directory stops changing.
+     * Bounded (2 s) and best-effort by design — a store that will not settle
+     * makes this a slow close, never a failed one. See engines/surreal/
+     * surrealSettle.ts for the measured close sequence behind that window.
      */
     async close(): Promise<void> {
         const connection = this.connection;
         this.connection = null;
         this.initialized = false;
-        if (connection) await connection.db.close().catch(() => undefined);
+        if (!connection) return;
+        await this.closeAndSettle(connection);
+    }
+
+    /**
+     * closeAndSettle — close the native handle, then wait for the on-disk
+     * store to stop changing (see `close()`'s doc comment for why the wait
+     * matters). Shared by `close()` and `initialize()`'s schema-apply-failure
+     * branch so neither can skip the settle silently — this module's own
+     * docstring promises callers can observe a timed-out settle, and a bare
+     * `.catch(() => undefined)` on `settleSurrealStore` here previously threw
+     * that signal away at both call sites.
+     */
+    private async closeAndSettle(connection: SurrealConnection): Promise<void> {
+        await connection.db.close().catch(() => undefined);
+        const settle = await settleSurrealStore(connection.dataPath).catch(() => undefined);
+        if (settle && !settle.settled) {
+            log.warn(
+                `[SurrealGraph] store at ${connection.dataPath} did not settle within `
+                + `${settle.waitedMs}ms (outcome=${settle.outcome}) — closing anyway`,
+            );
+        }
     }
 
     /** Which on-disk backend this instance opened (`surrealkv` / `rocksdb`). */
@@ -201,11 +232,11 @@ export class SurrealGraph implements LoreGraphHandle {
         return this.readCache.stats();
     }
 
-    /* ── operations that used to exist only on Kùzu ───────────────── */
+    /* ── operations that used to exist only on the prior local graph engine ── */
     //
     // Each of these had live callers and no SurrealDB implementation, so on a
-    // Surreal-backed workspace they either threw or ran against the empty Kùzu
-    // node table and returned a confident wrong answer. The two topology
+    // Surreal-backed workspace they either threw or ran against that prior
+    // engine's empty node table and returned a confident wrong answer. The two topology
     // overviews delegate their MEANING to the shared fold in
     // engines/topologyOverviewFold.ts; only the queries live in the Surreal
     // layer, so the engines cannot disagree about what the numbers mean.
@@ -250,8 +281,8 @@ export class SurrealGraph implements LoreGraphHandle {
     }
 
     /**
-     * Soft-archive. Bumps the read-cache epoch for the same reason the Kùzu
-     * implementation does: without it, recall keeps surfacing the node until
+     * Soft-archive. Bumps the read-cache epoch for the same reason the prior
+     * local graph engine's implementation did: without it, recall keeps surfacing the node until
      * some unrelated write happens to invalidate the cache.
      */
     async archiveNode(id: string): Promise<void> {
@@ -321,7 +352,7 @@ export class SurrealGraph implements LoreGraphHandle {
         return this.connection?.features ?? null;
     }
 
-    /** Invalidate every cached read. Called after any write, same as Kùzu. */
+    /** Invalidate every cached read. Called after any write, same invalidation policy as before. */
     private bumpWriteEpoch(): void {
         this.readCache.bumpEpoch();
     }
@@ -366,9 +397,9 @@ export class SurrealGraph implements LoreGraphHandle {
      * traverse — depth-limited walk from a seed node.
      *
      * This is the capability the evaluation exists to restore: SurrealDB
-     * resolves a whole frontier in ONE query per depth level, where the Kùzu
-     * path issues two per frontier NODE because 0.11.3 cannot parse the
-     * recursive form. Same observable contract (true per-node depth, minimum
+     * resolves a whole frontier in ONE query per depth level, where the prior
+     * engine's path issued two per frontier NODE because it could not parse
+     * the recursive form. Same observable contract (true per-node depth, minimum
      * depth wins, sorted by depth).
      */
     async traverse(nodeId: string, maxDepth: number = 2): Promise<TraversalResult[]> {
@@ -427,20 +458,51 @@ export class SurrealGraph implements LoreGraphHandle {
         this.bumpWriteEpoch();
     }
 
+    /**
+     * Round-E X-edges — the forward and reverse writes now share ONE
+     * `edgeWriteChain` critical section (both keys held for the whole
+     * call), rather than two sequential `addEdge()` calls that each took
+     * (then released) a single key. Previously a concurrent `deleteEdge`
+     * or single `addEdge` on the REVERSE triple — `deleteEdge` took no
+     * chain at all before this fix — could land in the gap between the
+     * forward and reverse write, e.g. deleting the reverse edge a moment
+     * before this call re-creates it, or vice versa. Keys are acquired in
+     * sorted order (same construction as core/nodeWriteLock.ts's
+     * `withEdgeLocks`), so this can never deadlock against a concurrent
+     * `addBidirectionalEdge` on the same pair.
+     */
     async addBidirectionalEdge(edge: LoreEdge): Promise<void> {
-        await this.addEdge(edge);
-        await this.addEdge({
+        await this.initialize();
+        const reverseEdge: LoreEdge = {
             sourceId: edge.targetId,
             targetId: edge.sourceId,
             relation: edge.relation,
             confidence: edge.confidence,
             confidenceScore: edge.confidenceScore,
-        });
+        };
+        const forwardKey = `${edge.sourceId}|${edge.targetId}|${edge.relation}`;
+        const reverseKey = `${edge.targetId}|${edge.sourceId}|${edge.relation}`;
+        const [outerKey, innerKey] = forwardKey <= reverseKey ? [forwardKey, reverseKey] : [reverseKey, forwardKey];
+        await this.edgeWriteChain.run(outerKey, () =>
+            this.edgeWriteChain.run(innerKey, async () => {
+                await writes.addEdge(this.query, edge);
+                await writes.addEdge(this.query, reverseEdge);
+            }));
+        this.bumpWriteEpoch();
     }
 
+    /**
+     * Round-E X-edges — `deleteEdge` previously took NO chain at all, so
+     * it could interleave with a concurrent `addEdge`/`addBidirectionalEdge`
+     * on the SAME triple (both read-decide-write against SurrealDB with no
+     * serialization between them beyond whatever the storage engine itself
+     * offers). Same key format `addEdge` uses, so a delete and an add on
+     * the same directed triple now always serialize against each other.
+     */
     async deleteEdge(sourceId: string, targetId: string, relation: string): Promise<number> {
         await this.initialize();
-        const count = await writes.deleteEdge(this.query, sourceId, targetId, relation);
+        const key = `${sourceId}|${targetId}|${relation}`;
+        const count = await this.edgeWriteChain.run(key, () => writes.deleteEdge(this.query, sourceId, targetId, relation));
         if (count > 0) this.bumpWriteEpoch();
         return count;
     }
@@ -493,33 +555,118 @@ export class SurrealGraph implements LoreGraphHandle {
     }
 
     /**
-     * pruneEphemeralNodes — delete expired ephemeral scratchpad nodes.
+     * 2026-09-03 (X-markstale audit fix) — read-only tag resolution used by
+     * the mark_stale entry points BEFORE they chunk-lock + outbox-record +
+     * apply (see LoreGraphHandle's doc comment). No `nodeWriteChain` here —
+     * it's a read.
+     */
+    async findNodeIdsByTags(tags: string[]): Promise<string[]> {
+        await this.initialize();
+        return writes.findNodeIdsByTags(this.query, tags);
+    }
+
+    /**
+     * 2026-09-03 (X-markstale audit fix) — apply the stale flag to EXACTLY
+     * the given ids. Deliberately does NOT take `nodeWriteChain` itself (the
+     * per-id engine-internal chain `upsertNode`/`deleteNode` use): every
+     * production caller of this method — the mark_stale entry points and
+     * the outbox replicator's replay (outbox/wiring.ts) — already holds
+     * `core/nodeWriteLock.ts`'s cross-path `withNodeLocks` for this exact id
+     * set before calling it, which is what actually serializes it against a
+     * concurrent `nodeUpsert()` (that acquires the SAME outer lock keyspace)
+     * on any of these ids. Re-acquiring `nodeWriteChain` per id here would
+     * also defeat the point of the single batched `UPDATE $ids` statement.
+     */
+    async markStaleByIds(ids: string[]): Promise<number> {
+        await this.initialize();
+        const marked = await writes.markStaleByIds(this.query, ids);
+        if (marked > 0) this.bumpWriteEpoch();
+        return marked;
+    }
+
+    /**
+     * 2026-09-03 (X-accesstimes audit fix) — the access-time coldness writer
+     * `engines/accessTracker.ts` feature-detects. Duck-typed, NOT part of
+     * `LoreGraphHandle` (cloud lacks it by design) — see the rationale and
+     * invariants (no epoch bump, no updatedAt/syncedAt touch) in
+     * `surreal/surrealGraphWrites.ts`'s `stampAccessTimes` doc comment and
+     * docs/design/maintain-access-coldness.md.
+     */
+    async stampAccessTimes(
+        entries: Array<{ id: string; accessedAt: string; retrievedAt?: string }>,
+    ): Promise<number> {
+        try {
+            await this.initialize();
+        } catch (error) {
+            console.error(
+                `[SurrealGraph] stampAccessTimes: initialize failed, dropping ${entries.length} pending stamp(s): ${(error as Error).message}`,
+            );
+            return 0;
+        }
+        return writes.stampAccessTimes(this.query, entries);
+    }
+
+    /**
+     * listExpiredEphemeralNodeIds — query-only half of ephemeral expiry.
+     *
+     * ITEM X-pruneeph (2026-09-03) — extracted out of pruneEphemeralNodes so
+     * a caller that needs the full node-delete discipline (per-id
+     * `nodeWriteLock`, outbox `node.delete`/`verbatim.tombstone` rows,
+     * verbatim tombstone) can drive its OWN per-id delete loop instead of
+     * this engine calling `this.deleteNode(id)` directly with none of that
+     * (see pruneEphemeralNodes below). The two safety-critical callers —
+     * `POST /api/prune-ephemeral` (mcp/http/routes/retention/policy.ts) and
+     * the `prune_ephemeral` MCP tool (mcp/tools/governance.ts) — now use
+     * this method and do the delete themselves, mirroring the exact
+     * discipline `prune_nodes` hard_delete uses (mcp/tools/lifecycle.ts).
      *
      * Expiry math runs in JS (not SurrealQL) deliberately: LocalGraph does the
      * same, and matching it keeps the boundary cases — `ttl_ms = 0` meaning
      * "use the default", an unparseable `createdAt` — identical rather than
-     * subtly re-derived in a second dialect. Non-fatal by contract: a prune
-     * failure must never block boot.
+     * subtly re-derived in a second dialect.
+     *
+     * Throws on query failure — callers that need "non-fatal" (this method's
+     * own `pruneEphemeralNodes` caller below; the daemon's boot-time prune)
+     * catch it themselves rather than this method silently returning `[]`,
+     * which would look identical to "nothing expired" to a caller that DOES
+     * want to distinguish the two.
+     */
+    async listExpiredEphemeralNodeIds(defaultTtlMs: number = 3_600_000): Promise<string[]> {
+        await this.initialize();
+        const rows = await this.query(
+            `SELECT * FROM ${NODE_TABLE} WHERE ephemeral = true LIMIT $cap`,
+            { cap: DEFAULT_LIST_NODES_CAP },
+        );
+        const now = Date.now();
+        const expired: string[] = [];
+        for (const row of rows) {
+            const id = ridToId(row['id']);
+            const createdAt = String(row['createdAt'] ?? '');
+            const rawTtl = row['ttl_ms'];
+            const ttl = typeof rawTtl === 'number' && rawTtl > 0 ? rawTtl : defaultTtlMs;
+            if (!id || !createdAt) continue;
+            const createdMs = new Date(createdAt).getTime();
+            if (!Number.isFinite(createdMs)) continue;
+            if (now - createdMs > ttl) expired.push(id);
+        }
+        return expired;
+    }
+
+    /**
+     * pruneEphemeralNodes — delete expired ephemeral scratchpad nodes.
+     *
+     * UNCHANGED behavior (still calls `this.deleteNode(id)` directly, with
+     * no outbox row / verbatim tombstone beyond what `deleteNode` itself
+     * does) — this is still what the daemon's non-fatal boot-time prune
+     * (mcp/server.ts) calls, and what any caller without the extra
+     * discipline requirements falls back to. See `listExpiredEphemeralNodeIds`
+     * above for the query half now shared with the safety-critical callers.
+     * Non-fatal by contract: a prune failure must never block boot.
      */
     async pruneEphemeralNodes(defaultTtlMs: number = 3_600_000): Promise<number> {
         await this.initialize();
         try {
-            const rows = await this.query(
-                `SELECT * FROM ${NODE_TABLE} WHERE ephemeral = true LIMIT $cap`,
-                { cap: DEFAULT_LIST_NODES_CAP },
-            );
-            const now = Date.now();
-            const expired: string[] = [];
-            for (const row of rows) {
-                const id = ridToId(row['id']);
-                const createdAt = String(row['createdAt'] ?? '');
-                const rawTtl = row['ttl_ms'];
-                const ttl = typeof rawTtl === 'number' && rawTtl > 0 ? rawTtl : defaultTtlMs;
-                if (!id || !createdAt) continue;
-                const createdMs = new Date(createdAt).getTime();
-                if (!Number.isFinite(createdMs)) continue;
-                if (now - createdMs > ttl) expired.push(id);
-            }
+            const expired = await this.listExpiredEphemeralNodeIds(defaultTtlMs);
             if (expired.length === 0) return 0;
 
             let deleted = 0;
@@ -549,8 +696,9 @@ export class SurrealGraph implements LoreGraphHandle {
      * Exposed as a bound object rather than by making `query` public: the raw
      * query primitive stays private, and the SurrealQL those three callers
      * need lives in one audited file. This is the SurrealDB counterpart to
-     * Kùzu's `getGraphContext()` escape hatch, and its existence is what lets
-     * `assertKuzuGraphSubstrate` stop refusing the subsystem here.
+     * the prior engine's `getGraphContext()` escape hatch, and its existence
+     * is what lets this workspace's schema-authoring subsystem run instead
+     * of being refused here.
      */
     getSchemaGraphOps(): SurrealSchemaGraphOps {
         return new SurrealSchemaGraphOps({
@@ -619,8 +767,8 @@ export class SurrealGraph implements LoreGraphHandle {
      * `nodes/getNode.ts` feature-detects this method and falls back to raw
      * Cypher when it is absent. Implementing it is what makes that route work
      * on a Surreal-backed workspace: the Cypher fallback would run against the
-     * Kùzu instance, whose node table is EMPTY here, and return 200-with-no-
-     * neighbours. The ArcadeDB engine carries it for the identical reason.
+     * prior local graph engine's instance, whose node table is EMPTY here, and
+     * return 200-with-no-neighbours. The ArcadeDB engine carries it for the identical reason.
      *
      * Built from `queryEdges` + `getNodesByIds` (engines/graphNeighbors.ts), so
      * there is one implementation and every backend produces the same rows.

@@ -17,8 +17,8 @@
  * `close()` calls `drain()` first; `VerbatimStore.close()` chains
  * through pool.close() before nulling its Table handles.
  *
- * (The original NW-1e finding also covered `KuzuConnectionPool`; that
- * pool was retired with the Kùzu engine removal. The shared pool
+ * (The original NW-1e finding also covered `LegacyConnectionPool`; that
+ * pool was retired with the legacy graph engine removal. The shared pool
  * plumbing — `poolLimits` / `nativePoolSafetyNet` — remains and is
  * exercised here through the Lance pool.)
  *

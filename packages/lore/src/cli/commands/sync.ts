@@ -1,8 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { SyncEngine } from '../../engines/syncEngine.js';
-import { resolveGraphBasePath } from './shared.js';
+import { resolveGraphBasePath, openGraphForCli } from './shared.js';
 
 export async function syncCommand(_args: string[]): Promise<void> {
     const basePath = resolveGraphBasePath();
@@ -13,8 +12,10 @@ export async function syncCommand(_args: string[]): Promise<void> {
         process.exit(1);
     }
 
-    const graph = openWorkspaceGraph(basePath);
-    await graph.initialize();
+    // Finding 11 (round E) — refuse fast with a clear message when a
+    // running daemon holds this store's lock, instead of the old ~15s
+    // openSurreal retry storm ending in a raw driver error.
+    const graph = await openGraphForCli(basePath);
 
     const syncEngine = new SyncEngine(graph, loreDir, null);
 

@@ -13,8 +13,8 @@
  *   - tables      — interface declared here, NOT YET IMPLEMENTED
  *
  * Step #2 of BUILD_ORDER.md (LocalAdapter) implements the missing
- * pieces against Kùzu + LanceDB. Step #6 implements them against
- * the dataplane SDK.
+ * pieces against SurrealDB + LanceDB + SQLite. Step #6 implements them
+ * against the dataplane SDK.
  */
 
 import type { CollectionStorage } from '../engines/collectionStorage.js';
@@ -36,6 +36,7 @@ export type {
     GroupResult,
     TimeSeriesPoint,
 } from './analytical.js';
+export { AnalyticalScanCapExceeded, ANALYTICAL_SCAN_CAP_DEFAULT } from './analytical.js';
 export type {
     ITableStorage,
     TableSchema,
@@ -47,6 +48,7 @@ export type {
     JoinQuery,
     TableOp,
     TableOpResult,
+    DestructiveWriteOptions,
 } from './tables.js';
 
 /**
@@ -55,7 +57,7 @@ export type {
  * adapter-specific code.
  *
  * Two implementations:
- *   - LocalAdapter — Kùzu + LanceDB + (Kùzu node tables for tables)
+ *   - LocalAdapter — SurrealDB + LanceDB + (SQLite for tables)
  *   - DataplaneAdapter — ts-sdk → ArangoDB + Qdrant + Postgres
  *
  * Performance characteristics differ; capabilities don't. There is no

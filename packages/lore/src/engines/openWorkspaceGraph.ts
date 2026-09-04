@@ -4,9 +4,10 @@
  * ── WHY THIS EXISTS ─────────────────────────────────────────────────────────
  *
  * Twenty-four CLI commands opened the graph with `new LocalGraph(basePath)`.
- * That hardcodes Kùzu, so on a workspace whose `graphEngine` is `'surreal'`
- * every one of them read the Kùzu database — which on such a workspace exists
- * and is EMPTY. They did not fail. They returned nothing and reported success:
+ * That hardcoded the prior local graph engine, so on a workspace whose
+ * `graphEngine` is `'surreal'` every one of them read that engine's database
+ * — which on such a workspace exists and is EMPTY. They did not fail. They
+ * returned nothing and reported success:
  * `lore status` shows zero nodes, `lore export` writes an empty file,
  * `lore recall` finds nothing. A silent wrong answer, on the command line, for
  * a workspace that is working perfectly.
@@ -28,7 +29,7 @@
  *
  * It returns a `WorkspaceGraph`, not a `LocalGraph`. The type names exactly the
  * surface BOTH local engines implement, so a caller that compiles against it
- * runs unchanged on either. The three genuinely Kùzu-only primitives — raw
+ * runs unchanged on either. The three genuinely engine-specific primitives — raw
  * Cypher via `getGraphContext`, `getTableStorage`, `withBulkConnection` — are
  * deliberately absent: table storage is SQLite keyed on a path
  * (`createTableStorage`), and every operation that used to need raw Cypher now
@@ -43,7 +44,7 @@ import { surrealDataPath } from './surreal/surrealConnection.js';
 import {
     DEFAULT_GRAPH_ENGINE,
     resolveWorkspaceGraphEngine,
-    kuzuEngineRemovedError,
+    legacyGraphEngineRemovedError,
     type GraphEngineKind,
 } from './graphEngineSelector.js';
 import { loadWorkspaces } from '../config/workspaces.js';
@@ -159,11 +160,12 @@ export function openWorkspaceGraph(
 
     if (engine === 'kuzu') {
         // LOUD, not silent: falling back to SurrealDB here would hand the
-        // caller an empty store while the workspace's real Kùzu data sits in
+        // caller an empty store while the workspace's real data sits in
         // .lore/graph — every read "finds nothing", every write lands in the
-        // wrong database, both report success. Same refusal as
+        // wrong database, both report success. A legacy graph engine
+        // declaration is no longer supported — same refusal as
         // LocalGraphRegistry.getGraphHandle.
-        kuzuEngineRemovedError(workspace ?? workspaceId ?? null, 'openWorkspaceGraph');
+        legacyGraphEngineRemovedError(workspace ?? workspaceId ?? null, 'openWorkspaceGraph');
     }
 
     // SurrealGraph implements the same ReadCache knobs LocalGraph took here
@@ -177,21 +179,11 @@ export function openWorkspaceGraph(
     }) satisfies WorkspaceGraph;
 }
 
-/*
- * `assertKuzuBackedPath` used to live here: a path-shaped refusal for the six
- * CLI commands that spoke raw Cypher and had no engine-agnostic equivalent
- * (`lore lint`, `report`, `migrate`, `diagnose`, and both ends of `migrate
- * workspace-to-workspace`). All six now run on either engine, so the guard has
- * no callers and is gone. `assertKuzuGraphSubstrate` (graphEngineSelector.ts)
- * stays: the schema-authoring seam in `mcp/bootSteps.ts` is still raw Cypher
- * and still has to fail closed.
- */
-
 /**
  * Which graph stores actually exist on disk under `basePath/.lore/`.
  *
  * Several commands answer "does this workspace have a graph?" by testing for
- * `.lore/graph` — the Kùzu directory — and nothing else. On a Surreal-backed
+ * `.lore/graph` and nothing else. On a Surreal-backed
  * workspace that is false while the graph is perfectly present in
  * `.lore/surreal/`, so `lore doctor` reported a missing graph and, worse,
  * `lore check-corruption` and `scripts/scan-all-workspaces.mjs` SKIPPED the
@@ -202,21 +194,21 @@ export function openWorkspaceGraph(
  * state: `lore migrate engine` deliberately leaves the source store in place
  * as the rollback path.
  */
-export function graphStoresOnDisk(basePath: string): { kuzu: boolean; surreal: boolean; any: boolean } {
+export function graphStoresOnDisk(basePath: string): { legacyGraph: boolean; surreal: boolean; any: boolean } {
     const lore = path.join(basePath, '.lore');
-    const kuzu = fs.existsSync(path.join(lore, 'graph'));
+    const legacyGraph = fs.existsSync(path.join(lore, 'graph'));
     // NOT path.join(lore, 'surreal') — that's the literal path, which is not
     // where the store actually lands whenever basePath's tree contains a
     // reserved URL character (a space is the common case). surrealDataPath
     // is the one function that knows the real, engine-normalized location;
     // see its doc comment in surreal/surrealConnection.ts.
     const surreal = fs.existsSync(surrealDataPath(basePath));
-    return { kuzu, surreal, any: kuzu || surreal };
+    return { legacyGraph, surreal, any: legacyGraph || surreal };
 }
 
 /** Human-readable engine name for a startup banner. */
 export function bannerEngineName(basePath: string): string {
-    return resolveGraphEngineForPath(basePath).engine === 'surreal' ? 'SurrealDB' : 'Kùzu';
+    return resolveGraphEngineForPath(basePath).engine === 'surreal' ? 'SurrealDB' : 'legacy graph engine (removed)';
 }
 
 /** The graph store path a banner should show for this workspace. */

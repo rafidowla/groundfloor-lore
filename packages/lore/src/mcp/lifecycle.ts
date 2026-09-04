@@ -88,9 +88,9 @@ export function startHttpLifecycle(input: HttpLifecycleInput): void {
         console.error(`[Lore MCP] Server v${VERSION} started on HTTP :${port}`);
         console.error(`[Lore MCP] Endpoint: http://127.0.0.1:${port}/mcp`);
         console.error(`[Lore MCP] Health:   http://127.0.0.1:${port}/health`);
-        // Named from the workspace's own graphEngine — this printed the Kùzu
-        // path and "Kùzu" unconditionally, so a Surreal-backed daemon
-        // announced an engine it was not running.
+        // Named from the workspace's own graphEngine — this used to print
+        // the local engine's path unconditionally, so a Surreal-backed
+        // daemon announced an engine it was not running.
         console.error(`[Lore MCP] Graph: ${bannerGraphPath(graphBasePath)}`);
         console.error(`[Lore MCP] Scope: workspace=${detectedScope.workspace}, ecosystem=${detectedScope.ecosystem}`);
         console.error(`[Lore MCP] Engine: ${bannerEngineName(graphBasePath)} (unified graph)`);

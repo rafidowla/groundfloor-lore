@@ -66,8 +66,9 @@ export interface ReEmbedJobInput {
      * Workspace-scoped graph used to list candidate nodes.
      *
      * Narrowed to the one method actually called (2026-08-06). It was typed
-     * `LocalGraph`, which made `lore embed reembed` refuse any non-Kùzu
-     * workspace for no reason — the job never touches a Kùzu-specific API.
+     * `LocalGraph`, which made `lore embed reembed` refuse any workspace not
+     * backed by that specific class for no reason — the job never touches
+     * an engine-specific API.
      */
     graph: Pick<GraphProvider, 'listNodes'>;
     /** Outbox store that receives the enqueued embed.batch rows. The

@@ -202,7 +202,7 @@ function makeProbingVerbatim(baselineHeap: number) {
         // Pre-build to exclude construction from the measurement window.
         gc();
         // Baseline is post-corpus-build: the source-of-truth ("disk") data is
-        // owned by the fake graph (just as it'd be owned by Kùzu+LanceDB in
+        // owned by the fake graph (just as it'd be owned by the legacy graph engine+LanceDB in
         // production). Reconnect's job is to STREAM through it; the delta
         // measures the extra working-set reconnect builds on top.
         const baseline = process.memoryUsage().heapUsed;

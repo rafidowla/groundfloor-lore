@@ -2,9 +2,10 @@
 /**
  * surreal-scale-parity.mjs — SurrealDB at REAL scale.
  *
- * Originally a Kùzu-vs-SurrealDB parity benchmark (docs/SURREALDB_BUILD_PLAN.md
- * Phase 2); Kùzu was removed from this codebase 2026-08-21 (Phase 3d/3e), so
- * there is no second engine left to compare against. Kept as a standalone
+ * Originally a legacy-engine-vs-SurrealDB parity benchmark
+ * (docs/SURREALDB_BUILD_PLAN.md Phase 2); the legacy engine was removed from
+ * this codebase 2026-08-21 (Phase 3d/3e, see docs/KUZU_REMOVAL.md), so there
+ * is no second engine left to compare against. Kept as a standalone
  * SurrealDB scale/throughput/RSS/latency benchmark -- the synthetic-corpus and
  * measurement machinery below still has real value on its own.
  *

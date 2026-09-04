@@ -28,7 +28,7 @@
 import type { ServerResponse } from 'node:http';
 import { WorkspaceNotFoundError } from '../../../../engines/localGraphRegistry.js';
 import { bindRouteTarget } from '../../../../security/routeWorkspaceBinding.js';
-import { writeWorkspaceRequired, writeError } from '../../helpers.js';
+import { writeWorkspaceRequired, writeError, writeGraphEngineError } from '../../helpers.js';
 import type { LoreGraph, NodesDeps } from './types.js';
 
 export async function resolveReadGraph(
@@ -45,11 +45,11 @@ export async function resolveReadGraph(
     // (2) token-scoped read gate (D-021: bindRouteTarget, not the raw scope
     // guard). Null principal = legacy bypass.
     if (bindRouteTarget(res, { requested: requestedWorkspace, intent: 'read' }) === null) return null;
-    // (3) workspace-aware graph resolution. getGraphHandle, not getOrOpen:
-    // the latter is the KÙZU substrate accessor and hands back a LocalGraph
-    // for every workspace, so every read gated here against a Surreal-backed
-    // workspace hit that workspace's real-but-EMPTY Kùzu table and returned
-    // "no such node" with a 200. getOrOpen still runs underneath, so the
+    // (3) workspace-aware graph resolution. getGraphHandle resolves the
+    // workspace's declared engine, so a read gated here against a
+    // Surreal-backed workspace reaches that workspace's own table rather
+    // than an empty one for a different engine and returning "no such
+    // node" with a 200. getOrOpen still runs underneath, so the
     // confinement gate is unchanged.
     let graph: LoreGraph = deps.store.loreGraph;
     if (deps.graphRegistry) {
@@ -63,6 +63,12 @@ export async function resolveReadGraph(
                 });
                 return null;
             }
+            // Round-S fix (2026-09-04, finding 3 addendum) — a workspace
+            // declaring the removed legacy graph engine used to rethrow
+            // here, land in the caller's generic 500 `internal_error`
+            // catch, and lose its own 501/legacy_graph_engine_removed
+            // shape. See writeGraphEngineError (mcp/http/helpers.ts).
+            if (writeGraphEngineError(res, err)) return null;
             throw err;
         }
     }

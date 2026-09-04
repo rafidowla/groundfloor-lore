@@ -22,7 +22,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
-import { readJsonBody, writeError, writeJson } from '../helpers.js';
+import { readJsonBody, writeError, writeJson, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import {
     type PendingOp,
     type PendingOpsStore,
@@ -377,6 +377,10 @@ export async function tryApprovalsRoutes(
             );
             writeJson(res, r.status, r.body);
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — already 400, but redactError
+            // garbled the JSON.parse diagnostic; route through
+            // writeInvalidJson for a clean, non-hashed message instead.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'bad_request', redactError(err)); // F-R25
         }
         return true;

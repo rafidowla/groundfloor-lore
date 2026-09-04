@@ -1,10 +1,11 @@
 import fs from 'fs';
 import path from 'path';
-import { openWorkspaceGraph, bannerEngineName } from '../../engines/openWorkspaceGraph.js';
+import { bannerEngineName } from '../../engines/openWorkspaceGraph.js';
 import { loreHome, loreHomePath } from '../../config/loreHome.js';
 import { migrateV1Sqlite } from '../../engines/v1Migration.js';
 import { migrateEmbeddingModelCommand } from './migrateEmbedding.js';
 import { migrateWorkspaceToWorkspaceCli } from './migrateWorkspaceToWorkspace.js';
+import { openGraphForCli } from './shared.js';
 
 export async function migrateCommand(args: string[]): Promise<void> {
     const target = args[0];
@@ -32,7 +33,7 @@ export async function migrateCommand(args: string[]): Promise<void> {
         console.error('');
         console.error('Targets:');
         console.error('  v1-sqlite [<path>] [--apply] [--archive]');
-        console.error('      Migrate a V1 knowledge.db SQLite file into the Kùzu graph.');
+        console.error('      Migrate a V1 knowledge.db SQLite file into the graph.');
         console.error('      Default path: ~/.groundfloor/knowledge.db');
         console.error('  embedding-model --to <modelId> [--dim <n>] [--apply] [--force]');
         console.error('      Re-embed the corpus into a different model\'s vector space.');
@@ -65,11 +66,13 @@ export async function migrateCommand(args: string[]): Promise<void> {
 
     const basePath = loreHome();
     const loreDir = path.join(basePath, '.lore');
-    const graph = openWorkspaceGraph(basePath);
+    // Finding 11 (round E) — refuse fast with a clear message when a
+    // running daemon holds this store's lock, instead of the old ~15s
+    // openSurreal retry storm ending in a raw driver error.
+    const graph = await openGraphForCli(basePath);
 
     const { VerbatimStore } = await import('../../engines/verbatimStore.js');
     const verbatim = new VerbatimStore(basePath);
-    await graph.initialize();
 
     console.log('');
     console.log(`Migration: V1 SQLite → V2 ${bannerEngineName(basePath)}`);
@@ -109,7 +112,7 @@ export async function migrateCommand(args: string[]): Promise<void> {
 
     if (report.nodesSkippedIdConflict.length > 0) {
         console.log('');
-        console.log('ID conflicts (V1 id matched an existing Kùzu node — V1 skipped):');
+        console.log('ID conflicts (V1 id matched an existing graph node — V1 skipped):');
         for (const id of report.nodesSkippedIdConflict.slice(0, 10)) console.log(`  - ${id}`);
         if (report.nodesSkippedIdConflict.length > 10) {
             console.log(`  ... and ${report.nodesSkippedIdConflict.length - 10} more`);

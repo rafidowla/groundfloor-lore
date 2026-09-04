@@ -344,7 +344,12 @@ function captureDeleteTool(
         auditLog: { log: () => undefined } as never,
         detectedScope: { workspace: 'boot-ws', ecosystem: '*' },
         workspaceVerbatimResolver: resolver as never,
-    } as Parameters<typeof registerDeleteNodeTool>[1];
+        // ITEM X-walnode (2026-09-03) — delete_node now appends to the WAL
+        // for an active-workspace delete (mirrors store_node/store_edge);
+        // MemoryToolsDeps.getWal is required. No graphRegistry here means
+        // resolveTargetGraph always reports isActive:true, so this IS reached.
+        getWal: () => ({ append: () => undefined }),
+    } as unknown as Parameters<typeof registerDeleteNodeTool>[1];
     registerDeleteNodeTool(server as never, deps);
     if (!handler) throw new Error('delete_node tool was not registered');
     return handler;

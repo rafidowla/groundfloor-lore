@@ -11,27 +11,21 @@
  *
  * Per Lore decision `lore-analytical-primitive-universal-2026-05-09`,
  * the tables surface is universal across both adapters. LocalAdapter
- * backs it with Kùzu node tables (or SQLite if that's chosen during
- * step #2 implementation). DataplaneAdapter backs it with Postgres.
+ * backs it with SQLite (`SqliteTableStorage`). DataplaneAdapter backs it
+ * with Postgres.
  *
  * Step #1 of BUILD_ORDER.md ships this interface stub. Step #2
- * implements it for LocalAdapter (Kùzu node tables lean). Step #6
- * implements for DataplaneAdapter.
+ * implements it for LocalAdapter. Step #6 implements for DataplaneAdapter.
  *
- * NOT YET DECIDED:
- *   - LocalAdapter table backing — Kùzu node tables (option 2 in
- *     IStorageAdapter.md) or SQLite (option 1). Lean: Kùzu-only for
- *     simplicity, revisit if performance demands it.
- *   - JOIN support — Postgres is trivial, Kùzu requires graph
- *     traversal mapping. Marked optional in this interface; adapters
- *     that don't support it throw a clear error.
+ *   - JOIN support — Postgres is trivial; marked optional in this
+ *     interface, and adapters that don't support it throw a clear error.
  */
 
 import type { Filter, FilterNode, FindOptions } from '../engines/collectionStorage.js';
 
 /**
  * ColumnType — declared column type in a TableSchema. Maps to
- * substrate-native types (Kùzu: STRING/INT64/etc; Postgres: text/bigint/etc).
+ * substrate-native types (SQLite: TEXT/INTEGER/etc; Postgres: text/bigint/etc).
  */
 export type ColumnType =
     | 'string'
@@ -66,9 +60,8 @@ export interface ColumnDecl {
      * the inner field from the JSON. Query filters on these sidecar
      * columns use the same column name (e.g. `eq: {'meta__tag': 'foo'}`).
      *
-     * Backends that don't support this (Kùzu's table layer) silently
-     * ignore the option — the JSON column still works, just without
-     * the indexed projection.
+     * Backends that don't support this silently ignore the option — the
+     * JSON column still works, just without the indexed projection.
      */
     extractedFields?: Array<{ key: string; type: ColumnType; indexed?: boolean }>;
 }
@@ -89,19 +82,127 @@ export interface TableSchema {
 }
 
 /**
+ * TableSchemaSummary — one entry in `ITableStorage.listTables()`.
+ *
+ * Finding #7 (2026-09-03) — there was no way to discover what
+ * collections exist short of already knowing a name to pass to
+ * `getByKey`-style introspection. `primaryKey` is pulled out of
+ * `columns` for convenience (every table has exactly one, per
+ * `ColumnDecl.primary`'s doc comment). `createdAt` and `rowCount`
+ * are optional because not every backend can produce them cheaply
+ * (or at all) — adapters populate what they can.
+ */
+export interface TableSchemaSummary {
+    name: string;
+    columns: ColumnDecl[];
+    /** Name of the column declared `primary: true`. Empty string if none. */
+    primaryKey: string;
+    createdAt?: string;
+    rowCount?: number;
+}
+
+/**
+ * ListTablesOptions — pagination + cost controls for `listTables`.
+ *
+ * QA finding B3 (round E, 2026-09-03) on the original finding #7 fix:
+ * `listTables()` enumerated every declared table unconditionally and
+ * ran a synchronous `COUNT(*)` per table on every call — no way to
+ * page a large collection count, and no way to skip the count
+ * fan-out (~7us/table, but linear and synchronous: 50k tables blocks
+ * the event loop for ~350ms). All fields are optional and, taken
+ * together as a whole omitted `opts` argument (or `{}`), preserve the
+ * original unpaginated, always-counted behavior for existing direct
+ * callers — only a caller that supplies these explicitly opts into
+ * the cheaper/paginated path. `collection_schema_list` and
+ * `GET /v1/schema` are the callers that do so, with their own
+ * defaults (limit 100, withCounts false) — see
+ * `handleSchemaListPaged` in `mcp/tools/collections.ts`.
+ *
+ * QA finding B3 (round E2, 2026-09-03) on the above: `offset` is a
+ * raw numeric position into the name-sorted list, re-sorted fresh on
+ * every call. Creating a table whose name sorts before a page
+ * boundary shifts every later table's position by one, so an
+ * offset-based cursor walk can return (or skip) an entry across two
+ * page fetches. `after` is the fix — a keyset cursor naming the last
+ * table already returned; the next page is `n > after` in the
+ * name-sorted order, which is stable regardless of what gets created
+ * or dropped elsewhere in the set. `offset` remains supported for
+ * callers that pass it explicitly (e.g. "jump to page 3"), but it is
+ * NOT stable under concurrent creates/drops — `handleSchemaListPaged`
+ * only ever emits `after`-shaped cursors now; `offset` is documented
+ * to callers as a best-effort/unstable positional param.
+ */
+export interface ListTablesOptions {
+    /**
+     * Zero-based offset into the name-sorted table list. Default 0.
+     * Unstable under concurrent table creates/drops — the name-sorted
+     * list is re-derived on every call, so a table created before the
+     * current offset shifts everything after it by one position. Use
+     * `after` for a stable walk across multiple calls.
+     */
+    offset?: number;
+    /**
+     * Keyset alternative to `offset`: only tables whose name sorts
+     * strictly after this one (i.e. `n > after` in the name-sorted
+     * order). Stable under concurrent creates/drops elsewhere in the
+     * set, unlike `offset`. Takes precedence over `offset` when both
+     * are given.
+     */
+    after?: string;
+    /** Max entries to return. Omitted/undefined = no cap (original behavior). */
+    limit?: number;
+    /**
+     * Compute `rowCount` (a `COUNT(*)`, or backend equivalent) for each
+     * entry actually returned. Default true — matches the original,
+     * always-counted behavior. Bounding this to only the *returned*
+     * page (via `limit`) is what keeps the count fan-out cheap; setting
+     * it false skips the count fan-out entirely.
+     */
+    withCounts?: boolean;
+}
+
+/**
  * Row — opaque dictionary keyed by column name. Caller code typically
  * casts to a typed shape it owns.
  */
 export type Row = Record<string, unknown>;
 
 /**
+ * X-allrows (2026-09-03) — opt-in for a destructive update/delete that
+ * really does intend to touch every row of a table. Covers both ways a
+ * filter can turn out to match every row:
+ *   - ALL by CONSTRUCTION — the filter shape itself is a tautology (an
+ *     empty/all filter, or one that reduces to one — see
+ *     `classifyFilterScope`'s ALL case, collectionsFilterScope.ts). The
+ *     storage layer's own empty-WHERE guard in sqliteTableTransaction.ts
+ *     honors `all: true` here directly (round-S fix, 2026-09-04 — this
+ *     used to be refused unconditionally, the one ALL-scope shape that
+ *     didn't honor the flag, contradicting every guard above it that
+ *     promises "pass all:true to confirm").
+ *   - ALL by DATA — the filter is merely SCOPED "by construction" (see
+ *     `classifyFilterScope`'s SCOPED case) but happens to match every row
+ *     of THIS table's data. Only the storage layer's data-aware check
+ *     (the COUNT(*)-vs-COUNT(*WHERE) comparison in
+ *     sqliteTableTransaction.ts) can see this; the syntactic guard in
+ *     mcp/tools/collectionsFilterScope.ts never does.
+ */
+export interface DestructiveWriteOptions {
+    all?: boolean;
+}
+
+/**
  * One typed mutation inside an all-or-nothing table transaction.
  * The public API accepts only these closed operations — never raw SQL.
+ *
+ * X-allrows — `update`/`delete` ops now carry the same `all` opt-in as
+ * `collection_update`/`collection_delete` (see `DestructiveWriteOptions`),
+ * so a transaction op that data-dependently matches every row of a >1-row
+ * table can be confirmed instead of being unconditionally refused.
  */
 export type TableOp =
     | { op: 'insert'; collection: string; row: Row }
-    | { op: 'update'; collection: string; filter: FilterNode; patch: Partial<Row> }
-    | { op: 'delete'; collection: string; filter: FilterNode }
+    | { op: 'update'; collection: string; filter: FilterNode; patch: Partial<Row>; all?: boolean }
+    | { op: 'delete'; collection: string; filter: FilterNode; all?: boolean }
     | { op: 'upsert'; collection: string; row: Row };
 
 export type TableOpResult =
@@ -193,6 +294,20 @@ export interface ITableStorage {
     createTable(schema: TableSchema): Promise<void>;
 
     /**
+     * Finding #7 — list every table this backend currently has
+     * declared. Complements `createTable`: callers otherwise have no
+     * way to enumerate collections without already knowing their
+     * names. Returns `[]` when nothing has been declared yet — never
+     * throws for "no tables".
+     *
+     * `opts` (finding B3, round E) adds pagination + a `withCounts`
+     * opt-out for the per-table `COUNT(*)` fan-out — see
+     * `ListTablesOptions`. Omitted entirely = original behavior
+     * (every table, every `rowCount` populated).
+     */
+    listTables(opts?: ListTablesOptions): Promise<TableSchemaSummary[]>;
+
+    /**
      * Insert a single row. Throws on primary-key collision.
      */
     insert(table: string, row: Row): Promise<void>;
@@ -216,13 +331,19 @@ export interface ITableStorage {
     /**
      * Update rows matching the filter. Patch is column-name → new value.
      * Returns the count of rows updated.
+     *
+     * X-allrows — `opts.all: true` confirms a data-dependent all-rows match
+     * (see `DestructiveWriteOptions`). Adapters that don't implement the
+     * data-aware tautology check may ignore `opts`; SqliteTableStorage
+     * enforces it.
      */
-    update(table: string, filter: FilterNode, patch: Partial<Row>): Promise<number>;
+    update(table: string, filter: FilterNode, patch: Partial<Row>, opts?: DestructiveWriteOptions): Promise<number>;
 
     /**
      * Delete rows matching the filter. Returns the count of rows deleted.
+     * X-allrows — see `update`'s `opts.all` doc above.
      */
-    delete(table: string, filter: FilterNode): Promise<number>;
+    delete(table: string, filter: FilterNode, opts?: DestructiveWriteOptions): Promise<number>;
 
     /**
      * Phase 2.5 — count rows matching the filter. With no filter,
@@ -237,8 +358,10 @@ export interface ITableStorage {
      * preserving the schema. Returns the number of rows deleted.
      * The SDK's `truncate` is the designated endpoint for
      * intentional full wipes; `delete(filter)` with the empty filter
-     * is rejected by the route layer to avoid an "I meant something
-     * else" footgun.
+     * is rejected unless the caller confirms with
+     * `DestructiveWriteOptions.all: true` (round-S fix, 2026-09-04 —
+     * this used to be an unconditional refusal with no `all: true`
+     * escape hatch, unlike every other ALL-scope filter shape).
      */
     truncate(table: string): Promise<number>;
 

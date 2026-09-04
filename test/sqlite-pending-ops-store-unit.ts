@@ -2,16 +2,17 @@
 /**
  * sqlite-pending-ops-store-unit.ts — SqlitePendingOpsStore lifecycle.
  *
- * The approval queue moved off Kùzu. This is `test/kuzu-pending-ops-store-unit.ts`
- * re-pointed at the SQLite store, case for case, so the port is proved to
- * preserve behaviour rather than asserted to. Every check that made sense on
- * both engines is carried over verbatim in intent; the two Kùzu-specific ones
+ * The approval queue moved off the legacy graph engine. This is the former
+ * legacy-engine-backed test re-pointed at the SQLite store, case
+ * for case, so the port is proved to preserve behaviour rather than asserted
+ * to. Every check that made sense on both engines is carried over verbatim
+ * in intent; the two legacy-engine-specific ones
  * (DDL round-trip of a column added later, and enqueue against a pre-existing
  * table lacking that column) are replaced by their SQLite equivalents, because
  * the upgrade hazard they guard — an older table missing a newer column —
  * exists here too.
  *
- * Two cases at the end have no counterpart in the Kùzu suite: they cover the
+ * Two cases at the end have no counterpart in the legacy-engine suite: they cover the
  * concurrent-decide race the old read-modify-write could not win. See the
  * header of `security/sqlitePendingOpsStore.ts`.
  *
@@ -49,7 +50,7 @@ const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-pendingops-'));
 let seq = 0;
 let clockMs = Date.parse('2026-01-01T00:00:00.000Z');
 
-/** Deterministic ids + monotonic clock, same discipline as the Kùzu suite. */
+/** Deterministic ids + monotonic clock, same discipline as the legacy-engine suite. */
 function newStore(file = 'q.sqlite'): SqlitePendingOpsStore {
     return new SqlitePendingOpsStore(
         path.join(dir, file),
@@ -141,7 +142,7 @@ await test('decide reject transitions pending → rejected', async () => {
     const op = await store.enqueue({ operation: 'b', workspaceId: 'ws1', initiator: 'alice', args: {} });
     const dec = await store.decide({ id: op.id, decision: 'rejected', decidedBy: 'bob' });
     assert.equal(dec.status, 'rejected');
-    // No reason given reads back as undefined, not ''. The Kùzu store wrote
+    // No reason given reads back as undefined, not ''. The legacy-engine store wrote
     // '' here because its binding had no clean null path.
     assert.equal(dec.decidedReason, undefined);
 });
@@ -217,7 +218,7 @@ await test('rows survive instance re-creation (persistence proof)', async () => 
 });
 
 await test('a pre-existing table lacking approverPermission is upgraded, not fatal', async () => {
-    // Upgrade safety, the SQLite counterpart of the Kùzu L-029 case: a table
+    // Upgrade safety, the SQLite counterpart of the legacy-engine L-029 case: a table
     // written by an older build has no `approverPermission` column.
     const file = path.join(dir, 'legacy.sqlite');
     const raw = new Database(file);
@@ -241,7 +242,7 @@ await test('a pre-existing table lacking approverPermission is upgraded, not fat
 });
 
 await test('CONCURRENT decide: exactly one approver wins', async () => {
-    // The race the Kùzu read-modify-write could not survive: both deciders
+    // The race the legacy engine's read-modify-write could not survive: both deciders
     // read `pending`, both wrote, and the second silently overwrote the
     // first's identity and reason on a second-party-approval record.
     const fresh = newStore('race.sqlite');

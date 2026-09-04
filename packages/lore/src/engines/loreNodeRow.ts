@@ -1,18 +1,14 @@
 /**
  * loreNodeRow.ts — engine-agnostic raw-row -> LoreNode mapping.
  *
- * Relocated out of `localGraphReads.ts` (Kùzu-only, importing
- * `@kineviz/kuzu-lite`'s `Connection` type) because both `rowToLoreNode` and
- * `DEFAULT_LIST_NODES_CAP` are pure, engine-agnostic and shared by every
- * substrate that produces a `LoreNode`-shaped row: `engines/surreal/`,
- * `engines/arcade/arcadeGraphStore.ts`, and (until it is deleted) Kùzu's own
- * `localGraphReads.ts`. Moving before the Kùzu-only remainder of that file
- * is deleted is load-bearing — see docs/audit/KUZU-REMOVAL-*.md.
+ * Both `rowToLoreNode` and `DEFAULT_LIST_NODES_CAP` are pure, engine-agnostic
+ * and shared by every substrate that produces a `LoreNode`-shaped row:
+ * `engines/surreal/` and `engines/arcade/arcadeGraphStore.ts`.
  *
  * `rowToLoreNode` depends only on the row shape, not on any engine: every
  * engine stores the same column names (SurrealDB and ArcadeDB deliberately
- * mirror Kùzu's naming so this mapper needs no per-engine translation beyond
- * unwrapping engine-specific id wrappers upstream — see
+ * share a common naming convention so this mapper needs no per-engine
+ * translation beyond unwrapping engine-specific id wrappers upstream — see
  * `engines/surreal/surrealRecordId.ts`'s `normalizeRow`).
  */
 
@@ -32,7 +28,7 @@ export const DEFAULT_LIST_NODES_CAP = 10_000;
  *
  * Pure function — depends only on the row shape, not on any specific engine.
  * Handles both prefixed ("n.id") and unprefixed ("id") keys, plus the
- * "connected." prefix used by some traversal projections (Kùzu Cypher
+ * "connected." prefix used by some traversal projections (Cypher
  * conventions every engine's row shape mirrors).
  */
 export function rowToLoreNode(row: Record<string, unknown>): LoreNode {
@@ -40,7 +36,7 @@ export function rowToLoreNode(row: Record<string, unknown>): LoreNode {
         return row[key] ?? row[`n.${key}`] ?? row[`connected.${key}`] ?? undefined;
     };
 
-    // language: stored as '' when unknown (Kùzu STRING DEFAULT '').
+    // language: stored as '' when unknown (STRING DEFAULT '' convention, mirrored across engines).
     // Surface as null to callers so the "unknown" state is obvious
     // at the API boundary.
     const rawLang = (getValue('language') as string) ?? '';

@@ -59,7 +59,7 @@ function test(name: string, fn: () => Promise<void> | void) {
         );
 }
 
-// kuzu-lite's native bindings segfault / Mmap-fail under repeated
+// the legacy engine's native bindings segfault / Mmap-fail under repeated
 // One store across all tests; reset data between tests instead.
 let _shared: { store: RebacStore; nodes: Set<string>; cleanup: () => void } | null = null;
 
@@ -71,7 +71,7 @@ async function makeFixture(): Promise<{ store: RebacStore; nodes: Set<string>; c
         return _shared;
     }
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-rebac-l2-test-'));
-    // The graph node set the endpoint probe answers from. On Kùzu this was a
+    // The graph node set the endpoint probe answers from. On the legacy graph engine this was a
     // real LoreNode table; the store no longer cares which engine supplies it,
     // which is the point of the injected probe.
     const nodes = new Set<string>();

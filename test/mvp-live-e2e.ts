@@ -47,8 +47,11 @@ async function main(): Promise<void> {
         const get = (p: string) => fetch(`${base}${p}`, { headers: { ...authHdr } });
         const postJson = (p: string, body: unknown) => fetch(`${base}${p}`, { method: 'POST', headers: jsonHdr, body: JSON.stringify(body) });
 
-        // Health says local.
-        const health = await (await fetch(`${base}/api/health`, { headers: { Origin: origin } })).json() as { deploymentMode?: string };
+        // Health says local. FINDING 4 (2026-09-03): /api/health's rich body
+        // (deploymentMode, outbox, ...) now requires a Bearer — an anonymous
+        // request gets only the lite liveness shape — so this probe (and the
+        // outbox-drain poll below) must authenticate.
+        const health = await (await fetch(`${base}/api/health`, { headers: authHdr })).json() as { deploymentMode?: string };
         assert.equal(health.deploymentMode, 'local', `expected local mode, got ${health.deploymentMode}`);
 
         /* ── §1 write → read loop across all three substrates ─────────────── */
@@ -64,7 +67,7 @@ async function main(): Promise<void> {
         // Wait for the outbox/embedder to drain so the vector is queryable.
         let drained = false;
         for (let i = 0; i < 80; i++) {
-            const hb = await (await fetch(`${base}/api/health`, { headers: { Origin: origin } })).json() as { outbox?: { depth?: number } };
+            const hb = await (await fetch(`${base}/api/health`, { headers: authHdr })).json() as { outbox?: { depth?: number } };
             if ((hb.outbox?.depth ?? 0) === 0) { drained = true; break; }
             await new Promise((r) => setTimeout(r, 250));
         }
@@ -126,7 +129,7 @@ async function main(): Promise<void> {
          * exactly the per-app token model of local mode (one daemon, many apps,
          * each app's token bound to its own workspace = its own database). Prove
          * the boundary HOLDS live: a default-scoped token can neither WRITE nor
-         * READ another workspace. (Data-level separation — distinct Kùzu+Lance
+         * READ another workspace. (Data-level separation — distinct the legacy graph engine+Lance
          * per workspace — is covered by the unit/integration suite + the audit's
          * cross-workspace-routing class; here we prove the HTTP auth boundary.) */
         const wsB = 'mvp-e2e-ws-b';

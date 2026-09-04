@@ -9,7 +9,7 @@
  *   - Every id crossing INTO SurrealQL does so as a bound `RecordId` OBJECT,
  *     never as query text. The driver serializes it over CBOR, so a hostile
  *     id (`x' OR 1=1; --`, `a[b]c`, backticks, angle brackets) is data, not
- *     syntax. This is the structural equivalent of Kùzu's prepare/execute
+ *     syntax. This is the structural equivalent of a prepared-statement's
  *     bound parameters, and the reason this engine has no escape helper: see
  *     localGraph.ts's "escapeString was removed in Phase 0 / S2" note — do
  *     NOT reintroduce one here either.
@@ -27,7 +27,7 @@ import { RecordId } from 'surrealdb';
 
 import { LoreGraphError } from '../loreGraphError.js';
 
-/** Node table. One row per LoreNode; SCHEMALESS, fields mirror Kùzu columns. */
+/** Node table. One row per LoreNode; SCHEMALESS, fields mirror the shared column convention. */
 export const NODE_TABLE = 'node';
 
 /** Edge table. A SurrealDB RELATION table (`in`/`out` + relation payload). */
@@ -133,7 +133,7 @@ function unquoteRecordIdText(text: string): string {
  * normalizeRow — make a SurrealDB document consumable by the shared
  * `rowToLoreNode` mapper.
  *
- * The stored field names deliberately mirror LocalGraph's Kùzu columns, so
+ * The stored field names deliberately mirror the same column convention LocalGraph uses, so
  * the ONLY translation needed is unwrapping the record id. Reusing the same
  * mapper (as the ArcadeDB engine already does) is what makes cross-engine
  * field coercion identical by construction rather than by review.

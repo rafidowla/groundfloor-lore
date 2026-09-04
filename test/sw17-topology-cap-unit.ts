@@ -3,9 +3,9 @@
  * sw17-topology-cap-unit.ts — SW-17 regression: topology overview caps.
  *
  * Originally this drove `computeTopologyOverviewByType` (engines/
- * graphTopology.ts) through a stubbed Kùzu WithConnection and asserted its
+ * graphTopology.ts) through a stubbed the legacy graph engine WithConnection and asserted its
  * Cypher LIMIT clauses. That half died with graphTopology.ts and the engine
- * (Kùzu removal Phase 3d, 2026-08-21). What the caps MEAN — `truncated` is
+ * (the legacy graph engine removal Phase 3d, 2026-08-21). What the caps MEAN — `truncated` is
  * computed from the node cap, blobs/edges fold correctly — lives in the
  * engine-agnostic `foldTopologyOverview` (engines/topologyOverviewFold.ts)
  * and is what this file pins now, against plain rows.

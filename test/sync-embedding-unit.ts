@@ -5,7 +5,7 @@
  * synced knowledge is queryable via semantic search locally.
  *
  * Audit 2026-05-13: prior to the fix, pullRemote() wrote pulled nodes to
- * Kùzu only — the matching vector upsert was missing. This regression
+ * the legacy graph engine only — the matching vector upsert was missing. This regression
  * test pins both the conflict-resolved (remote-newer) path and the
  * net-new-insert path.
  *

@@ -8,8 +8,8 @@
  * SIGTERM AND on /api/workspaces/switch + /api/daemon/restart.
  *
  * The ordering is load-bearing: stop PRODUCERS first, drain QUEUES, flush
- * CACHES, await SWEEPS, then close SUBSTRATE handles LAST — closing
- * Kùzu/LanceDB before the drains would abort in-flight transactions.
+ * CACHES, await SWEEPS, then close SUBSTRATE handles LAST — closing the
+ * graph engine/LanceDB before the drains would abort in-flight transactions.
  * Every step is awaited and individually try/caught so one failing
  * component can't strand the others.
  */
@@ -197,7 +197,7 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
         try { deps.store?.sessionCache?.flushNow(); } catch (e) { logStepError('sessionCache.flushNow', e); }
 
         // 7. Stop the consistency sweeper and AWAIT any in-flight sweep
-        //    (mid-LanceDB-write / mid-Kùzu-delete).
+        //    (mid-LanceDB-write / mid-graph-delete).
         try { await deps.consistencySweeper.stop(); } catch (e) { logStepError('consistencySweep.stop', e); }
 
         // 7.5 HOUSEKEEPING — stop the scheduled compaction sweeper and AWAIT
@@ -234,7 +234,7 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
         //     awaiting (deliberately — an ONNX embed + vector search per node
         //     must not sit on the synchronous write path). Untracked, a burst
         //     of writes followed by dispose() raced step 10's graph.close():
-        //     in-flight reconnect writes hit closed Kùzu/LanceDB handles and
+        //     in-flight reconnect writes hit closed graph engine/LanceDB handles and
         //     were swallowed by reconnectOneNode's own catch, dropping edges
         //     with no signal to the caller. Same class as the L-008
         //     migrateV1Sqlite fix, and placed here for the same reason as the
@@ -264,7 +264,7 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
         //     /api/graph/reconsume). SEPARATE tracker, SEPARATE deadline: these
         //     run for minutes and could never settle inside step 8.5's 5s, so
         //     sharing that queue meant the drain timed out and step 10 closed
-        //     Kùzu + LanceDB underneath a live sweep — while logging a message
+        //     the graph engine + LanceDB underneath a live sweep — while logging a message
         //     about "ingest autolink hooks", which is not what the operator
         //     just ran. Step 0b sealed the tracker, so a sweep in flight is
         //     already unwinding at its next page boundary; this waits for that
@@ -293,7 +293,7 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
         //     physically close every lazily-opened SIBLING workspace graph the
         //     registry holds. Before this, dispose only drained the pinned boot
         //     graph (closed below in step 10) and reference-dropped the
-        //     siblings, leaking their Kùzu/LanceDB native handles for the life
+        //     siblings, leaking their graph engine/LanceDB native handles for the life
         //     of the host process (acute in embedded mode). The sweep is already
         //     stopped (step 9), so no concurrent eviction races this. The boot
         //     graph stays pinned and is NOT closed here — step 10 owns it.
@@ -305,7 +305,7 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
         //     engine + any lazily-opened siblings) and drop references.
         //     Synchronous (no native handles); must run before graph.close()
         //     below so a mid-tick auto-sync push/pull isn't racing a closing
-        //     Kùzu connection pool.
+        //     graph engine connection pool.
         if (deps.syncEngineRegistry) {
             try { deps.syncEngineRegistry.disposeAll(); } catch (e) { logStepError('syncEngineRegistry.disposeAll', e); }
         }

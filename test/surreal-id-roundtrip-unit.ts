@@ -4,14 +4,14 @@
  * SurrealDB engine (Phase 1 hard constraint: "ID round-trip").
  *
  * Companion to test/id-alphabet-roundtrip-unit.ts, which covers the same
- * property on Kùzu + LanceDB. The bug it was written for
+ * property on the legacy graph engine + LanceDB. The bug it was written for
  * (fix/id-alphabet-sql-interpolation, 2026-08-03/04): an id-alphabet allowlist
  * silently rejected every Next.js dynamic-route id — `(app)/page.tsx`,
  * `[id]/route.ts`, `[...slug]/page.tsx` — so those nodes were never indexed at
  * all. 32 node rejections and ~1,100 consequential edge failures on one real
  * re-index, and nothing in the system said so.
  *
- * SurrealDB adds a SECOND, independent way to get this wrong that Kùzu does
+ * SurrealDB adds a SECOND, independent way to get this wrong that the legacy graph engine does
  * not have: it has its own record-id syntax with its own quoting rules
  * (`node:simple`, `node:⟨needs quoting⟩`), and an id outside its bare
  * alphabet — which every bracketed path id is — gets wrapped on the way in.

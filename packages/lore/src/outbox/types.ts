@@ -3,7 +3,7 @@
  *
  * The outbox is the answer to "no cross-substrate transactions"
  * (architecture backlog #1). Without it, a write that crosses
- * Kùzu + LanceDB + SQLite can fail halfway and leave silent
+ * the graph engine + LanceDB + SQLite can fail halfway and leave silent
  * inconsistencies. With it, every multi-substrate write is preceded
  * by a durable checklist; if the daemon crashes between steps, boot
  * sees the unfinished checklist and finishes it.
@@ -67,6 +67,36 @@ export type OutboxOperationKind =
     // directly — it is synthesized at dispatch time, like the consolidated
     // embed.batch path.
     | 'verbatim.upsert.batch'
+    // 2026-09-03 (A2 finding 2 fix) — every node-delete path tombstones the
+    // verbatim mirror inline, but until this kind existed no outbox row
+    // recorded that fact: `node.upsert` + `verbatim.upsert` rows from an
+    // earlier create stayed 'pending' (the synchronous path never marks
+    // them replicated — see hotLane.ts), so a later replicator tick or
+    // crash-recovery replay re-ran the stale `verbatim.upsert` AFTER the
+    // delete and resurrected the tombstoned content with nothing to
+    // re-tombstone it. Payload: `{ id: 'lore:<id>', reason: string }` —
+    // same `id` convention as `verbatim.upsert`. Every delete path now
+    // records this AFTER its `node.delete` row so replay in commit order
+    // converges to graph-absent + verbatim-tombstoned regardless of what
+    // stale rows precede it. Cross-supersedes `verbatim.upsert` on the same
+    // id in outbox/supersession.ts (mirrors the node.upsert/node.delete
+    // pairing) — see that file for why the two used to be independent.
+    | 'verbatim.tombstone'
+    // 2026-09-03 (X-markstale audit fix) — both mark_stale entry points
+    // (mcp/tools/memory/markStale.ts, POST /api/mark-stale) used to call
+    // `graph.markStaleByTags` directly: no outbox row, no per-node lock, so
+    // a crash between resolving the tag-matched ids and applying the flag
+    // lost the operation entirely, and no cross-substrate consumer or
+    // replay could ever see it. Payload: `{ ids: string[] }` — the ALREADY
+    // -RESOLVED node ids for ONE chunk (bulkWriteEdgesDelete.ts's
+    // `BULK_LOCK_CHUNK_SIZE` chunking pattern), not the original tags — a
+    // replay must re-apply the exact same ids the caller locked and
+    // committed, not re-run the tag query against however the corpus looks
+    // by then. Idempotent: re-marking an already-stale (or since-deleted)
+    // id is a no-op. Carries no single-entity identity (a chunk spans many
+    // ids), so it takes no supersession family in outbox/supersession.ts —
+    // same treatment as `verbatim.upsert.batch`.
+    | 'node.mark_stale'
     | 'sync.vector.mirror'
     // Sprint E1 (2026-05-24) — batched embed driver. `embed.batch`
     // carries { texts: string[]; targetNodeIds: string[] } and the
@@ -94,7 +124,7 @@ export type OutboxOperationKind =
     // Emitted by loadJobsRunner once a job transitions to 'complete'
     // (or 'failed' with the failure noted in payload). Carries
     // { jobId, workspace, status, rowsProcessed, rowsFailed,
-    //   graphEngine, graphPath }   (Phase 3c: engine-neutral — was kuzuPath)
+    //   graphEngine, graphPath }   (Phase 3c: engine-neutral — was engine-specific)
     // so downstream consumers (Sprint E re-embed scheduler, dashboards)
     // can pick up the freshly-loaded ids without scanning load_jobs.
     | 'load.done'

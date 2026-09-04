@@ -7,8 +7,9 @@
 > Since capture: batched checkpointing (`resume`), automated
 > `rollback`, and expand→migrate→contract decomposition have shipped;
 > the backend was reworked to be engine-agnostic
-> (`SchemaGraphOpsMigrationBackend`) during the Kuzu-removal effort
-> (updated 2026-08-21). The cloud backend remains queued.
+> (`SchemaGraphOpsMigrationBackend`) during the prior local graph engine's
+> removal effort (updated 2026-08-21; see `docs/KUZU_REMOVAL.md`). The cloud
+> backend remains queued.
 
 ## What it solves
 
@@ -44,18 +45,19 @@ change before it's applied.
   (`schemas/migration/schemaGraphOpsBackend.ts`) — engine-agnostic,
   built on the `SchemaGraphOps` port
   (`schemas/substrate/schemaGraphOps.ts`) instead of raw Cypher.
-  SurrealDB is the only graph engine — Kùzu was fully removed
-  2026-08-21 (see `docs/KUZU_REMOVAL.md`). `schemas/orchestration/
-  wiring.ts` picks the ops instance via `SurrealSchemaGraphOps`;
-  `KuzuSchemaGraphOps` still exists in `schemaGraphOps.ts` as a thin
+  SurrealDB is the only graph engine — the prior local graph engine was
+  fully removed 2026-08-21 (see `docs/KUZU_REMOVAL.md`). `schemas/orchestration/
+  wiring.ts` picks the ops instance via `SurrealSchemaGraphOps`; a stub
+  class for that engine's raw-Cypher schema ops still exists in
+  `schemaGraphOps.ts` as a thin
   wrapper over a generic `GraphReader & GraphWriter`, but it has no
   real caller left — nothing can produce a graph handle exposing the
-  raw-Cypher hatch it wraps, since `LocalGraph` is gone and a
-  `graphEngine: 'kuzu'` workspace now throws `KuzuEngineRemovedError`
-  before reaching this seam at all. It
-  replaces the MVP's `KuzuMigrationBackend`
-  (`schemas/migration/kuzuBackend.ts`, deleted in Kuzu-removal
-  Phase 3f) with the same scope op for op. Future:
+  raw-Cypher hatch it wraps, since `LocalGraph` is gone and a workspace
+  still declaring the legacy graph-engine config value now throws a
+  dedicated removal error before reaching this seam at all. It
+  replaces the MVP's migration backend for that engine (its source
+  file was deleted in that removal effort's Phase 3f; see
+  `docs/KUZU_REMOVAL.md`) with the same scope op for op. Future:
   `PostgresMigrationBackend`, `LanceDBMigrationBackend`,
   `DataplaneMigrationBackend`.
 - **`MigrationRunner`** — sequencer. Wraps a backend, exposes
@@ -131,11 +133,13 @@ class MigrationRunner {
 
 Ops are expressed through the engine-agnostic `SchemaGraphOps`
 port; each engine answers them natively. The Cypher below is the
-Kùzu implementation's query shape — `KuzuSchemaGraphOps`
-transcribes it verbatim from the original `KuzuMigrationBackend`,
-so behaviour on a Kùzu-backed workspace is unchanged — while
-`SurrealSchemaGraphOps` (`engines/surreal/surrealSchemaGraphOps.ts`)
-implements the same semantics in SurrealQL.
+query shape the now-unreachable stub class for the prior local graph
+engine's schema ops carried forward verbatim from its original
+migration-backend implementation before that engine was removed (see
+`docs/KUZU_REMOVAL.md`), kept here as the reference for the semantics —
+the live path is `SurrealSchemaGraphOps`
+(`engines/surreal/surrealSchemaGraphOps.ts`), which implements the
+same semantics in SurrealQL.
 
 ### `node_type.removed` (target = `know.Tenant`)
 
@@ -253,8 +257,8 @@ via REST.
 4. **Substrate isolation.** Ops are expressed through the
    engine-agnostic `SchemaGraphOps` port, not as engine-specific
    Cypher, so an op only ever reaches an engine that implements the
-   port natively (Kùzu or SurrealDB today). `MigrationBackend`
-   remains the choke point for future substrates.
+   port natively (SurrealDB, the only graph engine today).
+   `MigrationBackend` remains the choke point for future substrates.
 
 ## How this composes with prior phases
 
@@ -276,7 +280,8 @@ via REST.
    process (no separate worker); a per-workspace lock serialises
    `execute`/`resume`/`rollback` against each other. Future: queue
    runner as its own worker process? Or lean on engine-level
-   transactionality where it exists (Kùzu's MVCC if/when it lands)?
+   transactionality where it exists (SurrealDB's transaction support,
+   if a future revision leans on it more directly)?
 2. **Idempotency.** A repeated `execute(plan)` with `node_type.removed`
    today deletes nothing the second time (no rows match). For
    `field.removed`, second execution is also a no-op (no metadata

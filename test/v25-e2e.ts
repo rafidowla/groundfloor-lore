@@ -3,7 +3,7 @@
  * test/v25-e2e.ts — V2.5 end-to-end smoke.
  *
  * Exercises every V2.5 module in concert against a real embedded SurrealDB
- * graph (the default engine since the Kùzu removal), real disk, real
+ * graph (the default engine since the legacy graph engine removal), real disk, real
  * interactions. Not a unit test — the point is to catch wiring issues that
  * pass in isolation but fail when modules meet.
  *
@@ -150,7 +150,7 @@ async function seedNode(
     id: string,
 ): Promise<void> {
     // Through the public handle surface — the same path production ingest
-    // takes. (The old version hand-wrote Kùzu Cypher, which bit-rotted when
+    // takes. (The old version hand-wrote the legacy graph engine Cypher, which bit-rotted when
     // the engine's column types changed.)
     await graph.upsertNode({
         id, type: 'subject', label: id, content: '',
@@ -251,7 +251,7 @@ async function main() {
 
     // The resolver is substrate-agnostic; the accessor it gets here reads the
     // same .lore/rebac.sqlite tuples the evaluator does. (The old version
-    // read Kùzu's LoreRebacEdge mirror of those tuples — a table the engine
+    // read the legacy engine's LoreRebacEdge mirror of those tuples — a table the engine
     // no longer creates.)
     const rebacAccessor: ScopeGraphAccessor = {
         async neighborsOut(id, edgeTypes) {

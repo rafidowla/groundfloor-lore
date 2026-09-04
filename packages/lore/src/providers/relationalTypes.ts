@@ -1,7 +1,7 @@
 /**
  * relationalTypes.ts — the RELATIONAL substrate seam.
  *
- * Lore's local engine is tri-substrate: graph (Kùzu), vector (LanceDB),
+ * Lore's local engine is tri-substrate: graph (SurrealDB), vector (LanceDB),
  * and relational (SQLite). This file declares the swap point for the
  * *relational* substrate — the outbox / migrations / audit / load-jobs /
  * tabular-collections store — so that an embeddable build can choose its

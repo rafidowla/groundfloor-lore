@@ -6,7 +6,7 @@
  *   Before SP-F3 the outbox replicator dispatched node.upsert / verbatim.upsert
  *   into the BOOT-bound graph/verbatim regardless of entry.workspace, so any
  *   write targeting a non-boot workspace was replayed into the WRONG workspace's
- *   Kùzu/LanceDB (cross-workspace data contamination + manufactured orphan
+ *   the legacy graph engine/LanceDB (cross-workspace data contamination + manufactured orphan
  *   vectors). SP-F3 threads entry.workspace through dispatch() into the wiring
  *   substrates, which resolve the TARGET workspace's graph/verbatim via
  *   getGraphForWorkspace / getVerbatimForWorkspace (falling back to boot only
@@ -230,7 +230,7 @@ test('FALLBACK: no resolver wired routes to boot graph (cloud / test wirings)', 
 // R2 audit #2 (high) — a workspace-scoped row whose resolver THROWS must NOT
 // fall back to the boot graph/store. The old behavior (assert the write lands
 // in boot, "no data loss") silently applied workspace B's node/edge/vector
-// write to the boot tenant's Kùzu+LanceDB — a cross-workspace isolation breach
+// write to the boot tenant's the legacy graph engine+LanceDB — a cross-workspace isolation breach
 // — and, because the misrouted write succeeded, the row drained and was never
 // retried against B. dispatch() now propagates the resolver error (per its
 // contract: replicator catches, bumps attempts, leaves the row PENDING), so it

@@ -23,9 +23,8 @@
  * p50 and p95, never means: one slow first-open dominates a mean and hides the
  * distribution, which is exactly how a misleading headline gets produced.
  *
- * ONE ENGINE PER PROCESS. kuzu-lite SIGSEGVs after roughly a dozen database
- * open/close cycles, and mixing both engines in one process also lets one
- * engine's buffer pool distort the other's timings.
+ * ONE WORKSPACE PER PROCESS INVOCATION, so each reading starts cold rather
+ * than warmed by a prior run's buffer pool.
  *
  *   LORE_HOME=<home> BENCH_WS=src|dst tsx scripts/diagnostics/engine-workload-bench.ts
  */

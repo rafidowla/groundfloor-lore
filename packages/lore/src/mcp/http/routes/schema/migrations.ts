@@ -16,7 +16,7 @@ import { MigrationRunner, FOREIGN_IN_FLIGHT_ERROR } from '../../../../schemas/mi
 import type { MigrationPlan, ExecuteReport } from '../../../../schemas/migration/types.js';
 import { decompose } from '../../../../schemas/decomposition.js';
 import type { ProposedChange } from '../../../../schemas/authoring.js';
-import { readJsonBody, writeJson, writeError } from '../../helpers.js';
+import { readJsonBody, writeJson, writeError, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { getCurrentPrincipal } from '../../../../auth/principal.js';
 import { PREFIX, type SchemaRoutesDeps } from './shared.js';
 // F-M02 / F-M05 / F-M06 / D2-authz-1 — destructive-op approval correlation
@@ -96,6 +96,10 @@ export async function tryMigrationRoutes(req: IncomingMessage, res: ServerRespon
             const report = await runner.dryRun(plan);
             writeJson(res, 200, report);
         } catch (e) {
+            // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+            // through to 500 here; readJsonBody's tagged error is caught
+            // first now.
+            if (isInvalidJsonBody(e)) { writeInvalidJson(res, e); return true; }
             writeError(res, 500, 'migration_dry_run_failed', redactError(e));
         }
         return true;
@@ -255,7 +259,12 @@ export async function tryMigrationRoutes(req: IncomingMessage, res: ServerRespon
             // Foreign in-flight plan is a 409 (conflict) — caller
             // can switch on this to surface "another migration is
             // running" in the admin UI instead of a generic 500.
-            if (msg.startsWith(FOREIGN_IN_FLIGHT_ERROR)) {
+            if (isInvalidJsonBody(e)) {
+                // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+                // through to 500 here; readJsonBody's tagged error is
+                // checked before the domain-specific classifiers below.
+                writeInvalidJson(res, e);
+            } else if (msg.startsWith(FOREIGN_IN_FLIGHT_ERROR)) {
                 writeError(res, 409, FOREIGN_IN_FLIGHT_ERROR, redactError(e));
             } else {
                 writeError(res, 500, 'migration_execute_failed', redactError(e));
@@ -347,7 +356,10 @@ export async function tryMigrationRoutes(req: IncomingMessage, res: ServerRespon
             writeJson(res, 200, report);
         } catch (e) {
             const msg = (e as Error).message;
-            if (/no in-flight plan/i.test(msg)) {
+            if (isInvalidJsonBody(e)) {
+                // X-json400 (2026-09-03 audit) — see the execute handler above.
+                writeInvalidJson(res, e);
+            } else if (/no in-flight plan/i.test(msg)) {
                 writeError(res, 404, 'no_in_flight_plan', redactError(e));
             } else {
                 writeError(res, 500, 'migration_resume_failed', redactError(e));
@@ -409,6 +421,11 @@ export async function tryMigrationRoutes(req: IncomingMessage, res: ServerRespon
             });
             writeJson(res, 200, plan);
         } catch (e) {
+            // X-json400 (2026-09-03 audit) — malformed JSON never matched
+            // the /required|no type|missing/i classifier below (readJsonBody's
+            // message is "invalid JSON body: ..."), so it fell to 500. Check
+            // the tag first for a clean 400 instead.
+            if (isInvalidJsonBody(e)) { writeInvalidJson(res, e); return true; }
             const msg = (e as Error).message;
             // Missing-params + missing-type-on-live-schema errors are
             // 400, not 500 — they reflect a caller mistake.
@@ -512,6 +529,8 @@ export async function tryMigrationRoutes(req: IncomingMessage, res: ServerRespon
             );
             writeJson(res, 200, report);
         } catch (e) {
+            // X-json400 (2026-09-03 audit) — see the dry-run handler above.
+            if (isInvalidJsonBody(e)) { writeInvalidJson(res, e); return true; }
             writeError(res, 500, 'migration_rollback_failed', redactError(e));
         }
         return true;

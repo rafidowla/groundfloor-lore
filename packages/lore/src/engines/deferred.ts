@@ -150,7 +150,7 @@ const DEFERRED_SCAN_CACHE_TTL_MS: number = (() => {
  * P1 scale fix moved the fast path onto bulkListProjected, an uncached paged
  * walk, so every recall call re-scanned the entire corpus with no memoing —
  * confirmed by direct instrumentation to cost ~1.6s of a ~1.7s recall at
- * 10k nodes (Kùzu-removal branch verification, 2026-08-21). Keyed on the
+ * 10k nodes (branch verification, 2026-08-21). Keyed on the
  * graph object itself (WeakMap — no leak, no cross-workspace bleed, and it
  * clears itself if a workspace handle is ever evicted) rather than plumbing
  * this engine-agnostic module through any one engine's epoch/readCache.
@@ -177,7 +177,7 @@ async function scanDeferredNodes(graph: DeferredGraph): Promise<LoreNode[]> {
     // The paged walk goes through bulkListProjected — the engine-agnostic
     // keyset pager both LocalGraph and SurrealGraph implement. It used to be
     // raw Cypher over getGraphContext().queryRows, which made the fast path
-    // Kùzu-only: a Surreal-backed workspace silently took the unbounded scan.
+    // single-engine-only: a Surreal-backed workspace silently took the unbounded scan.
     // Failing soft here (not throwing) keeps recall's deferred sidecar a
     // best-effort enrichment across backends rather than a hard recall failure.
     let pagedOk = false;

@@ -68,7 +68,7 @@
 | `sw16-batch-hydration-unit.ts` | recallCrossWorkspace, localGraph |
 | `write-side-route-gate-unit.ts` | workspaces, retention, config, actorContext, … |
 
-### engines  (76 tests)
+### engines  (67 tests)
 
 | Test file | Primary modules under test |
 |---|---|
@@ -79,7 +79,7 @@
 | `bulk-write-content-hash-unit.ts` | bulkWrite, contentHash, verbatimStore, types |
 | `cache-per-kind-stats-unit.ts` | cache |
 | `cache-unit.ts` | cache |
-| `collection-storage-unit.ts` | kuzuCollectionStorage, dataplaneCollectionStorage |
+| `collection-storage-unit.ts` | dataplaneCollectionStorage |
 | `connector-capabilities-unit.ts` | connectorCapabilities |
 | `connector-contract-unit.ts` | registry, types |
 | `content-hash-unit.ts` | contentHash |
@@ -93,17 +93,10 @@
 | `edge-bulk-graph-integration.ts` | localGraph |
 | `embedding-fingerprint-unit.ts` | embeddingFingerprint |
 | `freshness-unit.ts` | freshnessEngine, localSourceWatcher, localGraph |
-| `kuzu-analytical-storage-unit.ts` | kuzuAnalyticalStorage |
-| `kuzu-collection-storage-accessors-unit.ts` | kuzuCollectionStorage |
-| `kuzu-connection-pool-unit.ts` | kuzuConnectionPool |
-| `kuzu-node-storage-unit.ts` | localGraph, kuzuNodeStorage, crud, types |
-| `kuzu-promotion-storage-unit.ts` | localGraph, kuzuPromotionStorage, promotionPipeline, classificationAudit, … |
 | `lance-recall-concurrency-unit.ts` | verbatimStore |
 | `lance-table-pool-unit.ts` | lanceTablePool |
 | `lazy-handle-unit.ts` | lazyHandle |
-| `local-adapter-integration.ts` | kuzuCollectionStorage, createLocalAdapter, verbatim |
 | `local-source-ingest-unit.ts` | bootSteps, freshnessEngine, localSourceWatcher, pathAllowlist, … |
-| `maintain-access-integration.ts` | localGraph, accessTracker, policy, selection |
 | `maintain-integration.ts` | adapters, maintain, policy |
 | `maintain-unit.ts` | policy, selection, maintain, ports |
 | `memory-backbone-adversarial-unit.ts` | sweeper, contentHash, verbatimStore, consistency, … |
@@ -113,23 +106,21 @@
 | `phase6-p4-migrate-and-compact-unit.ts` | localGraph, verbatimStore, migrateWorkspaceToWorkspace, compact |
 | `phase6-x1-knowledge-types-core-unit.ts` | localGraphRegistry, memory, workspaces, types |
 | `phase6-x6-5-fix-persistence-unit.ts` | localGraph, localGraphRegistry, memory, workspaces, … |
-| `pool-epoch-unit.ts` | kuzuConnectionPool |
 | `post-node-rest-content-hash-unit.ts` | nodes, contentHash, verbatimStore, types |
 | `provenance-unit.ts` | provenance |
-| `sp05-injection-unit.ts` | sqliteTableStorage, kuzuTableStorage, verbatimStore, verbatimHistory, … |
+| `sp05-injection-unit.ts` | sqliteTableStorage, verbatimStore, verbatimHistory, … |
 | `sp05-topology-clamp-unit.ts` | graphTopology |
 | `sp06-xss-unit.ts` | htmlExport |
 | `sp11-bounded-memory-unit.ts` | queue, boundedVectorCache, verbatimStore, rateLimit, … |
 | `sp20-facade-discipline-unit.ts` | syncEngine, loreStorageClient, localGraph, verbatimStore |
-| `sp25-paranoia-unit.ts` | kuzuTableStorage |
+| `sp25-paranoia-unit.ts` | sqliteTableStorage |
 | `sqlite-table-storage-unit.ts` | sqliteTableStorage, tables |
 | `table-transaction-contract-unit.ts` | sqliteTableStorage, tables, transactions |
 | `store-node-mcp-tool-content-hash-unit.ts` | storeNode, contentHash, verbatimStore |
 | `substrate-adversarial-unit.ts` | sqliteTableStorage, tables |
-| `sw01-injection-unit.ts` | kuzuAnalyticalStorage, kuzuCollectionStorage, kuzuResult |
 | `sw02-wal-dataloss-unit.ts` | syncEngine, localGraph |
 | `sw04-session-cache-corrupt-unit.ts` | sessionCacheManager |
-| `sw14-error-redaction-unit.ts` | analytics, index, kuzuTableStorage |
+| `sw14-error-redaction-unit.ts` | analytics, index |
 | `sw17-topology-cap-unit.ts` | graphTopology |
 | `sw18-bounded-queries-unit.ts` | sqliteTableStorage, tables |
 | `sw20-stream-reconnect-unit.ts` | reconnect, verbatimStore, types |
@@ -168,7 +159,7 @@
 | `sw03-embed-integrity-unit.ts` | dispatcher, wiring, types, queue |
 | `sw06-outbox-races-unit.ts` | sqliteStore, versionStore, hotLane, recovery |
 
-### security  (40 tests)
+### security  (38 tests)
 
 | Test file | Primary modules under test |
 |---|---|
@@ -180,7 +171,6 @@
 | `auth-context-unit.ts` | actorContext, rebacGate |
 | `classification-audit-unit.ts` | classificationAudit |
 | `clerk-auth-unit.ts` | clerkAuth |
-| `cypher-read-only-unit.ts` | cypherReadOnly |
 | `dataplane-authz-wrapper-unit.ts` | dataplaneAuthz |
 | `e2e-phase-7a.ts` | logRotator |
 | `embed-flag-store-node-unit.ts` | nodes, actorContext, workspaceContext, types, … |
@@ -189,7 +179,6 @@
 | `http-auth-shared-secret-unit.ts` | httpAuth |
 | `human-approval-unit.ts` | humanApproval |
 | `ingestion-route-gate-unit.ts` | ingestion, actorContext, workspaceContext |
-| `kuzu-pending-ops-store-unit.ts` | kuzuPendingOpsStore, pendingOps |
 | `local-mode-identity-unit.ts` | identity |
 | `nodes-route-gate-unit.ts` | nodes, actorContext, workspaceContext |
 | `operator-identity-unit.ts` | operatorIdentity |
@@ -287,8 +276,8 @@
 
 | Test file | Primary modules under test |
 |---|---|
-| `H1-additive-migrations-unit.ts` | store, coordinator, sqliteMigrationAdapter, kuzuMigrationAdapter, … |
-| `H2-expand-migrate-contract-unit.ts` | store, coordinator, sqliteMigrationAdapter, kuzuMigrationAdapter, … |
+| `H1-additive-migrations-unit.ts` | store, coordinator, sqliteMigrationAdapter, lanceMigrationAdapter, … |
+| `H2-expand-migrate-contract-unit.ts` | store, coordinator, sqliteMigrationAdapter, lanceMigrationAdapter, … |
 
 ### embed  (1 tests)
 
@@ -323,7 +312,7 @@
 | Test file | Primary modules under test |
 |---|---|
 | `Z2-perf-100k.ts` | sqliteAdapter, lanceAdapter, loadJobsStore, loadJobsRunner |
-| `Z2-substrate-loaders-unit.ts` | sqliteAdapter, kuzuAdapter, lanceAdapter, loaderDispatcher, … |
+| `Z2-substrate-loaders-unit.ts` | sqliteAdapter, lanceAdapter, loaderDispatcher, … |
 | `Z3-checkpoint-resume-unit.ts` | sqliteAdapter, lanceAdapter, loadJobsStore, loadJobsRunner, … |
 
 ### diagnostics  (1 tests)
@@ -381,28 +370,21 @@
 
 ## npm test coverage notes (NW-2b)
 
-### New test (NW-2b part a — E1b close-unit)
-
-`nw2b-kuzu-result-close-unit.ts` — dedicated unit for `engines/kuzuResult.ts`.
-Asserts the `queryRows` / `queryVoid` / `closeResult` close-every-result contract
-using injected test doubles (no real Kùzu DB). Wired as `test:unit:nw2b-kuzu-result-close`,
-chained into `npm test`. The `finally`-path test (case 3) will fail if
-`closeResult()` is removed from the `queryRows` finally block, confirming it
-actually guards the E1b SIGSEGV regression.
-
 ### Newly-wired suites (NW-2b parts b + c)
 
 All suites listed below previously existed in `package.json` but were absent
 from the `npm test` chain (confirmed by transitive-closure trace per
-audit finding `test-real-kuzu-tests-absent-from-npm-test` and
-`test-chaos-suite-absent-from-npm-test`). They are now wired directly into
-`npm test` — chaos suite runs in ~4.5 s (well under the 2-minute gate);
-integration suites are self-contained (each creates its own tmpdir).
+audit finding `test-chaos-suite-absent-from-npm-test`). They are now wired
+directly into `npm test` — chaos suite runs in ~4.5 s (well under the
+2-minute gate); integration suites are self-contained (each creates its own
+tmpdir). (NW-2b part a wired a dedicated close-every-result unit for a
+query-handle leak in the prior local graph engine it fixed; both the test
+and the module it covered were removed along with that engine, 2026-08-21;
+see `docs/KUZU_REMOVAL.md`.)
 
 | Script | Test file | Added via |
 |--------|-----------|-----------|
 | `test:chaos` | `test/chaos-suite.ts` (5 subprocess scenarios) | direct chain in `test` |
-| `test:unit:kuzu-node-storage` | `test/kuzu-node-storage-unit.ts` | `test:unit:engine-surface` |
 | `test:unit:crud` | `test/crud-unit.ts` | `test:unit:engine-surface` |
 | `test:unit:batch-scheduler` | `test/batch-scheduler-unit.ts` | `test:unit:engine-surface` |
 | `test:unit:connector-contract` | `test/connector-contract-unit.ts` | `test:unit:engine-surface` |

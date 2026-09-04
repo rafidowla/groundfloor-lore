@@ -407,7 +407,7 @@ async function plantFailedRow(
     // the grace window are what the ROUTINE self-heal sweep examines
     // (post-cluster-5b: 'dead' rows are only swept when the operator passes
     // includeDead — see 2.4a for the composed dead-row case).
-    await store.markEntryStatus(over.id, 'failed', { error: 'simulated kuzu write-write conflict' });
+    await store.markEntryStatus(over.id, 'failed', { error: 'simulated write-write conflict' });
 }
 
 /** The audit's exact terminal state: DEAD after maxAttempts. Routine sweeps
@@ -418,7 +418,7 @@ async function plantDeadRow(
     over: Partial<OutboxEntry> & { id: string },
 ): Promise<void> {
     await store.record(baseEntry(over));
-    await store.markEntryStatus(over.id, 'dead', { error: 'simulated kuzu write-write conflict' });
+    await store.markEntryStatus(over.id, 'dead', { error: 'simulated write-write conflict' });
 }
 
 function newSweepReplicator(store: SqliteOutboxStoreT, substrates: DispatcherSubstrates) {
@@ -676,9 +676,10 @@ function parseToolJson(r: { content: Array<{ text: string }> }): Record<string, 
 }
 
 const registry = new LocalGraphRegistry();
-// getGraphHandle, not getOrOpen: getOrOpen is the Kuzu-only substrate
-// accessor and would open a Kùzu database no matter what the workspace
-// declares. getGraphHandle resolves the declared engine (surreal, above)
+// getGraphHandle, not getOrOpen: getOrOpen was the legacy-engine-only
+// substrate accessor and would open a legacy-engine database no matter
+// what the workspace declares. getGraphHandle resolves the declared
+// engine (surreal, above)
 // and is exactly what the MCP tools' resolveTargetGraph uses too.
 const graph = await registry.getGraphHandle(WS);
 
@@ -697,7 +698,8 @@ const storeBundle = {
 async function seedNode(id: string): Promise<void> {
     // Production NEVER calls the raw handle write unwrapped (see the
     // withTransactionConflictRetry convention across MCP tools / REST routes
-    // / CLI; no-op on Kùzu where writes serialize internally). Under
+    // / CLI; historically a no-op on the legacy engine, where writes
+    // serialized internally). Under
     // SurrealDB's optimistic concurrency, concurrent tests seeding on the
     // one shared graph must follow the same convention.
     await withTransactionConflictRetry(() => graph.upsertNode({
@@ -869,7 +871,8 @@ console.log(`passed:  ${passed}`);
 console.log(`failed:  ${failed}`);
 
 // Close the REAL SurrealDB handle before closeAll()'s reference-drop: an open
-// SurrealGraph holds the event loop (Kùzu's native handles did not), and the
+// SurrealGraph holds the event loop (the legacy engine's native handles did
+// not), and the
 // all-pass path has no process.exit — without a true close the suite would
 // hang on success. Mirrors test/surreal-crash-recovery-unit.ts teardown.
 try { await graph.close(); } catch { /* non-fatal */ }

@@ -1,9 +1,10 @@
 import fs from 'fs';
 import path from 'path';
 import http from 'http';
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { loreHome, loreHomePath } from '../../config/loreHome.js';
 import { writeGraphReport } from '../../engines/graphReport.js';
+import { openGraphForCli } from './shared.js';
+import { DEFAULT_PORT } from './migrateWorkspaceToWorkspaceShared.js';
 
 export async function reportCommand(args: string[]): Promise<void> {
     const outIdx = args.indexOf('--output');
@@ -23,8 +24,15 @@ export async function reportCommand(args: string[]): Promise<void> {
 
     if (md == null) {
         const basePath = loreHome();
-        const graph = openWorkspaceGraph(basePath);
-        await graph.initialize();
+        // Finding 11 (round E) — the HTTP attempt above already tried the
+        // daemon; this direct-open fallback is what used to sit in the
+        // ~15s openSurreal retry storm. fetchReportViaDaemon() above now
+        // resolves DEFAULT_PORT (LORE_PORT-aware) instead of a hardcoded
+        // 3847, so this fallback fires only when the HTTP attempt
+        // genuinely misses the daemon (no auth token, daemon down,
+        // timeout). Refuse fast with a clear message instead of the raw
+        // driver error.
+        const graph = await openGraphForCli(basePath);
         md = await writeGraphReport(graph, { project, topN });
         await graph.close();
     }
@@ -53,7 +61,7 @@ async function fetchReportViaDaemon(project?: string, topN?: number): Promise<st
     return await new Promise<string>((resolve, reject) => {
         const req = http.request({
             host: '127.0.0.1',
-            port: 3847,
+            port: DEFAULT_PORT,
             method: 'GET',
             path: path_,
             headers: { Authorization: `Bearer ${token}` },

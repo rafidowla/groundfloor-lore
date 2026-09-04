@@ -37,10 +37,13 @@ import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { LoreEdge } from '../../../providers/types.js';
 import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
+import type { AuditLog } from '../../../security/audit.js';
+import { withEdgeLocks, withEdgeLock, type EdgeLockTriple } from '../../../core/nodeWriteLock.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 
 export interface EdgesDeps {
@@ -62,6 +65,12 @@ export interface EdgesDeps {
     outboxStore?: OutboxStore;
     /** Sprint O4 — backpressure lag cache (optional; absent = skip). */
     outboxLagCache?: OutboxLagCache;
+    /** Round-E X-edges — audit-coverage. POST/DELETE /api/edge had no audit
+     *  row, unlike the MCP store_edge/delete_edge tools and POST /api/node.
+     *  Optional so existing test fixtures that don't care about auditing
+     *  keep working; production wiring (dispatcher.ts / arcadeData.ts)
+     *  always supplies it. */
+    auditLog?: AuditLog;
 }
 
 interface PostEdgeBody {
@@ -144,8 +153,26 @@ export async function tryEdgesRoutes(
             return true;
         }
 
+        // Round-E X-edges finding (4) — a malformed JSON body used to fall
+        // through into the big try block below and get caught by the
+        // generic catch, whose status logic only recognizes "Failed to add
+        // edge"/"not found" messages as 400 — a SyntaxError from JSON.parse
+        // matched neither, so it surfaced as a 500 (implying a server
+        // fault) for what is really a client mistake. Parse in its own
+        // try/catch, same invalid_json_body shape import.ts/bulkList.ts use.
+        let parsed: PostEdgeBody;
         try {
-            const parsed = JSON.parse(body || '{}') as PostEdgeBody;
+            parsed = JSON.parse(body || '{}') as PostEdgeBody;
+        } catch {
+            writeError(res, 400, 'invalid_json_body', 'invalid JSON body');
+            return true;
+        }
+
+        const __auditStartedAt = Date.now();
+        const __auditCtx: { workspace: string | null; entityId: string | null; errored: boolean; resultDetail?: string } = {
+            workspace: null, entityId: null, errored: false,
+        };
+        try {
             if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
                 writeError(res, 400, 'bad_request', 'body must be a JSON object');
                 return true;
@@ -155,6 +182,7 @@ export async function tryEdgesRoutes(
                 writeError(res, 400, 'bad_request', 'sourceId, targetId, and relation are required strings');
                 return true;
             }
+            __auditCtx.entityId = `${parsed.sourceId}->${parsed.targetId}:${parsed.relation}`;
             const requestedWorkspace = typeof parsed.workspace === 'string' && parsed.workspace.length > 0
                 ? parsed.workspace
                 : (typeof (parsed as { project?: unknown }).project === 'string' && ((parsed as { project?: string }).project as string).length > 0
@@ -165,6 +193,7 @@ export async function tryEdgesRoutes(
             const principalEarly = getCurrentPrincipal();
             const effectivePostWorkspace = requestedWorkspace ?? principalEarly?.workspace;
             if (!effectivePostWorkspace) { writeWorkspaceRequired(res); return true; }
+            __auditCtx.workspace = effectivePostWorkspace;
             const bidirectional = parsed.bidirectional === undefined ? true : Boolean(parsed.bidirectional);
             const rawConf = typeof parsed.confidence === 'string' ? parsed.confidence : 'extracted';
             if (rawConf !== 'extracted' && rawConf !== 'inferred' && rawConf !== 'ambiguous') {
@@ -211,25 +240,48 @@ export async function tryEdgesRoutes(
                 confidenceScore: score,
             };
 
-            // O2: outbox-first — record edge.upsert before substrate.
-            if (deps.outboxStore) {
-                await recordHotWrite(deps.outboxStore, {
-                    workspace: effectivePostWorkspace,
-                    operationKind: 'edge.upsert',
-                    payload: { ...edge, bidirectional },
-                    initiator: 'http:POST /api/edge',
-                    operation: 'edge.upsert',
-                });
-            }
-            if (bidirectional) {
-                await withTransactionConflictRetry(() => edgeGraph.addBidirectionalEdge(edge));
-            } else {
-                await withTransactionConflictRetry(() => edgeGraph.addEdge(edge));
-            }
+            // Round-E X-edges — outbox record + substrate write now run
+            // under ONE per-triple lock (core/nodeWriteLock.ts
+            // `withEdgeLocks`), mirroring MCP store_edge. Unlocked, a
+            // concurrent write for the same (sourceId, targetId, relation)
+            // — via MCP store_edge, this route again, or a bulk edge call —
+            // could record its outbox row and land its graph write in the
+            // opposite relative order (outbox replay then contradicts the
+            // executed order). Bidirectional writes lock BOTH the forward
+            // and reverse triple together.
+            const lockTriples: EdgeLockTriple[] = bidirectional
+                ? [{ sourceId: parsed.sourceId, targetId: parsed.targetId, relation: parsed.relation },
+                    { sourceId: parsed.targetId, targetId: parsed.sourceId, relation: parsed.relation }]
+                : [{ sourceId: parsed.sourceId, targetId: parsed.targetId, relation: parsed.relation }];
+            await withEdgeLocks(effectivePostWorkspace, lockTriples, async () => {
+                // O2: outbox-first — record edge.upsert before substrate.
+                if (deps.outboxStore) {
+                    await recordHotWrite(deps.outboxStore, {
+                        workspace: effectivePostWorkspace,
+                        operationKind: 'edge.upsert',
+                        payload: { ...edge, bidirectional },
+                        initiator: 'http:POST /api/edge',
+                        operation: 'edge.upsert',
+                    });
+                }
+                if (bidirectional) {
+                    await withTransactionConflictRetry(() => edgeGraph.addBidirectionalEdge(edge));
+                } else {
+                    await withTransactionConflictRetry(() => edgeGraph.addEdge(edge));
+                }
+            });
             writeJson(res, 200, {
                 ok: true,
                 edge: { ...edge, bidirectional },
                 workspace: resolved.resolvedWorkspace || null,
+            });
+            // Round-E X-edges finding (2) — POST /api/edge wrote no audit
+            // row, unlike MCP store_edge and POST /api/node (NW-5b).
+            deps.auditLog?.log({
+                toolName: 'http:post_edge',
+                args: { workspace: __auditCtx.workspace, entityId: __auditCtx.entityId },
+                result: 'success',
+                durationMs: Date.now() - __auditStartedAt,
             });
         } catch (err) {
             // addEdge throws when source/target node missing; surface as
@@ -242,6 +294,13 @@ export async function tryEdgesRoutes(
             // (missing node) — keep it raw. 500 echoes raw engine text,
             // so redact it.
             writeError(res, status, status === 500 ? 'internal_error' : 'bad_request', status === 500 ? redactError(err) : msg);
+            deps.auditLog?.log({
+                toolName: 'http:post_edge',
+                args: { workspace: __auditCtx.workspace, entityId: __auditCtx.entityId },
+                result: 'error',
+                resultDetail: redactError(err),
+                durationMs: Date.now() - __auditStartedAt,
+            });
         }
         return true;
     }
@@ -260,6 +319,10 @@ export async function tryEdgesRoutes(
         );
         if (!gate.allowed) { writePermissionDenied(res, gate); return true; }
 
+        const __auditStartedAt = Date.now();
+        const __auditCtx: { workspace: string | null; entityId: string | null; errored: boolean; resultDetail?: string } = {
+            workspace: null, entityId: null, errored: false,
+        };
         try {
             const u = new URL(url, 'http://localhost');
             const sourceId = u.searchParams.get('sourceId');
@@ -270,12 +333,14 @@ export async function tryEdgesRoutes(
                 writeError(res, 400, 'bad_request', 'sourceId, targetId, and relation query params are required');
                 return true;
             }
+            __auditCtx.entityId = `${sourceId}->${targetId}:${relation}`;
 
             const principal = getCurrentPrincipal();
             // Sprint L1c — workspace required (writer). Token's bound
             // workspace counts as explicit; no token + no query param → 400.
             const effectiveDeleteWorkspace = requestedWorkspace ?? principal?.workspace;
             if (!effectiveDeleteWorkspace) { writeWorkspaceRequired(res); return true; }
+            __auditCtx.workspace = effectiveDeleteWorkspace;
             if (bindRouteTarget(res, { requested: requestedWorkspace, intent: 'write' }) === null) return true;
 
             const resolved = await resolveTargetGraph(deps, effectiveDeleteWorkspace);
@@ -289,22 +354,39 @@ export async function tryEdgesRoutes(
             const edgeGraph = resolved.graph;
             // Sprint O4 — backpressure gate.
             if (checkOutboxBackpressure(res, effectiveDeleteWorkspace, deps.outboxLagCache)) return true;
-            // O2: outbox-first — record edge.delete before substrate.
-            if (deps.outboxStore) {
-                await recordHotWrite(deps.outboxStore, {
-                    workspace: effectiveDeleteWorkspace,
-                    operationKind: 'edge.delete',
-                    payload: { sourceId, targetId, relation },
-                    initiator: 'http:DELETE /api/edge',
-                    operation: 'edge.delete',
-                });
-            }
-            // deleteEdge is declared on LoreGraphHandle — every graph
-            // substrate implements it directly, no capability probe needed.
-            const deleted = await withTransactionConflictRetry(() => edgeGraph.deleteEdge(sourceId, targetId, relation));
+            // Round-E X-edges — outbox record + substrate delete now run
+            // under the SAME per-triple lock POST /api/edge and MCP
+            // store_edge/delete_edge take (core/nodeWriteLock.ts
+            // `withEdgeLock`). Unlocked, a concurrent write for this triple
+            // could land its outbox row and graph write between this call's
+            // own outbox record and its graph delete.
+            const deleted = await withEdgeLock(effectiveDeleteWorkspace, sourceId, targetId, relation, async () => {
+                // O2: outbox-first — record edge.delete before substrate.
+                if (deps.outboxStore) {
+                    await recordHotWrite(deps.outboxStore, {
+                        workspace: effectiveDeleteWorkspace,
+                        operationKind: 'edge.delete',
+                        payload: { sourceId, targetId, relation },
+                        initiator: 'http:DELETE /api/edge',
+                        operation: 'edge.delete',
+                    });
+                }
+                // deleteEdge is declared on LoreGraphHandle — every graph
+                // substrate implements it directly, no capability probe needed.
+                return withTransactionConflictRetry(() => edgeGraph.deleteEdge(sourceId, targetId, relation));
+            });
             if (deleted === 0) {
                 writeError(res, 404, 'edge_not_found', `edge not found: ${sourceId} -${relation}-> ${targetId}`, {
                     sourceId, targetId, relation,
+                });
+                // Round-E X-edges finding (2) — DELETE /api/edge wrote no
+                // audit row, unlike MCP delete_edge and DELETE /api/node.
+                deps.auditLog?.log({
+                    toolName: 'http:delete_edge',
+                    args: { workspace: __auditCtx.workspace, entityId: __auditCtx.entityId },
+                    result: 'error',
+                    resultDetail: 'edge_not_found',
+                    durationMs: Date.now() - __auditStartedAt,
                 });
                 return true;
             }
@@ -313,9 +395,24 @@ export async function tryEdgesRoutes(
                 deleted,
                 workspace: resolved.resolvedWorkspace || null,
             });
+            deps.auditLog?.log({
+                toolName: 'http:delete_edge',
+                args: { workspace: __auditCtx.workspace, entityId: __auditCtx.entityId },
+                result: 'success',
+                durationMs: Date.now() - __auditStartedAt,
+            });
         } catch (err) {
             console.error(`[Lore HTTP] DELETE /api/edge failed: ${redactError(err)}`);
             writeError(res, 500, 'internal_error', redactError(err)); // F-COL5
+            __auditCtx.errored = true;
+            __auditCtx.resultDetail = redactError(err);
+            deps.auditLog?.log({
+                toolName: 'http:delete_edge',
+                args: { workspace: __auditCtx.workspace, entityId: __auditCtx.entityId },
+                result: 'error',
+                resultDetail: __auditCtx.resultDetail,
+                durationMs: Date.now() - __auditStartedAt,
+            });
         }
         return true;
     }

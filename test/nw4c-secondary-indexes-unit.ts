@@ -4,13 +4,13 @@
  *
  * NW-4c was opened to add secondary indexes on `LoreNode` so hot list /
  * cursor readers stop doing full table scans. Investigation found the
- * embedded engine (`@kineviz/kuzu-lite 0.11.x`) did NOT expose
+ * embedded legacy graph engine did NOT expose
  * `CREATE INDEX` DDL — the Cypher parser rejected every variant. The
- * task closed as `NOT-A-BUG: kuzu-engine-limitation`; the remediation
+ * task closed as `NOT-A-BUG: legacy-engine-limitation`; the remediation
  * is the documented design note in `docs/PERFORMANCE_NOTES.md` plus
  * the bounded-query guards that were already in place.
  *
- * Kùzu was removed entirely (Phase 3d, 2026-08-21), so the live
+ * The legacy graph engine was removed entirely (Phase 3d, 2026-08-21), so the live
  * parser-probe half and the localGraph.ts/localGraphReads.ts
  * source-scan halves died with the engine. What stays pinned:
  *
@@ -38,7 +38,7 @@ async function main(): Promise<void> {
     // The mitigation for the missing index is the SW-18 default cap
     // on listNodes. If someone removes it, the audit risk returns.
     // DEFAULT_LIST_NODES_CAP now lives in loreNodeRow.ts (relocated Phase 3a,
-    // Kuzu removal: it's pure/engine-agnostic and shared by every substrate
+    // legacy graph-engine removal: it's pure/engine-agnostic and shared by every substrate
     // that produces a LoreNode-shaped row) — assert on its VALUE, not on
     // which file textually declares it, so this pin survives the next
     // relocation instead of rotting on it.

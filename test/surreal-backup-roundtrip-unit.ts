@@ -1,17 +1,17 @@
 #!/usr/bin/env tsx
 /**
- * kuzu-free-backup-roundtrip-unit.ts — a workspace with NO Kùzu database can
- * be backed up and restored, and its data survives.
+ * surreal-backup-roundtrip-unit.ts — a workspace with NO legacy graph-engine
+ * database can be backed up and restored, and its data survives.
  *
  * ── WHY THIS IS NOT A TAUTOLOGY ─────────────────────────────────────────────
  *
  * `.lore/` is treated as an opaque tree, so it is tempting to assume a
- * Kùzu-free workspace "obviously" round-trips. That assumption has already been
- * wrong twice on this branch: `backup.ts` special-cased the literal filename
- * `tables.sqlite`, so the ReBAC and pending-ops stores shipped mismatched WAL
- * sidecars; and `storageInspector` categorised `.lore/surreal/` as "other", so
- * a disk report showed a graph of ~0 bytes. Both were opaque-tree assumptions
- * that a hardcoded name quietly broke.
+ * legacy-engine-free workspace "obviously" round-trips. That assumption has
+ * already been wrong twice on this branch: `backup.ts` special-cased the
+ * literal filename `tables.sqlite`, so the ReBAC and pending-ops stores
+ * shipped mismatched WAL sidecars; and `storageInspector` categorised
+ * `.lore/surreal/` as "other", so a disk report showed a graph of ~0 bytes.
+ * Both were opaque-tree assumptions that a hardcoded name quietly broke.
  *
  * So this test does the thing rather than asserting the property:
  *   - builds a workspace whose graph is REAL SurrealDB, written through
@@ -25,7 +25,7 @@
  * It also covers the engine-mismatch guard, which is new and is the one thing
  * here that can fail loudly rather than silently.
  *
- * Run: npx tsx test/kuzu-free-backup-roundtrip-unit.ts
+ * Run: npx tsx test/surreal-backup-roundtrip-unit.ts
  */
 
 import assert from 'node:assert/strict';
@@ -52,7 +52,7 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
     }
 }
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-kfree-'));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-surrealbackup-'));
 const ws = path.join(root, 'src');
 const loreDir = path.join(ws, '.lore');
 fs.mkdirSync(loreDir, { recursive: true });
@@ -64,7 +64,7 @@ const NODES = [
     { id: 'k3', type: 'convention', label: 'Gamma', content: 'third body' },
 ];
 
-console.log('Kùzu-free workspace: backup and restore');
+console.log('Legacy-engine-free workspace: backup and restore');
 
 // ── build a genuinely Surreal-backed workspace ──────────────────────────────
 {
@@ -102,10 +102,10 @@ fs.writeFileSync(path.join(loreDir, 'config.json'), '{"workspace":"src"}');
 
 let tarball = '';
 
-await test('the fixture really has NO Kùzu database', () => {
+await test('the fixture really has NO legacy graph-engine database', () => {
     const entries = fs.readdirSync(loreDir);
-    assert.ok(!entries.includes('graph'), `unexpected Kùzu graph: ${entries.join(', ')}`);
-    assert.ok(!entries.includes('graph.wal'), 'no Kùzu WAL');
+    assert.ok(!entries.includes('graph'), `unexpected legacy graph artefact: ${entries.join(', ')}`);
+    assert.ok(!entries.includes('graph.wal'), 'no legacy graph-engine WAL');
     assert.ok(entries.includes('surreal'), 'and it does have a Surreal store');
 });
 
@@ -160,9 +160,12 @@ await test('the SQLite substrates survive alongside it', () => {
     }
 });
 
-await test('restoring a surreal archive into a kuzu-registered workspace is REFUSED', async () => {
-    // Without this the daemon would open Kùzu, find no store, read an empty
-    // graph and report success — a workspace that looks fine and has no data.
+await test('restoring a surreal archive into a legacy-engine-registered workspace is REFUSED', async () => {
+    // Without this the daemon would open the legacy engine, find no store, read
+    // an empty graph and report success — a workspace that looks fine and has
+    // no data. 'kuzu' is the on-disk sentinel value a pre-removal
+    // workspaces.json registration still carries, so restore must recognise
+    // and reject it explicitly.
     const dest = path.join(root, 'mismatch');
     fs.mkdirSync(path.join(dest, '.lore'), { recursive: true });
     await assert.rejects(

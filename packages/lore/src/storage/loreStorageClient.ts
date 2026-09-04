@@ -76,6 +76,21 @@ export interface LoreGraphHandle extends GraphProvider {
     supersedeNode(oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }>;
     unsupersedeNode(id: string): Promise<boolean>;
     markStaleByTags(tags: string[]): Promise<number>;
+    /**
+     * 2026-09-03 (X-markstale audit fix) — the two id-scoped primitives the
+     * mark_stale entry points (mcp/tools/memory/markStale.ts, POST
+     * /api/mark-stale) use instead of calling `markStaleByTags` directly, so
+     * the tag-resolution (read) and the actual mutation (write, chunk-locked
+     * + outbox-recorded) are separate steps: `findNodeIdsByTags` resolves
+     * the full matching id set ONCE up front; `markStaleByIds` applies the
+     * flag to exactly the ids in ONE already-locked, already-outbox-recorded
+     * chunk (mirrors deleteNode's role in the `node.delete` outbox kind).
+     * `markStaleByTags` itself is UNCHANGED and stays for the CLI's
+     * no-daemon direct-open fallback (cli/commands/markStale.ts), which has
+     * no outbox/replicator to record against anyway.
+     */
+    findNodeIdsByTags(tags: string[]): Promise<string[]>;
+    markStaleByIds(ids: string[]): Promise<number>;
     pruneEphemeralNodes(defaultTtlMs?: number): Promise<number>;
     pruneInferredLoreEdges(relationPrefix: string): Promise<number>;
     /**

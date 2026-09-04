@@ -2,9 +2,9 @@
  * transactionConflictRetry.ts — retry wrapper for SurrealDB's optimistic-
  * concurrency "Transaction conflict... this transaction can be retried"
  * error under concurrent writes to overlapping keys — expected, retryable
- * behavior per SurrealDB's own error message. LocalGraph (Kùzu) serializes
- * writes internally (globalWriteQueue) and never hits this error class, so
- * this retry is a no-op there.
+ * behavior per SurrealDB's own error message. The prior local graph engine
+ * serialized writes internally (globalWriteQueue) and never hit this error
+ * class, so this retry was a no-op there.
  *
  * Originally inlined in bulkIngest.ts (2026-08-13, found: 27/550 nodes
  * failed on a real workload without it). That first version used a short

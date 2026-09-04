@@ -49,17 +49,51 @@ console.log('Sprint E2 — skip-on-write default for bulk lane');
 interface FakeNode { id: string; type: string; label: string }
 function makeFakeGraph() {
     const upsertCalls: string[] = [];
+    const upsertNode = async (n: FakeNode) => {
+        upsertCalls.push(n.id);
+        return { ...n, project: '*', ecosystem: '*', updatedAt: new Date().toISOString() };
+    };
     return {
         upsertCalls,
         graph: {
-            async upsertNode(n: FakeNode) {
-                upsertCalls.push(n.id);
-                return { ...n, project: '*', ecosystem: '*', updatedAt: new Date().toISOString() };
-            },
+            upsertNode,
             async addEdge() { /* unused */ },
             async addBidirectionalEdge() { /* unused */ },
             async deleteNode() { return false; },
             async search() { return []; },
+            // isWorkspaceGraph (engines/requireWorkspaceGraph.ts) probes for
+            // bulkListProjected + queryEdges to decide LOCAL vs ARCADE in
+            // handleBulkNodes (bulkWrite.ts). Without these two, this fake
+            // failed the probe and every test below silently ran the ARCADE
+            // per-id branch (per-node verbatim.upsert rows via
+            // bulkEmbedFlush.ts) instead of the LOCAL batched branch
+            // (one embed.batch row) the assertions below are written for.
+            // Neither body is exercised by handleBulkNodes — only their
+            // presence as functions matters for the probe — but they return
+            // shapes matching SurrealGraph's (engines/surrealGraph.ts) in
+            // case a future test starts exercising them for real.
+            async bulkListProjected() {
+                return { rows: [], nextCursor: null };
+            },
+            async queryEdges() {
+                return [];
+            },
+            // bulkUpsertNodes IS exercised by the LOCAL branch — mirrors
+            // SurrealGraph.bulkUpsertNodes's per-node error isolation: one
+            // call to the fake's own upsertNode per batch item, {id, ok,
+            // error} per result, batch continues past a per-node failure.
+            async bulkUpsertNodes(batch: FakeNode[]) {
+                const results: Array<{ id: string; ok: boolean; error?: string }> = [];
+                for (const n of batch) {
+                    try {
+                        await upsertNode(n);
+                        results.push({ id: n.id, ok: true });
+                    } catch (err) {
+                        results.push({ id: n.id, ok: false, error: (err as Error).message });
+                    }
+                }
+                return results;
+            },
         },
     };
 }

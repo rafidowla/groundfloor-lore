@@ -26,7 +26,7 @@
 import type { SchemaProposal } from '../../../../schemas/authoring.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { gateSchemaApproval } from '../../../../security/schemaApprovalGate.js';
-import { readJsonBody, writeJson, writeError } from '../../helpers.js';
+import { readJsonBody, writeJson, writeError, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { PREFIX, SCHEMA_APPROVE_OPERATION, type SchemaRoutesDeps } from './shared.js';
 import { redactError } from '../../../../security/logRedact.js';
 import { getCurrentPrincipal } from '../../../../auth/principal.js';
@@ -73,7 +73,12 @@ export async function tryProposalRoutes(req: IncomingMessage, res: ServerRespons
             // Phase 1 destructive guard messages mention "destructive change";
             // surface them as 403 (forbidden by policy), not 500.
             const msg = (e as Error).message;
-            if (/destructive change/i.test(msg)) {
+            if (isInvalidJsonBody(e)) {
+                // X-json400 (2026-09-03 audit) — already 400, but
+                // redactError garbled the JSON.parse diagnostic; route
+                // through writeInvalidJson for a clean message instead.
+                writeInvalidJson(res, e);
+            } else if (/destructive change/i.test(msg)) {
                 writeError(res, 403, 'destructive_change_requires_human', redactError(e));
             } else {
                 writeError(res, 400, 'propose_failed', redactError(e));
@@ -166,6 +171,10 @@ export async function tryProposalRoutes(req: IncomingMessage, res: ServerRespons
                 );
                 writeJson(res, 200, receipt);
             } catch (e) {
+                // X-json400 (2026-09-03 audit) — readJsonBody's tagged parse
+                // error never matched /not found/i, so a malformed body fell
+                // through to a 500 approve_failed. Check the tag first.
+                if (isInvalidJsonBody(e)) { writeInvalidJson(res, e); return true; }
                 const msg = (e as Error).message;
                 const status = /not found/i.test(msg) ? 404 : 500;
                 writeError(res, status, 'approve_failed', redactError(e));
@@ -185,6 +194,8 @@ export async function tryProposalRoutes(req: IncomingMessage, res: ServerRespons
                 );
                 writeJson(res, 200, rec);
             } catch (e) {
+                // X-json400 (2026-09-03 audit) — see the approve handler above.
+                if (isInvalidJsonBody(e)) { writeInvalidJson(res, e); return true; }
                 const msg = (e as Error).message;
                 const status = /not found/i.test(msg) ? 404 : 500;
                 writeError(res, status, 'reject_failed', redactError(e));

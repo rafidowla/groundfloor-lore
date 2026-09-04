@@ -1,11 +1,11 @@
 /**
  * surrealGraphOverview.ts — the SurrealDB query layer for the operations that
- * existed only on Kùzu.
+ * existed only on the prior local graph engine.
  *
  * Eight operations had live callers (topology chords, the diagnostics language
  * breakdown, `lore lint`, node lineage, the maintenance archive, cache
  * controls) and no SurrealDB implementation. On a Surreal-backed workspace each
- * one either threw or, worse, ran against the empty Kùzu node table and
+ * one either threw or, worse, ran against that prior engine's empty node table and
  * returned a confident wrong answer.
  *
  * The two topology overviews delegate their MEANING to
@@ -118,7 +118,7 @@ export async function getTopologyOverview(query: SurrealQuery): Promise<Topology
  *
  * The blob's own type list is itself the grouping column, which is why the
  * second argument repeats `type`: a type blob contains exactly one type entry,
- * matching the Kùzu implementation's shape.
+ * matching the prior implementation's shape.
  */
 export async function getTopologyOverviewByType(query: SurrealQuery): Promise<TopologyOverviewResult> {
     try {
@@ -138,8 +138,9 @@ export async function getTopologyOverviewByType(query: SurrealQuery): Promise<To
  * Node counts by `language` tag.
  *
  * Empty-string collapses under the key `null` — that is the public
- * representation of "unknown", and it is the Kùzu behaviour this must match.
- * A missing column is non-fatal for the same reason it is on Kùzu: older
+ * representation of "unknown", and it is the behaviour the prior
+ * implementation had, which this must match. A missing column is non-fatal
+ * for the same reason it was on the prior implementation: older
  * graphs predate the field, and a diagnostics panel must not 500 over it.
  */
 export async function getLanguageBreakdown(query: SurrealQuery): Promise<Record<string, number>> {
@@ -161,7 +162,7 @@ export async function getLanguageBreakdown(query: SurrealQuery): Promise<Record<
  * Orphan check — nodes with no edges in either direction, excluding notes.
  *
  * Notes are excluded because a standalone note is a legitimate artefact, not a
- * dangling reference; that carries over from the Kùzu implementation verbatim,
+ * dangling reference; that carries over from the prior implementation verbatim,
  * as does the message text, because operators grep these strings.
  */
 export async function lintGraph(query: SurrealQuery): Promise<string[]> {

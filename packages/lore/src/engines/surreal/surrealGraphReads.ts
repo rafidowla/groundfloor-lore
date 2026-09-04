@@ -12,8 +12,8 @@
  * by construction:
  *   - `rowToLoreNode` (localGraphReads.ts) — the row → LoreNode field mapper.
  *     The ArcadeDB engine already reuses it the same way
- *     (engines/arcade/arcadeGraphStore.ts). Stored field names mirror Kùzu's
- *     columns precisely so the mapper needs no translation beyond unwrapping
+ *     (engines/arcade/arcadeGraphStore.ts). Stored field names follow a
+ *     shared column-naming convention precisely so the mapper needs no translation beyond unwrapping
  *     the record id.
  *   - `rankSearchResults` + `SEARCH_SCAN_CAP` (searchRanking.ts) — the single
  *     source of truth for keyword-search ordering across every backend.
@@ -171,8 +171,8 @@ async function traverseUncached(
         bfs:
         for (let depth = 1; depth <= clampedDepth; depth++) {
             // ONE query per depth level, not one per frontier node: SurrealDB
-            // matches the whole frontier in a single edge scan. LocalGraph
-            // issues 2 queries per frontier node because Kùzu at 0.11.3 can't
+            // matches the whole frontier in a single edge scan. The prior local
+            // graph engine issued 2 queries per frontier node because it couldn't
             // parse the recursive form — the round-trip count differs, the
             // observable result does not.
             const byFrontier = await fetchFrontierEdges(ctx, frontier);
@@ -497,6 +497,6 @@ export async function listNodes(
     });
 }
 
-// Re-exported from the Kùzu read module rather than redeclared: a second copy
+// Re-exported from the shared node-row module rather than redeclared: a second copy
 // of this cap would be a silent parity fork the first time one moved.
 export { DEFAULT_LIST_NODES_CAP };

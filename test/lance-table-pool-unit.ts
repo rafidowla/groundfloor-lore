@@ -2,7 +2,7 @@
 /**
  * test/lance-table-pool-unit.ts — LanceTablePool unit tests.
  *
- * Mirrors test/kuzu-connection-pool-unit.ts shape. Validates the
+ * Mirrors test/the legacy graph engine-connection-pool-unit.ts shape. Validates the
  * pool-lifecycle invariants the /api/recall LanceDB fix depends on:
  *
  *   1. resolveLancePoolSize honours env + clamp + default

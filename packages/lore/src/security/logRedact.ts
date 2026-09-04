@@ -45,7 +45,7 @@ export function redactId(id: string): string {
  * redactError — format an Error's message for logging, redacting any
  * node-ID-looking substring.
  *
- * Best-effort. The native error messages from Kùzu and LanceDB can echo
+ * Best-effort. The native error messages from SurrealDB and LanceDB can echo
  * the ID back in their own strings. We catch several leak shapes:
  *   1. Quoted tokens — `'...'` and `"..."` (the original behavior).
  *   2. Absolute filesystem paths — `/Users/...`, `/home/...`, `/var/...`,

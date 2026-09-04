@@ -264,7 +264,7 @@ async function main(): Promise<void> {
     // NOTE: a distinct-triple "must run in parallel" assertion is intentionally
     // NOT added — the per-key mutex's role is strictly to make the SAME-key
     // read-decide-write atomic, not to widen cross-key parallelism (SurrealDB
-    // is multi-writer, unlike Kùzu, but the atomicity requirement is identical).
+    // is multi-writer, unlike the legacy graph engine, but the atomicity requirement is identical).
     // The same-triple convergence above is the fix's pin.
 
     console.log(`\n${passed} passed, ${failed} failed`);

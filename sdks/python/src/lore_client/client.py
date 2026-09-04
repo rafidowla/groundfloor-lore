@@ -1,6 +1,6 @@
 """client.py — typed Python wrapper over Lore Core's REST API.
 
-Lore Core's storage engines (SurrealDB/Kùzu, LanceDB, SQLite) are native
+Lore Core's storage engines (SurrealDB, LanceDB, SQLite) are native
 Node.js bindings — there is no in-process Python port, and this client does
 not attempt one (see sdks/python/README.md). `LoreClient` talks to a running
 `lore serve` daemon (default `http://127.0.0.1:3847`) over plain HTTP/JSON,
@@ -26,6 +26,7 @@ deliberately-scoped first pass, not full parity):
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Iterable, Optional, Union
 from urllib.parse import quote
 
@@ -126,13 +127,35 @@ class LoreClient:
 
     def health_full(self) -> dict[str, Any]:
         """GET /api/health — full daemon health snapshot (embedding backend,
-        outbox depth/lag, background-reconnect state, ...). No auth required.
+        outbox depth/lag, background-reconnect state, ...).
+
+        B1 (2026-09-03): this endpoint is on the public-path allowlist (no
+        Bearer required just to REACH it — the request never 401s), but the
+        BODY you get back depends on whether `self.token` is set. A token
+        gets the full snapshot described above; no token silently gets back
+        the same lite body as `health()` (`status`, `version`, `sessions`,
+        `backgroundReconnect`, `embeddingBackend` — no `loreHome`,
+        `workspace`/`workspaces`, `outbox`, or `rateLimit`). See
+        docs/OPERATIONS.md's "GET /api/health" section for the wire-level
+        contract. This client warns (not raises) when called with no token,
+        since the request still succeeds — callers relying on
+        outbox/workspace/loreHome fields would otherwise get a thinner dict
+        than the docstring implies with no error to explain why.
+
         Returned as a plain dict: the snapshot is large and evolves often, so
         it isn't modeled field-by-field yet — see the "gaps" note in the SDK
         README. `outbox.depth == 0` (when `outbox` is present) means the
         write pipeline has drained, useful for polling after a write before
         expecting semantic recall to see it.
         """
+        if not self.token:
+            warnings.warn(
+                "health_full() called with no auth token: /api/health will "
+                "return the LITE body (no loreHome/workspace/outbox/rateLimit) "
+                "rather than the full snapshot. Pass `token=` to LoreClient "
+                "to get the full snapshot.",
+                stacklevel=2,
+            )
         resp = self._request("GET", "/api/health", headers=self._headers())
         return resp.json()
 
@@ -324,7 +347,7 @@ class LoreClient:
         template: Optional[str] = None,
     ) -> dict[str, Any]:
         """POST /api/workspaces — create/register a new workspace (its own
-        Kùzu/Surreal graph + LanceDB — full data isolation from every other
+        SurrealDB graph + LanceDB — full data isolation from every other
         workspace). `mode`: 'local-only' | 'local-sync' | 'cloud-only'."""
         body: dict[str, Any] = {"name": name}
         if label is not None:

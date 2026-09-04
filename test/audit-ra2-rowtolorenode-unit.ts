@@ -31,7 +31,7 @@ test('maps success/failure/partial counts + confirmation_score from a full row',
     assert.equal(node.confirmation_score, 0.83);
 });
 
-test('coerces stringified counts (kuzu-lite numeric-as-string) and rejects NaN', () => {
+test('coerces stringified counts (legacy-engine numeric-as-string) and rejects NaN', () => {
     const node = rowToLoreNode({ 'n.id': 'x2', 'n.success_count': '5', 'n.confirmation_score': 'not-a-number' });
     assert.equal(node.success_count, 5, 'numeric string coerced');
     assert.equal(node.confirmation_score, undefined, 'NaN → undefined, not 0/NaN');

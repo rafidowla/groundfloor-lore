@@ -2,7 +2,7 @@
 /**
  * local-adapter-unit.ts — smoke test for LocalAdapter umbrella wiring.
  *
- * Doesn't bring up real Kùzu/LanceDB — passes minimal stub instances
+ * Doesn't bring up real the legacy graph engine/LanceDB — passes minimal stub instances
  * to verify:
  *   - the umbrella exposes all four surfaces
  *   - mode is 'local'
@@ -65,7 +65,7 @@ async function run(): Promise<void> {
         });
         await assert.rejects(
             () => a.tables.insert('x', { id: '1' }),
-            /KuzuTableStorage not yet implemented/,
+            /no table storage was supplied to this adapter/,
         );
     });
 

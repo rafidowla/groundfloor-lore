@@ -4,7 +4,7 @@
  * Migration history:
  *   - Pass 1: API boundary accepted string | string[], coerced to a
  *     comma-joined string (column stayed STRING).
- *   - Pass 2: Kùzu column flipped to STRING[]; readers joined back to a
+ *   - Pass 2: graph column flipped to STRING[]; readers joined back to a
  *     string so the public LoreNode.tags shape stayed a string.
  *   - Pass 3 (2026-06-24): LoreNode.tags IS now string[] — the canonical
  *     in-memory + graph shape is an array. The only places that still
@@ -40,7 +40,7 @@ function finalize(parts: string[]): string[] {
 
 /**
  * Coerce a wire- or storage-shaped tags value (string, string[], or a
- * legacy comma-joined Kùzu/cloud STRING) into the canonical normalized
+ * legacy comma-joined graph/cloud STRING) into the canonical normalized
  * string[]. Idempotent: re-normalizing an already-normalized array is a
  * no-op. This is the boundary normalizer for every write AND the reader
  * for every substrate row.

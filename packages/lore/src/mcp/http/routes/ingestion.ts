@@ -53,13 +53,13 @@ import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../../engines/localGraphRegistry.js';
 import type { WorkspaceVerbatimResolver } from '../../../outbox/workspaceVerbatimResolver.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, extractWorkspace, writeJson, writeError } from '../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, extractWorkspace, writeJson, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow to a class.
 type LoreGraph = LoreGraphHandle;
 type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
 
@@ -160,7 +160,7 @@ export async function tryIngestionRoutes(
         }
         const startMs = Date.now();
         try {
-            const parsedBody = JSON.parse(body || '{}') as {
+            const parsedBody = parseJsonBody(body) as {
                 k?: number;
                 threshold?: number;
                 apply?: boolean;
@@ -189,8 +189,8 @@ export async function tryIngestionRoutes(
             if (deps.graphRegistry && deps.workspaceVerbatimResolver) {
                 try {
                     // getGraphHandle: reconnect REBUILDS semantic edges, so a
-                    // Surreal-backed workspace was having them written into its
-                    // unused Kùzu database.
+                    // Surreal-backed workspace was having them written into an
+                    // unused database for a different engine.
                     reconnectGraphTarget = await deps.graphRegistry.getGraphHandle(reconnectWs);
                     reconnectVerbatimTarget = await deps.workspaceVerbatimResolver.getOrOpen(reconnectWs);
                 } catch (err) {
@@ -360,6 +360,10 @@ export async function tryIngestionRoutes(
                 resultDetail: (err as Error).message,
                 durationMs: Date.now() - startMs,
             });
+            // X-json400 (2026-09-03 audit): the audit log above already ran,
+            // but a client's malformed-JSON mistake still shouldn't answer
+            // 500 — reclassify it to 400 before the domain-error fallback.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 500, 'reconnect_failed', redactError(err));
         }
         return true;
@@ -386,7 +390,7 @@ export async function tryIngestionRoutes(
         }
         const startMs = Date.now();
         try {
-            const parsedBody = JSON.parse(body || '{}') as {
+            const parsedBody = parseJsonBody(body) as {
                 k?: number;
                 threshold?: number;
                 force?: boolean;
@@ -494,6 +498,8 @@ export async function tryIngestionRoutes(
                 resultDetail: (err as Error).message,
                 durationMs: Date.now() - startMs,
             });
+            // X-json400 (2026-09-03 audit) — see the reconnect handler above.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 500, 'reconsume_failed', redactError(err));
         }
         return true;
@@ -522,7 +528,7 @@ export async function tryIngestionRoutes(
             return true;
         }
         try {
-            const payload = JSON.parse(body || '{}') as Partial<ExtractPayload> & { workspace?: string; project?: string };
+            const payload = parseJsonBody(body) as Partial<ExtractPayload> & { workspace?: string; project?: string };
             // Sprint L1c — workspace required (writer per audit row 113).
             const extractWs = extractWorkspace(payload as Record<string, unknown>);
             if (!extractWs) { writeWorkspaceRequired(res); return true; }
@@ -567,6 +573,10 @@ export async function tryIngestionRoutes(
                 ...decision.body,
             });
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — already 400, but redactError
+            // garbled the JSON.parse diagnostic; route that case through
+            // writeInvalidJson for a clean, non-hashed message instead.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'extract_failed', redactError(err));
         }
         return true;
@@ -593,7 +603,7 @@ export async function tryIngestionRoutes(
             return true;
         }
         try {
-            const p = JSON.parse(body || '{}') as { filePath?: string; workspace?: string };
+            const p = parseJsonBody(body) as { filePath?: string; workspace?: string };
             if (!p.filePath || !p.workspace) {
                 writeError(res, 400, 'invalid_ingest_body', 'filePath and workspace required');
                 return true;
@@ -688,6 +698,8 @@ export async function tryIngestionRoutes(
                     { reason: (err as ExtractorError).code });
                 return true;
             }
+            // X-json400 (2026-09-03 audit) — see the reconnect handler above.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 500, 'ingest_file_failed', redactError(err));
         }
         return true;
@@ -714,7 +726,7 @@ export async function tryIngestionRoutes(
             return true;
         }
         try {
-            const p = JSON.parse(body || '{}') as {
+            const p = parseJsonBody(body) as {
                 filePath?: string; workspace?: string;
                 upgradeAction?: 'use_chandra' | 'use_local_vision' | 'use_local_text';
                 modelHint?: string;
@@ -777,6 +789,8 @@ export async function tryIngestionRoutes(
             }
             writeJson(res, 200, { filePath: resolvedPath, mimeType, reprocessedWith: modelUsed, upgradeAction: p.upgradeAction, content: text });
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — see the reconnect handler above.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 500, 'ingest_reprocess_failed', redactError(err));
         }
         return true;

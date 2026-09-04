@@ -1,40 +1,40 @@
 /**
  * sqliteAnalyticalStorage.ts — analytical aggregates over the SQLite collection
- * store, replacing the Kùzu implementation.
+ * store, replacing the prior graph-engine-backed implementation.
  *
  * ── WHY THIS REPLACES RATHER THAN PORTS ─────────────────────────────────────
  *
- * `KuzuAnalyticalStorage` issues `MATCH (n:<table>) RETURN count(n)` against
- * Kùzu node tables. Collections have written to **SQLite** since 061e189
- * (2026-05-16), so it has been aggregating over a substrate that stopped
- * receiving collection writes twelve weeks ago. Measured, not inferred: write
- * 7 rows through the live `SqliteTableStorage` path and ask each side for a
- * count —
+ * The prior analytical storage issued `MATCH (n:<table>) RETURN count(n)`
+ * against the graph engine's node tables. Collections have written to
+ * **SQLite** since 061e189 (2026-05-16), so it had been aggregating over a
+ * substrate that stopped receiving collection writes twelve weeks ago.
+ * Measured, not inferred: write 7 rows through the live `SqliteTableStorage`
+ * path and ask each side for a count —
  *
- *     SqliteTableStorage.count('invoice')   -> 7
- *     KuzuAnalyticalStorage.count('invoice') -> throws
+ *     SqliteTableStorage.count('invoice')                     -> 7
+ *     (prior graph-backed analytical store).count('invoice')  -> throws
  *                                  "Binder exception: Table invoice does not exist."
  *
  * That is an exposed MCP tool surface (`mcp/tools/analytical.ts`: count, sum,
  * avg, min, max, groupBy, distinct, timeSeries) failing in the open. So this is
- * a live-defect fix that happens to also remove a Kùzu dependency, which is why
- * it was rebuilt rather than deleted.
+ * a live-defect fix that happens to also remove a dependency on that prior
+ * engine, which is why it was rebuilt rather than deleted.
  *
  * ── WHAT IS ACTUALLY NEW HERE ───────────────────────────────────────────────
  *
- * `timeSeries` was never implemented on Kùzu — its own header says it is
- * "stubbed pending verification of Kùzu's date-bucketing functions". So this is
- * a first implementation, not a port, and it is the one place where SQLite is
- * dramatically the better host: `strftime` does calendar bucketing natively
- * where the Cypher version had no answer at all.
+ * `timeSeries` was never implemented on the prior engine — its own header
+ * said it was "stubbed pending verification of the engine's date-bucketing
+ * functions". So this is a first implementation, not a port, and it is the
+ * one place where SQLite is dramatically the better host: `strftime` does
+ * calendar bucketing natively where the Cypher version had no answer at all.
  *
  * ── SAFETY ──────────────────────────────────────────────────────────────────
  *
  * Every interpolated identifier — table, aggregate field, group field, time
  * field — goes through the shared `assertIdent`/`quoteSqliteIdent` guards, and
  * every filter through `buildSqliteWhere`. SQLite has no parameter slot for an
- * identifier, so this is the same SW-01 discipline `sqliteTableStorage.ts` and
- * `kuzuAnalyticalStorage.ts` already follow. Values are always bound.
+ * identifier, so this is the same SW-01 discipline `sqliteTableStorage.ts`
+ * follows. Values are always bound.
  */
 
 import type { Database as DatabaseType } from 'better-sqlite3';
@@ -42,12 +42,14 @@ import { assertIdent, buildSqliteWhere, quoteSqliteIdent } from './whereClause.j
 import { encodeValue, decodeValue } from './sqliteTableStorage.js';
 import type { ColumnType } from '../contracts/tables.js';
 import type { Filter } from './collectionStorage.js';
-import type {
-    AggregationType,
-    GroupResult,
-    IAnalyticalStorage,
-    TimeBucket,
-    TimeSeriesPoint,
+import {
+    AnalyticalScanCapExceeded,
+    ANALYTICAL_SCAN_CAP_DEFAULT,
+    type AggregationType,
+    type GroupResult,
+    type IAnalyticalStorage,
+    type TimeBucket,
+    type TimeSeriesPoint,
 } from '../contracts/analytical.js';
 
 /** Canonical collection name → physical SQLite table name. */
@@ -55,6 +57,22 @@ export type ResolveTableFn = (coll: string) => string;
 
 /** Physical table name → declared column types (null when unknown). */
 export type ColTypesFn = (table: string) => Map<string, ColumnType> | null;
+
+/**
+ * Per-call LORE_ANALYTICAL_SCAN_CAP override (docs/CONFIGURATION.md).
+ *
+ * Re-read on every call rather than cached at module load — matches the
+ * prior legacy-engine-backed `timeSeriesScanCap()` read pattern, which the graph-
+ * engine removal (2026-08-21) dropped when the analytical store was
+ * rebuilt on SQLite. Restores the documented fail-loud cap: `timeSeries`
+ * (JS-side bucketing) and `groupBy` (a full scan collapsed via `GROUP BY`)
+ * both aggregate over the WHOLE matched set, so a query that would exceed
+ * the cap must be refused rather than silently scanned/truncated.
+ */
+function analyticalScanCap(): number {
+    const raw = Number(process.env['LORE_ANALYTICAL_SCAN_CAP']);
+    return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : ANALYTICAL_SCAN_CAP_DEFAULT;
+}
 
 /**
  * `strftime` format per bucket.
@@ -120,6 +138,25 @@ export class SqliteAnalyticalStorage implements IAnalyticalStorage {
             throw new Error(`SqliteAnalyticalStorage.${method}: limit must be a positive integer, got ${limit}`);
         }
         return limit;
+    }
+
+    /**
+     * Enforce LORE_ANALYTICAL_SCAN_CAP (docs/CONFIGURATION.md) before an
+     * operation that aggregates over its FULL matched-row set (`timeSeries`
+     * JS-side buckets every row; `groupBy` collapses every row via
+     * `GROUP BY`). Cheapest correct check: a `SELECT COUNT(*)` over the
+     * same filter — reusing the existing `scalar('count', …)` path — rather
+     * than running the real aggregation just to discover it should have
+     * been refused. Throws `AnalyticalScanCapExceeded` when the matched
+     * count exceeds the cap; the caller must narrow the filter/time range
+     * or raise the override, per the documented fail-loud contract.
+     */
+    private assertWithinScanCap(coll: string, filter: Filter | undefined, method: string): void {
+        const cap = analyticalScanCap();
+        const matched = Number(this.scalar(coll, 'count', null, filter) ?? 0);
+        if (matched > cap) {
+            throw new AnalyticalScanCapExceeded(`SqliteAnalyticalStorage.${method}`, cap, matched);
+        }
     }
 
     /**
@@ -193,6 +230,10 @@ export class SqliteAnalyticalStorage implements IAnalyticalStorage {
                 `SqliteAnalyticalStorage.groupBy: aggregation '${aggregation}' requires aggregationField`,
             );
         }
+        // Fail loud over LORE_ANALYTICAL_SCAN_CAP BEFORE the GROUP BY scan —
+        // the cap bounds rows SCANNED, not groups returned, so a caller
+        // `limit` on the output does not exempt an oversized input.
+        this.assertWithinScanCap(coll, filter, 'groupBy');
         const key = quoteSqliteIdent(assertIdent(groupField));
         const expr = aggregation === 'count'
             ? 'count(*)'
@@ -224,7 +265,7 @@ export class SqliteAnalyticalStorage implements IAnalyticalStorage {
     }
 
     /**
-     * Aggregate bucketed by calendar period — the method Kùzu never implemented.
+     * Aggregate bucketed by calendar period — the method the prior engine never implemented.
      *
      * Buckets are computed by `strftime` over the stored value, so `timeField`
      * must hold an ISO-8601 string or a value SQLite's date functions accept.
@@ -245,6 +286,10 @@ export class SqliteAnalyticalStorage implements IAnalyticalStorage {
                 `SqliteAnalyticalStorage.timeSeries: aggregation '${aggregation}' requires aggregationField`,
             );
         }
+        // Fail loud over LORE_ANALYTICAL_SCAN_CAP BEFORE bucketing — restores
+        // the cap the prior legacy-engine-backed implementation enforced, dropped when
+        // the graph-engine removal (2026-08-21) rebuilt this store on SQLite.
+        this.assertWithinScanCap(coll, filter, 'timeSeries');
         const tf = quoteSqliteIdent(assertIdent(timeField));
         const bucketExpr = BUCKET_FORMAT[bucket].replace(/\{F\}/g, tf);
         const expr = aggregation === 'count'

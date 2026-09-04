@@ -36,8 +36,9 @@ export interface SchemaRoutesDeps {
     phaseA: PhaseAServices;
     schemaLoader: SchemaLoader;
     /**
-     * Phase 4 item 8 — migration backend (Kùzu in local mode; cloud
-     * impl pending). Optional so legacy callers + tests that don't
+     * Phase 4 item 8 — migration backend (engine-agnostic
+     * `SchemaGraphOpsMigrationBackend` in local mode; cloud impl
+     * pending). Optional so legacy callers + tests that don't
      * exercise /api/schema/migrations/* can pass undefined and the
      * routes refuse with a 503 instead of crashing.
      */

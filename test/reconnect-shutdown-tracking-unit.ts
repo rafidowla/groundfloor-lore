@@ -23,7 +23,7 @@
  *   R2 — the HTTP `/api/graph/reconnect` + `/api/graph/reconsume` endpoints
  *        `await reconnectGraph(...)` inside a REQUEST. Being awaited binds them
  *        to the request, not to the drain — and `server.close()` lets in-flight
- *        requests finish while the drain proceeds past them to close Kùzu and
+ *        requests finish while the drain proceeds past them to close the legacy graph engine and
  *        LanceDB underneath. reconsume is the worst case: it re-embeds every
  *        node, so it is the longest-running writer in the process. They are now
  *        started through `tracker.runTracked`, which both registers the sweep

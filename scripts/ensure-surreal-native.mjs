@@ -7,9 +7,10 @@
  * a prebuilt `.node` for every supported platform inside the npm tarball
  * (~180 MB), has no install script, and declares no platform-specific
  * optionalDependencies. There is nothing to download. (The repo's former
- * second postinstall, ensure-kuzu-native.mjs, WAS a fetch step — it closed
+ * second postinstall, for the former legacy graph engine, WAS a fetch step — it closed
  * the CDN-outage gap for a package that shipped without a binary — and was
- * deleted with the Kùzu engine, 2026-08-21. This script now runs alone.)
+ * deleted with the legacy graph engine, 2026-08-21. This script now runs
+ * alone.)
  *
  * What CAN still go wrong, and is worth catching at install time rather than
  * at first query:
@@ -40,7 +41,8 @@ const PACKAGE_NAME = '@surrealdb/node';
  * Locate the package wherever the package manager put it. npm normally HOISTS
  * it to the consumer's top-level node_modules when Lore is a dependency; the
  * nested layout only exists in this repo's own checkout. Same resolution
- * strategy (and same reason) as findKuzuLiteDir.
+ * strategy (and same reason) as the equivalent locator in the now-deleted
+ * legacy-engine postinstall script.
  */
 function findPackageDir() {
     const require = createRequire(import.meta.url);
@@ -85,7 +87,7 @@ const binaryName = platformBinaryName();
 if (binaryName === null) {
     warn(
         `no prebuilt addon exists for ${process.platform}/${process.arch}. `
-        + 'The SurrealDB engine will be unavailable on this machine; Kùzu is unaffected.',
+        + 'The SurrealDB engine — the only graph engine — will be unavailable on this machine.',
     );
     process.exit(0);
 }
@@ -112,8 +114,7 @@ try {
         `the native addon failed to load on Node ${process.versions.node} `
         + `(NODE_MODULE_VERSION ${process.versions.modules}): ${err.message}\n`
         + `       Lore pins Node 22 (package.json engines: ">=22 <23"); you are on Node ${nodeMajor}. `
-        + 'Switch to Node 22 (`nvm use`, this repo ships a .nvmrc) if you intend to use the SurrealDB engine. '
-        + 'Kùzu is unaffected.',
+        + 'Switch to Node 22 (`nvm use`, this repo ships a .nvmrc) if you intend to use the SurrealDB engine.',
     );
     process.exit(0);
 }

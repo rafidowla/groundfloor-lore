@@ -6,9 +6,9 @@ export async function reconsumeCommand(args: string[]): Promise<void> {
 }
 
 export async function reconnectCommand(args: string[]): Promise<void> {
-    const { openWorkspaceGraph } = await import('../../engines/openWorkspaceGraph.js');
     const { VerbatimStore } = await import('../../engines/verbatimStore.js');
     const { reconnectGraph } = await import('../../engines/reconnect.js');
+    const { openGraphForCli } = await import('./shared.js');
 
     const apply = args.includes('--apply');
     const force = args.includes('--force');
@@ -31,9 +31,11 @@ export async function reconnectCommand(args: string[]): Promise<void> {
         } catch { /* no cursor yet — first run; full sweep */ }
     }
 
-    const graph = openWorkspaceGraph(basePath);
+    // Finding 11 (round E) — refuse fast with a clear message when a
+    // running daemon holds this store's lock, instead of the old ~15s
+    // openSurreal retry storm ending in a raw driver error.
+    const graph = await openGraphForCli(basePath);
     const verbatim = new VerbatimStore(basePath);
-    await graph.initialize();
 
     console.log('');
     const sweepLabel = since ? `incremental since ${since}` : 'full sweep';

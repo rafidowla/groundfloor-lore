@@ -6,10 +6,9 @@
  * substrate adapter(s):
  *
  *   row.target === 'graph.node'     → the workspace's graph engine
- *                                     adapter — SurrealBulkLoaderAdapter
- *                                     (Phase 3d: the Kùzu adapter is gone;
+ *                                     adapter — SurrealBulkLoaderAdapter;
  *                                     with none wired, graph rows fail
- *                                     per-row (closed))
+ *                                     per-row (closed)
  *   row.target === 'graph.edge'     → same graph adapter (edge rows)
  *   row.target === 'verbatim'       → sqlite (text metadata) +
  *                                     lance  (vector mirror)
@@ -33,9 +32,9 @@
 import type {
     BatchResult,
     BulkLoaderOpts,
-    KuzuRow,
-    KuzuNodeRow,
-    KuzuEdgeRow,
+    GraphRow,
+    GraphNodeRow,
+    GraphEdgeRow,
 } from './types.js';
 import type { SurrealBulkLoaderAdapter } from './surrealAdapter.js';
 import type { SqliteBulkLoaderAdapter, SqliteVerbatimRow } from './sqliteAdapter.js';
@@ -49,8 +48,8 @@ export const FLUSH_THRESHOLD = 1_000;
 
 /** Parsed-row shape — what the runner produces per source line. */
 export type ParsedRow =
-    | { target: 'graph.node'; row: KuzuNodeRow }
-    | { target: 'graph.edge'; row: KuzuEdgeRow }
+    | { target: 'graph.node'; row: GraphNodeRow }
+    | { target: 'graph.edge'; row: GraphEdgeRow }
     | {
           target: 'verbatim';
           row: {
@@ -72,12 +71,10 @@ export type ParsedRow =
 
 export interface LoaderDispatcherDeps {
     sqlite?: SqliteBulkLoaderAdapter;
-    /** Phase 3c — the graph-row adapter. The local/embedded graph is
-     *  Surreal-backed since the Kùzu removal (the kuzu adapter died with
-     *  bulkLoader/kuzuAdapter.ts, phase 3d), selected by the daemon from
-     *  the live graph handle's capabilities. With none wired (cloud
-     *  mode), graph.node/graph.edge rows fail per-row instead of
-     *  silently vanishing. */
+    /** The graph-row adapter. The local/embedded graph is Surreal-backed,
+     *  selected by the daemon from the live graph handle's capabilities.
+     *  With none wired (cloud mode), graph.node/graph.edge rows fail
+     *  per-row instead of silently vanishing. */
     surreal?: SurrealBulkLoaderAdapter;
     lance?: LanceBulkLoaderAdapter;
     flushThreshold?: number;
@@ -92,14 +89,13 @@ export interface LoaderDispatcherDeps {
 
 export class LoaderDispatcher {
     private readonly sqlite?: SqliteBulkLoaderAdapter;
-    /** Phase 3c — the workspace's graph engine adapter; graph.node and
-     *  graph.edge rows both route here (SurrealBulkLoaderAdapter since
-     *  the Kùzu adapter's removal, phase 3d). */
+    /** The workspace's graph engine adapter; graph.node and graph.edge
+     *  rows both route here (SurrealBulkLoaderAdapter). */
     private readonly graph?: SurrealBulkLoaderAdapter;
     private readonly lance?: LanceBulkLoaderAdapter;
     private readonly flushThreshold: number;
 
-    private graphBuf: KuzuRow[] = [];
+    private graphBuf: GraphRow[] = [];
     private sqliteBuf: SqliteVerbatimRow[] = [];
     private lanceBuf: LanceRow[] = [];
     /** Parallel to lanceBuf: true when this row COUNTS toward the
@@ -132,9 +128,8 @@ export class LoaderDispatcher {
      *
      * Mapping decisions:
      *   - graph.node/graph.edge rows → never mirrored: dual-write windows
-     *     are keyed by SubstrateName ('sqlite' | 'kuzu' | 'lance'), whose
-     *     vocabulary has no 'surreal' entry — and the Kùzu adapter that
-     *     carried the 'kuzu' key was removed in phase 3d.
+     *     are keyed by SubstrateName (migration/types.ts), a local-substrate
+     *     vocabulary that has no 'surreal' entry.
      *   - verbatim → substrate=sqlite + lance (mirror both); "table" =
      *     'verbatim'. Metadata bag carries optional fields.
      *   - vector → substrate=lance; "table" = 'vector'.
@@ -265,7 +260,7 @@ export class LoaderDispatcher {
     private failGraphRowClosed(rowIndex: number): void {
         this.cumulative.errors.push({
             rowIndex,
-            errorMessage: 'graph_target_unsupported (no graph adapter wired — graph.node/graph.edge rows need a Kùzu or SurrealDB graph handle)',
+            errorMessage: 'graph_target_unsupported (no graph adapter wired — graph.node/graph.edge rows need a SurrealDB graph handle)',
         });
         this.cumulative.failed++;
     }

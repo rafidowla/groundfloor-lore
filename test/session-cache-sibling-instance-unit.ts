@@ -24,9 +24,9 @@
  *      registry-owned view over the top, DELETING the persisted write —
  *      silent data loss through the daemon's own graceful-shutdown path.
  *
- * Kùzu-removal (Phase 3f, 2026-08) restated the invariant for a
+ * legacy-removal (Phase 3f, 2026-08) restated the invariant for a
  * Surreal-backed sibling — same principle storageBundle.ts states for the
- * Kùzu-free case: with no LocalGraph there is no graph-owned manager to
+ * legacy-free case: with no LocalGraph there is no graph-owned manager to
  * reuse, so the registry's memoized path-keyed manager must be the ONLY one
  * in existence. `sessionCacheFor()` memoizes on the cache entry; the
  * invariant now holds by memoization, and these assertions pin that:

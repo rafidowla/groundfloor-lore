@@ -190,6 +190,9 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_SURREAL_FTS',                          // surreal: '1' opts into full-text search — changes matching to whole-word
     'LORE_SURREAL_OPEN_TIMEOUT_MS',              // surreal: per-attempt connect timeout, guards the never-settling open (default 2000)
     'LORE_SURREAL_OPEN_BUDGET_MS',               // surreal: total open-retry budget before failing loudly (default 15000)
+    'LORE_SURREAL_SETTLE_BUDGET_MS',             // surreal: ceiling on settleSurrealStore's post-close wait before giving up (default 2000, '0' disables)
+    'LORE_SURREAL_SETTLE_POLL_MS',               // surreal: gap between directory snapshots while settleSurrealStore polls a closing store (default 25)
+    'LORE_SURREAL_SETTLE_MIN_QUIET_MS',          // surreal: min wait before a store with a non-empty wal/ counts as settled (default 150)
 
     // TW-4c — search scan-cap + ranking weights (engines/searchRanking.ts intEnv reads).
     'LORE_SEARCH_SCAN_CAP',                      // search: candidate scan cap before ranking (default 2000)

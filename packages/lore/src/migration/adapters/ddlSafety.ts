@@ -2,16 +2,17 @@
  * ddlSafety.ts — anti-injection guards for online-migration DDL.
  *
  * Migration specs are operator-authored (`lore migrate apply <spec.json>`) and
- * the adapters splice `spec.table` / `spec.column(s)` / `spec.columnDdl` into
- * native SQLite DDL and Kùzu Cypher. `quoteIdent` covers bare identifiers, but
- * the column-DDL fragments ("name TYPE [constraints]") and — in the Kùzu
- * adapter — the table names were spliced RAW.
+ * the adapter splices `spec.table` / `spec.column(s)` / `spec.columnDdl` into
+ * native SQLite DDL. `quoteIdent` covers bare identifiers, but the
+ * column-DDL fragments ("name TYPE [constraints]") were spliced RAW. (The
+ * former local graph engine's now-removed Cypher-DDL adapter shared this
+ * same guard, with the same raw-table-name exposure.)
  *
  * This is a local-CLI defense-in-depth boundary (the migration coordinator is
  * not exposed on any HTTP/MCP route; the spec author is the operator acting on
  * their own DB). The guard blocks the statement-terminator and comment
  * sequences that turn one `ADD COLUMN` into multi-statement injection —
- * better-sqlite3's `exec()` and the Kùzu shim both run what they are handed.
+ * better-sqlite3's `exec()` runs what it is handed.
  * audit 2026-06-25 (MEDIUM, DDL injection).
  */
 

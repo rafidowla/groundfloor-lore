@@ -141,14 +141,16 @@ library gap (thread `dataDir` into `AuditLog` / audit every other
 `loreHome()`/`loreHomePath()` call site for the same pattern) is out of
 scope for this benchmark and belongs in `packages/lore/src`.
 
-### `graphEngine: 'kuzu'` is pinned explicitly (not the new SurrealDB default) — HISTORICAL
+### The legacy graph-engine config value was pinned explicitly (not the new SurrealDB default) — HISTORICAL
 
-> **This workaround is no longer available.** Kùzu was fully removed
-> 2026-08-21 (`docs/KUZU_REMOVAL.md`); `graphEngine: 'kuzu'` now throws
-> `KuzuEngineRemovedError` at workspace resolution instead of selecting an
-> engine. Kept below as the investigation record for the underlying
-> SurrealDB/tsx ESM import bug this benchmark hit, which is unrelated to
-> Kùzu's removal and may still need its own fix if this benchmark is rerun.
+> **This workaround is no longer available.** The prior local graph engine
+> was fully removed 2026-08-21 (`docs/KUZU_REMOVAL.md`); declaring the
+> legacy graph-engine config value now throws a dedicated removal error at
+> workspace resolution instead of selecting an engine (see
+> `docs/KUZU_REMOVAL.md` for the exact config value and error name). Kept
+> below as the investigation record for the underlying SurrealDB/tsx ESM
+> import bug this benchmark hit, which is unrelated to that removal and may
+> still need its own fix if this benchmark is rerun.
 
 README.md says new workspaces default to SurrealDB. The installed
 `@surrealdb/node@3.0.3` native package ships ESM-only `package.json#exports`
@@ -159,9 +161,8 @@ throws `ERR_PACKAGE_PATH_NOT_EXPORTED` before any workspace code runs, for
 an entry file located outside the repo's tsconfig scope (reproduced with a
 throwaway script; the repo's own `test/*.ts` files did not trigger it,
 likely because tsx's tsconfig-paths resolution behaves differently for
-files inside vs. outside the configured `include`). Pinning
-`graphEngine: 'kuzu'` (at the time, still selectable per workspace as the
-legacy engine — since fully removed 2026-08-21, see
+files inside vs. outside the configured `include`). Pinning the legacy graph-engine config value (at the time, still selectable
+per workspace — since fully removed 2026-08-21, see
 `docs/KUZU_REMOVAL.md`) sidestepped the
 bug entirely rather than debugging tsx/native-ESM
 interop further, which was out of scope here.
@@ -429,8 +430,10 @@ text, expected answer, every retrieved node id, per-k metrics):
 - **Ingestion**: 12,429 turns / 25 questions, 769.2s wall time
   (30.8s/question, 61.9ms/turn — a bit slower than the earlier n=2/n=3
   timing runs, consistent with the shared-workspace corpus growing). 4 of
-  25 ingests hit a transient Kùzu "timeout waiting for active transactions
-  to leave the system before checkpointing" under back-to-back bulk writes;
+  25 ingests hit a transient graph-engine "timeout waiting for active
+  transactions to leave the system before checkpointing" under back-to-back
+  bulk writes (against the graph engine in use at the time — see
+  `docs/KUZU_REMOVAL.md`);
   all 4 succeeded on the harness's built-in retry (3s backoff). One retry
   took 69.9s total instead of the usual ~28-30s.
 - **Retrieval (objective, real, computed against the actual dataset's
@@ -470,7 +473,8 @@ caveat below):
   (500 × 30.8s ≈ 15,400s), sequential, single machine, CPU-only embedding.
   This is the dominant cost of a full run, by far.
 - **Caveat, not a hand-wave**: this rate was measured on a corpus that grew
-  from 0 to ~12,400 nodes over the run. Kùzu ingestion and (per the scoping
+  from 0 to ~12,400 nodes over the run, on the graph engine in use at the
+  time (see `docs/KUZU_REMOVAL.md`). Its ingestion path and (per the scoping
   bug above) recall's raw-candidate filtering both have reasons to degrade
   further as the shared workspace grows toward ~247k nodes — the 4 observed
   checkpoint-timeout retries already showed some slowdown under load at

@@ -1,8 +1,10 @@
 import fs from 'fs';
 import http from 'http';
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { loreHome, loreHomePath } from '../../config/loreHome.js';
 import { withTransactionConflictRetry } from '../../engines/transactionConflictRetry.js';
+import { MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../../engines/nodeFieldLimits.js';
+import { openGraphForCli } from './shared.js';
+import { DEFAULT_PORT } from './migrateWorkspaceToWorkspaceShared.js';
 
 async function tryHttpSupersede(oldId: string, newId: string, reason: string | undefined): Promise<{ ok: boolean; reason?: string } | null> {
     let token: string | null = null;
@@ -15,7 +17,7 @@ async function tryHttpSupersede(oldId: string, newId: string, reason: string | u
     return new Promise((resolve) => {
         const payload = JSON.stringify({ oldId, newId, reason });
         const req = http.request(
-            'http://127.0.0.1:3847/api/node/supersede',
+            `http://127.0.0.1:${DEFAULT_PORT}/api/node/supersede`,
             {
                 method: 'POST',
                 headers: {
@@ -50,6 +52,15 @@ export async function supersedeCommand(args: string[]): Promise<void> {
     }
     const reasonIdx = args.indexOf('--reason');
     const reason = reasonIdx >= 0 ? args[reasonIdx + 1] : undefined;
+    // QA finding 2 (A4 round E, 2026-09-03) — DATA_CONTRACT.md's reason cap
+    // (MAX_NODE_FIELD_BYTES, UTF-8 bytes) is enforced by the daemon route
+    // (POST /api/node/supersede) when a daemon is running, but the no-daemon
+    // fallback below calls graph.supersedeNode() directly with zero
+    // validation. Check up front so BOTH paths are capped identically.
+    if (reason !== undefined && exceedsNodeFieldCap(reason)) {
+        console.error(`✗ --reason exceeds the ${MAX_NODE_FIELD_BYTES}-byte limit`);
+        process.exit(1);
+    }
 
     console.log('');
     console.log(`Supersede: ${oldId}  →  ${newId}`);
@@ -61,7 +72,7 @@ export async function supersedeCommand(args: string[]): Promise<void> {
         if (httpResult.ok) {
             console.log(`✓ Marked '${oldId}' as superseded by '${newId}'.`);
             console.log('');
-            console.log('(Routed through the running Lore daemon at 127.0.0.1:3847.)');
+            console.log(`(Routed through the running Lore daemon at 127.0.0.1:${DEFAULT_PORT}.)`);
             return;
         }
         console.error(`✗ Could not supersede: ${httpResult.reason ?? 'unknown'}`);
@@ -70,8 +81,14 @@ export async function supersedeCommand(args: string[]): Promise<void> {
     }
 
     const basePath = loreHome();
-    const graph = openWorkspaceGraph(basePath);
-    await graph.initialize();
+    // Finding 11 (round E) — the HTTP attempt above already tried the
+    // daemon; this direct-open fallback is what used to sit in the ~15s
+    // openSurreal retry storm. tryHttpSupersede() above now resolves
+    // DEFAULT_PORT (LORE_PORT-aware) instead of a hardcoded 3847, so this
+    // fallback fires only when the HTTP attempt genuinely misses the daemon
+    // (missing/stale auth token, daemon down, timeout). Refuse fast with a
+    // clear message instead of the raw driver error.
+    const graph = await openGraphForCli(basePath);
     const result = await graph.supersedeNode(oldId, newId, reason);
     if (result.ok) {
         // Parity with the supersede_node MCP tool / REST route: also record

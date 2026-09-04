@@ -3,12 +3,12 @@
  * collection-storage-unit.ts — DataplaneCollectionStorage adapter tests.
  *
  * History: this file used to run every Filter shape against BOTH the
- * Kùzu adapter (KuzuCollectionStorage, real temp DB, real Cypher) and
+ * the legacy graph engine adapter (LegacyCollectionStorage, real temp DB, real Cypher) and
  * the cloud adapter in the same pass — "same plugin code, two
- * substrates". The Kùzu graph-shaped declared-collections API had zero
+ * substrates". The legacy graph engine graph-shaped declared-collections API had zero
  * live production consumers and was deleted with the engine — an
  * explicitly accepted capability loss (DEC-COLLECTIONS-GRAPH-SHAPE-LOSS,
- * 2026-08-20). The Kùzu halves of this suite went with it. What remains
+ * 2026-08-20). The legacy graph engine halves of this suite went with it. What remains
  * pins the cloud adapter's Filter→SDK translation via a FakeSdkClient
  * that records calls, asserting the exact translated filter+params shape
  * the existing DataplaneGraph + mock e2e already validated for the core
@@ -329,7 +329,7 @@ const tests = [
 
 (async () => {
     console.log('CollectionStorage — Dataplane adapter tests');
-    console.log('(Kùzu adapter deleted with the engine: DEC-COLLECTIONS-GRAPH-SHAPE-LOSS, 2026-08-20)');
+    console.log('(the legacy graph engine adapter deleted with the engine: DEC-COLLECTIONS-GRAPH-SHAPE-LOSS, 2026-08-20)');
     console.log('='.repeat(72));
     for (const t of tests) await t();
     console.log('');

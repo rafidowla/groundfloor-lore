@@ -4,7 +4,7 @@
  *
  * Pins that MCP tool catch blocks no longer leak raw engine internals to
  * the MCP client. Before fix #4, every tool returned
- * `Error: ${(error as Error).message}` verbatim — and Kùzu/LanceDB errors
+ * `Error: ${(error as Error).message}` verbatim — and the legacy graph engine/LanceDB errors
  * routinely echo node ids, file paths, or content fragments. SW-14 closed
  * this on the HTTP routes; this is the MCP-side mirror.
  *
@@ -38,7 +38,7 @@ function captureLog(): { log: { error(msg: unknown): void }; lines: string[] } {
 console.log('Audit fix #4 — MCP tool error redaction');
 
 test('T1 quoted node-id in raw error is redacted in the caller envelope', () => {
-    // Simulates a Kùzu unique-constraint violation echoing the offending id.
+    // Simulates a legacy graph engine unique-constraint violation echoing the offending id.
     const raw = new Error(`Runtime exception: "person:sarah-smith" violates PK`);
     const { log, lines } = captureLog();
     const result = mcpToolError('store_node', raw, log, 'workspace=alpha');

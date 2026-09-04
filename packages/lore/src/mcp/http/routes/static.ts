@@ -13,14 +13,15 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { StorageBundle } from '../../services.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../../engines/localGraphRegistry.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
-import { writeWorkspaceRequired, writeError } from '../helpers.js';
+import { writeWorkspaceRequired, writeError, generateCspNonce, buildHtmlExportCsp } from '../helpers.js';
 import { exportGraphAsHtml } from '../../../engines/htmlExport.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 
 export interface StaticDeps {
@@ -79,12 +80,27 @@ export async function tryStaticRoutes(
             // Q2.2 — HTML export reads the local graph directly;
             // cloud-mode export is a slice-3 follow-up (needs
             // Dataplane-native dump).
+            // Security checklist #12 — this response is the one daemon
+            // surface that actually renders as a page in a browser, so it
+            // gets a page-specific CSP instead of the strict
+            // `default-src 'none'` every other (JSON/API) response gets by
+            // default (see mcp/http/helpers.ts's applySecurityHeaders,
+            // set earlier in mcp/http/middleware.ts's runHttpGates). The
+            // nonce is generated fresh per response, threaded into the
+            // template so its inline <script>/<style> tags carry the
+            // matching `nonce="..."` attribute, and repeated in the CSP
+            // header below — never 'unsafe-inline'.
+            const cspNonce = generateCspNonce();
             const html = await exportGraphAsHtml(graph, {
                 project,
                 maxNodes: Number.isFinite(maxNodes) ? maxNodes : 500,
                 title,
+                cspNonce,
             });
-            res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+            res.writeHead(200, {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Content-Security-Policy': buildHtmlExportCsp(cspNonce),
+            });
             res.end(html);
         } catch (err) {
             writeError(res, 500, 'internal_error', redactError(err));

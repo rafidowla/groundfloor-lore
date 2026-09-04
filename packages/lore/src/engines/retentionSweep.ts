@@ -39,13 +39,13 @@
  *     These two are the destructive tier — waiting for the consent UI
  *     so users aren't surprised the first time a sweep fires.
  *
- * Operator-visible fix (Kùzu removal step 2, commit 8):
+ * Operator-visible fix (graph-engine generalization, commit 8):
  *   Before this change `this.graph` was queried via `getGraphContext()` —
- *   the Kùzu-only raw-Cypher escape hatch — regardless of which engine the
+ *   a raw-Cypher-only escape hatch — regardless of which engine the
  *   workspace actually declared. Every caller resolved the graph via
- *   `LocalGraphRegistry.getOrOpen`, the Kùzu substrate accessor, so a
+ *   `LocalGraphRegistry.getOrOpen`, a single-engine substrate accessor, so a
  *   `graphEngine: 'surreal'` workspace's sweep silently ran against that
- *   workspace's real-but-EMPTY Kùzu database and reported "0 eligible" no
+ *   workspace's real-but-EMPTY legacy-engine database and reported "0 eligible" no
  *   matter what the workspace's actual (Surreal) data held. The sweep now
  *   drives `getStats()` / `getNode()` / `upsertNode()` (every engine) plus
  *   `bulkListProjected` (both local engines, via `requireWorkspaceGraph`) —
@@ -54,7 +54,7 @@
 
 import type { GraphStats } from '../providers/types.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
+// Widened during the legacy-engine removal: naming the two CONCRETE classes silently
 // excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
 // shared handle? Feature-detect and refuse — do not re-narrow to a class.
 type LoreGraph = LoreGraphHandle;
@@ -136,7 +136,7 @@ export class RetentionSweeper {
                 // every LoreGraphHandle as getStats().typeBreakdown — no
                 // Cypher, no scan, and (unlike the old raw
                 // `MATCH (n:LoreNode) WHERE n.type = $t` query) no implicit
-                // assumption that this workspace's substrate is Kùzu.
+                // assumption about which engine backs this workspace's substrate.
                 //
                 // Deliberate choice: the old code swallowed a failed count
                 // to a silent `kept += 0` (`.catch(() => [])` around the
@@ -171,8 +171,8 @@ export class RetentionSweeper {
             const cutoffMs = Date.now() - rule.ageThresholdDays * 24 * 60 * 60 * 1000;
             const cutoffIso = new Date(cutoffMs).toISOString();
 
-            // Only LoreNode has the legalHold column (core schema; Kùzu-only
-            // for now — SurrealDB has no column of that name yet, so
+            // Only LoreNode has the legalHold column (core schema; present on
+            // the legacy engine's schema only, for now — SurrealDB has no column of that name yet, so
             // `row['legalHold']` reads undefined there and never blocks a
             // Surreal-backed sweep. That's a real cross-engine gap, but not
             // a regression: this path was unreachable on Surreal before this
@@ -182,10 +182,10 @@ export class RetentionSweeper {
             // custom sweeper in Phase 7+.
             //
             // Engine-agnostic: `bulkListProjected` is the keyset-paged,
-            // projection-narrowed node scan both local engines implement
-            // (engines/graphBulkList.ts); it replaces the raw
+            // projection-narrowed node scan both local engines implement;
+            // it replaces the raw
             // `MATCH (n:LoreNode) WHERE ... LIMIT 500` Cypher, which only
-            // ever worked against a Kùzu-backed graph. It's not on
+            // ever worked against one graph engine. It's not on
             // `LoreGraphHandle` (DataplaneGraph doesn't implement it), so
             // `requireWorkspaceGraph` narrows first and turns a cloud-mode
             // call into a named `CloudModeUnsupportedError` instead of a
@@ -270,10 +270,10 @@ export class RetentionSweeper {
                         const ref = await sink.put(nodeId, Buffer.from(content, 'utf-8'));
                         const refStr = encodeSourceRef(ref);
                         // Engine-agnostic node patch: getNode + upsertNode are on
-                        // every LoreGraphHandle (Kùzu, SurrealDB, Dataplane). This
+                        // every LoreGraphHandle (SurrealDB, Dataplane). This
                         // replaces the old raw `MATCH (n:LoreNode {id}) SET
                         // n.content = ..., n.metadata = ...` Cypher, which only
-                        // ever ran against a Kùzu-backed graph. upsertNode does a
+                        // ever ran against one graph engine. upsertNode does a
                         // full-field SET on update (not a partial patch), so the
                         // current node is re-fetched rather than reconstructed
                         // from the paged-scan projection (which only carries the

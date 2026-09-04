@@ -30,7 +30,7 @@
  * Concurrency: only one in-flight plan at a time. The runner refuses
  * to start a new plan if `load()` returns a non-completed entry —
  * caller must explicitly resume or clear first. This keeps the
- * "single-writer per workspace" invariant the existing Kùzu setup
+ * "single-writer per workspace" invariant the existing graph engine
  * already relies on.
  */
 

@@ -3,7 +3,7 @@
  *
  * Defines the SubstrateMigrationAdapter interface that the
  * MigrationCoordinator dispatches to. Designed cloud-compatible:
- * the same shape works for local SQLite + kuzu + LanceDB today AND
+ * the same shape works for local SQLite + SurrealDB + LanceDB today AND
  * for Postgres / Arango / Zilliz when cloud activates. Concrete
  * cloud adapters land in the cloud-activation phase; H1 ships only
  * the local adapters.
@@ -22,7 +22,7 @@
  *     success/failure to the migrations table + outbox.
  *   - Capability probing: adapters expose `capabilities()` so the
  *     coordinator can refuse to dispatch a verb the substrate doesn't
- *     support (e.g., kuzu lacks ALTER COLUMN — coordinator throws
+ *     support (e.g., a substrate lacking a native ALTER COLUMN — coordinator throws
  *     CapabilityNotSupported with a structured reason the operator
  *     CLI surfaces as "additive-not-supported, schema-rebuild-required").
  */
@@ -145,7 +145,7 @@ export interface AdapterCapabilities {
     renameColumn: boolean;
     /** Native column-type change — false today; H2 decomposes. */
     changeType: boolean;
-    /** Native drop column — sqlite>=3.35 supports; kuzu does not. */
+    /** Native drop column — sqlite>=3.35 supports; not every substrate does. */
     dropColumn: boolean;
 }
 
@@ -183,7 +183,7 @@ export interface SubstrateMigrationAdapter {
     /** Phase 2 MIGRATE — batched backfill from fromColumn to toColumn. */
     migrateData(spec: MigrateDataSpec): Promise<AdapterOpResult>;
     /** Phase 3 CONTRACT — remove the old column. On substrates that
-     *  cannot drop (kuzu), null-out + leave-in-place; result.detail
+     *  cannot drop, null-out + leave-in-place; result.detail
      *  carries `{ workaround: 'leave-in-place' }` so the coordinator
      *  surfaces it to the operator. */
     dropOld(spec: DropOldSpec): Promise<AdapterOpResult>;
@@ -223,7 +223,7 @@ export type MigrationKind =
  * the coordinator persists into the migrations table.
  *
  * `target` is the substrate-specific table identifier (SQLite table
- * name, kuzu node-table name, lance dataset name). `params` carries
+ * name, graph node-table name, lance dataset name). `params` carries
  * op-kind-specific fields (column DDL, index name, etc.) so the spec
  * stays a single JSON envelope.
  *

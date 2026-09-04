@@ -11,7 +11,7 @@
  *   WITHIN a single operationKind. That misses the reverse-op reorderings:
  *
  *     1. store node X  → node.upsert seq=1 (pending) + direct graph write
- *     2. the replicator dispatch of seq=1 throws TRANSIENTLY (Kùzu
+ *     2. the replicator dispatch of seq=1 throws TRANSIENTLY (the legacy graph engine
  *        single-writer acquireTimeout / IO hiccup) → row 'failed' w/ a
  *        future nextAttemptAt (backoff).
  *     3. delete node X → node.delete seq=3 (pending) + direct graph delete;
@@ -59,8 +59,19 @@
  *           verbatim.upsert on a DIFFERENT id → it retries.
  *   VN-FAM  NEGATIVE: a failed verbatim.upsert is NOT superseded by a node.*
  *           op sharing the exact key string (verbatim is its own family) →
- *           it retries. (There is no verbatim delete/tombstone kind, so no
- *           V-CROSS pair exists.)
+ *           it retries.
+ *
+ * UPDATE (2026-09-03, QA A2 round-2): `verbatim.tombstone` now exists
+ * (outbox/types.ts, A2 finding 2 fix) and cross-supersedes `verbatim.upsert`
+ * on the same id (outbox/supersession.ts), mirroring node.upsert/node.delete.
+ * Locking that in:
+ *   VT-CROSS   replicated verbatim.tombstone supersedes a failed
+ *              verbatim.upsert on the SAME id → the failed upsert must NOT
+ *              re-dispatch and resurrect content a delete already tombstoned.
+ *   VT-INVERSE replicated verbatim.upsert (a re-create after a delete)
+ *              supersedes a failed verbatim.tombstone on the SAME id → the
+ *              failed tombstone must NOT re-dispatch and erase the
+ *              re-created content.
  */
 
 import assert from 'node:assert/strict';
@@ -148,6 +159,14 @@ function makeHarness(store: SqliteOutboxStore) {
             const id = String(payload['id']);
             dispatched.push(`verbatim.upsert:${id}`);
             verbatim.set(id, String(payload['text']));
+        },
+        // 2026-09-03 (A2 round-2) — verbatim.tombstone now cross-supersedes
+        // verbatim.upsert (outbox/supersession.ts); model it here so VT-*
+        // cases can drive the guard through a REAL replicator tick like every
+        // other case in this file, not just keyOfEntry() in isolation.
+        async tombstoneVerbatim(id) {
+            dispatched.push(`verbatim.tombstone:${id}`);
+            verbatim.set(id, `[TOMBSTONED] ${verbatim.get(id) ?? ''}`);
         },
     };
     const replicator = new OutboxReplicator({
@@ -486,6 +505,73 @@ test('VN-FAM failed verbatim.upsert is NOT superseded by a node.* op sharing the
         `verbatim op must NOT be superseded by a node op on a colliding key; dispatched=${JSON.stringify(dispatched)}`);
     assert.equal(verbatim.get('lore:C'), 'textC');
     assert.equal((await getRow(store, 'vup1'))?.status, 'replicated');
+});
+
+// ── VT-CROSS / VT-INVERSE: verbatim.upsert / verbatim.tombstone cross-
+//    supersede (QA A2 round-2, 2026-09-03) ──
+
+test('VT-CROSS replicated verbatim.tombstone supersedes failed verbatim.upsert (same id) → failed upsert NOT re-dispatched, content stays tombstoned', async () => {
+    const store = newStore();
+    const ws = 'wsVT1';
+    const { dispatched, verbatim, replicator } = makeHarness(store);
+    // The newer replicated delete already tombstoned the durable content.
+    verbatim.set('lore:X', '[TOMBSTONED] oldText');
+
+    // seq=1: an OLDER verbatim.upsert(lore:X, oldText) that failed transiently
+    // (e.g. the original create's outbox row, never reached before the delete).
+    await store.record(baseEntry({ id: 'vt1', operationKind: 'verbatim.upsert', workspace: ws, payload: { id: 'lore:X', text: 'oldText' }, sequenceId: 1 }));
+    await markFailedRetryable(store, 'vt1');
+    // seq=3: the NEWER verbatim.tombstone(lore:X) already durably replicated.
+    await plantReplicated(store, { id: 'vt3', operationKind: 'verbatim.tombstone', workspace: ws, payload: { id: 'lore:X', reason: 'test delete' }, sequenceId: 3 });
+
+    await replicator.tickOnce();
+
+    assert.equal(dispatched.filter(d => d === 'verbatim.upsert:lore:X').length, 0,
+        `the superseded verbatim.upsert must NOT be re-dispatched (would resurrect tombstoned content); dispatched=${JSON.stringify(dispatched)}`);
+    assert.equal(verbatim.get('lore:X'), '[TOMBSTONED] oldText',
+        'stored content must stay tombstoned — a stale re-dispatch would resurrect oldText live');
+    assert.equal((await getRow(store, 'vt1'))?.status, 'dead', 'superseded verbatim.upsert row must be marked dead');
+});
+
+test('VT-INVERSE replicated verbatim.upsert (re-create) supersedes failed verbatim.tombstone (same id) → failed tombstone NOT re-dispatched, content stays live', async () => {
+    const store = newStore();
+    const ws = 'wsVT2';
+    const { dispatched, verbatim, replicator } = makeHarness(store);
+    // The newer replicated re-create already restored live content.
+    verbatim.set('lore:Y', 'reCreatedText');
+
+    // seq=1: an OLDER verbatim.tombstone(lore:Y) that failed transiently
+    // (e.g. a delete whose tombstone row never reached before a re-create).
+    await store.record(baseEntry({ id: 'vt1', operationKind: 'verbatim.tombstone', workspace: ws, payload: { id: 'lore:Y', reason: 'stale delete' }, sequenceId: 1 }));
+    await markFailedRetryable(store, 'vt1');
+    // seq=3: the NEWER verbatim.upsert(lore:Y, reCreatedText) already durably replicated.
+    await plantReplicated(store, { id: 'vt3', operationKind: 'verbatim.upsert', workspace: ws, payload: { id: 'lore:Y', text: 'reCreatedText' }, sequenceId: 3 });
+
+    await replicator.tickOnce();
+
+    assert.equal(dispatched.filter(d => d === 'verbatim.tombstone:lore:Y').length, 0,
+        `the superseded verbatim.tombstone must NOT be re-dispatched (would erase re-created content); dispatched=${JSON.stringify(dispatched)}`);
+    assert.equal(verbatim.get('lore:Y'), 'reCreatedText',
+        'stored content must stay the re-created text — a stale re-dispatch would tombstone it');
+    assert.equal((await getRow(store, 'vt1'))?.status, 'dead', 'superseded verbatim.tombstone row must be marked dead');
+});
+
+test('VTN-FAM NEGATIVE: a failed verbatim.tombstone is NOT superseded by a node.delete op sharing the exact key string → it retries', async () => {
+    const store = newStore();
+    const ws = 'wsVTN';
+    const { dispatched, verbatim, replicator } = makeHarness(store);
+
+    await store.record(baseEntry({ id: 'vt1', operationKind: 'verbatim.tombstone', workspace: ws, payload: { id: 'lore:Z', reason: 'r' }, sequenceId: 1 }));
+    await markFailedRetryable(store, 'vt1');
+    // Newer replicated node op sharing the EXACT key string 'lore:Z'. Verbatim
+    // is its own family, so this must NOT supersede the verbatim row.
+    await plantReplicated(store, { id: 'nd3', operationKind: 'node.delete', workspace: ws, payload: { id: 'lore:Z' }, sequenceId: 3 });
+
+    await replicator.tickOnce();
+
+    assert.equal(dispatched.filter(d => d === 'verbatim.tombstone:lore:Z').length, 1,
+        `verbatim.tombstone must NOT be superseded by a node op on a colliding key; dispatched=${JSON.stringify(dispatched)}`);
+    assert.equal((await getRow(store, 'vt1'))?.status, 'replicated');
 });
 
 // ── S1: SUBSET — original RA-6 same-kind supersession still holds ──

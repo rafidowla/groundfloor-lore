@@ -13,12 +13,13 @@ import type { AuxStore } from '../../../outbox/auxStore.js';
 import type { VersionStore } from '../../../outbox/versionStore.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../../engines/localGraphRegistry.js';
 import { gateRoute } from '../../../security/routeGate.js';
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 import { writePermissionDenied } from '../../../security/rebacGate.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError } from '../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../security/routeWorkspaceBinding.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
@@ -33,7 +34,7 @@ export interface OutcomesRouteDeps {
     /**
      * Sprint L1c (cross-workspace routing) — per-workspace graph registry.
      * When present, the graph-counter side of POST /api/nodes/:id/outcomes
-     * routes its node read + upsert to the REQUESTED workspace's Kùzu store
+     * routes its node read + upsert to the REQUESTED workspace's graph
      * instead of the boot/active `store.loreGraph`. Absent (cloud/tests) →
      * falls back to the boot store, so the no-registry path is unchanged.
      */
@@ -85,7 +86,7 @@ export async function tryOutcomesRoutes(
             return true;
         }
         try {
-            const parsed = JSON.parse(body || '{}') as {
+            const parsed = parseJsonBody(body) as {
                 workspace?: string;
                 status?: string;
                 notes?: string;
@@ -123,10 +124,9 @@ export async function tryOutcomesRoutes(
             // are `LoreGraphHandle` (this file's `LoreGraph` alias), so no
             // cast is needed either way — the pre-widening casts here bridged
             // `LocalGraph`/a union down to the alias; that gap is gone now.
-            // getGraphHandle honours the workspace's declared engine —
-            // getOrOpen is the Kùzu substrate accessor and would target a
-            // Surreal workspace's unused, empty Kùzu graph instead, silently
-            // mis-scoring outcome counters on the wrong node.
+            // getGraphHandle honours the workspace's declared engine,
+            // resolving the requested workspace's own graph rather than
+            // silently mis-scoring outcome counters against the wrong node.
             let graph: LoreGraph = deps.store.loreGraph;
             if (deps.graphRegistry) {
                 try {
@@ -197,6 +197,10 @@ export async function tryOutcomesRoutes(
                 counts,
             }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+            // through to 500 here; parseJsonBody's tagged error is caught
+            // first now.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 500, 'internal_error', redactError(err));
         }
         return true;

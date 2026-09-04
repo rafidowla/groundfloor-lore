@@ -5,7 +5,7 @@
  * no COPY; the fast path is prepared INSERT inside a db.transaction
  * wrapper. Z0 measured the floor at ~81 ms / 100k rows (1.23M rps);
  * Z2's end-to-end target is 100k <5min so this substrate is not the
- * bottleneck — kuzu graph + lance vector dominate.
+ * bottleneck — the graph and vector substrates dominate.
  *
  * What this adapter writes:
  *   - Verbatim documents (id, text, metadata, workspace, ...) into

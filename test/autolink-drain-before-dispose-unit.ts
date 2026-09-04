@@ -7,7 +7,7 @@
  * `void` — untracked fire-and-forget. A caller that wrote a burst of nodes
  * with autolink enabled and then called `dispose()` (exactly what
  * benchmarks/longmemeval/src/writeMosaicQuestion.ts does) raced them: the
- * drain closed Kùzu + LanceDB at step 10 while reconnect writes were still in
+ * drain closed the legacy graph engine + LanceDB at step 10 while reconnect writes were still in
  * flight, those writes threw against closed handles, and `reconnectOneNode`'s
  * own `catch { }` swallowed them. Semantic edges silently missing, no signal
  * to the caller that anything was dropped.

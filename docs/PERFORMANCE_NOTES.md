@@ -3,7 +3,8 @@
 Operational and architectural notes about hot-path performance, what
 optimizations are in place, and which limitations are imposed by the
 underlying engines (the graph engine — SurrealDB, the only graph engine
-since Kùzu was fully removed 2026-08-21 — / LanceDB / SQLite).
+since the prior local graph engine was fully removed 2026-08-21, see
+`docs/KUZU_REMOVAL.md` — / LanceDB / SQLite).
 
 This document is the single home for "we looked at it; here's the
 plain story" performance notes that don't fit cleanly into
@@ -12,22 +13,23 @@ is for the high-level design).
 
 ---
 
-## 1. `LoreNode` table — no secondary indexes (Kùzu engine limitation, HISTORICAL)
+## 1. `LoreNode` table — no secondary indexes (prior local graph engine limitation, HISTORICAL)
 
-> **Moot as of 2026-08-21 — Kùzu was fully removed.** Everything below
-> describes a real constraint of the Kùzu engine specifically, kept as the
-> investigation record (why fake DDL wasn't added, what mitigations exist)
-> rather than deleted. It no longer describes a current limitation — there
-> is only one graph engine now, SurrealDB, and its own secondary-index
-> story is unrelated (see `SurrealFeatures.indexes` /
-> `LORE_SURREAL_DEFINE_INDEXES` in `engines/surreal/surrealConnection.ts`
-> for that engine's own index situation, which is a separate, still-current
-> topic this note doesn't cover).
+> **Moot as of 2026-08-21 — the prior local graph engine was fully removed
+> (see `docs/KUZU_REMOVAL.md`).** Everything below describes a real
+> constraint of that engine specifically, kept as the investigation record
+> (why fake DDL wasn't added, what mitigations exist) rather than deleted.
+> It no longer describes a current limitation — there is only one graph
+> engine now, SurrealDB, and its own secondary-index story is unrelated
+> (see `SurrealFeatures.indexes` / `LORE_SURREAL_DEFINE_INDEXES` in
+> `engines/surreal/surrealConnection.ts` for that engine's own index
+> situation, which is a separate, still-current topic this note doesn't
+> cover).
 
 **Status (as of the original investigation, superseded — see above):**
-Engine-limited to the Kùzu graph engine (`graphEngine: 'kuzu'`), not
-fixable in core at the time. Mitigated by bounded queries and caller-side
-patterns.
+Engine-limited to the prior local graph engine (selected via the legacy
+graph-engine config value), not fixable in core at the time. Mitigated by
+bounded queries and caller-side patterns.
 
 ### What was investigated
 
@@ -36,15 +38,16 @@ Audit finding `perf-listnodes-bulklist-fullscan-no-index`
 only `PRIMARY KEY (id)` — no index on `updatedAt`, `type`, `project`,
 or `ecosystem`. Hot readers (`listNodes`, `bulkListNodes`,
 cursor-paginated `reconnect`) all `ORDER BY n.updatedAt DESC`, which
-without a secondary index forces Kùzu to do a full table scan + sort
-on every page. At enterprise volume (K ≥ 100k nodes) this becomes
+without a secondary index forces the graph engine to do a full table scan +
+sort on every page. At enterprise volume (K ≥ 100k nodes) this becomes
 O(N²/pageSize) work for full-corpus reconnect.
 
 ### What we tried
 
-We probed `@kineviz/kuzu-lite 0.11.3` (the embedded engine used when a
-workspace is configured for the legacy `graphEngine: 'kuzu'`) directly. The
-Cypher parser rejects every variant of `CREATE INDEX` at parse time:
+We probed the prior local graph engine's embedded package directly (see
+`docs/KUZU_REMOVAL.md`; used when a workspace was configured for the legacy
+graph-engine config value). The Cypher parser rejects every variant of
+`CREATE INDEX` at parse time:
 
 ```
 CREATE INDEX idx_k ON T(k)              -> Parser exception
@@ -55,7 +58,8 @@ CALL create_index('T', 'k', 'idx_k')    -> Catalog exception: function does not 
 ```
 
 Only the primary-key index (built automatically on the `id` column) is
-available. Kùzu Lite 0.11.x does not expose secondary index DDL.
+available. That engine's embedded package (0.11.x) does not expose
+secondary index DDL.
 
 ### Why we did NOT add fake DDL
 
@@ -69,8 +73,8 @@ existing migration loop. We deliberately did not, because:
 3. The next person debugging a slow `listNodes` at K=100k would
    waste hours before discovering the index is decorative.
 
-If/when Kùzu Lite gains secondary indexes (or we move off Kùzu
-Lite), revisit this section first.
+This section is moot now that engine has been removed entirely (see
+`docs/KUZU_REMOVAL.md`); it is kept only as the investigation record.
 
 ### Mitigations in place today
 
@@ -123,19 +127,22 @@ admin-UI list latency becomes a problem:
 
 ### What unlocks the real fix
 
-The real fix — true secondary indexes on `(updatedAt)`, `(type)`,
-`(project)` — requires one of:
+This was moot the moment the engine was removed (see
+`docs/KUZU_REMOVAL.md`); it is preserved for historical completeness only.
+At the time, the real fix — true secondary indexes on `(updatedAt)`,
+`(type)`, `(project)` — would have required one of:
 
-- Kùzu Lite gaining `CREATE INDEX` support (track upstream).
-- Migration to full Kùzu (different package, larger install footprint,
-  needs evaluation against the kuzu-lite-for-package-size decision).
+- The embedded package gaining `CREATE INDEX` support (track upstream).
+- Migration to a larger variant of the same engine family (different
+  package, larger install footprint, needs evaluation against the
+  package-size decision that led to the smaller embedded package).
 - A SQLite-side `(workspace, updatedAt, id)` lookup oracle that
   cursor pagination consults for the row-id list, then hydrates
-  through Kùzu by primary key. This is a meaningful architecture
-  change — it splits the cursor source of truth across two stores
-  and complicates the write path (every write would have to keep
-  the oracle in sync, transactionally). Not justified at current
-  customer scale.
+  through the graph engine by primary key. This is a meaningful
+  architecture change — it splits the cursor source of truth across two
+  stores and complicates the write path (every write would have to keep
+  the oracle in sync, transactionally). Not justified at the customer
+  scale reached before the engine was removed.
 
 The recommendation in the audit finding (verifier downgraded to
 medium) is: **defer the structural fix; document the limitation;
@@ -150,5 +157,5 @@ records.
 - `architecture.md` — high-level engine layout (tri-substrate).
 - `AUDIT_FINDINGS_2.md` §A.3 `perf-listnodes-bulklist-fullscan-no-index`
   — original audit finding.
-- `SWARM_QUEUE_2.md` NW-4c — task that closed out as
-  `NOT-A-BUG: kuzu-engine-limitation`.
+- `SWARM_QUEUE_2.md` NW-4c — task that closed out as a not-a-bug, citing the
+  prior local graph engine's index limitation (see `docs/KUZU_REMOVAL.md`).

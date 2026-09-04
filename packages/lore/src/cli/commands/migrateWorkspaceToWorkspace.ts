@@ -7,8 +7,8 @@
  *
  * Behavior:
  *   - Opens BOTH source and destination workspaces' graph engine
- *     (whichever engine each workspace declares — Kùzu or SurrealDB) and
- *     VerbatimStore (LanceDB) directly. The daemon is required to be down.
+ *     (whichever engine each workspace declares) and VerbatimStore
+ *     (LanceDB) directly. The daemon is required to be down.
  *   - Filters source nodes by `--filter-type`, `--filter-tag`, and
  *     `--exclude-id-prefix`.
  *   - Per-node atomic upsert to destination via `WorkspaceGraph.upsertNode`.
@@ -35,7 +35,8 @@ import { openWorkspaceGraph, type WorkspaceGraph } from '../../engines/openWorks
 import { tagsToString } from '../../engines/normalizeTags.js';
 import { VerbatimStore } from '../../engines/verbatimStore.js';
 import { getWorkspacePath } from '../../config/workspaces.js';
-import { isDaemonUp, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
+import { loreHome } from '../../config/loreHome.js';
+import { isDaemonServingHome, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
 import { withTransactionConflictRetry } from '../../engines/transactionConflictRetry.js';
 
 export type OnConflict = 'skip' | 'overwrite' | 'fail';
@@ -55,9 +56,9 @@ export interface MigrateOptions {
     force?: boolean;
     /**
      * Pre-opened WorkspaceGraph + VerbatimStore instances. Used by the
-     * test suite to avoid the segfault we see when kuzu-lite is
-     * close()d and re-opened multiple times in the same process.
-     * When omitted, the CLI path opens fresh instances from
+     * test suite to avoid a segfault the former native graph engine
+     * exhibited when close()d and re-opened multiple times in the same
+     * process. When omitted, the CLI path opens fresh instances from
      * workspaces.json + closes them on exit.
      */
     injected?: {
@@ -125,7 +126,11 @@ export async function migrateWorkspaceToWorkspace(opts: MigrateOptions): Promise
         throw new Error('--from and --to must differ');
     }
     if (!opts.force) {
-        if (await isDaemonUp()) {
+        // Round E2, 2026-09-03 — isDaemonUp() alone refused whenever ANY
+        // process answered 200 on the port, never checking it served THIS
+        // home; isDaemonServingHome() only reports true when the daemon's
+        // own Bearer-authenticated /api/health confirms it.
+        if ((await isDaemonServingHome(loreHome())).servesHome) {
             console.error(daemonRefuseMessage('lore migrate workspace-to-workspace'));
             process.exit(1);
         }
@@ -139,9 +144,10 @@ export async function migrateWorkspaceToWorkspace(opts: MigrateOptions): Promise
 
     // Both sides now open whichever engine the workspace declares —
     // openWorkspaceGraph resolves that per-path, so a Surreal-backed source
-    // or destination works instead of the old assertKuzuBackedPath refusal.
-    // (The refusal existed because step 4's edge copy used to be raw Cypher;
-    // it no longer is — see the comment there for what replaced it.)
+    // or destination works instead of the old path-shaped refusal that
+    // rejected anything but the former local engine. (The refusal existed
+    // because step 4's edge copy used to be raw Cypher; it no longer is —
+    // see the comment there for what replaced it.)
     const ownsSrcGraph = !opts.injected?.srcGraph;
     const ownsDstGraph = !opts.injected?.dstGraph;
     const srcGraph = opts.injected?.srcGraph ?? openWorkspaceGraph(fromPath, { workspaceId: opts.from });
@@ -249,13 +255,13 @@ export async function migrateWorkspaceToWorkspace(opts: MigrateOptions): Promise
 
     // ── 4. Edges (optional) ──────────────────────────────────────
     if (opts.includeEdges && moved.length > 0) {
-        // The Kùzu-only path this replaced ran ONE Cypher statement per
-        // 500-id chunk of `movedIds`:
+        // The single-local-engine-only path this replaced ran ONE Cypher
+        // statement per 500-id chunk of `movedIds`:
         //   MATCH (a:LoreNode)-[e:LoreEdge]->(b:LoreNode)
         //   WHERE a.id IN [chunk] AND b.id IN [chunk]
         //   RETURN a.id, b.id, e.relation, e.confidence, e.confidenceScore
         // — a directed a->b edge; both endpoints had to be IN the SAME
-        // 500-id chunk (chunking existed only to stay under Kùzu's
+        // 500-id chunk (chunking existed only to stay under that engine's
         // parameter-bind limit, not to change the query's meaning).
         //
         // `queryEdges` takes a single `source`/`target` filter, not an id

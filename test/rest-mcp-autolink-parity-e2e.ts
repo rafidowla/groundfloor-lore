@@ -147,9 +147,13 @@ async function main(): Promise<void> {
         // The seed's canonical verbatim row lands via the outbox (async
         // LanceDB apply). Autolink candidates come from that index, so wait
         // for the pipeline to drain before either probed write fires its hook.
+        // FINDING 4 (2026-09-03): `outbox` is now only in the Bearer-
+        // authenticated /api/health body — an anonymous probe would read
+        // `hb.outbox` as undefined and the `?? 0` fallback would falsely
+        // report "drained" on the very first poll.
         let drained = false;
         for (let i = 0; i < 240; i++) {
-            const hb = await (await fetch(`${base}/api/health`, { headers: { Origin: base } })).json() as { outbox?: { depth?: number } };
+            const hb = await (await fetch(`${base}/api/health`, { headers: authHdr })).json() as { outbox?: { depth?: number } };
             if ((hb.outbox?.depth ?? 0) === 0) { drained = true; break; }
             await new Promise((r) => setTimeout(r, 250));
         }

@@ -9,9 +9,9 @@
  * read and write the graph through it. The failure mode it has to rule out is
  * NOT "throws an error" — it is "returns a confident wrong number". A count
  * that under-reports, or a snapshot that comes back empty, lets a destructive
- * change proceed with nothing to restore from. That is precisely what
- * `assertKuzuGraphSubstrate` existed to prevent by refusing the whole
- * subsystem on this engine.
+ * change proceed with nothing to restore from. That is precisely what the
+ * legacy engine's graph-substrate assertion guard existed to prevent by
+ * refusing the whole subsystem on this engine.
  *
  * So: every assertion is an exact value, never a truthiness check, and the
  * mutation cases assert the state of the graph AFTER the call, not the return

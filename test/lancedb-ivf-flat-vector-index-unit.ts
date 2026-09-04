@@ -102,7 +102,7 @@ class KnownVectorEmbedder implements EmbeddingProvider {
 
 /** Reach into the store's LanceDB table to read raw index metadata — the
  *  same test-only introspection pattern used throughout this test suite for
- *  Kùzu/LanceDB internals not exposed on the public VerbatimStore API. */
+ *  the legacy graph engine/LanceDB internals not exposed on the public VerbatimStore API. */
 async function listVectorIndices(store: VerbatimStore): Promise<Array<{ indexType?: string; columns?: string[] }>> {
     const table = (store as unknown as { table: lancedb.Table | null }).table;
     if (!table) return [];

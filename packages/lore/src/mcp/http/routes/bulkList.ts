@@ -8,8 +8,8 @@
  * 5,829-node dataset cold-warmup takes ~18 minutes. This endpoint:
  *
  *   - Returns up to 1,000 nodes per call (same as listNodes upper bound)
- *   - Cursor-based, NOT offset-based — kuzu doesn't honor offset
- *     reliably, and cursors are robust to inserts during pagination
+ *   - Cursor-based, NOT offset-based — not every graph engine honors
+ *     offset reliably, and cursors are robust to inserts during pagination
  *   - Is RATE-LIMIT-EXEMPT (the only /api/* endpoint that is, beyond
  *     /api/health + /api/auth/bootstrap). Auth + ReBAC gates still
  *     run; the exemption is bucket-only.
@@ -45,7 +45,7 @@ import type { StorageBundle } from '../../services.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../../engines/localGraphRegistry.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeJson, writeError, writeWorkspaceRequired } from '../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeJson, writeError, writeWorkspaceRequired, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { redactError } from '../../../security/logRedact.js';
 import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
@@ -53,9 +53,10 @@ import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { BulkListQuery } from '../../../providers/types.js';
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 
 export interface BulkListDeps {
@@ -161,7 +162,7 @@ export async function tryBulkListRoutes(
     }
 
     try {
-        const parsed = JSON.parse(body || '{}') as BulkListBody;
+        const parsed = parseJsonBody(body) as BulkListBody;
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
             writeError(res, 400, 'bad_request', 'body must be a JSON object');
             return true;
@@ -199,8 +200,8 @@ export async function tryBulkListRoutes(
             });
             return true;
         }
-        // Cloud parity — bulk-list is a graph-adapter method now (LocalGraph:
-        // Kùzu Cypher; DataplaneGraph: SDK on lore_node). The route owns
+        // Cloud parity — bulk-list is a graph-adapter method now (SurrealGraph:
+        // SurrealQL; DataplaneGraph: SDK on lore_node). The route owns
         // cursor base64url (de/en)coding + limit clamp; the adapter owns the
         // (updatedAt DESC, id ASC) ordering, limit+1 hasMore detection, and
         // nextCursor selection. gateRoute already 503s cloud-without-Dataplane.
@@ -250,6 +251,10 @@ export async function tryBulkListRoutes(
             nodes: confinedNodes,
         });
     } catch (err) {
+        // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+        // through to 500 here; parseJsonBody's tagged error is caught
+        // first now.
+        if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
         console.error(`[Lore HTTP] POST /api/nodes/bulk-list failed: ${redactError(err)}`);
         writeError(res, 500, 'internal_error', redactError(err));
     }

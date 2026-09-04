@@ -43,7 +43,7 @@
  *
  *   test/sprint-O-outbox-property.ts, test/audit-node-field-cap-unit.ts,
  *   test/audit-embedded-writes-unit.ts, test/id-alphabet-roundtrip-unit.ts,
- *   test/nw7e-kuzu-native-teardown-unit.ts
+ *   test/nw7e-legacy-engine-teardown-unit.ts
  *
  * A whole-file skip means such a file can accumulate BRAND-NEW type errors —
  * including a newly-omitted required `tracker` / `autolinkTracker`, the very

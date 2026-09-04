@@ -213,7 +213,7 @@ function buildFakeWorkspace(): { wsDir: string; outDir: string; cleanup: () => v
     const outDir = path.join(dir, 'out');
     fs.mkdirSync(loreDir, { recursive: true });
     fs.mkdirSync(outDir, { recursive: true });
-    fs.writeFileSync(path.join(loreDir, 'graph'), 'fake-kuzu-bytes');
+    fs.writeFileSync(path.join(loreDir, 'graph'), 'fake-legacy-engine-bytes');
     fs.writeFileSync(path.join(loreDir, 'graph.wal'), 'fake-wal');
     const db = new Database(path.join(loreDir, 'tables.sqlite'));
     db.exec(`CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)`);

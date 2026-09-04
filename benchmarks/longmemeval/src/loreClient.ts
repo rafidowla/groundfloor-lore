@@ -6,15 +6,17 @@
  * - `deploymentMode: 'embedded'` per README.md "Embedding Lore in your
  *   application" — no daemon, no port, in-process.
  * - Uses the default graph engine (SurrealDB, per README). An earlier
- *   version of this harness pinned `graphEngine: 'kuzu'`, believing
- *   `createLore()`'s static import of the SurrealDB connection module threw
- *   `ERR_PACKAGE_PATH_NOT_EXPORTED` from a standalone entry file. That
- *   diagnosis did not hold up: re-tested 2026-08-13 from this exact file
- *   location and invocation (`npx tsx benchmarks/longmemeval/src/...ts`)
- *   with no engine override — `createLore()` + `nodeUpsert()` succeed
- *   cleanly and write real SurrealDB files (`wal`/`manifest`/`sstables`
- *   under `.lore/surreal/`). No Kùzu workspace is to exist anywhere in this
- *   project (settled decision) — do not reintroduce this pin.
+ *   version of this harness pinned the legacy graph-engine config value,
+ *   believing `createLore()`'s static import of the SurrealDB connection
+ *   module threw `ERR_PACKAGE_PATH_NOT_EXPORTED` from a standalone entry
+ *   file. That diagnosis did not hold up: re-tested 2026-08-13 from this
+ *   exact file location and invocation
+ *   (`npx tsx benchmarks/longmemeval/src/...ts`) with no engine override —
+ *   `createLore()` + `nodeUpsert()` succeed cleanly and write real
+ *   SurrealDB files (`wal`/`manifest`/`sstables` under `.lore/surreal/`).
+ *   No workspace on the prior local graph engine (removed 2026-08-21; see
+ *   docs/KUZU_REMOVAL.md) is to exist anywhere in this project (settled
+ *   decision) — do not reintroduce this pin.
  * - We seed `workspaces.json` ourselves (createLore does not auto-create a
  *   workspace for a fresh `dataDir` — confirmed against
  *   `test/embeddable-capstone-e2e.ts`, which does the same).
@@ -75,15 +77,18 @@ export async function createBenchmarkLore(dataDir: string): Promise<BenchmarkLor
                         name: WORKSPACE,
                         path: absDataDir,
                         createdAt: new Date().toISOString(),
-                        // Explicit, not omitted — found 2026-08-13 that a
-                        // workspace this harness PRE-CREATES in workspaces.json
-                        // (as opposed to letting createLore() provision a
-                        // brand-new one from nothing) falls back to Kùzu when
-                        // graphEngine is left unset here, even though
-                        // resolveWorkspaceGraphEngine's own documented default
-                        // is 'surreal'. Matches the explicit-not-implicit
-                        // convention already used project-wide when migrating
-                        // real workspaces off Kùzu (MIRA, pm-scope-app).
+                        // Explicit, not omitted — historically (found
+                        // 2026-08-13, before the prior local graph engine
+                        // was fully removed 2026-08-21) a workspace this
+                        // harness PRE-CREATES in
+                        // workspaces.json (as opposed to letting createLore()
+                        // provision a brand-new one from nothing) did not
+                        // pick up resolveWorkspaceGraphEngine's documented
+                        // default the same way an omitted field does today.
+                        // Kept explicit to match the explicit-not-implicit
+                        // convention used project-wide for real workspaces
+                        // (MIRA, pm-scope-app) and because SurrealDB is now
+                        // the only graph engine there is to default to.
                         graphEngine: 'surreal',
                     },
                 ],

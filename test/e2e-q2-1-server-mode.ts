@@ -160,8 +160,10 @@ async function caseLocalMode(): Promise<void> {
         const origin = `http://127.0.0.1:${h.port}`;
         const authHdr = { Authorization: `Bearer ${h.token}`, Origin: origin };
 
-        // /api/health reports mode=local, no header required.
-        const healthRes = await fetch(`http://127.0.0.1:${h.port}/api/health`, { headers: { Origin: origin } });
+        // /api/health reports mode=local, no header required to REACH the
+        // route — but FINDING 4 (2026-09-03) means the rich body (incl.
+        // deploymentMode) is now Bearer-gated, so this probe must authenticate.
+        const healthRes = await fetch(`http://127.0.0.1:${h.port}/api/health`, { headers: authHdr });
         assert.equal(healthRes.status, 200, 'health must be 200');
         const health = await healthRes.json() as { deploymentMode?: string };
         assert.equal(health.deploymentMode, 'local', `expected deploymentMode=local, got ${health.deploymentMode}`);
@@ -259,8 +261,9 @@ async function caseCloudWithCredential(): Promise<void> {
         const origin = `http://127.0.0.1:${h.port}`;
         const authHdr = { Authorization: `Bearer ${h.token}`, Origin: origin };
 
-        // health reports mode=cloud.
-        const healthRes = await fetch(`http://127.0.0.1:${h.port}/api/health`, { headers: { Origin: origin } });
+        // health reports mode=cloud. FINDING 4 (2026-09-03): deploymentMode
+        // is only in the Bearer-authenticated body now.
+        const healthRes = await fetch(`http://127.0.0.1:${h.port}/api/health`, { headers: authHdr });
         const health = await healthRes.json() as { deploymentMode?: string };
         assert.equal(health.deploymentMode, 'cloud', `expected deploymentMode=cloud, got ${health.deploymentMode}`);
 

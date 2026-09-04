@@ -103,7 +103,7 @@ await test('T2 — daemonTimers consistency fan-out scans + heals every register
     // runConsistencySweep + a resolver, so the test pins the ACTUAL routing
     // contract: each workspace's own graph+vector, workspace stamped on enqueue.
     // getGraphHandle — the engine-aware accessor the daemon's fan-out uses
-    // (getOrOpen was the Kùzu substrate accessor; deleted with the engine).
+    // (getOrOpen was the legacy graph engine substrate accessor; deleted with the engine).
     const registry = { async getGraphHandle(ws: string) { return graphs[ws]; } };
     const resolver = { async getOrOpen(ws: string) { return vectors[ws]; } };
     for (const ws of ['A', 'B']) {

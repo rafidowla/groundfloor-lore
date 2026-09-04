@@ -25,7 +25,7 @@ import * as os from 'os';
 import { loreHome, loreHomePath } from '../config/loreHome.js';
 
 export interface StorageBreakdown {
-    /** Absolute bytes used by the graph substrate — Kùzu files or `.lore/surreal/`. */
+    /** Absolute bytes used by the graph substrate — legacy engine files or `.lore/surreal/`. */
     graphBytes: number;
     /** Bytes used by LanceDB vector store (all index shards + wal). */
     embeddingsBytes: number;

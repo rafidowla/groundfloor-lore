@@ -11,7 +11,7 @@
  * the rest), missing-snapshot handling, and the
  * UNSUPPORTED_OP_ERROR surface.
  *
- * Real Kùzu rollback is covered alongside the schema-routes test
+ * Real legacy-engine rollback is covered alongside the schema-routes test
  * harness (small surface — most logic is in the runner + snapshot
  * file plumbing).
  */
@@ -162,7 +162,7 @@ test('rollback is fail-SOFT — one op error does not abort the others', async (
         const plan = TWO_OP_PLAN(sandboxId);
         for (const op of plan.ops) writeSnapshot(dir, sandboxId, op, [{ id: 'x' }]);
         const { backend } = fakeBackend({
-            rollbackThrows: { 'node_type.removed|know.Doomed': 'kuzu connection blip' },
+            rollbackThrows: { 'node_type.removed|know.Doomed': 'legacy-engine connection blip' },
             rollbackResults: { 'field.removed|know.Person.email': { restored: 0, repaired: 5 } },
         });
         const runner = new MigrationRunner(backend);
@@ -174,7 +174,7 @@ test('rollback is fail-SOFT — one op error does not abort the others', async (
         assert.equal(fieldResult.error, undefined);
         // The node_type op recorded the error.
         const nodeResult = report.ops.find(r => r.op.kind === 'node_type.removed')!;
-        assert.match(nodeResult.error ?? '', /kuzu connection blip/);
+        assert.match(nodeResult.error ?? '', /legacy-engine connection blip/);
     });
 });
 

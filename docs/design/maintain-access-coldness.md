@@ -44,8 +44,21 @@ version actively harmful (both verified in code):
   window collapse to ≤1 write. Wired at boot (local mode only) and final-flushed
   on graceful shutdown.
 
-- **`LocalGraph.stampAccessTimes(entries)`** — the only writer of these columns.
-  Per-entry `SET`, no `bumpWriteEpoch`, no `updatedAt`/`syncedAt` mutation.
+- **`stampAccessTimes(entries)`** — the only writer of these columns. No
+  `bumpWriteEpoch`, no `updatedAt`/`syncedAt` mutation. Implemented on
+  `SurrealGraph` (`engines/surreal/surrealGraphWrites.ts`, wired as a class
+  method on `engines/surrealGraph.ts`) — the ONLY local graph engine as of
+  2026-08-21 (the prior Cypher-based `LocalGraph` this was originally built
+  against was removed that day; see surrealGraph.ts's header). Batches
+  entries by their `(accessedAt, retrievedAt)` pair into one `UPDATE $ids`
+  statement per group (direct record targeting, same form `markStaleByIds`
+  uses), rather than the prior engine's per-id loop. Not part of
+  `LoreGraphHandle` — duck-typed and feature-detected by
+  `engines/accessTracker.ts`'s `ensureAccessTracker()`, since cloud's
+  DataplaneGraph deliberately lacks it (access coldness is a local-disk
+  capacity concern). No outbox row: these columns are instance-local
+  telemetry, never synced to cloud (see below), so there is nothing for a
+  replica to replay.
 
 - **`maintain` policy `coldSignal`** (`retrieval` | `access` | `update`,
   default `retrieval`). `selection.ts` reads the chosen field, falling back to
@@ -80,11 +93,14 @@ wants graph-view to protect nodes sets `cold_signal=access`.
 
 - `test/maintain-unit.ts` — `cold_signal` selection (retrieval spares
   retrieved, access spares browsed, update ignores access; updatedAt fallback).
-- `test/maintain-access-integration.ts` — against real Kùzu, via
-  `LocalGraph` (the legacy graph engine — SurrealDB is the default
-  as of v3.13.0, and the `stampAccessTimes` path currently exists
-  only on the Kùzu-backed `LocalGraph`): stamp sets the columns
-  WITHOUT touching `updatedAt`/`syncedAt`/epoch (the three
-  invariants); `AccessTracker.touch → flush` path; end-to-end
-  retrieval-coldness spares a retrieved node while archiving a
-  never-retrieved one.
+- `test/access-coldness-surreal-unit.ts` — against a real `SurrealGraph`
+  (2026-09-03, X-accesstimes audit fix, replacing the old
+  `maintain-access-integration.ts` that ran against the now-deleted
+  `LocalGraph` backed by the prior graph engine): `ensureAccessTracker()` is
+  no longer a no-op; `stampAccessTimes` sets the columns WITHOUT touching
+  `updatedAt`/`syncedAt`/epoch (the three invariants); an untouched node
+  stays unstamped; `AccessTracker.touch → flush` path; end-to-end —
+  `selectRetentionCandidates` with `cold_signal='access'` spares the
+  touched node and selects the untouched one; best-effort — a failing
+  write (read-only-style error, transaction-conflict/lock-style error) is
+  swallowed, never thrown.

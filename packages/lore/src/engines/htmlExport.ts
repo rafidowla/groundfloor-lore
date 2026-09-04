@@ -23,8 +23,8 @@
 
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 
-// Widened 2026-08-06: this module only ever calls shared-handle
-// methods, so naming the concrete Kùzu class excluded SurrealDB for no reason.
+// This module only ever calls shared-handle methods, so it is written
+// against the engine-agnostic handle type rather than a concrete backend class.
 type LoreGraph = LoreGraphHandle;
 
 export interface HtmlExportOptions {
@@ -36,6 +36,19 @@ export interface HtmlExportOptions {
     title?: string;
     /** Embed a custom preamble the viewer sees above the graph. */
     description?: string;
+    /**
+     * Security checklist #12 — CSP nonce for the page's inline <style> and
+     * inline <script> tags. GET /api/export/html (routes/static.ts) always
+     * generates one (mcp/http/helpers.ts's generateCspNonce) and passes it
+     * here, then repeats the same value in the response's
+     * Content-Security-Policy header (buildHtmlExportCsp) so the browser's
+     * script-src/style-src 'nonce-<value>' matches these tags instead of
+     * requiring 'unsafe-inline'. Callers with no CSP to satisfy (the `lore
+     * export html` CLI, which writes a plain file to disk with no HTTP
+     * response at all) omit it — the tags are then un-nonced, exactly as
+     * before this option existed.
+     */
+    cspNonce?: string;
 }
 
 export async function exportGraphAsHtml(
@@ -86,6 +99,16 @@ export async function exportGraphAsHtml(
     const payload = rawJson.replace(/</g, '\\u003c');
     const exportedAt = new Date().toISOString();
 
+    // Security checklist #12 — when the caller (routes/static.ts) supplies a
+    // CSP nonce, stamp it onto the inline <style> block and the inline
+    // <script> block (the one carrying DATA + the vis.Network wiring) so
+    // the response's script-src/style-src 'nonce-<value>' CSP directive
+    // (buildHtmlExportCsp) allows them without 'unsafe-inline'. The
+    // separate `<script src="https://unpkg.com/...">` CDN loader does NOT
+    // need the nonce — it's allow-listed by origin in that same CSP, on
+    // top of the SRI hash already pinned on the tag itself.
+    const nonceAttr = opts.cspNonce ? ` nonce="${opts.cspNonce}"` : '';
+
     return [
         '<!DOCTYPE html>',
         '<html lang="en">',
@@ -96,7 +119,7 @@ export async function exportGraphAsHtml(
         // Integrity so an exported snapshot loads a known-good vis-network build,
         // not whatever "latest" unpkg serves when the file is opened later.
         '<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js" integrity="sha384-yxKDWWf0wwdUj/gPeuL11czrnKFQROnLgY8ll7En9NYoXibgg3C6NK/UDHNtUgWJ" crossorigin="anonymous"></script>',
-        '<style>',
+        `<style${nonceAttr}>`,
         '  body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 0; background: #0f172a; color: #e2e8f0; }',
         '  header { padding: 1rem 1.5rem; background: #1e293b; border-bottom: 1px solid #334155; }',
         '  header h1 { margin: 0 0 0.25rem; font-size: 1.1rem; }',
@@ -121,7 +144,7 @@ export async function exportGraphAsHtml(
         '  <div><span class="dashed"></span> inferred (semantic)</div>',
         '  <div><span class="dotted"></span> ambiguous (review)</div>',
         '</div>',
-        '<script>',
+        `<script${nonceAttr}>`,
         `  const DATA = ${payload};`,
         '  const options = {',
         '    nodes: { shape: "dot", size: 14, font: { color: "#e2e8f0", size: 12 }, borderWidth: 1 },',

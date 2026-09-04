@@ -1,13 +1,9 @@
 /**
  * poolLimits.ts — engine-agnostic pool admission limits and their errors.
  *
- * Relocated out of `kuzuConnectionPool.ts` (Kùzu-only, importing
- * `@kineviz/kuzu-lite`'s `Connection`/`Database`) because none of these
- * symbols touch Kùzu: they are the shared bounded-acquire policy used
- * identically by `LanceTablePool` and (until it is deleted) Kùzu's own
- * `KuzuConnectionPool`, plus the two error classes the HTTP layer maps
- * to 503. Moving them before the Kùzu-only remainder of that file is
- * deleted is load-bearing — see docs/audit/KUZU-REMOVAL-*.md.
+ * This is the shared bounded-acquire policy used identically by
+ * `LanceTablePool` and any other native-resource pool, plus the two error
+ * classes the HTTP layer maps to 503.
  */
 
 /**

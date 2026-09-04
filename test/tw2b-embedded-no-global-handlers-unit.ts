@@ -35,7 +35,7 @@
  *       both are removed, restoring the prior listener set.
  *
  * Harness: the tsx no-framework style used across test/ — manual pass/fail
- * counters + a trailing process.exit so a native-Kùzu teardown SIGSEGV after
+ * counters + a trailing process.exit so a native legacy-graph-engine teardown SIGSEGV after
  * the assertions can't flip a green run red.
  */
 
@@ -159,8 +159,8 @@ async function run(): Promise<void> {
 
         // Construct a native pool with cast-stubs so no real native handle
         // is opened — construction is all we need to trigger the (now
-        // armed) install. (Was KuzuConnectionPool; Lance is the surviving
-        // pool whose constructor performs the armed install — Kùzu removal
+        // armed) install. (Was LegacyConnectionPool; Lance is the surviving
+        // pool whose constructor performs the armed install — the legacy graph engine removal
         // Phase 3d, 2026-08-21.)
         const pool = new LanceTablePool({} as never, 'unused', 1);
         void pool;
@@ -225,7 +225,7 @@ async function run(): Promise<void> {
     //     treating "not embedded" as a synonym for "Lore owns the process". It
     //     is not. `deploymentMode` selects SUBSTRATES; it says nothing about
     //     whose process this is. A host can legitimately construct an in-process
-    //     instance with deploymentMode 'local' (same local Kùzu/LanceDB
+    //     instance with deploymentMode 'local' (same local legacy graph engine/LanceDB
     //     substrates, host-owned lifecycle) — and that call passed the mode
     //     check and armed a SURVIVE-policy handler pair in the HOST's process,
     //     silently suppressing every uncaught fault in an application Lore does
@@ -284,7 +284,7 @@ async function run(): Promise<void> {
 run()
     .then(() => {
         console.log('TW-2b PASSED — embedded adds no global handlers; daemon net installs+reverses ✓');
-        // Explicit clean exit (harness style): a lingering native-Kùzu teardown
+        // Explicit clean exit (harness style): a lingering native legacy-graph-engine teardown
         // SIGSEGV after all assertions passed must not flip a green run red.
         process.exit(0);
     })

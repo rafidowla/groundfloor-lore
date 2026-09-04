@@ -3,7 +3,7 @@
  *
  * Purpose:
  *   When `deploymentMode === 'cloud'` (Q2.1 toggle), core swaps the embedded
- *   Kùzu LocalGraph for this adapter. Every LoreNode / LoreEdge operation is
+ *   local graph engine for this adapter. Every LoreNode / LoreEdge operation is
  *   routed through `groundfloor-ts-sdk` → Dataplane → (Arango | Postgres |
  *   …whatever connector the tenant has). D-017 rules: Lore never talks to a
  *   cloud DB driver directly — Dataplane owns tenant isolation, ReBAC, and
@@ -719,7 +719,7 @@ export class DataplaneGraph implements GraphProvider {
      * limit+1 to detect hasMore. Records map through recordToLoreNode so the
      * camelCase `updatedAt`/`id` cursor contract matches the local path.
      *
-     * Slice-1 limitations (documented; the local Kùzu path is fully robust
+     * Slice-1 limitations (documented; the local graph path is fully robust
      * and actively used — cloud bulk-list is a deferred, unverified parity follow-up):
      *   - Multi-value type/tag filters apply only the FIRST value — the
      *     AND-only SDK filter can't express an OR-chain. Single type/tag
@@ -824,7 +824,7 @@ export class DataplaneGraph implements GraphProvider {
      *   - slice 1: stub, blanket-throws on any call.
      *   - slice 4: schema parity lands via `registerCloudSchema` hook
      *     (collections now exist in cloud mode), but OP routing
-     *     (translating Kùzu Cypher to Dataplane AQL/SQL via executeRaw)
+     *     (translating Cypher to Dataplane AQL/SQL via executeRaw)
      *     is still out of scope. executeQuery/queryRows throw a
      *     structured error naming the operation for root-causing;
      *     bumpEpoch is a no-op; detectLanguage is pure.
@@ -848,7 +848,7 @@ export class DataplaneGraph implements GraphProvider {
         detectLanguage(text: string, options?: { threshold?: number; minLength?: number }): { language: string | null; confidence: number };
     } {
         // Q2.2 slice 5a — substrate-portable storage. Callers on `storage.*`
-        // run identically here and on Kùzu in local mode.
+        // run identically here and in local mode.
         //
         // Slice 5c — single instance cached on the engine so collection
         // declarations (declareCollection) persist across every
@@ -931,6 +931,15 @@ export class DataplaneGraph implements GraphProvider {
 
     async markStaleByTags(tags: string[]): Promise<number> {
         return dpMaintenance.markStaleByTags(this.maintenanceCtx(), tags);
+    }
+
+    /** 2026-09-03 (X-markstale audit fix) — see LoreGraphHandle's doc comment. */
+    async findNodeIdsByTags(tags: string[]): Promise<string[]> {
+        return dpMaintenance.findNodeIdsByTags(this.maintenanceCtx(), tags);
+    }
+
+    async markStaleByIds(ids: string[]): Promise<number> {
+        return dpMaintenance.markStaleByIds(this.maintenanceCtx(), ids);
     }
 
     async pruneEphemeralNodes(defaultTtlMs: number = 3_600_000): Promise<number> {

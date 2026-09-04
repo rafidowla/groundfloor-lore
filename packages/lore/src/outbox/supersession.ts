@@ -26,10 +26,19 @@
  * supersession: an older FAILED verbatim.upsert could later retry and durably
  * OVERWRITE a newer replicated verbatim.upsert on the same id, reverting the
  * vector/BM25 substrate to stale content (recall/search return stale results).
- * The fix restores supersession for every previously-covered kind. There is no
- * verbatim delete/tombstone kind, so `verbatim.upsert` gets its OWN family
- * (never cross-supersedes another kind) — same-kind supersession exactly as
- * pre-fix, never broader.
+ * The fix restores supersession for every previously-covered kind. At the
+ * time there was no verbatim delete/tombstone kind, so `verbatim.upsert` got
+ * its OWN family (never cross-superseded another kind) — same-kind
+ * supersession only.
+ *
+ * UPDATE (2026-09-03, A2 finding 2 fix): `verbatim.tombstone` now exists
+ * (outbox/types.ts) — every node-delete path records one AFTER its
+ * `node.delete` row so replay converges to graph-absent + verbatim-
+ * tombstoned. It joins the `verbatim` family and cross-supersedes
+ * `verbatim.upsert` on the same id, exactly like `node.upsert`/`node.delete`
+ * cross-supersede in the `node` family: without this, a `verbatim.upsert`
+ * retried after its sibling `verbatim.tombstone` already replicated would
+ * durably resurrect content a delete already tombstoned.
  *
  * This module centralizes the two pieces the fix needs so the replicator
  * (key derivation) and the SQLite store (matching SQL) stay in lock-step:
@@ -58,10 +67,10 @@ import type { OutboxEntry } from './types.js';
  *                  durably-applied op wins.
  *   - 'edge'     — edge.upsert / edge.delete (identity = the (sourceId,
  *                  targetId, relation) triple). Same cross-supersede pairing.
- *   - 'verbatim' — verbatim.upsert only (identity = payload.id = `lore:<id>`).
- *                  There is NO verbatim delete/tombstone kind, so this family
- *                  has a single member and only ever supersedes SAME-kind,
- *                  same-id — exactly the pre-c79e505 behavior, never broader.
+ *   - 'verbatim' — verbatim.upsert / verbatim.tombstone (identity =
+ *                  payload.id = `lore:<id>`). The two kinds CROSS-supersede
+ *                  (upsert/tombstone pair, mirroring node) so the latest
+ *                  durably-applied op wins.
  */
 export type EntityFamily = 'node' | 'edge' | 'verbatim';
 
@@ -87,11 +96,12 @@ const EDGE_KEY_SEP = String.fromCharCode(0);
  *     joined by EDGE_KEY_SEP (NUL), mirroring the store's `char(0)`
  *     composite (see supersessionFamilySql) so JS and SQL keys compare
  *     equal; NUL cannot appear in an id/relation, so it is collision-free.
- *   - verbatim family (verbatim.upsert) → key = payload.id (`lore:<id>`),
- *     identical derivation to node so the SAME identity space is compared,
- *     but a DIFFERENT family so a verbatim op never supersedes a node op on
- *     a colliding key (and vice-versa). Single-member family (no verbatim
- *     delete kind) — same-kind supersession only, restoring pre-c79e505.
+ *   - verbatim family (verbatim.upsert / verbatim.tombstone) → key =
+ *     payload.id (`lore:<id>`), identical derivation to node so the SAME
+ *     identity space is compared, but a DIFFERENT family so a verbatim op
+ *     never supersedes a node op on a colliding key (and vice-versa). The
+ *     two verbatim kinds CROSS-supersede each other (2026-09-03), same
+ *     pairing shape as node.upsert/node.delete.
  *
  * Returns null ONLY for kinds with no supersedable identity — i.e. that had
  * none pre-c79e505 either: the batch/marker/notification kinds
@@ -100,6 +110,15 @@ const EDGE_KEY_SEP = String.fromCharCode(0);
  * `payload.id`. Also returns null when a required identity field is
  * missing/blank — the caller then falls through to the normal retry path
  * (no supersession guard).
+ *
+ * `node.mark_stale` (2026-09-03, X-markstale audit fix) joins this null-key
+ * group deliberately rather than the `node` family: its payload carries
+ * `ids: string[]` for a whole locked chunk, not one entity's `payload.id`,
+ * so it has no single identity to compare against a `node.upsert` /
+ * `node.delete` row. It also has no resurrection hazard those two
+ * cross-supersede to prevent — replaying a stale mark on an id that was
+ * since deleted (or re-created) is a harmless idempotent no-op / soft
+ * false-positive flag, not a data-loss reordering.
  */
 export function keyOfEntry(entry: OutboxEntry): { family: EntityFamily; key: string } | null {
     const kind = entry.operationKind;
@@ -120,11 +139,12 @@ export function keyOfEntry(entry: OutboxEntry): { family: EntityFamily; key: str
         }
         return { family: 'edge', key: `${sourceId}${EDGE_KEY_SEP}${targetId}${EDGE_KEY_SEP}${relation}` };
     }
-    if (kind === 'verbatim.upsert') {
+    if (kind === 'verbatim.upsert' || kind === 'verbatim.tombstone') {
         // payload.id is the canonical `lore:<id>` verbatim key. Same identity
         // derivation as node, but its own family so it never cross-supersedes
-        // a node op on a colliding key. No verbatim delete kind exists, so
-        // this is same-kind-only — exactly the pre-c79e505 guard.
+        // a node op on a colliding key. The two verbatim kinds cross-supersede
+        // each other (2026-09-03) — a delete's tombstone must be able to
+        // supersede a stale failed upsert, and vice versa, same as node.
         const id = payload['id'];
         if (typeof id !== 'string' || id.length === 0) return null;
         return { family: 'verbatim', key: id };
@@ -146,12 +166,11 @@ export function supersessionFamilySql(family: EntityFamily): { kinds: string; ke
                 keyExpr: "json_extract(payload, '$.id')",
             };
         case 'verbatim':
-            // Single-member family: only verbatim.upsert. Same keyExpr as
-            // node (payload.id), but the disjoint `kinds` set keeps it from
-            // matching a node row on a colliding key. Restores the
-            // pre-c79e505 same-kind, same-id verbatim supersession.
+            // verbatim.upsert / verbatim.tombstone cross-supersede (2026-09-03),
+            // same keyExpr as node (payload.id), but the disjoint `kinds` set
+            // keeps it from matching a node row on a colliding key.
             return {
-                kinds: "('verbatim.upsert')",
+                kinds: "('verbatim.upsert', 'verbatim.tombstone')",
                 keyExpr: "json_extract(payload, '$.id')",
             };
         case 'edge':

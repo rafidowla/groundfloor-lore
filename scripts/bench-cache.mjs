@@ -2,8 +2,8 @@
 /**
  * bench-cache.mjs — Q1.3 SLO harness for the local read cache.
  *
- * Runs against SurrealGraph (the local engine since the Kùzu removal,
- * Phase 3d 2026-08-21 — the cache surface it exercises is engine-agnostic:
+ * Runs against SurrealGraph (the local engine since the legacy graph-engine
+ * removal, Phase 3d 2026-08-21 — the cache surface it exercises is engine-agnostic:
  * search / listNodes / getNode / getCacheStats / write-invalidation).
  * What it measures:
  *   1. Cold baseline — repeated read hits with LORE_CACHE_DISABLED=1.

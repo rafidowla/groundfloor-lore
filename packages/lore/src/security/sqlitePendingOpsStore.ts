@@ -1,14 +1,15 @@
 /**
  * sqlitePendingOpsStore.ts — the HITL second-party-approval queue, on SQLite.
  *
- * Replaces `KuzuPendingOpsStore`, which was one of only two subsystems still
- * issuing real Kùzu DDL (`CREATE NODE TABLE lore_pending_op`). The queue is
- * row-shaped, not graph-shaped: it has never stored an edge, and every query it
- * runs is a filtered scan of one table. Kùzu was never buying it anything.
+ * Replaces the former graph-native pending-ops store, which was one of only
+ * two subsystems still issuing real graph DDL (`CREATE NODE TABLE
+ * lore_pending_op`). The queue is row-shaped, not graph-shaped: it has never
+ * stored an edge, and every query it runs is a filtered scan of one table.
+ * The graph engine was never buying it anything.
  *
  * ── A RACE THIS FIXES, RATHER THAN PORTS ────────────────────────────────────
  *
- * The Kùzu version decides in two steps: `getById`, check
+ * The former version decides in two steps: `getById`, check
  * `status !== 'pending'`, then `SET n.status = ...`. Nothing holds between the
  * read and the write, so two approvers racing on one op can BOTH observe
  * `pending` and both write — the second silently overwriting the first's
@@ -28,7 +29,7 @@
  * ── SCHEMA NOTE ─────────────────────────────────────────────────────────────
  *
  * Optional columns are stored as SQL NULL and read back as `undefined`, which
- * is what `PendingOp` declares. The Kùzu version wrote `''` for absent reasons
+ * is what `PendingOp` declares. The former version wrote `''` for absent reasons
  * (its binding had no clean null path), so a rejected-with-no-reason op read
  * back as an empty-string reason rather than "no reason given". Preserved as
  * NULL here; `rowToPendingOp` maps empty string to undefined as well so rows
@@ -185,7 +186,7 @@ export class SqlitePendingOpsStore implements PendingOpsStore {
         if (opts.workspaceId) { clauses.push('workspaceId = ?'); params.push(opts.workspaceId); }
         if (opts.initiator) { clauses.push('initiator = ?'); params.push(opts.initiator); }
         const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
-        // LIMIT is bound, not interpolated. The Kùzu version inlined
+        // LIMIT is bound, not interpolated. The former version inlined
         // `Math.floor(opts.limit)`, which was safe only because of that floor.
         const limit = typeof opts.limit === 'number' && opts.limit > 0 ? 'LIMIT ?' : '';
         if (limit) params.push(Math.floor(opts.limit as number));
@@ -239,7 +240,7 @@ export class SqlitePendingOpsStore implements PendingOpsStore {
     }
 
     /**
-     * TTL sweep. One statement — the Kùzu version needed a pre-count because
+     * TTL sweep. One statement — the former version needed a pre-count because
      * its binding could not return an update count, which also meant the count
      * it reported came from a different read than the write it described.
      */

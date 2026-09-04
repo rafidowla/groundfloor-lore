@@ -23,10 +23,11 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type {
-    IAnalyticalStorage,
-    AggregationType,
-    TimeBucket,
+import {
+    AnalyticalScanCapExceeded,
+    type IAnalyticalStorage,
+    type AggregationType,
+    type TimeBucket,
 } from '../../../contracts/index.js';
 import type { Filter } from '../../../engines/collectionStorage.js';
 import { readJsonBody, writeError } from '../helpers.js';
@@ -52,14 +53,50 @@ export interface AnalyticsDeps {
 const AGGREGATIONS = new Set<AggregationType>(['count', 'sum', 'avg', 'min', 'max']);
 const BUCKETS = new Set<TimeBucket>(['minute', 'hour', 'day', 'week', 'month', 'quarter', 'year']);
 
+/**
+ * Thrown by `parseFilter` for a malformed nested `filterJson` string.
+ *
+ * Distinct from a generic `Error` so the route handlers below can map it to
+ * `400 invalid_filter_json` instead of falling through to the generic
+ * `500 internal_error` catch — a client-side bad-request has no business
+ * being reported as a server fault.
+ */
+class InvalidFilterJsonError extends Error {
+    constructor(detail: string) {
+        super(`filterJson is not valid JSON: ${detail}`);
+        this.name = 'InvalidFilterJsonError';
+    }
+}
+
 function parseFilter(raw: unknown): Filter | undefined {
     if (raw === undefined || raw === null) return undefined;
     if (typeof raw === 'object') return raw as Filter;
     if (typeof raw === 'string') {
         try { return JSON.parse(raw) as Filter; }
-        catch { throw new Error('filterJson is not valid JSON'); }
+        catch (err) { throw new InvalidFilterJsonError(err instanceof Error ? err.message : String(err)); }
     }
     return undefined;
+}
+
+/**
+ * Map the two client-caused analytical errors to their documented client
+ * error codes; returns false when `err` is neither (caller falls through to
+ * its generic 500 handling). `AnalyticalScanCapExceeded` uses 400 (not 413):
+ * the request itself is well-formed, it is the current dataset/filter
+ * combination that exceeds the operator-configured cap — same class of
+ * refusal as any other over-broad-query 400, and consistent with the other
+ * `invalid_*`/`*_required` 400s this route already returns.
+ */
+function writeAnalyticalClientError(res: ServerResponse, err: unknown): boolean {
+    if (err instanceof InvalidFilterJsonError) {
+        writeError(res, 400, 'invalid_filter_json', err.message);
+        return true;
+    }
+    if (err instanceof AnalyticalScanCapExceeded) {
+        writeError(res, 400, 'analytical_scan_cap_exceeded', err.message, { cap: err.cap, matched: err.matched });
+        return true;
+    }
+    return false;
 }
 
 function notWired(res: ServerResponse, tool: string): boolean {
@@ -141,6 +178,7 @@ export async function tryAnalyticsRoutes(
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ points }));
         } catch (err) {
+            if (writeAnalyticalClientError(res, err)) return true;
             console.error(`[Lore HTTP] POST /api/time-series failed: ${redactError(err)}`);
             writeError(res, 500, 'internal_error', 'an internal error occurred');
         }
@@ -225,6 +263,7 @@ export async function tryAnalyticsRoutes(
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ value }));
         } catch (err) {
+            if (writeAnalyticalClientError(res, err)) return true;
             console.error(`[Lore HTTP] POST /api/aggregate failed: ${redactError(err)}`);
             writeError(res, 500, 'internal_error', 'an internal error occurred');
         }

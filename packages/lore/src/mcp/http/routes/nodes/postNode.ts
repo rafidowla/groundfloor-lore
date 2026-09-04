@@ -12,12 +12,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { WorkspaceNotFoundError } from '../../../../engines/localGraphRegistry.js';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, checkOutboxBackpressure, writeError } from '../../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, checkOutboxBackpressure, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { enforceStrictFields, enforceVocabPolicy } from '../storeNodeGates.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../../security/routeWorkspaceBinding.js';
 import { nodeUpsert, resolveAutolinkHandles } from '../../../../core/nodeService.js';
 // 1.1 (2026-08-17 audit) — retry SurrealDB transaction-conflict write drops
-// (same wrapper bulkIngest already uses; no-op on Kùzu).
+// (same wrapper bulkIngest already uses; no-op for engines that serialize
+// writes internally).
 import { withTransactionConflictRetry } from '../../../../engines/transactionConflictRetry.js';
 import type { LoreGraph, NodesDeps } from './types.js';
 import { assertSafeLanceId } from '../../../../engines/verbatimHistory.js';
@@ -47,7 +48,12 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
         return;
     }
     try {
-        const nodeData = JSON.parse(body);
+        // X-json400 (2026-09-03 audit) — JSON.parse used to sit inside this
+        // same try/catch with no dedicated branch, so a truncated/malformed
+        // body fell all the way to the generic `catch (saveErr)` below and
+        // came back as 500 internal_error — a client mistake reported as a
+        // server crash. parseJsonBody tags the error so it's caught first.
+        const nodeData = parseJsonBody(body) as Record<string, unknown>;
         if (nodeData && typeof nodeData === 'object' && !Array.isArray(nodeData)) {
             if (typeof nodeData.id === 'string') __auditCtx.nodeId = nodeData.id;
             if (typeof nodeData.workspace === 'string') __auditCtx.workspace = nodeData.workspace;
@@ -134,10 +140,10 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
             const resolvedWorkspace = requestedWorkspace;
             try {
                 // getGraphHandle resolves the workspace's DECLARED engine
-                // (Kùzu or Surreal) instead of unconditionally handing back a
-                // Kùzu handle — a Surreal-backed workspace was silently
-                // upserting into its empty, unused Kùzu store. Still runs
-                // assertWorkspaceOpenAllowed via its internal getOrOpen call.
+                // instead of unconditionally handing back the boot engine's
+                // handle — a Surreal-backed workspace was silently
+                // upserting into its empty, unused store for the other
+                // engine. Still enforces assertWorkspaceOpenAllowed.
                 targetGraph = await deps.graphRegistry.getGraphHandle(resolvedWorkspace);
             } catch (err) {
                 if (err instanceof WorkspaceNotFoundError) {
@@ -153,7 +159,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
         // Phase 6 P2 — workspace vocab policy gate. Default mode='open' is a
         // no-op; reject/hitl write their own response, warn surfaces a
         // typeWarning we attach below.
-        const vocab = await enforceVocabPolicy(nodeData, res, {
+        const vocab = await enforceVocabPolicy(nodeData as { type: string; workspace?: string }, res, {
             pendingOpsStore: deps.pendingOpsStore,
             coreNodeTypes: deps.coreNodeTypes,
             activeWorkspace: deps.graphRegistry?.activeName() ?? '*',
@@ -177,7 +183,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
         // HTTP 201 on first-create + 200 on update, matching POST
         // /api/workspaces and standard REST convention. A pre-read on
         // the target graph is the cheapest existence check available;
-        // it adds one Kùzu lookup that is already on the hot path for
+        // it adds one graph lookup that is already on the hot path for
         // version capture (see storeNode.ts:266). The upsert itself
         // remains atomic — the pre-read is advisory only. If the pre-
         // read throws (test fixtures with mock graphs that lack getNode,
@@ -219,7 +225,10 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
         });
         const writeResult = await withTransactionConflictRetry(() => nodeUpsert(
             {
-                id: nodeData.id,
+                // nodeData.id is validated as a string above (line ~73); the
+                // Record<string, unknown> typing from parseJsonBody doesn't
+                // carry that narrowing across the intervening await calls.
+                id: nodeData.id as string,
                 workspace: requestedWorkspace,
                 ecosystem: typeof nodeData.ecosystem === 'string' ? nodeData.ecosystem : '*',
                 nodeData: nodeData as Record<string, unknown>,
@@ -253,6 +262,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
         res.writeHead(__isNew ? 201 : 200, okHeaders);
         res.end(JSON.stringify({ ok: true, id: nodeData.id, isNew: __isNew, ...(typeWarning ? { warning: typeWarning } : {}) }));
     } catch (saveErr) {
+        if (isInvalidJsonBody(saveErr)) { writeInvalidJson(res, saveErr); return; }
         writeError(res, 500, 'internal_error', redactError(saveErr));
     }
     } catch (outerErr) {

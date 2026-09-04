@@ -4,12 +4,12 @@
  * Extracted from `LocalGraph.getTableStorage()` so the local-mode storage
  * bundle can build one WITHOUT holding a `LocalGraph`.
  *
- * SQLite is the only backend. The legacy `LORE_TABLE_BACKEND=kuzu` path
- * (`KuzuTableStorage` over Kùzu node tables) was removed with the Kùzu
- * teardown: a prior operator audit found ZERO `collection-schemas.json`
- * files (the Kùzu backend's schema cache) and 44/44 empty `tables.sqlite`
- * across every real workspace on this machine — no collection was ever
- * declared in either backend, so there is no legacy data to read.
+ * SQLite is the only backend. The legacy `LORE_TABLE_BACKEND` graph-engine path
+ * (a graph-node-table-backed implementation) was removed: a prior operator
+ * audit found ZERO `collection-schemas.json` files (that backend's schema
+ * cache) and 44/44 empty `tables.sqlite` across every real workspace on
+ * this machine — no collection was ever declared in either backend, so
+ * there is no legacy data to read.
  */
 
 import * as path from 'node:path';

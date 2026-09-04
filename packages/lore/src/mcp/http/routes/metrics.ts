@@ -21,7 +21,7 @@
  *   lore_build_info{version}                — daemon version
  *
  * Aggregation cache: /metrics is potentially scraped every 10–15s. To
- * avoid hammering Kùzu on every scrape, per-workspace counts are
+ * avoid hammering the graph engine on every scrape, per-workspace counts are
  * cached for METRICS_CACHE_MS (5s). Outbox stats are read fresh (cheap
  * — file read of outbox.jsonl).
  *

@@ -3,7 +3,7 @@
  * sp25-paranoia-unit.ts — SP-25 regression: paranoia cluster.
  *
  * Findings verified before fixing:
- *   F1 kuzuTableStorage column-name validation: NOT-A-BUG (SP-05 assertIdent already
+ *   F1 the legacy engine's TableStorage column-name validation: NOT-A-BUG (SP-05 assertIdent already
  *      guards every interpolation site: createTable, insert, insertBatch, query, etc.)
  *   F2 physicalDeleteMany per-id length cap: REAL — no length check before building
  *      id IN (...) predicate. Fixed: throw VerbatimStoreError if any id > 512 chars.
@@ -13,7 +13,7 @@
  *      Fixed: chunk the IN-predicate query + delete loop in SNAPSHOT_CHUNK=500 slices.
  *
  * Tests:
- *   F1-guard: kuzuTableStorage assertIdent rejects a malicious column name
+ *   F1-guard: the legacy engine's TableStorage assertIdent rejects a malicious column name
  *   F2-exploit: oversized id throws from physicalDeleteMany (closes the gap)
  *   F2-normal: short ids (CHUNK+1 items) work without throwing
  *   F4-chunk: storeBatch IN predicate is NOT built as one big string (structural)
@@ -32,9 +32,9 @@ function test(name: string, fn: () => Promise<void> | void): void {
     })());
 }
 
-// ── F1: kuzuTableStorage assertIdent (NOT-A-BUG — guards already in SP-05) ────
+// ── F1: the legacy engine's TableStorage assertIdent (NOT-A-BUG — guards already in SP-05) ────
 
-test('F1 — kuzuTableStorage assertIdent rejects malicious column name (SP-05 pre-existing guard)', async () => {
+test("F1 — the legacy engine's TableStorage assertIdent rejects malicious column name (SP-05 pre-existing guard)", async () => {
     // SP-05 added assertIdent to every interpolation site. Verify it still blocks
     // the exploit pattern from the SP-25 finding.
     const { _assertIdentForTests: assertIdent } = await import('./helpers/ident-test-util.js');

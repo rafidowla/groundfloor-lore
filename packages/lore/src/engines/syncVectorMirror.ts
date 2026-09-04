@@ -6,7 +6,7 @@
  * Handles mirroring a pulled/synced node into the vector store so
  * semantic recall surfaces cloud-synced knowledge locally.
  *
- * Failure contract: errors are logged but never re-throw — the Kùzu
+ * Failure contract: errors are logged but never re-throw — the
  * graph row is the source of truth. A missed embedding is backfilled
  * on next sync or by a manual re-store. We do NOT roll back the graph
  * write because pull is idempotent.
@@ -90,7 +90,7 @@ export async function upsertVectorMirror(
  *
  * @param vectorStore  - Target vector store (null → skips all, returns skipped=ids.length).
  * @param localGraph   - Source of truth for node content. Only `getNode` is
- *                       called, so the handle (not the concrete Kùzu class)
+ *                       called, so the handle (not a concrete engine class)
  *                       is enough — this also runs against a Surreal-backed
  *                       workspace.
  * @param nodeIds      - IDs to recover.

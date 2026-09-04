@@ -17,7 +17,7 @@
  *
  * The resolver is substrate-agnostic. Callers supply a tiny
  * GraphAccessor with two methods (neighborsOut, neighborsIn). Both
- * LocalGraph (Kùzu) and DataplaneGraph (cloud) can implement those.
+ * LocalGraph (SurrealDB) and DataplaneGraph (cloud) can implement those.
  *
  * Why a resolver, not Cypher: scope rules are workspace-data, not code.
  * They're authored as part of the schema, evolve with the workspace,
@@ -29,7 +29,7 @@ import type { LoreSchemaV2, ScopeDirection, ScopeSpec } from '../schemas/types.j
 
 /**
  * Tiny graph-accessor interface the resolver needs. Substrate-specific
- * adapters implement this against Kùzu, ArangoDB, or any other graph
+ * adapters implement this against SurrealDB, ArangoDB, or any other graph
  * store. Both directions are required because scopes can walk up,
  * down, or both.
  */

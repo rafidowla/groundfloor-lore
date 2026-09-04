@@ -288,7 +288,7 @@ async function main(): Promise<void> {
         // dir VALID (ConfigManager succeeds, timers start), but plant a regular
         // FILE where the engine wants its `.lore/surreal` data dir → graph
         // .initialize() rejects inside the embedded init block. We drive it
-        // via LORE_HOME for parity with the original Kùzu-era fixture shape.
+        // via LORE_HOME for parity with the original legacy-era fixture shape.
         // The open-retry budget is shrunk via env so the deliberate failure
         // costs ~1.5s, not the 15s production default.
         const home = freshHome('throw');

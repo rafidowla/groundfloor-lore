@@ -12,7 +12,7 @@
  *
  * ── WHY THIS FILE EXISTS ─────────────────────────────────────────────────────
  * GET /api/node (with neighbors) and GET /api/subgraph originally issued RAW
- * Kùzu CYPHER (`MATCH (n:LoreNode)…`) through graph.getGraphContext().queryRows.
+ * CYPHER (`MATCH (n:LoreNode)…`) through graph.getGraphContext().queryRows.
  * On the arcade graph handle queryRows is a bare ArcadeDB-SQL passthrough — the
  * ArcadeDB parser rejects Cypher (CommandSQLParsingException), and the route's
  * `.catch(() => [])` swallowed it, so the routes returned 200-with-EMPTY graph
@@ -121,8 +121,8 @@ export async function neighbors1Hop(
   // NOTE ON ORDER: outRows precede inRows (matching the getNode route, which
   // renders out-neighbors then in-neighbors), and within each the order follows
   // ArcadeDB's edge-storage iteration. Exact array order is NOT a portability
-  // contract — LocalGraph's order is Kùzu's own insertion-scan order, which no
-  // engine-agnostic sort reproduces; the neighbor SET (and every per-neighbor
+  // contract — LocalGraph's order is the local engine's own insertion-scan order,
+  // which no engine-agnostic sort reproduces; the neighbor SET (and every per-neighbor
   // field) is identical across backends, which is the contract that matters.
   return { outRows, inRows };
 }

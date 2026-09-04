@@ -104,7 +104,7 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                                 ? 'dataplane (cloud)'
                                 : deps.graphRegistry.graphEngineFor(workspace) === 'surreal'
                                     ? 'surrealdb (local)'
-                                    : 'kùzu + lancedb (local)',
+                                    : 'legacy graph engine + lancedb (local)',
                         }, null, 2),
                     }],
                 };
@@ -216,15 +216,15 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                                 // Sprint-8/commit-8 — report the engine THIS
                                 // workspace declares (per-workspace, via the
                                 // registry) rather than a class check on a graph
-                                // resolved from the Kùzu-only accessor. No
-                                // registry (cloud/tests) → the boot-bound
-                                // dataplane; that path never reaches a
-                                // workspace-declared engine at all.
+                                // resolved from an accessor tied to a single
+                                // local engine. No registry (cloud/tests) → the
+                                // boot-bound dataplane; that path never reaches
+                                // a workspace-declared engine at all.
                                 engine: !deps.graphRegistry
                                     ? 'dataplane (cloud)'
                                     : deps.graphRegistry.graphEngineFor(callerWs) === 'surreal'
                                         ? 'surrealdb (local)'
-                                        : 'kùzu + lancedb (local)',
+                                        : 'legacy graph engine + lancedb (local)',
                             },
                             capabilities: {
                                 compactRecall: true,
@@ -406,8 +406,8 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                 // `bulkList()`, the same (updatedAt DESC, id ASC)
                 // cursor-paginated primitive W4's /api/nodes/bulk-list uses,
                 // so cursors compose across the two endpoints. Every graph
-                // substrate this daemon hands out (LocalGraph/Kùzu,
-                // SurrealGraph, DataplaneGraph) implements `bulkList` on
+                // substrate this daemon hands out (SurrealGraph,
+                // DataplaneGraph) implements `bulkList` on
                 // `LoreGraphHandle` — unlike the old `getGraphContext()`
                 // feature-detect, which DataplaneGraph also implements (as a
                 // stub that always throws "raw Cypher routing is not

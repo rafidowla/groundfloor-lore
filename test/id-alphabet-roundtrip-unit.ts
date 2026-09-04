@@ -307,7 +307,7 @@ test('D: NUL / oversized / non-string ids fail loudly, naming the id', async () 
         // Nothing persisted on any refusal — no partial orphan. The read
         // path refuses the NUL id just as loudly (guard, not silent null) —
         // SurrealGraph's getNode throws rather than returning null, unlike
-        // Kùzu's silent-miss read path.
+        // the legacy engine's silent-miss read path.
         await assert.rejects(
             () => graph.getNode('bad\x00route/[id].ts'),
             /NUL byte/,

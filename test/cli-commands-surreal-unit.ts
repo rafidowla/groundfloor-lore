@@ -5,17 +5,20 @@
  *
  * ── WHAT THIS REPLACES ──────────────────────────────────────────────────────
  *
- * Six commands used to construct `new LocalGraph(basePath)` and call
- * `assertKuzuBackedPath(...)`, so on a Surreal-backed workspace they REFUSED —
+ * Six commands used to construct `new LocalGraph(basePath)` and call the
+ * legacy engine's path-assertion guard, so on a Surreal-backed workspace they
+ * REFUSED —
  * `lore lint`, `lore report`, `lore diagnose`, `lore migrate` (v1-sqlite) and
  * both ends of `lore migrate workspace-to-workspace`. Refusing was the right
  * answer while their internals were raw Cypher, because the alternative was
- * reading the real-but-EMPTY Kùzu `LoreNode` table a Surreal workspace still
- * carried and reporting a clean graph. It was never the destination.
+ * reading the real-but-EMPTY legacy-engine `LoreNode` table a Surreal
+ * workspace still carried and reporting a clean graph. It was never the
+ * destination.
  *
  * They now open whichever engine the workspace declares. This file used to
- * prove the swap by comparing a Kùzu workspace against a Surreal workspace
- * node-for-node; now that Kùzu is being removed, it instead pins the
+ * prove the swap by comparing a legacy-engine workspace against a Surreal
+ * workspace node-for-node; now that the legacy engine has been fully
+ * removed, it instead pins the
  * SurrealDB-side behavior directly — the assertions below are the exact
  * values the shared client-side aggregation in `graphReportAggregates.ts`
  * must produce for this fixture, so a regression there still fails loudly
@@ -136,16 +139,17 @@ await loadFixture(surreal);
 
 let surrealReport = '';
 
-await test('precondition: the workspace opened a SurrealGraph, not the Kùzu default', () => {
-    // Without this the rest of the file could silently be exercising the
-    // still-empty Kùzu database a Surreal workspace carries alongside it.
+await test('precondition: the workspace opened a real SurrealGraph', () => {
+    // Without this the rest of the file could silently be exercising a stub
+    // or the wrong graph implementation instead of a real SurrealGraph.
     assert.equal(surreal.constructor.name, 'SurrealGraph');
 });
 
 await test('report: not the empty-database report', async () => {
-    // The regression this whole port could have introduced. A Surreal-backed
-    // workspace still has a real, empty Kùzu database on disk; reading THAT
-    // yields a well-formed report of a graph with nothing in it.
+    // The regression this whole port could have introduced. Historically, a
+    // Surreal-backed workspace still carried a real, empty legacy-engine
+    // database on disk; reading THAT yielded a well-formed report of a
+    // graph with nothing in it.
     surrealReport = await writeGraphReport(surreal, { topN: 20 });
     assert.match(surrealReport, /\*\*Nodes\*\*: 6/, 'six fixture nodes are visible');
     assert.match(surrealReport, /\*\*Edges\*\*: 5/, 'five fixture edges are visible');

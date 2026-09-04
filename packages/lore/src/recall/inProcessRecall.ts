@@ -133,11 +133,9 @@ export async function inProcessRecall(
     }
 
     // Resolve the graph for presentation (deferred / hint / auto-escalate).
-    // getGraphHandle, not getOrOpen: the latter is the Kùzu substrate accessor
-    // and returns a LocalGraph for every workspace regardless of its declared
-    // engine. getGraphHandle resolves the DECLARED engine and still goes
-    // through (memoised) getOrOpen internally first, so this re-uses the
-    // same open retrieve() just performed.
+    // getGraphHandle resolves the workspace's DECLARED engine (and still
+    // goes through (memoised) getOrOpen internally first, so this re-uses
+    // the same open retrieve() just performed).
     const graph = deps.graphRegistry ? await deps.graphRegistry.getGraphHandle(workspace) : deps.store.loreGraph;
     const ecosystemScope = crossProject ? '*' : (ecosystem ?? '*');
 

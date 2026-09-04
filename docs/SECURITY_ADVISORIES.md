@@ -961,11 +961,9 @@ docstring that implied encryption coverage was a credibility risk for
 enterprise reviewers.
 
 **Current posture:**
-- The live graph store — SurrealDB by default as of v3.13.0 (`.lore/surreal/`),
-  or Kùzu (`graph`, `graph.wal`) when a workspace opts in via
-  `graphEngine: 'kuzu'` — the LanceDB vector store (`lancedb/`), and the
-  SQLite relational store (`tables.sqlite`) are **not**
-  encrypted at the application layer.
+- The live graph store — SurrealDB, the only graph engine (`.lore/surreal/`) —
+  the LanceDB vector store (`lancedb/`), and the SQLite relational store
+  (`tables.sqlite`) are **not** encrypted at the application layer.
 - At-rest confidentiality relies on **host OS / full-disk encryption**
   (e.g. FileVault on macOS, LUKS/dm-crypt on Linux, BitLocker on Windows).
 - Per-workspace keys are generated and stored in the OS keychain

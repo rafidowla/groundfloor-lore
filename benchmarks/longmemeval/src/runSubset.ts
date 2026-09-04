@@ -27,7 +27,7 @@
  * majority-vote score alongside the official single-call one (see
  * judgeMajority.ts) — costs N-1x extra judge calls, off by default.
  *
- * Must be run under Node 22 (native Kùzu/LanceDB bindings) — see
+ * Must be run under Node 22 (native LanceDB/better-sqlite3 bindings) — see
  * ../README.md "Running this" for the exact command.
  */
 
@@ -143,13 +143,17 @@ async function ingestWithRetry(
         } catch (err) {
             lastErr = err;
             const msg = err instanceof Error ? err.message : String(err);
-            // Observed once during smoke testing: Kùzu's checkpointer can time
-            // out waiting for a prior bulkIngest's transaction to fully clear
-            // under rapid back-to-back large bulk writes. Retrying after a
-            // short pause has cleared it every time seen so far.
+            // Observed once during smoke testing under the prior local
+            // graph engine (since removed 2026-08-21; see
+            // docs/KUZU_REMOVAL.md): the checkpointer could time out
+            // waiting for a prior bulkIngest's transaction to fully clear
+            // under rapid back-to-back large bulk writes. Kept as a
+            // defensive retry in case the same message class ever surfaces
+            // under the current SurrealDB engine. Retrying after a short
+            // pause has cleared it every time seen so far.
             const retryable = msg.includes('Timeout waiting for active transactions');
             if (!retryable || attempt === maxAttempts) throw err;
-            console.log(`  ingest attempt ${attempt} hit a retryable Kùzu checkpoint timeout, retrying in 3s...`);
+            console.log(`  ingest attempt ${attempt} hit a retryable checkpoint timeout, retrying in 3s...`);
             await new Promise((r) => setTimeout(r, 3000));
         }
     }

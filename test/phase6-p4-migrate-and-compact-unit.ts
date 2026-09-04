@@ -362,8 +362,8 @@ function dirSize(p: string): number {
 // stores, no cross-test state), and a hard exit sidesteps any lingering
 // async-driver handles. The main process is just the conductor.
 //
-// (Historically this isolation existed because kuzu-lite, the Kùzu Node
-// binding, segfaulted after thousands of writes; the engine is SurrealDB
+// (Historically this isolation existed because the legacy engine's native Node
+// binding segfaulted after thousands of writes; the engine is SurrealDB
 // now, but per-test isolation is still the reliable shape.)
 //
 // LORE_HOME is per-child (the main process pre-creates and threads

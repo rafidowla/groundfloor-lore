@@ -1,6 +1,6 @@
 import http from 'http';
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
-import { resolveGraphBasePath } from './shared.js';
+import { resolveGraphBasePath, openGraphForCli } from './shared.js';
+import { DEFAULT_PORT } from './migrateWorkspaceToWorkspaceShared.js';
 
 async function tryHttpMarkStale(tags: string[]): Promise<number | null> {
     return new Promise((resolve) => {
@@ -8,7 +8,7 @@ async function tryHttpMarkStale(tags: string[]): Promise<number | null> {
         const req = http.request(
             {
                 hostname: '127.0.0.1',
-                port: 3847,
+                port: DEFAULT_PORT,
                 path: '/api/mark-stale',
                 method: 'POST',
                 headers: {
@@ -63,9 +63,15 @@ export async function markStaleCommand(args: string[]): Promise<void> {
     }
 
     const basePath = resolveGraphBasePath();
-    const graph = openWorkspaceGraph(basePath);
+    // Finding 11 (round E) — the HTTP attempt above already tried the
+    // daemon; this direct-open fallback is what used to sit in the ~15s
+    // openSurreal retry storm. tryHttpMarkStale() above now resolves
+    // DEFAULT_PORT (LORE_PORT-aware) instead of a hardcoded 3847, so this
+    // fallback fires only when the HTTP attempt genuinely misses the daemon
+    // (daemon down, timeout). Refuse fast with a clear message instead of
+    // the raw driver error.
+    const graph = await openGraphForCli(basePath);
     try {
-        await graph.initialize();
         const marked = await graph.markStaleByTags(tags);
         console.log(`[Lore] Marked ${marked} node(s) stale (tags: ${tags.join(', ')}).`);
     } finally {

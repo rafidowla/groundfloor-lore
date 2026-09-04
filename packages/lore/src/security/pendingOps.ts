@@ -9,8 +9,7 @@
  * approve, the op is replayed by the original handler.
  *
  * Storage:
- *   Local mode → SQLite at `.lore/pending-ops.sqlite` (this PR ships
- *                 the schema + a Kùzu-backed PendingOpsStore).
+ *   Local mode → SQLite at `.lore/pending-ops.sqlite`.
  *   Cloud mode  → Postgres collection (Bucket B/C follow-up; the
  *                 interface here is shaped to plug into both).
  *
@@ -87,7 +86,7 @@ export interface DecisionInput {
 }
 
 /**
- * Backend interface — separate impls for Kùzu (local) + Postgres-via-
+ * Backend interface — separate impls for SQLite (local) + Postgres-via-
  * Dataplane (cloud). The route handlers + decision endpoints depend
  * only on this interface.
  */

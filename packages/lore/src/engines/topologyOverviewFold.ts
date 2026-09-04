@@ -27,9 +27,9 @@ export const TOPOLOGY_OVERVIEW_EDGE_CAP = 200_000;
 /**
  * SECURITY (SP-05): coerce a LIMIT value to a safe non-negative integer
  * before it reaches a query. Born in graphTopology.ts, where the value was
- * string-interpolated into Cypher (Kùzu has no `$limit` parameter slot), so
- * a non-integer (e.g. `100; DROP TABLE`) would land arbitrary Cypher — moved
- * here (kuzu-removal Phase 3d) because the clamp is engine-agnostic: engines
+ * string-interpolated into Cypher (the graph engine had no `$limit` parameter
+ * slot), so a non-integer (e.g. `100; DROP TABLE`) would land arbitrary Cypher
+ * — moved here because the clamp is engine-agnostic: engines
  * that bind the limit keep the same guard, since a bound 10-billion is still
  * a 10-billion-row scan. NaN/negative → 0; values above `max` are clamped;
  * fractions are floored.

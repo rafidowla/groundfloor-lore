@@ -4,7 +4,7 @@
  * Per-workspace VerbatimStore resolver for the outbox replicator.
  *
  * Background: the LocalGraphRegistry already resolves a per-workspace
- * `LocalGraph` (Kùzu) by name, but it deliberately leaves the verbatim
+ * graph handle by name, but it deliberately leaves the verbatim
  * (LanceDB) store global — see localGraphRegistry.ts:20-21 "Verbatim store
  * remains global (id-keyed); per-workspace verbatim is a separate concern."
  * That gap is exactly what let the replicator replay `verbatim.upsert` rows
@@ -20,7 +20,7 @@
  * Scope kept minimal on purpose:
  *   - No LRU eviction here (the replicator touches a small, stable set of
  *     workspaces per tick; the graph registry's MAX_OPEN cap already bounds
- *     the Kùzu side). `closeAll()` releases handles on shutdown.
+ *     the graph side). `closeAll()` releases handles on shutdown.
  *   - The BOOT workspace's VerbatimStore is primed in so the replicator
  *     reuses the daemon's existing instance instead of opening a second
  *     LanceDB handle on the same dir.

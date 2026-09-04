@@ -57,6 +57,14 @@ export function formatMaintainReport(report: MaintainReport, policy: MaintainPol
     if (!report.dryRun && report.workspaces.bytesFreed > 0) {
         L.push(`  freed: ${fmtBytes(report.workspaces.bytesFreed)}`);
     }
+    if (report.workspaces.pendingSidelines.length > 0) {
+        const totalBytes = report.workspaces.pendingSidelines.reduce((sum, p) => sum + p.bytes, 0);
+        L.push(`  leftover sidelines: ${report.workspaces.pendingSidelines.length} (${fmtBytes(totalBytes)}) — a prior delete's cleanup did not fully complete; retried automatically the next time that workspace name is deleted`);
+        for (const p of report.workspaces.pendingSidelines.slice(0, 20)) {
+            const age = p.ageMs >= 0 ? `${Math.round(p.ageMs / 1000)}s old` : 'age unknown';
+            L.push(`    - ${p.name}: ${fmtBytes(p.bytes)}, ${age} (${p.dirName})`);
+        }
+    }
 
     // Errors / op status
     const errs = report.operations.flatMap((o) => o.errors.map((e) => `${o.operation}: ${e}`));

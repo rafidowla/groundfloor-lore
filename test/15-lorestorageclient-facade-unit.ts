@@ -28,7 +28,7 @@
  *        the underlying substrate exactly once with the exact arg shape
  *        (no transform, no bypass).
  *
- * Strategy: no real Kùzu/LanceDB; substrate is a recording stub matching
+ * Strategy: no real the legacy graph engine/LanceDB; substrate is a recording stub matching
  * the surface area the facade touches. This isolates "does the facade
  * route correctly" from "does the substrate work" (covered elsewhere).
  */

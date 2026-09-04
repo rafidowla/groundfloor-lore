@@ -22,7 +22,7 @@
  *  (c) CLEAN UP ON INIT-THROW — `createLore()` starts background timers
  *      (rate-limiter sweep, retention bootstrap, token sweeper, consistency
  *      sweep, active-session sweep) BEFORE the embedded substrate init. If a
- *      later init step throws (corrupt Kùzu, locked LanceDB), the caller never
+ *      later init step throws (corrupt graph store, locked LanceDB), the caller never
  *      receives a `LoreInstance`, so `dispose()` — the only thing that stops
  *      those timers — is unreachable and they leak into the host event loop.
  *      {@link initEmbeddedSubstrates} wraps the init body so ANY throw runs the
@@ -47,7 +47,7 @@ export interface EmbeddedReplicationWiring {
     replicator: { start(): void };
 }
 
-/** Structural contract for the Kùzu-backed graph the embedded outbox writes
+/** Structural contract for the graph the embedded outbox writes
  *  through — only the members the guarded wrapper needs. Exported so callers
  *  (e.g. server.ts's own local wrapper) can stay generic/structural instead
  *  of re-narrowing to a concrete graph class. */
@@ -64,9 +64,10 @@ export interface GuardableGraph {
  * Why: in embedded mode the host's in-process write path
  * (`LoreInstance.nodeUpsert`) applies the graph node SYNCHRONOUSLY (nodeService
  * step 2) BEFORE the replicator ever sees the outbox row. The replicator then
- * re-applying the same `upsertNode` is pure redundancy — and, because Kùzu
- * permits exactly one write transaction at a time, that redundant write RACES
- * any concurrent host write (e.g. a long-held `withBulkConnection`) and trips
+ * re-applying the same `upsertNode` is pure redundancy — and, because the
+ * former local graph engine permitted exactly one write transaction at a
+ * time, that redundant write RACES any concurrent host write (e.g. a
+ * long-held `withBulkConnection`) and tripped
  * "Only one write transaction at a time". The daemon never hit this because no
  * replicator ran in-process alongside arbitrary host graph writes.
  *
@@ -75,7 +76,7 @@ export interface GuardableGraph {
  * write) has NO existing node, so the wrapper applies it normally. Only the
  * already-applied steady-state rows are skipped — exactly the redundant,
  * racy ones. Verbatim/embedding rows (LanceDB) are unaffected (separate
- * substrate, no Kùzu txn) and still drain so semantic recall works.
+ * substrate, no graph txn) and still drain so semantic recall works.
  *
  * Every other graph member is delegated untouched via the prototype, so the
  * wrapper is transparent to the dispatcher's other call sites.

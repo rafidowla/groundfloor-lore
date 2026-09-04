@@ -18,7 +18,7 @@
  *
  * What it does NOT do (deliberately):
  *
- *   - Connect to Kùzu / Dataplane — caller supplies a NodeStorage
+ *   - Connect to SurrealDB / Dataplane — caller supplies a NodeStorage
  *     adapter implementing five operations.
  *   - Index / search / vector embedding — those are different paths.
  *   - Audit on every read — only writes get audited (reads are too hot).
@@ -38,7 +38,7 @@ import { NODE_FLOOR_FIELDS } from '../schemas/types.js';
 /**
  * NodeStorage — the substrate adapter the CRUD module talks to.
  *
- * Both LocalGraph (Kùzu) and DataplaneGraph (cloud) implement these
+ * Both LocalGraph (SurrealDB) and DataplaneGraph (cloud) implement these
  * five operations on top of their respective storage layers.
  */
 export interface NodeStorage {

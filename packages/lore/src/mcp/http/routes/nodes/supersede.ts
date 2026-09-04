@@ -11,12 +11,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { bindRouteTarget } from '../../../../security/routeWorkspaceBinding.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, extractWorkspace, writeError } from '../../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, extractWorkspace, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { WorkspaceNotFoundError } from '../../../../engines/localGraphRegistry.js';
 import { recordHotWrite } from '../../../../outbox/hotLane.js';
 import { log } from '../../../../logger.js';
 import type { LoreGraph, NodesDeps } from './types.js';
 import { redactError } from '../../../../security/logRedact.js';
+import { MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../../../../engines/nodeFieldLimits.js';
 
 export async function handleSupersede(req: IncomingMessage, res: ServerResponse, url: string, deps: NodesDeps): Promise<void> {
     const gate = await gateRoute(
@@ -37,7 +38,7 @@ export async function handleSupersede(req: IncomingMessage, res: ServerResponse,
         return;
     }
     try {
-        const parsed = JSON.parse(body || '{}') as { oldId?: string; newId?: string; reason?: string; workspace?: string; project?: string };
+        const parsed = parseJsonBody(body) as { oldId?: string; newId?: string; reason?: string; workspace?: string; project?: string };
         // Sprint L1c — workspace required (writer). No silent fallback.
         const supersedeWs = extractWorkspace(parsed as Record<string, unknown>, new URL(url, 'http://localhost').searchParams);
         if (!supersedeWs) { writeWorkspaceRequired(res); return; }
@@ -46,8 +47,26 @@ export async function handleSupersede(req: IncomingMessage, res: ServerResponse,
         // Pre-fix, an app token bound to A — holding only `write`, not
         // `cross-workspace-write` — could supersede nodes in B.
         if (bindRouteTarget(res, { requested: supersedeWs, intent: 'write' }) === null) return;
-        if (!parsed.oldId || !parsed.newId) {
+        // DATA_CONTRACT (2026-09-03) — shape + size validation before this
+        // reaches the graph layer: oldId/newId must be non-empty strings,
+        // and `reason` (if present) a string within the same per-field cap
+        // storeNode.ts applies. This is a guard only, not a content filter —
+        // once accepted, `reason` is persisted verbatim on every engine
+        // (Lore does not sanitize free text; see docs/DATA_CONTRACT.md).
+        //
+        // QA finding 3 (A4 round E, 2026-09-03) — the cap MUST be byte-based
+        // (exceedsNodeFieldCap / MAX_NODE_FIELD_BYTES is a UTF-8 byte count),
+        // not `.length` (UTF-16 code units): a CJK/emoji-heavy reason could
+        // pass a `.length` check while its persisted UTF-8 form ran 2-4x the
+        // documented cap.
+        if (typeof parsed.oldId !== 'string' || parsed.oldId.length === 0
+            || typeof parsed.newId !== 'string' || parsed.newId.length === 0) {
             writeError(res, 400, 'bad_request', '`oldId` and `newId` are required in POST body');
+            return;
+        }
+        if (parsed.reason !== undefined
+            && (typeof parsed.reason !== 'string' || exceedsNodeFieldCap(parsed.reason))) {
+            writeError(res, 400, 'bad_request', `\`reason\` must be a string of at most ${MAX_NODE_FIELD_BYTES} bytes`);
             return;
         }
         // NW-3a (api-001) — resolve the registry-bound target graph for
@@ -58,10 +77,10 @@ export async function handleSupersede(req: IncomingMessage, res: ServerResponse,
         let targetGraph: LoreGraph = deps.store.loreGraph;
         if (deps.graphRegistry) {
             try {
-                // getGraphHandle honours the workspace's declared engine —
-                // getOrOpen is the Kùzu substrate accessor and used to land
-                // supersede/unsupersede on a Surreal workspace's unused, empty
-                // Kùzu graph instead. Still runs assertWorkspaceOpenAllowed.
+                // getGraphHandle honours the workspace's declared engine, so
+                // supersede/unsupersede lands on the requested workspace's
+                // own graph rather than an unused, empty one for the wrong
+                // engine. Still runs assertWorkspaceOpenAllowed.
                 targetGraph = await deps.graphRegistry.getGraphHandle(supersedeWs);
             } catch (err) {
                 if (err instanceof WorkspaceNotFoundError) {
@@ -116,6 +135,10 @@ export async function handleSupersede(req: IncomingMessage, res: ServerResponse,
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
     } catch (supErr) {
+        // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+        // through to 500 here; parseJsonBody's tagged error is caught
+        // first now.
+        if (isInvalidJsonBody(supErr)) { writeInvalidJson(res, supErr); return; }
         writeError(res, 500, 'internal_error', redactError(supErr));
     }
 }
@@ -137,14 +160,18 @@ export async function handleUnsupersede(req: IncomingMessage, res: ServerRespons
         return;
     }
     try {
-        const parsed = JSON.parse(body || '{}') as { id?: string; workspace?: string; project?: string };
+        const parsed = parseJsonBody(body) as { id?: string; workspace?: string; project?: string };
         // Sprint L1c — workspace required (writer). No silent fallback.
         const unsupersedeWs = extractWorkspace(parsed as Record<string, unknown>, new URL(url, 'http://localhost').searchParams);
         if (!unsupersedeWs) { writeWorkspaceRequired(res); return; }
         // RA2-reaudit2/D-021 — bind on the REQUESTED workspace, not the caller's own.
         if (bindRouteTarget(res, { requested: unsupersedeWs, intent: 'write' }) === null) return;
-        if (!parsed.id) {
-            writeError(res, 400, 'bad_request', '`id` is required in POST body');
+        // QA finding 4 (A4 round E, 2026-09-03) — mirror handleSupersede's
+        // oldId/newId type check: an array/object `id` previously passed this
+        // `!parsed.id` presence check (both are truthy) and crashed further
+        // down as an uncaught 500, instead of a clean 400.
+        if (typeof parsed.id !== 'string' || parsed.id.length === 0) {
+            writeError(res, 400, 'bad_request', '`id` is required in POST body and must be a string');
             return;
         }
         // NW-3a (api-001) — same workspace-routing fix as supersede above.
@@ -189,6 +216,8 @@ export async function handleUnsupersede(req: IncomingMessage, res: ServerRespons
         res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ok }));
     } catch (unsupErr) {
+        // X-json400 (2026-09-03 audit) — see handleSupersede above.
+        if (isInvalidJsonBody(unsupErr)) { writeInvalidJson(res, unsupErr); return; }
         writeError(res, 500, 'internal_error', redactError(unsupErr));
     }
 }

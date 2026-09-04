@@ -6,7 +6,7 @@
  * migrate → soak → contract using:
  *   - real SchemaAuthoringStore (file-backed in a tmpdir)
  *   - real OrchestrationStore (file-backed in same tmpdir)
- *   - fake MigrationBackend (avoids Kùzu segfault pattern)
+ *   - fake MigrationBackend (avoids the legacy graph engine segfault pattern)
  *   - injected clock so soak-timer transitions are deterministic
  *
  * Coverage:

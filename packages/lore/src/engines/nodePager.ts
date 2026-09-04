@@ -1,21 +1,13 @@
 /**
  * nodePager.ts — engine-agnostic paged node scan and raw query-rows type.
  *
- * Relocated out of `graphBulkList.ts` and `graphEdges.ts` (Kùzu-Cypher
- * files, slated for deletion in the Kùzu removal) because nothing here
- * touches an engine: every export either types a raw query surface or
- * walks pages through a `NodePager` function parameter. Both engines
- * expose a `bulkListProjected` method that IS a `NodePager`
- * (`engines/localGraph.ts`, `engines/surreal/surrealGraph.ts`), and the
- * maintenance family (consistency sweep, freshness, corpus health,
- * supersession candidates, retention, deferred surfacing) drives it
- * through `forEachNodePage` so peak heap is one bounded page. Relocating
- * before the Kùzu-Cypher remainder of the source files is deleted is
- * load-bearing — see docs/audit/KUZU-REMOVAL-*.md.
- *
- * Not relocated with them: `pagerFromQueryRows` — it adapts a raw Cypher
- * `queryRows` over Kùzu's own `bulkListProjected`, so it stays in
- * `graphBulkList.ts` and dies with the Cypher it wraps.
+ * Nothing here touches an engine: every export either types a raw query
+ * surface or walks pages through a `NodePager` function parameter. Both
+ * the local graph engine and DataplaneGraph expose a `bulkListProjected`
+ * method that IS a `NodePager`, and the maintenance family (consistency
+ * sweep, freshness, corpus health, supersession candidates, retention,
+ * deferred surfacing) drives it through `forEachNodePage` so peak heap is
+ * one bounded page.
  */
 
 import type { BulkListCursor } from '../providers/types.js';
@@ -24,8 +16,7 @@ import type { BulkListCursor } from '../providers/types.js';
  * Run a Cypher read and return raw rows. This is the
  * `getGraphContext().queryRows` surface, threaded in so query logic can
  * live beside its helpers (single concern) while LocalGraph stays a thin
- * delegator. Defined in `graphEdges.ts` before the Kùzu removal; its
- * engine-agnostic consumers (`deferred.ts`, `freshnessEngine.ts`,
+ * delegator. Its engine-agnostic consumers (`deferred.ts`, `freshnessEngine.ts`,
  * `diagnostics/consistency.ts`, `graphBulkList.ts`) now import it from
  * here.
  */
@@ -88,7 +79,7 @@ export type NodePager = (
 export async function collectSupersededEligible(
     /**
      * A `NodePager` — NOT a raw-Cypher `queryRows`. It took the latter, which
-     * made the retention sweep Kùzu-only: a Surreal-backed workspace has no
+     * made the retention sweep single-engine-only: a Surreal-backed workspace has no
      * `getGraphContext()` to hand it, so the sweep silently reported a clean
      * zero. Both engines implement `bulkListProjected`, which IS a `NodePager`.
      */

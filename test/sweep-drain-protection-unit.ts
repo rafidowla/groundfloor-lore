@@ -14,7 +14,7 @@
  *        `buildShutdownDrain` call site in server.ts overrides it).
  *        `reconnectGraph` re-embeds and searches the whole corpus and runs for
  *        MINUTES. So on any real sweep the drain timed out after 5s and step 10
- *        closed Kùzu + LanceDB underneath the still-running sweep — exactly the
+ *        closed the legacy graph engine + LanceDB underneath the still-running sweep — exactly the
  *        use-after-close the registration was added to prevent. Registration
  *        without a survivable deadline is not protection.
  *
@@ -261,7 +261,7 @@ function drainDeps(store: Record<string, unknown>, order: string[], extra: Recor
 
 await test('S-drain: a sweep that stops on the seal finishes BEFORE the graph closes', async () => {
     // The whole point. Pre-fix the sweep sat in the 5s ingest queue with no way
-    // to stop, so the drain gave up and step 10 closed Kùzu + LanceDB
+    // to stop, so the drain gave up and step 10 closed the legacy graph engine + LanceDB
     // underneath it.
     const order: string[] = [];
     const sweepTracker = new PendingAutolinkTracker();

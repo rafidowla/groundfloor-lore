@@ -27,8 +27,8 @@ const gunzip = promisify(zlib.gunzip);
 
 /**
  * Minimal shape of a warmed node. Matches the LoreNode columns the
- * retention pass has access to without re-fetching from kuzu. Restore
- * in W6b will round-trip these fields back into kuzu via upsertNode.
+ * retention pass has access to without re-fetching from the graph. Restore
+ * in W6b will round-trip these fields back into the graph via upsertNode.
  */
 export interface WarmedNode {
     id: string;
@@ -53,7 +53,7 @@ export class WarmStore {
     constructor(private readonly warmDir: string) {}
 
     /** Resolve filesystem path for a node's warm file. Caller is
-     *  responsible for sanitizing `id` (kuzu LoreNode.id is already
+     *  responsible for sanitizing `id` (LoreNode.id is already
      *  validated upstream — letters, digits, dash, colon, dot, slash). */
     private fileFor(id: string): string {
         // Replace path separators in id with `_` to keep one-file-per-id

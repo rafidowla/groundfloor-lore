@@ -7,19 +7,20 @@
  *
  * Twenty-four CLI commands opened the graph with `new LocalGraph(basePath)`.
  * On a workspace whose `graphEngine` is `'surreal'` that is the WRONG database
- * — and it does not fail, because such a workspace keeps a Kùzu database that
- * has a real, EMPTY `LoreNode` table. So `lore status` reported zero nodes,
+ * — and it did not fail, because such a workspace kept a legacy-engine
+ * database that had a real, EMPTY `LoreNode` table. So `lore status` reported
+ * zero nodes,
  * `lore export` wrote an empty file and `lore recall` found nothing, all with
  * exit code 0, on a workspace that was working perfectly.
  *
  * There used to be two mechanisms here. `openWorkspaceGraph` picks the declared
- * engine, and `assertKuzuBackedPath` REFUSED for the six commands that spoke
+ * engine, and the legacy engine's path-assertion guard REFUSED for the six commands that spoke
  * raw Cypher and had no engine-agnostic equivalent. The refusal was correct
  * while it was true — a clean `lore lint` on an unread graph is worse than an
  * error, because someone believes it — but it was never the destination. All
  * six are ported, the guard is deleted, and the invariant at the bottom of this
- * file tightened accordingly: a CLI command may no longer name the Kùzu class
- * AT ALL, with or without a guard.
+ * file tightened accordingly: a CLI command may no longer name the legacy
+ * engine's graph class AT ALL, with or without a guard.
  *
  * Cross-engine agreement of the ported commands themselves is
  * `test/cli-engine-parity-unit.ts`; this file covers engine RESOLUTION.
@@ -53,21 +54,21 @@ function test(name: string, fn: () => void): void {
 
 /**
  * A LORE_HOME with three registered workspaces: an explicit surreal
- * declaration (sws), a legacy 'kuzu' declaration (kws), and one (bws) with
+ * declaration (sws), a legacy-engine declaration (kws), and one (bws) with
  * no graphEngine field at all, to test the absent-field/default path on its
  * own. kws is no longer asserted against: honouring an explicit 'kuzu'
  * declaration is transitional behavior that dies with LocalGraph, so it
  * survives here only as the decoy path in the workspaceId-precedence test.
  */
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-owg-'));
-const kuzuPath = path.join(home, 'workspaces', 'kws');
+const legacyPath = path.join(home, 'workspaces', 'kws');
 const surrealPath = path.join(home, 'workspaces', 'sws');
 const barePath = path.join(home, 'workspaces', 'bws');
-for (const p of [kuzuPath, surrealPath, barePath]) fs.mkdirSync(path.join(p, '.lore'), { recursive: true });
+for (const p of [legacyPath, surrealPath, barePath]) fs.mkdirSync(path.join(p, '.lore'), { recursive: true });
 fs.writeFileSync(path.join(home, 'workspaces.json'), JSON.stringify({
     active: 'kws',
     workspaces: [
-        { name: 'kws', path: kuzuPath, createdAt: new Date().toISOString(), graphEngine: 'kuzu' },
+        { name: 'kws', path: legacyPath, createdAt: new Date().toISOString(), graphEngine: 'kuzu' },
         { name: 'sws', path: surrealPath, createdAt: new Date().toISOString(), graphEngine: 'surreal' },
         { name: 'bws', path: barePath, createdAt: new Date().toISOString() },
     ],
@@ -84,7 +85,7 @@ test('a workspace with no graphEngine field resolves to the default (surreal sin
 
 test('graphEngine: surreal resolves to surreal, found by PATH not by name', () => {
     // The path lookup is the load-bearing part: CLI commands have a directory,
-    // not a workspace name, which is why they all hardcoded Kùzu.
+    // not a workspace name, which is why they all hardcoded the legacy engine.
     const r = resolveGraphEngineForPath(surrealPath, { home });
     assert.equal(r.engine, 'surreal');
     assert.equal(r.workspace, 'sws');
@@ -97,7 +98,7 @@ test('a trailing slash still matches the registered workspace', () => {
 
 test('an explicit workspaceId wins over path lookup', () => {
     assert.equal(
-        resolveGraphEngineForPath(kuzuPath, { workspaceId: 'sws', home }).engine,
+        resolveGraphEngineForPath(legacyPath, { workspaceId: 'sws', home }).engine,
         'surreal',
     );
 });
@@ -115,8 +116,9 @@ test('an unregistered path falls back to the default, it does not throw', () => 
 test('the factory constructs the engine the workspace declares', () => {
     // The regression in one assertion: before this, every path returned
     // LocalGraph. The load-bearing half now is that a declared engine and
-    // the absent-field default BOTH yield SurrealGraph — the Kùzu branch of
-    // this factory is on its way out, and nothing may keep asserting it.
+    // the absent-field default BOTH yield SurrealGraph — the legacy-engine
+    // branch of this factory is on its way out, and nothing may keep
+    // asserting it.
     const s = openWorkspaceGraph(surrealPath, { home });
     const b = openWorkspaceGraph(barePath, { home });
     assert.equal(s.constructor.name, 'SurrealGraph');
@@ -131,14 +133,15 @@ test('construction has no side effects on disk', () => {
     assert.deepEqual(fs.readdirSync(path.join(surrealPath, '.lore')).sort(), before);
 });
 
-console.log('the Kùzu class is out of the CLI entirely');
+console.log('the legacy graph-engine class is out of the CLI entirely');
 
 test('no CLI command constructs LocalGraph', () => {
     // The invariant that makes the tests above mean something: a command that
     // builds its own `new LocalGraph(...)` bypasses engine resolution and is
-    // back to reading the empty Kùzu table on a Surreal workspace. This
-    // replaces the older "constructs LocalGraph AND calls assertKuzuBackedPath"
-    // pairing, which permitted the construction as long as it was guarded.
+    // back to reading the empty legacy-engine table on a Surreal workspace.
+    // This replaces the older "constructs LocalGraph AND calls the legacy
+    // engine's path-assertion guard" pairing, which permitted the
+    // construction as long as it was guarded.
     // Nothing needs that permission any more, so the rule is now flat.
     //
     // A source check because it is a statement about the whole directory
@@ -149,7 +152,7 @@ test('no CLI command constructs LocalGraph', () => {
         if (fs.readFileSync(path.join(dir, f), 'utf8').includes('new LocalGraph(')) offenders.push(f);
     }
     assert.deepEqual(offenders, [],
-        `these bypass openWorkspaceGraph and hardcode Kùzu: ${offenders.join(', ')}`);
+        `these bypass openWorkspaceGraph and hardcode the legacy engine: ${offenders.join(', ')}`);
 });
 
 fs.rmSync(home, { recursive: true, force: true });

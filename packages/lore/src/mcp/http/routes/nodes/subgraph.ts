@@ -88,9 +88,9 @@ export async function handleSubgraph(res: ServerResponse, url: string, deps: Nod
 
         // ONE implementation for every backend — see getNode.ts for why the
         // raw-Cypher fallback that used to live here is gone rather than
-        // guarded. On a Surreal-backed workspace it ran against the Kùzu
-        // instance, whose node table is EMPTY there, and rendered an empty
-        // subgraph with a 200. `subgraphFetch` (engines/graphNeighbors.ts) is
+        // guarded. On a Surreal-backed workspace it ran against the other
+        // engine's instance, whose node table is EMPTY there, and rendered
+        // an empty subgraph with a 200. `subgraphFetch` (engines/graphNeighbors.ts) is
         // built from the portable queryEdges + getNodesByIds verbs that every
         // backend implements, so all of them now walk the same BFS.
         const fetched = await subgraphFetch(

@@ -3,7 +3,7 @@
  * retrieval-parity-unit.ts — Retrieval Unification P4: CROSS-SURFACE parity.
  *
  * The anti-drift guarantee. DIFFERENT from parity-graph-unit.ts (which proves
- * local-Kùzu vs cloud-Dataplane backend parity). This proves that for the SAME
+ * local-the legacy graph engine vs cloud-Dataplane backend parity). This proves that for the SAME
  * query on the SAME workspace, the SURFACES agree — because every surface is a
  * thin adapter over the one retrieve() core (docs/RETRIEVAL_UNIFICATION.md):
  *
@@ -14,7 +14,7 @@
  *          vector_index_consulted + sources_consulted).
  *
  * A single fixtured workspace is built once (a deterministic in-memory mock
- * store + registry — no native Kùzu/LanceDB), then each surface's REAL entry
+ * store + registry — no native the legacy graph engine/LanceDB), then each surface's REAL entry
  * point runs against it. If any adapter ever re-parses params differently,
  * skips the core, or projects a different shape, one of these assertions fails
  * — which is the point: future drift fails CI.
@@ -101,7 +101,7 @@ function buildFixture(): { searchDeps: SearchDeps; toolDeps: SearchToolsDeps } {
         // Both accessors return the SAME object as store.loreGraph — that
         // identity is what lets the core treat this as the active workspace.
         // Production resolves graphs via getGraphHandle now; getOrOpen stays
-        // the Kùzu-substrate accessor.
+        // the legacy-substrate accessor.
         async getOrOpen(_ws: string) { void _ws; return graph; },
         async getGraphHandle(_ws: string) { void _ws; return graph; },
     };
@@ -269,7 +269,7 @@ await test('P16: scan_cap_hit surfaces on REST search + recall when the engine r
         // Both accessors return the SAME object as store.loreGraph — that
         // identity is what lets the core treat this as the active workspace.
         // Production resolves graphs via getGraphHandle now; getOrOpen stays
-        // the Kùzu-substrate accessor.
+        // the legacy-substrate accessor.
         async getOrOpen(_ws: string) { void _ws; return graph; },
         async getGraphHandle(_ws: string) { void _ws; return graph; },
     };

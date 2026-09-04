@@ -21,7 +21,8 @@ import { assertSafeLanceId } from '../../../engines/verbatimHistory.js';
 import { tagsToArray } from '../../../engines/normalizeTags.js';
 import { nodeUpsert, resolveAutolinkHandles, resolveVocabVerdict } from '../../../core/nodeService.js';
 // 1.1 (2026-08-17 audit) — retry SurrealDB transaction-conflict write drops
-// (same wrapper bulkIngest already uses; no-op on Kùzu).
+// (same wrapper bulkIngest already uses; no-op for engines that serialize
+// writes internally).
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import { checkWorkspaceQuota, bumpNodeWriteQuota } from '../../../security/workspaceQuota.js';
 import { mcpToolError } from '../mcpToolError.js';
@@ -441,7 +442,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
             } catch (error) {
                 __auditCtx.errored = true;
                 // Audit fix #4: redact the message before it lands in the
-                // audit log AND the client envelope — Kùzu/LanceDB errors can
+                // audit log AND the client envelope — SurrealDB/LanceDB errors can
                 // echo node ids/paths/content fragments (findings #4 + #13).
                 __auditCtx.resultDetail = redactError(error);
                 return mcpToolError('store_node', error, log, `workspace=${__auditCtx.workspace ?? '?'}`);

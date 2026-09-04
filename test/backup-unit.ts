@@ -2,7 +2,7 @@
 /**
  * test/backup-unit.ts — coordinated workspace backup (gap #12).
  *
- * Builds a fake workspace dir with a Kùzu-shaped file + a real
+ * Builds a fake workspace dir with a legacy-shaped file + a real
  * SQLite file + a LanceDB-shaped directory + sidecar JSON, runs the
  * backup, and asserts:
  *   - tarball is produced and non-empty
@@ -38,8 +38,8 @@ function makeFakeWorkspace(): { wsDir: string; outDir: string; cleanup: () => vo
     fs.mkdirSync(loreDir, { recursive: true });
     fs.mkdirSync(outDir, { recursive: true });
 
-    // Kùzu-shaped graph file (just a placeholder; backup doesn't parse).
-    fs.writeFileSync(path.join(loreDir, 'graph'), 'fake-kuzu-bytes');
+    // legacy-shaped graph file (just a placeholder; backup doesn't parse).
+    fs.writeFileSync(path.join(loreDir, 'graph'), 'fake-legacy-engine-bytes');
     fs.writeFileSync(path.join(loreDir, 'graph.wal'), 'fake-wal');
 
     // Real SQLite file with one row so the online backup has work to do.
@@ -89,8 +89,8 @@ test('produces a non-empty tarball with all three substrate files', async () => 
         assert.match(path.basename(result.tarballPath), /^lore-backup-test-ws-/);
 
         const entries = await tarList(result.tarballPath);
-        assert.ok(entries.some(e => e.endsWith('.lore/graph')), 'kuzu graph in tarball');
-        assert.ok(entries.some(e => e.endsWith('.lore/graph.wal')), 'kuzu wal in tarball');
+        assert.ok(entries.some(e => e.endsWith('.lore/graph')), 'legacy graph-engine file in tarball');
+        assert.ok(entries.some(e => e.endsWith('.lore/graph.wal')), 'legacy graph-engine WAL in tarball');
         assert.ok(entries.some(e => e.endsWith('.lore/tables.sqlite')), 'sqlite in tarball');
         assert.ok(entries.some(e => e.includes('.lore/lancedb')), 'lancedb in tarball');
         assert.ok(entries.some(e => e.endsWith('.lore/config.json')), 'sidecar in tarball');

@@ -1,28 +1,29 @@
 #!/usr/bin/env tsx
 /**
- * getgraphhandle-no-kuzu-open-unit.ts — a Surreal-backed workspace no longer
- * forces an unused Kùzu open through getGraphHandle/tableStorageFor/
+ * getgraphhandle-lazy-open-unit.ts — a Surreal-backed workspace no longer
+ * forces an unused legacy-engine open through getGraphHandle/tableStorageFor/
  * sessionCacheFor.
  *
  * ── THE DEFECT THIS CLOSES ──────────────────────────────────────────────────
  *
- * `LocalGraphRegistry.getGraphHandle()` called `getOrOpen()` (the Kùzu
- * substrate accessor) UNCONDITIONALLY, before even checking the workspace's
- * declared engine — so every Surreal-backed workspace also opened a real,
- * empty, never-touched `.lore/graph` Kùzu database on every access.
- * `tableStorageFor`/`sessionCacheFor` had the same shape. Found 2026-08-10
- * while investigating why every migrated workspace still carried an open
- * Kùzu handle in the daemon's memory.
+ * `LocalGraphRegistry.getGraphHandle()` called `getOrOpen()` (the legacy
+ * graph-engine substrate accessor) UNCONDITIONALLY, before even checking the
+ * workspace's declared engine — so every Surreal-backed workspace also opened
+ * a real, empty, never-touched `.lore/graph` legacy-engine database on every
+ * access. `tableStorageFor`/`sessionCacheFor` had the same shape. Found
+ * 2026-08-10 while investigating why every migrated workspace still carried
+ * an open legacy-engine handle in the daemon's memory.
  *
  * ── HOW THIS IS OBSERVED ─────────────────────────────────────────────────────
  *
- * Opening a Kùzu `Database` and calling `initialize()` (CREATE TABLE IF NOT
- * EXISTS ...) creates `.lore/graph` on disk. So the fail-then-pass signal is
- * external and filesystem-based rather than reaching into registry
+ * Opening the legacy engine's `Database` and calling `initialize()` (CREATE
+ * TABLE IF NOT EXISTS ...) creates `.lore/graph` on disk. So the fail-then-pass
+ * signal is external and filesystem-based rather than reaching into registry
  * internals: on the pre-fix code, `.lore/graph` exists after these calls; on
- * the fixed code, it does not, because Kùzu was never opened at all.
+ * the fixed code, it does not, because the legacy engine was never opened at
+ * all.
  *
- * Run: npx tsx test/getgraphhandle-no-kuzu-open-unit.ts
+ * Run: npx tsx test/getgraphhandle-lazy-open-unit.ts
  */
 
 import assert from 'node:assert/strict';
@@ -48,7 +49,7 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
 }
 
 function freshHome(): { home: string; wsPath: string; wsName: string } {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-nokuzu-'));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-lazyopen-'));
     const wsName = 'sws';
     const wsPath = path.join(home, 'workspaces', wsName);
     fs.mkdirSync(path.join(wsPath, '.lore'), { recursive: true });
@@ -60,11 +61,11 @@ function freshHome(): { home: string; wsPath: string; wsName: string } {
     return { home, wsPath, wsName };
 }
 
-function kuzuGraphExists(wsPath: string): boolean {
+function legacyGraphExists(wsPath: string): boolean {
     return fs.existsSync(path.join(wsPath, '.lore', 'graph'));
 }
 
-console.log('getGraphHandle/tableStorageFor/sessionCacheFor — no incidental Kùzu open on a Surreal workspace');
+console.log('getGraphHandle/tableStorageFor/sessionCacheFor — no incidental legacy-engine open on a Surreal workspace');
 
 await test('getGraphHandle on a Surreal-backed workspace never creates .lore/graph', async () => {
     const { home, wsPath, wsName } = freshHome();
@@ -72,8 +73,8 @@ await test('getGraphHandle on a Surreal-backed workspace never creates .lore/gra
     try {
         const handle = await registry.getGraphHandle(wsName);
         assert.equal(handle.constructor.name, 'SurrealGraph');
-        assert.equal(kuzuGraphExists(wsPath), false,
-            'getGraphHandle must not have opened the Kùzu substrate for a Surreal-backed workspace');
+        assert.equal(legacyGraphExists(wsPath), false,
+            'getGraphHandle must not have opened the legacy graph substrate for a Surreal-backed workspace');
     } finally {
         await registry.disposeAll();
         fs.rmSync(home, { recursive: true, force: true });
@@ -86,8 +87,8 @@ await test('tableStorageFor on a Surreal-backed workspace never creates .lore/gr
     try {
         const storage = await registry.tableStorageFor(wsName);
         assert.ok(storage);
-        assert.equal(kuzuGraphExists(wsPath), false,
-            'tableStorageFor is path-keyed SQLite and must not force a Kùzu open');
+        assert.equal(legacyGraphExists(wsPath), false,
+            'tableStorageFor is path-keyed SQLite and must not force a legacy-engine open');
     } finally {
         await registry.disposeAll();
         fs.rmSync(home, { recursive: true, force: true });
@@ -100,8 +101,8 @@ await test('sessionCacheFor on a Surreal-backed workspace never creates .lore/gr
     try {
         const cache = await registry.sessionCacheFor(wsName);
         assert.ok(cache);
-        assert.equal(kuzuGraphExists(wsPath), false,
-            'sessionCacheFor is path-keyed JSON and must not force a Kùzu open');
+        assert.equal(legacyGraphExists(wsPath), false,
+            'sessionCacheFor is path-keyed JSON and must not force a legacy-engine open');
     } finally {
         await registry.disposeAll();
         fs.rmSync(home, { recursive: true, force: true });
@@ -144,7 +145,7 @@ await test('an unknown workspace is refused via the Surreal path too', async () 
 });
 
 await test('two workspace names on the SAME path share one Surreal handle (alias dedup)', async () => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-nokuzu-alias-'));
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-lazyopen-alias-'));
     const wsPath = path.join(home, 'workspaces', 'shared');
     fs.mkdirSync(path.join(wsPath, '.lore'), { recursive: true });
     fs.writeFileSync(path.join(home, 'workspaces.json'), JSON.stringify({

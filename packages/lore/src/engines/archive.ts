@@ -16,7 +16,7 @@
  *     Verbatim: id="lore:family-photo-2024-07-04" text="(evicted: 2.3 MB @ archive:photos/...)"
  *     Archive: /Volumes/ExternalSSD/lore-archive/photos/family-photo-2024-07-04.bin
  *
- * This frees the hot-path storage (LanceDB + Kùzu) of the bulk while
+ * This frees the hot-path storage (LanceDB + the graph store) of the bulk while
  * keeping the graph searchable (embeddings stay) and navigable (metadata
  * stays). On "show me that photo", the UI resolves sourceRef to the
  * archive, reads the bytes, renders.

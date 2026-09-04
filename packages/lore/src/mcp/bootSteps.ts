@@ -28,7 +28,7 @@ import { LocalSourceWatcher } from '../engines/localSourceWatcher.js';
 import { buildVerbatimText } from '../engines/verbatimSchema.js';
 import { sweepFreshness, type IFreshnessGraph } from '../engines/freshnessEngine.js';
 import { log } from '../logger.js';
-import { KuzuSchemaGraphOps, type SchemaGraphOps } from '../schemas/substrate/schemaGraphOps.js';
+import { LegacySchemaGraphOps, type SchemaGraphOps } from '../schemas/substrate/schemaGraphOps.js';
 import { resolveWorkspaceGraphEngine, GraphSubstrateUnsupportedError } from '../engines/graphEngineSelector.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 import { isWorkspaceGraph } from '../engines/requireWorkspaceGraph.js';
@@ -148,7 +148,8 @@ export function runEnvScrub(): void {
  * S1 — File permission lockdown (Phase 0 security hardening). Tighten
  * ~/.groundfloor (data home) AND the active workspace root if it
  * differs (custom workspace paths can live anywhere). Must run before
- * graph.initialize() so Kùzu files inherit the 0700 parent dir.
+ * graph.initialize() so the graph engine's on-disk files inherit the 0700
+ * parent dir.
  */
 export function runPermLockdown(graphBasePath: string): void {
     try {
@@ -244,12 +245,12 @@ export interface FileWatcherStartupDeps {
  * files AFTER the graph schema is initialized so writes can land in the
  * graph. Failures are non-fatal.
  *
- * Gated on the LOCAL ENGINE capability, not on the Kùzu class. The old
- * `deps.graph instanceof LocalGraph` was written when local mode could only
- * mean Kùzu; once `createGraph` started honouring the workspace's declared
- * engine it would have silently stopped watching files on a Surreal-backed
- * workspace — or, worse, kept watching and written the ingested content into
- * the empty Kùzu database the old boot graph pointed at.
+ * Gated on the LOCAL ENGINE capability, not on a specific graph class. The
+ * old `deps.graph instanceof LocalGraph` check was written when local mode
+ * had only one graph engine; once `createGraph` started honouring the
+ * workspace's declared engine it would have silently stopped watching files
+ * on a Surreal-backed workspace — or, worse, kept watching and written the
+ * ingested content into the empty database the old boot graph pointed at.
  */
 export async function startFileWatcher(deps: FileWatcherStartupDeps): Promise<void> {
     if (isWorkspaceGraph(deps.graph)) {
@@ -446,8 +447,8 @@ export function stopAllLocalWatchers(): void {
 /**
  * Phase 6 P1.B/P1.C — boot-construct the multi-workspace LocalGraph
  * registry. Primed with the boot-bound active graph so getOrOpen(active)
- * returns the SAME instance (single-writer Kùzu constraint); sibling
- * workspaces lazy-open on first access. Cloud mode skips wiring.
+ * returns the SAME instance (single-writer graph engine constraint);
+ * sibling workspaces lazy-open on first access. Cloud mode skips wiring.
  */
 export function buildGraphRegistryForLocalMode(
     deploymentMode: 'local' | 'cloud',
@@ -456,16 +457,17 @@ export function buildGraphRegistryForLocalMode(
     home: string = loreHome(),
     opts: { autoEvict?: boolean } = { autoEvict: true },
 ): LocalGraphRegistry | undefined {
-    // Gate on MODE, not on the Kùzu class. `graph instanceof LocalGraph` was
-    // equivalent while local mode could only mean Kùzu; once `createGraph`
-    // honours the workspace's declared engine, a Surreal-backed boot workspace
-    // would have returned `undefined` here — no registry at all, so every
-    // per-workspace HTTP route silently fell back to the boot handle and the
-    // whole workspace-isolation boundary went with it.
+    // Gate on MODE, not on a specific graph class. `graph instanceof
+    // LocalGraph` was equivalent while local mode had only one graph
+    // engine; once `createGraph` honours the workspace's declared engine, a
+    // Surreal-backed boot workspace would have returned `undefined` here —
+    // no registry at all, so every per-workspace HTTP route silently fell
+    // back to the boot handle and the whole workspace-isolation boundary
+    // went with it.
     if (deploymentMode !== 'local' || !isWorkspaceGraph(graph)) return undefined;
     // SP-11 — autoEvict closes idle/over-cap lazily-opened sibling
     // workspaces so a multi-repo daemon doesn't keep every workspace's
-    // Kùzu + LanceDB handle open forever. The boot graph is primed +
+    // graph + LanceDB handle open forever. The boot graph is primed +
     // pinned below and is never evicted by the registry.
     // TW-2a — `home` scopes every workspaces.json read inside the registry
     // to this instance's data root; `opts.autoEvict` lets the embedded path
@@ -478,7 +480,7 @@ export function buildGraphRegistryForLocalMode(
     // whatever workspace is `active` in workspaces.json. Prime under
     // that name so subsequent `getOrOpen(activeName)` returns this
     // same instance instead of constructing a second writer racing
-    // against the bootstrap graph on the same Kùzu file.
+    // against the bootstrap graph on the same on-disk graph store.
     //
     // The `activeWorkspace` parameter (from `detectedScope.workspace`)
     // can be `"*"` when the daemon's CWD doesn't match any registered
@@ -574,8 +576,8 @@ export function resolveToolTier(): 'default' | 'slim' | 'opt-in' {
 }
 
 /**
- * The raw-Cypher escape hatch the schema subsystem's Kùzu path runs on.
- * Kùzu's `LocalGraph` exposes it; `SurrealGraph` and `DataplaneGraph` do not.
+ * The raw-Cypher escape hatch the schema subsystem's now-removed local-engine
+ * path used to run on. `SurrealGraph` and `DataplaneGraph` do not expose it.
  */
 export interface GraphCypherContext {
     queryRows(cypher: string, params?: Record<string, unknown>): unknown;
@@ -585,11 +587,11 @@ export interface GraphCypherContext {
 /**
  * A graph handle that may expose EITHER the engine-agnostic schema-ops port
  * directly (`SurrealGraph.getSchemaGraphOps()`) or the raw-Cypher hatch
- * (`LocalGraph.getGraphContext()`, wrapped into `KuzuSchemaGraphOps` below).
+ * (`LocalGraph.getGraphContext()`, wrapped into `LegacySchemaGraphOps` below).
  *
  * Optional because the boot graph's actual shape depends on the workspace's
  * declared engine (`createGraph` resolves it): a `SurrealGraph` has the
- * former, a Kùzu `LocalGraph` has the latter, and a `DataplaneGraph` (cloud
+ * former, a `LocalGraph` has the latter, and a `DataplaneGraph` (cloud
  * mode) has neither — this subsystem doesn't run there.
  *
  * Intersected with `LoreGraphHandle` rather than declared standalone so it
@@ -605,10 +607,10 @@ export type SchemaOpsCapableGraph = LoreGraphHandle & {
  * buildGraphReaders — the `SchemaGraphOps` adapter that bridges
  * SchemaAuthoringStore + the migration backend onto the live graph's
  * engine-agnostic schema-ops port (`schemas/substrate/schemaGraphOps.ts`).
- * Formerly a Kùzu-only raw-Cypher adapter gated by `assertKuzuGraphSubstrate`;
- * now selects the ops instance for whichever engine the workspace actually
- * runs, so blast radius / the pre-destructive snapshot / migration execution
- * work on a SurrealDB-backed workspace instead of being refused.
+ * Formerly a raw-Cypher adapter gated to a single local engine; now selects
+ * the ops instance for whichever engine the workspace actually runs, so
+ * blast radius / the pre-destructive snapshot / migration execution work on
+ * a SurrealDB-backed workspace instead of being refused.
  *
  * Takes `getGraph` (not the graph itself) so the boot-mutable `graph`
  * binding — which main()'s keychain-upgrade may reassign — is read fresh on
@@ -642,14 +644,14 @@ export function buildGraphReaders(
         }
         if (typeof g.getGraphContext === 'function') {
             const ctx = g.getGraphContext();
-            return new KuzuSchemaGraphOps({
+            return new LegacySchemaGraphOps({
                 queryRows: async (cypher, params) =>
                     await ctx.queryRows(cypher, params) as Array<Record<string, unknown>>,
                 executeWrite: async (cypher, params) => { await ctx.executeQuery(cypher, params); },
             });
         }
-        // Neither hatch present. Every local-mode engine (Kùzu, SurrealDB)
-        // has one, so this is either an invariant violation (whoever
+        // Neither hatch present. SurrealDB, the only local-mode engine, has
+        // one, so this is either an invariant violation (whoever
         // supplied the graph handle) or this seam reached from a deployment
         // mode (cloud) it was never meant to serve — named refusal rather
         // than a raw TypeError three frames down.

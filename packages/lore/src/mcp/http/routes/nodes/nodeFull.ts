@@ -3,7 +3,7 @@
  *
  * Fetch the full body of a single node by id. Companion to /api/recall —
  * the CLI's `lore get-full <id>` calls this when the daemon is up so it
- * doesn't fight Kùzu's lock. Path is `/api/node-full` (not
+ * doesn't fight the graph engine's lock. Path is `/api/node-full` (not
  * `/api/node/full`) to avoid the `/api/node` match.
  */
 

@@ -320,7 +320,7 @@ await test('D1: Surreal bulkList treats ecosystem:\'*\' as no filter at all', as
     await surrealBulkList(rec.fn as never, { limit: 10, ecosystem: '*' });
     // The projection legitimately names ecosystem; only the WHERE clause and
     // the bound param are the question. (This assertion was born against
-    // Kùzu's bulkListNodes and re-pointed to the surviving Surreal path when
+    // the legacy engine's bulkListNodes and re-pointed to the surviving Surreal path when
     // the engine was deleted — Phase 3d, 2026-08-21.)
     assert.doesNotMatch(rec.calls[0]!.sql, /\$ecosystem/, `'*' must not become a predicate:\n${rec.calls[0]!.sql}`);
     assert.equal(rec.calls[0]!.params['ecosystem'], undefined, "'*' must bind no param");

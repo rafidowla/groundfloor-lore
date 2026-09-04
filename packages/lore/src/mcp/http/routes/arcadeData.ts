@@ -244,7 +244,7 @@ function cellGraphForStats(cell: BoundArcadeCell): StorageBundle['loreGraph'] {
  *                       WorkspaceNotFoundError (the local 404/400 shape).
  *   getGraphHandle(ws)→ same as getOrOpen: there is exactly one graph here,
  *                       already resolved to the cell's actual engine by
- *                       cellGraphForStats — no Kuzu-vs-Surreal branch to run.
+ *                       cellGraphForStats — no per-engine branch to run.
  *   activeName()      → cellWorkspace (there is exactly one workspace).
  * Typed as LocalGraphRegistry via a cast because the local routes only ever
  * call getOrOpen / getGraphHandle / activeName / withGraph on it (verified

@@ -57,7 +57,7 @@ copy. The five/six duplicate implementations are deleted.
 
 ## Explicitly NOT in scope (non-goals)
 - A brand-new ranking/search algorithm.
-- Changing the storage engines (SurrealDB or Kùzu / LanceDB).
+- Changing the storage engines (SurrealDB / LanceDB).
 - **ALL query preprocessing** — spelling/typo correction, normalization, query
   expansion, multilingual handling. Per **D3** the engine searches the raw query;
   this is the app's responsibility (or a separate later phase).
@@ -97,14 +97,15 @@ copy. The five/six duplicate implementations are deleted.
     `RecallResult`: ids, order, `_meta` incl. `vector_index_consulted` +
     `sources_consulted`).
   This is DISTINCT from `parity-graph-unit.ts` (local graph — SurrealDB by
-  default as of v3.13.0, formerly Kùzu — vs cloud-Dataplane
+  default as of v3.13.0, formerly the prior local graph engine (see
+  `docs/KUZU_REMOVAL.md`) — vs cloud-Dataplane
   *backend* parity). It is the anti-drift guarantee: if any adapter ever
   re-parses params differently, skips the core, or projects a different shape,
   CI fails.
 
 ### P3 — what landed
 - **P14 freshness:** `_meta.vector_index_consulted` on every search/recall response (type-required). false = semantic skipped (just-written / non-active workspace), keyword still ran.
-- **P15 tag parity:** local search re-matches tags via exact `$q IN n.tags` (Kùzu can't substring-match a list vs a bound param). Restores "search by tag name"; new `kappa-tag-only` parity fixture. *Edge:* substring-within-a-tag stays cloud-only.
+- **P15 tag parity:** local search re-matches tags via exact `$q IN n.tags` (the prior local graph engine couldn't substring-match a list vs a bound param; see `docs/KUZU_REMOVAL.md`). Restores "search by tag name"; new `kappa-tag-only` parity fixture. *Edge:* substring-within-a-tag stays cloud-only.
 - **P16 transparency:** operator warning when the 2000 scan cap bites (no longer silent; points at `LORE_SEARCH_SCAN_CAP`). The rework was deliberately skipped (tradeoff-laden, rare); a per-response caller flag is deferred (needs a search-contract change).
 
 ### P2 — what landed

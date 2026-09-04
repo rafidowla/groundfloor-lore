@@ -3,7 +3,7 @@
  * OutboxReplicator whose DispatcherSubstrates fan out to per-cell RAW ArcadeDB
  * adapters (spike/arcadedb-multitenant, Slice 4).
  *
- * Do NOT extend outbox/wiring.ts — that file is local-substrate-shaped (Kùzu +
+ * Do NOT extend outbox/wiring.ts — that file is local-substrate-shaped (graph engine +
  * LanceDB + sync engine). This is the arcade-shaped analogue.
  *
  * ── RESOLUTION ───────────────────────────────────────────────────────────────
@@ -147,6 +147,15 @@ export function wireArcadeReplicator(input: {
       const { graph } = await resolveCell(workspace);
       await graph.deleteNode(id);
     },
+    // 2026-09-03 (X-markstale audit fix) — arcade-lane replay of a
+    // `node.mark_stale` chunk row (outbox/types.ts). Mirrors deleteNode
+    // above: no node-write-lock in this lane (arcade has no
+    // core/nodeWriteLock.ts equivalent wired here — same as every other
+    // handler in this file), resolve the cell, apply the substrate update.
+    markStale: async (ids, workspace) => {
+      const { graph } = await resolveCell(workspace);
+      await graph.markStaleByIds(ids);
+    },
     deleteEdge: async (payload, workspace) => {
       const { graph } = await resolveCell(workspace);
       await graph.deleteEdge(payload.sourceId, payload.targetId, payload.relation);
@@ -158,6 +167,24 @@ export function wireArcadeReplicator(input: {
       if (!id) return;
       const { vector } = await resolveCell(workspace);
       await vector.store({ id, text, metadata: metadata as never });
+    },
+    // QA A2 round-2 finding 3 (2026-09-03) — every node-delete path
+    // unconditionally records a `verbatim.tombstone` outbox row (see
+    // nodes-delete.ts / deleteNode.ts / lifecycle.ts / changesetWrite.ts),
+    // but ArcadeVectorStore has no soft-tombstone concept (its synchronous
+    // delete path already falls back to hard `delete()` — see those same
+    // callers' `canTombstone` branch). Before this, the row had NOTHING to
+    // dispatch to here — the dispatcher threw UnwiredOperationKindError on
+    // first attempt and the row dead-lettered PERMANENTLY (unbounded
+    // dead-letter growth, one row per arcade delete). Map the dispatch to
+    // ArcadeVectorStore's actual delete semantics: a hard delete is the
+    // honest terminal state for this substrate, it is idempotent (deleting
+    // an already-absent id is a no-op DELETE), and getVerbatim below then
+    // reports the row absent — the SAME "verified" shape verifyApplied
+    // already accepts for a real tombstone (outbox/dispatcher.ts).
+    tombstoneVerbatim: async (id, _reason, workspace) => {
+      const { vector } = await resolveCell(workspace);
+      await vector.delete(id);
     },
     // Verifier hooks (self-heal sweep). hasEdge uses a plain param-bound MATCH
     // count via getEdges — no both()/expand() traps.
@@ -175,6 +202,16 @@ export function wireArcadeReplicator(input: {
     hasVerbatim: async (id, workspace) => {
       const { vector } = await resolveCell(workspace);
       return (await vector.getById(id)) !== null;
+    },
+    // 2026-09-03 (A2 round-2 finding 3 fix) — content witness for verbatim
+    // self-heal AND the verbatim.tombstone verifier (outbox/dispatcher.ts
+    // verifyApplied): a row this store's tombstoneVerbatim hard-deleted
+    // reports absent here, which verifyApplied treats as "verified" for a
+    // tombstone kind — the same convergence shape as the local substrate's
+    // soft tombstone.
+    getVerbatim: async (id, workspace) => {
+      const { vector } = await resolveCell(workspace);
+      return vector.getById(id);
     },
     // embed.batch / sync.vector.mirror: NOT produced in arcade — leave unwired.
   };

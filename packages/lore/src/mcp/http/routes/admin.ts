@@ -35,7 +35,7 @@ import { bindDaemonOperatorLane } from '../../../security/routeWorkspaceBinding.
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { loadExtraIngestionRoots, saveExtraIngestionRoots, isIngestionConfigured, isWatchRootSafe } from '../../../security/pathAllowlist.js';
 import { loreHome } from '../../../config/loreHome.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError } from '../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { redactError } from '../../../security/logRedact.js';
 
 export interface AdminDeps {
@@ -106,7 +106,7 @@ export async function tryAdminRoutes(
             return true;
         }
         try {
-            const payload = JSON.parse(body || '{}') as { approved?: boolean; reason?: string };
+            const payload = parseJsonBody(body) as { approved?: boolean; reason?: string };
             if (typeof payload.approved !== 'boolean') {
                 writeError(res, 400, 'invalid_request_body', 'approved must be boolean');
                 return true;
@@ -123,6 +123,10 @@ export async function tryAdminRoutes(
             res.writeHead(ok ? 200 : 404, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok, id }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — already 400, but redactError
+            // garbled the JSON.parse diagnostic; route through
+            // writeInvalidJson for a clean, non-hashed message instead.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'invalid_request_body', redactError(err));
         }
         return true;
@@ -155,7 +159,7 @@ export async function tryAdminRoutes(
         }
         const startMs = Date.now();
         try {
-            const { apply } = JSON.parse(body || '{}') as {
+            const { apply } = parseJsonBody(body) as {
                 apply?: boolean;
             };
             let approvalId: string | undefined;
@@ -199,6 +203,10 @@ export async function tryAdminRoutes(
                 resultDetail: (err as Error).message,
                 durationMs: Date.now() - startMs,
             });
+            // X-json400 (2026-09-03 audit) — malformed JSON used to fall
+            // through to 500 here; parseJsonBody's tagged error is caught
+            // first now.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 500, 'internal_error', redactError(err));
         }
         return true;
@@ -349,7 +357,7 @@ export async function tryAdminRoutes(
             return true;
         }
         try {
-            const parsed = JSON.parse(body || '{}') as { roots?: unknown };
+            const parsed = parseJsonBody(body) as { roots?: unknown };
             if (!Array.isArray(parsed.roots)) {
                 writeError(res, 400, 'invalid_request_body', 'roots must be an array of strings');
                 return true;
@@ -390,6 +398,10 @@ export async function tryAdminRoutes(
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ roots: persisted, isConfigured: true, suggestedDefaults }));
         } catch (err) {
+            // X-json400 (2026-09-03 audit) — already 400, but redactError
+            // garbled the JSON.parse diagnostic; route through
+            // writeInvalidJson for a clean, non-hashed message instead.
+            if (isInvalidJsonBody(err)) { writeInvalidJson(res, err); return true; }
             writeError(res, 400, 'invalid_request_body', redactError(err));
         }
         return true;

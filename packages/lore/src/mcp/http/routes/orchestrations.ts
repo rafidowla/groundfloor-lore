@@ -19,7 +19,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { PlanOrchestrator } from '../../../schemas/orchestration/orchestrator.js';
 import type { DecomposedPlan } from '../../../schemas/decomposition.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
-import { readJsonBody, writeJson, writeError } from '../helpers.js';
+import { readJsonBody, writeJson, writeError, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { redactError } from '../../../security/logRedact.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../security/routeWorkspaceBinding.js';
 
@@ -192,6 +192,10 @@ export async function tryOrchestrationsRoutes(
             const advanced = await orchestrator.tick(initial.id);
             writeJson(res, 201, advanced);
         } catch (e) {
+            // X-json400 (2026-09-03 audit) — already 400, but redactError
+            // garbled the JSON.parse diagnostic; route through
+            // writeInvalidJson for a clean, non-hashed message instead.
+            if (isInvalidJsonBody(e)) { writeInvalidJson(res, e); return true; }
             writeError(res, 400, 'create_orchestration_failed', redactError(e));
         }
         return true;

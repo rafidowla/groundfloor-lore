@@ -2,9 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { execSync, spawnSync } from 'child_process';
-import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { loreHome, loreHomePath } from '../../config/loreHome.js';
-import { resolveGraphBasePath, isDaemonRunning, writeMcpConfig } from './shared.js';
+import { resolveGraphBasePath, isDaemonRunning, writeMcpConfig, openGraphForCli } from './shared.js';
 import { readOperatorIdentity, operatorIdentityPath } from '../../security/operatorIdentity.js';
 
 export async function setupCommand(args: string[]): Promise<void> {
@@ -28,10 +27,13 @@ export async function setupCommand(args: string[]): Promise<void> {
     } else {
         try {
             fs.mkdirSync(loreDir, { recursive: true });
-            const graph = openWorkspaceGraph(basePath);
-            await graph.initialize();
+            // Finding 11 (round E) — refuse fast with a clear message when
+            // a running daemon holds this store's lock, instead of the old
+            // ~15s openSurreal retry storm ending in a raw driver error
+            // (caught below the same as any other init failure).
+            const graph = await openGraphForCli(basePath);
             await graph.close();
-            console.log('  ✓ Kùzu graph initialized at ~/.groundfloor/.lore/graph/');
+            console.log('  ✓ Graph initialized at ~/.groundfloor/.lore/graph/');
         } catch (graphError) {
             console.error(`  ✗ Failed to initialize graph: ${(graphError as Error).message}`);
             issues++;

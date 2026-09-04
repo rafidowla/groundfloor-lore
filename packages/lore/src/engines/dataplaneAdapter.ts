@@ -38,6 +38,7 @@ import type {
     TableOp,
     TableOpResult,
 } from '../contracts/index.js';
+import type { TableSchemaSummary } from '../contracts/tables.js';
 import type { Filter, FindOptions } from './collectionStorage.js';
 
 export interface DataplaneAdapterDeps {
@@ -108,6 +109,7 @@ function unimplementedTables(): ITableStorage {
             extractedJsonFields: true, additiveSchemaEvolution: true,
         }),
         createTable: (_s: TableSchema) => fail<void>('createTable'),
+        listTables: () => fail<TableSchemaSummary[]>('listTables'),
         insert: (_t: string, _r: Row) => fail<void>('insert'),
         insertBatch: (_t: string, _r: Row[]) => fail<void>('insertBatch'),
         query: (_t: string, _f?: Filter, _o?: FindOptions) => fail<Row[]>('query'),

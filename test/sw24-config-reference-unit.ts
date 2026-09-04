@@ -74,8 +74,8 @@ const KNOWN_EXCLUSIONS = new Set<string>([
     // doesn't false-positive on the comment artifact. If a real consumer
     // lands later, wire it through, document it, and remove this entry.
     'LORE_SWEEP_KEEP_ORPHANS',
-    // Kuzu-removal Phase 3d (2026-08-21) — the LORE_TABLE_BACKEND=kuzu legacy
-    // path (KuzuTableStorage) was deleted; the name survives only in
+    // legacy graph-engine removal Phase 3d (2026-08-21) — the LORE_TABLE_BACKEND legacy-engine
+    // path (the legacy TableStorage class) was deleted; the name survives only in
     // tableStorageFactory.ts's header comment explaining the removal, not as
     // a real process.env read. CONFIGURATION.md's entry was removed with it.
     'LORE_TABLE_BACKEND',

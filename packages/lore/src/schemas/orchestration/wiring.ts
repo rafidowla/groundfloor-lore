@@ -111,7 +111,7 @@ export function wireOrchestration(input: {
             // ── DATA-MIGRATION HOOK (2026-05-17 fix) ──────────────────
             // The approve() call above flips schema.json, captures the
             // snapshot, and writes the audit entry — but it does NOT
-            // touch the live Kuzu graph. Without the runner step the
+            // touch the live graph. Without the runner step the
             // "approved" schema and the actual data diverge silently
             // (data outlives its declared type). Run the migration
             // synchronously here so the approver's expectation (the

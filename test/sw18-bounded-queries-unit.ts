@@ -18,9 +18,9 @@
  *   - For listNodes: a REAL embedded SurrealGraph with 10 050 nodes on
  *     disk, so the 10 000 cap is observable behaviour, not an assertion
  *     about a string the test built itself. (The original version of
- *     this section replicated Kuzu's Cypher decision tree locally and
+ *     this section replicated the legacy engine's Cypher decision tree locally and
  *     asserted on its own output — coverage that evaporated with the
- *     Kùzu removal.)
+ *     the legacy graph engine removal.)
  *   - For SqliteTableStorage: a real SQLite file in /tmp; insert rows
  *     > cap and verify the default query returns the capped set.
  *

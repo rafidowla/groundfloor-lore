@@ -123,7 +123,7 @@ workspace").
 | **Surface** | daemon |
 
 Selects the operating mode for the daemon. `local` runs against the embedded
-Kùzu + LanceDB substrates under `LORE_HOME`. `cloud` routes data access
+SurrealDB + LanceDB substrates under `LORE_HOME`. `cloud` routes data access
 through the Dataplane SDK. Env value takes precedence over the `deploymentMode`
 key in `~/.groundfloor/config.json`. Invalid values are logged and fall back
 to the config-file value (or `local`).
@@ -1658,14 +1658,14 @@ Source: `src/engines/lanceTablePool.ts`
 |---|---|
 | **Default** | `200` |
 | **Range** | `[1, ∞)` |
-| **Surface** | daemon (Kùzu + LanceDB pools) |
+| **Surface** | daemon (LanceDB pool) |
 
 Maximum number of requests that may queue waiting for a pool connection.
 When this limit is reached, new requests immediately receive a `503
 server_overloaded` response with `Retry-After: 1` instead of hanging until
-the client times out. Applies to both the Kùzu and LanceDB pools.
+the client times out.
 
-Source: `src/engines/kuzuConnectionPool.ts`
+Source: `src/engines/poolLimits.ts`
 
 ---
 
@@ -1675,14 +1675,14 @@ Source: `src/engines/kuzuConnectionPool.ts`
 |---|---|
 | **Default** | `30000` |
 | **Range** | `[1, ∞)` |
-| **Surface** | daemon (Kùzu + LanceDB pools) |
+| **Surface** | daemon (LanceDB pool) |
 
 Maximum milliseconds a queued pool acquire may wait before the request
 receives a `503 server_overloaded` response. This is a backstop for requests
 that queued before `LORE_POOL_MAX_WAITERS` was reached but are still waiting
-too long. Applies to both the Kùzu and LanceDB pools.
+too long.
 
-Source: `src/engines/kuzuConnectionPool.ts`
+Source: `src/engines/poolLimits.ts`
 
 ---
 
@@ -1753,11 +1753,11 @@ Source: `src/engines/searchRanking.ts`
 | | |
 |---|---|
 | **Default** | `200000` |
-| **Surface** | daemon + embedded (analytical `timeSeries`) |
+| **Surface** | daemon + embedded (analytical `timeSeries` + `groupBy`/`aggregate`) |
 
-Maximum number of rows `KuzuAnalyticalStorage.timeSeries` scans before bucketing them in JS. timeSeries aggregates in memory, so an unbounded scan over a large collection/time-window would OOM the daemon. When a query would exceed this cap the call **fails loud** ("narrow the filter or time range") rather than silently truncating the input — a truncated scan would corrupt the aggregation (missing buckets / wrong sums). Raise it only if you genuinely need wider series and have the memory headroom.
+Maximum number of matched rows `SqliteAnalyticalStorage.timeSeries`/`groupBy` scan before aggregating over the full matched set (`timeSeries` buckets in JS; `groupBy` collapses via SQL `GROUP BY`). An unbounded scan over a large collection/time-window would exhaust memory or run an unbounded full-table scan. When a query would exceed this cap the call **fails loud** (`AnalyticalScanCapExceeded` — "narrow the filter or time range") rather than silently truncating the input — a truncated scan would corrupt the aggregation (missing buckets/groups, wrong sums). The REST siblings (`POST /api/time-series`, `POST /api/aggregate`) map this to `400 analytical_scan_cap_exceeded`; the `aggregate`/`time_series` MCP tools surface it as a structured tool error. Raise it only if you genuinely need wider series/groups and have the memory/latency headroom.
 
-Source: `src/engines/kuzuAnalyticalStorage.ts`
+Source: `src/engines/sqliteAnalyticalStorage.ts` (this cap silently stopped being enforced after the prior graph-engine removal, until it was restored per `docs/audit/` finding X-scancap)
 
 ---
 
@@ -1792,7 +1792,7 @@ Source: `src/engines/dataplaneGraphTopology.ts` (local default in
 
 Maximum number of workspaces scanned by a single cross-workspace
 (`workspace="*"`) recall. The workspace list is sliced to this cap before any
-graph is opened, so a large `workspaces.json` never forces every Kùzu handle
+graph is opened, so a large `workspaces.json` never forces every graph handle
 open for one query. Clamped to `[1, 10000]`.
 
 Source: `src/mcp/http/routes/search.ts`
@@ -1808,7 +1808,7 @@ Source: `src/mcp/http/routes/search.ts`
 
 Maximum number of per-workspace scans run in parallel during a cross-workspace
 recall. Replaces the former serial one-workspace-at-a-time fan-out. Higher
-values reduce latency at the cost of more concurrent Kùzu/LanceDB reads.
+values reduce latency at the cost of more concurrent SurrealDB/LanceDB reads.
 Clamped to `[1, 64]`.
 
 Source: `src/mcp/http/routes/search.ts`
@@ -1869,7 +1869,7 @@ Source: `src/engines/verbatimStore.ts`
 | **Surface** | daemon (LocalGraphRegistry) |
 
 Idle-eviction threshold for cached workspace handles. Workspaces that have not
-been accessed within this window are closed and their Kùzu + LanceDB handles
+been accessed within this window are closed and their SurrealDB + LanceDB handles
 released. Each open workspace consumes ~10–50 MB RSS; lowering this value
 reduces steady-state memory on daemons that touch many workspaces.
 
@@ -1900,8 +1900,8 @@ Source: `src/engines/localGraphRegistry.ts`
 | **Surface** | daemon (LocalGraphRegistry) |
 
 Maximum number of workspace graphs kept open before the registry evicts the
-least-recently-accessed one (LRU). Each open workspace holds a Kùzu mmap + a
-connection pool + a LanceDB handle (~10–50 MB RSS). Lower on a memory-tight
+least-recently-accessed one (LRU). Each open workspace holds a SurrealDB
+handle + a connection pool + a LanceDB handle (~10–50 MB RSS). Lower on a memory-tight
 host; raise on a big-RAM daemon that fans out across many workspaces.
 
 Source: `src/engines/localGraphRegistry.ts`
@@ -1930,8 +1930,8 @@ Source: `src/mcp/services.ts`
 | **Default** | `1800000` (30 minutes) |
 | **Surface** | daemon (consistency sweeper) |
 
-Interval between cross-substrate consistency-reconciliation sweeps (Kùzu ↔
-LanceDB drift repair). Lower to reconcile drift sooner at the cost of more
+Interval between cross-substrate consistency-reconciliation sweeps
+(SurrealDB ↔ LanceDB drift repair). Lower to reconcile drift sooner at the cost of more
 frequent sweep overhead.
 
 Source: `src/diagnostics/sweeper.ts`
@@ -2266,12 +2266,12 @@ daemon is started, no config file is consulted for these settings.
 
 Selects the substrate and transport mode for a `createLore()` call:
 
-- `'embedded'` — in-process only. Kùzu + LanceDB + SQLite outbox, no TCP
+- `'embedded'` — in-process only. SurrealDB + LanceDB + SQLite outbox, no TCP
   socket, no daemon threads, no process-level signal/error handlers installed.
   In-process outbox replication runs so `search`/`recall` find newly written
   nodes without a daemon. The host process owns the lifecycle; call `dispose()`
   to release all handles.
-- `'local'` — local Kùzu + LanceDB substrates, but wired for daemon mode
+- `'local'` — local SurrealDB + LanceDB substrates, but wired for daemon mode
   (stdio or HTTP transport via `main()`). Use `'embedded'` for library use.
 - `'cloud'` — Dataplane SDK substrates, wired for daemon mode with the cloud
   adapter. Requires `DATAPLANE_URL`, `DATAPLANE_API_KEY`, `DATAPLANE_ORG_ID`.
@@ -2293,7 +2293,7 @@ Source: `packages/lore/src/mcp/server.ts` (`createLore`, `CreateLoreOptions`)
 
 Per-instance Lore data root. Set this to a unique path when embedding
 multiple Lore instances in one process — each instance will maintain a fully
-isolated on-disk graph (Kùzu DB, LanceDB vectors, SQLite outbox).
+isolated on-disk graph (SurrealDB, LanceDB vectors, SQLite outbox).
 
 Without `dataDir`, two `createLore()` calls in the same process will share the
 global `LORE_HOME` workspace state and can corrupt each other's data. Always
@@ -2331,14 +2331,16 @@ full build.
 
 ---
 
-## SurrealDB engine (evaluation — additive, opt-in)
+## SurrealDB engine
 
-A second local graph engine built alongside Kùzu
-(`docs/SURREALDB_BUILD_PLAN.md`, Phase 1). **Nothing in the default runtime
-path constructs it** — these variables only matter once a caller builds a
-`SurrealGraph` / `LoreStorageClient.fromSurreal(...)`. Graph substrate only:
-collections, analytical storage, pending-ops, and ReBAC stay on Kùzu; vectors
-stay on LanceDB.
+SurrealDB is the graph engine — the only one; the prior local graph engine
+was fully removed 2026-08-21 (see `docs/KUZU_REMOVAL.md`). It was built as a
+second local graph engine alongside the one it replaced
+(`docs/SURREALDB_BUILD_PLAN.md`, Phase 1) and has been the default
+construction path since; these variables tune the
+`SurrealGraph` / `LoreStorageClient.fromSurreal(...)` every local workspace
+now uses. Graph substrate only: collections, analytical storage,
+pending-ops, and ReBAC are on SQLite; vectors stay on LanceDB.
 
 SurrealDB core is BSL 1.1 — embedding is permitted, offering it as a hosted
 service is not. The engine is **local/embedded only**, enforced by
@@ -2457,11 +2459,12 @@ exits afterwards.** Only the first boot of a workspace is affected (a no-op
 `IF NOT EXISTS` re-define is clean), which makes it look like a fluke rather
 than a bug. Asserted as a ratchet by `test/surreal-process-exit-unit.ts`.
 
-Costs nothing today: the Kùzu binding exposes no `CREATE INDEX` surface at all
-(`src/migration/adapters/kuzuMigrationAdapter.ts`, `addIndex: false`), so
-LocalGraph has no secondary indexes either — running without them is engine
-parity, not a regression. Use this for the Phase-2 real-scale measurement,
-where a hung process at the end of a benchmark run is acceptable.
+Since the prior local graph engine's removal (2026-08-21) SurrealDB is the only graph engine, so
+leaving this off means the live workspace runs with no secondary indexes at
+all — see `docs/PERFORMANCE_NOTES.md` §1 for the current-state discussion
+of what that costs on hot list/cursor readers. Use this flag for the
+Phase-2 real-scale measurement, where a hung process at the end of a
+benchmark run is acceptable.
 
 Source: `src/engines/surreal/surrealConnection.ts`
 
@@ -2496,6 +2499,65 @@ identifying a held directory lock as the likely cause. Raise it on a slow disk;
 lowering it makes a genuinely-locked workspace fail faster.
 
 Source: `src/engines/surreal/surrealConnection.ts`
+
+---
+
+### `LORE_SURREAL_SETTLE_BUDGET_MS`
+
+| | |
+|---|---|
+| **Default** | `2000` |
+| **Surface** | local + embedded (SurrealDB engine only) |
+
+Hard ceiling on how long `settleSurrealStore` waits for an on-disk store to
+stop changing after `close()` before giving up and reporting `{ settled:
+false, outcome: 'timeout' }` (best-effort — a store that never settles in
+time is a slow close, never a failed one). Set to `0` to disable the wait
+entirely. Raise it on a slow disk if timeouts show up in `restore`/`backup`
+warnings under normal load.
+
+Source: `src/engines/surreal/surrealSettle.ts`
+
+---
+
+### `LORE_SURREAL_SETTLE_POLL_MS`
+
+| | |
+|---|---|
+| **Default** | `25` |
+| **Surface** | local + embedded (SurrealDB engine only) |
+
+Gap between directory snapshots while `settleSurrealStore` polls a closing
+store for changes. Smaller values notice a settled store sooner but poll the
+filesystem more often; the round-2 QA fix (below) ties the fast-path floor to
+a multiple of this value, so lowering it also lowers how soon a genuinely
+idle store can be trusted.
+
+Source: `src/engines/surreal/surrealSettle.ts`
+
+---
+
+### `LORE_SURREAL_SETTLE_MIN_QUIET_MS`
+
+| | |
+|---|---|
+| **Default** | `150` |
+| **Surface** | local + embedded (SurrealDB engine only) |
+
+Minimum wait before a store whose `wal/` is still non-empty (i.e. a real
+flush was observed in flight) counts as settled. Does not gate the faster
+"unchanged since before polling started" path — see `settleSurrealStore`'s
+`FAST_PATH_MIN_ELAPSED_MS` (currently a fixed 60ms floor, not
+env-overridable): QA round 2 (2026-09-03) found that path trusting a store
+after a single poll (~25-27ms) let a deferred flush landing at t+30ms — still
+inside the module's own documented ~10-25ms flush window plus jitter — slip
+past undetected. The fast path now requires at least two full poll intervals
+AND at least 60ms elapsed from the start of polling before it fires, closing
+that gap while still beating this `minQuietMs` floor for a truly idle,
+reopened store (measured ~27ms pre-round-2-fix → ~80ms post-fix → 150ms with
+this floor alone).
+
+Source: `src/engines/surreal/surrealSettle.ts`
 
 ---
 
@@ -2653,3 +2715,6 @@ Source: `src/engines/surreal/surrealConnection.ts`
 | `LORE_SURREAL_OPEN_BUDGET_MS` | `15000` | SurrealDB engine |
 | `LORE_SURREAL_COUNT_VIEW` | off | SurrealDB engine |
 | `LORE_SURREAL_FTS` | off | SurrealDB engine |
+| `LORE_SURREAL_SETTLE_BUDGET_MS` | `2000` | SurrealDB engine |
+| `LORE_SURREAL_SETTLE_POLL_MS` | `25` | SurrealDB engine |
+| `LORE_SURREAL_SETTLE_MIN_QUIET_MS` | `150` | SurrealDB engine |

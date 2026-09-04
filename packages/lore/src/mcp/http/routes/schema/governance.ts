@@ -14,7 +14,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { SchemaChangeAuditFilter, SchemaChangeKind } from '../../../../security/schemaChangeAudit.js';
 import type { ExceptionResolution } from '../../../../security/classificationExceptionQueue.js';
-import { readJsonBody, writeJson, writeError } from '../../helpers.js';
+import { readJsonBody, writeJson, writeError, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { getCurrentPrincipal } from '../../../../auth/principal.js';
 import { PREFIX, type SchemaRoutesDeps } from './shared.js';
 import { redactError } from '../../../../security/logRedact.js';
@@ -67,6 +67,11 @@ export async function tryGovernanceRoutes(req: IncomingMessage, res: ServerRespo
             deps.phaseA.schemaAuthoring.rollback(file, body.actor);
             writeJson(res, 200, { rolledBackTo: file, actor: body.actor });
         } catch (e) {
+            // X-json400 (2026-09-03 audit) — readJsonBody's tagged parse
+            // error message ("invalid JSON body: ...") never matched the
+            // /not found|missing/i classifier below, so a malformed body
+            // fell through to a 500 rollback_failed. Check the tag first.
+            if (isInvalidJsonBody(e)) { writeInvalidJson(res, e); return true; }
             const msg = (e as Error).message;
             const status = /not found|missing/i.test(msg) ? 404 : 500;
             writeError(res, status, 'rollback_failed', redactError(e));
@@ -152,6 +157,8 @@ export async function tryGovernanceRoutes(req: IncomingMessage, res: ServerRespo
             const rec = deps.phaseA.exceptionQueue.resolve(resolution);
             writeJson(res, 200, rec);
         } catch (e) {
+            // X-json400 (2026-09-03 audit) — see the rollback handler above.
+            if (isInvalidJsonBody(e)) { writeInvalidJson(res, e); return true; }
             const msg = (e as Error).message;
             const status = /not found|missing/i.test(msg) ? 404 : 500;
             writeError(res, status, 'resolve_exception_failed', redactError(e));

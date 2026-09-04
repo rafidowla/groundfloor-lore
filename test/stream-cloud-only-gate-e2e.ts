@@ -40,7 +40,9 @@ async function main(): Promise<void> {
         const authHdr = { Authorization: `Bearer ${h.token}`, Origin: base };
 
         // Sanity: this daemon really is the LOCAL deployment under test.
-        const health = await (await fetch(`${base}/api/health`, { headers: { Origin: base } }))
+        // FINDING 4 (2026-09-03): deploymentMode is only in the Bearer-
+        // authenticated /api/health body now, so this probe must authenticate.
+        const health = await (await fetch(`${base}/api/health`, { headers: authHdr }))
             .json() as { deploymentMode?: string };
         assert.equal(health.deploymentMode, 'local', `expected local mode, got ${health.deploymentMode}`);
 
@@ -71,7 +73,10 @@ async function main(): Promise<void> {
 
         // Outbox stays empty: a live session would have committed the event
         // via LocalStreamConsumer → recordHotWrite before any ack frame.
-        const healthAfter = await (await fetch(`${base}/api/health`, { headers: { Origin: base } }))
+        // FINDING 4: `outbox` is only in the authenticated body — an
+        // anonymous probe would read undefined and the `?? 0` fallback
+        // would falsely "pass" this assertion regardless of the real depth.
+        const healthAfter = await (await fetch(`${base}/api/health`, { headers: authHdr }))
             .json() as { outbox?: { depth?: number } };
         assert.equal(healthAfter.outbox?.depth ?? 0, 0, 'refused connect must not commit to the outbox');
 

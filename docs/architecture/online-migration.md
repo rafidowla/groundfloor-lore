@@ -1,6 +1,6 @@
 # Online schema migration — operator runbook
 
-Sprint H ships online schema migration for Lore's SQLite + LanceDB substrates. Every migration verb is online by construction — no daemon-down window is required. The graph substrate — SurrealDB, the only graph engine since Kùzu was fully removed 2026-08-21 (see `docs/KUZU_REMOVAL.md`) — is NOT wired into this coordinator: SurrealDB's node/edge tables are schemaless by design, so there is no ALTER-TABLE ladder to run against them (`migration/adapters/kuzuMigrationAdapter.ts`, which used to cover graph DDL for Kùzu, no longer exists either). This runbook covers what an operator runs, in which order, and what each of the two wired substrates does under the hood.
+Sprint H ships online schema migration for Lore's SQLite + LanceDB substrates. Every migration verb is online by construction — no daemon-down window is required. The graph substrate — SurrealDB, the only graph engine since the prior local graph engine was fully removed 2026-08-21 (see `docs/KUZU_REMOVAL.md`) — is NOT wired into this coordinator: SurrealDB's node/edge tables are schemaless by design, so there is no ALTER-TABLE ladder to run against them (the migration adapter that used to cover graph DDL for that engine no longer exists either). This runbook covers what an operator runs, in which order, and what each of the two wired substrates does under the hood.
 
 ## TL;DR — supported operations
 

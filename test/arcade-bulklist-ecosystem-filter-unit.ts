@@ -2,7 +2,7 @@
 /**
  * test/arcade-bulklist-ecosystem-filter-unit.ts — pins the security-review
  * finding: bulkListArcadeNodes (ArcadeGraphStore.bulkList, the fourth
- * LoreGraphHandle.bulkList implementer alongside Kùzu/graphBulkList.ts,
+ * LoreGraphHandle.bulkList implementer alongside the legacy graph engine/graphBulkList.ts,
  * Surreal/surrealGraphAggregates.ts, and DataplaneGraph) built its WHERE
  * clause from `types`, `tags`, `project`, and `cursor` but never read
  * `q.ecosystem` — so a caller scoped to one ecosystem (e.g. diagnostic.ts's

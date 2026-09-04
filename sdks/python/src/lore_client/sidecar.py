@@ -1,6 +1,6 @@
 """sidecar.py — spawn/manage a local `lore serve` daemon from Python.
 
-Lore Core's storage engines are native Node.js bindings (SurrealDB/Kùzu,
+Lore Core's storage engines are native Node.js bindings (SurrealDB,
 LanceDB, better-sqlite3) — there is no way to run Lore in-process inside a
 Python interpreter. `LoreSidecar` is the next best thing: it spawns the real
 daemon as a subprocess (an isolated data dir + a free port, exactly like the
@@ -21,8 +21,8 @@ fetchAuthToken() / killDaemon() pattern as closely as Python allows:
     — Python's twin of the TS helper's `process.kill(-pid, signal)` is
     `os.killpg` over a session started with `start_new_session=True`.
 
-Requires Node 22 — Lore's native bindings (Kùzu, LanceDB, better-sqlite3) are
-built against Node 22 and fail NODE_MODULE_VERSION checks under Node 20. See
+Requires Node 22 — Lore's native bindings (SurrealDB, LanceDB, better-sqlite3)
+are built against Node 22 and fail NODE_MODULE_VERSION checks under Node 20. See
 `_default_node_bin()` for how the Node 22 binary is located.
 """
 
@@ -112,7 +112,7 @@ def _default_node_bin() -> str:
 
     raise LoreSidecarError(
         "no `node` executable found on PATH, and no Node 22 install found "
-        "under ~/.nvm/versions/node/. Lore's native bindings (Kùzu/LanceDB/"
+        "under ~/.nvm/versions/node/. Lore's native bindings (SurrealDB/LanceDB/"
         "better-sqlite3) require Node 22 — set LORE_NODE_BIN to an explicit "
         "Node 22 binary path."
     )

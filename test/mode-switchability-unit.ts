@@ -9,7 +9,7 @@
  * Modes under test:
  *
  *   (1) EMBEDDED — createLore({deploymentMode:'embedded', dataDir}) opens
- *       Kùzu/LanceDB in-process, exposes a working storageClient facade,
+ *       the legacy graph engine/LanceDB in-process, exposes a working storageClient facade,
  *       opens NO port, and dispose() drains cleanly.
  *
  *   (2) LOCAL — LoreStorageClient.fromLocal({graph, verbatim}) over recording
@@ -144,7 +144,7 @@ function makeCloudFacade() {
     return { client, graph, verbatim, sdk };
 }
 
-/** Recording stubs for local-mode routing tests (no real Kùzu/LanceDB). */
+/** Recording stubs for local-mode routing tests (no real the legacy graph engine/LanceDB). */
 type Call = { method: string; args: unknown[] };
 
 function makeGraphStub() {
@@ -257,8 +257,8 @@ try {
         assert.equal(lore.runMode, 'embedded');
     });
 
-    await test('embedded: deploymentMode (substrate) === "local" (Kùzu/LanceDB)', () => {
-        // 'embedded' collapses substrate mode to 'local' (in-process Kùzu/LanceDB).
+    await test('embedded: deploymentMode (substrate) === "local" (the legacy graph engine/LanceDB)', () => {
+        // 'embedded' collapses substrate mode to 'local' (in-process the legacy graph engine/LanceDB).
         assert.equal(lore.deploymentMode, 'local');
     });
 
@@ -331,7 +331,7 @@ try {
 /* ═══════════════════════════════════════════════════════════════════
    MODE (2): LOCAL
    LoreStorageClient.fromLocal({graph, verbatim}) over recording stubs.
-   Verifies local routing without real Kùzu/LanceDB — substrate
+   Verifies local routing without real the legacy graph engine/LanceDB — substrate
    correctness is covered by the integration tests; this test guards
    that the facade's local-mode routing path is live (not branched away
    to a stub throw) and that getMode() reports 'local'.

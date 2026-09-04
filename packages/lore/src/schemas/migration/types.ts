@@ -12,7 +12,7 @@
  *
  * MVP scope: only `node_type.removed` and `field.removed` are
  * implemented (most-common destructive cases). The shape covers the
- * other 7 destructive kinds; KuzuMigrationBackend will throw
+ * other 7 destructive kinds; SchemaGraphOpsMigrationBackend will throw
  * `unsupported_op` for them until added.
  *
  * 2026-05-16 — batched checkpointing: `executeOp` was replaced by
@@ -28,7 +28,7 @@
  * implement (others throw `UNSUPPORTED_OP_ERROR` so the runner can
  * report cleanly).
  *
- * Coverage as of 2026-05-16 (KuzuMigrationBackend):
+ * Coverage as of 2026-05-16 (SchemaGraphOpsMigrationBackend):
  *   - row-level work:     node_type.removed, field.removed, edge_type.removed
  *   - row-level + params: node_type.renamed (needs params.newName),
  *                         field.type_changed (needs params.newType)

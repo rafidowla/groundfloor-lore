@@ -49,9 +49,10 @@ function filterNodesByActorScope(nodes: LoreNode[]): LoreNode[] {
     return applyActorScopeFilter(wrapped, getCurrentActorScopes()).map((w) => w.node);
 }
 
-// Widened for the Kùzu removal: naming the two CONCRETE classes silently
-// excluded SurrealGraph (see engines/htmlExport.ts). Need more than the
-// shared handle? Feature-detect and refuse — do not re-narrow to a class.
+// Widened when the local graph engine changed: naming the two CONCRETE
+// classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
+// more than the shared handle? Feature-detect and refuse — do not re-narrow
+// to a class.
 type LoreGraph = LoreGraphHandle;
 type LoreVerbatim = VerbatimStore | DataplaneVectorStore;
 
@@ -173,7 +174,7 @@ export async function runCrossWorkspaceRecall(
     const projectsSeen: string[] = [];
 
     // Bounded fan-out: cap the workspace set BEFORE opening graphs (so a huge
-    // workspaces.json never forces every Kùzu handle open) and scan with bounded
+    // workspaces.json never forces every graph handle open) and scan with bounded
     // parallelism. Ported from the former HTTP-only handler so this one shared
     // implementation carries the scale protection for MCP + embedded + REST.
     const candidateWorkspaces = workspaceNames.slice(0, resolveRecallFanoutWsCap());

@@ -12,15 +12,31 @@
  *
  * Usage:
  *   lore outbox drain-failed [--workspace <ws>] [--check-substrate]
- *                            [--mark-dead] [--dry-run]
+ *                            [--mark-dead] [--dry-run] [--force]
  *
- * The job opens the same SQLite outbox + LocalGraph/VerbatimStore the
- * daemon uses; it does NOT require the daemon to be running. If the
- * daemon IS running, this CLI is safe to invoke concurrently — the
- * underlying markEntryStatus mutation is a single UPDATE in WAL mode,
- * and the self-heal tick is idempotent against the same row being
- * recovered twice (the second call simply sees status='replicated' and
- * makes no change).
+ * The job opens the same SQLite outbox the daemon uses, which is safe to
+ * touch concurrently — the underlying markEntryStatus mutation is a single
+ * UPDATE in WAL mode, and the self-heal tick is idempotent against the same
+ * row being recovered twice (the second call simply sees
+ * status='replicated' and makes no change).
+ *
+ * X-outboxcli (2026-09-03, high) — that "safe to invoke concurrently with
+ * the daemon" claim is true ONLY for `--no-check-substrate`, which never
+ * opens a graph store (SQLite-only, as this header now says). The DEFAULT
+ * `--check-substrate` mode opens each row's declared graph engine directly
+ * via `LocalGraphRegistry` to probe whether the data is actually there —
+ * exactly the store-touching operation every other CLI command that opens
+ * the graph now guards with a daemon/lock preflight (openGraphForCli in
+ * shared.ts; the probeSurrealLock users in compact.ts/backup.ts/
+ * restore.ts/maintain.ts). Previously this command had NONE of that: with
+ * a daemon (or any other process) holding the store, `--check-substrate`
+ * sat through the full ~15s openSurreal retry storm and then died with the
+ * raw driver error instead of the friendly refusal every other store-
+ * touching command gives. `drainFailedSubcommand` below now runs the same
+ * two-layer guard for that path (isDaemonServingHome preflight + a
+ * shortened open-retry budget with a LoreGraphError('openSurreal') catch),
+ * with `--force` to override — the `--no-check-substrate` branch is
+ * untouched and does not go anywhere near a graph store.
  */
 
 import path from 'node:path';
@@ -41,6 +57,11 @@ export interface DrainFlags {
     dryRun: boolean;
     limit?: number;
     help: boolean;
+    /** X-outboxcli — bypass the daemon/lock preflight in front of the
+     *  --check-substrate graph open (same escape hatch as `lore compact`'s
+     *  `--force`). Has no effect on `--no-check-substrate`, which never
+     *  opens a graph store and so has nothing to bypass. */
+    force: boolean;
 }
 
 export function parseDrainFlags(args: string[]): DrainFlags {
@@ -52,6 +73,7 @@ export function parseDrainFlags(args: string[]): DrainFlags {
         markDead: false,
         dryRun: false,
         help: false,
+        force: false,
     };
     for (let i = 0; i < args.length; i++) {
         const a = args[i];
@@ -60,6 +82,7 @@ export function parseDrainFlags(args: string[]): DrainFlags {
         if (a === '--check-substrate') { out.checkSubstrate = true; continue; }
         if (a === '--no-check-substrate') { out.checkSubstrate = false; continue; }
         if (a === '--mark-dead') { out.markDead = true; continue; }
+        if (a === '--force') { out.force = true; continue; }
         if (a === '--workspace' && i + 1 < args.length) { out.workspace = args[++i]; continue; }
         if (a === '--limit' && i + 1 < args.length) {
             const n = parseInt(args[++i], 10);
@@ -74,7 +97,7 @@ export function parseDrainFlags(args: string[]): DrainFlags {
  * L-004 — minimal engine-aware registry surface the drain-failed wiring needs.
  * Lets the unit test inject a recording fake without spinning a real graph.
  * `getGraphHandle` is the graph-substrate accessor: it returns the engine the
- * workspace declares, unlike `getOrOpen`, which is the Kùzu-only substrate.
+ * workspace declares.
  */
 export interface DrainGraphRegistry<G = WorkspaceGraph> {
     getGraphHandle(workspace: string): Promise<G>;
@@ -126,6 +149,10 @@ Options:
   --dry-run             Report what WOULD change without writing
   --limit <N>           Cap sweep at N rows (default: replicator's
                         selfHealBatchSize = 256)
+  --force               Bypass the daemon/lock preflight in front of the
+                        --check-substrate graph open (only meaningful
+                        with --check-substrate; use only when you are
+                        CERTAIN nothing else is writing to this workspace)
   -h, --help            Show this help
 
 Behavior:
@@ -175,6 +202,12 @@ Run 'lore outbox drain-failed --help' for details.
     }
 }
 
+/** X-outboxcli — shortened LORE_SURREAL_OPEN_BUDGET_MS for the
+ *  --check-substrate boot-graph open, mirroring shared.ts's
+ *  CLI_OPEN_BUDGET_MS: fail fast on a real lock instead of sitting through
+ *  the full ~15s default retry storm. */
+const CHECK_SUBSTRATE_OPEN_BUDGET_MS = 3_000;
+
 async function drainFailedSubcommand(args: string[]): Promise<void> {
     const flags = parseDrainFlags(args);
     if (flags.help) {
@@ -182,11 +215,7 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
         return;
     }
 
-    // Lazy imports — keeps `--help` fast and matches the embed.ts
-    // pattern. Construct the graph + outbox wiring in the same shape
-    // the daemon uses so the verifier hooks the replicator runs are
-    // bit-identical to the ones drain-failed exercises.
-    const { LocalGraphRegistry } = await import('../../engines/localGraphRegistry.js');
+    // Lazy imports — keeps `--help` fast and matches the embed.ts pattern.
     const { wireOutbox } = await import('../../outbox/wiring.js');
 
     const home = loreHome();
@@ -197,30 +226,6 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
     const activeBasePath = getActiveWorkspacePath(home);
     const loreDir = path.join(activeBasePath, '.lore');
 
-    // Build a registry so per-row workspace resolution probes the CORRECT
-    // declared graph engine, not the boot-bound Kùzu substrate. Previously
-    // drain-failed called getOrOpen for both the boot graph and row resolver;
-    // on a Surreal-backed workspace that opened the real but EMPTY Kùzu graph,
-    // producing false negatives and potentially marking valid rows dead.
-    // The CLI is offline (no daemon), so autoEvict=false — we close() manually.
-    const registry = new LocalGraphRegistry({ home, autoEvict: false });
-
-    // Pre-open the boot/active graph the verifier uses for legacy rows that have
-    // no workspace tag. getGraph must return a synchronous WorkspaceGraph (the
-    // wireOutbox boot-fallback contract), so we open it here and hand back the
-    // resolved instance. For an explicit --workspace, the boot fallback short-
-    // circuits to that workspace's own declared graph.
-    const bootWsName = flags.workspace ?? getActiveWorkspaceName(home);
-    const bootGraph = await registry.getGraphHandle(bootWsName);
-
-    // wireOutbox returns the store + replicator wired with the self-heal
-    // verifier hooks. We do NOT call replicator.start() — the CLI invokes
-    // runSelfHealSweep directly with `force: true` so the cadence gate is
-    // ignored AND the grace window is set to 0 (operators expect immediate
-    // action). The wiring input is built by the exported helper so the L-004
-    // routing is unit-testable.
-    const wiring = wireOutbox(buildDrainWiringInput({ loreDir, bootGraph, registry }));
-
     console.log('');
     console.log(`  lore outbox drain-failed — workspace=${flags.workspace ?? '*'}`
         + `  checkSubstrate=${flags.checkSubstrate}`
@@ -228,7 +233,99 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
         + `  dryRun=${flags.dryRun}`);
 
     let report;
+    // Populated only on the --check-substrate path (the only one that opens
+    // a graph store) so it can be disposed once we're done with it.
+    let registry: import('../../engines/localGraphRegistry.js').LocalGraphRegistry | null = null;
+    // wiring.store is needed by both branches (--mark-dead below reads it
+    // regardless of --check-substrate), so build it in each branch and
+    // carry it out rather than duplicating the mark-dead loop.
+    let store: import('../../outbox/types.js').OutboxStore;
+
     if (flags.checkSubstrate) {
+        // X-outboxcli (high) — this branch opens each row's declared graph
+        // engine via LocalGraphRegistry to probe substrate state, exactly
+        // the store-touching operation every other direct-open CLI command
+        // guards against a daemon (or bare holder process) already sitting
+        // on the store's single-writer lock. Two layers, same shape as
+        // openGraphForCli (shared.ts) / the probeSurrealLock users
+        // (compact.ts, backup.ts, restore.ts, maintain.ts):
+        //   1. isDaemonServingHome() preflight — refuse fast before even
+        //      attempting the open, unless --force.
+        //   2. A shortened open-retry budget around the open itself, for a
+        //      real holder the port probe missed (wrong LORE_PORT, no
+        //      auth.token on disk, a daemon whose health probe timed out) —
+        //      catches the resulting LoreGraphError('openSurreal') and
+        //      reports the same friendly refusal instead of the raw driver
+        //      error.
+        const { LocalGraphRegistry } = await import('../../engines/localGraphRegistry.js');
+        const { isDaemonServingHome, daemonRefuseMessage, otherDaemonRefuseMessage, DEFAULT_PORT } =
+            await import('./migrateWorkspaceToWorkspaceShared.js');
+        const { LoreGraphError } = await import('../../engines/loreGraphError.js');
+
+        if (flags.force) {
+            console.error('proceeding with --force; daemon/lock checks skipped');
+        } else {
+            const probe = await isDaemonServingHome(home);
+            if (probe.servesHome) {
+                console.error(daemonRefuseMessage('lore outbox drain-failed --check-substrate'));
+                process.exit(1);
+            }
+            // servesHome:false covers "no daemon at all" AND "a process on
+            // this port did not confirm it serves this home" (rejected
+            // credential, or a genuinely different home) — only the first
+            // is actually safe to proceed on; treat the rest as "not proven
+            // safe" per the compact.ts/maintain.ts otherDaemonReachable fix.
+            if (probe.otherDaemonReachable) {
+                console.error(otherDaemonRefuseMessage('lore outbox drain-failed --check-substrate', DEFAULT_PORT));
+                process.exit(1);
+            }
+        }
+
+        // Build a registry so per-row workspace resolution probes the CORRECT
+        // declared graph engine, not the boot-bound one. Previously
+        // drain-failed called getOrOpen for both the boot graph and row resolver;
+        // on a Surreal-backed workspace that opened the real but EMPTY graph for
+        // the other engine, producing false negatives and potentially marking
+        // valid rows dead.
+        // The CLI is offline (no daemon), so autoEvict=false — we close() manually.
+        registry = new LocalGraphRegistry({ home, autoEvict: false });
+
+        // Pre-open the boot/active graph the verifier uses for legacy rows that have
+        // no workspace tag. getGraph must return a synchronous WorkspaceGraph (the
+        // wireOutbox boot-fallback contract), so we open it here and hand back the
+        // resolved instance. For an explicit --workspace, the boot fallback short-
+        // circuits to that workspace's own declared graph.
+        const bootWsName = flags.workspace ?? getActiveWorkspaceName(home);
+
+        const prevBudget = process.env['LORE_SURREAL_OPEN_BUDGET_MS'];
+        process.env['LORE_SURREAL_OPEN_BUDGET_MS'] = String(CHECK_SUBSTRATE_OPEN_BUDGET_MS);
+        let bootGraph;
+        try {
+            bootGraph = await registry.getGraphHandle(bootWsName);
+        } catch (err) {
+            if (err instanceof LoreGraphError && err.operation === 'openSurreal') {
+                console.error(
+                    `lore outbox drain-failed --check-substrate: store is held by a running Lore `
+                    + `process (port ${DEFAULT_PORT}) — set LORE_PORT to reach it, or stop it and `
+                    + `retry. Pass --force if you are CERTAIN nothing else is writing to this workspace.`,
+                );
+                process.exit(1);
+            }
+            throw err;
+        } finally {
+            if (prevBudget === undefined) delete process.env['LORE_SURREAL_OPEN_BUDGET_MS'];
+            else process.env['LORE_SURREAL_OPEN_BUDGET_MS'] = prevBudget;
+        }
+
+        // wireOutbox returns the store + replicator wired with the self-heal
+        // verifier hooks. We do NOT call replicator.start() — the CLI invokes
+        // runSelfHealSweep directly with `force: true` so the cadence gate is
+        // ignored AND the grace window is set to 0 (operators expect immediate
+        // action). The wiring input is built by the exported helper so the L-004
+        // routing is unit-testable.
+        const wiring = wireOutbox(buildDrainWiringInput({ loreDir, bootGraph, registry }));
+        store = wiring.store;
+
         report = await wiring.replicator.runSelfHealSweep({
             force: true,
             graceMsOverride: 0,
@@ -245,11 +342,27 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
         // workspace whose substrate is known to be missing the data
         // (e.g. an aborted import). Without --mark-dead this is a
         // no-op; the CLI surfaces that explicitly.
-        const listFn = (wiring.store as {
+        //
+        // X-outboxcli — this branch must stay SQLite-only, as the header
+        // above documents: no LocalGraphRegistry, no getGraph/
+        // getGraphForWorkspace threaded into wireOutbox, so nothing here
+        // ever touches a graph store or can contend with a daemon holding
+        // one. `getGraph` is optional on wireOutbox's input precisely for
+        // this shape (cloud-mode / no-local-substrate wirings already rely
+        // on the same optionality).
+        const wiring = wireOutbox({
+            loreDir,
+            getSyncEngine: () => {
+                throw new Error('outbox drain-failed: syncEngine not needed for check-substrate-skipped path');
+            },
+        });
+        store = wiring.store;
+
+        const listFn = (store as {
             listFailedOlderThan?: (ms: number, opts?: { workspace?: string | null; limit?: number; includeDead?: boolean }) => Promise<unknown[]>;
         }).listFailedOlderThan;
         const rows = typeof listFn === 'function'
-            ? await listFn.call(wiring.store, 0, { workspace: flags.workspace ?? null, limit: flags.limit ?? 1024, includeDead: true })
+            ? await listFn.call(store, 0, { workspace: flags.workspace ?? null, limit: flags.limit ?? 1024, includeDead: true })
             : [];
         report = {
             examined: rows.length, recovered: 0, leftFailed: rows.length,
@@ -269,7 +382,7 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
         for (const d of report.details) {
             if (!d.verified) {
                 try {
-                    await wiring.store.markEntryStatus!(d.id, 'dead', { error: `drain-failed --mark-dead (reason=${d.reason})` });
+                    await store.markEntryStatus!(d.id, 'dead', { error: `drain-failed --mark-dead (reason=${d.reason})` });
                     deadMarked++;
                 } catch (err) {
                     console.error(`  ! failed to mark ${d.id} dead: ${(err as Error).message}`);
@@ -306,11 +419,12 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
         console.log('  (dry run — nothing was written. Re-run without --dry-run to commit.)');
     }
 
-    // The registry owns every graph it opened (boot + any per-workspace graphs
-    // the verifier resolved). The CLI is single-threaded and has awaited the
+    // The registry (--check-substrate only; null on the SQLite-only branch)
+    // owns every graph it opened (boot + any per-workspace graphs the
+    // verifier resolved). The CLI is single-threaded and has awaited the
     // sweep above, so no verifier promise is still in flight here. disposeAll
     // physically closes every (unpinned) handle — in the offline CLI nothing is
     // pinned, so this releases the boot graph too (there is no daemon drain to
     // close it for us, unlike in the long-lived daemon).
-    await registry.disposeAll();
+    if (registry) await registry.disposeAll();
 }

@@ -24,6 +24,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tryNodeDeleteRoute } from '../packages/lore/src/mcp/http/routes/nodes-delete.js';
 import { tryEdgesRoutes } from '../packages/lore/src/mcp/http/routes/edges.js';
 import { validateRequest } from '../packages/lore/src/security/httpAuth.js';
+import { runHttpGates } from '../packages/lore/src/mcp/http/middleware.js';
 
 let passed = 0;
 let failed = 0;
@@ -377,6 +378,109 @@ test('T4 DELETE /api/edge with missing query params → 400', async () => {
     );
     assert.equal(res._status, 400);
     assert.match(res._body, /required/);
+});
+
+/* ---------- F-DEL8 — query-string form of node delete ---------- */
+// GET /api/node has always accepted `id` as a query param (nodes.ts /
+// getNode.ts); DELETE only ever matched the path form (`/api/node/:id`),
+// so `DELETE /api/node?id=X` 404'd. The fix normalizes the pathname in
+// runHttpGates (middleware.ts), BEFORE any route matching, so this
+// file's existing tryNodeDeleteRoute handler runs completely unchanged.
+// These tests drive the real runHttpGates (not a hand-built pathname)
+// so the normalization itself — not just the handler it feeds — is
+// under test.
+
+const GATE_PORT = 58174; // arbitrary; only used to satisfy the Host check
+const GATE_TOKEN = 'a'.repeat(64);
+const noopRateLimiter = { tryConsume: () => ({ allowed: true, limit: 1, remaining: 1, resetSec: 0, retryAfterSec: 0 }) };
+
+function gateDeps(): Parameters<typeof runHttpGates>[2] {
+    return {
+        port: GATE_PORT,
+        dataHome: '/tmp/rest-delete-node-edge-unit-unused',
+        getAuthToken: () => GATE_TOKEN,
+        rateLimiter: noopRateLimiter as never,
+        deploymentMode: 'local',
+        getBootstrapWorkspace: () => 'del-fixture',
+    };
+}
+
+function gateReq(rawUrl: string): IncomingMessage {
+    return {
+        method: 'DELETE',
+        url: rawUrl,
+        headers: { host: `localhost:${GATE_PORT}`, authorization: `Bearer ${GATE_TOKEN}` },
+    } as unknown as IncomingMessage;
+}
+
+function gateRes(): ServerResponse & { _status: number; _body: string } {
+    const r = {
+        _status: 0, _body: '',
+        setHeader() { /* noop */ },
+        writeHead(status: number) { (this as { _status: number })._status = status; return this; },
+        end(body?: string) { (this as { _body: string })._body = body ?? ''; },
+    };
+    return r as unknown as ServerResponse & { _status: number; _body: string };
+}
+
+test('F-DEL8 runHttpGates rewrites DELETE /api/node?id=X to the path form', async () => {
+    const gate = await runHttpGates(
+        gateReq('/api/node?id=foo&workspace=del-fixture'),
+        gateRes() as unknown as ServerResponse,
+        gateDeps(),
+    );
+    assert.equal(gate.handled, false, `gate should pass through: ${JSON.stringify(gate)}`);
+    if (gate.handled) return;
+    assert.equal(gate.pathname, '/api/node/foo', 'pathname rewritten onto the path form');
+    assert.equal(
+        gate.url, '/api/node?id=foo&workspace=del-fixture',
+        'raw url (and its query string, still read for ?workspace=) is untouched',
+    );
+});
+
+test('F-DEL8 end-to-end: DELETE /api/node?id=X (query form) deletes the node', async () => {
+    const fake = makeFakeGraph({ seedNodes: [{ id: 'qform', type: 'decision', label: 'QForm' }] });
+    const verbatim = makeFakeVerbatim();
+    const audit = makeFakeAudit();
+    const req = gateReq('/api/node?id=qform&workspace=del-fixture');
+    const gate = await runHttpGates(req, gateRes() as unknown as ServerResponse, gateDeps());
+    assert.equal(gate.handled, false);
+    if (gate.handled) return;
+    const res = fakeRes();
+    const handled = await tryNodeDeleteRoute(
+        req,
+        res,
+        gate.url,
+        gate.pathname,
+        makeNodeDeleteDeps(fake.graph, verbatim.store, audit.log),
+    );
+    await new Promise<void>((r) => setImmediate(r));
+    assert.equal(handled, true);
+    assert.equal(res._status, 200, `expected 200; got ${res._status}: ${res._body}`);
+    const body = JSON.parse(res._body);
+    assert.equal(body.id, 'qform');
+    assert.deepEqual(fake.deleteNodeCalls, ['qform']);
+    const after = await fake.graph.getNode('qform');
+    assert.equal(after, null, 'node must be gone after DELETE via the query-string form');
+});
+
+test('F-DEL8 query form with no matching node → 404 (same as path form)', async () => {
+    const fake = makeFakeGraph();
+    const verbatim = makeFakeVerbatim();
+    const audit = makeFakeAudit();
+    const req = gateReq('/api/node?id=ghost&workspace=del-fixture');
+    const gate = await runHttpGates(req, gateRes() as unknown as ServerResponse, gateDeps());
+    assert.equal(gate.handled, false);
+    if (gate.handled) return;
+    const res = fakeRes();
+    await tryNodeDeleteRoute(
+        req,
+        res,
+        gate.url,
+        gate.pathname,
+        makeNodeDeleteDeps(fake.graph, verbatim.store, audit.log),
+    );
+    assert.equal(res._status, 404, `expected 404; got ${res._status}: ${res._body}`);
 });
 
 /* ---------- T5 — Unauthenticated DELETE → 401 ---------- */
