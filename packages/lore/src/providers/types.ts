@@ -423,6 +423,23 @@ export interface GraphProvider {
 export interface VerbatimDocument {
     id: string;
     text: string;
+    /**
+     * OPTIONAL pre-computed embedding for `text`.
+     *
+     * Set ONLY by the parent-embeds search-worker path
+     * (verbatimSearchWorkerProxy.storeBatch): the parent owns the single ONNX
+     * model, so it embeds locally and ships the vector to the child, whose
+     * provider is a stub that throws on any embed call. `store()`/`storeBatch()`
+     * use it verbatim instead of calling the provider; every other caller omits
+     * it and the store embeds as before.
+     *
+     * It MUST be the embedding of the text in THIS document, post-redaction —
+     * the proxy redacts before it embeds, so the pair stays consistent through
+     * the child's own (idempotent) redaction pass. This is a transport field:
+     * it is never persisted as a column, the row builders read it through
+     * `toPlainVector` into the schema's `vector` field like any other vector.
+     */
+    vector?: number[] | Float32Array;
     metadata: {
         type?: string;
         label?: string;

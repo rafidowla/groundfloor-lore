@@ -109,7 +109,6 @@ export class SurrealGraph implements LoreGraphHandle {
     private connection: SurrealConnection | null = null;
     private initPromise: Promise<void> | null = null;
     private initialized = false;
-
     private readonly basePath: string;
     private readonly options: SurrealGraphOptions;
     private readonly workspaceId: string;
@@ -595,14 +594,17 @@ export class SurrealGraph implements LoreGraphHandle {
     async stampAccessTimes(
         entries: Array<{ id: string; accessedAt: string; retrievedAt?: string }>,
     ): Promise<number> {
-        try {
-            await this.initialize();
-        } catch (error) {
-            console.error(
-                `[SurrealGraph] stampAccessTimes: initialize failed, dropping ${entries.length} pending stamp(s): ${(error as Error).message}`,
-            );
-            return 0;
-        }
+        // STAMP AN ALREADY-OPEN STORE, NEVER OPEN ONE. This began with `await
+        // this.initialize()` in 3.18.0, and that line was the embedded-host hang:
+        // AccessTracker's flush timer outlived the drain, so a background tick
+        // RE-OPENED a closed surrealkv store, and that unowned engine held the
+        // host's loop forever — invisible to BOTH `_getActiveHandles()` and
+        // `getActiveResourcesInfo()`. A `closed` flag would only narrow the window (a
+        // flush past the check still reaches initialize); refusing to open at all
+        // closes it. Dropping the batch is safe — instance-local retention telemetry,
+        // and the drain stops trackers while graphs are still open (step 8.7).
+        // Pinned by test/access-tracker-no-resurrect-unit.ts.
+        if (!this.initialized || !this.connection) return 0;
         return writes.stampAccessTimes(this.query, entries);
     }
 

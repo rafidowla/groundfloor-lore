@@ -512,6 +512,46 @@ export class SqliteOutboxStore implements IOutboxStore {
         return rows.map(rowToEntry);
     }
 
+    /** See the OutboxStore.requeueDead contract in types.ts — in particular
+     *  WHY this requeues to 'failed' rather than 'pending' (the RA-6
+     *  supersession guard only runs on 'failed', and stale rows are exactly
+     *  what it protects against). */
+    async requeueDead(opts?: {
+        workspace?: string | null;
+        operationKind?: string;
+        errorContains?: string;
+        limit?: number;
+    }): Promise<number> {
+        const limit = Math.max(0, opts?.limit ?? 500);
+        if (limit === 0) return 0;
+        const where: string[] = [`status = 'dead'`];
+        const params: unknown[] = [];
+        if (opts?.workspace) { where.push(`workspace = ?`); params.push(opts.workspace); }
+        if (opts?.operationKind) { where.push(`operationKind = ?`); params.push(opts.operationKind); }
+        if (opts?.errorContains) {
+            // LIKE with the operand escaped: the caller's string is matched
+            // literally, so an error text containing % or _ selects only itself.
+            where.push(`lastError LIKE ? ESCAPE '\\'`);
+            params.push(`%${opts.errorContains.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
+        }
+        const now = new Date().toISOString();
+        // Subselect + LIMIT rather than `UPDATE ... LIMIT`: better-sqlite3 builds
+        // don't guarantee SQLITE_ENABLE_UPDATE_DELETE_LIMIT (same reason
+        // pruneReplicated is written this way).
+        const info = this.db.prepare(
+            `UPDATE outbox_entries
+                SET status = 'failed', attempts = 0, lastError = NULL,
+                    failedAt = NULL, nextAttemptAt = NULL, completed = 0,
+                    updatedAt = ?
+              WHERE id IN (
+                    SELECT id FROM outbox_entries
+                     WHERE ${where.join(' AND ')}
+                     ORDER BY workspace ASC, sequenceId ASC
+                     LIMIT ?)`,
+        ).run(now, ...params, limit);
+        return info.changes;
+    }
+
     async listDead(opts?: { workspace?: string | null; limit?: number }): Promise<OutboxEntry[]> {
         const limit = Math.max(0, opts?.limit ?? 500);
         const ws = opts?.workspace ?? null;

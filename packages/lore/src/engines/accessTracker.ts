@@ -169,6 +169,20 @@ export class AccessTracker {
      */
     async stop(): Promise<void> {
         if (this.timer) { clearInterval(this.timer); this.timer = null; }
+        // Drop out of BOTH registries. `liveTrackers` so a later
+        // stopAllAccessTrackers() does not re-stop us (and does not pin this
+        // graph until one runs); `trackers` so a later read builds a FRESH,
+        // started tracker instead of getting handed this stopped one.
+        //
+        // That second half matters because the ordered drain is not only run
+        // at process death: /api/workspaces/switch and /api/daemon/restart run
+        // it too, and the daemon carries on afterwards. Leaving the stopped
+        // tracker in the WeakMap silently killed access-time stamping for the
+        // rest of that daemon's life. Re-creating is safe: stamping can no
+        // longer open a closed store (surrealGraph.ts `stampAccessTimes`), so
+        // a fresh tracker on a closed graph is inert rather than dangerous.
+        liveTrackers.delete(this);
+        trackers.delete(this.target as unknown as object);
         // TW-7e — remove the process-global beforeExit listener (if the daemon
         // registered one) so dispose() leaves the host's listener set unchanged.
         if (this.beforeExitListener) {
@@ -203,6 +217,40 @@ let singleton: AccessTracker | null = null;
 // is GC'd with it.
 const trackers = new WeakMap<object, AccessTracker>();
 
+/**
+ * The same trackers, ITERABLE, so a shutdown can stop them.
+ *
+ * `trackers` is a WeakMap and cannot be walked, which is why nothing ever
+ * stopped a lazily-created tracker — `ensureAccessTracker`'s own comment used
+ * to state "neither drain calls tracker.stop()" as a known gap. The
+ * consequence was not a mere leak: a still-armed flush timer fires AFTER the
+ * owner closed its graph and re-opens the store from the background
+ * (surrealGraph.ts `stampAccessTimes`), stranding a native engine that keeps
+ * an embedding host alive forever.
+ *
+ * A strong Set adds no retention that was not already there: `start()`'s
+ * `setInterval` holds the callback closure, which holds the tracker, which
+ * holds its target graph — an armed tracker was never collectable, WeakMap or
+ * not. `stop()` removes itself here, so a stopped tracker is released by both.
+ */
+const liveTrackers = new Set<AccessTracker>();
+
+/**
+ * Stop every tracker created through {@link ensureAccessTracker}.
+ *
+ * Called by the ordered shutdown drain BEFORE any substrate handle closes, so
+ * each tracker's final `stop()` flush still lands on a LIVE graph — the
+ * stamps are preserved rather than dropped, and no flush can arrive after the
+ * close. Best-effort and individually caught: one wedged tracker must not
+ * strand the rest or the drain behind it.
+ */
+export async function stopAllAccessTrackers(): Promise<void> {
+    // Snapshot: stop() mutates the set as it removes each tracker.
+    const all = [...liveTrackers];
+    await Promise.allSettled(all.map((t) => t.stop()));
+    liveTrackers.clear();
+}
+
 export function setAccessTracker(tracker: AccessTracker | null): void {
     singleton = tracker;
 }
@@ -233,8 +281,10 @@ export function ensureAccessTracker(target: unknown): AccessTracker | null {
     const tracker = new AccessTracker(t as AccessStampTarget, {
         intervalMs: Number.isFinite(flushMs) && flushMs > 0 ? flushMs : 60_000,
         // TW-7e — lazy ensure path runs in BOTH daemon and embedded (host)
-        // processes; it cannot tell them apart, and neither drain calls
-        // tracker.stop(). A process-global `beforeExit` listener here would leak
+        // processes; it cannot tell them apart. (The drain DOES stop these now
+        // — see `stopAllAccessTrackers` — but stopping them does not make a
+        // process-global listener safe in an embedded host.)
+        // A process-global `beforeExit` listener here would leak
         // into the host on every embedded recall/search (TW-2b violation). The
         // timer is unref'd and stop() flushes, so skipping the beforeExit hook
         // only forgoes a best-effort idle-exit flush (≤1 interval) — acceptable
@@ -245,6 +295,7 @@ export function ensureAccessTracker(target: unknown): AccessTracker | null {
     });
     tracker.start();
     trackers.set(key, tracker);
+    liveTrackers.add(tracker);
     singleton = tracker; // back-compat for get/setAccessTracker (unused today)
     return tracker;
 }

@@ -28,6 +28,38 @@ const DAILY_INTERVAL_MS = resolveSchedMs(process.env['LORE_RETENTION_INTERVAL_MS
 
 export interface RetentionScheduler {
     bootstrapTimer: NodeJS.Timeout;
+    /** Cancel BOTH timers. Idempotent. */
+    stop(): void;
+}
+
+/**
+ * Every scheduler armed by {@link scheduleRetentionSweep}, so a shutdown can
+ * cancel them — see {@link stopAllRetentionSweeps}.
+ *
+ * The daily timer used to be UNSTOPPABLE BY CONSTRUCTION: it was created
+ * inside the bootstrap callback and its handle was never returned, so once the
+ * bootstrap had fired (60 s after boot by default) nothing in the process could
+ * ever clear it. The drain closes the graph + verbatim handles; a later fire
+ * then re-opened them through `getGraphHandle` / `getOrOpen`
+ * (mcp/daemonTimers.ts `runRetentionSweepAllWorkspaces`), leaking a graph and a
+ * LanceDB handle per workspace — and risking two live handles on one surrealkv
+ * directory once the switch had re-opened it. Same defect class as the
+ * access-tracker resurrection, and the reason both are now stoppable.
+ *
+ * Daemon-only in practice (`startsDaemonTimers` gates the arming), so this is
+ * not the embedded-host hang; the drain also runs on /api/workspaces/switch and
+ * /api/daemon/restart, after which the daemon keeps going, which is where it
+ * bites.
+ */
+const liveSchedulers = new Set<RetentionScheduler>();
+
+/** Cancel every armed retention sweep. Called by the ordered shutdown drain
+ *  before substrate handles close. Best-effort and idempotent. */
+export function stopAllRetentionSweeps(): void {
+    for (const s of [...liveSchedulers]) {
+        try { s.stop(); } catch { /* best-effort */ }
+    }
+    liveSchedulers.clear();
 }
 
 /**
@@ -41,11 +73,17 @@ export interface RetentionScheduler {
 export function scheduleRetentionSweep(
     runSweep: (dryRun: boolean) => Promise<unknown>,
 ): RetentionScheduler {
+    // Held OUTSIDE the callback so stop() can reach it. Previously this handle
+    // only ever existed inside the closure below, which made the daily sweep
+    // permanently uncancellable — see `liveSchedulers` above.
+    let dailyTimer: NodeJS.Timeout | null = null;
+    let stopped = false;
     const bootstrapTimer = setTimeout(() => {
+        if (stopped) return;   // cancelled between arming and firing
         void runSweep(false).catch((err) => {
             console.error('[retention] daily sweep failed:', (err as Error).message);
         });
-        const dailyTimer = setInterval(() => {
+        dailyTimer = setInterval(() => {
             void runSweep(false).catch((err) => {
                 console.error('[retention] daily sweep failed:', (err as Error).message);
             });
@@ -53,5 +91,15 @@ export function scheduleRetentionSweep(
         if (typeof dailyTimer.unref === 'function') dailyTimer.unref();
     }, FIRST_FIRE_MS);
     if (typeof bootstrapTimer.unref === 'function') bootstrapTimer.unref();
-    return { bootstrapTimer };
+    const scheduler: RetentionScheduler = {
+        bootstrapTimer,
+        stop(): void {
+            stopped = true;
+            clearTimeout(bootstrapTimer);
+            if (dailyTimer) { clearInterval(dailyTimer); dailyTimer = null; }
+            liveSchedulers.delete(scheduler);
+        },
+    };
+    liveSchedulers.add(scheduler);
+    return scheduler;
 }

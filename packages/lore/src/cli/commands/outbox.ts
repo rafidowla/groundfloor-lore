@@ -185,8 +185,10 @@ lore outbox — outbox operator commands.
 
 Subcommands:
   drain-failed   Recover (or evict) stuck 'failed' outbox rows.
+  requeue-dead   Return dead-lettered rows to the retry queue, after the
+                 defect that killed them has been fixed and deployed.
 
-Run 'lore outbox drain-failed --help' for details.
+Run 'lore outbox <subcommand> --help' for details.
 `.trim());
         return;
     }
@@ -195,6 +197,12 @@ Run 'lore outbox drain-failed --help' for details.
         case 'drain-failed':
             await drainFailedSubcommand(rest);
             break;
+        case 'requeue-dead': {
+            // Lazy import so `lore outbox --help` and drain-failed don't pay for it.
+            const { requeueDeadSubcommand } = await import('./outboxRequeue.js');
+            await requeueDeadSubcommand(rest);
+            break;
+        }
         default:
             console.error(`Unknown 'lore outbox' subcommand: '${sub}'`);
             console.error(`Run 'lore outbox --help' for the list.`);

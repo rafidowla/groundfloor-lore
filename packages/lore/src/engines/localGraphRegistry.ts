@@ -33,6 +33,7 @@ import { SessionCacheManager } from './sessionCacheManager.js';
 import { createTableStorage } from './tableStorageFactory.js';
 import type { ITableStorage } from '../contracts/tables.js';
 import { SurrealGraph } from './surrealGraph.js';
+import { disposeAccessTracker } from './accessTracker.js';
 import type { WorkspaceGraph } from './openWorkspaceGraph.js';
 import {
     resolveWorkspaceGraphEngine,
@@ -196,6 +197,14 @@ export class LocalGraphRegistry {
             if (entry.surreal && other.surreal === entry.surreal) { aliased = true; break; }
         }
         if (aliased) return false;
+        // Flush and drop THIS graph's access tracker before closing it. Its
+        // pending stamps can only be written while the store is open, and a
+        // tracker left armed on a closed graph is a leak (pre-3.18.2 it was
+        // worse: the flush re-opened the store — see surrealGraph.ts
+        // `stampAccessTimes`). Idle eviction reaches here too, so a long-lived
+        // daemon would otherwise accumulate one armed tracker per evicted
+        // workspace.
+        if (entry.surreal) { try { await disposeAccessTracker(entry.surreal); } catch { /* best-effort */ } }
         // The Surreal handle's directory lock is released asynchronously by
         // the driver — best-effort close is all we can do here.
         if (entry.surreal) { try { await entry.surreal.close(); } catch { /* best-effort */ } }

@@ -3,8 +3,8 @@
   "entries": [
     {
       "path": "packages/lore/src/engines/verbatimStore.ts",
-      "lines": 1843,
-      "justification": "pre-existing"
+      "lines": 1820,
+      "justification": "pre-existing; ratcheted DOWN 1843->1820 by fix/verbatim-worker-nested-metadata (batch vector resolution moved to verbatimBatch.ts, orphaned wrapper removed)"
     },
     {
       "path": "packages/lore/src/mcp/server.ts",
@@ -23,8 +23,8 @@
     },
     {
       "path": "packages/lore/src/outbox/replicator.ts",
-      "lines": 857,
-      "justification": "pre-existing"
+      "lines": 863,
+      "justification": "pre-existing; +6 for the dead-letter watchdog hook (fix/verbatim-worker-nested-metadata). The policy itself lives in outbox/deadLetterWatch.ts rather than inline; these lines are the field, its comment, the import and the one call site."
     }
   ]
 }

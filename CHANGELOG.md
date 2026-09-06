@@ -6,6 +6,241 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+## [3.19.1] — 2026-09-06
+
+### Fixed — `lore outbox requeue-dead` could not reach an embedded host's outbox
+
+3.19.0 shipped the command resolving its outbox the way the DAEMON lays it out:
+`<LORE_HOME>/workspaces/<active>/.lore/`. **Embedded hosts do not use that
+layout** — they open one Lore per workspace at its own `dataDir`, so there is no
+active workspace and no `workspaces.json` to consult. Atlas keeps every
+workspace under `<ATLAS_HOME>/lore-data/<workspace>/.lore/`, which is 11
+independent outboxes; the command would have resolved to a home holding none of
+their data, or — after a local-daemon teardown — to nothing at all.
+
+Since embedded is the normal deployment (Lore is app-fronted, never a shared
+standalone daemon), the recovery command was effectively unusable exactly where
+the incident it was written for happened.
+
+`--lore-dir <path>` now addresses an outbox directly, and the command fails with
+a pointed message when no `outbox.sqlite` is there. Each directory is its own
+outbox, so an incident spanning several workspaces means one invocation per
+directory:
+
+```
+for ws in a b c; do
+  lore outbox requeue-dead --lore-dir "$ATLAS_HOME/lore-data/$ws/.lore" \
+    --error-contains "metadata.type"
+done
+```
+
+Note that a row's `workspace` column reads `default` inside an embedded host's
+own outbox, so `--workspace` does not discriminate there — `--lore-dir` is the
+selector.
+
+## [3.19.0] — 2026-09-06
+
+### Fixed — the search worker silently discarded every write carrying metadata (regression since 3.17.0)
+
+**With `LORE_SEARCH_WORKER=1` and a parent embedder configured, every
+`verbatim.upsert` was rejected, retried to exhaustion, and dead-lettered.** The
+outbox kept the payloads, so nothing was destroyed — but the vector rows were
+never written, and the affected nodes vanished from semantic recall while
+remaining perfectly readable by id. Found on an Atlas host running 3.18.2:
+2,980 dead-lettered rows across 11 workspaces over seven days, 286 nodes left
+with no vector row. It surfaced only because somebody read the daemon log by
+hand while doing something else.
+
+**Root cause.** 3.17.0 (`cfb258f9`) added parent-embeds mode: the parent process
+owns the single ONNX model, embeds locally, and ships the vector to the child,
+whose provider is a stub that throws. To deliver it,
+`VerbatimSearchWorkerProxy.storeBatch` spread the `VerbatimDocument`, attached
+`vector`, and called the child's `bulkUpsertPrebuiltRows`.
+
+That sink is for PREBUILT ROWS — it hands what it is given straight to Arrow as
+a schema row. A `VerbatimDocument` is not a schema row: its `metadata` is a
+NESTED object, which Arrow flattens to the dotted path `metadata.type`, a column
+`buildVerbatimSchema` does not declare. Hence, on every write:
+
+```
+Found field not in schema: metadata.type at row 0
+```
+
+`store()` delegated to `storeBatch()`, so the single (`verbatim.upsert`),
+consolidated (`verbatim.upsert.batch`) and autolink ingest-hook paths all failed
+identically — the payload never mattered, only its shape.
+
+**Why the suite did not catch it.** Every pre-existing test on this path seeds
+`metadata: {}`. An EMPTY object contributes no Arrow field paths at all, so the
+schema check never fires. The bug was invisible to a green suite. TypeScript
+missed it too: the row was cast through `Record<string, unknown>` on the way to
+the sink.
+
+**Second defect, same shortcut.** `bulkUpsertPrebuiltRows` also skips everything
+`VerbatimStore.store`/`storeBatch` do around the write — the `#rev` history
+snapshot, the skip-identical short-circuit, same-id dedupe, the deferred-delete
+ordering. So parent-embeds mode had been keeping **no revision history at all**
+since 3.17.0, silently, with no error. Flattening the row alone would have left
+that half broken.
+
+**The fix.** `store()`/`storeBatch()` now forward to the child's OWN
+`store`/`storeBatch` with the vector already attached; `VerbatimDocument` gains
+an optional `vector` the store consumes instead of calling its provider. The
+store flattens the row itself, exactly as the in-process path does, and the
+child's throwing stub is never reached. `store()` deliberately routes to the
+child's `store`, not `storeBatch` — only the former carries skip-identical, and
+these workloads re-store the same nodes constantly (one host: 2,545 writes
+across 61 distinct nodes), so batching singles would snapshot a revision on
+every no-op. Worker and non-worker behaviour are now identical, which is the
+property that stops the two drifting again.
+
+Redaction is unchanged and still happens in the parent — that is what keeps a
+raw secret away from the embedding provider, which no child-side pass can undo
+once the text has left the process.
+
+### Added — `lore outbox requeue-dead`
+
+Returns dead-lettered rows to the retry queue. `drain-failed` cannot: it probes
+the substrate and then either confirms replicated or re-marks dead, never
+re-dispatches. That is right when the ROW is bad and wrong when the BUILD was
+bad — a defect that rejects a whole class of write leaves a queue full of
+payloads that are valid and will apply cleanly once fixed.
+
+Rows return as `'failed'`, not `'pending'`, and this is load-bearing:
+`replicateOne` runs the RA-6 supersession guard only on `'failed'`. Every
+requeued row is days old and may have been superseded since, so requeueing to
+`'pending'` would skip the guard and turn a recovery into a data-loss event.
+`attempts` resets and the backoff clears. Filters (`--workspace`, `--kind`,
+`--error-contains`, `--limit`) scope the blast radius — a dead-letter queue also
+holds rows that are dead for good reasons. SQLite-only, so it is safe to run
+against a live daemon.
+
+Backed by `OutboxStore.requeueDead` (optional on the interface, implemented by
+`SqliteOutboxStore`).
+
+**Deploy the fixed build before requeueing.** Requeueing first just burns the
+retries again and re-kills the same rows.
+
+### Added — dead-letter watchdog (`outbox/deadLetterWatch.ts`)
+
+A dead-letter is permanent, silent data loss, and the only trace was one
+`marked dead:` line per row. The incident above wrote ~3,000 of those over seven
+days and nobody noticed, because thousands of identical lines are wallpaper.
+
+The replicator now watches the dead-letter COUNT on the tick that already reads
+`aggregateStats()`, which lets it say the thing a per-row line cannot: whether
+the rate is sustained. A one-off dead-letter is a bad row; a count climbing tick
+after tick is a defect eating a class of write, and it escalates after three
+consecutive increases with the triage and recovery commands named. Quiet ticks
+print nothing, so every line it emits is real, new, permanent loss. A non-empty
+queue at startup gets one NOTE, not a repeated alarm.
+
+### Changed
+
+- `VerbatimDocument` gains an optional `vector` (transport only — never
+  persisted as a column; the row builders read it like any other vector).
+- Batch vector resolution moved out of `VerbatimStore.storeBatch` into
+  `verbatimBatch.resolveBatchVectors`, which also skips the contentHash probe
+  entirely when every document already carries a vector.
+
+## [3.18.2] — 2026-09-05
+
+### Fixed — embedding hosts could never exit (regression since 3.18.0)
+
+**An embedded consumer's process hung forever after all work completed and
+every `close()` had resolved.** Reported by the Atlas team against 3.18.1;
+reproduced here, bisected to `ef5a2d09` (3.18.0), and fixed. Anyone embedding
+Lore in-process on 3.18.0 or 3.18.1 is affected. The daemon is not — its HTTP
+listener holds the loop open regardless, which is why this reached a release.
+
+**Root cause.** `ef5a2d09` restored the access-time coldness signal by adding
+`SurrealGraph.stampAccessTimes`, which began with `await this.initialize()`.
+That method is driven by `engines/accessTracker.ts`, a background flush timer
+that **no drain ever stopped** — `ensureAccessTracker`'s own comment recorded
+"neither drain calls tracker.stop()" as a known gap, and the tracker registry
+was a `WeakMap` nothing could walk. So the timer kept firing after its graph
+was closed, and `initialize()` RE-OPENED the surrealkv store from a background
+tick. The resulting engine had no owner and was never closed, and an open
+surrealkv engine holds the libuv loop — so the host could never exit.
+
+**Why it was hard to see.** Every assertion passed, every `close()` resolved,
+and nothing was visible to introspection: `_getActiveHandles()` reports
+neither timers nor native NAPI resources, and `getActiveResourcesInfo()` was
+empty too. The only external evidence was `lsof` showing WAL/sstable
+descriptors for workspaces that had already been closed. A consumer's
+73-second suite ran to a clean pass and then sat indefinitely.
+
+**The fix, in three parts:**
+
+- `SurrealGraph.stampAccessTimes` now stamps an already-open store and never
+  initializes one. A `closed` flag was considered and rejected: a flush that
+  passed such a check while the store was open would still reach
+  `initialize()` after `close()`. Refusing to open at all removes the window
+  instead of narrowing it. Dropping a batch is safe — these stamps are
+  instance-local retention telemetry, never synced.
+- New `stopAllAccessTrackers()` (`engines/accessTracker.ts`), backed by an
+  iterable registry alongside the existing `WeakMap`, called from the ordered
+  shutdown drain as **step 8.7** — before any substrate closes, so each
+  tracker's final flush still lands on a live graph and the stamps are
+  preserved rather than dropped.
+- `AccessTracker.stop()` now also drops its `WeakMap` entry so a later read
+  builds a fresh tracker. This matters because the ordered drain is not run
+  only at process death: `/api/workspaces/switch` and `/api/daemon/restart`
+  run it too and the daemon continues afterwards.
+
+### Fixed — the same defect class in the daily retention sweep
+
+Found by auditing every `setInterval` in `src` against two questions: can the
+drain stop this, and does it touch a substrate? One failed both.
+
+`scheduleRetentionSweep` armed its daily `setInterval` INSIDE the bootstrap
+callback and never returned that handle, so once the bootstrap had fired (60 s
+after boot) the daily timer was **uncancellable by construction**. The sweep
+re-opens substrates — `runRetentionSweepAllWorkspaces` resolves every workspace
+through `registry.getGraphHandle()` and `resolver.getOrOpen()` — so a fire after
+the drain resurrected a graph and a LanceDB handle per workspace, and could
+leave two live handles on one surrealkv directory.
+
+**Not the embedded hang**: arming is gated on `startsDaemonTimers`, so embedding
+hosts never armed it, and the timer is unref'd so it never held a process open.
+It bites the daemon, where the drain also runs on `/api/workspaces/switch` and
+`/api/daemon/restart` and the daemon then carries on. `RetentionScheduler` now
+exposes `stop()`, a module registry backs `stopAllRetentionSweeps()`, and the
+drain calls it at step 7.7. Pinned by `retention-sweep-cancellable-unit.ts`.
+
+### Fixed — three teardown handle leaks found alongside it
+
+None of these caused the hang; all three leaked real handles on the
+local/embedded teardown path.
+
+- **The outbox replicator's between-tick nap is now unref'd**
+  (`outbox/replicator.ts`). Referenced, it held an embedding host's event loop
+  open forever on any teardown that did not reach `replicator.stop()` —
+  including a host that deliberately abandons `dispose()` when its own lock is
+  wedged. Predates 3.18.0.
+- **`WorkspaceVerbatimResolver.closeAll()` is now actually called** (drain
+  step 9.7). It had zero callers anywhere in the tree while its own docstring
+  promised "`closeAll()` releases handles on shutdown", so every workspace the
+  outbox replicator resolved leaked its LanceDB handle for the life of the
+  host.
+- **The SQLite sidecars are now closed** (drain step 11): outbox, aux,
+  versions, pending-ops and table storage. They were closed only on the
+  arcade/cloud boot path, so a local or embedded drain left every `.sqlite` /
+  `-wal` / `-shm` descriptor open. Capability-probed via the new
+  `collectSqliteStores()`, so a `FileOutboxStore` or the cloud table-storage
+  stub is skipped rather than crashing the drain.
+
+**New regression tests**, all wired into `npm test` and each verified to FAIL
+with its fix reverted: `access-tracker-no-resurrect-unit.ts` (the mechanism),
+`embedded-abandoned-dispose-exit-unit.ts` (end-to-end — a host process must
+exit), `shutdown-drain-sidecar-close-unit.ts` (the drain's new steps).
+
+**Diagnostic note** for anyone chasing a "process will not exit" bug here:
+`process._getActiveHandles()` reports neither timers nor native NAPI
+resources, so an empty list proves nothing. Use
+`process.getActiveResourcesInfo()` (which does report `Timeout`, though not
+unref'd ones) and `lsof` on the hung pid.
+
 ## [3.18.1] — 2026-09-04
 
 **Highlights.** This is a small patch release: a data-safety fix for

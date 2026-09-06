@@ -30,6 +30,7 @@ import type { BoundedVectorCache } from './boundedVectorCache.js';
 import { assertSafeLanceId, assertSafeLanceHash } from './verbatimHistory.js';
 import { markBuildStart, markBuildDone } from './indexIntegrity.js';
 import type { FtsTokenizerSettings } from './ftsTokenizerProfile.js';
+import type { VerbatimDocument } from '../providers/types.js';
 
 /**
  * VERBATIM_CHUNK_SIZE — Row budget per LanceDB / IN-predicate batch operation.
@@ -152,6 +153,47 @@ export async function ensureVerbatimTable(
     // ctx.table fast-path above takes over.
     init.catch(() => tableInitByCtx.delete(ctx));
     return init;
+}
+
+/**
+ * The caller-supplied embedding for a document, or null when it has none.
+ *
+ * Only the parent-embeds search-worker path sets `doc.vector`
+ * (verbatimSearchWorkerProxy embeds in the parent because the child's provider
+ * is a stub that throws). An empty array is treated as ABSENT: a zero-length
+ * vector is never a valid embedding, and persisting one would silently poison
+ * the row for every future similarity search.
+ */
+export function suppliedVector(doc: VerbatimDocument): Float32Array | number[] | null {
+    const v = doc.vector;
+    if (!v) return null;
+    return v.length > 0 ? v : null;
+}
+
+/**
+ * Resolve one vector per doc for storeBatch's Phase 1, ahead of the embed pass.
+ *
+ * Precedence: the doc's own supplied vector wins (parent-embeds worker path —
+ * see suppliedVector), then the contentHash cache/table probe, then null, which
+ * marks the doc for Phase 2's batch embed. When EVERY doc arrives with a vector
+ * — a whole consolidated verbatim.upsert run, in practice — the probe query is
+ * skipped outright. Supplied vectors seed hashCache so a later write of the
+ * same text reuses them rather than re-embedding.
+ */
+export async function resolveBatchVectors(
+    ctx: VerbatimBatchCtx,
+    docs: VerbatimDocument[],
+    hashes: string[],
+): Promise<Array<Float32Array | number[] | null>> {
+    const supplied = docs.map(suppliedVector);
+    const probe = supplied.every((v) => v !== null)
+        ? new Map<string, Float32Array | number[]>()
+        : await bulkLookupByContentHash(ctx, hashes);
+    return supplied.map((v, i) => {
+        const hash = hashes[i];
+        if (v && hash) ctx.hashCache.set(hash, v);
+        return v ?? probe.get(hash) ?? null;
+    });
 }
 
 /**

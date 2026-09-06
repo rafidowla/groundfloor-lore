@@ -47,6 +47,7 @@ import { collectVerbatimUpsertRun, consolidateVerbatimRun } from './verbatimCons
 import { keyOfEntry, type EntityFamily } from './supersession.js';
 import type { OutboxLagCache } from './lagCache.js';
 import type { OutboxEntry, OutboxStore } from './types.js';
+import { DeadLetterWatch } from './deadLetterWatch.js';
 
 /**
  * Sprint E3 — embed.batch consolidation cap (total merged texts.length,
@@ -436,18 +437,23 @@ export class OutboxReplicator {
         }
     }
 
+    /** Dead-letter watchdog state — see outbox/deadLetterWatch.ts. */
+    private deadLetterWatch = new DeadLetterWatch();
+
     /** Sprint O4 — refresh the lag cache from the store's
      *  aggregateStats(). Called at the end of each tick AND once
      *  before the loop starts so cold-boot writes don't all hit the
      *  fail-open path. Errors are non-fatal — stale cache is better
      *  than blocking writes. */
     private async refreshLagCache(): Promise<void> {
-        if (!this.lagCache) return;
+        // deadLetterWatch rides this same stats read, so it runs even with no
+        // lagCache wired (see outbox/deadLetterWatch.ts for why it must).
         const fn = (this.store as { aggregateStats?: () => Promise<import('./types.js').OutboxAggregateStats> }).aggregateStats;
         if (typeof fn !== 'function') return;
         try {
             const stats = await fn.call(this.store);
-            this.lagCache.refresh(stats);
+            this.lagCache?.refresh(stats);
+            this.deadLetterWatch.observe(stats.dead, this.log);
         } catch (err) {
             this.log(`[outbox replicator] lag-cache refresh failed: ${(err as Error).message}`);
         }
@@ -818,8 +824,8 @@ export function wireReplicator(input: ReplicatorWiring): OutboxReplicator {
     return new OutboxReplicator(input);
 }
 
-function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number): Promise<void> { // UNREF'D so an IDLE replicator cannot hold an embedding host's loop open — referenced, it hung any teardown that missed stop(), invisibly (_getActiveHandles reports no timers). Work in flight holds its own handles. See test/embedded-abandoned-dispose-exit-unit.ts
+    return new Promise((resolve) => { setTimeout(resolve, ms).unref(); });
 }
 
 /**

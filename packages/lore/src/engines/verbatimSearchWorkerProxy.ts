@@ -138,58 +138,92 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         return this.call('searchByVector', [queryVector, { topK: limit, filter, includeHistory: opts?.includeHistory, actorScopes }]) as Promise<VerbatimSearchResult[]>;
     }
 
-    /** Delegates to {@link storeBatch} so embedding logic lives in one place. */
+    /**
+     * Forwards to the child's OWN {@code store} — never to {@code storeBatch}.
+     *
+     * The two are not interchangeable: `store()` alone carries the
+     * skip-identical short-circuit (an unchanged re-store is a no-op), and
+     * these workloads re-store the same nodes constantly — one host had 2,545
+     * writes across 61 distinct nodes. Routing singles through the batch path
+     * would snapshot a fresh `#rev` revision on every one of those no-ops.
+     * Mirroring the in-process shape keeps worker and non-worker behaviour
+     * identical, which is the only property that stops the two drifting.
+     */
     override async store(row: VerbatimDocument): Promise<void> {
-        return this.storeBatch([row]);
+        if (!this.parentEmbedder) {
+            return this.call('store', [row]) as Promise<void>;
+        }
+        const [prepared] = await this.embedLocally([row]);
+        return this.call('store', [prepared]) as Promise<void>;
     }
 
     /**
-     * When a parentEmbedder is configured: embed every row's text locally,
-     * then send pre-built rows (vector included) to the child via
-     * {@code bulkUpsertPrebuiltRows}. Without one: forward to the child's
-     * own {@code storeBatch} (backward-compatible path). Rows that already
-     * carry a {@code vector} field skip local embedding.
+     * Forwards to the child's own {@code storeBatch}, embedding locally first
+     * when a parentEmbedder is configured.
+     *
+     * fix/verbatim-worker-nested-metadata (3.17.0 regression): this used to
+     * send the embedded documents to {@code bulkUpsertPrebuiltRows}, which is a
+     * PREBUILT-ROW sink — it hands what it is given straight to Arrow as a
+     * schema row. A VerbatimDocument is not a schema row: its `metadata` is a
+     * NESTED object, which Arrow flattens to the dotted path `metadata.type`,
+     * a column `buildVerbatimSchema` does not declare. Every write through this
+     * branch was rejected with "Found field not in schema: metadata.type at row
+     * 0", the outbox retried it to exhaustion and dead-lettered it. Both the
+     * single and consolidated verbatim.upsert paths failed, because `store()`
+     * delegated here.
+     *
+     * The shortcut also skipped everything `VerbatimStore.storeBatch` does
+     * around the write — the `#rev` history snapshot, same-id dedupe, the
+     * deferred-delete ordering — so parent-embeds mode silently kept no
+     * revision history at all. Going through the child's real `storeBatch`
+     * with the vector already attached fixes both: the store flattens the row
+     * itself, exactly as the in-process path does, and never calls the child's
+     * stub provider (which throws by design).
      */
     override async storeBatch(rows: VerbatimDocument[]): Promise<void> {
-        const embedder = this.parentEmbedder;
-        if (!embedder) {
+        if (!this.parentEmbedder) {
             return this.call('storeBatch', [rows]) as Promise<void>;
         }
-        // 2.6 parity: VerbatimStore.storeBatch (child-process path) redacts
-        // secrets before embed/persist (verbatimStore.ts). This branch bypasses
-        // that path entirely — rows are embedded HERE, in the parent process, and
-        // sent straight to bulkUpsertPrebuiltRows (no redaction of its own) — so
-        // it must redact itself, once, up front, before either use of row.text.
-        const redactedRows = rows.map((row) => {
-            const r = row as unknown as Record<string, unknown>;
-            if (typeof r.text === 'string' && r.text.length > 0) {
-                return { ...row, text: redactSecrets(r.text) };
-            }
-            return row;
-        });
+        return this.call('storeBatch', [await this.embedLocally(rows)]) as Promise<void>;
+    }
+
+    /**
+     * Redact, then attach each document's embedding, in the parent process.
+     *
+     * 2.6 parity: `VerbatimStore.storeBatch` redacts secrets before it embeds.
+     * Redacting HERE keeps the vector and the text that ships with it in
+     * agreement — the child re-runs `redactSecrets` on the same text, which is
+     * a no-op on already-redacted input, so the pair cannot come apart.
+     * Documents that already carry a vector are passed through untouched.
+     */
+    private async embedLocally(rows: VerbatimDocument[]): Promise<VerbatimDocument[]> {
+        const embedder = this.parentEmbedder!;
+        const redactedRows = rows.map((row) => (
+            typeof row.text === 'string' && row.text.length > 0
+                ? { ...row, text: redactSecrets(row.text) }
+                : row
+        ));
         const textsToEmbed: string[] = [];
         const embedIndices: number[] = [];
         for (let i = 0; i < redactedRows.length; i++) {
-            const row = redactedRows[i] as unknown as Record<string, unknown>;
-            if (row.vector === undefined && typeof row.text === 'string' && (row.text as string).length > 0) {
-                textsToEmbed.push(row.text as string);
+            const row = redactedRows[i];
+            const hasVector = !!row.vector && row.vector.length > 0;
+            if (!hasVector && typeof row.text === 'string' && row.text.length > 0) {
+                textsToEmbed.push(row.text);
                 embedIndices.push(i);
             }
         }
-        let vectors: number[][];
-        if (textsToEmbed.length > 0) {
-            vectors = await embedder.embedDocumentBatch!(textsToEmbed);
-        } else {
-            vectors = [];
-        }
-        const prebuiltRows = redactedRows.map((row, i) => {
-            const embedIdx = embedIndices.indexOf(i);
-            if (embedIdx >= 0) {
-                return { ...row, vector: vectors[embedIdx] };
-            }
-            return row;
+        const vectors = textsToEmbed.length > 0
+            ? await embedder.embedDocumentBatch!(textsToEmbed)
+            : [];
+        // indexOf over embedIndices is O(n^2) on a large consolidated run;
+        // a position map keeps it linear.
+        const vectorByRow = new Map<number, number[]>();
+        embedIndices.forEach((rowIdx, k) => vectorByRow.set(rowIdx, vectors[k]));
+        return redactedRows.map((row, i) => {
+            const v = vectorByRow.get(i);
+            return v ? { ...row, vector: v } : row;
         });
-        return this.call('bulkUpsertPrebuiltRows', [prebuiltRows]) as Promise<void>;
     }
 
     /** Spawn (or reuse) the worker; resolves once it has initialized. */

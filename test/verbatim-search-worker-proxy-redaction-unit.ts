@@ -7,18 +7,31 @@
  * process's own VerbatimStore.storeBatch, which redacts secrets via
  * redactSecrets() before embed/persist (verbatimStore.ts:731, :881). v3.17.0
  * added a `parentEmbedder` fast path to VerbatimSearchWorkerProxy.storeBatch
- * that embeds row.text locally IN THE PARENT and sends pre-built rows straight
+ * that embeds row.text locally IN THE PARENT and sent pre-built rows straight
  * to the child's `bulkUpsertPrebuiltRows` — a low-level LanceDB primitive with
  * no redaction logic of its own. Net effect (pre-fix): a note containing a
  * secret got embedded UNREDACTED (sent raw to the embedding provider, which
  * under openai-compat can be a third-party HTTP endpoint) and PERSISTED
  * unredacted, so a later recall() returned the plaintext secret.
  *
+ * The parent still redacts, and must: that is what keeps the raw secret away
+ * from the embedding provider, which no child-side redaction can undo once the
+ * text has left the process.
+ *
+ * ROUTE CHANGE (fix/verbatim-worker-nested-metadata): the parent-embeds path no
+ * longer calls `bulkUpsertPrebuiltRows` — that sink rejected every document
+ * with non-empty metadata ("Found field not in schema: metadata.type") and
+ * skipped the store's history/skip-identical logic. It now sends the document,
+ * vector attached, to the child's own `store`/`storeBatch`. Redaction is
+ * unchanged and still belongs to the parent; only the method name moved. The
+ * child re-runs redactSecrets, which is a no-op on already-redacted text, so
+ * the text and the vector shipped with it cannot come apart.
+ *
  * This test stubs out the proxy's private IPC `call()` (a TS-private, not
  * JS-private, instance method — same runtime-accessible-internals pattern as
  * test/worker-embed-overrides-unit.ts) so it never forks a real child process;
  * it only needs to observe (1) what text reaches the embedder and (2) what
- * rows reach `bulkUpsertPrebuiltRows` (via `call`).
+ * documents reach the child (via `call`).
  *
  * Run: npx tsx test/verbatim-search-worker-proxy-redaction-unit.ts
  */
@@ -50,9 +63,9 @@ class RecordingEmbedder implements EmbeddingProvider {
 
 type CapturedCall = { method: string; args: unknown[] };
 
-/** Shape of a row handed to `bulkUpsertPrebuiltRows` via `call` — named
- *  once so both assertion sites below share one documented shape. */
-type PrebuiltRow = { id: string; text: string; vector?: number[] };
+/** Shape of a document handed to the child's store/storeBatch via `call` —
+ *  named once so every assertion site below shares one documented shape. */
+type SentDocument = { id: string; text: string; vector?: number[] };
 
 /** Proxy-internal `call` (TS-private, not JS-private — accessible at
  *  runtime) — named once here per the ProxyInternals convention in
@@ -117,13 +130,13 @@ async function main() {
             );
         });
 
-        await test('storeBatch persists REDACTED text via bulkUpsertPrebuiltRows, never the raw secret', async () => {
+        await test('storeBatch sends REDACTED text to the child, never the raw secret', async () => {
             assert.equal(calls.length, 1, 'exactly one call reaches the child');
-            assert.equal(calls[0].method, 'bulkUpsertPrebuiltRows', 'parentEmbedder path calls bulkUpsertPrebuiltRows');
-            const prebuiltRows = calls[0].args[0] as PrebuiltRow[];
-            assert.equal(prebuiltRows.length, 2);
-            const secretRow = prebuiltRows.find((r) => r.id === 'lore:secret')!;
-            const plainRow = prebuiltRows.find((r) => r.id === 'lore:plain')!;
+            assert.equal(calls[0].method, 'storeBatch', "parentEmbedder path calls the child's own storeBatch, not a prebuilt-row sink");
+            const sent = calls[0].args[0] as SentDocument[];
+            assert.equal(sent.length, 2);
+            const secretRow = sent.find((r) => r.id === 'lore:secret')!;
+            const plainRow = sent.find((r) => r.id === 'lore:plain')!;
             assert.equal(secretRow.text, redactedSecretText, 'persisted secret row is redacted');
             assert.ok(!secretRow.text.includes('sk-abcdefghijklmnopqrstuvwxyz1234567890'), 'no raw secret reaches the LanceDB row');
             assert.ok(Array.isArray(secretRow.vector) && secretRow.vector.length === 4, 'secret row still got a real embedded vector');
@@ -136,7 +149,7 @@ async function main() {
 
     // ── Edge case: a row that already carries a vector (skips local embedding)
     // must still have its persisted text redacted — it is embedded nowhere,
-    // but it IS persisted, via the very same bulkUpsertPrebuiltRows call. ──
+    // but it IS persisted, through the very same call to the child. ──
     const homeB = fs.mkdtempSync(path.join(os.tmpdir(), 'verbatim-proxy-redaction-b-'));
     try {
         const embedder = new RecordingEmbedder();
@@ -149,12 +162,33 @@ async function main() {
             ] as unknown as VerbatimDocument[]);
             assert.equal(embedder.documentBatchCalls.length, 0, 'a row with vector already set never reaches embedDocumentBatch');
             assert.equal(calls.length, 1);
-            const prebuiltRows = calls[0].args[0] as PrebuiltRow[];
-            assert.equal(prebuiltRows[0].text, redactedSecretText, 'persisted text is redacted even though this row skipped embedding');
-            assert.deepEqual(prebuiltRows[0].vector, [9, 9, 9, 9], 'the pre-supplied vector passes through untouched');
+            const sent = calls[0].args[0] as SentDocument[];
+            assert.equal(sent[0].text, redactedSecretText, 'persisted text is redacted even though this row skipped embedding');
+            assert.deepEqual(sent[0].vector, [9, 9, 9, 9], 'the pre-supplied vector passes through untouched');
         });
     } finally {
         fs.rmSync(homeB, { recursive: true, force: true });
+    }
+
+    // ── store() has its OWN route now (it used to delegate to storeBatch), so
+    // redaction on the single-write path needs its own case. ──
+    const homeS = fs.mkdtempSync(path.join(os.tmpdir(), 'verbatim-proxy-redaction-s-'));
+    try {
+        const embedder = new RecordingEmbedder();
+        const proxy = new VerbatimSearchWorkerProxy(homeS, undefined, embedder);
+        const calls = stubCall(proxy);
+
+        await test('store() with parentEmbedder redacts before embed and sends the redacted text on', async () => {
+            await proxy.store({ id: 'lore:single-secret', text: secretText, metadata: {} } as VerbatimDocument);
+            assert.deepEqual(embedder.documentBatchCalls[0], [redactedSecretText], 'the embedder never sees the raw secret');
+            assert.equal(calls.length, 1);
+            assert.equal(calls[0].method, 'store', "store() routes to the child's own store, not storeBatch");
+            const sent = calls[0].args[0] as SentDocument;
+            assert.equal(sent.text, redactedSecretText, 'the document sent to the child is redacted');
+            assert.ok(Array.isArray(sent.vector) && sent.vector.length === 4, 'and carries its parent-computed vector');
+        });
+    } finally {
+        fs.rmSync(homeS, { recursive: true, force: true });
     }
 
     // ── (c): no parentEmbedder — this change must not touch that path at all ──

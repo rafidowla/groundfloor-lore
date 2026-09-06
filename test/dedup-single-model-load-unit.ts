@@ -10,10 +10,16 @@
  *     the pre-computed vector to the child over IPC via `searchByVector`
  *     (never the child's own `search`).
  *   - storeBatch() embeds every row via parentEmbedder.embedDocumentBatch()
- *     and sends pre-built rows (vectors included) to the child via
- *     `bulkUpsertPrebuiltRows` (never the child's own `storeBatch`).
+ *     and sends the documents — vector attached — to the child's OWN
+ *     `storeBatch`, which flattens them into schema rows itself.
  * Without a parentEmbedder, search/storeBatch forward straight to the
  * child's own embedder — the pre-existing backward-compatible path.
+ *
+ * NOTE (fix/verbatim-worker-nested-metadata): this used to route to
+ * `bulkUpsertPrebuiltRows`, a prebuilt-ROW sink, which rejected every document
+ * whose `metadata` was non-empty. This file did not catch it because its
+ * fixtures all use `metadata: {}` — see
+ * test/verbatim-worker-parent-embeds-metadata-unit.ts for the guard that does.
  *
  * Harness: a real child_process fork (the production path — same as
  * verbatim-search-worker-e2e.ts), with a CountingEmbedProvider wrapping the

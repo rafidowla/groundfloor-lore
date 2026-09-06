@@ -16,6 +16,9 @@
 
 import { VerbatimStore } from '../engines/verbatimStore.js';
 import { awaitBackgroundReconnect } from '../engines/backgroundReconnect.js';
+import { stopAllAccessTrackers } from '../engines/accessTracker.js';
+import { stopAllRetentionSweeps } from './retentionScheduler.js';
+import { stopIdleSweeper } from '../providers/llmDispatch.js';
 import {
     defaultAutolinkTracker,
     DEFAULT_AUTOLINK_DRAIN_TIMEOUT_MS,
@@ -86,6 +89,31 @@ export interface ShutdownDrainDeps {
      *  every cached engine and drops references; synchronous (SyncEngine
      *  holds no native handles). */
     syncEngineRegistry?: { disposeAll(): void };
+    /** Per-workspace VerbatimStore resolver (outbox/workspaceVerbatimResolver.ts).
+     *  Optional (undefined in cloud mode / wiring without it).
+     *
+     *  `closeAll()` releases the LanceDB handles the resolver opened LAZILY for
+     *  non-boot workspaces. Its own docstring has promised since it was written
+     *  that "`closeAll()` releases handles on shutdown" — but nothing anywhere
+     *  called it, so every workspace the outbox replicator touched leaked its
+     *  verbatim handle for the life of the host process. Acute in embedded mode,
+     *  where the "host process" is the embedder's, not a daemon that was about
+     *  to exit anyway. The BOOT store is deliberately NOT closed here (the
+     *  resolver skips primed paths) — step 10 owns that one, same split as
+     *  graphRegistry.disposeAll() vs graph.close(). */
+    workspaceVerbatimResolver?: { closeAll(): Promise<void> };
+    /** SQLite sidecar handles opened per data directory, closed in step 11.
+     *  Production passes the outbox store, aux store, version store,
+     *  pending-ops store and table storage; entries may be undefined when a
+     *  given store is not wired, and are skipped.
+     *
+     *  These were previously closed ONLY on the arcade/cloud boot path
+     *  (mcp/arcadeBoot.ts), so a local or embedded teardown left every
+     *  `.sqlite` / `-wal` / `-shm` descriptor open. better-sqlite3 handles do
+     *  not hold the event loop, so this never blocked an exit — it leaked
+     *  descriptors and kept WAL files hot, which matters to a long-lived
+     *  embedder that opens and closes many instances. */
+    sqliteStores?: ReadonlyArray<{ name: string; close(): void } | undefined>;
     /** Hard ceiling on the embed-queue drain (default 5s). */
     embedDrainTimeoutMs?: number;
     /** Hard ceiling on the ingest-autolink drain (default 5s — same order of
@@ -99,6 +127,32 @@ export interface ShutdownDrainDeps {
      *  still bounded because nothing may hang a dispose(). Reached only if a
      *  sweep ignores its `shouldAbort` poll. */
     sweepDrainTimeoutMs?: number;
+}
+
+/**
+ * Capability-probe a set of candidate SQLite sidecars into the `sqliteStores`
+ * shape step 11 closes.
+ *
+ * Lives here rather than at server.ts's two drain call sites because that file
+ * is already over its size baseline, and — the load-bearing reason — because
+ * both sites must pass the SAME set. A store closed on the daemon path and
+ * leaked on the embedded one is exactly the split this fix removes.
+ *
+ * Probed, not typed: `FileOutboxStore` (the non-SQLite outbox backend) and the
+ * cloud table-storage stub have no `close()`, and cloud mode wires neither an
+ * aux nor a version store. The key becomes the label in step 11's error log.
+ */
+export function collectSqliteStores(
+    candidates: Readonly<Record<string, unknown>>,
+): Array<{ name: string; close(): void }> {
+    const out: Array<{ name: string; close(): void }> = [];
+    for (const [name, handle] of Object.entries(candidates)) {
+        const close = (handle as { close?: unknown } | null | undefined)?.close;
+        if (typeof close === 'function') {
+            out.push({ name, close: () => (close as () => void).call(handle) });
+        }
+    }
+    return out;
 }
 
 function logStepError(step: string, e: unknown): void {
@@ -280,11 +334,44 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
             }
         } catch (e) { logStepError('sweep.await', e); }
 
+        // 7.7 Cancel the daily retention sweep. Its timer is unref'd, so it never
+        //     held a process open — but it re-opens graph + verbatim handles
+        //     through getGraphHandle/getOrOpen, and the drain is not only run at
+        //     process death (/api/workspaces/switch and /api/daemon/restart run
+        //     it and the daemon continues). A fire after the drain therefore
+        //     resurrected the handles steps 9.5-10 had just closed, and could
+        //     leave two live handles on one surrealkv directory. Same defect
+        //     class as the access-tracker resurrection below.
+        try { stopAllRetentionSweeps(); } catch (e) { logStepError('retentionSweep.stop', e); }
+
+        // 8.7 Stop the access-time trackers (engines/accessTracker.ts).
+        //
+        //     MUST be before step 9.5/10 close any graph. A tracker's flush
+        //     timer is unref'd but was never stopped by either drain, so it
+        //     kept firing after teardown and `SurrealGraph.stampAccessTimes`
+        //     RE-OPENED the closed store from that background timer — an
+        //     unowned native engine that holds the host's event loop open
+        //     forever. That was the 3.18.0 embedded-host hang: all work done,
+        //     every close() resolved, process never exits, and nothing in
+        //     `process._getActiveHandles()` to blame.
+        //
+        //     Stopping here rather than after step 10 is deliberate and
+        //     preserves data: `stop()` runs a final flush, and at this point
+        //     the graphs are all still OPEN, so the pending stamps land
+        //     instead of being dropped by the closed-store guard.
+        try { await stopAllAccessTrackers(); } catch (e) { logStepError('accessTrackers.stop', e); }
+
         // 9. Auth-registry sweeper + rate-limiter sweeper + local file
         //    watchers. Sync clearInterval; idempotent on restart re-entry.
         try {
             deps.authTokenSweeper.stop();
             deps.rateLimiter?.stopSweeper();
+            // providers/llmDispatch.ts's embedded-model idle-unload sweeper.
+            // Its own comment already promised an embedding host "has nothing
+            // left firing" after dispose — but nothing called this, so the
+            // interval outlived every teardown. Unref'd, so it never held a
+            // process open; it just kept running in the host forever.
+            stopIdleSweeper();
             deps.graphRegistry?.stopEvictionSweep();
             deps.stopAllLocalWatchers();
         } catch { /* non-fatal */ }
@@ -310,6 +397,16 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
             try { deps.syncEngineRegistry.disposeAll(); } catch (e) { logStepError('syncEngineRegistry.disposeAll', e); }
         }
 
+        // 9.7 Close the lazily-opened per-workspace VerbatimStores (LanceDB)
+        //     the outbox replicator resolved. Sibling of step 9.5 for the graph
+        //     side, and placed here for the same reason: BEFORE step 10 closes
+        //     the boot substrates, and after every producer that could ask the
+        //     resolver to open a new one has stopped (steps 1-8.6).
+        if (deps.workspaceVerbatimResolver) {
+            try { await deps.workspaceVerbatimResolver.closeAll(); }
+            catch (e) { logStepError('workspaceVerbatimResolver.closeAll', e); }
+        }
+
         // 10. Close substrate handles LAST, after every write has
         //     drained. Local mode only (DataplaneGraph has no close()).
         //
@@ -329,6 +426,18 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
         }
         if (deps.verbatimStore instanceof VerbatimStore) {
             try { await deps.verbatimStore.close(); } catch (e) { logStepError('verbatimStore.close', e); }
+        }
+
+        // 11. Close the SQLite sidecars, after the substrates above. Last
+        //     because the steps before this one can still write to them (a
+        //     final outbox row, a version snapshot, an audit-adjacent aux
+        //     write), and because closing them cannot fail anything that
+        //     follows — nothing does. Synchronous and individually guarded;
+        //     `close()` on an already-closed better-sqlite3 handle throws, so
+        //     a double-drain must not strand the remaining stores.
+        for (const s of deps.sqliteStores ?? []) {
+            if (!s) continue;
+            try { s.close(); } catch (e) { logStepError(`${s.name}.close`, e); }
         }
 
         console.error('[Lore MCP] graceful shutdown complete');

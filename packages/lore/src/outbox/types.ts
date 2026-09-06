@@ -365,6 +365,36 @@ export interface OutboxStore {
      *  it sweeps both fresh + stale failures. */
     listDead?(opts?: { workspace?: string | null; limit?: number }): Promise<OutboxEntry[]>;
 
+    /** Operator recovery — return `status='dead'` rows to the retry queue.
+     *
+     *  Exists because a dead-letter caused by a BUILD DEFECT is not a row
+     *  problem: the payloads are intact and correct, and once the defect is
+     *  fixed they will apply cleanly. `drain-failed` cannot do this — it only
+     *  probes the substrate and then confirms replicated or re-marks dead; it
+     *  never re-dispatches. Written for the 3.17.0 parent-embeds regression
+     *  (`Found field not in schema: metadata.type`), which dead-lettered ~3k
+     *  rows across 11 workspaces that were individually perfectly valid.
+     *
+     *  Requeues to `'failed'`, NOT `'pending'`, and this is load-bearing:
+     *  `replicateOne` runs the RA-6 supersession guard
+     *  (`isSupersededFailed`) ONLY on `status === 'failed'`. Week-old rows are
+     *  exactly the case that guard exists for — replaying one over a newer
+     *  same-entity write would corrupt it. Requeueing as 'pending' would skip
+     *  the guard and turn a recovery into a data-loss event.
+     *
+     *  `attempts` resets to 0 (the exhausted count would re-dead-letter on the
+     *  first hiccup) and `nextAttemptAt` clears so the rows are eligible on the
+     *  next tick. Filters narrow the blast radius to the incident being
+     *  recovered — never requeue a dead-letter queue wholesale, since it also
+     *  holds rows that are dead for good reasons (RA-6 supersession, genuinely
+     *  malformed payloads). Returns the number of rows requeued. */
+    requeueDead?(opts?: {
+        workspace?: string | null;
+        operationKind?: string;
+        errorContains?: string;
+        limit?: number;
+    }): Promise<number>;
+
     /** SP-F2 (2026-06-10) — retention sweep. Delete `status='replicated'`
      *  rows whose `replicatedAt` (fallback `updatedAt`) is older than
      *  `olderThanMs` ms ago. Returns the number of rows deleted.

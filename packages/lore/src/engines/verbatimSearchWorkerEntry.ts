@@ -61,9 +61,12 @@ async function main(): Promise<void> {
     try {
         let embeddingProvider: EmbeddingProvider;
         if (process.env[WORKER_ENV.PARENT_EMBEDS] === '1') {
-            // The parent embeds every query/document itself (Option A) and only
-            // ever calls searchByVector/bulkUpsertPrebuiltRows on this store, so
-            // embedQuery/embedDocument are never reached here. Loading the real
+            // The parent embeds every query/document itself (Option A) and hands
+            // the vector down — via searchByVector for reads, and on the document
+            // itself for store/storeBatch writes — so embedQuery/embedDocument
+            // are never reached here. The `unreachable` stubs below are the
+            // enforcement: if a write path ever stops supplying a vector, this
+            // throws loudly instead of silently persisting a wrong one. Loading the real
             // ONNX model in every forked child would defeat that memory win
             // (~600MiB RSS per workspace fork) for no benefit — VerbatimStore
             // only needs `dimension`/`modelId` from the provider to size its

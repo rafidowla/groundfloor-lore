@@ -114,7 +114,7 @@ import {
     buildGraphReaders,
 } from './bootSteps.js';
 // SP-02 — ordered graceful-shutdown drain (extracted from this file).
-import { buildShutdownDrain } from './shutdownDrain.js';
+import { buildShutdownDrain, collectSqliteStores } from './shutdownDrain.js';
 // W3-SERVICE-LAYER — transport-agnostic guarded node-write orchestration,
 // shared with the MCP store_node tool + POST /api/node route.
 import { nodeUpsert as nodeServiceUpsert, resolveAutolinkHandles, type NodeWriteResult } from '../core/nodeService.js';
@@ -912,8 +912,8 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         migrationWiring: migrationWiring ?? undefined,
         authTokenSweeper,
         rateLimiter,
-        graphRegistry,
-        syncEngineRegistry,
+        graphRegistry, syncEngineRegistry, workspaceVerbatimResolver,
+        sqliteStores: collectSqliteStores({ outboxStore: outboxWiring.store, auxStore, versionStore, pendingOpsStore, tableStorage: store.tableStorage }),
         stopAllLocalWatchers,
     });
     // TW-2b — after the ordered drain completes, remove any process-global
@@ -1648,8 +1648,8 @@ async function main(): Promise<LoreInstance | void> {
                 migrationWiring: migrationWiring ?? undefined,
                 authTokenSweeper,
                 rateLimiter,
-                graphRegistry,
-                syncEngineRegistry,
+                graphRegistry, syncEngineRegistry, workspaceVerbatimResolver: d.workspaceVerbatimResolver,
+                sqliteStores: collectSqliteStores({ outboxStore: outboxWiring.store, auxStore: d.auxStore, versionStore: d.versionStore, pendingOpsStore: d.pendingOpsStore, tableStorage: d.store.tableStorage }),
                 stopAllLocalWatchers,
             })),
         });

@@ -21,7 +21,7 @@ import { assertSafeLanceId, assertSafeLanceHash, isRevisionHistoryId, HISTORY_ID
 import { redactSecrets } from '../security/secretScan.js';
 import * as verbatimBatch from './verbatimBatch.js';
 import type { VerbatimBatchCtx } from './verbatimBatch.js';
-import { VERBATIM_CHUNK_SIZE } from './verbatimBatch.js';
+import { VERBATIM_CHUNK_SIZE, suppliedVector } from './verbatimBatch.js';
 import { embedBatchCap, awaitEmbedMemoryHeadroom } from '../embed/memoryBudget.js';
 import { SearchGate } from './searchGate.js';
 import {
@@ -702,26 +702,6 @@ export class VerbatimStore implements VectorProvider {
         }
     }
 
-    /**
-     * SW-20 (E7): bulk-resolve contentHash → vector for storeBatch.
-     *
-     * storeBatch Phase 1 previously did `await lookupByContentHash(hash)`
-     * once per doc — a 16k-doc reconnect issued up to 16k serial LanceDB
-     * scans before embedding could start. This resolves the cache-miss
-     * hashes in CHUNKED `contentHash IN (...)` queries (mirroring the
-     * snapshot preflight's chunked id-IN), keeping the predicate string
-     * bounded. The in-memory hashCache is consulted first (and refilled
-     * with whatever the table returns), so semantics are identical to the
-     * per-doc path — just fewer round-trips.
-     *
-     * Returns a Map keyed by contentHash → vector for every hash found.
-     */
-    private async bulkLookupByContentHash(
-        hashes: string[],
-    ): Promise<Map<string, Float32Array | number[]>> {
-        return verbatimBatch.bulkLookupByContentHash(this.batchCtx, hashes);
-    }
-
     async store(doc: VerbatimDocument): Promise<void> {
         try {
             if (!this.initialized || !this.db) {
@@ -781,11 +761,11 @@ export class VerbatimStore implements VectorProvider {
                     if (!tombstoned && sameMetadata) return;
                 }
             }
-            let vector = await this.lookupByContentHash(effectiveHash);
-            if (!vector) {
-                vector = await this.embeddingProvider.embedDocument(doc.text);
-                this.hashCache.set(effectiveHash, vector);
-            }
+            // Parent-embeds worker: a supplied vector outranks the cache probe
+            // and the provider, whose child-side stub throws (suppliedVector).
+            let vector = suppliedVector(doc) ?? await this.lookupByContentHash(effectiveHash);
+            if (!vector) vector = await this.embeddingProvider.embedDocument(doc.text);
+            this.hashCache.set(effectiveHash, vector);
 
             // Snapshot the prior canonical row into history before replacing it
             // (history rows — id contains `#rev` — bypass; already snapshots).
@@ -985,11 +965,8 @@ export class VerbatimStore implements VectorProvider {
         const hashes = docs.map(
             (doc) => (doc.metadata as { contentHash?: string })?.contentHash || computeContentHash(doc.text),
         );
-        const hashToVector = await this.bulkLookupByContentHash(hashes);
-        const resolved: Resolved[] = docs.map((doc, i) => {
-            const hash = hashes[i];
-            return { doc, vector: hashToVector.get(hash) ?? null, hash };
-        });
+        const vectors = await verbatimBatch.resolveBatchVectors(this.batchCtx, docs, hashes);
+        const resolved: Resolved[] = docs.map((doc, i) => ({ doc, vector: vectors[i], hash: hashes[i] }));
 
         // Phase 2: batch-embed the misses.
         const missIndices = resolved
