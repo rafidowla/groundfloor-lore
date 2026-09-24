@@ -46,6 +46,23 @@ export interface RecallOpts {
     includeSuperseded?: boolean;
     /** Filter results to nodes that carry ALL listed tags. */
     tags?: string[];
+    /**
+     * fix/3.22.1-d1-recall-option-parity — D2 node TYPE/KIND prefilter,
+     * ANY-of. Mirrors the `recall` MCP tool's `types` param and
+     * RetrieveOptions.types (retrieveTypes.ts). Omitted/empty = no filter.
+     * Was accepted by retrieve()/the MCP tool/REST since D2 but silently
+     * dropped by this embedded surface — this is the fix for that gap.
+     *
+     * Single-workspace (`workspace` is a name): pushed INTO the vector +
+     * BM25 seed queries, not applied after the fixed-size seed window.
+     *
+     * Cross-workspace (`workspace: '*'`, fix/3.22.1-recall-parity review
+     * fix (2)): pushed into EACH fanned-out workspace's own semantic +
+     * keyword seed queries (see CrossWorkspaceRecallArgs.types in
+     * recallCrossWorkspace.ts), with an identical post-merge filter over
+     * the fused candidate set kept as a backstop.
+     */
+    types?: string[];
     /** Rough token budget — fills top-ranked nodes until exhausted. */
     maxTokens?: number;
     /** Include archived (status="archived") nodes. Default false. */
@@ -56,7 +73,18 @@ export interface RecallOpts {
     queryLanguage?: string;
     /** File paths from the host's current context (Q1.7 deferred surfacing). */
     filePaths?: string[];
-    /** Maximum number of candidate seed nodes. Default: 10. */
+    /**
+     * Maximum number of candidate seed nodes. Default: 10.
+     * fix/3.22.1-recall-parity review fix (1) — clamped to [1, 100]
+     * (matching the `recall` MCP tool's/REST's own `max` bound); a value
+     * outside that range is silently clamped, not rejected, since this is
+     * a permissive embedded API rather than a schema-validated tool arg.
+     * Also now threaded into buildRecallResult's `maxHits`, which sizes the
+     * summary-mode display cap — previously only retrieve()'s own seed
+     * `limit` honoured `max`, so `lore.recall(t, {max:25})` in summary mode
+     * still silently capped at 10 (the historic hardcoded
+     * SUMMARY_MAX_HITS in recallPreset.ts).
+     */
     max?: number;
     /**
      * 3.21 step 4 (r9 recall-quality fix) — up to 5 EXTRA phrasings of
@@ -183,12 +211,12 @@ async function inProcessRecallCore(
         crossProject = false,
         includeSuperseded = false,
         tags,
+        types,
         maxTokens,
         includeArchived = false,
         searchMode = 'hybrid',
         queryLanguage,
         filePaths,
-        max = 10,
         queries,
         entities,
         topics,
@@ -198,13 +226,20 @@ async function inProcessRecallCore(
         abstainTermCoverage,
     } = opts;
 
+    // fix/3.22.1-recall-parity review fix (1) — clamp `max` to [1, 100],
+    // the same bound the `recall` MCP tool/REST enforce via schema.
+    // Applied AFTER the default (10) so an unset `max` is unaffected
+    // (default output must stay byte-identical); a non-finite value also
+    // falls back to the default rather than propagating NaN downstream.
+    const max = Number.isFinite(opts.max) ? Math.min(100, Math.max(1, opts.max as number)) : 10;
+
     // Cross-workspace path — delegate to the shared aggregation and unwrap.
     if (workspace === '*') {
         if (!deps.graphRegistry) {
             throw new Error('inProcessRecall: workspace="*" requires a graphRegistry — ensure deploymentMode is "local" or "embedded"');
         }
         const mcpResult = await runCrossWorkspaceRecall({
-            topic, depth, includeSuperseded, includeArchived, tags,
+            topic, depth, includeSuperseded, includeArchived, tags, types,
             registry: deps.graphRegistry,
             verbatimStore: deps.store.loreVerbatim as Parameters<typeof runCrossWorkspaceRecall>[0]['verbatimStore'],
             sessionCache: deps.store.sessionCache,
@@ -222,7 +257,7 @@ async function inProcessRecallCore(
     try {
         outcome = await retrieve(ctx, topic, {
             workspace, ecosystem, mode: searchMode, depth, limit: max,
-            tags, includeArchived, includeSuperseded, maxTokens, crossProject,
+            tags, types, includeArchived, includeSuperseded, maxTokens, crossProject,
             queries, entities, topics, project,
             abstain, relevanceFloor, abstainTermCoverage,
             // fix/search-worker-call-cancellation (3.20.2 follow-up): this was
@@ -250,7 +285,17 @@ async function inProcessRecallCore(
     const ecosystemScope = crossProject ? '*' : (ecosystem ?? '*');
 
     return buildRecallResult(
-        { topic, responseMode: mode, searchMode, workspaceScope: workspace, ecosystemScope, crossProject, queryLanguage, filePaths, maxTokens },
+        {
+            topic, responseMode: mode, searchMode, workspaceScope: workspace, ecosystemScope, crossProject, queryLanguage, filePaths, maxTokens,
+            // fix/3.22.1-recall-parity review fix (1) — this was the actual
+            // gap: `max` was already sized into retrieve()'s own seed
+            // `limit` above, but never threaded into buildRecallResult's
+            // `maxHits`, so summary-mode display stayed hard-capped at the
+            // historic SUMMARY_MAX_HITS (10) regardless of a larger `max`.
+            // Mirrors the `recall` MCP tool (recallTool.ts) and REST
+            // GET /api/recall (search.ts), which both already pass this.
+            maxHits: max,
+        },
         outcome,
         graph as unknown as Parameters<typeof buildRecallResult>[2],
     );

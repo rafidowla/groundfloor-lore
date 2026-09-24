@@ -64,6 +64,35 @@ export function parseCsvParam(params: URLSearchParams, name: string): string[] |
 }
 
 /**
+ * fix/3.22.1-recall-parity review fix (3) — bounds-check the `types` filter
+ * parsed via `parseCsvParam(params, 'types')` for /api/recall + /api/search,
+ * matching the `recall`/`search` MCP tools' own zod schema for the same
+ * param (`z.array(z.string().max(100)).max(20)`): more than 20 items, or
+ * any single item longer than 100 chars, is rejected rather than silently
+ * truncated or accepted — an unbounded `?types=` list would otherwise widen
+ * the IN(...) pushdown / graph.search() type-set arbitrarily. Returns an
+ * error message the caller maps to HTTP 400 (same `{error}` shape as
+ * parseSearchMode's return convention); undefined = valid (including the
+ * absent/undefined case, which callers should check before invoking this).
+ *
+ * NOTE (documented, not a bug): like `tags`/`entities`/`topics`, `types` is
+ * comma-split from a SINGLE `?types=` occurrence. A caller who repeats the
+ * param (`?types=a&types=b`) has the later occurrence(s) silently ignored —
+ * `URLSearchParams.get()` only returns the first — same behavior tags has
+ * always had. Not changed here.
+ */
+export function validateTypesParam(types: string[]): { error: string } | undefined {
+    if (types.length > 20) {
+        return { error: `types: at most 20 values allowed, got ${types.length}` };
+    }
+    const tooLong = types.find((t) => t.length > 100);
+    if (tooLong !== undefined) {
+        return { error: `types: each value must be at most 100 characters (got ${tooLong.length})` };
+    }
+    return undefined;
+}
+
+/**
  * denyCrossWorkspaceRead — SP-04 shared read-scope gate for the
  * workspace-scoped read routes (/api/search, /api/nodes, /api/query).
  *

@@ -73,6 +73,18 @@ interface CacheEntry {
 const UNAVAILABLE_RETRY_MS = 60_000;
 
 /**
+ * 3.22.1 security fix — the cache key includes the caller-supplied D2 `types`
+ * set, reachable from REST `?types=` and the MCP `types` arg, so a caller can
+ * mint distinct keys without limit. Cap entries per store identity (LRU) and
+ * cap concurrent background fits process-wide; a non-blocking call that finds
+ * the fit pool full returns 'pending' without launching or caching anything,
+ * so a later call retries. 64 keys covers realistic type-set variety per
+ * workspace; 4 fits bounds the 128-probe search load a flood can generate.
+ */
+export const MAX_CALIBRATION_KEYS_PER_STORE = 64;
+export const MAX_BACKGROUND_FITS = 4;
+
+/**
  * Review fix (fingerprint gap): the cache is scoped to the UNDERLYING store
  * object (`VerbatimSeedStore.calibrationIdentity`) via a WeakMap, so a
  * reopened store — which is what an embedder switch / re-embed / second
@@ -89,6 +101,26 @@ function cacheFor(seedStore: VerbatimSeedStore): Map<string, CacheEntry> {
     let m = cacheByStore.get(id);
     if (!m) { m = new Map(); cacheByStore.set(id, m); }
     return m;
+}
+
+/** LRU read: a hit moves the key to the most-recently-used end. */
+function cacheGet(cache: Map<string, CacheEntry>, key: string): CacheEntry | undefined {
+    const entry = cache.get(key);
+    if (entry) { cache.delete(key); cache.set(key, entry); }
+    return entry;
+}
+
+/** LRU write, then evict least-recently-used entries above the cap. In-flight
+ *  entries are skipped (their fit will re-insert on landing anyway). */
+function cacheSet(cache: Map<string, CacheEntry>, key: string, entry: CacheEntry): void {
+    cache.delete(key);
+    cache.set(key, entry);
+    if (cache.size <= MAX_CALIBRATION_KEYS_PER_STORE) return;
+    for (const [k, e] of cache) {
+        if (cache.size <= MAX_CALIBRATION_KEYS_PER_STORE) break;
+        if (k === key || e.inflight) continue;
+        cache.delete(k);
+    }
 }
 
 function cacheKey(workspace: string, typesKey: string): string {
@@ -198,7 +230,7 @@ export async function getCalibration(
 
     const cache = cacheFor(seedStore);
     const key = cacheKey(workspace, typesKey);
-    const entry = cache.get(key);
+    const entry = cacheGet(cache, key);
     if (entry) {
         if (entry.inflight) {
             if (blocking) return entry.inflight;
@@ -229,19 +261,21 @@ export async function getCalibration(
         try { rows = await seedStore.count(); } catch { /* fall through to background fit; count() itself will fail there too */ }
         if (rows < MIN_ROWS_FOR_CALIBRATION) {
             const result: CalibrationResult = { status: 'insufficient_rows', version: PROBE_SET_VERSION, probes: CALIBRATION_PROBES.length, rows, nullMedian: null, nullScale: null };
-            cache.set(key, { result, fitRows: rows, storedAt: Date.now() });
+            cacheSet(cache, key, { result, fitRows: rows, storedAt: Date.now() });
             return result;
         }
+        // Fit pool full: don't launch or cache anything — a later call retries.
+        if (backgroundFits.size >= MAX_BACKGROUND_FITS) return pendingResult(rows);
         const inflight = launchFit(seedStore, typesKey, cache, key, rows);
-        cache.set(key, { result: entry?.result ?? pendingResult(rows), fitRows: rows, inflight });
+        cacheSet(cache, key, { result: entry?.result ?? pendingResult(rows), fitRows: rows, inflight });
         return pendingResult(rows);
     }
 
     const inflight = computeCalibration(seedStore, typesKey);
-    cache.set(key, { result: entry?.result ?? { status: 'unavailable', version: PROBE_SET_VERSION, probes: 0, rows: 0, nullMedian: null, nullScale: null }, fitRows: entry?.fitRows ?? 0, inflight });
+    cacheSet(cache, key, { result: entry?.result ?? { status: 'unavailable', version: PROBE_SET_VERSION, probes: 0, rows: 0, nullMedian: null, nullScale: null }, fitRows: entry?.fitRows ?? 0, inflight });
     try {
         const result = await inflight;
-        cache.set(key, { result, fitRows: result.rows, storedAt: Date.now() });
+        cacheSet(cache, key, { result, fitRows: result.rows, storedAt: Date.now() });
         return result;
     } catch {
         // Never let a calibration failure fail the caller's real query —
@@ -255,6 +289,16 @@ export async function getCalibration(
 /** Test-only: clear the in-memory cache between unit tests. */
 export function _resetCalibrationCacheForTests(): void {
     fallbackCache = new Map();
+}
+
+/** Test-only: number of cached fits held for this seed store's identity. */
+export function _calibrationCacheSizeForTests(seedStore: VerbatimSeedStore): number {
+    return cacheFor(seedStore).size;
+}
+
+/** Test-only: number of background fits currently in flight. */
+export function _backgroundFitCountForTests(): number {
+    return backgroundFits.size;
 }
 
 function pendingResult(fitRows: number): CalibrationResult {
@@ -288,7 +332,7 @@ function launchFit(
     const p = (async (): Promise<CalibrationResult> => {
         try {
             const result = await computeCalibration(seedStore, typesKey);
-            cache.set(key, { result, fitRows: result.rows, storedAt: Date.now() });
+            cacheSet(cache, key, { result, fitRows: result.rows, storedAt: Date.now() });
             return result;
         } catch {
             cache.delete(key);

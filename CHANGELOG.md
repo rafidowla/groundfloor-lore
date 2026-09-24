@@ -4,6 +4,113 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.22.2] — 2026-09-24
+
+Patch release: host-install dependency hygiene. 3.22.1 was merged (PR #142)
+but not tagged on its own; hosts should take 3.22.2, which contains all
+of 3.22.1.
+
+### Security
+- **`csv-parse` `^5.6.0` → `^7.0.2`** (GHSA-8cw4-87c7-c6xx, "prototype
+  replacement still reachable via columns path"). `parseCsv` in
+  `mcp/http/routes/import.ts` uses exactly `columns: true` on user-uploaded
+  CSV (REST `/api/import`). Behaviour change: a `__proto__` header column
+  was silently dropped under 5.x. It is now kept as an own string field and
+  lands in the Collections table as the sanitized column `proto`. No
+  prototype is replaced either way. Pinned by
+  `test/r3222-csv-proto-header-unit.ts` (failed on 5.6.0, passes on 7.0.2).
+- Tightened Lore's own `overrides`: `uuid` `>=9.0.1` → `>=11.1.1`
+  (GHSA-w5hq-g745-h8pq), and `sharp` `^0.35.3` → `^0.35.4` (both the
+  override and the dependency floor). Lockfile unchanged apart from
+  `csv-parse`.
+
+### Docs
+- **Host dependency setup** — `docs/MIGRATION-3.22.md` §6 and
+  `docs/SECURITY_MODEL.md` §12. npm applies `overrides` only from the root
+  manifest, so hosts must pin `sharp` (via `@lancedb/lancedb`'s optional
+  `@huggingface/transformers@3.0.2`) and `uuid` (via `exceljs`) themselves.
+  Neither is reachable from Lore. Upgrading lancedb to 0.39.0 does not
+  remove the old `sharp`.
+
+## [3.22.1] — 2026-09-24 (not tagged separately — ships in 3.22.2)
+
+Patch release: two recall entry-point drifts found by Atlas while making
+`knowledge_recall` default to curated types (Atlas PR #32). No ranking change
+when no filter is set — `scripts/diagnostics/recall-eval/` (sqlite, real
+embedder, 10k code rows, depth 0) returns identical ranked top-10 id lists for all
+48 terse/chatty questions before and after.
+
+### Fixed
+- **In-process `lore.recall()` honours `types`.** `inProcessRecallCore`
+  destructured `RecallOpts` without `types`, so the D2 type prefilter never
+  reached `retrieve()` and hosts got unfiltered results with no error.
+  `types` is now on `RecallOpts` and forwarded on the single-workspace path.
+  Cross-workspace (`workspace: "*"`) now also honours `types` on every entry
+  point: pushed into each workspace's semantic seed and graph search (so
+  on-type nodes are no longer crowded out of the fixed per-workspace seed
+  window), with an ANY-of post-merge filter kept as a backstop.
+  `lore.recall()` `max` is now clamped to 1–100 and also sets the
+  summary-mode hit count (was: summary always 10).
+- **REST `/api/recall` and `/api/search` parse `?types=`** and forward it
+  (named-workspace and, for `/api/recall`, cross-workspace), bounded like the
+  MCP schema: more than 20 values or any value over 100 chars → HTTP 400
+  `invalid_types`. Repeated `?types=a&types=b` keeps only the first, same as
+  `tags`. **Behaviour change:** the REST cross-workspace `/api/recall`
+  (`workspace=*`) branch forwarded no `tags` and now applies them.
+- **MCP `recall` tool accepts `max`** (integer 1–100, default 10), threaded
+  into `retrieve()`'s `limit`. Previously `SEED_LIMIT = 10` was hardcoded, so
+  no MCP caller could get more than 10 results. The cap of 100 matches the
+  REST route's existing `RECALL_MAX_CAP`. Omitting `max` is unchanged.
+- **Summary mode no longer re-caps at 10.** `buildRecallResult` sliced
+  summary hits to a fixed `SUMMARY_MAX_HITS = 10` regardless of the retrieve
+  limit, so REST `?max=25` also returned 10. It now takes `maxHits` (MCP
+  `max`, REST `max`); defaults are unchanged (MCP 10, REST 8). `max_tokens`
+  still truncates top-ranked-first after the limit; `compact` and `full`
+  follow `max`. The cross-workspace `"*"` path keeps its own fixed caps and
+  ignores `max` (stated in the tool schema).
+
+### Added
+- `DataplaneVectorStore.search()`/`bm25Search()` filter parameter widened to
+  `VerbatimQueryFilter` to match the `VectorProvider` interface (type-only;
+  array-valued `type` against a live Dataplane connector is not verified).
+- Entry-point option-parity test (`test/r3221-d1-recall-option-parity-unit.ts`)
+  via a test-only `retrieveOptionsSpy` seam in `retrieve.ts`: fails if the
+  in-process path and the MCP tool ever forward different `retrieve()` option
+  keys or values, or pass `buildRecallResult` a different `maxHits`
+  (test-only setter seams `setRetrieveOptionsSpy` /
+  `setBuildRecallResultParamsSpy`). Intentional exceptions (in-process only: `signal`, `candidateFloor`,
+  `lexicalBase`, `abstainTermCoverage` — env knobs cover MCP/REST) are listed
+  in the test.
+
+### Security
+- D1 calibration cache bounded. The cache key includes the caller-supplied
+  `types` set (REST `?types=` from this release, MCP `types` since 3.22.0), so
+  an authenticated caller could mint unbounded keys: each added a never-evicted
+  entry and, on the non-blocking path, launched an unthrottled 128-probe
+  background fit. Now LRU-capped at `MAX_CALIBRATION_KEYS_PER_STORE` (64) per
+  store identity, and concurrent background fits are capped at
+  `MAX_BACKGROUND_FITS` (4) process-wide — a call that finds the pool full
+  returns `pending` without launching or caching, so a later call retries. The
+  types key is also de-duplicated (`fact,fact` == `fact`). Test:
+  `test/r3221-calibration-cache-bound-unit.ts`.
+- Dependencies: `nodemailer` 9.0.1 → 9.1.1 (GHSA-2x7j-588g-ccc2, quadratic
+  address parsing reachable via `.eml` extraction, plus three moderates;
+  override tightened from `>=9.0.1` to `^9.1.1` to match `mailparser`'s pin
+  instead of floating to 10.x) and `sharp` 0.35.3 → 0.35.4
+  (GHSA-rgj7-g3m4-5g8c, libheif). `scripts/audit-dependencies.mjs` passes
+  again; no other lockfile changes.
+
+### Docs
+- `docs/MIGRATION-3.22.md` §2 overclaimed D2 filters on in-process
+  `recall`/`search`. Corrected: in-process `lore.recall()` honours them from
+  3.22.1; embedded `lore.search()` takes no D2 filters (use
+  `lore.recall(topic, { types, depth: 0 })`).
+
+### Hosts — Atlas can now drop
+- The MCP loopback in `EmbeddedLore.recallWithTypes()` — call
+  `lore.recall(topic, { types, max })` in-process directly.
+- Its 10-result cap and `_meta.maxCapped` flag — pass `max` (≤100) instead.
+
 ## [3.22.0] — 2026-09-23
 
 Upgrading from 3.21.x: read [`docs/MIGRATION-3.22.md`](docs/MIGRATION-3.22.md) — D4 changes the

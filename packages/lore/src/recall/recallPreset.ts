@@ -190,6 +190,13 @@ export interface RecallPresentationParams {
     filePaths?: string[];
     /** Whether a token budget was requested (controls the tokenMeta fields). */
     maxTokens?: number;
+    /** D2 (3.22.1): overrides SUMMARY_MAX_HITS for this call's summary-mode
+     *  display cap — the caller's `max` (recall tool) / `max` (REST /api/recall),
+     *  already used to size retrieve()'s own `limit`, so `outcome.results` is
+     *  never larger than this anyway. Undefined/omitted keeps the historic
+     *  default of 10. Full mode is unaffected — it has never capped `knowledge`
+     *  separately from `outcome.results`. */
+    maxHits?: number;
 }
 
 /** D4 fix: `outcome.results` is direct-matches-only now, so `source` is
@@ -272,12 +279,26 @@ export function buildRelatedCandidates(outcome: RetrieveOutcome): RecallRelatedC
     });
 }
 
+// fix/3.22.1-recall-parity review fix (5) — test-only instrumentation seam,
+// same pattern as retrieve.ts's setRetrieveOptionsSpy: unset (null) in every
+// real code path, setter-only (no exported mutable binding). A parity test
+// sets this to capture the exact `params` object each single-workspace
+// recall surface (in-process lore.recall(), the `recall` MCP tool, REST
+// GET /api/recall) passes into buildRecallResult — in particular `maxHits`
+// — so a future drift (one surface passing it, another silently not) is
+// caught by VALUE comparison, not just by the two call sites existing.
+let buildRecallResultParamsSpy: ((params: RecallPresentationParams) => void) | null = null;
+export function setBuildRecallResultParamsSpy(spy: ((params: RecallPresentationParams) => void) | null): void {
+    buildRecallResultParamsSpy = spy;
+}
+
 export async function buildRecallResult(
     params: RecallPresentationParams,
     outcome: RetrieveOutcome,
     graph: RecallGraph,
 ): Promise<RecallResult> {
-    const { topic, responseMode, searchMode, workspaceScope, ecosystemScope, crossProject, queryLanguage, filePaths, maxTokens } = params;
+    buildRecallResultParamsSpy?.(params);
+    const { topic, responseMode, searchMode, workspaceScope, ecosystemScope, crossProject, queryLanguage, filePaths, maxTokens, maxHits } = params;
     const { topScore, sourcesConsulted, totalMatched, truncated, droppedCount, directMatches } = outcome.meta;
     // 3.21 step 3(h) — a correlation token for this recall call, so a later
     // `recall_outcome` / POST /api/recall/outcome can be tied back to the
@@ -404,7 +425,7 @@ export async function buildRecallResult(
     }
 
     // Summary.
-    const trimmed = recalled.slice(0, SUMMARY_MAX_HITS);
+    const trimmed = recalled.slice(0, maxHits ?? SUMMARY_MAX_HITS);
     const projectsSeen = new Set<string>();
     for (const { node } of recalled) { const p = (node as { project?: string }).project; if (p) projectsSeen.add(p); }
 

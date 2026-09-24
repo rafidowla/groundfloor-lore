@@ -129,6 +129,22 @@ interface RetrievalGraph {
 type HiddenFlags = LoreNode & { supersededAt?: unknown; status?: string };
 
 /**
+ * fix/3.22.1-d1-recall-option-parity — test-only instrumentation seam. Unset
+ * (null) in every real code path; a parity test sets it to capture the exact
+ * `opts` object (and therefore its key set, including explicitly-`undefined`
+ * values) each caller passes into `retrieve()`, without needing a mocking
+ * framework or module-loader hooks. Never read or written outside tests.
+ */
+// fix/3.22.1-recall-parity review fix (5): setter-only — the mutable
+// variable itself is no longer exported, so a caller can only ever go
+// through setRetrieveOptionsSpy() (no direct read/write of the closed-over
+// state from outside this module).
+let retrieveOptionsSpy: ((opts: RetrieveOptions) => void) | null = null;
+export function setRetrieveOptionsSpy(spy: ((opts: RetrieveOptions) => void) | null): void {
+    retrieveOptionsSpy = spy;
+}
+
+/**
  * retrieve — the single shared retrieval entry point.
  */
 export async function retrieve(
@@ -136,6 +152,7 @@ export async function retrieve(
     query: string,
     opts: RetrieveOptions,
 ): Promise<RetrieveOutcome> {
+    retrieveOptionsSpy?.(opts);
     return withRecallStageTiming(() => retrieveInner(ctx, query, opts));
 }
 
@@ -541,7 +558,7 @@ async function retrieveInner(
     // D2 x D1: seedStore carries the D2 `types` prefilter (resolveSeedStore), so
     // calibration probes run type-scoped — key the fit on that filter so a
     // type-filtered null distribution never serves an unfiltered query.
-    const typesKey = typesFilter && typesFilter.length > 0 ? [...typesFilter].sort().join(',') : '*';
+    const typesKey = typesFilter && typesFilter.length > 0 ? [...new Set(typesFilter)].sort().join(',') : '*';
     // Review fix: never probe when the vector leg is not in play — mode:'keyword'
     // must NEVER call the embedding provider (3.21 step 3(a) contract), and an
     // embeddings-disabled / empty store has nothing to calibrate. null ⇒ not_applicable.

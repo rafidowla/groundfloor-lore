@@ -25,7 +25,7 @@ import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, writeError, extractWorkspace } from '../helpers.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
-import { parseSearchMode, parseTags, parseQueries, parseCsvParam, parseAbstainParam, denyCrossWorkspaceRead } from './searchRouteParams.js';
+import { parseSearchMode, parseTags, parseQueries, parseCsvParam, parseAbstainParam, denyCrossWorkspaceRead, validateTypesParam } from './searchRouteParams.js';
 import { retrieve, type RetrieveContext } from '../../../recall/retrieve.js';
 import { hydrateApiQueryHits } from './apiQueryHydration.js';
 import { projectResults, projectKeywordNodes } from '../../../recall/retrievalProjection.js';
@@ -140,6 +140,21 @@ export async function trySearchRoutes(
             const recallEntities = parseCsvParam(recallParams, 'entities');
             const recallTopics = parseCsvParam(recallParams, 'topics');
             const recallProject = recallParams.get('project') ?? undefined;
+            // fix/3.22.1-d1-recall-option-parity — D2 type/kind prefilter,
+            // parity with the MCP recall tool's `types` param (comma-
+            // separated, same convention as `tags`/`entities`/`topics`
+            // above). Absent → undefined (no filter, prior behaviour).
+            const recallTypes = parseCsvParam(recallParams, 'types');
+            // fix/3.22.1-recall-parity review fix (3) — bound `?types=`,
+            // matching the MCP recall tool's zod schema (max 20 items, each
+            // <=100 chars).
+            if (recallTypes) {
+                const typesErr = validateTypesParam(recallTypes);
+                if (typesErr) {
+                    writeError(res, 400, 'invalid_types', typesErr.error, { reason: typesErr.error });
+                    return true;
+                }
+            }
             // D1 — ?abstain=true / ?relevance_floor=<n>, parity with the MCP
             // recall tool's abstain/relevance_floor params. Absent → abstain
             // off (calibration/relevance _meta fields always on regardless).
@@ -231,6 +246,7 @@ export async function trySearchRoutes(
                     // too, so the "*" branch can't silently ignore a scope the
                     // named-workspace branch enforces.
                     ecosystem: recallEcosystem,
+                    tags: recallTags, types: recallTypes, // fix/3.22.1-d1-recall-option-parity — tags was already parsed above but never threaded into this branch; types is the new parity fix
                     registry: deps.graphRegistry, verbatimStore: deps.store.loreVerbatim,
                     sessionCache: deps.store.sessionCache, responseMode: 'summary',
                     allowedWorkspaces,
@@ -253,7 +269,7 @@ export async function trySearchRoutes(
             try {
                 recallOutcome = await retrieve(recallCtx, topic, {
                     workspace: requestedWorkspace, ecosystem: recallEcosystem,
-                    mode: recallMode, depth: 1, limit: max, tags: recallTags, includeSuperseded, includeArchived: false, crossProject,
+                    mode: recallMode, depth: 1, limit: max, tags: recallTags, types: recallTypes, includeSuperseded, includeArchived: false, crossProject,
                     queries: recallQueries, entities: recallEntities, topics: recallTopics, project: recallProject, // 3.21 step 3(f)
                     abstain: recallAbstain, relevanceFloor: recallRelevanceFloor, // D1
                 });
@@ -297,6 +313,13 @@ export async function trySearchRoutes(
                 {
                     topic, responseMode: 'summary', searchMode: recallMode, workspaceScope: requestedWorkspace,
                     ecosystemScope: recallEcosystem, crossProject,
+                    // D2 (3.22.1): same fix as the MCP recall tool — REST's own
+                    // `max` (parsed above, default RECALL_MAX_DEFAULT=8, capped
+                    // at RECALL_MAX_CAP=100) already sizes retrieve()'s `limit`,
+                    // but buildRecallResult was separately hard-capping summary
+                    // display at 10 regardless, so `?max=25` silently lost to
+                    // that inner cap. Threading it through here fixes REST too.
+                    maxHits: max,
                 },
                 recallOutcome,
                 recallGraph as unknown as Parameters<typeof buildRecallResult>[2],
@@ -406,6 +429,20 @@ export async function trySearchRoutes(
             }
             const searchMode = searchModeParsed;
             const searchTags = parseTags(searchParams);
+            // fix/3.22.1-d1-recall-option-parity — the MCP `search` tool has
+            // had a `types` D2 prefilter since D2; REST /api/search never
+            // parsed it. Same comma-separated convention as `tags` above.
+            const searchTypes = parseCsvParam(searchParams, 'types');
+            // fix/3.22.1-recall-parity review fix (3) — bound `?types=`,
+            // matching the MCP search tool's zod schema (max 20 items,
+            // each <=100 chars).
+            if (searchTypes) {
+                const typesErr = validateTypesParam(searchTypes);
+                if (typesErr) {
+                    writeError(res, 400, 'invalid_types', typesErr.error, { reason: typesErr.error });
+                    return true;
+                }
+            }
             // `?ecosystem=` wins over the boot-detected default — see the
             // POST /api/query note below for why the detected value is only a
             // default (process-global, derived once from process.cwd()).
@@ -458,7 +495,7 @@ export async function trySearchRoutes(
                 // isolation, because the default source (detectedScope) is a
                 // boot-global value. `?ecosystem=` is how a caller supplies a
                 // real per-request scope.
-                outcome = await retrieve(ctx, query, { workspace, ecosystem: searchEcosystem, mode: searchMode, depth: 0, limit: 50, tags: searchTags, abstain: searchAbstain, relevanceFloor: searchRelevanceFloor });
+                outcome = await retrieve(ctx, query, { workspace, ecosystem: searchEcosystem, mode: searchMode, depth: 0, limit: 50, tags: searchTags, types: searchTypes, abstain: searchAbstain, relevanceFloor: searchRelevanceFloor });
             } catch (wsErr) {
                 if ((wsErr as { code?: string }).code === 'workspace_not_found') {
                     const e = wsErr as { requested?: string; known?: string[] };

@@ -68,6 +68,24 @@ export interface CrossWorkspaceRecallArgs {
     includeSuperseded: boolean;
     includeArchived?: boolean;
     tags?: string[];
+    /**
+     * fix/3.22.1-d1-recall-option-parity — D2 node TYPE/KIND prefilter,
+     * ANY-of, mirrors RetrieveOptions.types.
+     *
+     * fix/3.22.1-recall-parity review fix (2): as of this fix, `types` IS
+     * pushed into each workspace's own seed queries too, same as the
+     * single-workspace retrieve() core — the semantic seed pass (via
+     * VerbatimQueryFilter.type on verbatimStore.search()/per-workspace
+     * store.search()) AND the keyword pass (via GraphProvider.search()'s
+     * `types` positional arg). Each workspace still runs its own
+     * semantic + keyword pass independently, so this is N separate
+     * pushdowns, not one shared seed query. The post-merge filter below
+     * (applied to the fused candidate set) is KEPT as a backstop — it is
+     * what makes this correct even if a future seed path forgets the
+     * pushdown, and it is also what narrows nodes hydrated via the legacy
+     * boot-seed ids path. Omitted/empty = no filter (prior behavior).
+     */
+    types?: string[];
     registry: LocalGraphRegistry;
     verbatimStore: LoreVerbatim;
     sessionCache: ISessionCache;
@@ -115,7 +133,7 @@ export async function runCrossWorkspaceRecall(
     args: CrossWorkspaceRecallArgs,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
     const {
-        topic, includeSuperseded, includeArchived, tags, registry, verbatimStore,
+        topic, includeSuperseded, includeArchived, tags, types, registry, verbatimStore,
         sessionCache, responseMode, maxTokens, allowedWorkspaces, workspaceVerbatimResolver,
     } = args;
     const ecosystemScope = args.ecosystem ?? '*';
@@ -161,7 +179,15 @@ export async function runCrossWorkspaceRecall(
         try {
             verbatimCount = await verbatimStore.count();
             if (verbatimCount > 0) {
-                const sem = await verbatimStore.search(topic, SEED_LIMIT);
+                // fix/3.22.1-recall-parity review fix (2) — push `types` INTO
+                // the boot-store seed query itself (VerbatimQueryFilter.type
+                // accepts string|string[] → IN(...) pushdown), mirroring the
+                // single-workspace retrieve() core (resolveSeedStore). This
+                // widens the SEED WINDOW to already-typed candidates instead
+                // of relying solely on the post-merge filter below, which can
+                // only narrow a fixed-size window that may already be
+                // crowded out by off-type rows.
+                const sem = await verbatimStore.search(topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined);
                 seeds = sem.map((r) => ({
                     id: r.id.startsWith('lore:') ? r.id.slice(5) : r.id,
                     score: r.score ?? 0,
@@ -216,7 +242,10 @@ export async function runCrossWorkspaceRecall(
                 try {
                     const store = await workspaceVerbatimResolver!.getOrOpen(ws);
                     if ((await store.count()) > 0) {
-                        const sem = await store.search(topic, SEED_LIMIT);
+                        // fix/3.22.1-recall-parity review fix (2) — same
+                        // pushdown as the legacy boot-store seed above, per
+                        // workspace.
+                        const sem = await store.search(topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined);
                         wsSeeds = sem.map((r) => ({
                             id: r.id.startsWith('lore:') ? r.id.slice(5) : r.id,
                             score: r.score ?? 0,
@@ -241,7 +270,12 @@ export async function runCrossWorkspaceRecall(
                 hydrateIds.length > 0
                     ? wsGraph.getNodesByIds(hydrateIds).catch(() => new Map<string, LoreNode>())
                     : Promise.resolve(new Map<string, LoreNode>()),
-                wsGraph.search(topic, KEYWORD_LIMIT_PER_WORKSPACE, '*', ecosystemScope, true, kwSignals).catch(() => [] as LoreNode[]),
+                // fix/3.22.1-recall-parity review fix (2) — `types` pushed
+                // into the keyword-leg query too (7th positional arg on
+                // GraphProvider.search — see providers/types.ts), same as
+                // the single-workspace retrieve() core's keyword leg
+                // (retrieve.ts's own `graph.search(..., typesFilter)` call).
+                wsGraph.search(topic, KEYWORD_LIMIT_PER_WORKSPACE, '*', ecosystemScope, true, kwSignals, types).catch(() => [] as LoreNode[]),
             ]);
             // D2-recall-1/2: scope-filter both the hydrated semantic seeds and
             // the keyword hits per workspace, so rows tagged with scopes the
@@ -353,6 +387,19 @@ export async function runCrossWorkspaceRecall(
         const lowerTags = tags.map((t) => t.toLowerCase().trim());
         merged = merged.filter((c) =>
             lowerTags.every((t) => (c.node.tags ?? []).includes(t)));
+    }
+
+    // fix/3.22.1-d1-recall-option-parity — D2 type/kind prefilter, ANY-of
+    // (matches RetrieveOptions.types semantics). fix/3.22.1-recall-parity
+    // review fix (2): now a BACKSTOP, not the only filter — each workspace's
+    // own seed queries above already push `types` into the semantic +
+    // keyword passes (see the `types` field's doc comment on
+    // CrossWorkspaceRecallArgs). Kept here because it is still correct and
+    // cheap, and it also covers nodes hydrated via the legacy boot-seed ids
+    // path (which has no per-workspace query of its own to push into).
+    if (types && types.length > 0) {
+        const typeSet = new Set(types);
+        merged = merged.filter((c) => typeSet.has(c.node.type));
     }
 
     // Feature 3 — token-budget truncation.

@@ -59,6 +59,7 @@ import type {
     EmbeddingProvider,
     VectorProvider,
     VerbatimDocument,
+    VerbatimQueryFilter,
     VerbatimSearchResult,
 } from '../providers/types.js';
 import { LocalEmbeddingProvider } from '../providers/localEmbeddingProvider.js';
@@ -277,7 +278,18 @@ export class DataplaneVectorStore implements VectorProvider {
     async search(
         query: string,
         limit: number = 10,
-        filter?: Partial<VerbatimDocument['metadata']>,
+        // fix/3.22.1-recall-parity review fix (2) — widened from
+        // `Partial<VerbatimDocument['metadata']>` to `VerbatimQueryFilter`
+        // (providers/types.ts) so this matches the `VectorProvider.search`
+        // contract it implements (which already declared `VerbatimQueryFilter`
+        // for D2's `type: string[]` pushdown). Pure type widening: the body
+        // below already treats every filter entry generically via
+        // `Object.entries(filter)`, so an array `type` value round-trips into
+        // `metadataFilter.type` unchanged — whether the underlying Dataplane
+        // connector's `filter` predicate supports an array value the same way
+        // local LanceDB/SQLite IN(...) pushdown does is a connector-level
+        // question, not something this signature change decides either way.
+        filter?: VerbatimQueryFilter,
         // opts.includeHistory is a LocalVerbatimStore extension; Dataplane ignores it.
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         _opts?: { includeHistory?: boolean },
@@ -376,7 +388,10 @@ export class DataplaneVectorStore implements VectorProvider {
     async bm25Search(
         query: string,
         limit: number = 10,
-        _filter?: Partial<VerbatimDocument['metadata']>,
+        // fix/3.22.1-recall-parity review fix (2) — same widening as
+        // search() above, for interface-contract consistency (this param is
+        // unused here already, prefixed `_`).
+        _filter?: VerbatimQueryFilter,
         actorScopes?: ReadonlyArray<string>,
     ): Promise<Bm25Envelope<VerbatimSearchResult>> {
         if (!query || !query.trim()) return makeBm25Envelope([], true);

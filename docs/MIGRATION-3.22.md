@@ -58,7 +58,7 @@ are unchanged. Abstention itself stays off (below).
 |---|---|---|
 | D1 abstention | reported, never abstains | `abstain: true` per call or `LORE_RECALL_ABSTAIN=1`; floor via `relevanceFloor` / `LORE_RECALL_RELEVANCE_FLOOR` (default `2.0`) |
 | D1 term coverage — **EXPERIMENTAL** | off | `LORE_RECALL_ABSTAIN_TERM_COVERAGE=1` (+ abstention on); `LORE_RECALL_TERM_COVERAGE_MIN` (default `0.1`) |
-| D2 filters | n/a — pass the filter | `types`, `entities`, `topics`, `project` on `retrieve()`/`recall`/`search` |
+| D2 filters | n/a — pass the filter | `types`, `entities`, `topics`, `project` on `retrieve()`, in-process `lore.recall()` (`types` only from **3.22.1** — 3.22.0 silently ignored it), the MCP `recall`/`search` tools, and REST `/api/recall`/`/api/search` (`?types=` from 3.22.1). Embedded `lore.search()` takes no D2 filters — use `lore.recall(topic, { types, depth: 0 })`. |
 | D3 prefix-stable ranking + exact-identifier lane | identical to 3.21 | `LORE_RECALL_CANDIDATE_FLOOR=50` (forces `lexicalBase=anchored` and enables the identifier lane) |
 | D5 write-time enforcement | off | per-workspace `WorkspaceSupersessionPolicy.enforce` > `createLore({ supersessionEnforce: true })` > `LORE_SUPERSESSION_ENFORCE=1` |
 
@@ -104,5 +104,34 @@ are unchanged. Abstention itself stays off (below).
   `queries[]` phrasings are not laned.
 - **Cross-workspace recall:** aggregate `top_score`/confidence still use the
   raw seed score, which can be the superseded node's.
+- **MCP `recall` result cap:** 3.22.0 always returned at most 10; 3.22.1 adds
+  `max` (1–100, default 10). The `workspace: "*"` path still ignores `max`.
 - **D6:** the `allowSkipEmbedStore` exception covers `bulkIngest()`'s
   same-batch sibling visibility only; review it before reusing elsewhere.
+
+## 6. Host dependency setup (3.22.2)
+
+npm applies `overrides` only from the **root** `package.json`, so Lore's own
+overrides do not reach a host that installs the tarball. A fresh host install
+of 3.22.2 still resolves two transitive packages that `npm audit` flags, and
+Lore cannot pin them from inside its own manifest:
+
+| Package | Pulled in by | Advisory | Reachable from Lore? |
+|---|---|---|---|
+| `sharp` 0.33.x | `@lancedb/lancedb` optional dep `@huggingface/transformers@3.0.2` (still present in lancedb 0.39.0) | GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c (high) | No — Lore embeds via its own `@huggingface/transformers@^4`, never lancedb's embedding helpers |
+| `uuid` 8.x | `exceljs@4.4.0` (latest; declares `uuid ^8.3.0`) | GHSA-w5hq-g745-h8pq (moderate) | No — the bug needs a caller-supplied `buf` to v3/v5/v6; exceljs calls `v4()` |
+
+Add both to the host's root `package.json`, then `npm install`:
+
+```json
+"overrides": {
+  "sharp": "^0.35.4",
+  "uuid": ">=11.1.1"
+}
+```
+
+These match the versions Lore's own test suite runs against. With them, a
+clean install's `npm audit --omit=dev` is left with only the `pdfjs-dist`
+finding documented in `docs/SECURITY_MODEL.md` §12. That finding is not
+reachable, and its fix, the `pdfjs-dist` 5→6 upgrade, ships in the next
+release.
