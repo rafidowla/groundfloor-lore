@@ -1,0 +1,218 @@
+[
+  {
+    "id": "q-fx-decision-lease-ttl",
+    "terse": "worker lease timeout value",
+    "chatty": "Why did we land on 45 seconds for how long a worker can hold a job lease before it expires?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-decision-lease-ttl"
+    ]
+  },
+  {
+    "id": "q-fx-decision-dlq-retention",
+    "terse": "dead letter queue retention period",
+    "chatty": "How long do we keep messages sitting in the dead-letter queue before they get purged automatically?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-decision-dlq-retention"
+    ]
+  },
+  {
+    "id": "q-fx-decision-tenant-router-hash",
+    "terse": "tenant router sharding strategy",
+    "chatty": "What approach does the tenant router use to decide which shard a given tenant lands on?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-decision-tenant-router-hash"
+    ]
+  },
+  {
+    "id": "q-fx-decision-config-loader-format",
+    "terse": "config file format choice",
+    "chatty": "Why did the config loader switch away from YAML to TOML for its file format?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-decision-config-loader-format"
+    ]
+  },
+  {
+    "id": "q-fx-convention-retry-jitter",
+    "terse": "retry policy jitter rule",
+    "chatty": "What is our house rule about how retry delays have to be randomized across workers?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-convention-retry-jitter"
+    ]
+  },
+  {
+    "id": "q-fx-convention-metrics-naming",
+    "terse": "metric naming convention",
+    "chatty": "Is there a required naming pattern for the metrics that components emit?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-convention-metrics-naming"
+    ]
+  },
+  {
+    "id": "q-fx-convention-webhook-signing",
+    "terse": "webhook signature requirement",
+    "chatty": "What are we required to do when signing outbound webhook payloads before they go out?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-convention-webhook-signing"
+    ]
+  },
+  {
+    "id": "q-fx-architecture-checkpoint-store",
+    "terse": "checkpoint store design",
+    "chatty": "How is the checkpoint store for tracking long job progress structured relative to the main job table?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-architecture-checkpoint-store"
+    ]
+  },
+  {
+    "id": "q-fx-architecture-connector-bus",
+    "terse": "connector bus outbox design",
+    "chatty": "How does the connector bus keep a slow downstream system from blocking the workers that feed it?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-architecture-connector-bus"
+    ]
+  },
+  {
+    "id": "q-fx-architecture-scheduler-tiers",
+    "terse": "scheduler priority tiers",
+    "chatty": "How many priority tiers does the scheduler have, and what stops the lowest one from starving?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-architecture-scheduler-tiers"
+    ]
+  },
+  {
+    "id": "q-fx-architecture-rate-limiter-token-bucket",
+    "terse": "rate limiter token bucket design",
+    "chatty": "What algorithm does the rate limiter use to enforce a global request ceiling across shards?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-architecture-rate-limiter-token-bucket"
+    ]
+  },
+  {
+    "id": "q-fx-bug-checkpoint-torn-write",
+    "terse": "torn checkpoint write bug",
+    "chatty": "What went wrong with checkpoints getting corrupted when a worker process was killed mid-write?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-bug-checkpoint-torn-write"
+    ]
+  },
+  {
+    "id": "q-fx-bug-lease-double-execution",
+    "terse": "duplicate job execution bug",
+    "chatty": "How did a job end up getting executed twice because of a lease renewal race condition?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-bug-lease-double-execution"
+    ]
+  },
+  {
+    "id": "q-fx-bug-rate-limiter-thundering-herd",
+    "terse": "rate limiter thundering herd bug",
+    "chatty": "What caused a burst of simultaneous retries every time the rate limiter refilled its tokens?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-bug-rate-limiter-thundering-herd"
+    ]
+  },
+  {
+    "id": "q-fx-bug-config-loader-hot-reload-leak",
+    "terse": "config reload watcher leak",
+    "chatty": "Why did the process eventually run out of file watchers after config got hot-reloaded many times?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-bug-config-loader-hot-reload-leak"
+    ]
+  },
+  {
+    "id": "q-fx-convention-idempotency-key",
+    "terse": "job submission idempotency key rule",
+    "chatty": "What do callers have to provide when submitting a job so duplicate submissions do not create duplicate jobs?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-convention-idempotency-key"
+    ]
+  },
+  {
+    "id": "q-fx-decision-webhook-relay-language",
+    "terse": "why webhook relay is in rust",
+    "chatty": "What was the reasoning behind rewriting the webhook relay service into Rust?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-decision-webhook-relay-language"
+    ]
+  },
+  {
+    "id": "q-fx-architecture-metrics-exporter-batching",
+    "terse": "metrics exporter flush policy",
+    "chatty": "Under what conditions does the metrics exporter actually flush its buffered points?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-architecture-metrics-exporter-batching"
+    ]
+  },
+  {
+    "id": "q-fx-bug-tenant-router-hot-shard",
+    "terse": "tenant router hot shard bug",
+    "chatty": "Why did one shard in the tenant router end up overloaded while the others were mostly idle?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-bug-tenant-router-hot-shard"
+    ]
+  },
+  {
+    "id": "q-fx-convention-schema-migration-additive",
+    "terse": "schema migration safety rule",
+    "chatty": "What is the rule about what kinds of schema changes are allowed to ship in a single release?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-convention-schema-migration-additive"
+    ]
+  },
+  {
+    "id": "q-fx-architecture-worker-pool-autoscale",
+    "terse": "worker pool autoscaling trigger",
+    "chatty": "What signal drives the decision to add more workers to the pool — queue size or something else?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-architecture-worker-pool-autoscale"
+    ]
+  },
+  {
+    "id": "q-fx-bug-dlq-purge-race",
+    "terse": "dlq purge replay race bug",
+    "chatty": "What went wrong when a manual DLQ replay happened at the same time as the automatic purge job?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-bug-dlq-purge-race"
+    ]
+  },
+  {
+    "id": "q-fx-decision-observability-vendor",
+    "terse": "why self-hosted metrics stack",
+    "chatty": "Why did we choose to self-host the metrics/observability stack instead of using a SaaS vendor?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-decision-observability-vendor"
+    ]
+  },
+  {
+    "id": "q-fx-convention-postmortem-blameless",
+    "terse": "postmortem process rule",
+    "chatty": "What is our policy on writing up and sharing postmortems after an incident?",
+    "workspace": "default",
+    "expectedIds": [
+      "fx-convention-postmortem-blameless"
+    ]
+  }
+]

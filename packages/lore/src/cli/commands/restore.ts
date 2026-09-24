@@ -43,6 +43,7 @@
 
 import * as fs from 'node:fs';
 import { resolveWorkspaceGraphEngine } from '../../engines/graphEngineSelector.js';
+import { resolveWorkspaceVectorEngine } from '../../engines/vectorEngineSelector.js';
 import * as path from 'node:path';
 
 import { restoreWorkspace, peekArchiveManifest } from '../../engines/restore.js';
@@ -227,6 +228,7 @@ async function restoreOneWorkspace(tarballPath: string, wsName: string, flags: F
         // From the registry, so a cross-engine restore is refused rather than
         // leaving workspaces.json and .lore/ disagreeing.
         expectedEngine: resolveWorkspaceGraphEngine(wsName),
+        expectedVectorEngine: resolveWorkspaceVectorEngine(wsName),
         allowUnverifiedSource: flags.allowUnverified ?? false,
         // So a cross-workspace restore (wrong tarball, stale --workspace
         // flag) is refused rather than landing silently — see

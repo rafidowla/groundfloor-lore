@@ -40,7 +40,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SurrealGraph } from './surrealGraph.js';
+import { SqliteGraph } from './sqliteGraph.js';
 import { surrealDataPath } from './surreal/surrealConnection.js';
+import { sqliteGraphDataPath } from './sqlite/sqliteGraphSchema.js';
 import {
     DEFAULT_GRAPH_ENGINE,
     resolveWorkspaceGraphEngine,
@@ -168,15 +170,19 @@ export function openWorkspaceGraph(
         legacyGraphEngineRemovedError(workspace ?? workspaceId ?? null, 'openWorkspaceGraph');
     }
 
-    // SurrealGraph implements the same ReadCache knobs LocalGraph took here
+    // Both engines implement the same ReadCache knobs LocalGraph took here
     // (settings-driven: bootConfig.localCache, plus the LORE_CACHE_DISABLED=1
-    // killswitch inside the engine), so the cache options stay live.
-    return new SurrealGraph(basePath, {
+    // killswitch inside the engine), so the cache options stay live either way.
+    const cacheOpts = {
         ...(workspaceId ? { workspaceId } : {}),
         ...(opts.cacheTtlMs !== undefined ? { cacheTtlMs: opts.cacheTtlMs } : {}),
         ...(opts.cacheMaxSize !== undefined ? { cacheMaxSize: opts.cacheMaxSize } : {}),
         ...(opts.cacheDisabled !== undefined ? { cacheDisabled: opts.cacheDisabled } : {}),
-    }) satisfies WorkspaceGraph;
+    };
+    if (engine === 'sqlite') {
+        return new SqliteGraph(basePath, cacheOpts) satisfies WorkspaceGraph;
+    }
+    return new SurrealGraph(basePath, cacheOpts) satisfies WorkspaceGraph;
 }
 
 /**
@@ -194,7 +200,7 @@ export function openWorkspaceGraph(
  * state: `lore migrate engine` deliberately leaves the source store in place
  * as the rollback path.
  */
-export function graphStoresOnDisk(basePath: string): { legacyGraph: boolean; surreal: boolean; any: boolean } {
+export function graphStoresOnDisk(basePath: string): { legacyGraph: boolean; surreal: boolean; sqlite: boolean; any: boolean } {
     const lore = path.join(basePath, '.lore');
     const legacyGraph = fs.existsSync(path.join(lore, 'graph'));
     // NOT path.join(lore, 'surreal') — that's the literal path, which is not
@@ -203,17 +209,22 @@ export function graphStoresOnDisk(basePath: string): { legacyGraph: boolean; sur
     // is the one function that knows the real, engine-normalized location;
     // see its doc comment in surreal/surrealConnection.ts.
     const surreal = fs.existsSync(surrealDataPath(basePath));
-    return { legacyGraph, surreal, any: legacyGraph || surreal };
+    const sqlite = fs.existsSync(sqliteGraphDataPath(basePath));
+    return { legacyGraph, surreal, sqlite, any: legacyGraph || surreal || sqlite };
 }
 
 /** Human-readable engine name for a startup banner. */
 export function bannerEngineName(basePath: string): string {
-    return resolveGraphEngineForPath(basePath).engine === 'surreal' ? 'SurrealDB' : 'legacy graph engine (removed)';
+    const engine = resolveGraphEngineForPath(basePath).engine;
+    if (engine === 'surreal') return 'SurrealDB';
+    if (engine === 'sqlite') return 'SQLite';
+    return 'legacy graph engine (removed)';
 }
 
 /** The graph store path a banner should show for this workspace. */
 export function bannerGraphPath(basePath: string): string {
     const engine = resolveGraphEngineForPath(basePath).engine;
     if (engine === 'surreal') return surrealDataPath(basePath);
+    if (engine === 'sqlite') return sqliteGraphDataPath(basePath);
     return path.join(basePath, '.lore', 'graph');
 }

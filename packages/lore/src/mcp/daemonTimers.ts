@@ -181,12 +181,19 @@ async function runConsistencySweepAllWorkspaces(
             // see the doc comment above for why that matters for this
             // sweep. It also enforces the workspace-confinement gate
             // (assertWorkspaceOpenAllowed).
-            const graph = await registry.getGraphHandle(ws);
-            const vectorStore = await resolver.getOrOpen(ws);
+            //
+            // `{ touch: false }` on all three accessors — this is a
+            // BACKGROUND sweep, not user activity, and pre-fix it stamped
+            // `lastAccessedAt` for EVERY registered workspace once per pass,
+            // defeating LocalGraphRegistry / WorkspaceVerbatimResolver idle
+            // eviction for any workspace this fan-out reaches before the
+            // next observation window closes (docs/PERFORMANCE-MEMORY.md §11).
+            const graph = await registry.getGraphHandle(ws, { touch: false });
+            const vectorStore = await resolver.getOrOpen(ws, { touch: false });
             // From the registry, not the graph: table storage is a SQLite file
             // keyed on the workspace path, and casting a graph handle to reach
             // it silently required a specific engine's graph implementation.
-            const tableStorage = await registry.tableStorageFor(ws);
+            const tableStorage = await registry.tableStorageFor(ws, { touch: false });
             const r = await runConsistencySweep(
                 {
                     // WorkspaceGraph satisfies SweepDeps['graph'] directly:
@@ -231,8 +238,10 @@ async function runRetentionSweepAllWorkspaces(
     const reports: Array<{ workspace: string; archived?: number; error?: string }> = [];
     for (const ws of listWs()) {
         try {
-            const graph = await registry.getGraphHandle(ws);
-            const verbatimStore = await resolver.getOrOpen(ws);
+            // `{ touch: false }` — background sweep, not user activity; see
+            // the matching comment in runConsistencySweepAllWorkspaces above.
+            const graph = await registry.getGraphHandle(ws, { touch: false });
+            const verbatimStore = await resolver.getOrOpen(ws, { touch: false });
             const report = await runRetentionSweep(
                 {
                     // WorkspaceGraph is a direct subtype of LoreGraph

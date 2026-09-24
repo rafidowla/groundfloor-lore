@@ -211,6 +211,12 @@ export async function retryOptimizeOnConflict(
 export class LanceMaintainer implements LanceMaintainerPort {
     constructor(private readonly lancedbDir: string) {}
 
+    /** Defect 3 (3.20.2) — the report needs to name the dir it actually probed, so a
+     *  caller can tell whether a maintenance pass targeted the store it expected. */
+    dir(): string {
+        return this.lancedbDir;
+    }
+
     private async connect(): Promise<{ db: { tableNames(): Promise<string[]>; openTable(n: string): Promise<LanceTable> } } | null> {
         if (!fs.existsSync(this.lancedbDir)) return null;
         const lancedb = await import('@lancedb/lancedb');
@@ -379,31 +385,38 @@ export class WorkspaceRegistry implements WorkspaceRegistryPort {
     // cached open handle before removing the workspace's data dir. The in-process
     // (MCP-tool) path passes the live registry; the CLI path leaves it undefined
     // (no shared handles; DaemonSafety already refuses when the daemon is up).
-    constructor(private readonly graphRegistry?: LocalGraphRegistry) {}
+    //
+    // Defect 3 (3.20.2) — `home` is the registry root this instance reads/writes
+    // (formerly hardcoded to the process-wide `loreHome()` everywhere in this
+    // class). Defaulting the param to `loreHome()` keeps every existing
+    // zero/one-arg call site (CLI, other tests) behaving exactly as before;
+    // an embedded host now passes its OWN `dataHome` so a maintenance pass
+    // never reads or bootstraps a registry outside the instance it targets.
+    constructor(private readonly graphRegistry?: LocalGraphRegistry, private readonly home: string = loreHome()) {}
 
     list(): WorkspaceForSelection[] {
-        return loadWorkspaces().workspaces.map((w) => ({ name: w.name, path: w.path, createdAt: w.createdAt }));
+        return loadWorkspaces(this.home).workspaces.map((w) => ({ name: w.name, path: w.path, createdAt: w.createdAt }));
     }
 
     activeName(): string {
-        return getActiveWorkspaceName();
+        return getActiveWorkspaceName(this.home);
     }
 
     bootstrapPath(): string {
-        return loreHome();
+        return this.home;
     }
 
     /** QA round 4, finding 3 — surface leftover `.pending-delete-*` sidelines to `lore maintain`'s report. */
     pendingSidelines(): PendingSidelineInfo[] {
-        return listPendingSidelines(path.join(loreHome(), 'workspaces'));
+        return listPendingSidelines(path.join(this.home, 'workspaces'));
     }
 
     async delete(name: string): Promise<{ bytesFreed: number }> {
-        const entry = loadWorkspaces().workspaces.find((w) => w.name === name);
+        const entry = loadWorkspaces(this.home).workspaces.find((w) => w.name === name);
         if (!entry) throw new Error(`Unknown workspace "${name}"`);
-        const workspacesDir = path.join(loreHome(), 'workspaces');
+        const workspacesDir = path.join(this.home, 'workspaces');
         const resolved = path.resolve(entry.path);
-        const underManagedDir = resolved !== path.resolve(loreHome())
+        const underManagedDir = resolved !== path.resolve(this.home)
             && resolved.startsWith(path.resolve(workspacesDir) + path.sep);
 
         // QA round 3 retry path — a previous delete() call already renamed
@@ -439,7 +452,7 @@ export class WorkspaceRegistry implements WorkspaceRegistryPort {
             if (stillRemaining.length > 0) {
                 throw new Error(`workspace "${name}" cleanup is still incomplete — partial data remains at ${stillRemaining.join('; ')} for a later maintain pass to retry`);
             }
-            deleteWorkspace(name);
+            deleteWorkspace(name, this.home);
             return { bytesFreed };
         }
 
@@ -564,7 +577,7 @@ export class WorkspaceRegistry implements WorkspaceRegistryPort {
         }
         // Registry removal (refuses active + bootstrap workspaces) — only
         // reached once the physical delete above did not throw.
-        deleteWorkspace(name);
+        deleteWorkspace(name, this.home);
         return { bytesFreed };
     }
 }

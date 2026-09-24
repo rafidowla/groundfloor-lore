@@ -20,6 +20,19 @@
  * — which is the point: future drift fails CI.
  *
  * Run: npm run test:unit:retrieval-parity
+ *      npm run test:unit:retrieval-parity:sqlite (identical — see note below)
+ *
+ * Opus review follow-up (3.21 step 2, "retrieval-parity MUST be included"
+ * in the SQLite/Lance suite parameterization): `loreVerbatim: {}` above is
+ * a bare MOCK object, not a real VerbatimStore/SqliteVerbatimStore
+ * instance — this file's whole point is proving the MCP/REST/recall
+ * SURFACES agree with each other over the SAME (mocked) retrieve() core,
+ * never the vector engine itself. There is nothing here for
+ * `makeVerbatimStore` (test/helpers/testVerbatimStore.ts) to route: the
+ * `:sqlite` script variant runs the IDENTICAL test file, and passes for
+ * the same reason the default run does — the assertions never depend on
+ * which engine backs `loreVerbatim` in production. Included per the
+ * review's explicit requirement, verified rather than assumed.
  */
 
 import assert from 'node:assert/strict';
@@ -63,8 +76,8 @@ const NODES: Record<string, FNode> = {
 // Vector seeds (real ids are 'lore:'-prefixed in the verbatim store).
 const SEMANTIC = [{ id: 'lore:alpha', score: 0.9 }, { id: 'lore:beta', score: 0.72 }];
 const BM25 = [{ id: 'lore:beta', score: 5 }, { id: 'lore:alpha', score: 4 }];
-const TRAVERSE: Record<string, Array<{ node: FNode; depth: number }>> = {
-    alpha: [{ node: NODES.gamma!, depth: 1 }],
+const TRAVERSE: Record<string, Array<{ node: FNode; depth: number; relation: string }>> = {
+    alpha: [{ node: NODES.gamma!, depth: 1, relation: 'relates_to' }],
     beta: [],
 };
 
@@ -80,7 +93,7 @@ function buildFixture(): { searchDeps: SearchDeps; toolDeps: SearchToolsDeps } {
             for (const id of ids) { const x = NODES[id]; if (x) m.set(id, { ...x }); }
             return m;
         },
-        async traverse(id: string) { return (TRAVERSE[id] ?? []).map((h) => ({ node: { ...h.node }, depth: h.depth })); },
+        async traverse(id: string) { return (TRAVERSE[id] ?? []).map((h) => ({ node: { ...h.node }, depth: h.depth, relation: h.relation })); },
         async getNode(id: string) { const x = NODES[id]; return x ? { ...x } : null; },
         async listNodes() { return []; },                       // deferred sidecar: none
         async getLanguageBreakdown() { return {}; },            // only used with queryLanguage
@@ -174,25 +187,35 @@ await test('recall: MCP `recall` == embedded inProcessRecall == REST /api/recall
     const mcp = captureMcpTools(toolDeps);
     const topic = 'auth token';
 
-    // MCP recall tool (strip the surface-only `tip` helper field).
+    // MCP recall tool (strip the surface-only `tip` helper field, and
+    // `queryId` — 3.21 step 3(h)'s per-call correlation token, a fresh
+    // randomUUID() on EVERY recall by design, so it legitimately differs
+    // across these three independent calls even though everything else
+    // must match byte-for-byte).
     const mcpRaw = await callMcp(mcp, 'recall', { topic, workspace: WORKSPACE, mode: 'summary', search_mode: 'hybrid' });
-    const { tip: _tip, ...mcpRecall } = mcpRaw;
+    const { tip: _tip, queryId: _mcpQueryId, ...mcpRecall } = mcpRaw;
 
     // Embedded recall — max=10 to match the MCP tool's fixed SEED_LIMIT.
-    const embedded = await inProcessRecall(topic, { workspace: WORKSPACE, mode: 'summary', searchMode: 'hybrid', max: 10 }, { store: searchDeps.store, graphRegistry: (searchDeps as any).graphRegistry });
+    const embeddedRaw = await inProcessRecall(topic, { workspace: WORKSPACE, mode: 'summary', searchMode: 'hybrid', max: 10 }, { store: searchDeps.store, graphRegistry: (searchDeps as any).graphRegistry });
+    const { queryId: _embeddedQueryId, ...embedded } = embeddedRaw as typeof embeddedRaw & { queryId: string };
 
     // REST /api/recall — max=10 (its default is 8) so the limit matches.
-    const rest = await callRest(searchDeps, `/api/recall?topic=${encodeURIComponent(topic)}&workspace=${WORKSPACE}&max=10`, '/api/recall');
-    assert.equal(rest.status, 200, 'REST recall must be 200');
+    const restRaw = await callRest(searchDeps, `/api/recall?topic=${encodeURIComponent(topic)}&workspace=${WORKSPACE}&max=10`, '/api/recall');
+    assert.equal(restRaw.status, 200, 'REST recall must be 200');
+    const { queryId: _restQueryId, ...restBody } = restRaw.body;
 
     // Sanity: the fixture must actually exercise the semantic path + traversal.
     assert.equal(mcpRecall.mode, 'summary');
     assert.equal(mcpRecall._meta.vector_index_consulted, true, 'vector index should be consulted (active workspace)');
     assert.equal(mcpRecall._meta.sources_consulted, 2, 'semantic + keyword = 2 sources');
     assert.ok(mcpRecall.hits.length > 0, 'recall must return hits');
+    // Every surface DOES carry a queryId (just not the SAME one per call).
+    assert.equal(typeof mcpRaw.queryId, 'string');
+    assert.equal(typeof embeddedRaw.queryId, 'string');
+    assert.equal(typeof restRaw.body.queryId, 'string');
 
     assert.deepEqual(embedded, mcpRecall, 'embedded recall must equal the MCP recall tool');
-    assert.deepEqual(rest.body, mcpRecall, 'REST /api/recall must equal the MCP recall tool');
+    assert.deepEqual(restBody, mcpRecall, 'REST /api/recall must equal the MCP recall tool');
 });
 
 await test('recall _meta is consistent across surfaces (vector_index_consulted + sources_consulted)', async () => {

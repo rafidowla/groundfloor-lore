@@ -425,6 +425,7 @@ async function scenarioLockConflict(): Promise<void> {
     const holder = spawn(tsxBin, [selfPath, '--child', 'holder'], {
         env: { ...process.env, LORE_HOME: home },
         stdio: ['ignore', 'pipe', 'inherit'],
+        detached: true,
     });
     try {
         await new Promise<void>((resolve, reject) => {
@@ -457,7 +458,7 @@ async function scenarioLockConflict(): Promise<void> {
 
         assert.ok(elapsedMs < 8_000, `expected the shortened lock-probe budget (well under the old 15s storm); took ${elapsedMs}ms`);
     } finally {
-        holder.kill('SIGKILL');
+        if (holder.pid) { try { process.kill(-holder.pid, 'SIGKILL'); } catch { /* already gone */ } } else { holder.kill('SIGKILL'); }
     }
 }
 

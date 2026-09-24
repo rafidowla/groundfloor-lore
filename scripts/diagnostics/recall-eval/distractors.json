@@ -1,0 +1,98 @@
+[
+  {
+    "id": "dx-0",
+    "query": "How do we handle a GDPR data-deletion request for a tenant?"
+  },
+  {
+    "id": "dx-1",
+    "query": "What CI provider runs the Riverstone build pipeline?"
+  },
+  {
+    "id": "dx-2",
+    "query": "How does SSL certificate renewal work for the API gateway?"
+  },
+  {
+    "id": "dx-3",
+    "query": "What is our on-call escalation policy outside business hours?"
+  },
+  {
+    "id": "dx-4",
+    "query": "Which cloud region hosts the disaster-recovery replica?"
+  },
+  {
+    "id": "dx-5",
+    "query": "How do we rotate the database root credentials?"
+  },
+  {
+    "id": "dx-6",
+    "query": "What is the process for onboarding a new enterprise customer?"
+  },
+  {
+    "id": "dx-7",
+    "query": "How is customer support ticket priority determined?"
+  },
+  {
+    "id": "dx-8",
+    "query": "What load balancer do we use in front of the API?"
+  },
+  {
+    "id": "dx-9",
+    "query": "How do we handle SOC 2 audit evidence collection?"
+  },
+  {
+    "id": "dx-10",
+    "query": "What is the deprecation policy for old API versions?"
+  },
+  {
+    "id": "dx-11",
+    "query": "How does the billing system calculate usage-based invoices?"
+  },
+  {
+    "id": "dx-12",
+    "query": "What is our incident postmortem template?"
+  },
+  {
+    "id": "dx-13",
+    "query": "How do we test disaster recovery failover?"
+  },
+  {
+    "id": "dx-14",
+    "query": "What analytics platform tracks product usage?"
+  },
+  {
+    "id": "dx-15",
+    "query": "How is employee offboarding handled for system access?"
+  },
+  {
+    "id": "dx-16",
+    "query": "What is the process for requesting a new AWS account?"
+  },
+  {
+    "id": "dx-17",
+    "query": "How do we manage feature flags across environments?"
+  },
+  {
+    "id": "dx-18",
+    "query": "What is our policy on third-party dependency updates?"
+  },
+  {
+    "id": "dx-19",
+    "query": "How does the sales team request a custom demo environment?"
+  },
+  {
+    "id": "dx-20",
+    "query": "What is the data retention policy for support tickets?"
+  },
+  {
+    "id": "dx-21",
+    "query": "How do we handle a customer requesting an SLA credit?"
+  },
+  {
+    "id": "dx-22",
+    "query": "What is the process for a security vulnerability disclosure?"
+  },
+  {
+    "id": "dx-23",
+    "query": "How do we provision a new internal admin dashboard user?"
+  }
+]

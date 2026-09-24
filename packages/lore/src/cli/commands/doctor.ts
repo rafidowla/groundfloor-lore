@@ -144,12 +144,32 @@ export async function doctorCommand(args: string[]): Promise<void> {
         // operator to run `lore init` on a healthy Surreal workspace.
         const stores = graphStoresOnDisk(basePath);
         if (stores.any) {
-            const which = stores.legacyGraph && stores.surreal ? 'legacy graph engine + SurrealDB (post-migration)'
-                : stores.surreal ? 'SurrealDB' : 'legacy graph engine';
+            const which = stores.legacyGraph && (stores.surreal || stores.sqlite)
+                ? `legacy graph engine + ${stores.surreal ? 'SurrealDB' : 'SQLite'} (post-migration)`
+                : stores.surreal && stores.sqlite ? 'SurrealDB + SQLite (mid-migration)'
+                : stores.surreal ? 'SurrealDB' : stores.sqlite ? 'SQLite' : 'legacy graph engine';
             console.log(`  ✓ graph store exists (${which})`);
         } else {
-            console.log('  ✗ no graph store found (.lore/graph or .lore/surreal) — run "lore init"');
+            console.log('  ✗ no graph store found (.lore/graph, .lore/surreal or .lore/graph.sqlite) — run "lore init"');
             issues++;
+        }
+
+        // 3.21 step 2 part 2 — same "report which substrate, not just
+        // whether ANY substrate exists" reasoning as the graph check above.
+        // NOTE: `.lore/lancedb/` alone is NOT proof of a Lance table — both
+        // engines share one embedding-fingerprint sidecar at
+        // `.lore/lancedb/embedding_model.json` (embeddingFingerprint.ts), so
+        // a pure-SQLite workspace that has ever been written to also has
+        // this directory. Check for the actual table dir instead.
+        const hasLanceVectors = fs.existsSync(path.join(loreDir, 'lancedb', 'lore_verbatim.lance'));
+        const hasSqliteVectors = fs.existsSync(path.join(loreDir, 'verbatim.sqlite'));
+        if (hasLanceVectors || hasSqliteVectors) {
+            const whichVectors = hasLanceVectors && hasSqliteVectors
+                ? 'LanceDB + SQLite (mid/post-promotion)'
+                : hasSqliteVectors ? 'SQLite' : 'LanceDB';
+            console.log(`  ✓ vector store exists (${whichVectors})`);
+        } else if (fs.existsSync(loreDir)) {
+            console.log('  ⓘ no vector store found (.lore/lancedb or .lore/verbatim.sqlite) — created on first write');
         }
 
         if (fs.existsSync(loreDir)) {

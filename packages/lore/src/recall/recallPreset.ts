@@ -12,9 +12,11 @@
  * retrieve() core; this module is presentation only.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { LoreNode } from '../providers/types.js';
 import type { RetrieveOutcome } from './retrieve.js';
 import { buildLanguageHint } from '../mcp/tools/search/helpers.js';
+import { buildRelevanceMeta, type RelevanceMetaFields } from './abstention.js';
 
 /* ─── RecallResult shape (canonical; embedded lore.recall returns it) ─── */
 
@@ -27,6 +29,27 @@ export interface RecallHit {
     snippet: string | null;
     source: string;
     stale_warning?: boolean;
+    /** D1: this hit's own raw vector-leg similarity / calibrated z-score.
+     *  Additive only — absent for keyword/traversal-only matches. */
+    similarity?: number;
+    relevance?: number;
+}
+
+/** D4 fix (fix/d4-traversal-separate-field): a graph-traversal neighbour of a
+ *  direct hit. Never a ranked/relevance match to the query itself — `via` +
+ *  `relation` say exactly how it was reached, so a caller cannot mistake it
+ *  for a query match. Not counted in `shown`/`totalRecalled`. */
+export interface RecallRelated {
+    id: string;
+    type: string;
+    label: string;
+    project: string;
+    snippet: string | null;
+    /** id of the direct hit this neighbour was reached FROM. */
+    via: string;
+    /** the REAL edge relation reported by graph.traverse() — never invented. */
+    relation: string;
+    depth: number;
 }
 
 export interface RecallNode {
@@ -39,9 +62,12 @@ export interface RecallNode {
     source: string;
     language?: string | null;
     stale_warning?: boolean;
+    /** D1: see RecallHit.similarity/relevance — same semantics. */
+    similarity?: number;
+    relevance?: number;
 }
 
-export interface RecallMeta {
+export interface RecallMeta extends RelevanceMetaFields {
     confidence: number;
     negative_evidence?: string;
     top_score?: number;
@@ -64,18 +90,44 @@ export interface RecallMeta {
      *  beyond the scanned window, so a thin/empty result is NOT authoritative
      *  absence (negative_evidence says so too when this is set). */
     possible_starvation?: boolean;
+    /** 3.21 step 3(a): present + false only when bm25 was consulted (mode
+     *  'keyword' or 'hybrid' against a populated store) but came back
+     *  UNRANKED — the store's LIKE-scan fallback, every hit force-scored
+     *  1.0. Absent means either bm25 was not consulted, or it was and came
+     *  back genuinely ranked. A caller must not present `false` results as
+     *  relevance-ordered. */
+    bm25_ranked?: boolean;
+    /** 3.21 step 3(c): present + true only when a semantic fetch was
+     *  skipped because the embedding provider is disabled
+     *  (NullEmbeddingProvider / LORE_EMBEDDING_PROVIDER=none) — the read
+     *  degraded to the keyword/BM25/graph path instead of throwing. */
+    vector_leg_skipped?: boolean;
 }
+// D1 (calibrated relevance + abstention): the top_similarity/top_relevance/
+// floor/below_floor/abstained/calibration fields above come from
+// RelevanceMetaFields (abstention.ts) via `extends`. Always present. An
+// abstained retrieve() outcome is itself an empty-results outcome, so it
+// flows through the SAME `outcome.results.length === 0` branch below as
+// ordinary "nothing found" — no separate code path needed.
 
 export interface RecallResultSummary {
     topic: string;
     mode: 'summary';
     searchMode: string;
     scope: { workspace: string; ecosystem: string };
+    /** 3.21 step 3(h) — correlation token for this recall call; echo it
+     *  back on `recall_outcome` / POST /api/recall/outcome to tie an
+     *  outcome to the query that surfaced the node. */
+    queryId: string;
     crossProject: boolean;
     totalRecalled: number;
     shown: number;
     projectsSeen: string[];
     hits: RecallHit[];
+    /** D4 fix: graph-traversal neighbours of `hits`, separate from ranked
+     *  results — never counted in `shown`/`totalRecalled`. Absent (not an
+     *  empty array) when depth=0 or no neighbours were found. */
+    related?: RecallRelated[];
     auto_full?: Array<{ id: string; label: string; content: string }>;
     auto_full_reason?: string;
     deferred?: unknown[];
@@ -88,11 +140,20 @@ export interface RecallResultFull {
     mode: 'full';
     searchMode: string;
     scope: { workspace: string; ecosystem: string };
+    /** 3.21 step 3(h) — see RecallResultSummary.queryId. */
+    queryId: string;
     crossProject: boolean;
     totalRecalled: number;
     directMatches: number;
     connectedMatches: number;
     knowledge: RecallNode[];
+    /** D4 fix: graph-traversal neighbours, separate from `knowledge` — never
+     *  interleaved into it, and never counted in `totalRecalled`/
+     *  `directMatches`. `connectedMatches` (below) IS this array's length —
+     *  a pure count, kept for backward-compatible callers that only read
+     *  the number, not the nodes. Absent (not an empty array) on `related`
+     *  itself when depth=0 or no neighbours were found. */
+    related?: RecallRelated[];
     deferred?: unknown[];
     hint?: { queryLanguage: string; corpusLanguageBreakdown: Record<string, number>; suggestion: string } | null;
     /** Same envelope the summary mode has always carried. Present on every
@@ -131,18 +192,84 @@ export interface RecallPresentationParams {
     maxTokens?: number;
 }
 
-/** retrieve() tags seeds 'seed' and neighbours 'via:<id>'; recall's wire shape
- *  has historically used 'search' / 'via <id>'. */
+/** D4 fix: `outcome.results` is direct-matches-only now, so `source` is
+ *  always 'seed' → 'search'. Kept as a function (not a constant) so any
+ *  caller still importing it keeps working; the `via:<id>` branch is
+ *  unreachable via `results` post-fix but is preserved for the (already
+ *  scope-filtered) case where a caller passes a raw retrieve() result
+ *  through directly, e.g. defensive/older code paths. */
 function mapSource(source: string): string {
     if (source === 'seed') return 'search';
     return source.startsWith('via:') ? `via ${source.slice(4)}` : source;
 }
 
-function snippetOf(content: unknown): string | null {
+function snippetOf(content: unknown, maxLen: number = SNIPPET_LEN): string | null {
     if (typeof content !== 'string') return null;
-    return content.length > SNIPPET_LEN
-        ? content.slice(0, SNIPPET_LEN).replace(/\s+/g, ' ').trim() + '…'
+    return content.length > maxLen
+        ? content.slice(0, maxLen).replace(/\s+/g, ' ').trim() + '…'
         : content.replace(/\s+/g, ' ').trim();
+}
+
+/* ─── 3.21 step 3(g) — compact candidates ──────────────────────────
+ * A caller that only needs to DECIDE which hits are worth a full body
+ * (before spending the tokens `full`/`summary` cost) passes `compact:true`.
+ * Deliberately NOT a third `responseMode` value: compact bypasses
+ * buildRecallResult's summary/full shaping entirely (no traversal-source
+ * labels, no deferred sidecar, no language hint, no auto-escalation) — it
+ * is the thinnest possible pointer into a result set, paired with
+ * `recall_expand` / POST /api/recall/expand to fetch chosen ids' full
+ * bodies afterward.
+ */
+export const COMPACT_SNIPPET_LEN = 240;
+
+export interface RecallCandidate {
+    id: string;
+    label: string;
+    snippet: string | null;
+    score: number;
+    matchedBy: string[];
+    updatedAt: string;
+}
+
+export function buildCompactCandidates(outcome: RetrieveOutcome): RecallCandidate[] {
+    return outcome.results.map((r) => {
+        const n = r.node as LoreNode;
+        return {
+            id: n.id,
+            label: n.label,
+            snippet: snippetOf(n.content, COMPACT_SNIPPET_LEN),
+            score: r.score,
+            matchedBy: r.matchedBy,
+            updatedAt: n.updatedAt,
+        };
+    });
+}
+
+/** D4 fix: compact mode's counterpart to `related` on summary/full — a
+ *  caller that only wants ids-to-decide-on still needs to see graph
+ *  neighbours, but never mixed into `candidates` (which stays "things that
+ *  matched the query"). Paired with the same `recall_expand` flow. */
+export interface RecallRelatedCandidate {
+    id: string;
+    label: string;
+    snippet: string | null;
+    via: string;
+    relation: string;
+    depth: number;
+}
+
+export function buildRelatedCandidates(outcome: RetrieveOutcome): RecallRelatedCandidate[] {
+    return outcome.related.map((r) => {
+        const n = r.node as LoreNode;
+        return {
+            id: n.id,
+            label: n.label,
+            snippet: snippetOf(n.content, COMPACT_SNIPPET_LEN),
+            via: r.via,
+            relation: r.relation,
+            depth: r.depth,
+        };
+    });
 }
 
 export async function buildRecallResult(
@@ -152,6 +279,12 @@ export async function buildRecallResult(
 ): Promise<RecallResult> {
     const { topic, responseMode, searchMode, workspaceScope, ecosystemScope, crossProject, queryLanguage, filePaths, maxTokens } = params;
     const { topScore, sourcesConsulted, totalMatched, truncated, droppedCount, directMatches } = outcome.meta;
+    // 3.21 step 3(h) — a correlation token for this recall call, so a later
+    // `recall_outcome` / POST /api/recall/outcome can be tied back to the
+    // query that surfaced the node. Nothing persists it at recall time —
+    // it exists purely so the CALLER can echo it back; recall_outcome folds
+    // it into the existing outcome row's free-text `notes` column.
+    const queryId = randomUUID();
 
     const { findDeferredMatches } = await import('../engines/deferred.js');
     const deferredMatches = await findDeferredMatches(graph as unknown as Parameters<typeof findDeferredMatches>[0], { topic, filePaths });
@@ -174,13 +307,16 @@ export async function buildRecallResult(
             vector_index_consulted: outcome.meta.verbatimConsulted,
             ...(outcome.meta.scanCapHit ? { scan_cap_hit: true } : {}),
             ...(outcome.meta.possibleStarvation ? { possible_starvation: true } : {}),
+            ...(outcome.meta.bm25Ranked === false ? { bm25_ranked: false } : {}),
+            ...(outcome.meta.vectorLegSkipped ? { vector_leg_skipped: true } : {}),
+            ...buildRelevanceMeta(outcome.meta),
         };
         // An empty result keeps the REQUESTED response shape — a full-mode
         // caller gets the full-mode shape with an empty knowledge array, not
         // a silent downgrade to the summary shape.
         if (responseMode === 'full') {
             return {
-                topic, mode: 'full', searchMode, scope: { workspace: workspaceScope, ecosystem: ecosystemScope },
+                topic, mode: 'full', searchMode, scope: { workspace: workspaceScope, ecosystem: ecosystemScope }, queryId,
                 crossProject, totalRecalled: 0, directMatches: 0, connectedMatches: 0, knowledge: [],
                 ...(deferredMatches.length > 0 ? { deferred: deferredMatches } : {}),
                 ...(earlyHint ? { hint: earlyHint } : {}),
@@ -188,7 +324,7 @@ export async function buildRecallResult(
             };
         }
         return {
-            topic, mode: 'summary', searchMode, scope: { workspace: workspaceScope, ecosystem: ecosystemScope },
+            topic, mode: 'summary', searchMode, scope: { workspace: workspaceScope, ecosystem: ecosystemScope }, queryId,
             crossProject, totalRecalled: 0, shown: 0, projectsSeen: [], hits: [],
             ...(deferredMatches.length > 0 ? { deferred: deferredMatches } : {}),
             ...(earlyHint ? { hint: earlyHint } : {}),
@@ -196,20 +332,29 @@ export async function buildRecallResult(
         };
     }
 
-    const recalled = outcome.results.map((r) => ({ node: r.node, source: mapSource(r.source) }));
+    const recalled = outcome.results.map((r) => ({ node: r.node, source: mapSource(r.source), similarity: r.similarity, relevance: r.relevance }));
+    const related: RecallRelated[] = outcome.related.map((r) => {
+        const n = r.node as LoreNode;
+        return { id: n.id, type: n.type, label: n.label, project: n.project, snippet: snippetOf(n.content), via: r.via, relation: r.relation, depth: r.depth };
+    });
     const tokenMeta = maxTokens ? { truncated, dropped_count: droppedCount, total_matched: totalMatched } : {};
     const hint = queryLanguage ? await buildLanguageHint(graph as unknown as Parameters<typeof buildLanguageHint>[0], queryLanguage) : null;
 
     // Confidence/negative-evidence are computed ONCE, before the mode branch,
     // so full mode can carry the same _meta envelope summary mode has always
     // had (Finding: maxTokens truncation was invisible in mode:'full').
+    // D4 fix: `outcome.results` is now direct-matches-only, and the
+    // `outcome.results.length === 0` case already early-returned above — so
+    // past this point `directMatches` (== outcome.results.length) can never
+    // be 0. The old `directMatches === 0` branch ("every hit is a traversal
+    // neighbour") described exactly the bug this fix removes and is now
+    // unreachable; removed rather than left as dead defensive code, since
+    // keeping it would misleadingly suggest results can still contain
+    // traversal-only content.
     let confidence: number;
     let negativeEvidence: string | undefined;
     const metaTopScore = topScore !== null ? parseFloat(topScore.toFixed(3)) : undefined;
-    if (directMatches === 0) {
-        confidence = 0.4;
-        negativeEvidence = `Direct match count is 0 — every hit is a traversal neighbour, not a seed match.`;
-    } else if (topScore !== null) {
+    if (topScore !== null) {
         confidence = topScore >= 0.82 ? 1.0 : topScore >= 0.65 ? 0.7 : 0.4;
         if (topScore < 0.65) negativeEvidence = `Semantic similarity is low (top score: ${topScore.toFixed(2)}). Results may be loosely related.`;
     } else {
@@ -221,18 +366,25 @@ export async function buildRecallResult(
 
     if (responseMode === 'full') {
         return {
-            topic, mode: 'full', searchMode, scope: { workspace: workspaceScope, ecosystem: ecosystemScope },
+            topic, mode: 'full', searchMode, scope: { workspace: workspaceScope, ecosystem: ecosystemScope }, queryId,
             crossProject, totalRecalled: recalled.length,
             directMatches,
-            connectedMatches: recalled.length - directMatches,
-            knowledge: recalled.map(({ node, source }) => {
+            // D4 fix: was `recalled.length - directMatches` (a derived count
+            // over an array that used to hold BOTH kinds of node). Now that
+            // `related` is retrieve()'s own separate array, this is a direct
+            // count of it, not arithmetic over `knowledge`.
+            connectedMatches: related.length,
+            knowledge: recalled.map(({ node, source, similarity, relevance }) => {
                 const n = node as LoreNode & { language?: string | null; stale?: boolean };
                 return {
                     id: n.id, type: n.type, label: n.label, content: n.content, tags: n.tags,
                     project: n.project, source, language: n.language ?? null,
                     ...(n.stale ? { stale_warning: true } : {}),
+                    ...(similarity !== undefined && similarity !== null ? { similarity } : {}),
+                    ...(relevance !== undefined && relevance !== null ? { relevance } : {}),
                 };
             }),
+            ...(related.length > 0 ? { related } : {}),
             ...(deferredMatches.length > 0 ? { deferred: deferredMatches } : {}),
             ...(hint ? { hint } : {}),
             _meta: {
@@ -243,7 +395,10 @@ export async function buildRecallResult(
                 vector_index_consulted: outcome.meta.verbatimConsulted,
                 ...(outcome.meta.scanCapHit ? { scan_cap_hit: true } : {}),
                 ...(outcome.meta.possibleStarvation ? { possible_starvation: true } : {}),
+            ...(outcome.meta.bm25Ranked === false ? { bm25_ranked: false } : {}),
+            ...(outcome.meta.vectorLegSkipped ? { vector_leg_skipped: true } : {}),
                 ...tokenMeta,
+                ...buildRelevanceMeta(outcome.meta),
             },
         };
     }
@@ -269,16 +424,19 @@ export async function buildRecallResult(
     }
 
     return {
-        topic, mode: 'summary', searchMode, scope: { workspace: workspaceScope, ecosystem: ecosystemScope },
+        topic, mode: 'summary', searchMode, scope: { workspace: workspaceScope, ecosystem: ecosystemScope }, queryId,
         crossProject, totalRecalled: recalled.length, shown: trimmed.length, projectsSeen: [...projectsSeen],
-        hits: trimmed.map(({ node, source }) => {
+        hits: trimmed.map(({ node, source, similarity, relevance }) => {
             const n = node as LoreNode & { stale?: boolean };
             return {
                 id: n.id, type: n.type, label: n.label, project: n.project, tags: n.tags,
                 snippet: snippetOf(n.content), source,
                 ...(n.stale ? { stale_warning: true } : {}),
+                ...(similarity !== undefined && similarity !== null ? { similarity } : {}),
+                ...(relevance !== undefined && relevance !== null ? { relevance } : {}),
             };
         }),
+        ...(related.length > 0 ? { related } : {}),
         ...(autoEscalated ? { auto_full: autoEscalated, auto_full_reason: `Top similarity score ${topScore?.toFixed(2)} >= ${AUTO_ESCALATE_THRESHOLD} — fetched full bodies to save a get_full round-trip.` } : {}),
         ...(deferredMatches.length > 0 ? { deferred: deferredMatches } : {}),
         ...(hint ? { hint } : {}),
@@ -290,7 +448,10 @@ export async function buildRecallResult(
             vector_index_consulted: outcome.meta.verbatimConsulted,
             ...(outcome.meta.scanCapHit ? { scan_cap_hit: true } : {}),
             ...(outcome.meta.possibleStarvation ? { possible_starvation: true } : {}),
+            ...(outcome.meta.bm25Ranked === false ? { bm25_ranked: false } : {}),
+            ...(outcome.meta.vectorLegSkipped ? { vector_leg_skipped: true } : {}),
             ...tokenMeta,
+            ...buildRelevanceMeta(outcome.meta),
         },
     };
 }

@@ -20,6 +20,7 @@ import { assertMcpScope } from '../mcpScope.js';
 import { assertSafeLanceId } from '../../../engines/verbatimHistory.js';
 import { tagsToArray } from '../../../engines/normalizeTags.js';
 import { nodeUpsert, resolveAutolinkHandles, resolveVocabVerdict } from '../../../core/nodeService.js';
+import { resolveSupersessionContext } from '../../../core/supersessionPolicy.js';
 // 1.1 (2026-08-17 audit) — retry SurrealDB transaction-conflict write drops
 // (same wrapper bulkIngest already uses; no-op for engines that serialize
 // writes internally).
@@ -29,6 +30,7 @@ import { mcpToolError } from '../mcpToolError.js';
 import { redactError } from '../../../security/logRedact.js';
 import { log } from '../../../logger.js';
 import { MAX_NODE_FIELD_BYTES } from '../../../engines/nodeFieldLimits.js';
+import { MAX_QUESTIONS, MAX_QUESTION_CHARS, MAX_SUMMARY_CHARS, MAX_LIST_ITEMS, MAX_LIST_ITEM_CHARS } from '../../../core/questionAliases.js';
 import type { MemoryToolsDeps } from './types.js';
 
 /* ─── Phase 6 P2 — vocab + strict-field response shapers ───────── */
@@ -51,6 +53,20 @@ function unknownFieldEnvelope(
         : `unknown_field: ${rejected.join(', ')}`;
     return {
         content: [{ type: 'text' as const, text: JSON.stringify({ ...payload, message: friendly }, null, 2) }],
+        isError: true,
+    };
+}
+
+/** D5 — envelope for the three write-time supersession rejection codes.
+ *  `writeResult.error.message` is already the actionable, id-naming text
+ *  checkSupersessionPolicy built; this just shapes it as an MCP error. */
+function supersessionRejectionEnvelope(
+    code: 'missing_supersedes_field' | 'prose_supersedes_mismatch' | 'unlisted_near_duplicate' | 'supersedes_apply_failed' | 'supersedes_partial',
+    message: string,
+    extra?: { applied?: string[]; unapplied?: Array<{ id: string; reason: string }> },
+): { content: Array<{ type: 'text'; text: string }>; isError: true } {
+    return {
+        content: [{ type: 'text' as const, text: JSON.stringify({ error: code, reason: message, ...(extra ?? {}) }, null, 2) }],
         isError: true,
     };
 }
@@ -94,6 +110,26 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
             changeset_id: z.string().optional().describe('Feature 8: when provided, buffer this write into the open changeset instead of applying it immediately. Obtain a changeset_id from begin_changeset. Apply all buffered writes atomically via commit_changeset.'),
             validFrom: z.string().optional().describe('Bi-temporal: ISO 8601 timestamp when this fact became true in the real world (valid-time), distinct from createdAt (when Lore recorded it). Omit if unknown/not applicable — a node with no validFrom/validUntil is always valid. Core never infers or sets this.'),
             validUntil: z.string().optional().describe('Bi-temporal: ISO 8601 timestamp when this fact stopped being true in the real world. Omit while still valid. Core never infers or sets this — deciding a fact is superseded is an application-layer judgment.'),
+            // 3.21 step 3(e) — optional recall-enhancement fields. Every one
+            // is optional and additive; omitting all four is exactly today's
+            // behaviour. Lore does not generate these — the caller (an app,
+            // an agent) supplies its own questions/summary/entities/topics.
+            questions: z.array(z.string().min(1).max(MAX_QUESTION_CHARS)).max(MAX_QUESTIONS).optional()
+                .describe(`Up to ${MAX_QUESTIONS} alternate phrasings a user might ask to find this node (each ≤${MAX_QUESTION_CHARS} chars). Each is embedded + BM25-indexed as its own alias row so a query sharing no words with the content can still find this node via recall. Rewriting the node REPLACES its aliases (a write with fewer/no questions than before drops the stale ones). Requires an outbox-backed daemon (production default) — a caller with no outbox wired gets the rest of the write with aliases silently skipped.`),
+            summary: z.string().max(MAX_SUMMARY_CHARS).optional()
+                .describe(`A short summary of this node (≤${MAX_SUMMARY_CHARS} chars), stored verbatim in the node's metadata.`),
+            entities: z.array(z.string().min(1).max(MAX_LIST_ITEM_CHARS)).max(MAX_LIST_ITEMS).optional()
+                .describe(`Named entities this node references (≤${MAX_LIST_ITEMS} items, each ≤${MAX_LIST_ITEM_CHARS} chars), stored verbatim in metadata and filterable via recall's \`entities\` filter (3.21 step 3f).`),
+            topics: z.array(z.string().min(1).max(MAX_LIST_ITEM_CHARS)).max(MAX_LIST_ITEMS).optional()
+                .describe(`Topics this node covers (≤${MAX_LIST_ITEMS} items, each ≤${MAX_LIST_ITEM_CHARS} chars), stored verbatim in metadata and filterable via recall's \`topics\` filter (3.21 step 3f).`),
+            // D5 (2026-09-23) — write-time supersession. Required (an explicit
+            // [] asserts "supersedes nothing") when the workspace's
+            // supersessionPolicy has enforce:true and type is decision/
+            // convention/architecture. See core/supersessionPolicy.ts.
+            supersedes: z.array(z.string().min(1)).optional()
+                .describe('Ids this write supersedes. Pass [] to explicitly assert "supersedes nothing". Required under an enforcing workspace supersession policy for decision/convention/architecture nodes — see the supersession_candidates tool for near-duplicate discovery.'),
+            force: z.boolean().optional()
+                .describe('Bypasses the near-duplicate check for this one write (does not bypass the missing-field or prose-mismatch checks).'),
         },
         async (args) => {
             // NW-5b — audit-coverage. Pre-fix, store_node — the primary
@@ -212,6 +248,14 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                         type,
                         coreTypes: deps.coreNodeTypes,
                         logPrefix: '[Lore MCP]',
+                        // 3.20.2 follow-up — resolve against THIS instance's
+                        // own registry (LocalGraphRegistry.homeDir()), not
+                        // the process-wide default; see resolveVocabVerdict's
+                        // `home` doc in nodeService.ts. undefined when no
+                        // registry is wired (cloud mode, test fixtures) —
+                        // resolveVocabVerdict falls back to the prior
+                        // process-wide-home behavior in that case.
+                        home: deps.graphRegistry?.homeDir?.(),
                     });
                     if (verdict.decision === 'reject') {
                         return vocabRejectionEnvelope(verdict.result);
@@ -383,6 +427,22 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                     targetGraph,
                     tracker: deps.store.autolinkTracker,
                 });
+                // D5 — resolve the workspace's supersession policy against
+                // THIS instance's own registry, same pattern as the vocab
+                // verdict above (deps.graphRegistry?.homeDir()); absent
+                // registry (cloud mode / test fixtures) falls back to the
+                // process-wide home, matching getWorkspaceVocabPolicy's own
+                // documented fallback.
+                const { policy: supersessionPolicy, findDuplicate: findSupersessionDuplicate } = resolveSupersessionContext({
+                    workspace: scopedWorkspace,
+                    targetGraph,
+                    homeDir: deps.graphRegistry?.homeDir?.(),
+                    bootGraph: deps.store.loreGraph,
+                    storageClient: deps.store.storageClient,
+                    workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+                    hostDefaultEnforce: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+                });
+
                 const writeResult = await withTransactionConflictRetry(() => nodeUpsert(
                     {
                         id,
@@ -394,6 +454,12 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                         skipEmbed,
                         asyncEmbed: async_embed,
                         isActiveWorkspace: resolved.isActive,
+                        questions: args.questions as string[] | undefined,
+                        summary: args.summary as string | undefined,
+                        entities: args.entities as string[] | undefined,
+                        topics: args.topics as string[] | undefined,
+                        supersedes: args.supersedes as string[] | undefined,
+                        force: args.force as boolean | undefined,
                     },
                     {
                         outboxStore: deps.outboxStore,
@@ -409,10 +475,46 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                         // MCP version records were stamped principal 'mcp'.
                         versionPrincipal: 'mcp',
                         autolink,
+                        supersessionPolicy,
+                        findSupersessionDuplicate,
                     },
                 ));
 
                 if (!writeResult.ok) {
+                    // 3.21 step 3(e) — a questions/summary/entities/topics cap
+                    // violation is a caller input error, not a substrate
+                    // failure; give it its own clear message + code instead of
+                    // the generic "vector store unavailable" wording below.
+                    if (writeResult.code === 'invalid_questions_meta') {
+                        return {
+                            content: [{ type: 'text' as const, text: JSON.stringify({ error: 'invalid_questions_meta', reason: writeResult.error.message }, null, 2) }],
+                            isError: true,
+                        };
+                    }
+                    // D5 — the three write-time supersession rejection codes
+                    // are caller input errors (missing field / prose-field
+                    // mismatch / unlisted near-duplicate / apply failure),
+                    // not substrate unavailability; give them their own
+                    // actionable envelope instead of the generic wording below.
+                    // round 4 (#4) — the new node's own write already
+                    // succeeded when this fires; only the supersede effect
+                    // on some id(s) did not apply. Still surfaced as an
+                    // error envelope (the caller's supersedes list needs
+                    // attention) with the applied/unapplied partition named.
+                    if (writeResult.code === 'supersedes_partial') {
+                        return supersessionRejectionEnvelope(writeResult.code, writeResult.error.message, {
+                            applied: writeResult.applied,
+                            unapplied: writeResult.unapplied,
+                        });
+                    }
+                    if (
+                        writeResult.code === 'missing_supersedes_field' ||
+                        writeResult.code === 'prose_supersedes_mismatch' ||
+                        writeResult.code === 'unlisted_near_duplicate' ||
+                        writeResult.code === 'supersedes_apply_failed'
+                    ) {
+                        return supersessionRejectionEnvelope(writeResult.code, writeResult.error.message);
+                    }
                     return {
                         content: [{ type: 'text' as const, text: `store_node failed: vector store unavailable (${redactError(writeResult.error)}). No partial state retained.` }],
                         isError: true,
@@ -435,6 +537,12 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                             success: true,
                             node: { id: node.id, type: node.type, label: node.label, project: scopedWorkspace, ecosystem: scopedEcosystem },
                             message: `Node '${id}' stored successfully (project: ${scopedWorkspace}, ecosystem: ${scopedEcosystem}).`,
+                            // 3.21 step 3(d) — true only when the embed/verbatim
+                            // write failed but the node was KEPT (a durable or
+                            // best-effort retry is queued) rather than rolled
+                            // back. Absent on the ordinary success path.
+                            ...(writeResult.embedPending ? { embedPending: true } : {}),
+                            ...(writeResult.supersessionWarning ? { supersessionWarning: writeResult.supersessionWarning } : {}),
                             ...(typeWarning ? { _meta: { warning: typeWarning, header: `X-Lore-Type-Warning: ${typeWarning}` } } : {}),
                         }, null, 2),
                     }],

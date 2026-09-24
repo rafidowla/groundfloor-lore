@@ -233,6 +233,23 @@ export class EmbedQueue {
         return this.pending.length;
     }
 
+    /** STEP2-CLOSE-PATH-DESIGN.md (c) — the smallest query needed for the
+     *  verbatim-resolver idle-eviction guardrail: does this workspace have
+     *  pending OR in-flight embed work right now? Checks `pending` (not yet
+     *  dispatched) and `inFlightKeys` (dispatched, awaiting the executor) —
+     *  the setTimeout backoff gap between a failed attempt and its retry is
+     *  not workspace-indexed and is not covered; an evict racing that
+     *  narrow window would reopen on the next `getOrOpen`, same as any
+     *  other post-eviction reopen. */
+    hasPendingForWorkspace(workspace: string): boolean {
+        if (this.pending.some((j) => (j.workspace ?? '') === workspace)) return true;
+        const prefix = `${workspace}\n`;
+        for (const key of this.inFlightKeys) {
+            if (key.startsWith(prefix)) return true;
+        }
+        return false;
+    }
+
     /** Begin draining. Idempotent — calling start twice is a no-op. */
     start(executor: EmbedExecutor): void {
         if (this.running) return;

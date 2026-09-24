@@ -329,4 +329,17 @@ export class LoaderDispatcher {
         if (this.graph) await this.graph.rollback();
         if (this.lance) await this.lance.rollback();
     }
+
+    /**
+     * STEP2-CLOSE-PATH-DESIGN.md (d) — release native handles this session
+     * owns. Only the sqlite adapter holds one of its own (a dedicated
+     * `bulk-verbatim.sqlite` connection, bulkLoader/sqliteAdapter.ts); the
+     * graph and lance adapters route through the workspace's shared,
+     * separately-owned graph/verbatim stores and must NOT be closed here.
+     * Idempotent (SqliteBulkLoaderAdapter.close() is) — safe to call once
+     * per job regardless of the commit/rollback/throw path taken.
+     */
+    close(): void {
+        this.sqlite?.close();
+    }
 }

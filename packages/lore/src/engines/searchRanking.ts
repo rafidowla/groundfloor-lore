@@ -97,7 +97,7 @@ const MAX_KEYWORD_TERMS = 8;
  * terms, so removing these can never make a previously-matching query match
  * nothing.
  */
-const KEYWORD_STOPWORDS: ReadonlySet<string> = new Set([
+export const KEYWORD_STOPWORDS: ReadonlySet<string> = new Set([
     'a', 'an', 'the', 'and', 'or', 'but', 'if', 'so', 'of', 'in', 'on', 'at',
     'to', 'for', 'by', 'with', 'from', 'as', 'is', 'are', 'was', 'were', 'be',
     'been', 'do', 'does', 'did', 'have', 'has', 'had', 'not', 'no', 'we', 'i',

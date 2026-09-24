@@ -1,6 +1,6 @@
 {
   "generatedAt": "2026-08-13T00:15:59.272Z",
-  "datasetFile": "/Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/data/longmemeval_s_cleaned.json",
+  "datasetFile": "<repo>/benchmarks/longmemeval/data/longmemeval_s_cleaned.json",
   "subsetSize": 25,
   "ks": [
     5,

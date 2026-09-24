@@ -21,11 +21,15 @@
  */
 
 import { nodeUpsert as nodeServiceUpsert } from '../core/nodeService.js';
-import { VerbatimStore } from '../engines/verbatimStore.js';
+import { applyBulkQuestionAliases } from '../core/bulkQuestionAliases.js';
+import { isVerbatimStore } from '../engines/verbatimStoreApi.js';
+import { embedAndWriteAliasRowsInline } from './bulkIngestAliasSync.js';
+import { writePrecomputedVectors } from './bulkIngestPrecomputed.js';
 import { buildVerbatimText } from '../engines/verbatimSchema.js';
 import { tagsToArray, tagsToString } from '../engines/normalizeTags.js';
 import { computeContentHash } from '../engines/contentHash.js';
 import type { EmbeddingProvider } from '../providers/types.js';
+import { isEmbeddingDisabled } from '../providers/nullEmbeddingProvider.js';
 import type { LoreGraph, LoreVectorStore } from './services.js';
 import type { LocalGraphRegistry } from '../engines/localGraphRegistry.js';
 import { WorkspaceNotFoundError } from '../engines/localGraphRegistry.js';
@@ -35,6 +39,7 @@ import type { EmbedQueue } from '../embed/queue.js';
 import type { ReconnectableGraph } from '../engines/reconnect.js';
 import type { PendingAutolinkTracker } from '../engines/pendingAutolink.js';
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
+import { resolveSupersessionContext } from '../core/supersessionPolicy.js';
 import {
     ABORT_EMBED_CHUNK_SIZE,
     markCancelled,
@@ -93,6 +98,30 @@ export type BulkIngestNodeArgs = {
      * fails this node in `results[]` without aborting the batch.
      */
     embedding?: number[];
+    /**
+     * 3.21 step 3(e)/3(h) round 2 — same optional questions[]/summary/
+     * entities/topics fields `nodeUpsert()` (core/nodeService.ts) accepts on
+     * the single-write path, with IDENTICAL alias semantics, limits, and
+     * outbox durability. `summary`/`entities`/`topics` DO ride through the
+     * `{...node}` spread into nodeServiceUpsert() below (Step 1b) for free —
+     * they're metadata-merge only, unconditional on skipEmbed. `questions`
+     * needs its own explicit step (see the `applyBulkQuestionAliases` call
+     * in Step 1b below): nodeServiceUpsert() is ALWAYS called with
+     * `skipEmbed: true` here (bulkIngest defers embedding to the batched
+     * Step 3), and nodeServiceVerbatim.ts's applyVerbatimFanout
+     * short-circuits its WHOLE body — including the alias fan-out — on
+     * `skipEmbed`, so the spread alone is silently a no-op for `questions`.
+     * Top-level fields, exactly like NodeUpsertArgs — NOT nested inside
+     * `nodeData`.
+     */
+    questions?: string[];
+    summary?: string;
+    entities?: string[];
+    topics?: string[];
+    /** D5 — same `supersedes`/`force` contract as nodeUpsert(); enforced
+     *  per node (its own workspace), a refusal lands in `results[]`. */
+    supersedes?: string[];
+    force?: boolean;
 };
 
 export interface BulkIngestDeps {
@@ -122,6 +151,8 @@ export interface BulkIngestDeps {
      * registry / tests) → falls back to `verbatimStore`, behavior unchanged.
      */
     workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<LoreVectorStore> };
+    /** D5 round 2 (#2) — host-level supersession-enforce default. */
+    supersessionEnforceDefault?: boolean;
     /**
      * The owning Lore instance's autolink registry (StorageBundle.autolinkTracker).
      * Only consulted when `opts.autolink` is on.
@@ -150,11 +181,31 @@ export interface BulkIngestDeps {
  * than misrouting them to the boot store (cf. outbox R2 #2). Stores that are
  * not a local VerbatimStore (cloud) fall back to per-row store().
  */
-async function writePrebuiltRowsPerWorkspace(
+export async function writePrebuiltRowsPerWorkspace(
     deps: BulkIngestDeps,
     items: Array<{ node: BulkIngestNodeArgs; idx: number; row: Record<string, unknown> }>,
     resultSlots: BulkIngestResult['results'],
+    opts: {
+        /**
+         * r9 follow-up (Opus review, sync alias fan-out) — question-alias
+         * rows have no result slot of their own (they're a sub-write of an
+         * already-`ok:true` parent node), so a failed alias-row GROUP write
+         * must NOT be reported through `resultSlots` the way a failed MAIN
+         * content group is — doing so would flip an already-successful
+         * node to `ok:false` over a best-effort alias write. When set, this
+         * replaces the default resultSlots-marking failure path with a
+         * caller-supplied handler (log-and-continue); the durable outbox
+         * `verbatim.upsert` row recorded earlier remains the real retry
+         * path regardless of which branch runs.
+         */
+        onGroupError?: (group: Array<{ node: BulkIngestNodeArgs; idx: number; row: Record<string, unknown> }>, err: Error) => void;
+    } = {},
 ): Promise<void> {
+    const reportGroupError = (group: Array<{ node: BulkIngestNodeArgs; idx: number; row: Record<string, unknown> }>, err: Error): void => {
+        if (opts.onGroupError) { opts.onGroupError(group, err); return; }
+        const msg = err.message?.slice(0, 300) ?? 'lance_bulk_add_failed';
+        for (const g of group) resultSlots[g.idx] = { ok: false, id: g.node.id, error: msg };
+    };
     const groups = new Map<string, Array<{ node: BulkIngestNodeArgs; idx: number; row: Record<string, unknown> }>>();
     for (const it of items) {
         const g = groups.get(it.node.workspace) ?? [];
@@ -167,14 +218,59 @@ async function writePrebuiltRowsPerWorkspace(
             try {
                 store = await deps.workspaceVerbatimResolver.getOrOpen(ws);
             } catch (resolveErr) {
-                const msg = (resolveErr as Error).message?.slice(0, 300) ?? 'workspace_verbatim_resolve_failed';
-                for (const g of group) resultSlots[g.idx] = { ok: false, id: g.node.id, error: msg };
+                reportGroupError(group, resolveErr as Error);
                 continue;
             }
         }
         try {
-            if (store instanceof VerbatimStore) {
+            if (isVerbatimStore(store)) {
                 await store.bulkUpsertPrebuiltRows(group.map((g) => g.row));
+                // r9 recall-quality fix (Finding A — keyword/BM25 leg
+                // materially worse than a reference BM25 on a benchmark that
+                // ingests then immediately recalls). bulkIngest's own
+                // contract (see this file's header) promises "when the
+                // promise resolves, every vector IS persisted... no drain
+                // race" — but the underlying write path only SCHEDULES the
+                // vector/FTS index build on a debounced, unref'd timer
+                // (engines/verbatimBatch.ts's scheduleSearchIndexesAfterBulk,
+                // default 2s) that this caller has no handle on. A caller
+                // that ingests once and searches immediately after (this
+                // benchmark; any one-shot embedder bulk import) can query
+                // before that timer ever fires — and LanceDB's fullTextSearch/
+                // vectorSearch on an INDEX-LESS table does not reliably behave
+                // like a genuinely-ranked brute-force scan the way
+                // bm25Search's doc comment assumes (verified empirically:
+                // near-arbitrary/physical-row-order results, no error, so
+                // bm25Search reports `ranked:true` on effectively unranked
+                // output). bulkIngest is a deliberate, one-shot bulk
+                // operation — unlike the outbox's trickle embed.batch flush
+                // (outbox/wiring.ts) or the substrate-native bulk LOADER path
+                // (mcp/server.ts), both of which legitimately want the
+                // debounce to coalesce many rapid small batches, and so are
+                // deliberately NOT touched here. ensureVectorIndex/
+                // ensureFtsIndex are already idempotent (skip below their row
+                // threshold, or once already built), so this is a no-op for
+                // a small ingest and an IMMEDIATE, synchronous build once a
+                // group crosses the threshold — closing the race instead of
+                // leaving search quality to however much of the debounce
+                // window happened to elapse before the first read.
+                //
+                // KNOWN BENIGN RACE: when a single bulkIngest() call writes
+                // to the same workspace's store more than once (e.g. the
+                // main content batch AND a separate alias-row batch), two
+                // of these immediate calls can occasionally overlap a
+                // still-pending DEBOUNCED build from an earlier write on
+                // the same table, surfacing a caught, logged
+                // "ensureVectorIndex failed (non-fatal): ... commit
+                // conflict" from LanceDB's optimistic concurrency control.
+                // This is the SAME idempotent-retry contract every other
+                // index build in this codebase already relies on (see
+                // verbatimBatch.ts's own doc comments) — the losing call
+                // simply skips (the winner's index is already correct for
+                // the rows present when it ran), so it costs a log line,
+                // never correctness or a failed node result.
+                await store.ensureVectorIndex();
+                await store.ensureFtsIndex();
             } else {
                 // Cloud / non-local store: per-row store() with reconstructed metadata.
                 await Promise.all(group.map((g) => store.store({
@@ -191,8 +287,7 @@ async function writePrebuiltRowsPerWorkspace(
                 })));
             }
         } catch (writeErr) {
-            const msg = (writeErr as Error).message?.slice(0, 300) ?? 'lance_bulk_add_failed';
-            for (const g of group) resultSlots[g.idx] = { ok: false, id: g.node.id, error: msg };
+            reportGroupError(group, writeErr as Error);
         }
     }
 }
@@ -389,6 +484,17 @@ export async function runBulkIngest(
                 }
             }
             const autolinkGraph: ReconnectableGraph | null = enableAutolink ? (targetGraph as ReconnectableGraph) : null;
+            // D5 — per-node policy via the shared helper every write path
+            // uses; nodeServiceUpsert() enforces once these hooks are set.
+            const { policy: supersessionPolicy, findDuplicate: findSupersessionDuplicate } = resolveSupersessionContext({
+                workspace: node.workspace,
+                targetGraph,
+                homeDir: deps.graphRegistry?.homeDir?.(),
+                bootGraph: deps.graph,
+                storageClient: deps.storageClient,
+                workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+                hostDefaultEnforce: deps.supersessionEnforceDefault,
+            });
             const res = await withTransactionConflictRetry(() => nodeServiceUpsert(
                 {
                     ...node,
@@ -396,6 +502,8 @@ export async function runBulkIngest(
                     targetGraph,
                     initiator: 'lib:bulkIngest',
                     isActiveWorkspace: isActive,
+                    supersedes: node.supersedes,
+                    force: node.force === true,
                 },
                 {
                     outboxStore: deps.outboxStore,
@@ -405,13 +513,50 @@ export async function runBulkIngest(
                     versionStore: deps.versionStore,
                     previousState,
                     versionPrincipal: 'lib',
+                    // D6 (2026-09-23): allowSkipEmbedStore lets reconnectOneNode
+                    // store this skipEmbed node's row so OTHER nodes in the same
+                    // batch can find it via similarity search before Step 3's own
+                    // batch embed runs later. Every non-bulkIngest caller leaves
+                    // this unset, so skipEmbed there still means no vector row.
                     autolink: autolinkGraph
-                        ? { graph: autolinkGraph, verbatim: autolinkVerbatim, tracker: deps.autolinkTracker }
+                        ? { graph: autolinkGraph, verbatim: autolinkVerbatim, tracker: deps.autolinkTracker, allowSkipEmbedStore: true }
                         : undefined,
+                    supersessionPolicy,
+                    findSupersessionDuplicate,
                 },
             ));
             if (res.ok) {
                 resultSlots[slotOf(i)] = { ok: true, id: node.id };
+                // 3.21 step 3(h) round 2 (Opus review) — the Step 1b graph
+                // write above ALWAYS passes `skipEmbed: true` (bulkIngest
+                // defers embedding to the batched Step 3 below), and
+                // nodeServiceVerbatim.ts's applyVerbatimFanout short-circuits
+                // its ENTIRE body — including the alias tombstone/record
+                // block — on `skipEmbed`. So declaring `questions` on
+                // BulkIngestNodeArgs and letting the `{...node}` spread carry
+                // it into nodeServiceUpsert() above is NOT enough by itself;
+                // the alias fan-out has to run as its own explicit step here,
+                // exactly like POST /api/nodes/bulk's own bulk pipeline does
+                // (core/bulkQuestionAliases.ts) — same primitives, same
+                // semantics, same durability, just a different write shape.
+                try {
+                    await applyBulkQuestionAliases({
+                        outboxStore: deps.outboxStore, workspace: node.workspace,
+                        initiator: 'lib:bulkIngest', logPrefix: '[Lore bulkIngest]',
+                        node: {
+                            id: node.id,
+                            type: String(node.nodeData.type ?? ''),
+                            project: String(node.nodeData.project ?? node.workspace),
+                            ecosystem: String(node.nodeData.ecosystem ?? node.ecosystem),
+                        },
+                        questions: node.questions,
+                    });
+                } catch (aliasErr) {
+                    // Best-effort, same posture as tombstoneQuestionAliases/
+                    // recordQuestionAliases' own internal catches — never
+                    // fails an already-successful graph write.
+                    console.error(`[Lore bulkIngest] question-alias fan-out failed for ${node.id} (non-fatal): ${(aliasErr as Error).message}`);
+                }
             } else {
                 resultSlots[slotOf(i)] = {
                     ok: false, id: node.id,
@@ -472,7 +617,17 @@ export async function runBulkIngest(
     }
 
     if (embed === 'precomputed') {
-        return writePrecomputedVectors(toEmbed, resultSlots, deps, finish);
+        return writePrecomputedVectors(toEmbed, resultSlots, deps, finish, writePrebuiltRowsPerWorkspace);
+    }
+
+    // 3.21 step 3(c) — NullEmbeddingProvider: no vector write attempted, and
+    // never errors. The graph write already landed (Step 0/earlier); every
+    // `toEmbed` slot is already `{ok:true}` from that step, so skipping the
+    // embed call here (rather than calling embedDocumentBatch and letting it
+    // throw into the catch below, which would mark every node FAILED) is
+    // what "degrades to no-vector, never errors" means for bulk ingest.
+    if (isEmbeddingDisabled(deps.embeddingProvider)) {
+        return finish();
     }
 
     // sync mode: one embedDocumentBatch call → bulkAddPrebuiltRows.
@@ -579,67 +734,12 @@ export async function runBulkIngest(
         },
     })), resultSlots);
 
-    return finish();
-}
-
-async function writePrecomputedVectors(
-    toEmbed: Array<{ node: BulkIngestNodeArgs; idx: number }>,
-    resultSlots: BulkIngestResult['results'],
-    deps: BulkIngestDeps,
-    finish: () => BulkIngestResult,
-): Promise<BulkIngestResult> {
-    const expectedDim = deps.embeddingProvider.dimension;
-
-    // Validate per-node: embedding present + correct dimension.
-    const valid: Array<{ node: BulkIngestNodeArgs; idx: number; vector: number[] }> = [];
-    for (const { node, idx } of toEmbed) {
-        if (!node.embedding || node.embedding.length === 0) {
-            resultSlots[idx] = {
-                ok: false, id: node.id,
-                error: `embed:'precomputed' requires node.embedding — missing on node '${node.id}'`,
-            };
-            continue;
-        }
-        if (node.embedding.length !== expectedDim) {
-            resultSlots[idx] = {
-                ok: false, id: node.id,
-                error: `embedding dimension mismatch: got ${node.embedding.length}, model expects ${expectedDim}`,
-            };
-            continue;
-        }
-        valid.push({ node, idx, vector: node.embedding });
+    // r9 follow-up (Opus review) — question-alias rows must follow the SAME
+    // embed mode as the main verbatim row above. Full rationale + the
+    // confirmed C4/C6 connection in bulkIngestAliasSync.ts's header.
+    if (!aborted()) {
+        await embedAndWriteAliasRowsInline(deps, toEmbed, resultSlots, writePrebuiltRowsPerWorkspace);
     }
-
-    if (valid.length === 0) return finish();
-
-    const texts = valid.map(({ node }) => buildVerbatimText(
-        String(node.nodeData.label ?? ''),
-        String(node.nodeData.content ?? ''),
-        tagsToArray(node.nodeData.tags as string | string[] | undefined),
-    ));
-
-    // R4 #4 — route each precomputed vector to ITS workspace's LanceDB (not
-    // the boot/active store), grouped per workspace; same-id duplicates were
-    // collapsed keep-last in Step 0 (C3 3.4). (Cloud has no resolver;
-    // bulkUpsertPrebuiltRows requires a local VerbatimStore — the helper's
-    // per-row store() fallback ignores the precomputed vector, matching the
-    // prior cloud behavior where the Dataplane re-embeds server-side.)
-    await writePrebuiltRowsPerWorkspace(deps, valid.map(({ node, vector, idx }, i) => ({
-        node, idx,
-        row: {
-            vector,
-            id: `lore:${node.id}`,
-            text: texts[i]!,
-            type: String(node.nodeData.type ?? ''),
-            label: String(node.nodeData.label ?? ''),
-            tags: tagsToString(node.nodeData.tags as string | string[] | undefined),
-            project: String(node.nodeData.project ?? node.ecosystem),
-            ecosystem: node.ecosystem,
-            updatedAt: new Date().toISOString(),
-            security_scopes: (node.nodeData['security_scopes'] as string[] | undefined) ?? [],
-            contentHash: computeContentHash(texts[i]!),
-        },
-    })), resultSlots);
 
     return finish();
 }

@@ -86,7 +86,26 @@ export function registerLifecycleTools(server: McpServer, deps: LifecycleDeps): 
                 // SP-01 — enforce bound-principal workspace scope (write).
                 const scopeDenied = assertMcpScope(workspace, 'write');
                 if (scopeDenied) return scopeDenied;
-                const wsFile = loadWorkspaces();
+                // Finding 3 (post-review, 3.20.2) — a bare `loadWorkspaces()`
+                // defaults to the process-wide `loreHome()`, not this
+                // instance's own home. For an embedded host with its own
+                // registry (`deps.graphRegistry`, scoped via
+                // `LocalGraphRegistry.homeDir()` to `deps.dataHome`), that
+                // could both bootstrap a stray workspaces.json in a foreign
+                // home AND — the concrete failure the review flagged —
+                // authorize `hard_delete` below against the WRONG registry's
+                // `allowHardDelete` flag while `resolveTargetGraph` further
+                // down operates on the correct instance's actual graph data.
+                // Same defensive, duck-typed read diagnostic.ts/
+                // recallCrossWorkspace.ts already use; `deps.graphRegistry`
+                // is optional here (unlike those two call sites, which are
+                // inside an `if (deps.graphRegistry)` block), so guard for it
+                // being absent too — falls back to `loadWorkspaces()`'s own
+                // `loreHome()` default there, exactly as before.
+                const registryHome = deps.graphRegistry && typeof (deps.graphRegistry as { homeDir?: () => string }).homeDir === 'function'
+                    ? (deps.graphRegistry as unknown as { homeDir: () => string }).homeDir()
+                    : undefined;
+                const wsFile = loadWorkspaces(registryHome);
                 const wsEntry = wsFile.workspaces.find((w) => w.name === workspace);
                 if (!wsEntry) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'workspace_not_found', workspace }, null, 2) }], isError: true };

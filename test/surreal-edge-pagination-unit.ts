@@ -25,7 +25,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
+import { createTestGraphEngine } from './helpers/testGraphEngine.js';
 import type { LoreNode } from '../packages/lore/src/providers/types.js';
 
 let passed = 0;
@@ -54,7 +54,7 @@ const PAGE = 25;
 const RELATIONS = ['refers_to', 'calls', 'imports'];
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-p7-edgepage-'));
-const g = new SurrealGraph(dir, { cacheDisabled: true });
+const g = createTestGraphEngine(dir, { cacheDisabled: true });
 await g.initialize();
 
 for (let i = 0; i < NODES; i++) await g.upsertNode(node(`n${String(i).padStart(4, '0')}`));

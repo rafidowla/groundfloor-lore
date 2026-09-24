@@ -53,6 +53,13 @@ export interface LanceMaintainerPort {
         name: string,
         opts: { compact: boolean; cleanupOlderThanMs?: number; now: number },
     ): Promise<LanceTableResult>;
+    /**
+     * Defect 3 (3.20.2) — the directory this port instance actually targets.
+     * Optional (not on every existing fake) so `runMaintenance` reports
+     * `lancedbDir` only when the wired port can name one; every real
+     * implementation (LanceMaintainer) provides it.
+     */
+    dir?(): string;
 }
 
 /** Node retention port — backed by the graph store. */

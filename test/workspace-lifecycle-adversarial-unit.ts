@@ -32,6 +32,7 @@ import * as path from 'node:path';
 
 import { backupWorkspace } from '../packages/lore/src/engines/backup.js';
 import { restoreWorkspace } from '../packages/lore/src/engines/restore.js';
+import { fileURLToPath } from 'node:url';
 
 /** Recursively list every regular file under `root`. Returns absolute paths. */
 function listFilesRecursive(root: string): string[] {
@@ -49,7 +50,7 @@ function listFilesRecursive(root: string): string[] {
 
 const DAEMON_URL = process.env.LORE_AUDIT_DAEMON_URL ?? 'http://127.0.0.1:3847';
 const TOKEN_PATH = process.env.LORE_AUDIT_TOKEN_PATH
-    ?? '/Users/rdowla/Downloads/AiDev/BitBucket/lore/lore-local-data/auth.token';
+    ?? fileURLToPath(new URL('../../lore-local-data/auth.token', import.meta.url));
 
 let TOKEN = '';
 try { TOKEN = fs.readFileSync(TOKEN_PATH, 'utf8').trim(); }

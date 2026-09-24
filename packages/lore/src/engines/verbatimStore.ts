@@ -4,12 +4,14 @@ import * as fs from 'fs';
 import { buildVerbatimSchema } from './verbatimSchema.js';
 import * as path from 'path';
 
-import type { EmbeddingProvider, VectorProvider, VerbatimDocument, VerbatimSearchResult } from '../providers/types.js';
+import type { EmbeddingProvider, VectorProvider, VerbatimDocument, VerbatimSearchResult, VerbatimQueryFilter } from '../providers/types.js';
 import { LocalEmbeddingProvider } from '../providers/localEmbeddingProvider.js';
-import { checkCompatibility, readFingerprint, writeFingerprint } from './embeddingFingerprint.js';
+import { isEmbeddingDisabled } from '../providers/nullEmbeddingProvider.js';
+import { applyFingerprintOnOpen, stampFingerprint, EmbeddingFingerprintMismatchError } from './verbatimFingerprintGate.js';
 import { applyActorScopeFilter } from '../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../security/actorContext.js';
 import { LanceTablePool, resolveLancePoolSize } from './lanceTablePool.js';
+import { VerbatimWriteGate, closeVerbatimNatives, nativeCloseEnabled } from './verbatimWriteGate.js';
 import { resolvePoolMaxWaiters, resolvePoolAcquireTimeoutMs } from './poolLimits.js';
 import { log } from '../logger.js';
 import { timeRecallStage } from '../recall/recallStageTiming.js';
@@ -24,6 +26,7 @@ import type { VerbatimBatchCtx } from './verbatimBatch.js';
 import { VERBATIM_CHUNK_SIZE, suppliedVector } from './verbatimBatch.js';
 import { embedBatchCap, awaitEmbedMemoryHeadroom } from '../embed/memoryBudget.js';
 import { SearchGate } from './searchGate.js';
+import { SearchWorkerDeadlineError } from './verbatimWorkerProtocol.js';
 import {
     hasInterruptedBuild,
     clearAllBuildMarkers,
@@ -38,7 +41,41 @@ import { detectDesiredTokenizer, reconcileFtsTokenizer } from './verbatimFtsReco
 import type { FtsReconcileCtx } from './verbatimFtsReconcile.js';
 import { makeBm25Envelope } from './verbatimBm25Result.js';
 import type { VerbatimFtsRow, Bm25Envelope } from './verbatimBm25Result.js';
+import { assertWritableRole, shouldOpenWriteTable, shouldBuildReadPool, canSearchWithoutTable, shouldLogWriteRoleFallback, WRITE_ROLE_FALLBACK_LOG_MESSAGE, countHandles, type VerbatimStoreRole } from './verbatimStoreRole.js';
 export type { VerbatimDocument, VerbatimSearchResult };
+
+/** Optional per-call cancellation/deadline for search/searchByVector/
+ *  bm25Search (fix/search-worker-call-cancellation, 3.20.2, req. 3) — both
+ *  fields and the parameter itself optional, so existing callers are
+ *  unaffected. `deadline`: epoch-ms past which the call must not be admitted
+ *  through the search gate. `signal`: cancels this caller's own queued wait. */
+export interface VerbatimGateOptions {
+    signal?: AbortSignal;
+    deadline?: number;
+}
+
+/** One in-flight, possibly-shared native call behind cachedRead()'s single-
+ *  flight dedup (fix/search-worker-call-cancellation, 3.20.2, review finding
+ *  1). `controller` gates the SHARED native work — it is aborted only once
+ *  every joined caller has individually given up (`refCount` reaches 0), so
+ *  one caller's own signal/deadline can never cancel work another, still-
+ *  waiting caller is relying on. See cachedRead()'s doc for the full design. */
+interface SearchFlight<T> {
+    controller: AbortController;
+    refCount: number;
+    promise: Promise<T>;
+}
+
+/** Convert an aborted AbortSignal into a rejection-worthy Error, preserving
+ *  the original reason when it already is one (matches the pattern used by
+ *  searchGate.ts's and inProcessRecall.ts's own toAbortError()). */
+function toGateAbortError(signal: AbortSignal): Error {
+    const reason = (signal as { reason?: unknown }).reason;
+    if (reason instanceof Error) return reason;
+    const err = new Error(reason !== undefined ? String(reason) : 'aborted');
+    err.name = 'AbortError';
+    return err;
+}
 
 export class VerbatimStoreError extends Error {
     public operation: string;
@@ -53,6 +90,8 @@ export class VerbatimStore implements VectorProvider {
     private initialized: boolean = false;
     private db: lancedb.Connection | null = null;
     private table: lancedb.Table | null = null;
+    private nativesClosed: boolean = false; // idempotent-close guard
+    private readonly writeGate = new VerbatimWriteGate(); // gates direct table/db touches
     /**
      * Read-side pool of N additional Table handles on the same on-disk
      * `lore_verbatim` table. Built lazily on first search() (or eagerly
@@ -99,7 +138,7 @@ export class VerbatimStore implements VectorProvider {
     // includes a `kind` discriminator ('verbatim-search' vs
     // 'verbatim-bm25'), so semantic + bm25 paths can share one map
     // without ever colliding on the same key.
-    private readonly searchInFlight = new Map<string, Promise<VerbatimSearchResult[]>>();
+    private readonly searchFlights = new Map<string, SearchFlight<unknown>>();
     private searchCacheEpoch = 0;
     /** hc-verbatim-search-cache-hardcoded (NW-7c) — env override: LORE_SEARCH_CACHE_TTL_MS (default 1500 ms). */
     private static readonly SEARCH_CACHE_TTL_MS: number = (() => {
@@ -115,8 +154,17 @@ export class VerbatimStore implements VectorProvider {
     /** Cached basePath so initialize() can read/write the fingerprint sidecar. */
     private readonly basePath: string;
 
-    constructor(basePath: string, embeddingProvider?: EmbeddingProvider) {
-        this.basePath = basePath;
+    private readonly role: VerbatimStoreRole; // defaults to 'both' — see verbatimStoreRole.ts
+    /** `strictFingerprintCheck` (default false): refuse, rather than warn on, a fingerprint
+     *  mismatch at open — set only for host-injected providers; see verbatimFingerprintGate.ts. */
+    private readonly strictFingerprintCheck: boolean;
+    /** Test-only: how many times each gated method reached native execution
+     *  (after its deadline check + gate permit). null/zero-cost unless
+     *  LORE_TEST_WORKER_HOOKS=1. See checkGateAborted. */
+    private readonly testCounters: Record<string, number> | null =
+        process.env.LORE_TEST_WORKER_HOOKS === '1' ? Object.create(null) : null;
+    constructor(basePath: string, embeddingProvider?: EmbeddingProvider, opts?: { role?: VerbatimStoreRole; strictFingerprintCheck?: boolean }) {
+        this.basePath = basePath; this.role = opts?.role ?? 'both'; this.strictFingerprintCheck = opts?.strictFingerprintCheck ?? false;
         this.lancedbPath = path.join(basePath, '.lore', 'lancedb');
         fs.mkdirSync(this.lancedbPath, { recursive: true });
         // Default to the local Xenova provider when none is injected.
@@ -166,31 +214,168 @@ export class VerbatimStore implements VectorProvider {
      *    `bumpSearchEpoch()` invalidates BOTH search and bm25 entries
      *    in O(1) — matches the existing semantic-path semantics.
      *  - TTL is the existing SEARCH_CACHE_TTL_MS knob (unchanged).
+     *
+     * fix/search-worker-call-cancellation (3.20.2 review, finding 1 — BLOCKING):
+     * the original version baked the FIRST caller's own `gate` (signal/deadline)
+     * into the loader closure, so when that caller's timeout/abort fired it
+     * rejected the ONE shared promise every joined caller was awaiting —
+     * contradicting SearchGate's own "a signal never affects any other waiter"
+     * contract the moment two identical queries were in flight together.
+     * Reproduced 3 ways (see test/verbatim-search-flight-cancellation-unit.ts).
+     *
+     * Fix: reference-counted per-flight cancellation. Each caller now races
+     * its OWN combined abort condition (its `gate.signal` plus a timer derived
+     * from its `gate.deadline`) against the SHARED flight, in a wrapper promise
+     * scoped to that caller alone — an abort there only rejects THAT caller's
+     * wrapper, never the flight. The flight's own `AbortController` (passed to
+     * `loader` and from there into searchGate.read()'s `{signal}`, so an
+     * abandoned call is genuinely spliced out of the FIFO queue, not merely
+     * orphaned while still occupying a slot) is aborted only when `refCount`
+     * drops to 0 — i.e. every joined caller has individually given up. This
+     * also closes finding 4 (in-process deployments got no queue removal from
+     * a deadline alone): a sole caller's own deadline firing settles its
+     * wrapper, which releases its ref, which (refCount 1 -> 0) aborts the
+     * flight — no worker-side deadlineTimer required for that to happen.
      */
     private async cachedRead<T>(
         kind: string,
         params: Record<string, unknown>,
-        loader: () => Promise<T>,
+        loader: (signal: AbortSignal) => Promise<T>,
+        gate?: VerbatimGateOptions,
     ): Promise<T> {
         const key = cacheKey(kind, 'default', this.searchCacheEpoch, params);
         const cached = this.searchCache.get<T>(key);
         if (cached !== undefined) return cached;
-        const inFlight = this.searchInFlight.get(key) as Promise<T> | undefined;
-        if (inFlight) return inFlight;
-        const promise = (async (): Promise<T> => {
-            try {
-                const result = await loader();
-                this.searchCache.set(key, result as unknown as VerbatimSearchResult[], VerbatimStore.SEARCH_CACHE_TTL_MS);
-                return result;
-            } finally {
-                this.searchInFlight.delete(key);
+
+        const own = this.buildOwnAbort(gate, kind);
+        if (own?.signal.aborted) {
+            own.cleanup();
+            throw toGateAbortError(own.signal);
+        }
+
+        let flight = this.searchFlights.get(key) as SearchFlight<T> | undefined;
+        if (!flight) {
+            const controller = new AbortController();
+            const promise = (async (): Promise<T> => {
+                try {
+                    const result = await loader(controller.signal);
+                    this.searchCache.set(key, result as unknown as VerbatimSearchResult[], VerbatimStore.SEARCH_CACHE_TTL_MS);
+                    return result;
+                } finally {
+                    this.searchFlights.delete(key);
+                }
+            })();
+            flight = { controller, refCount: 0, promise };
+            this.searchFlights.set(key, flight as unknown as SearchFlight<unknown>);
+        }
+        const activeFlight = flight;
+        activeFlight.refCount++;
+        let releasedRef = false;
+        const releaseRef = () => {
+            if (releasedRef) return;
+            releasedRef = true;
+            activeFlight.refCount--;
+            // Cancel the SHARED native work only once nobody is left waiting on
+            // it — never on any single caller's own abort (finding 1).
+            if (activeFlight.refCount <= 0) {
+                activeFlight.controller.abort(new Error(`${kind}: every joined caller gave up waiting`));
             }
-        })();
-        // The in-flight map stores VerbatimSearchResult[] promises for
-        // both kinds — they have the same result shape. The cast is
-        // local to this helper.
-        this.searchInFlight.set(key, promise as unknown as Promise<VerbatimSearchResult[]>);
-        return await promise;
+        };
+
+        // No signal/deadline at all (the common case) — skip the wrapper
+        // Promise/AbortController entirely and await the shared flight
+        // directly; concurrent identical callers still resolve to the exact
+        // same value (verbatim-search-cache-unit.ts's single-flight test).
+        if (!own) {
+            try {
+                return await activeFlight.promise;
+            } finally {
+                releaseRef();
+            }
+        }
+
+        const ownSignal = own.signal;
+        try {
+            return await new Promise<T>((resolve, reject) => {
+                let settled = false;
+                const onAbort = () => {
+                    if (settled) return;
+                    settled = true;
+                    reject(toGateAbortError(ownSignal));
+                };
+                ownSignal.addEventListener('abort', onAbort, { once: true });
+                activeFlight.promise.then(
+                    (v) => { if (settled) return; settled = true; ownSignal.removeEventListener('abort', onAbort); resolve(v); },
+                    (e) => { if (settled) return; settled = true; ownSignal.removeEventListener('abort', onAbort); reject(e as Error); },
+                );
+            });
+        } finally {
+            own.cleanup();
+            releaseRef();
+        }
+    }
+
+    /** Build THIS caller's own combined abort condition from its `gate`
+     *  (fix/search-worker-call-cancellation, 3.20.2 review, findings 1 + 4) —
+     *  never wired into the shared flight's controller directly. Returns
+     *  `undefined` when the caller passed neither a signal nor a deadline (no
+     *  AbortController allocated in the common ungated case). A `deadline`
+     *  converts to its own local timer (using SearchWorkerDeadlineError, not
+     *  a generic AbortSignal.timeout(), so the message/name stay consistent
+     *  regardless of whether this timer or an upstream one — e.g. the search
+     *  worker child's own deadlineTimer — fires first). */
+    private buildOwnAbort(gate: VerbatimGateOptions | undefined, label: string): { signal: AbortSignal; cleanup: () => void } | undefined {
+        if (!gate || (gate.signal === undefined && gate.deadline === undefined)) return undefined;
+        const controller = new AbortController();
+        const cleanups: Array<() => void> = [];
+        if (gate.signal) {
+            const sig = gate.signal;
+            if (sig.aborted) {
+                controller.abort((sig as { reason?: unknown }).reason);
+            } else {
+                const onAbort = () => controller.abort((sig as { reason?: unknown }).reason);
+                sig.addEventListener('abort', onAbort, { once: true });
+                cleanups.push(() => sig.removeEventListener('abort', onAbort));
+            }
+        }
+        if (gate.deadline !== undefined && !controller.signal.aborted) {
+            const ms = Math.max(0, gate.deadline - Date.now());
+            const timer = setTimeout(
+                () => controller.abort(new SearchWorkerDeadlineError(`search worker deadline exceeded before ${label} could run`)),
+                ms,
+            );
+            cleanups.push(() => clearTimeout(timer));
+        }
+        return { signal: controller.signal, cleanup: () => { for (const c of cleanups) c(); } };
+    }
+
+    /** Defense-in-depth: bail out of native execution if the SHARED flight's
+     *  signal (see cachedRead()) is already aborted by the time a searchGate
+     *  permit is granted — the narrow race where every joined caller gave up
+     *  right as the permit came through. Bumps the test-only per-method
+     *  counter in the SAME step, AFTER the check, so __testCounters() can
+     *  prove a call that lost this race never reached native execution. */
+    private checkGateAborted(signal: AbortSignal, method: string): void {
+        if (signal.aborted) {
+            const reason = (signal as { reason?: unknown }).reason;
+            throw reason instanceof Error ? reason : new SearchWorkerDeadlineError(`search worker deadline exceeded before ${method} could run`);
+        }
+        if (this.testCounters) this.testCounters[method] = (this.testCounters[method] ?? 0) + 1;
+    }
+
+    /** Test-only: snapshot of per-method native-execution counts. */
+    __testCounters(): Record<string, number> {
+        return this.testCounters ? { ...this.testCounters } : {};
+    }
+
+    /** Test-only: hold the EXCLUSIVE search-gate permit for `ms`, simulating a
+     *  slow FTS build so tests can exercise queued-call deadline/cancellation
+     *  deterministically. */
+    async __testHold(ms: number): Promise<{ ok: true }> {
+        await this.searchGate.exclusive(async () => {
+            await new Promise((resolve) => setTimeout(resolve, ms));
+        });
+        return { ok: true };
     }
 
     /**
@@ -224,52 +409,17 @@ export class VerbatimStore implements VectorProvider {
             // Warm the embedder so the first store()/search() doesn't
             // pay the model-load latency on the request path.
             await this.embeddingProvider.initialize();
-            this.db = await lancedb.connect(this.lancedbPath);
+            this.db = await lancedb.connect(this.lancedbPath); this.nativesClosed = false; // reconnect => close() runs again
             try {
-                this.table = await this.db.openTable('lore_verbatim');
+                this.table = shouldOpenWriteTable(this.role) ? await this.db.openTable('lore_verbatim') : null; // role:'read' skips this open
             } catch (e) {
                 // Table doesn't exist yet; it will be created on first store()
                 this.table = null;
             }
-            // Embedding-model fingerprint check (slice 7 follow-up).
-            // Two cases:
-            //   1. Table exists + no fingerprint on disk → legacy store
-            //      (pre-fingerprint MiniLM/384). Stamp it now so the
-            //      next config change can detect a mismatch. We assume
-            //      the configured provider is what the legacy operator
-            //      used, which holds for the default install.
-            //   2. Table exists + fingerprint exists → check it matches
-            //      the configured provider. On mismatch, log a clear
-            //      action item and continue (warn-only): refusing to
-            //      start the daemon over a config drift would be worse
-            //      UX than degraded retrieval until the operator runs
-            //      `lore migrate embedding-model`.
-            //   3. Table missing → defer the fingerprint write until
-            //      first store(); we don't know yet that this install
-            //      will actually use embeddings (some operators run
-            //      core-only).
-            const expected = {
-                modelId: this.embeddingProvider.modelId,
-                dimension: this.embeddingProvider.dimension,
-            };
-            const onDisk = readFingerprint(this.basePath);
-            if (this.table && onDisk == null) {
-                // Stamp legacy store with what the runtime provider thinks.
-                try {
-                    writeFingerprint(this.basePath, expected);
-                } catch (err) {
-                    // Best-effort; missing fingerprint is non-fatal.
-                    log.error(`[VerbatimStore] could not stamp legacy fingerprint: ${(err as Error).message}`);
-                }
-            } else if (this.table && onDisk != null) {
-                const compat = checkCompatibility(this.basePath, expected);
-                if (!compat.matches) {
-                    // Multi-line warn — mismatch is structurally important.
-                    for (const line of compat.message.split('\n')) {
-                        log.error(`[VerbatimStore] ${line}`);
-                    }
-                }
-            }
+            // Embedding-model fingerprint check at open: legacy stamp, then
+            // warn-only (default) or refuse (strict / injected provider) on a
+            // mismatch — policy + rationale in verbatimFingerprintGate.ts.
+            applyFingerprintOnOpen(this.basePath, this.table != null, this.embeddingProvider, this.strictFingerprintCheck);
             this.initialized = true;
 
             // CRASH-SAFE INDEX HEAL (2026-07-01). A build marker that survived
@@ -352,11 +502,8 @@ export class VerbatimStore implements VectorProvider {
                 });
             }
 
-            // Eagerly build the read pool if the table already exists.
-            // First-install installs won't have a table yet — the pool
-            // builds lazily on first search() once the table is
-            // created by a store() call.
-            if (this.table) {
+            // Eagerly build the read pool per shouldBuildReadPool (role:'read' unconditionally; else once a table exists).
+            if (shouldBuildReadPool(this.role, !!this.table)) {
                 await this.ensureReadPool().catch((err) => {
                     // Non-fatal: search will fall back to the single
                     // handle. Log so operators see when the pool fails
@@ -366,6 +513,7 @@ export class VerbatimStore implements VectorProvider {
                 });
             }
         } catch (error: any) {
+            if (error instanceof EmbeddingFingerprintMismatchError) throw error; // typed strict refusal — don't rewrap
             throw new VerbatimStoreError('initialize', error.message);
         }
     }
@@ -378,7 +526,7 @@ export class VerbatimStore implements VectorProvider {
      * handles the empty-table case).
      */
     private async ensureReadPool(): Promise<LanceTablePool | null> {
-        if (!this.db || !this.table) return null;
+        if (!this.db || !shouldBuildReadPool(this.role, !!this.table)) return null;
         if (this.readPool) return this.readPool;
         if (this.readPoolInit) return this.readPoolInit;
         const initStart = (async (): Promise<LanceTablePool | null> => {
@@ -408,6 +556,7 @@ export class VerbatimStore implements VectorProvider {
     /** SP-11 observability hook — current bounded-hashCache size. */
     hashCacheSize(): number { return this.hashCache.size; }
 
+    handleCount(): number { return countHandles(!!this.db, !!this.table, this.readPool?.size ?? 0); } // live handle count
     /**
      * Verbatim is the institutional memory — it is never destructively
      * deleted. When a canonical id is overwritten, the previous row is
@@ -440,7 +589,7 @@ export class VerbatimStore implements VectorProvider {
      * wired in mcp/server.ts. NOT a hot-path API — bulk loads only.
      */
     async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
-        return verbatimBatch.bulkAddPrebuiltRows(this.batchCtx, rows);
+        assertWritableRole(this.role, 'bulkAddPrebuiltRows'); return this.writeGate.run(() => verbatimBatch.bulkAddPrebuiltRows(this.batchCtx, rows));
     }
 
     /**
@@ -458,11 +607,11 @@ export class VerbatimStore implements VectorProvider {
      * large batch does not build an unbounded predicate / payload.
      */
     async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
-        return verbatimBatch.bulkUpsertPrebuiltRows(this.batchCtx, rows);
+        assertWritableRole(this.role, 'bulkUpsertPrebuiltRows'); return this.writeGate.run(() => verbatimBatch.bulkUpsertPrebuiltRows(this.batchCtx, rows));
     }
 
     async ensureVectorIndex(opts: { minRows?: number } = {}): Promise<boolean> {
-        return verbatimBatch.ensureVectorIndex(this.batchCtx, opts);
+        return this.writeGate.run(() => verbatimBatch.ensureVectorIndex(this.batchCtx, opts));
     }
 
     /**
@@ -485,24 +634,43 @@ export class VerbatimStore implements VectorProvider {
      * or a test) supply a precomputed choice; omitted, it auto-detects.
      */
     async ensureFtsIndex(opts: { minRows?: number; tokenizer?: FtsTokenizerSettings } = {}): Promise<boolean> {
-        // Build under the EXCLUSIVE gate: it drains in-flight searches and blocks
-        // new ones for the (one-time, short) build, so the index build never
-        // overlaps live reads on the same LanceDB table — the concurrent
-        // read-while-rebuild condition that hard-crashed the process. The build
-        // is fired fire-and-forget from bm25Search's fallback path; the exclusive
-        // acquire simply waits for that triggering read to release first.
-        return this.searchGate.exclusive(async () => {
-            const tokenizer = opts.tokenizer ?? await detectDesiredTokenizer(this.ftsReconcileCtx);
-            const built = await verbatimBatch.ensureFtsIndex(this.batchCtx, { minRows: opts.minRows, tokenizer });
-            if (built) {
-                try {
-                    writeTokenizerFingerprintFile(this.basePath, tokenizer);
-                } catch (err) {
-                    log.error(`[VerbatimStore] could not write FTS tokenizer fingerprint (non-fatal): ${(err as Error).message}`);
-                }
+        // fix/search-worker-call-cancellation (3.20.2, defect 1, req. 5): every
+        // storeBatch calls this unconditionally, and exclusive() drains every
+        // in-flight read even when nothing needs building. Check the cheap
+        // predicate FIRST, outside the gate; only enter exclusive() when a
+        // build might actually be needed. Skipped when opts.tokenizer forces a
+        // rebuild. ONE writeGate.enter()/exit() spans both phases (not two
+        // run() calls) so a concurrent close()/drain() never sees in-flight
+        // hit zero mid-method.
+        this.writeGate.enter();
+        try {
+            if (!opts.tokenizer) {
+                const alreadyPresent = await verbatimBatch.ftsIndexPresent(this.batchCtx);
+                if (alreadyPresent) return false;
             }
-            return built;
-        });
+            // Build under the EXCLUSIVE gate: it drains in-flight searches and blocks
+            // new ones for the (one-time, short) build, so the index build never
+            // overlaps live reads on the same LanceDB table — the concurrent
+            // read-while-rebuild condition that hard-crashed the process. The build
+            // is fired fire-and-forget from bm25Search's fallback path; the exclusive
+            // acquire simply waits for that triggering read to release first. (The
+            // presence check re-runs inside verbatimBatch.ensureFtsIndex, so a lost
+            // race here never causes a duplicate or missed build.)
+            return await this.searchGate.exclusive(async () => {
+                const tokenizer = opts.tokenizer ?? await detectDesiredTokenizer(this.ftsReconcileCtx);
+                const built = await verbatimBatch.ensureFtsIndex(this.batchCtx, { minRows: opts.minRows, tokenizer });
+                if (built) {
+                    try {
+                        writeTokenizerFingerprintFile(this.basePath, tokenizer);
+                    } catch (err) {
+                        log.error(`[VerbatimStore] could not write FTS tokenizer fingerprint (non-fatal): ${(err as Error).message}`);
+                    }
+                }
+                return built;
+            });
+        } finally {
+            this.writeGate.exit();
+        }
     }
 
     /** Mutable surface engines/verbatimFtsReconcile.ts needs from this
@@ -668,6 +836,7 @@ export class VerbatimStore implements VectorProvider {
     /** SW-20 (E11): one-shot guard so the no-FTS LIKE-scan warning logs once. */
     private ftsFallbackWarned = false;
 
+    private writeRoleFallbackLogged = false; // one-shot guard for the role:'write' search fallback log
     // Admission control for the native search engine. Bounds concurrent reads
     // (a burst of searches becomes an orderly line, not a native-layer stampede),
     // and the FTS index BUILD runs exclusively so it never overlaps live reads —
@@ -703,7 +872,15 @@ export class VerbatimStore implements VectorProvider {
     }
 
     async store(doc: VerbatimDocument): Promise<void> {
-        try {
+        // 3.21 step 3(c) — NullEmbeddingProvider: no vector write attempted.
+        // The caller's graph node + text already landed via the graph
+        // substrate; this is a clean no-op (never throws) so node writes
+        // always succeed with embeddings off, instead of throwing
+        // EmbeddingDisabledError from embedDocument() below and forcing
+        // every write path to catch it.
+        if (isEmbeddingDisabled(this.embeddingProvider)) return;
+        assertWritableRole(this.role, 'store'); // must not be rewrapped below
+        this.writeGate.enter(); try {
             if (!this.initialized || !this.db) {
                 throw new Error('Store not initialized');
             }
@@ -800,18 +977,8 @@ export class VerbatimStore implements VectorProvider {
             if (!this.table) {
                 log.info('[VerbatimStore] Creating new table with explicit schema...');
                 createdTable = (await verbatimBatch.ensureVerbatimTable(this.batchCtx)).created;
-                if (createdTable) {
-                    // Stamp the fingerprint at table-birth so subsequent
-                    // daemon starts can detect a model-config drift.
-                    try {
-                        writeFingerprint(this.basePath, {
-                            modelId: this.embeddingProvider.modelId,
-                            dimension: this.embeddingProvider.dimension,
-                        });
-                    } catch (err) {
-                        log.error(`[VerbatimStore] could not write fingerprint on table create: ${(err as Error).message}`);
-                    }
-                }
+                // Stamp the fingerprint at table-birth so later opens can detect a model-config drift.
+                if (createdTable) stampFingerprint(this.basePath, this.embeddingProvider, 'table create');
             }
             const table = this.table!; // set: either pre-existing or just ensured above
             if (createdTable) {
@@ -835,7 +1002,7 @@ export class VerbatimStore implements VectorProvider {
             this.bumpSearchEpoch();
         } catch (error: any) {
             throw new VerbatimStoreError('store', error.message);
-        }
+        } finally { this.writeGate.exit(); }
     }
 
     /**
@@ -854,10 +1021,15 @@ export class VerbatimStore implements VectorProvider {
      * model 32 fits in <1MB working memory.
      */
     async storeBatch(docs: VerbatimDocument[]): Promise<void> {
-        if (!this.initialized || !this.db) {
-            throw new Error('Store not initialized');
-        }
+        // 3.21 step 3(c) — see store()'s identical guard: no vector write
+        // attempted when embeddings are disabled. bulkIngest / embed.batch
+        // outbox replay / the async embed queue all funnel through here, so
+        // this ONE guard covers "bulkIngest with embed:'sync'/'async'
+        // degrades to no-vector, never errors" for every one of them.
+        if (isEmbeddingDisabled(this.embeddingProvider)) return;
+        assertWritableRole(this.role, 'storeBatch'); if (!this.initialized || !this.db) throw new Error('Store not initialized');
         if (docs.length === 0) return;
+        this.writeGate.enter(); try {
         for (const d of docs) d.text = redactSecrets(d.text); // 2.6 — screen secrets
         // C3 3.2/3.3 (2026-08-17) — collapse duplicate canonical ids WITHIN
         // this batch, keep-last. Phase 3 below is ONE delete(id IN (...)) +
@@ -1025,16 +1197,7 @@ export class VerbatimStore implements VectorProvider {
         let createdTable = false;
         if (!this.table) {
             createdTable = (await verbatimBatch.ensureVerbatimTable(this.batchCtx)).created;
-            if (createdTable) {
-                try {
-                    writeFingerprint(this.basePath, {
-                        modelId: this.embeddingProvider.modelId,
-                        dimension: this.embeddingProvider.dimension,
-                    });
-                } catch (err) {
-                    log.error(`[VerbatimStore] could not write fingerprint on table create: ${(err as Error).message}`);
-                }
-            }
+            if (createdTable) stampFingerprint(this.basePath, this.embeddingProvider, 'table create');
         }
         const table = this.table!; // set: either pre-existing or just ensured above
         if (createdTable) {
@@ -1077,18 +1240,18 @@ export class VerbatimStore implements VectorProvider {
         // Idempotent and gated the same way as ensureVectorIndex — safe to
         // call unconditionally after every bulk write.
         await this.ensureFtsIndex();
+        } finally { this.writeGate.exit(); }
     }
 
     async search(
         query: string,
         limit: number = 10,
-        filter?: Partial<VerbatimDocument['metadata']>,
+        filter?: VerbatimQueryFilter,
         opts?: { includeHistory?: boolean },
         actorScopes?: ReadonlyArray<string>,
+        gate?: VerbatimGateOptions, // optional, additive — see VerbatimGateOptions
     ): Promise<VerbatimSearchResult[]> {
-        if (!this.initialized || !this.table) {
-            return [];
-        }
+        if (!this.initialized || (!this.table && !canSearchWithoutTable(this.role))) return [];
 
         // Cache + single-flight wrap (extracted to cachedRead helper
         // in NW-4b so bm25Search can share the same machinery). Key
@@ -1122,8 +1285,13 @@ export class VerbatimStore implements VectorProvider {
             },
             // Native read runs under the admission gate (bounded concurrency).
             // Wraps the loader, so cache HITS never take a permit — only real
-            // native reads do.
-            () => this.searchGate.read(() => this._searchUncached(query, limit, filter, opts, actorScopes)),
+            // native reads do. `signal` is the SHARED flight's own controller
+            // (see cachedRead), not any individual caller's gate.signal.
+            (signal) => this.writeGate.run(() => this.searchGate.read(() => {
+                this.checkGateAborted(signal, 'search');
+                return this._searchUncached(query, limit, filter, opts, actorScopes);
+            }, { signal })),
+            gate,
         );
     }
 
@@ -1147,14 +1315,14 @@ export class VerbatimStore implements VectorProvider {
         queryVector: number[],
         opts?: {
             topK?: number;
-            filter?: Partial<VerbatimDocument['metadata']>;
+            filter?: VerbatimQueryFilter;
             includeHistory?: boolean;
             actorScopes?: ReadonlyArray<string>;
+            signal?: AbortSignal; // optional, merged into opts (see VerbatimGateOptions)
+            deadline?: number;
         },
     ): Promise<VerbatimSearchResult[]> {
-        if (!this.initialized || !this.table) {
-            return [];
-        }
+        if (!this.initialized || (!this.table && !canSearchWithoutTable(this.role))) return [];
         const limit = opts?.topK ?? 10;
         // Cache + single-flight wrap (same machinery as search()).
         const sortedScopes = opts?.actorScopes
@@ -1179,7 +1347,11 @@ export class VerbatimStore implements VectorProvider {
                 includeHistory: opts?.includeHistory ?? false,
                 scopes: sortedScopes,
             },
-            () => this.searchGate.read(() => this._runVectorSearchUncached(queryVector, limit, opts?.filter, opts?.includeHistory, opts?.actorScopes, 'searchByVector')),
+            (signal) => this.writeGate.run(() => this.searchGate.read(() => {
+                this.checkGateAborted(signal, 'searchByVector');
+                return this._runVectorSearchUncached(queryVector, limit, opts?.filter, opts?.includeHistory, opts?.actorScopes, 'searchByVector');
+            }, { signal })),
+            (opts?.signal !== undefined || opts?.deadline !== undefined) ? { signal: opts?.signal, deadline: opts?.deadline } : undefined,
         );
     }
 
@@ -1192,7 +1364,7 @@ export class VerbatimStore implements VectorProvider {
     private async _runVectorSearchUncached(
         vector: number[],
         limit: number,
-        filter: Partial<VerbatimDocument['metadata']> | undefined,
+        filter: VerbatimQueryFilter | undefined,
         includeHistory: boolean | undefined,
         actorScopes: ReadonlyArray<string> | undefined,
         operation: string,
@@ -1203,15 +1375,12 @@ export class VerbatimStore implements VectorProvider {
                 conditions.push(`id NOT LIKE '${HISTORY_ID_LIKE_PATTERN}'`);
                 conditions.push("text NOT LIKE '[TOMBSTONED%'");
             }
-            if (filter) {
-                for (const [key, value] of Object.entries(filter)) {
-                    // SECURITY (SP-05): allowlist key + escape value (see helpers).
-                    if (value && !Array.isArray(value) && verbatimHistory.VERBATIM_FILTERABLE_COLUMNS.has(key)) {
-                        conditions.push(`${key} = '${verbatimHistory.escapeSqlLiteral(String(value))}'`);
-                    }
-                }
-            }
-            const pool = await this.ensureReadPool();
+            // D2: array values (e.g. `types: string[]`) become an IN (...)
+            // pushdown condition instead of being silently dropped — see
+            // buildLanceFilterConditions's docstring for the allowlist/escape
+            // rules shared with bm25SearchUncached below.
+            conditions.push(...verbatimHistory.buildLanceFilterConditions(filter));
+            const pool = await this.ensureReadPool().catch(() => null); // role:'read' pre-first-write: can throw
             const runVectorSearch = async (tbl: lancedb.Table) => {
                 let qb = tbl.vectorSearch(vector).limit(limit);
                 if (conditions.length > 0) {
@@ -1219,6 +1388,8 @@ export class VerbatimStore implements VectorProvider {
                 }
                 return await qb.toArray();
             };
+            if (!pool && !this.table) return []; // role:'read', no table on disk yet
+            if (shouldLogWriteRoleFallback(this.role, !!pool, this.writeRoleFallbackLogged)) { this.writeRoleFallbackLogged = true; log.info(WRITE_ROLE_FALLBACK_LOG_MESSAGE); }
             const results = pool
                 ? await pool.withTable(runVectorSearch)
                 : await runVectorSearch(this.table!);
@@ -1246,7 +1417,7 @@ export class VerbatimStore implements VectorProvider {
     }
     private async _searchUncached(
         query: string, limit: number,
-        filter: Partial<VerbatimDocument['metadata']> | undefined,
+        filter: VerbatimQueryFilter | undefined,
         opts: { includeHistory?: boolean } | undefined, actorScopes: ReadonlyArray<string> | undefined,
     ): Promise<VerbatimSearchResult[]> {
         const vector = await timeRecallStage('embed', () => this.embeddingProvider.embedQuery(query));
@@ -1272,7 +1443,7 @@ export class VerbatimStore implements VectorProvider {
         updatedAt?: string;
         security_scopes?: string[];
     } | null> {
-        return verbatimHistory.getById(this.table, this.initialized, id);
+        return this.writeGate.run(() => verbatimHistory.getById(this.table, this.initialized, id));
     }
 
     /**
@@ -1291,7 +1462,7 @@ export class VerbatimStore implements VectorProvider {
      * a `getById` miss. Returns an empty Map when the table isn't built.
      */
     async getContentHashesByIds(ids: string[]): Promise<Map<string, string>> {
-        return verbatimBatch.getContentHashesByIds(this.batchCtx, ids);
+        return this.writeGate.run(() => verbatimBatch.getContentHashesByIds(this.batchCtx, ids));
     }
 
     /**
@@ -1308,8 +1479,8 @@ export class VerbatimStore implements VectorProvider {
      * Returns [] if the table isn't initialized (caller treats as "no
      * records" — safe).
      */
-    async listIds(prefix?: string, opts?: { project?: string }): Promise<string[]> {
-        return verbatimHistory.listIds(this.table, this.initialized, prefix, opts);
+    async listIds(prefix?: string, opts?: { project?: string; includeHistory?: boolean }): Promise<string[]> {
+        return this.writeGate.run(() => verbatimHistory.listIds(this.table, this.initialized, prefix, opts));
     }
 
     /** Slice-4 EXPORT read path — every canonical verbatim row with its RAW
@@ -1323,11 +1494,11 @@ export class VerbatimStore implements VectorProvider {
         rows: verbatimHistory.VerbatimExportRow[];
     }> {
         await this.initialize();
-        return {
+        return this.writeGate.run(async () => ({
             modelId: this.embeddingProvider.modelId,
             dim: this.embeddingProvider.dimension,
             rows: await verbatimHistory.listRowsWithVectors(this.table, this.initialized, opts),
-        };
+        }));
     }
 
     /**
@@ -1345,14 +1516,14 @@ export class VerbatimStore implements VectorProvider {
      *  orphan-cascade path; tombstones are for user-initiated deletes
      *  where history matters. Bumps search-cache epoch. */
     async physicalDelete(id: string): Promise<void> {
-        assertSafeLanceId(id, 'physicalDelete'); // D2-inj-1: guard id before WHERE interpolation, mirroring physicalDeleteMany/tombstone — outside try so validation errors propagate
-        try {
+        assertWritableRole(this.role, 'physicalDelete'); assertSafeLanceId(id, 'physicalDelete'); // D2-inj-1: guard id before WHERE interpolation, mirroring physicalDeleteMany/tombstone — outside try so validation errors propagate
+        this.writeGate.enter(); try {
             if (!this.initialized || !this.table) return;
             await this.table.delete(`id = '${id.replace(/'/g, "''")}'`);
             this.bumpSearchEpoch();
         } catch (error) {
             throw new VerbatimStoreError('physicalDelete', (error as Error).message);
-        }
+        } finally { this.writeGate.exit(); }
     }
 
     /**
@@ -1368,7 +1539,7 @@ export class VerbatimStore implements VectorProvider {
      * epoch once at the end.
      */
     async physicalDeleteMany(ids: string[]): Promise<number> {
-        if (!this.initialized || !this.table || ids.length === 0) return 0;
+        assertWritableRole(this.role, 'physicalDeleteMany'); if (!this.initialized || !this.table || ids.length === 0) return 0;
         // SP-25 F2: reject oversized ids before building the IN predicate.
         // 512 chars is generous for any legitimate lore: / sha-style id.
         const MAX_ID_LEN = 512;
@@ -1379,7 +1550,7 @@ export class VerbatimStore implements VectorProvider {
         }
         ids.forEach((id) => assertSafeLanceId(id, 'physicalDeleteMany')); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
         let processed = 0;
-        try {
+        this.writeGate.enter(); try {
             for (let i = 0; i < ids.length; i += VERBATIM_CHUNK_SIZE) {
                 const chunk = ids.slice(i, i + VERBATIM_CHUNK_SIZE);
                 const list = chunk.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
@@ -1390,7 +1561,7 @@ export class VerbatimStore implements VectorProvider {
             return processed;
         } catch (error) {
             throw new VerbatimStoreError('physicalDeleteMany', (error as Error).message);
-        }
+        } finally { this.writeGate.exit(); }
     }
 
     /**
@@ -1417,7 +1588,7 @@ export class VerbatimStore implements VectorProvider {
         oldVersionsRemoved: number;
     } | null> {
         if (!this.initialized || !this.table) return null;
-        try {
+        this.writeGate.enter(); try {
             // 2026-06-09 — keep a 10-minute "grace window" on cleanupOlderThan
             // to avoid provoking lance#3718, the upstream race where
             // auto_cleanup deletes a manifest mid-commit. Lance's docs
@@ -1452,7 +1623,7 @@ export class VerbatimStore implements VectorProvider {
             };
         } catch (error) {
             throw new VerbatimStoreError('compact', (error as Error).message);
-        }
+        } finally { this.writeGate.exit(); }
     }
 
     /**
@@ -1467,8 +1638,8 @@ export class VerbatimStore implements VectorProvider {
      * canonical row plus every preceding `#rev` snapshot.
      */
     async tombstone(id: string, reason: string): Promise<void> {
-        assertSafeLanceId(id, 'tombstone'); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
-        try {
+        assertWritableRole(this.role, 'tombstone'); assertSafeLanceId(id, 'tombstone'); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
+        this.writeGate.enter(); try {
             if (!this.initialized || !this.table) return;
             if (this.isHistoryId(id)) return; // never tombstone a snapshot
             const safe = id.replace(/'/g, "''");
@@ -1535,7 +1706,7 @@ export class VerbatimStore implements VectorProvider {
             // not initialized, row absent, already tombstoned, history id)
             // still return normally above.
             throw new VerbatimStoreError('tombstone', (error as Error).message);
-        }
+        } finally { this.writeGate.exit(); }
     }
 
     /**
@@ -1551,7 +1722,7 @@ export class VerbatimStore implements VectorProvider {
         isTombstone: boolean;
         isCanonical: boolean;
     }>> {
-        return verbatimHistory.getHistory(this.table, this.initialized, id);
+        return this.writeGate.run(() => verbatimHistory.getHistory(this.table, this.initialized, id));
     }
 
     /**
@@ -1584,8 +1755,9 @@ export class VerbatimStore implements VectorProvider {
     async bm25Search(
         query: string,
         limit: number = 10,
-        filter?: Partial<VerbatimDocument['metadata']>,
+        filter?: VerbatimQueryFilter,
         actorScopes?: ReadonlyArray<string>,
+        gate?: VerbatimGateOptions, // optional, additive — see VerbatimGateOptions
     ): Promise<Bm25Envelope<VerbatimSearchResult>> {
         if (!this.initialized || !this.table) return makeBm25Envelope([], true);
         // NW-4b — same cache + single-flight wrapper used by search().
@@ -1614,7 +1786,11 @@ export class VerbatimStore implements VectorProvider {
                 filter: normFilter,
                 scopes: sortedScopes,
             },
-            () => this.searchGate.read(() => timeRecallStage('fts', () => this._bm25SearchUncached(query, limit, filter, actorScopes))),
+            (signal) => this.writeGate.run(() => this.searchGate.read(() => {
+                this.checkGateAborted(signal, 'bm25Search');
+                return timeRecallStage('fts', () => this._bm25SearchUncached(query, limit, filter, actorScopes));
+            }, { signal })),
+            gate,
         );
     }
 
@@ -1626,7 +1802,7 @@ export class VerbatimStore implements VectorProvider {
     private async _bm25SearchUncached(
         query: string,
         limit: number,
-        filter: Partial<VerbatimDocument['metadata']> | undefined,
+        filter: VerbatimQueryFilter | undefined,
         actorScopes: ReadonlyArray<string> | undefined,
     ): Promise<Bm25Envelope<VerbatimSearchResult>> {
         try {
@@ -1636,14 +1812,8 @@ export class VerbatimStore implements VectorProvider {
                 `id NOT LIKE '${HISTORY_ID_LIKE_PATTERN}'`,
                 "text NOT LIKE '[TOMBSTONED%'",
             ];
-            if (filter) {
-                for (const [key, value] of Object.entries(filter)) {
-                    // SECURITY (SP-05): allowlist key + escape value (matches search()).
-                    if (value && !Array.isArray(value) && verbatimHistory.VERBATIM_FILTERABLE_COLUMNS.has(key)) {
-                        conditions.push(`${key} = '${verbatimHistory.escapeSqlLiteral(String(value))}'`);
-                    }
-                }
-            }
+            // D2: see the matching comment in _runVectorSearchUncached above.
+            conditions.push(...verbatimHistory.buildLanceFilterConditions(filter));
             const whereClause = conditions.join(' AND ');
 
             // Native BM25 full-text search. `table.query().fullTextSearch(...)`
@@ -1787,32 +1957,29 @@ export class VerbatimStore implements VectorProvider {
     }
 
     async count(): Promise<number> {
-        try {
+        this.writeGate.enter(); try {
             if (!this.initialized || !this.table) return 0;
             return await this.table.countRows();
         } catch (error: any) {
             return 0; // return 0 on error
-        }
+        } finally { this.writeGate.exit(); }
     }
 
+    /** Releases the LanceDB natives (LORE_VERBATIM_NATIVE_CLOSE kill switch, default
+     *  on); idempotent PER OPEN (initialize() resets the guard on reconnect). Order:
+     *  drain in-flight table/db touches → close read pool → closeVerbatimNatives.
+     *  On a drain timeout natives stay open this round (gate.drain() logs). */
     async close(): Promise<void> {
+        if (this.nativesClosed) return;
         try {
             this.initialized = false;
-            // NW-1e — Drain the read pool BEFORE nulling this.db/this.table
-            // so any in-flight `withTable(...)` (vectorSearch) gets to
-            // finish on its borrowed Table handle before native close.
-            // Closing a borrowed Table mid-query was a documented
-            // use-after-close SIGSEGV on darwin-arm64 (audit:
-            // conc-close-does-not-drain-inflight-reads). Drain has a
-            // 5s timeout; on timeout we log + best-effort close, never
-            // crash the daemon. Queued (not-yet-acquired) waiters are
-            // rejected by drain() with a clear "pool is closed" error.
-            if (this.readPool) {
-                await this.readPool.close().catch(() => undefined);
-                this.readPool = null;
-            }
-            this.db = null;
-            this.table = null;
+            const nativeClose = nativeCloseEnabled();
+            const drained = nativeClose ? await this.writeGate.drain(undefined, `VerbatimStore(${this.lancedbPath})`) : true;
+            if (this.readPool) { await this.readPool.close().catch(() => undefined); this.readPool = null; }
+            this.readPoolInit = null;
+            if (nativeClose && drained) await closeVerbatimNatives({ table: this.table, db: this.db }, this.lancedbPath);
+            this.db = null; this.table = null; this.searchCache.clear();
+            this.hashCache = new BoundedVectorCache(10_000); this.nativesClosed = true;
         } catch (error: any) {
             throw new VerbatimStoreError('close', error.message);
         }

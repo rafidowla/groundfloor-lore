@@ -16,7 +16,7 @@
 
 import { EmbedQueue } from './queue.js';
 import { tagsToString } from '../engines/normalizeTags.js';
-import type { VerbatimStore } from '../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import type { DataplaneVectorStore } from '../engines/dataplaneVectorStore.js';
 import { computeContentHash } from '../engines/contentHash.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
@@ -26,7 +26,7 @@ import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 // more than the shared handle? Feature-detect and refuse — do not re-narrow
 // to a class.
 type LoreGraph = LoreGraphHandle;
-type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
+type LoreVectorStore = VerbatimStoreApi | DataplaneVectorStore;
 
 export function wireEmbedQueue(input: {
     graph: LoreGraph;

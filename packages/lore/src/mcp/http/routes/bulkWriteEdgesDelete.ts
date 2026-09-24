@@ -10,7 +10,7 @@
 
 import type { ServerResponse } from 'node:http';
 import { WorkspaceNotFoundError } from '../../../engines/localGraphRegistry.js';
-import type { VerbatimStore } from '../../../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../../../engines/verbatimStoreApi.js';
 import { redactError } from '../../../security/logRedact.js';
 import { writeJson, writeError } from '../helpers.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
@@ -216,7 +216,7 @@ export async function handleBulkDelete(
     // REQUESTED workspace's LanceDB, not the boot singleton (bulk-DELETE was
     // missed in the L-012 sweep). Falls back to deps.store.loreVerbatim when no
     // resolver / no requested workspace.
-    let targetVerbatim: VerbatimStore | typeof deps.store.loreVerbatim = deps.store.loreVerbatim;
+    let targetVerbatim: VerbatimStoreApi | typeof deps.store.loreVerbatim = deps.store.loreVerbatim;
     if (deps.workspaceVerbatimResolver && requestedWorkspace) {
         try {
             targetVerbatim = await deps.workspaceVerbatimResolver.getOrOpen(requestedWorkspace);

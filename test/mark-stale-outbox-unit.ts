@@ -51,7 +51,8 @@ import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { FileOutboxStore } from '../packages/lore/src/outbox/store.js';
 import { nodeUpsert } from '../packages/lore/src/core/nodeService.js';
 import { registerMarkStaleTool } from '../packages/lore/src/mcp/tools/memory/markStale.js';
@@ -83,7 +84,7 @@ function delay(ms: number): Promise<void> {
 
 /** Real replicator substrates over a given (graph, verbatim) pair — used to
  *  replay outbox rows onto either the SAME substrates or a FRESH pair. */
-function realDispatchSubstrates(graph: SurrealGraph, store: VerbatimStore): DispatcherSubstrates {
+function realDispatchSubstrates(graph: SurrealGraph, store: VerbatimStoreApi): DispatcherSubstrates {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-mark-stale-wiring-'));
     const wiring = wireOutbox({
         loreDir: tmp,
@@ -152,7 +153,7 @@ test('1: mark_stale (MCP) records node.mark_stale outbox rows for EXACTLY the ma
     const v = mkTmp('lore-markstale-1-v-');
     const o = mkTmp('lore-markstale-1-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();
@@ -219,10 +220,10 @@ test('2: a full replay through the real dispatcher, on a FRESH wiring + FRESH gr
     const freshG = mkTmp('lore-markstale-2-freshg-');
     const freshV = mkTmp('lore-markstale-2-freshv-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     const freshGraph = new SurrealGraph(freshG.dir);
-    const freshStore = new VerbatimStore(freshV.dir, new ConstEmbedProvider());
+    const freshStore = makeVerbatimStore(freshV.dir, new ConstEmbedProvider());
     await graph.initialize();
     await store.initialize();
     await freshGraph.initialize();
@@ -286,10 +287,10 @@ test('3: mark_stale racing a concurrent nodeUpsert on the SAME id converges (bot
         const freshG = mkTmp(`lore-markstale-3-freshg${run}-`);
         const freshV = mkTmp(`lore-markstale-3-freshv${run}-`);
         const graph = new SurrealGraph(g.dir);
-        const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+        const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
         const outboxStore = new FileOutboxStore(o.dir);
         const freshGraph = new SurrealGraph(freshG.dir);
-        const freshStore = new VerbatimStore(freshV.dir, new ConstEmbedProvider());
+        const freshStore = makeVerbatimStore(freshV.dir, new ConstEmbedProvider());
         await graph.initialize();
         await store.initialize();
         await freshGraph.initialize();

@@ -69,4 +69,6 @@ export interface NodesDeps {
      *  so test/cloud wiring without the store still types. */
     quotaStore?: import('../../../../security/workspaceQuota.js').IWorkspaceQuotaStore;
     getWorkspaceEntryForQuota?: (workspace: string) => import('../../../../config/workspaces.js').WorkspaceEntry | undefined;
+    /** D5 round 2 (#2) — host-level supersession-enforce default. */
+    supersessionEnforceDefault?: boolean;
 }

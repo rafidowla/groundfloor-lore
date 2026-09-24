@@ -37,6 +37,7 @@
  */
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 
 import { buildShutdownDrain, collectSqliteStores } from '../packages/lore/src/mcp/shutdownDrain.js';
 
@@ -91,20 +92,20 @@ await test('a throwing resolver does not strand the SQLite sidecars behind it', 
     assert.deepEqual(closed, ['outboxStore'], 'the sidecar step must still run after a resolver failure');
 });
 
-await test('every wired SQLite sidecar is closed', async () => {
+await test('every wired SQLite sidecar is closed (including loadJobsStore)', async () => {
     const closed: string[] = [];
     const store = (name: string) => ({ name, close: () => { closed.push(name); } });
     await buildShutdownDrain({
         ...inertDeps(),
         sqliteStores: [
             store('outboxStore'), store('auxStore'), store('versionStore'),
-            store('pendingOpsStore'), store('tableStorage'),
+            store('pendingOpsStore'), store('tableStorage'), store('loadJobsStore'),
         ],
     } as never)('test');
     assert.deepEqual(
         closed,
-        ['outboxStore', 'auxStore', 'versionStore', 'pendingOpsStore', 'tableStorage'],
-        'all five sidecars close, in the order given',
+        ['outboxStore', 'auxStore', 'versionStore', 'pendingOpsStore', 'tableStorage', 'loadJobsStore'],
+        'all six sidecars close, in the order given',
     );
 });
 
@@ -156,6 +157,59 @@ await test('collectSqliteStores skips handles with no close() and binds `this`',
         'only handles that actually expose close() are collected');
     collected[0]!.close();
     assert.equal(withClose.closed, true, 'close() must be invoked with its own receiver, not detached');
+});
+
+await test('structural: every SQLite sidecar server.ts constructs is in BOTH collectSqliteStores() call sets', () => {
+    // (b) STEP2-CLOSE-PATH-DESIGN.md — loadJobsStore joined the close set
+    // (L1/L2's own point: two drain call sites, daemon + arcade/cloud, MUST
+    // pass the SAME set, or a store closed on one boot path leaks on the
+    // other). This scans server.ts's actual source instead of trusting a
+    // hand-maintained list, so the NEXT sidecar someone constructs cannot be
+    // silently forgotten from one (or both) call sites the way loadJobsStore
+    // was.
+    //
+    // Heuristic: every local binding built via `new XStore(...)`,
+    // `XStore.open(...)`, or `createXStore(...)` — the three constructor
+    // shapes every sqlite sidecar in this file already uses — must appear as
+    // a bare identifier or object-key inside EVERY `collectSqliteStores({...})`
+    // call found in the file. `tableStorage` is the one sidecar that does not
+    // follow the *Store naming convention (it hangs off the storage bundle as
+    // `store.tableStorage` / `d.store.tableStorage`) — allowlisted explicitly
+    // below rather than silently widening the naming heuristic.
+    const serverPath = new URL('../packages/lore/src/mcp/server.ts', import.meta.url);
+    const src = fs.readFileSync(serverPath, 'utf-8');
+
+    // Known *Store constructions that are NOT sqlite/native-handle-backed —
+    // no close() is needed and none is wired. Ratchet this list DOWN, never
+    // widen it as a shortcut past a real miss (same discipline as
+    // D021_UNDEFINED_TARGET_ALLOWLIST in scripts/test-arch.mjs).
+    const KNOWN_NON_SQLITE_STORES = new Set([
+        'workspaceQuotaStore', // InMemoryWorkspaceQuotaStore — process-memory only
+        'feedbackStore',       // FeedbackStore — append-only JSONL file, no persistent handle
+    ]);
+
+    const constructedStores = new Set<string>();
+    for (const m of src.matchAll(/\b(\w*Store)\s*=\s*(?:new\s+\w+Store\(|\w+Store\.open\(|create\w*Store\()/g)) {
+        if (!KNOWN_NON_SQLITE_STORES.has(m[1]!)) constructedStores.add(m[1]!);
+    }
+    assert.ok(constructedStores.size >= 4, `sanity: expected several *Store constructions in server.ts, found ${constructedStores.size}`);
+    assert.ok(constructedStores.has('loadJobsStore'), 'sanity: the scan itself must find loadJobsStore’s construction');
+
+    const NON_STORE_SUFFIX_SIDECARS = ['tableStorage']; // see comment above
+
+    const callSites = [...src.matchAll(/collectSqliteStores\(\{([^}]*)\}\)/gs)];
+    assert.ok(callSites.length >= 2, `expected at least 2 collectSqliteStores() call sites, found ${callSites.length}`);
+
+    for (const [siteIndex, call] of callSites.entries()) {
+        const argsText = call[1]!;
+        for (const name of [...constructedStores, ...NON_STORE_SUFFIX_SIDECARS]) {
+            assert.ok(
+                new RegExp(`\\b${name}\\b`).test(argsText),
+                `collectSqliteStores() call site #${siteIndex + 1} is missing "${name}" — ` +
+                'a sidecar constructed in server.ts is not wired into this drain’s close set',
+            );
+        }
+    }
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

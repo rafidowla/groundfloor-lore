@@ -33,6 +33,7 @@ import { SessionCacheManager } from './sessionCacheManager.js';
 import { createTableStorage } from './tableStorageFactory.js';
 import type { ITableStorage } from '../contracts/tables.js';
 import { SurrealGraph } from './surrealGraph.js';
+import { SqliteGraph } from './sqliteGraph.js';
 import { disposeAccessTracker } from './accessTracker.js';
 import type { WorkspaceGraph } from './openWorkspaceGraph.js';
 import {
@@ -75,10 +76,12 @@ interface CacheEntry {
      *  them. Lazy-opened workspaces are unpinned and fully evictable. */
     pinned: boolean;
     /**
-     * The SurrealDB graph engine for this workspace. Null until first
-     * opened; `getGraphHandle` fills it.
+     * The graph engine for this workspace (SurrealDB or, 3.21 step 1d,
+     * SQLite — whichever `graphEngine` selects). Null until first opened;
+     * `getGraphHandle` fills it. Field name kept as `surreal` for a
+     * minimal diff against the pre-3.21 registry; it holds either engine.
      */
-    surreal: SurrealGraph | null;
+    surreal: WorkspaceGraph | null;
 }
 
 function parseRegistryEnvMs(raw: string | undefined, fallback: number): number {
@@ -87,12 +90,49 @@ function parseRegistryEnvMs(raw: string | undefined, fallback: number): number {
     return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/** Access-kind option threaded through the registry's accessors.
+ *  `touch: false` marks BACKGROUND/MAINTENANCE access — see `ensureEntry`'s
+ *  doc comment. Default (omitted / `true`) is ordinary user access. */
+export interface AccessOpts {
+    touch?: boolean;
+}
+
+/** `lastAccessedAt` given to an entry OPENED (not merely touched) by
+ *  background/maintenance access (`{ touch: false }`) with no prior cache
+ *  entry — epoch 0 guarantees `nowMs - lastAccessedAt > idleMs` at the very
+ *  next eviction sweep tick for any positive TTL, so a sweep that reopens an
+ *  idle/evicted workspace to do its work doesn't thereby grant it a fresh
+ *  full-TTL lease. */
+const STALE_SENTINEL_MS = 0;
+
 /** SP-11 — entries idle longer than this are closed by the periodic
  *  sweep. Each open workspace holds a surrealkv directory lock + driver
  *  state + a LanceDB handle (~10–50MB RSS).
  *
- *  hc-registry-idle-sweep-hardcoded (NW-7c): env override LORE_REGISTRY_IDLE_TTL_MS. */
-const IDLE_WORKSPACE_TTL_MS: number = parseRegistryEnvMs(process.env.LORE_REGISTRY_IDLE_TTL_MS, 30 * 60 * 1000);
+ *  DEFAULT CHANGED 2026-09-18 (docs/PERFORMANCE-MEMORY.md §9/§11):
+ *  `@surrealdb/node` 3.0.3 never frees a datastore on `close()`, so
+ *  evicting an idle graph and reopening it later doesn't return that
+ *  ~10-50MB — it COSTS an extra ~100MB per reopen, unbounded, because the
+ *  previous open's native allocation is never released. Idle graph
+ *  eviction is therefore net-negative on this driver: 0 (disabled) is now
+ *  the default, so a workspace opened once stays open for the life of the
+ *  process instead of being evicted-then-reopened at a cost the eviction
+ *  was supposed to be saving. A positive value restores the pre-3.20.0
+ *  sweep behaviour (for a host that has verified its `@surrealdb/node`
+ *  doesn't have this leak, or that prefers bounded idle memory over
+ *  reopen cost for its own reasons). This does NOT affect
+ *  `LORE_MAX_OPEN_WORKSPACES` over-cap LRU eviction (docs/CONFIGURATION.md)
+ *  or the vector-store (`WorkspaceVerbatimResolver`) idle sweep, which
+ *  stays on LanceDB, a driver that DOES release memory on close() — see
+ *  that class's own IDLE_TTL_MS, unchanged by this file.
+ *
+ *  hc-registry-idle-sweep-hardcoded (NW-7c): env override LORE_REGISTRY_IDLE_TTL_MS.
+ *  0 or unset = idle eviction disabled (this file's `startEvictionSweep()`
+ *  arms no timer); any positive value re-enables the sweep at that TTL.
+ *  `evictIdle()` itself is unaffected — it stays callable directly with an
+ *  explicit `idleMs` (e.g. `evictIdle(now, 0)` to force-evict everything
+ *  idle-eligible right now) regardless of this default. */
+const IDLE_WORKSPACE_TTL_MS: number = parseRegistryEnvMs(process.env.LORE_REGISTRY_IDLE_TTL_MS, 0);
 /** SP-11 — how often the optional background eviction sweep runs.
  *
  *  hc-registry-idle-sweep-hardcoded (NW-7c): env override LORE_REGISTRY_SWEEP_MS. */
@@ -143,12 +183,33 @@ export class LocalGraphRegistry {
         return path.join(this.home, 'workspaces.json');
     }
 
+    /**
+     * Defect 3 follow-up (3.20.2) — the home this registry's workspaces.json
+     * reads are actually scoped to (an embedded instance's own `dataHome`,
+     * or the process-wide `loreHome()` for local/cloud). Public so a caller
+     * that already holds this registry (e.g. a cross-workspace fan-out) can
+     * derive the SAME home for its own `listWorkspaceNames`/`getWorkspacePath`
+     * calls instead of defaulting to the process-wide home and silently
+     * reading a different workspaces.json than the registry it is paired with.
+     */
+    homeDir(): string {
+        return this.home;
+    }
+
     /** SP-11 — start the periodic idle-workspace eviction sweep.
      *  Idempotent; the timer is unref()'d so it never holds the process
      *  open. The daemon enables this; embedded/test uses drive evictIdle
-     *  directly. */
+     *  directly.
+     *
+     *  DEFAULT CHANGED 2026-09-18 — a no-op (arms NO timer) when
+     *  `IDLE_WORKSPACE_TTL_MS` is 0 (the new default: unset
+     *  `LORE_REGISTRY_IDLE_TTL_MS`). See that constant's own doc comment
+     *  for why (docs/PERFORMANCE-MEMORY.md §9/§11 — idle graph eviction is
+     *  net-negative on the current SurrealDB driver). A positive TTL (via
+     *  the env override) restores the sweep exactly as before. */
     startEvictionSweep(): void {
         if (this.sweepTimer) return;
+        if (IDLE_WORKSPACE_TTL_MS <= 0) return; // idle eviction disabled by default
         const t = setInterval(() => { void this.evictIdle(this.now(), IDLE_WORKSPACE_TTL_MS); }, REGISTRY_SWEEP_INTERVAL_MS);
         if (typeof t.unref === 'function') t.unref();
         this.sweepTimer = t;
@@ -254,8 +315,18 @@ export class LocalGraphRegistry {
      *
      * Does NOT alias-dedup a bare entry across names: no two names share a
      * path today, and it self-corrects — the first engine either name opens
-     * runs its own alias scan below and shares that handle. */
-    private async ensureEntry(workspace: string): Promise<CacheEntry> {
+     * runs its own alias scan below and shares that handle.
+     *
+     * `opts.touch` (default true) — pass `{ touch: false }` for BACKGROUND/
+     * MAINTENANCE access (the daemon's own periodic sweeps) that must NOT
+     * count as user activity: a cache-hit then returns the entry WITHOUT
+     * bumping `lastAccessedAt`, so a sweep that merely glances at an idle
+     * workspace can't keep it alive forever. See docs/PERFORMANCE-MEMORY.md
+     * §11 — the daily retention sweep's fan-out (daemonTimers.ts) touched
+     * every registered workspace ~60s after boot, defeating idle eviction at
+     * any TTL the fan-out interval could reach before the next checkpoint. */
+    private async ensureEntry(workspace: string, opts: AccessOpts = {}): Promise<CacheEntry> {
+        const touch = opts.touch !== false;
         // Wave 4.1 — substrate chokepoint (→ 403 on a request's non-target
         // workspace); slotless callers unaffected.
         assertWorkspaceOpenAllowed(workspace);
@@ -273,7 +344,7 @@ export class LocalGraphRegistry {
 
         const cached = this.cache.get(workspace);
         if (cached && cached.path === resolvedPath) {
-            cached.lastAccessedAt = this.now(); // SP-11 — touch for LRU.
+            if (touch) cached.lastAccessedAt = this.now(); // SP-11 — touch for LRU (user access only).
             return cached;
         }
 
@@ -300,10 +371,20 @@ export class LocalGraphRegistry {
         const create = async (): Promise<CacheEntry> => {
             const fresh = this.cache.get(workspace);
             if (fresh && fresh.path === resolvedPath) {
-                fresh.lastAccessedAt = this.now();
+                if (touch) fresh.lastAccessedAt = this.now();
                 return fresh;
             }
-            const entry: CacheEntry = { path: resolvedPath, lastAccessedAt: this.now(), pinned: false, surreal: null };
+            // BACKGROUND-open (touch:false) of a workspace with no bare entry
+            // yet gets the STALE sentinel, not `this.now()` — a maintenance
+            // sweep that opens a cold workspace must not grant it a fresh
+            // full-TTL lease; the entry stays eligible for the very next
+            // eviction sweep tick once the sweep's own work finishes. See
+            // getGraphHandle's `open()` for the matching fix on the engine
+            // open path (docs/PERFORMANCE-MEMORY.md §11 — this is what the
+            // 30→70 graph-fd growth during the TTL=40000 idle wait traced
+            // back to: the fan-out re-opening evicted workspaces with a
+            // fresh `lastAccessedAt` before this fix).
+            const entry: CacheEntry = { path: resolvedPath, lastAccessedAt: touch ? this.now() : STALE_SENTINEL_MS, pinned: false, surreal: null };
             this.cache.set(workspace, entry);
             return entry;
         };
@@ -324,35 +405,47 @@ export class LocalGraphRegistry {
      * write the WRONG store while the workspace's real data sits in
      * `.lore/graph` — the exact silent-fallback bug class behind the
      * pm-scope-app incident.
+     *
+     * `opts.touch` (default true) — see `ensureEntry`'s doc comment.
+     * `{ touch: false }` is for the daemon's own background sweeps
+     * (daemonTimers.ts's per-workspace fan-outs); ordinary callers should
+     * never pass it.
      */
-    async getGraphHandle(workspace: string): Promise<WorkspaceGraph> {
-        if (resolveWorkspaceGraphEngine(workspace, this.home) === 'kuzu') {
+    async getGraphHandle(workspace: string, opts: AccessOpts = {}): Promise<WorkspaceGraph> {
+        const engineKind = resolveWorkspaceGraphEngine(workspace, this.home);
+        if (engineKind === 'kuzu') {
             legacyGraphEngineRemovedError(workspace, 'LocalGraphRegistry.getGraphHandle');
         }
 
-        const entry = await this.ensureEntry(workspace);
+        const touch = opts.touch !== false;
+        const entry = await this.ensureEntry(workspace, opts);
         if (entry.surreal) return entry.surreal;
 
         // Path dedup: reuse another name's Surreal handle on this path
         // rather than open a second one (lock contention — see below).
         for (const [otherName, other] of this.cache.entries()) {
             if (otherName !== workspace && other.path === entry.path && other.surreal) {
-                const at = this.now();
-                other.lastAccessedAt = at;
+                const at = touch ? this.now() : other.lastAccessedAt;
+                if (touch) other.lastAccessedAt = at;
                 this.cache.set(workspace, { path: entry.path, lastAccessedAt: at, pinned: other.pinned, surreal: other.surreal });
                 return other.surreal;
             }
         }
 
-        // Serialize the Surreal open on the SAME chain as entry creation.
-        // Two handles on one surrealkv directory contend on its lock, and
-        // the driver's lock release is asynchronous (engines/
+        // Serialize the open on the SAME chain as entry creation. Two
+        // handles on one surrealkv directory contend on its lock, and the
+        // driver's lock release is asynchronous (engines/
         // surreal/surrealConnection.ts), so a concurrent double-open would
-        // burn the whole retry budget before failing.
-        const open = async (): Promise<SurrealGraph> => {
+        // burn the whole retry budget before failing. SqliteGraph has no
+        // such contention (better-sqlite3 is synchronous, one process-local
+        // handle), but sharing the same chain keeps the entry-creation race
+        // guard identical for both engines rather than forking it.
+        const open = async (): Promise<WorkspaceGraph> => {
             const fresh = this.cache.get(workspace);
             if (fresh?.surreal) return fresh.surreal;
-            const surreal = new SurrealGraph(entry.path, { workspaceId: workspace });
+            const surreal: WorkspaceGraph = engineKind === 'sqlite'
+                ? new SqliteGraph(entry.path, { workspaceId: workspace })
+                : new SurrealGraph(entry.path, { workspaceId: workspace });
             await surreal.initialize();
             // Re-read: the entry may have been replaced while we awaited.
             const target = this.cache.get(workspace);
@@ -362,11 +455,17 @@ export class LocalGraphRegistry {
                 await surreal.close().catch(() => undefined);
                 throw new Error(
                     `[LocalGraphRegistry] workspace '${workspace}' moved while opening its `
-                    + 'SurrealDB graph — retry the operation',
+                    + `${engineKind === 'sqlite' ? 'SQLite' : 'SurrealDB'} graph — retry the operation`,
                 );
             }
             target.surreal = surreal;
-            target.lastAccessedAt = this.now();
+            // Background open (touch:false): stale sentinel, not `this.now()`
+            // — see the matching comment in ensureEntry's `create()`. Without
+            // this, a maintenance fan-out reopening an EVICTED workspace
+            // handed it a fresh full-TTL lease, which is exactly what made
+            // graph fds grow 30→70 during a TTL=40000 idle wait (the sweep's
+            // own reopen kept re-arming the clock every pass).
+            target.lastAccessedAt = touch ? this.now() : STALE_SENTINEL_MS;
             return surreal;
         };
         const opening = this.openChain.then(open, open);
@@ -419,14 +518,14 @@ export class LocalGraphRegistry {
         // Recognising the concrete class is correct here and nowhere else:
         // this is the one seam that accepts an already-constructed engine
         // from outside and has to file it into the engine-specific slot.
-        // SurrealGraph is the only engine left.
-        if (!(graph instanceof SurrealGraph)) {
+        // SurrealGraph and SqliteGraph are the only two local engines left.
+        if (!(graph instanceof SurrealGraph) && !(graph instanceof SqliteGraph)) {
             // Loudly, not silently: a no-op prime leaves the registry to open
             // its OWN handle on the same directory, which is a lock fight on
-            // surrealkv.
+            // surrealkv (or a redundant SQLite open).
             throw new Error(
                 `[LocalGraphRegistry] prime('${workspace}'): unrecognised graph implementation `
-                + `'${graph.constructor?.name ?? 'anonymous'}'. Only SurrealGraph `
+                + `'${graph.constructor?.name ?? 'anonymous'}'. Only SurrealGraph/SqliteGraph `
                 + 'can be primed — the cache files it in the engine-specific slot.',
             );
         }
@@ -481,10 +580,10 @@ export class LocalGraphRegistry {
      * this inherits `ensureEntry`'s workspace-confinement gate — a caller
      * denied the workspace must not reach its tables either.
      */
-    async tableStorageFor(workspace: string): Promise<ITableStorage> {
+    async tableStorageFor(workspace: string, opts: AccessOpts = {}): Promise<ITableStorage> {
         // A SQLite file keyed on the workspace PATH, not a graph substrate —
         // only needs the entry (gate + path), never an engine open.
-        const entry = await this.ensureEntry(workspace);
+        const entry = await this.ensureEntry(workspace, opts);
         entry.tableStorage ??= createTableStorage(entry.path);
         return entry.tableStorage;
     }
@@ -528,7 +627,7 @@ export class LocalGraphRegistry {
      */
     async disposeAll(): Promise<void> {
         this.stopEvictionSweep();
-        const closedGraphs = new Set<SurrealGraph>();
+        const closedGraphs = new Set<WorkspaceGraph>();
         const closes: Array<Promise<void>> = [];
         for (const [name, entry] of [...this.cache.entries()]) {
             if (entry.pinned) continue;          // boot graph closed by the drain

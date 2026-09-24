@@ -11,6 +11,7 @@ import { resolveTargetGraph, workspaceRequiredEnvelope } from '../workspaceResol
 import { assertMcpScope } from '../mcpScope.js';
 import { recordHotWrite } from '../../../outbox/hotLane.js';
 import { withNodeLock } from '../../../core/nodeWriteLock.js';
+import { tombstoneQuestionAliases } from '../../../core/nodeServiceVerbatim.js';
 import type { MemoryToolsDeps } from './types.js';
 import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
@@ -137,6 +138,14 @@ export function registerDeleteNodeTool(mcpServer: McpServer, deps: MemoryToolsDe
                                     payload: { id: `lore:${id}`, reason },
                                     initiator: 'mcp:delete_node',
                                     operation: 'verbatim.tombstone',
+                                });
+                                // 3.21 step 3(e) — tombstone this node's question
+                                // aliases too (best-effort; see
+                                // nodeServiceVerbatim.ts's tombstoneQuestionAliases).
+                                await tombstoneQuestionAliases({
+                                    id, workspace: resolvedDel.resolvedWorkspace,
+                                    initiator: 'mcp:delete_node', logPrefix: '[Lore MCP]',
+                                    outboxStore: deps.outboxStore,
                                 });
                             }
                         } catch (tombErr) {

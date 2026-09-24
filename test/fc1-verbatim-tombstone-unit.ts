@@ -25,8 +25,16 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { VerbatimStore, VerbatimStoreError } from '../packages/lore/src/engines/verbatimStore.js';
+import { VerbatimStoreError } from '../packages/lore/src/engines/verbatimStore.js';
 import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
+// Opus review follow-up (item: excluded suites testing SEMANTICS, not Lance
+// internals). Routed through makeVerbatimStore — T1.10/M9/M10a are
+// engine-neutral store()/tombstone() contract checks; T1.M10b (a REAL
+// substrate failure must propagate loudly, not be swallowed) needs a
+// per-engine way to force that failure, since Lance's on-disk table
+// directory and SQLite's native db handle are sabotaged differently.
+import { makeVerbatimStore, testVectorEngine } from './helpers/testVerbatimStore.js';
+import type { Database as SqliteDatabaseType } from 'better-sqlite3';
 
 let passed = 0, failed = 0;
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
@@ -64,7 +72,7 @@ function stubProvider(): EmbeddingProvider {
 
 function tmpStore() {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'fc1-tomb-'));
-    return { dir, store: new VerbatimStore(dir, stubProvider()), cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+    return { dir, store: makeVerbatimStore(dir, stubProvider()), cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
 const META = { type: 'decision', label: 'L', tags: '', project: 'default', ecosystem: '*', updatedAt: '2026-08-17T00:00:00.000Z', security_scopes: [] as string[] };
@@ -154,20 +162,40 @@ async function main() {
         } finally { cleanup(); }
     });
 
-    await test('T1.M10b a REAL substrate failure throws VerbatimStoreError (was silently swallowed)', async () => {
+    await test('T1.M10b a REAL substrate failure throws (was silently swallowed) — per-engine sabotage', async () => {
         const { store, dir, cleanup } = tmpStore();
         try {
             await store.initialize();
             await store.store({ id: 'lore:victim', text: 'important content', metadata: META });
-            // Break the table underneath the initialized store: the tombstone's
-            // query now genuinely fails (IO-level), which callers must see.
-            const tableDir = path.join(dir, '.lore', 'lancedb', 'lore_verbatim.lance');
-            fs.rmSync(tableDir, { recursive: true, force: true });
-            await assert.rejects(
-                () => store.tombstone('lore:victim', 'should fail loudly'),
-                (err: unknown) => err instanceof VerbatimStoreError && (err as VerbatimStoreError).operation === 'tombstone',
-                'tombstone must throw VerbatimStoreError on real failure (pre-fix: bare catch {})',
-            );
+
+            if (testVectorEngine() === 'sqlite') {
+                // Close the underlying better-sqlite3 NATIVE handle directly
+                // (not store.close(), which would also flip `initialized`
+                // back to false and make tombstone() take the graceful
+                // no-op path instead of reaching the real write). Every
+                // subsequent `db.prepare(...)` genuinely throws
+                // "The database connection is not open" — a real,
+                // non-swallowed Error, matching M10's "propagate, don't
+                // swallow" contract even though SqliteVerbatimStore does
+                // not (yet) wrap it in a VerbatimStoreError the way the
+                // Lance path does.
+                (store as unknown as { db: SqliteDatabaseType }).db.close();
+                await assert.rejects(
+                    () => store.tombstone('lore:victim', 'should fail loudly'),
+                    (err: unknown) => err instanceof Error && !!(err as Error).message,
+                    'tombstone must throw a real Error on a genuine substrate failure (sqlite: closed native handle) — never silently swallowed',
+                );
+            } else {
+                // Break the table underneath the initialized store: the tombstone's
+                // query now genuinely fails (IO-level), which callers must see.
+                const tableDir = path.join(dir, '.lore', 'lancedb', 'lore_verbatim.lance');
+                fs.rmSync(tableDir, { recursive: true, force: true });
+                await assert.rejects(
+                    () => store.tombstone('lore:victim', 'should fail loudly'),
+                    (err: unknown) => err instanceof VerbatimStoreError && (err as VerbatimStoreError).operation === 'tombstone',
+                    'tombstone must throw VerbatimStoreError on real failure (pre-fix: bare catch {})',
+                );
+            }
         } finally { cleanup(); }
     });
 

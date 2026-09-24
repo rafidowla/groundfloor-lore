@@ -15,6 +15,7 @@ import { mcpToolError } from '../mcpToolError.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import { recordHotWrite } from '../../../outbox/hotLane.js';
 import { redactError } from '../../../security/logRedact.js';
+import { tombstoneQuestionAliases } from '../../../core/nodeServiceVerbatim.js';
 import { MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../../../engines/nodeFieldLimits.js';
 
 export function registerSupersedeNodeTool(mcpServer: McpServer, deps: MemoryToolsDeps): void {
@@ -114,6 +115,18 @@ export function registerSupersedeNodeTool(mcpServer: McpServer, deps: MemoryTool
                         await withTransactionConflictRetry(() => targetGraph.addEdge(supersedeEdge));
                     } catch (edgeErr) {
                         log.warn(`[Lore] supersede_node: supersedes edge ${new_id}->${old_id} failed (non-fatal; supersededAt is authoritative): ${redactError(edgeErr)}`);
+                    }
+                    // 3.21 step 3(e) — tombstone the SUPERSEDED node's question
+                    // aliases (best-effort). The main content row stays fully
+                    // intact (supersede is soft — recallable via
+                    // includeSuperseded), but its alternate question-phrasings
+                    // should stop surfacing it as if it were still current.
+                    if (deps.outboxStore) {
+                        await tombstoneQuestionAliases({
+                            id: old_id, workspace: _ws,
+                            initiator: 'mcp:supersede_node', logPrefix: '[Lore MCP]',
+                            outboxStore: deps.outboxStore,
+                        });
                     }
                 }
                 deps.auditLog.log({

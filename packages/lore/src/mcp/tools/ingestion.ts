@@ -119,7 +119,23 @@ export function registerIngestionTools(mcpServer: McpServer, deps: IngestionTool
                 // Route the quota inspection to the RESOLVED workspace's path
                 // (not getActiveWorkspacePath, which always reads the boot/active
                 // store). Falls back to the active path when no name resolves.
-                const ws = getWorkspacePath(resolvedRead.resolvedWorkspace);
+                //
+                // Finding 3 (post-review, 3.20.2) — a bare `getWorkspacePath()`
+                // defaults to the process-wide `loreHome()`, not this instance's
+                // own home. For an embedded host with its own registry
+                // (`deps.graphRegistry`, scoped via `LocalGraphRegistry.homeDir()`
+                // to `deps.dataHome`) whose requested workspace is registered
+                // ONLY in its own registry, that throws workspace_not_found
+                // instead of misdirecting — the FAIL CLOSED quota catch below
+                // then denies ingestion outright. Same defensive, duck-typed
+                // read governance.ts/lifecycle.ts already use; `deps.graphRegistry`
+                // is optional, so guard for it being absent too — falls back to
+                // `getWorkspacePath()`'s own `loreHome()` default there, exactly
+                // as before.
+                const registryHome = deps.graphRegistry && typeof (deps.graphRegistry as { homeDir?: () => string }).homeDir === 'function'
+                    ? (deps.graphRegistry as unknown as { homeDir: () => string }).homeDir()
+                    : undefined;
+                const ws = getWorkspacePath(resolvedRead.resolvedWorkspace, registryHome);
                 const breakdown = inspectDataHome(ws);
                 const q = decideQuota({ breakdown });
                 if (!q.allowIngestion) {
@@ -446,7 +462,19 @@ export function registerIngestionTools(mcpServer: McpServer, deps: IngestionTool
                 // when the red tier pauses ingestion. Mirrors the single-file
                 // read block exactly (resolved-workspace path + same envelope).
                 try {
-                    const ws = getWorkspacePath(resolvedImport.resolvedWorkspace);
+                    // Finding 3 (post-review, 3.20.2) — same duck-typed
+                    // registryHome pattern as the read_document_for_ingestion
+                    // quota gate above (and governance.ts/lifecycle.ts): a bare
+                    // `getWorkspacePath()` defaults to the process-wide
+                    // `loreHome()`, which throws workspace_not_found for an
+                    // embedded host's workspace that isn't ALSO registered
+                    // process-wide. `deps.graphRegistry` is optional, so guard
+                    // for it being absent — falls back to `getWorkspacePath()`'s
+                    // own `loreHome()` default there, exactly as before.
+                    const registryHome = deps.graphRegistry && typeof (deps.graphRegistry as { homeDir?: () => string }).homeDir === 'function'
+                        ? (deps.graphRegistry as unknown as { homeDir: () => string }).homeDir()
+                        : undefined;
+                    const ws = getWorkspacePath(resolvedImport.resolvedWorkspace, registryHome);
                     const breakdown = inspectDataHome(ws);
                     const q = decideQuota({ breakdown });
                     if (!q.allowIngestion) {

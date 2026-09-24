@@ -82,6 +82,24 @@ test('writeFingerprint round-trips through readFingerprint', () => {
     assert.equal(typeof fp!.version, 'number');
 });
 
+test('dtype round-trips through read, is omitted when not given, and a dtype disagreement is its own mismatch kind', () => {
+    // Regression pin: readFingerprint() rebuilt the object field-by-field and
+    // silently dropped `dtype`, so every dtype comparison saw "absent".
+    const base = freshBase();
+    writeFingerprint(base, { modelId: 'Xenova/multilingual-e5-small', dimension: 384, dtype: 'q8' });
+    assert.equal(readFingerprint(base)!.dtype, 'q8');
+    const r = checkCompatibility(base, { modelId: 'Xenova/multilingual-e5-small', dimension: 384, dtype: 'fp32' });
+    assert.equal(r.matches, false);
+    assert.equal(r.mismatch, 'dtype');
+    assert.equal(checkCompatibility(base, { modelId: 'Xenova/multilingual-e5-small', dimension: 384 }).matches, true,
+        'an undeclared expected dtype is not itself a mismatch (strict callers add that rule)');
+    const legacy = freshBase();
+    writeFingerprint(legacy, { modelId: 'Xenova/multilingual-e5-small', dimension: 384 });
+    assert.equal(readFingerprint(legacy)!.dtype, undefined);
+    assert.equal(checkCompatibility(legacy, { modelId: 'Xenova/multilingual-e5-small', dimension: 384, dtype: 'q8' }).matches, true,
+        'a fingerprint written before dtype existed is never a dtype mismatch');
+});
+
 test('writeFingerprint is atomic (no leftover .tmp file on success)', () => {
     const base = freshBase();
     writeFingerprint(base, { modelId: 'BAAI/bge-m3', dimension: 1024 });

@@ -21,7 +21,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { StorageBundle } from '../services.js';
-import type { VerbatimStore } from '../../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../../engines/verbatimStoreApi.js';
 import { redactError } from '../../security/logRedact.js';
 import { assertMcpScope } from './mcpScope.js';
 import { assertSafeVerbatimId } from '../../engines/verbatimHistory.js';
@@ -50,7 +50,7 @@ export interface VerbatimToolsDeps {
      * the boot-singleton fallback — same back-compat discipline as
      * graphRegistry being optional in the search tools.
      */
-    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<VerbatimStore> };
+    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<VerbatimStoreApi> };
 }
 
 export function registerVerbatimTools(mcpServer: McpServer, deps: VerbatimToolsDeps): void {

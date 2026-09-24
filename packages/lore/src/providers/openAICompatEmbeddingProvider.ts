@@ -53,6 +53,14 @@ export interface OpenAICompatEmbeddingProviderOptions {
     dimension: number;
     /** API key. Many local servers accept any non-empty string. */
     apiKey?: string;
+    /**
+     * Optional precision/quantization variant the server runs (e.g. `'q8'`).
+     * Declare it when the endpoint serves the same weights as a local model
+     * so this provider's fingerprint (`modelId@dtype`) matches the local
+     * provider's and strict fingerprint checking can verify the store. See
+     * `EmbeddingProvider.dtype`.
+     */
+    dtype?: string;
     /** Per-request timeout in milliseconds. Defaults to 30000. */
     timeoutMs?: number;
     /**
@@ -96,6 +104,7 @@ export class OpenAICompatEmbeddingProviderError extends Error {
 export class OpenAICompatEmbeddingProvider implements EmbeddingProvider {
     public readonly modelId: string;
     public readonly dimension: number;
+    public readonly dtype?: string;
 
     private readonly endpoint: string;
     private readonly headers: Record<string, string>;
@@ -117,6 +126,7 @@ export class OpenAICompatEmbeddingProvider implements EmbeddingProvider {
 
         this.modelId = opts.modelId;
         this.dimension = opts.dimension;
+        if (opts.dtype) this.dtype = opts.dtype;
         this.timeoutMs = opts.timeoutMs ?? 30_000;
         // Strip trailing slash so "/v1/" + "/embeddings" doesn't become "//embeddings".
         const base = opts.baseUrl.replace(/\/+$/, '');

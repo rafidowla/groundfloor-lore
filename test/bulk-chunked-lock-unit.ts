@@ -65,7 +65,8 @@ import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { FileOutboxStore } from '../packages/lore/src/outbox/store.js';
 import { nodeUpsert } from '../packages/lore/src/core/nodeService.js';
 import { handleBulkDelete } from '../packages/lore/src/mcp/http/routes/bulkWriteEdgesDelete.js';
@@ -95,7 +96,7 @@ function delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function realDispatchSubstrates(graph: SurrealGraph, store: VerbatimStore): DispatcherSubstrates {
+function realDispatchSubstrates(graph: SurrealGraph, store: VerbatimStoreApi): DispatcherSubstrates {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-bulk-chunked-lock-wiring-'));
     const wiring = wireOutbox({
         loreDir: tmp,
@@ -156,7 +157,7 @@ test('(a) bulk-delete: round-3 ordering invariant still holds when the racing id
     const v = mkTmp('bulk-chunk-a-v-');
     const o = mkTmp('bulk-chunk-a-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();
@@ -242,7 +243,7 @@ test('(b) bulk-delete(1000 ids) in flight: a concurrent single nodeUpsert comple
     const v = mkTmp('bulk-chunk-b-v-');
     const o = mkTmp('bulk-chunk-b-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();
@@ -299,7 +300,7 @@ test('(c) bulk-upsert: a per-node substrate failure leaves NO pending node.upser
     const v = mkTmp('bulk-chunk-c-v-');
     const o = mkTmp('bulk-chunk-c-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();
@@ -374,7 +375,7 @@ test('(d) bulk-delete: a per-id substrate delete failure leaves NO pending node.
     const v = mkTmp('bulk-chunk-d-v-');
     const o = mkTmp('bulk-chunk-d-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();
@@ -442,7 +443,7 @@ test('(e) bulk-upsert (inline embed): a per-node inline verbatim-seed failure le
     const v = mkTmp('bulk-chunk-e-v-');
     const o = mkTmp('bulk-chunk-e-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();

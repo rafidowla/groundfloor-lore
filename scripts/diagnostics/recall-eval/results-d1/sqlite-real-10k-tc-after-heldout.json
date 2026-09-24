@@ -1,0 +1,4283 @@
+{
+  "generatedAt": "2026-09-23T20:12:17.318Z",
+  "config": {
+    "engine": "sqlite",
+    "graphEngine": "sqlite",
+    "vectorEngine": "sqlite",
+    "embedder": "real",
+    "codeRows": 10000,
+    "depth": 0,
+    "searchMode": "hybrid",
+    "max": 10,
+    "wideMax": 50,
+    "abstain": true,
+    "relevanceFloor": null,
+    "termCoverage": true,
+    "termCoverageMin": null,
+    "gibberishFile": "gibberish-heldout.json",
+    "distractorsFile": "distractors-heldout.json",
+    "withQueries": true,
+    "candidateFloor": null,
+    "lexicalBase": null,
+    "identifiersFile": "identifiers.json",
+    "absentIdentifiersFile": "identifiers-absent.json"
+  },
+  "fixture": {
+    "dataDir": "<local>/logs-e1/cache/sqlite/fixture-f4b536ccd6b5d820",
+    "reused": true,
+    "counts": {
+      "knowledge": 80,
+      "notes": 300,
+      "code": 10000,
+      "edges": 36,
+      "edgesWritten": 36
+    },
+    "buildMs": 2
+  },
+  "timings": {
+    "fixtureMs": 2,
+    "evalMs": 8342,
+    "totalMs": 9269,
+    "meanRecallMs": 25.11977569578312
+  },
+  "latency": {
+    "n": 332,
+    "p50": 21.355207999999948,
+    "p90": 28.759541999999783,
+    "p95": 33.54533300000003,
+    "p99": 37.52637500000128
+  },
+  "perQuestion": [
+    {
+      "id": "q-fx-decision-lease-ttl",
+      "expectedIds": [
+        "fx-decision-lease-ttl"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-lease-ttl",
+          "fx-note-0198",
+          "fx-note-0164",
+          "fx-note-0276",
+          "fx-note-0177",
+          "fx-note-0029",
+          "fx-note-0121",
+          "fx-note-0115",
+          "fx-note-0246",
+          "fx-note-0175"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.869,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.25,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.7
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-lease-ttl",
+          "fx-bug-lease-double-execution",
+          "fx-dup-connector-timeout-default-b",
+          "fx-dup-connector-timeout-default-a",
+          "fx-code-007825",
+          "fx-code-003729",
+          "fx-code-001233",
+          "fx-code-001057",
+          "fx-code-007377",
+          "fx-code-004929"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.89,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.11,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-decision-lease-ttl",
+          "fx-bug-lease-double-execution",
+          "fx-note-0198",
+          "fx-note-0164",
+          "fx-note-0276",
+          "fx-note-0177",
+          "fx-note-0029",
+          "fx-note-0121",
+          "fx-note-0115",
+          "fx-note-0246"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-decision-dlq-retention",
+      "expectedIds": [
+        "fx-decision-dlq-retention"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-dlq-retention",
+          "fx-note-0256",
+          "fx-note-0191",
+          "fx-note-0108",
+          "fx-note-0020",
+          "fx-note-0163",
+          "fx-note-0201",
+          "fx-note-0227",
+          "fx-note-0223",
+          "fx-note-0107"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.919,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.31,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.7
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-dlq-retention",
+          "fx-note-0212",
+          "fx-note-0141",
+          "fx-note-0014",
+          "fx-note-0242",
+          "fx-note-0108",
+          "fx-note-0019",
+          "fx-note-0201",
+          "fx-note-0133",
+          "fx-note-0227"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.922,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.42,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.6
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": true,
+      "prefixStableBoth": true,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-decision-dlq-retention",
+          "fx-note-0212",
+          "fx-note-0256",
+          "fx-note-0141",
+          "fx-note-0014",
+          "fx-note-0242",
+          "fx-note-0108",
+          "fx-note-0019",
+          "fx-note-0201",
+          "fx-note-0133"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-decision-tenant-router-hash",
+      "expectedIds": [
+        "fx-decision-tenant-router-hash"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-tenant-router-hash",
+          "fx-filler-bug_pattern-003",
+          "fx-bug-tenant-router-hot-shard",
+          "fx-code-003541",
+          "fx-code-002469",
+          "fx-code-004725",
+          "fx-code-005349",
+          "fx-code-004581",
+          "fx-code-007893",
+          "fx-code-001125"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.88,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.68,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.75
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-tenant-router-hash",
+          "fx-bug-tenant-router-hot-shard",
+          "fx-filler-bug_pattern-003",
+          "fx-code-009013",
+          "fx-code-006213",
+          "fx-code-005301",
+          "fx-code-006645",
+          "fx-code-005349",
+          "fx-code-007893",
+          "fx-code-004181"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.89,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.1,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": false,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 1,
+      "top3SetEqual": true,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-decision-tenant-router-hash",
+          "fx-bug-tenant-router-hot-shard",
+          "fx-filler-bug_pattern-003",
+          "fx-code-009013",
+          "fx-code-006213",
+          "fx-code-005301",
+          "fx-code-006645",
+          "fx-code-005349",
+          "fx-code-007893",
+          "fx-code-004181"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-decision-config-loader-format",
+      "expectedIds": [
+        "fx-decision-config-loader-format"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-config-loader-format",
+          "fx-note-0041",
+          "fx-note-0017",
+          "fx-note-0259",
+          "fx-note-0203",
+          "fx-note-0128",
+          "fx-note-0088",
+          "fx-note-0269",
+          "fx-note-0077",
+          "fx-note-0179"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.916,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.18,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.63
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-config-loader-format",
+          "fx-note-0041",
+          "fx-note-0017",
+          "fx-note-0150",
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-bug-checkpoint-torn-write",
+          "fx-code-007017",
+          "fx-code-008537",
+          "fx-code-004201",
+          "fx-code-008665"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.849,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.41,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.67
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 1,
+      "top3SetEqual": true,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-decision-config-loader-format",
+          "fx-note-0041",
+          "fx-note-0017",
+          "fx-note-0259",
+          "fx-note-0203",
+          "fx-note-0128",
+          "fx-note-0088",
+          "fx-note-0269",
+          "fx-note-0077",
+          "fx-note-0150"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-convention-retry-jitter",
+      "expectedIds": [
+        "fx-convention-retry-jitter"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-note-0046",
+          "fx-convention-retry-jitter",
+          "fx-note-0120",
+          "fx-note-0086",
+          "fx-note-0255",
+          "fx-note-0164",
+          "fx-note-0115",
+          "fx-note-0271",
+          "fx-note-0200",
+          "fx-note-0130"
+        ],
+        "rank": 2,
+        "hit1": false,
+        "hit3": true,
+        "topScore": 0.845,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.25,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.83
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-retry-jitter",
+          "fx-note-0255",
+          "fx-note-0034",
+          "fx-note-0130",
+          "fx-note-0237",
+          "fx-note-0152",
+          "fx-note-0236",
+          "fx-note-0046",
+          "fx-note-0137",
+          "fx-filler-architecture-034"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.89,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.09,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": true,
+      "prefixStableBoth": true,
+      "anchorBothTop3": true,
+      "top1Equal": false,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-convention-retry-jitter",
+          "fx-note-0255",
+          "fx-note-0034",
+          "fx-note-0130",
+          "fx-note-0237",
+          "fx-note-0152",
+          "fx-note-0236",
+          "fx-note-0046",
+          "fx-note-0137",
+          "fx-filler-architecture-034"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-convention-metrics-naming",
+      "expectedIds": [
+        "fx-convention-metrics-naming"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-convention-metrics-naming",
+          "fx-architecture-metrics-exporter-batching",
+          "fx-note-0158",
+          "fx-filler-architecture-014",
+          "fx-note-0145",
+          "fx-note-0127",
+          "fx-note-0092",
+          "fx-note-0012",
+          "fx-note-0210",
+          "fx-note-0230"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.884,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.87,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.67
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-metrics-naming",
+          "fx-note-0158",
+          "fx-note-0092",
+          "fx-convention-postmortem-blameless",
+          "fx-filler-convention-037",
+          "fx-filler-convention-041",
+          "fx-filler-convention-001",
+          "fx-filler-convention-009",
+          "fx-code-001962",
+          "fx-code-000394"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.864,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.04,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-convention-metrics-naming",
+          "fx-architecture-metrics-exporter-batching",
+          "fx-note-0158",
+          "fx-filler-architecture-014",
+          "fx-note-0145",
+          "fx-note-0127",
+          "fx-note-0092",
+          "fx-note-0012",
+          "fx-note-0210",
+          "fx-note-0230"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-convention-webhook-signing",
+      "expectedIds": [
+        "fx-convention-webhook-signing"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-convention-webhook-signing",
+          "fx-note-0047",
+          "fx-note-0146",
+          "fx-decision-dlq-retention",
+          "fx-convention-metrics-naming",
+          "fx-dup-connector-timeout-default-a",
+          "fx-dup-audit-log-immutability-b",
+          "fx-note-0123",
+          "fx-code-000619",
+          "fx-code-001355"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.888,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.02,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-webhook-signing",
+          "fx-filler-convention-025",
+          "fx-decision-observability-vendor",
+          "fx-filler-bug_pattern-023",
+          "fx-code-009883",
+          "fx-code-004907",
+          "fx-code-009339",
+          "fx-filler-convention-041",
+          "fx-code-000523",
+          "fx-code-009307"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.893,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.21,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": false,
+      "prefixStableTerse": true,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-convention-webhook-signing",
+          "fx-note-0047",
+          "fx-note-0146",
+          "fx-filler-convention-025",
+          "fx-code-009883",
+          "fx-code-004907",
+          "fx-code-009339",
+          "fx-code-000523",
+          "fx-code-009307",
+          "fx-code-006539"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-architecture-checkpoint-store",
+      "expectedIds": [
+        "fx-architecture-checkpoint-store"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-checkpoint-store",
+          "fx-note-0131",
+          "fx-note-0169",
+          "fx-note-0177",
+          "fx-note-0028",
+          "fx-filler-decision-028",
+          "fx-filler-convention-021",
+          "fx-note-0124",
+          "fx-note-0153",
+          "fx-filler-convention-033"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.919,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.29,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.6
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-checkpoint-store",
+          "fx-filler-convention-021",
+          "fx-filler-decision-028",
+          "fx-note-0169",
+          "fx-note-0155",
+          "fx-note-0136",
+          "fx-note-0101",
+          "fx-note-0205",
+          "fx-note-0113",
+          "fx-note-0069"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.868,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.21,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": false,
+      "prefixStableTerse": true,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-architecture-checkpoint-store",
+          "fx-note-0131",
+          "fx-filler-convention-021",
+          "fx-filler-decision-028",
+          "fx-note-0169",
+          "fx-note-0177",
+          "fx-note-0028",
+          "fx-note-0155",
+          "fx-note-0136",
+          "fx-note-0101"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-architecture-connector-bus",
+      "expectedIds": [
+        "fx-architecture-connector-bus"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-connector-bus",
+          "fx-dup-connector-timeout-default-b",
+          "fx-filler-architecture-018",
+          "fx-filler-convention-029",
+          "fx-architecture-worker-pool-autoscale",
+          "fx-dup-connector-timeout-default-a",
+          "fx-note-0285",
+          "fx-note-0080",
+          "fx-note-0209",
+          "fx-note-0143"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.892,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.21,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.78
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-connector-bus",
+          "fx-filler-bug_pattern-035",
+          "fx-dup-connector-timeout-default-b",
+          "fx-filler-convention-029",
+          "fx-filler-architecture-018",
+          "fx-dup-connector-timeout-default-a",
+          "fx-note-0197",
+          "fx-filler-decision-016",
+          "fx-note-0072",
+          "fx-code-005716"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.884,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.85,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-architecture-connector-bus",
+          "fx-filler-bug_pattern-035",
+          "fx-dup-connector-timeout-default-b",
+          "fx-filler-convention-029",
+          "fx-filler-architecture-018",
+          "fx-dup-connector-timeout-default-a",
+          "fx-note-0197",
+          "fx-filler-decision-016",
+          "fx-note-0072",
+          "fx-architecture-worker-pool-autoscale"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-architecture-scheduler-tiers",
+      "expectedIds": [
+        "fx-architecture-scheduler-tiers"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-scheduler-tiers",
+          "fx-note-0207",
+          "fx-dup-batch-size-tuning-a",
+          "fx-note-0270",
+          "fx-hub-glossary",
+          "fx-dup-batch-size-tuning-b",
+          "fx-note-0092",
+          "fx-note-0211",
+          "fx-architecture-checkpoint-store",
+          "fx-note-0062"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.905,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.73,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.83
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-scheduler-tiers",
+          "fx-note-0207",
+          "fx-hub-glossary",
+          "fx-filler-bug_pattern-023",
+          "fx-dup-batch-size-tuning-a",
+          "fx-note-0270",
+          "fx-note-0204",
+          "fx-note-0065",
+          "fx-note-0211",
+          "fx-note-0092"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.904,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.69,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": true,
+      "prefixStableBoth": true,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-architecture-scheduler-tiers",
+          "fx-note-0207",
+          "fx-hub-glossary",
+          "fx-filler-bug_pattern-023",
+          "fx-dup-batch-size-tuning-a",
+          "fx-note-0270",
+          "fx-note-0204",
+          "fx-note-0065",
+          "fx-note-0211",
+          "fx-note-0092"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-architecture-rate-limiter-token-bucket",
+      "expectedIds": [
+        "fx-architecture-rate-limiter-token-bucket"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-decision-tenant-router-hash",
+          "fx-convention-retry-jitter",
+          "fx-dup-retry-budget-cap-a",
+          "fx-bug-tenant-router-hot-shard",
+          "fx-code-001128",
+          "fx-code-005112",
+          "fx-code-002200",
+          "fx-code-003944",
+          "fx-code-007480"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.869,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.23,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.56
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-filler-bug_pattern-007",
+          "fx-filler-architecture-030",
+          "fx-filler-bug_pattern-039",
+          "fx-bug-rate-limiter-thundering-herd",
+          "fx-filler-bug_pattern-011",
+          "fx-filler-decision-020",
+          "fx-filler-architecture-022",
+          "fx-filler-architecture-026",
+          "fx-dup-cli-auth-token-scope-b"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.919,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.29,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": false,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-filler-bug_pattern-007",
+          "fx-filler-architecture-030",
+          "fx-filler-bug_pattern-039",
+          "fx-bug-rate-limiter-thundering-herd",
+          "fx-filler-bug_pattern-011",
+          "fx-filler-decision-020",
+          "fx-filler-architecture-022",
+          "fx-filler-architecture-026",
+          "fx-code-003480"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-bug-checkpoint-torn-write",
+      "expectedIds": [
+        "fx-bug-checkpoint-torn-write"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-bug-checkpoint-torn-write",
+          "fx-note-0124",
+          "fx-note-0227",
+          "fx-note-0247",
+          "fx-architecture-checkpoint-store",
+          "fx-filler-architecture-010",
+          "fx-filler-architecture-002",
+          "fx-filler-architecture-030",
+          "fx-filler-decision-040",
+          "fx-code-002001"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.878,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.61,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-checkpoint-torn-write",
+          "fx-note-0227",
+          "fx-note-0014",
+          "fx-note-0104",
+          "fx-note-0244",
+          "fx-note-0224",
+          "fx-architecture-checkpoint-store",
+          "fx-bug-lease-double-execution",
+          "fx-filler-bug_pattern-023",
+          "fx-code-000453"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.895,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.31,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": false,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-bug-checkpoint-torn-write",
+          "fx-note-0227",
+          "fx-note-0014",
+          "fx-note-0124",
+          "fx-note-0104",
+          "fx-note-0244",
+          "fx-note-0224",
+          "fx-note-0247",
+          "fx-architecture-checkpoint-store",
+          "fx-code-000453"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-bug-lease-double-execution",
+      "expectedIds": [
+        "fx-bug-lease-double-execution"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-bug-lease-double-execution",
+          "fx-bug-dlq-purge-race",
+          "fx-note-0121",
+          "fx-note-0198",
+          "fx-note-0276",
+          "fx-convention-idempotency-key",
+          "fx-note-0010",
+          "fx-note-0243",
+          "fx-note-0029",
+          "fx-note-0261"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.886,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.94,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.56
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-lease-double-execution",
+          "fx-bug-dlq-purge-race",
+          "fx-convention-idempotency-key",
+          "fx-note-0164",
+          "fx-note-0087",
+          "fx-note-0109",
+          "fx-note-0284",
+          "fx-convention-schema-migration-additive",
+          "fx-decision-lease-ttl",
+          "fx-filler-bug_pattern-031"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.872,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.34,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-bug-lease-double-execution",
+          "fx-bug-dlq-purge-race",
+          "fx-note-0121",
+          "fx-note-0198",
+          "fx-convention-idempotency-key",
+          "fx-note-0276",
+          "fx-note-0164",
+          "fx-note-0087",
+          "fx-note-0109",
+          "fx-note-0284"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-bug-rate-limiter-thundering-herd",
+      "expectedIds": [
+        "fx-bug-rate-limiter-thundering-herd"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-bug-rate-limiter-thundering-herd",
+          "fx-filler-architecture-026",
+          "fx-note-0186",
+          "fx-note-0105",
+          "fx-note-0298",
+          "fx-note-0199",
+          "fx-note-0223",
+          "fx-filler-bug_pattern-007",
+          "fx-note-0119"
+        ],
+        "rank": 2,
+        "hit1": false,
+        "hit3": true,
+        "topScore": 0.855,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.65,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.78
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-rate-limiter-thundering-herd",
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-filler-bug_pattern-039",
+          "fx-filler-bug_pattern-011",
+          "fx-filler-bug_pattern-007",
+          "fx-note-0119",
+          "fx-note-0199",
+          "fx-note-0263",
+          "fx-note-0298",
+          "fx-note-0223"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.876,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.53,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": true,
+      "prefixStableBoth": true,
+      "anchorBothTop3": true,
+      "top1Equal": false,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-bug-rate-limiter-thundering-herd",
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-filler-bug_pattern-039",
+          "fx-filler-bug_pattern-011",
+          "fx-filler-bug_pattern-007",
+          "fx-note-0119",
+          "fx-note-0199",
+          "fx-note-0263",
+          "fx-note-0298",
+          "fx-note-0223"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-bug-config-loader-hot-reload-leak",
+      "expectedIds": [
+        "fx-bug-config-loader-hot-reload-leak"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-note-0203",
+          "fx-decision-config-loader-format",
+          "fx-note-0150",
+          "fx-note-0235",
+          "fx-note-0041",
+          "fx-note-0017",
+          "fx-note-0259",
+          "fx-note-0269",
+          "fx-note-0088"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.903,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.65,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.88
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-note-0269",
+          "fx-code-002409",
+          "fx-code-009785",
+          "fx-code-007881",
+          "fx-code-009097",
+          "fx-code-005593",
+          "fx-code-007417",
+          "fx-code-009353",
+          "fx-code-006281"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.917,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.2,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-note-0269",
+          "fx-note-0203",
+          "fx-decision-config-loader-format",
+          "fx-note-0150",
+          "fx-note-0235",
+          "fx-note-0041",
+          "fx-note-0017",
+          "fx-note-0259",
+          "fx-note-0088"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-convention-idempotency-key",
+      "expectedIds": [
+        "fx-convention-idempotency-key"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-convention-idempotency-key",
+          "fx-bug-lease-double-execution",
+          "fx-convention-schema-migration-additive",
+          "fx-dup-worker-pool-min-size-b",
+          "fx-dup-batch-size-tuning-a",
+          "fx-dup-retry-budget-cap-a",
+          "fx-dup-batch-size-tuning-b",
+          "fx-dup-worker-pool-min-size-a",
+          "fx-code-006700",
+          "fx-dup-retry-budget-cap-b"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.897,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.4,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.86
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-idempotency-key",
+          "fx-filler-convention-013",
+          "fx-note-0284",
+          "fx-note-0153",
+          "fx-note-0073",
+          "fx-note-0218",
+          "fx-note-0042",
+          "fx-note-0177",
+          "fx-note-0171",
+          "fx-note-0087"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.921,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.39,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": false,
+      "prefixStableTerse": true,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-convention-idempotency-key",
+          "fx-filler-convention-013",
+          "fx-note-0284",
+          "fx-note-0153",
+          "fx-note-0073",
+          "fx-note-0218",
+          "fx-note-0042",
+          "fx-note-0177",
+          "fx-note-0171",
+          "fx-note-0087"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-decision-webhook-relay-language",
+      "expectedIds": [
+        "fx-decision-webhook-relay-language"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-webhook-relay-language",
+          "fx-filler-convention-025",
+          "fx-note-0137",
+          "fx-filler-decision-000",
+          "fx-filler-architecture-006",
+          "fx-filler-decision-004",
+          "fx-filler-decision-040",
+          "fx-code-000475",
+          "fx-code-001659",
+          "fx-code-009883"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.9,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.51,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.8
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-webhook-relay-language",
+          "fx-filler-convention-025",
+          "fx-filler-decision-000",
+          "fx-note-0269",
+          "fx-filler-architecture-006",
+          "fx-note-0221",
+          "fx-note-0234",
+          "fx-note-0057",
+          "fx-note-0025",
+          "fx-note-0137"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.913,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.04,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": false,
+      "prefixStableTerse": true,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-decision-webhook-relay-language",
+          "fx-filler-convention-025",
+          "fx-filler-decision-000",
+          "fx-note-0269",
+          "fx-filler-architecture-006",
+          "fx-note-0221",
+          "fx-note-0234",
+          "fx-note-0057",
+          "fx-note-0025",
+          "fx-note-0137"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-architecture-metrics-exporter-batching",
+      "expectedIds": [
+        "fx-architecture-metrics-exporter-batching"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-metrics-exporter-batching",
+          "fx-note-0145",
+          "fx-note-0210",
+          "fx-filler-architecture-014",
+          "fx-note-0230",
+          "fx-note-0127",
+          "fx-note-0011",
+          "fx-note-0111",
+          "fx-note-0143",
+          "fx-bug-dlq-purge-race"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.914,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.1,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.83
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-metrics-exporter-batching",
+          "fx-note-0230",
+          "fx-note-0145",
+          "fx-note-0237",
+          "fx-note-0210",
+          "fx-note-0046",
+          "fx-code-005370",
+          "fx-code-007386",
+          "fx-code-005418",
+          "fx-code-006570"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.9,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.5,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": false,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-architecture-metrics-exporter-batching",
+          "fx-note-0230",
+          "fx-note-0145",
+          "fx-note-0237",
+          "fx-note-0210",
+          "fx-filler-architecture-014",
+          "fx-note-0127",
+          "fx-note-0011",
+          "fx-note-0111",
+          "fx-note-0143"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-bug-tenant-router-hot-shard",
+      "expectedIds": [
+        "fx-bug-tenant-router-hot-shard"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-tenant-router-hash",
+          "fx-bug-tenant-router-hot-shard",
+          "fx-note-0135",
+          "fx-filler-bug_pattern-003",
+          "fx-note-0128",
+          "fx-note-0104",
+          "fx-note-0090",
+          "fx-note-0040",
+          "fx-note-0267",
+          "fx-note-0219"
+        ],
+        "rank": 2,
+        "hit1": false,
+        "hit3": true,
+        "topScore": 0.882,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.78,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.88
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-tenant-router-hot-shard",
+          "fx-decision-tenant-router-hash",
+          "fx-filler-bug_pattern-003",
+          "fx-code-006997",
+          "fx-code-008949",
+          "fx-code-001909",
+          "fx-code-009013",
+          "fx-code-004325",
+          "fx-code-004181",
+          "fx-code-006213"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.89,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.1,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": false,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-bug-tenant-router-hot-shard",
+          "fx-decision-tenant-router-hash",
+          "fx-filler-bug_pattern-003",
+          "fx-note-0135",
+          "fx-note-0128",
+          "fx-note-0104",
+          "fx-note-0090",
+          "fx-note-0040",
+          "fx-note-0267",
+          "fx-note-0219"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-convention-schema-migration-additive",
+      "expectedIds": [
+        "fx-convention-schema-migration-additive"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-convention-schema-migration-additive",
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-decision-config-loader-format",
+          "fx-architecture-checkpoint-store",
+          "fx-note-0290",
+          "fx-note-0243",
+          "fx-dup-audit-log-immutability-a",
+          "fx-architecture-worker-pool-autoscale",
+          "fx-dup-worker-pool-min-size-b",
+          "fx-convention-retry-jitter"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.86,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.88,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.43
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-schema-migration-additive",
+          "fx-convention-webhook-signing",
+          "fx-dup-retry-budget-cap-b",
+          "fx-dup-retry-budget-cap-a",
+          "fx-decision-tenant-router-hash",
+          "fx-code-000876",
+          "fx-code-003968",
+          "fx-code-006480",
+          "fx-code-008784",
+          "fx-code-007456"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.853,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.57,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.67
+      },
+      "prefixStableChatty": false,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-convention-schema-migration-additive",
+          "fx-convention-webhook-signing",
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-decision-config-loader-format",
+          "fx-architecture-checkpoint-store",
+          "fx-note-0290",
+          "fx-note-0243",
+          "fx-code-000876",
+          "fx-code-003968",
+          "fx-code-006480"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-architecture-worker-pool-autoscale",
+      "expectedIds": [
+        "fx-architecture-worker-pool-autoscale"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-worker-pool-autoscale",
+          "fx-dup-worker-pool-min-size-a",
+          "fx-dup-worker-pool-min-size-b",
+          "fx-note-0247",
+          "fx-filler-decision-032",
+          "fx-note-0173",
+          "fx-note-0029",
+          "fx-note-0266",
+          "fx-note-0189",
+          "fx-note-0210"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.847,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.32,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.57
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-worker-pool-autoscale",
+          "fx-filler-decision-036",
+          "fx-filler-bug_pattern-027",
+          "fx-note-0124",
+          "fx-note-0247",
+          "fx-code-005345",
+          "fx-code-005313",
+          "fx-code-007585",
+          "fx-code-005761",
+          "fx-code-009233"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.908,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.85,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-architecture-worker-pool-autoscale",
+          "fx-filler-decision-036",
+          "fx-filler-bug_pattern-027",
+          "fx-note-0124",
+          "fx-note-0247",
+          "fx-dup-worker-pool-min-size-a",
+          "fx-dup-worker-pool-min-size-b",
+          "fx-filler-decision-032",
+          "fx-note-0173",
+          "fx-note-0029"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-bug-dlq-purge-race",
+      "expectedIds": [
+        "fx-bug-dlq-purge-race"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-bug-dlq-purge-race",
+          "fx-note-0116",
+          "fx-note-0117",
+          "fx-note-0282",
+          "fx-note-0269",
+          "fx-note-0029",
+          "fx-decision-dlq-retention",
+          "fx-filler-bug_pattern-019",
+          "fx-note-0103",
+          "fx-convention-schema-migration-additive"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.907,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.8,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.71
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-dlq-purge-race",
+          "fx-note-0023",
+          "fx-bug-lease-double-execution",
+          "fx-filler-bug_pattern-031",
+          "fx-decision-dlq-retention",
+          "fx-filler-bug_pattern-023",
+          "fx-code-002903",
+          "fx-code-005879",
+          "fx-code-008455",
+          "fx-code-000519"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.905,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.73,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": false,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-bug-dlq-purge-race",
+          "fx-note-0023",
+          "fx-note-0116",
+          "fx-note-0117",
+          "fx-note-0282",
+          "fx-note-0269",
+          "fx-note-0029",
+          "fx-decision-dlq-retention",
+          "fx-filler-bug_pattern-019",
+          "fx-note-0103"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-decision-observability-vendor",
+      "expectedIds": [
+        "fx-decision-observability-vendor"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-observability-vendor",
+          "fx-note-0146",
+          "fx-note-0158",
+          "fx-note-0111",
+          "fx-note-0115",
+          "fx-note-0127",
+          "fx-note-0012",
+          "fx-note-0086",
+          "fx-note-0092",
+          "fx-note-0011"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.901,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.57,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.75
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-observability-vendor",
+          "fx-note-0158",
+          "fx-note-0012",
+          "fx-note-0146",
+          "fx-filler-convention-001",
+          "fx-filler-decision-016",
+          "fx-filler-convention-021",
+          "fx-filler-convention-033",
+          "fx-code-004586",
+          "fx-code-000186"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.895,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.31,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-decision-observability-vendor",
+          "fx-note-0146",
+          "fx-note-0158",
+          "fx-note-0111",
+          "fx-note-0115",
+          "fx-note-0127",
+          "fx-note-0012",
+          "fx-note-0086",
+          "fx-note-0092",
+          "fx-note-0011"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    },
+    {
+      "id": "q-fx-convention-postmortem-blameless",
+      "expectedIds": [
+        "fx-convention-postmortem-blameless"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-convention-postmortem-blameless",
+          "fx-bug-checkpoint-torn-write",
+          "fx-note-0086",
+          "fx-note-0074",
+          "fx-note-0046",
+          "fx-note-0103",
+          "fx-note-0141",
+          "fx-note-0115",
+          "fx-note-0045",
+          "fx-note-0001"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.853,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.57,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 0.67
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-postmortem-blameless",
+          "fx-decision-dlq-retention",
+          "fx-bug-checkpoint-torn-write",
+          "fx-filler-architecture-010",
+          "fx-filler-architecture-002",
+          "fx-filler-architecture-030",
+          "fx-filler-decision-040",
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-code-005031",
+          "fx-code-002919"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.875,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.48,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      "prefixStableChatty": true,
+      "prefixStableTerse": false,
+      "prefixStableBoth": false,
+      "anchorBothTop3": true,
+      "top1Equal": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      },
+      "withQueries": {
+        "ids": [
+          "fx-convention-postmortem-blameless",
+          "fx-decision-dlq-retention",
+          "fx-bug-checkpoint-torn-write",
+          "fx-note-0086",
+          "fx-note-0074",
+          "fx-note-0046",
+          "fx-note-0103",
+          "fx-note-0141",
+          "fx-note-0115",
+          "fx-note-0045"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "abstained": false
+      }
+    }
+  ],
+  "gibberish": [
+    {
+      "id": "gh-0",
+      "query": "origami deckle",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.15,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-1",
+      "query": "ceramics lure viticulture contour",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.26,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-2",
+      "query": "propolis vintage anvil",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.22,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-3",
+      "query": "rag rag",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.1,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-4",
+      "query": "meridian bindery tannin queen",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.2,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-5",
+      "query": "fold papermaking fold",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.43,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-6",
+      "query": "anvil propolis",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.06,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-7",
+      "query": "glaze apiary kirigami apiary",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.19,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-8",
+      "query": "queen talon legend",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.24,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-9",
+      "query": "bisque falconry",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.36,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-10",
+      "query": "graticule quench meridian greenware",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 1.47,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-11",
+      "query": "datum tempering valley",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.66,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-12",
+      "query": "quarry wedging",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.82,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-13",
+      "query": "bisque blacksmithing contour viticulture",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.23,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-14",
+      "query": "projection graticule swarm kiln",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.61,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-15",
+      "query": "cartography fold viticulture",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.48,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-16",
+      "query": "wedging ingot",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.68,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-17",
+      "query": "throwing datum gauntlet rag",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.79,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-18",
+      "query": "pulp legend slip",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.23,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-19",
+      "query": "cartography lure",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.17,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-20",
+      "query": "tessellation anvil",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.46,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-21",
+      "query": "beekeeping deckle falconry tongs",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.65,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-22",
+      "query": "nectar gauntlet",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.38,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-23",
+      "query": "crease mountain tessellation vintage",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.6,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-24",
+      "query": "deckle beekeeping terroir",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.02,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-25",
+      "query": "pulp tannin",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.1,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-26",
+      "query": "apiary glaze vellum cartouche",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.09,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-27",
+      "query": "tongs cartography",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.8,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-28",
+      "query": "nectar rootstock rootstock",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 1.52,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-29",
+      "query": "canopy module",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.93,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-30",
+      "query": "drone viticulture drone beekeeping",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.01,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-31",
+      "query": "bindery jesses queen",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.88,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-32",
+      "query": "kirigami cartouche",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.64,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-33",
+      "query": "module bellows greenware crease",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 1.97,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-34",
+      "query": "beekeeping contour blacksmithing",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.04,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-35",
+      "query": "eyass legend",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.49,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-36",
+      "query": "nectar gauntlet throwing valley",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.04,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-37",
+      "query": "jesses ingot bellows",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.34,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-38",
+      "query": "falconry contour",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.29,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-39",
+      "query": "mountain meridian vintage graticule",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.07,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-40",
+      "query": "glaze vellum forge",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.23,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-41",
+      "query": "slip meridian",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.2,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-42",
+      "query": "papermaking drone ceramics deckle",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.43,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-43",
+      "query": "talon projection crease",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.45,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-44",
+      "query": "throwing datum",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.94,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-45",
+      "query": "trellis greenware graticule eyass",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.8,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-46",
+      "query": "tongs ceramics tongs",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.78,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-47",
+      "query": "crease talon",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 1.01,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-48",
+      "query": "vellum forge forge forge",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 1.1,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-49",
+      "query": "eyass propolis bindery",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.52,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-50",
+      "query": "terroir origami",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.35,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-51",
+      "query": "tannin module pulp bindery",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.6,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-52",
+      "query": "rootstock valley tempering",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.58,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-53",
+      "query": "deckle origami terroir cartography",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.13,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-54",
+      "query": "quarry trellis wedging",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.01,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-55",
+      "query": "cartouche kirigami",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.2,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-56",
+      "query": "viticulture lure ceramics",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.66,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-57",
+      "query": "vintage swarm",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.02,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-58",
+      "query": "rag rag valley throwing",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": -0.39,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    },
+    {
+      "id": "gh-59",
+      "query": "meridian bindery tannin",
+      "hitCount": 0,
+      "topScore": null,
+      "confidence": 0,
+      "abstained": true,
+      "topRelevance": 0.03,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0,
+      "withQueries": {
+        "hitCount": 0,
+        "abstained": true
+      }
+    }
+  ],
+  "distractors": [
+    {
+      "id": "dxh-0",
+      "query": "What programming language is the scheduler written in?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.82,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.25
+    },
+    {
+      "id": "dxh-1",
+      "query": "How many replicas does the job table database run with?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.93,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.4
+    },
+    {
+      "id": "dxh-2",
+      "query": "Which message broker backs the connector bus in production?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.6,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.33
+    },
+    {
+      "id": "dxh-3",
+      "query": "What port does the webhook relay listen on?",
+      "hitCount": 10,
+      "topScore": 0.849,
+      "abstained": false,
+      "topRelevance": 2.43,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": 0.5
+    },
+    {
+      "id": "dxh-4",
+      "query": "Who approves changes to the rate limiter configuration?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.89,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.6
+    },
+    {
+      "id": "dxh-5",
+      "query": "How do we encrypt checkpoint data at rest?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 2.85,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0.25
+    },
+    {
+      "id": "dxh-6",
+      "query": "What is the maximum payload size a webhook can deliver?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.97,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.4
+    },
+    {
+      "id": "dxh-7",
+      "query": "worker pool kubernetes node type",
+      "hitCount": 10,
+      "topScore": 0.878,
+      "abstained": false,
+      "topRelevance": 3.59,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": 0.4
+    },
+    {
+      "id": "dxh-8",
+      "query": "tenant router failover to a secondary datacenter",
+      "hitCount": 10,
+      "topScore": 0.867,
+      "abstained": false,
+      "topRelevance": 3.15,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": 0.6
+    },
+    {
+      "id": "dxh-9",
+      "query": "How are CLI releases versioned and published to customers?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 0.54,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.2
+    },
+    {
+      "id": "dxh-10",
+      "query": "What license do we ship the Riverstone SDK under?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.81,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.25
+    },
+    {
+      "id": "dxh-11",
+      "query": "How does the audit log get exported to the compliance team?",
+      "hitCount": 10,
+      "topScore": 0.847,
+      "abstained": false,
+      "topRelevance": 2.32,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": 0.6
+    },
+    {
+      "id": "dxh-12",
+      "query": "Which alerting tool pages the team when the dead-letter queue grows?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.93,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.38
+    },
+    {
+      "id": "dxh-13",
+      "query": "What is the naming convention for git branches?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 0.37,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.33
+    },
+    {
+      "id": "dxh-14",
+      "query": "How do we benchmark the scheduler before a release?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 2.29,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0.25
+    },
+    {
+      "id": "dxh-15",
+      "query": "scheduler cron expression syntax",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 3.25,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0.25
+    },
+    {
+      "id": "dxh-16",
+      "query": "What timezone are scheduled jobs evaluated in?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.04,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.5
+    },
+    {
+      "id": "dxh-17",
+      "query": "How long are metrics retained in the self-hosted stack before downsampling?",
+      "hitCount": 10,
+      "topScore": 0.851,
+      "abstained": false,
+      "topRelevance": 2.49,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": 0.5
+    },
+    {
+      "id": "dxh-18",
+      "query": "Which CDN serves the static assets for the tenant web console?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.62,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.14
+    },
+    {
+      "id": "dxh-19",
+      "query": "Which team owns the connector bus on-call rotation?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.08,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.5
+    },
+    {
+      "id": "dxh-20",
+      "query": "How do tenants get billed for job execution minutes?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.52,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.4
+    },
+    {
+      "id": "dxh-21",
+      "query": "What is the password complexity policy for the admin console?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 0.81,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.2
+    },
+    {
+      "id": "dxh-22",
+      "query": "config loader environment variable precedence order",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 3.28,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0.33
+    },
+    {
+      "id": "dxh-23",
+      "query": "How do we load test the webhook relay before peak season?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 3.05,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0.29
+    },
+    {
+      "id": "dxh-24",
+      "query": "Why did we pick Postgres for the job table?",
+      "hitCount": 10,
+      "topScore": 0.842,
+      "abstained": false,
+      "topRelevance": 2.12,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": 0.67
+    },
+    {
+      "id": "dxh-25",
+      "query": "What is the upgrade path from Riverstone 1.x to 2.0 for existing tenants?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 2.71,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0
+    },
+    {
+      "id": "dxh-26",
+      "query": "How are secrets injected into worker containers?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.77,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0.25
+    },
+    {
+      "id": "dxh-27",
+      "query": "rate limiter per-tenant quota override process",
+      "hitCount": 10,
+      "topScore": 0.863,
+      "abstained": false,
+      "topRelevance": 3,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": 0.5
+    }
+  ],
+  "negatives": {
+    "offtopic": {
+      "n": 20,
+      "topScoreNullCount": 20,
+      "top1LexicalOnlyCount": 0,
+      "top3LexicalOnlySlots": 0,
+      "top3LexicalOnlySlotsOf": 60
+    },
+    "unanswerable": {
+      "n": 12,
+      "topScoreNullCount": 12,
+      "top1LexicalOnlyCount": 0,
+      "top3LexicalOnlySlots": 0,
+      "top3LexicalOnlySlotsOf": 36
+    }
+  },
+  "identifiers": {
+    "n": 20,
+    "rank1": 0.85,
+    "hit3": 0.9,
+    "found10": 0.95,
+    "mrr": 0.875,
+    "perQuery": [
+      {
+        "id": "id-01",
+        "query": "fixture symbol #3",
+        "expectedIds": [
+          "fx-code-000003"
+        ],
+        "ids": [
+          "fx-note-0003",
+          "fx-dup-worker-pool-min-size-b",
+          "fx-dup-worker-pool-min-size-a",
+          "fx-convention-postmortem-blameless",
+          "fx-code-009995",
+          "fx-code-000003",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016"
+        ],
+        "rank": 6,
+        "rank1": false,
+        "hit3": false,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.41,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-02",
+        "query": "fixture symbol #99",
+        "expectedIds": [
+          "fx-code-000099"
+        ],
+        "ids": [
+          "fx-note-0099",
+          "fx-code-009995",
+          "fx-code-000099",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016",
+          "fx-code-000029",
+          "fx-code-000031",
+          "fx-code-000032"
+        ],
+        "rank": 3,
+        "rank1": false,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.13,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-03",
+        "query": "fixture symbol #1234",
+        "expectedIds": [
+          "fx-code-001234"
+        ],
+        "ids": [
+          "fx-code-001234",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016",
+          "fx-code-000029",
+          "fx-code-000031",
+          "fx-code-000032",
+          "fx-code-000045",
+          "fx-code-000047"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.3,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-04",
+        "query": "fixture symbol #2500",
+        "expectedIds": [
+          "fx-code-002500"
+        ],
+        "ids": [
+          "fx-code-005525",
+          "fx-code-005217",
+          "fx-code-006100",
+          "fx-code-001749",
+          "fx-code-007045",
+          "fx-code-005669",
+          "fx-code-002741",
+          "fx-code-005061",
+          "fx-code-002549",
+          "fx-code-002629"
+        ],
+        "rank": null,
+        "rank1": false,
+        "hit3": false,
+        "found10": false,
+        "hitCount": 10,
+        "topScore": 0.82,
+        "abstained": false,
+        "topRelevance": 1.21,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-05",
+        "query": "fixture symbol #3333",
+        "expectedIds": [
+          "fx-code-003333"
+        ],
+        "ids": [
+          "fx-code-003333",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016",
+          "fx-code-000029",
+          "fx-code-000031",
+          "fx-code-000032",
+          "fx-code-000045",
+          "fx-code-000047"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.73,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-06",
+        "query": "fixture symbol #4444",
+        "expectedIds": [
+          "fx-code-004444"
+        ],
+        "ids": [
+          "fx-code-004444",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016",
+          "fx-code-000029",
+          "fx-code-000031",
+          "fx-code-000032",
+          "fx-code-000045",
+          "fx-code-000047"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.39,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-07",
+        "query": "fixture symbol #5555",
+        "expectedIds": [
+          "fx-code-005555"
+        ],
+        "ids": [
+          "fx-code-005555",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016",
+          "fx-code-000029",
+          "fx-code-000031",
+          "fx-code-000032",
+          "fx-code-000045",
+          "fx-code-000047"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.52,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-08",
+        "query": "fixture symbol #6666",
+        "expectedIds": [
+          "fx-code-006666"
+        ],
+        "ids": [
+          "fx-code-006666",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016",
+          "fx-code-000029",
+          "fx-code-000031",
+          "fx-code-000032",
+          "fx-code-000045",
+          "fx-code-000047"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.77,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-09",
+        "query": "fixture symbol #7777",
+        "expectedIds": [
+          "fx-code-007777"
+        ],
+        "ids": [
+          "fx-code-007777",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016",
+          "fx-code-000029",
+          "fx-code-000031",
+          "fx-code-000032",
+          "fx-code-000045",
+          "fx-code-000047"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.32,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-10",
+        "query": "fixture symbol #8888",
+        "expectedIds": [
+          "fx-code-008888"
+        ],
+        "ids": [
+          "fx-code-008888",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016",
+          "fx-code-000029",
+          "fx-code-000031",
+          "fx-code-000032",
+          "fx-code-000045",
+          "fx-code-000047"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.61,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-11",
+        "query": "fixture symbol #9750",
+        "expectedIds": [
+          "fx-code-009750"
+        ],
+        "ids": [
+          "fx-code-009750",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016",
+          "fx-code-000029",
+          "fx-code-000031",
+          "fx-code-000032",
+          "fx-code-000045",
+          "fx-code-000047"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.38,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-12",
+        "query": "fixture symbol #9999",
+        "expectedIds": [
+          "fx-code-009999"
+        ],
+        "ids": [
+          "fx-code-009999",
+          "fx-code-000000",
+          "fx-code-000013",
+          "fx-code-000015",
+          "fx-code-000016",
+          "fx-code-000029",
+          "fx-code-000031",
+          "fx-code-000032",
+          "fx-code-000045",
+          "fx-code-000047"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.32,
+        "overridden": "exact_identifier",
+        "abstainReason": null,
+        "termCoverage": 0.5
+      },
+      {
+        "id": "id-13",
+        "query": "rebalanceLedger.ts checkpoint-store",
+        "expectedIds": [
+          "fx-code-000179"
+        ],
+        "ids": [
+          "fx-code-000179",
+          "fx-code-002643",
+          "fx-code-003139",
+          "fx-code-009939",
+          "fx-code-001107",
+          "fx-code-009491",
+          "fx-code-009763",
+          "fx-code-007443",
+          "fx-code-009155",
+          "fx-code-005475"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.936,
+        "abstained": false,
+        "topRelevance": 5.99,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      {
+        "id": "id-14",
+        "query": "src/job-table/throttleLedger.ts",
+        "expectedIds": [
+          "fx-code-000956"
+        ],
+        "ids": [
+          "fx-code-000956",
+          "fx-code-009361",
+          "fx-code-002561",
+          "fx-code-000241",
+          "fx-code-001041",
+          "fx-code-003073",
+          "fx-code-001345",
+          "fx-code-005212",
+          "fx-code-003500",
+          "fx-code-009774"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.919,
+        "abstained": false,
+        "topRelevance": 5.3,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      {
+        "id": "id-15",
+        "query": "validateCursor.ts checkpoint-store",
+        "expectedIds": [
+          "fx-code-001939"
+        ],
+        "ids": [
+          "fx-code-001939",
+          "fx-code-006566",
+          "fx-code-005318",
+          "fx-code-009014",
+          "fx-code-002250",
+          "fx-code-004314",
+          "fx-code-009002",
+          "fx-code-009830",
+          "fx-code-000484",
+          "fx-code-003302"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.949,
+        "abstained": false,
+        "topRelevance": 6.53,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      {
+        "id": "id-16",
+        "query": "src/audit-log/renewCursor.ts",
+        "expectedIds": [
+          "fx-code-003118"
+        ],
+        "ids": [
+          "fx-code-003118",
+          "fx-code-009566",
+          "fx-code-007774",
+          "fx-code-006734",
+          "fx-code-005822",
+          "fx-code-007374",
+          "fx-code-000206",
+          "fx-code-005114",
+          "fx-code-004554",
+          "fx-code-003054"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.934,
+        "abstained": false,
+        "topRelevance": 5.91,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      {
+        "id": "id-17",
+        "query": "dispatchBatch.ts tenant-router",
+        "expectedIds": [
+          "fx-code-004549"
+        ],
+        "ids": [
+          "fx-code-004549",
+          "fx-code-004485",
+          "fx-code-002453",
+          "fx-code-002677",
+          "fx-code-002933",
+          "fx-code-006133",
+          "fx-code-000037",
+          "fx-code-005701",
+          "fx-code-002053",
+          "fx-code-003093"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.934,
+        "abstained": false,
+        "topRelevance": 5.93,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      {
+        "id": "id-18",
+        "query": "src/lease-manager/reconcileOffset.ts",
+        "expectedIds": [
+          "fx-code-005938"
+        ],
+        "ids": [
+          "fx-code-005938",
+          "fx-code-005426",
+          "fx-code-003314",
+          "fx-code-002450",
+          "fx-code-000450",
+          "fx-code-006802",
+          "fx-code-007826",
+          "fx-code-001970",
+          "fx-code-008082",
+          "fx-code-003026"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.928,
+        "abstained": false,
+        "topRelevance": 5.69,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      {
+        "id": "id-19",
+        "query": "reconcileShard.ts lease-manager",
+        "expectedIds": [
+          "fx-code-007490"
+        ],
+        "ids": [
+          "fx-code-007490",
+          "fx-code-000210",
+          "fx-code-009698",
+          "fx-code-005826",
+          "fx-code-003058",
+          "fx-code-006514",
+          "fx-code-006706",
+          "fx-code-006034",
+          "fx-code-005378",
+          "fx-code-007074"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.923,
+        "abstained": false,
+        "topRelevance": 5.48,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      },
+      {
+        "id": "id-20",
+        "query": "src/job-table/renewToken.ts",
+        "expectedIds": [
+          "fx-code-008988"
+        ],
+        "ids": [
+          "fx-code-008988",
+          "fx-code-003564",
+          "fx-code-005516",
+          "fx-code-009180",
+          "fx-code-008700",
+          "fx-code-009772",
+          "fx-code-004748",
+          "fx-code-002524",
+          "fx-code-008124",
+          "fx-code-003308"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.938,
+        "abstained": false,
+        "topRelevance": 6.07,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": 1
+      }
+    ]
+  },
+  "absentIdentifiers": [
+    {
+      "id": "ida-01",
+      "query": "fixture symbol #999999",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.32,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-02",
+      "query": "fixture symbol #10000",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.33,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-03",
+      "query": "fixture symbol #123456",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.48,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-04",
+      "query": "fixture symbol #48213",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.54,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-05",
+      "query": "fx-code-999999",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 2.19,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-06",
+      "query": "compactGrimoire",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.54,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-07",
+      "query": "src/billing/chargeInvoice.ts",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 3.37,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-08",
+      "query": "transmuteWidget.ts checkpoint-store",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 3.7,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-09",
+      "query": "ERR_LEASE_EXPIRED",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 3.17,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-10",
+      "query": "ctx.quantum_router.teleport",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 3.67,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-11",
+      "query": "src/lease-manager/frobnicateShard.ts",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 4.11,
+      "overridden": null,
+      "abstainReason": "term_coverage",
+      "termCoverage": 0
+    },
+    {
+      "id": "ida-12",
+      "query": "where is harmonizeVortex defined?",
+      "hitCount": 0,
+      "topScore": null,
+      "abstained": true,
+      "topRelevance": 1.58,
+      "overridden": null,
+      "abstainReason": "below_floor",
+      "termCoverage": 0
+    }
+  ],
+  "aggregate": {
+    "n_questions": 24,
+    "n_gibberish": 60,
+    "hit1": 0.875,
+    "hit3": 1,
+    "mrr": 0.9375,
+    "hit1Terse": 1,
+    "hit3Terse": 1,
+    "mrrTerse": 1,
+    "pooledHit3": 1,
+    "pooledHit3Count": 48,
+    "pooledHit3N": 48,
+    "prefixStableChattyPct": 0.5833333333333334,
+    "prefixStableTersePct": 0.3333333333333333,
+    "prefixStableBothPct": 0.16666666666666666,
+    "anchorBothTop3Pct": 1,
+    "top1EqualPct": 0.875,
+    "top3AgreementMean": 0.4041666666666666,
+    "top3SetEqualPct": 0.08333333333333333,
+    "meanPairwiseJaccard": 0.021048225466720534,
+    "zeroHitGibberishPct": 1,
+    "abstainedGibberishPct": 1,
+    "realAbstainedCount": 0,
+    "realAbstainedN": 48,
+    "rescueOverrideCount": 12,
+    "topScoreQuantiles": {
+      "real": {
+        "0": 0.845,
+        "1": 0.919,
+        "0.1": 0.853,
+        "0.25": 0.869,
+        "0.5": 0.888,
+        "0.75": 0.905,
+        "0.9": 0.916
+      },
+      "gibberish": {
+        "0": null,
+        "1": null,
+        "0.1": null,
+        "0.25": null,
+        "0.5": null,
+        "0.75": null,
+        "0.9": null
+      }
+    },
+    "calibration": {
+      "statuses": [
+        "ok"
+      ],
+      "nullMedianMean": 0.7904558479785919,
+      "nullScaleMean": 0.024249201420945887
+    },
+    "distractors": {
+      "n": 28,
+      "zeroHitPct": 0.75,
+      "abstainedPct": 0.75,
+      "topScoreQuantiles": {
+        "0": 0.842,
+        "1": 0.878,
+        "0.1": 0.842,
+        "0.25": 0.847,
+        "0.5": 0.851,
+        "0.75": 0.867,
+        "0.9": 0.878
+      }
+    },
+    "identifiers": {
+      "n": 20,
+      "rank1": 0.85,
+      "hit3": 0.9,
+      "found10": 0.95,
+      "abstainedPct": 0,
+      "overriddenCount": 12
+    },
+    "absentIdentifiers": {
+      "n": 12,
+      "zeroHitPct": 1,
+      "abstainedPct": 1,
+      "overriddenCount": 0
+    },
+    "withQueries": {
+      "hit1": 1,
+      "hit3": 1,
+      "mrr": 1,
+      "realAbstainedPct": 0,
+      "gibberishZeroHitPct": 1
+    }
+  }
+}

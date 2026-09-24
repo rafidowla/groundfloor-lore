@@ -46,7 +46,8 @@ import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { FileOutboxStore } from '../packages/lore/src/outbox/store.js';
 import { nodeUpsert } from '../packages/lore/src/core/nodeService.js';
 import { registerLifecycleTools, type LifecycleDeps } from '../packages/lore/src/mcp/tools/lifecycle.js';
@@ -79,7 +80,7 @@ const WORKSPACE = 'default';
 
 interface Stack {
     graph: SurrealGraph;
-    store: VerbatimStore;
+    store: VerbatimStoreApi;
     outboxStore: FileOutboxStore;
     close: () => Promise<void>;
 }
@@ -89,7 +90,7 @@ async function openStack(prefix: string): Promise<Stack> {
     const v = mkTmp(`${prefix}-v-`);
     const o = mkTmp(`${prefix}-o-`);
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();

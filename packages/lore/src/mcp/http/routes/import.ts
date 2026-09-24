@@ -46,6 +46,11 @@ import { assertSafeLanceId } from '../../../engines/verbatimHistory.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
+// Round-2 review fix (HIGH #1) — bulk import writes via `targetGraph.
+// upsertNode()` directly, bypassing core/nodeService's nodeUpsert()
+// chokepoint entirely, so D5 write-time supersession enforcement never ran
+// on imported rows. Same shared helpers every other write path now uses.
+import { checkSupersessionPolicy, applyWriteTimeSupersedes, resolveSupersessionContext, validateSupersedesIds, SUPERSESSION_ENFORCED_TYPES } from '../../../core/supersessionPolicy.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
 // classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
@@ -69,6 +74,8 @@ export interface ImportDeps {
      *  + callers that don't care about semantic searchability can
      *  pass undefined. */
     embedQueue?: { enqueue: (nodeId: string, text: string, workspace?: string) => void };
+    /** D5 round 2 (#2) — host-level supersession-enforce default. */
+    supersessionEnforceDefault?: boolean;
 }
 
 /** What the caller (wizard / SDK / MCP tool) submits. */
@@ -123,6 +130,18 @@ export interface ImportMapping {
     fields: Record<string, string>;
     /** Whether to write a 'project' tag onto every row. Default: detected scope's project. */
     project?: string;
+    /**
+     * D5 (round-2 review fix) — map a column to the top-level `supersedes`
+     * array field (comma-separated ids, or a JSON array like `tags`
+     * already supports). Needed because 'supersedes' is a write-time
+     * directive, not free-form node data, so it must be reachable without
+     * falling into the generic `metadata.<target>` nesting below.
+     */
+    // (declared via RESERVED_TARGETS — see buildNode)
+    /** D5 — skip the near-duplicate leg of write-time supersession
+     *  enforcement for this whole import (same meaning as store_node's
+     *  per-write `force`). Missing-field/prose checks still run per row. */
+    force?: boolean;
 }
 
 export interface ImportRowError {
@@ -139,6 +158,11 @@ export interface ImportResponse {
     errored: number;
     totalRows: number;
     errors: ImportRowError[];
+    /** D5 round 4 (#3) — non-fatal near-duplicate warnings from
+     *  checkSupersessionPolicy(), same shape as `errors` but the row WAS
+     *  written. Absent/omitted when empty (additive, same posture as
+     *  `table` below). */
+    warnings?: ImportRowError[];
     /** First 5 imported node ids, for the wizard's success preview. */
     sampleIds: string[];
     /**
@@ -156,7 +180,7 @@ export interface ImportResponse {
 const MAX_DECODED_BYTES = 10 * 1024 * 1024; // 10 MB v0 cap
 const MAX_ERROR_REPORT = 100; // bound the response payload
 
-const RESERVED_TARGETS = new Set(['id', 'label', 'content', 'tags', 'project']);
+const RESERVED_TARGETS = new Set(['id', 'label', 'content', 'tags', 'project', 'supersedes']);
 
 // L-015 — prototype-pollution guard for the attacker-controlled dotted
 // field-mapping target (mapping.fields[csvCol] = target). A target of
@@ -431,6 +455,16 @@ export function buildNode(
                     } catch { /* not JSON, keep CSV string */ }
                 }
                 node.tags = tagsToArray(v);
+            } else if (target === 'supersedes') {
+                // D5 — same JSON-array-or-comma-string recovery as `tags`.
+                let v: string | string[] = raw.trim();
+                if (typeof v === 'string' && v.startsWith('[')) {
+                    try {
+                        const parsedArr: unknown = JSON.parse(v);
+                        if (Array.isArray(parsedArr)) v = parsedArr as string[];
+                    } catch { /* not JSON, keep CSV string */ }
+                }
+                node.supersedes = Array.isArray(v) ? v.map((s) => String(s).trim()).filter(Boolean) : v.split(',').map((s) => s.trim()).filter(Boolean);
             } else {
                 node[target] = raw.trim();
             }
@@ -512,6 +546,7 @@ export async function runImport(
     }
 
     const errors: ImportRowError[] = [];
+    const warnings: ImportRowError[] = [];
     const sampleIds: string[] = [];
     let imported = 0;
     let skipped = 0;
@@ -540,6 +575,19 @@ export async function runImport(
 
     const defaultProject = body.mapping.project ?? deps.detectedScope.workspace;
 
+    // D5 — resolved ONCE for the whole import (one workspace, one entityType
+    // per request), same resolver every other write path uses.
+    const importWorkspace = targetWorkspace || deps.detectedScope.workspace;
+    const { policy: supersessionPolicy, findDuplicate: findSupersessionDuplicate } = resolveSupersessionContext({
+        workspace: importWorkspace,
+        targetGraph,
+        homeDir: deps.graphRegistry?.homeDir?.(),
+        bootGraph: deps.store.loreGraph,
+        storageClient: deps.store.storageClient,
+        hostDefaultEnforce: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+    });
+    const enforceThisImport = SUPERSESSION_ENFORCED_TYPES.has(body.mapping.entityType);
+
     for (let i = 0; i < parsed.rows.length; i++) {
         const row = parsed.rows[i]!;
         const built = buildNode(row, body.mapping, defaultProject, i);
@@ -547,6 +595,49 @@ export async function runImport(
             errors.push(built.error);
             skipped++;
             continue;
+        }
+
+        // D5 — enforce BEFORE the write, same as every other surface. Bulk
+        // import has no chokepoint to route through (writes `targetGraph.
+        // upsertNode` directly for throughput), so the check runs inline
+        // here instead. A rejected row is reported like any other row
+        // error (per-item, the import keeps going).
+        const rowSupersedes = Array.isArray(built.node.supersedes)
+            ? (built.node.supersedes as unknown[]).filter((v): v is string => typeof v === 'string')
+            : undefined;
+        let rowSupersessionWarning: string | undefined;
+        // D5 round 4 (#4) — same shared all-or-nothing pre-write validator
+        // (exists / not archived / no cycle) every other write path uses,
+        // run REGARDLESS of enforcement (matches nodeService.ts's
+        // runSupersessionValidation posture — enforcement only gates
+        // whether `supersedes` is *required*, not whether a supplied list
+        // is checked). Previously this row only got an existence-only check,
+        // and only while `supersessionPolicy.enforce` was true.
+        if (rowSupersedes && rowSupersedes.length > 0) {
+            const preCheck = await validateSupersedesIds({ id: String(built.node.id ?? ''), supersedes: rowSupersedes, targetGraph });
+            if (!preCheck.ok) {
+                errors.push({ row: i + 2, message: `${preCheck.code}: ${preCheck.error.message}` });
+                skipped++;
+                continue;
+            }
+        }
+        if (enforceThisImport && supersessionPolicy.enforce) {
+            const verdict = await checkSupersessionPolicy({
+                type: body.mapping.entityType,
+                id: String(built.node.id ?? ''),
+                label: typeof built.node.label === 'string' ? built.node.label : undefined,
+                content: typeof built.node.content === 'string' ? built.node.content : undefined,
+                supersedes: rowSupersedes,
+                force: body.mapping.force === true,
+                policy: supersessionPolicy,
+                findDuplicate: findSupersessionDuplicate,
+            });
+            if (!verdict.ok) {
+                errors.push({ row: i + 2, message: `${verdict.code}: ${verdict.error.message}` });
+                skipped++;
+                continue;
+            }
+            rowSupersessionWarning = verdict.supersessionWarning;
         }
 
         try {
@@ -568,6 +659,30 @@ export async function runImport(
             if (sampleIds.length < 5) sampleIds.push(written.id);
             // 1.9 — only rows that actually reached the graph get a table row.
             recordTableRow(row, written.id);
+            if (rowSupersessionWarning) warnings.push({ row: i + 2, message: rowSupersessionWarning });
+
+            // D5 — apply this row's `supersedes` now that its own write has
+            // durably succeeded. Failure downgrades this row to an error
+            // (imported--/skipped++) rather than silently reporting success
+            // for a link the caller's data asked for that didn't happen.
+            if (rowSupersedes && rowSupersedes.length > 0) {
+                const applyResult = await applyWriteTimeSupersedes({
+                    targetGraph, supersedes: rowSupersedes, newId: written.id,
+                    workspace: importWorkspace, initiator: 'http:POST /api/import',
+                    logPrefix: '[Lore HTTP import]',
+                });
+                if (!applyResult.ok) {
+                    imported--;
+                    skipped++;
+                    // D5 round 4 (#4) — surface applied/unapplied ids on a
+                    // partial failure, same posture as bulkWrite.ts.
+                    if (applyResult.code === 'supersedes_partial') {
+                        errors.push({ row: i + 2, message: `supersedes_partial: ${applyResult.error.message} (applied: ${applyResult.applied.join(', ') || 'none'}; unapplied: ${applyResult.unapplied.map((u) => `${u.id} (${u.reason})`).join(', ')})` });
+                    } else {
+                        errors.push({ row: i + 2, message: `supersedes_apply_failed: ${applyResult.error.message}` });
+                    }
+                }
+            }
 
             // Architecture gap #2 — enqueue embedding for async compute
             // when the queue is wired. Synchronous import previously
@@ -624,6 +739,7 @@ export async function runImport(
         errored: errors.length,
         totalRows: parsed.rows.length,
         errors,
+        ...(warnings.length > 0 ? { warnings } : {}),
         sampleIds,
         ...(tableOutcome.table ? { table: tableOutcome.table } : {}),
         ...(tableOutcome.error ? { tableError: tableOutcome.error } : {}),

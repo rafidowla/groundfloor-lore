@@ -27,6 +27,7 @@ import { tagsToArray } from '../normalizeTags.js';
 import type { SurrealQuery } from './surrealGraphReads.js';
 import { EDGE_TABLE, ridToId, toNodeRid } from './surrealRecordId.js';
 import { withTransactionConflictRetry } from '../transactionConflictRetry.js';
+import { wouldCreateSupersedeCycle } from '../graphShared/supersedeCycle.js';
 
 /** The node document as stored. Keys match LocalGraph's column convention 1:1. */
 type NodeDocument = Record<string, unknown>;
@@ -409,20 +410,15 @@ export async function supersedeNode(
     // 2026-08-17 (functional-correctness, cluster 4 medium) — refuse a
     // supersession that would CLOSE A CYCLE. Mirrors LocalGraph's identical
     // guard (engines/nodeLifecycle.ts) so the two engines can't tell apart —
-    // see that function's comment for the full rationale.
+    // see that function's comment for the full rationale. The walk itself is
+    // the SHARED `wouldCreateSupersedeCycle` (graphShared/supersedeCycle.ts).
     {
-        const MAX_CHAIN_HOPS = 1000;
-        let cursor: string | null | undefined = newNode.supersededBy;
-        const visited = new Set<string>();
-        let hops = 0;
-        while (cursor && hops < MAX_CHAIN_HOPS) {
-            if (cursor === oldId) return { ok: false, reason: 'cycle' };
-            if (visited.has(cursor)) break;
-            visited.add(cursor);
-            const next = await getNode(cursor);
-            cursor = next?.supersededBy;
-            hops++;
-        }
+        const cyclic = await wouldCreateSupersedeCycle(
+            oldId,
+            newNode.supersededBy,
+            async (id) => (await getNode(id))?.supersededBy,
+        );
+        if (cyclic) return { ok: false, reason: 'cycle' };
     }
     try {
         const supersededAt = new Date().toISOString();

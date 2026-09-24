@@ -30,7 +30,7 @@ process.env['LORE_HOME'] = TEST_HOME;
 
 import { redactSecrets } from '../packages/lore/src/security/secretScan.js';
 import { computeContentHash } from '../packages/lore/src/engines/contentHash.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
 import { LocalEmbeddingProvider } from '../packages/lore/src/providers/localEmbeddingProvider.js';
 
 let passed = 0, failed = 0;
@@ -73,7 +73,7 @@ await test('vendor-shaped secrets ARE still redacted', () => {
 });
 
 await test('RAN repro: a code snippet round-trips byte-identical through VerbatimStore', async () => {
-    const store = new VerbatimStore(path.join(TEST_HOME, 'ws-code'), new LocalEmbeddingProvider());
+    const store = makeVerbatimStore(path.join(TEST_HOME, 'ws-code'), new LocalEmbeddingProvider());
     await store.initialize();
     const snippet =
         "const token = crypto.randomBytes(32).toString('hex');\n" +
@@ -91,7 +91,7 @@ await test('RAN repro: a code snippet round-trips byte-identical through Verbati
 });
 
 await test('two distinct writes that redact alike do NOT collapse into a no-op', async () => {
-    const store = new VerbatimStore(path.join(TEST_HOME, 'ws-redact'), new LocalEmbeddingProvider());
+    const store = makeVerbatimStore(path.join(TEST_HOME, 'ws-redact'), new LocalEmbeddingProvider());
     await store.initialize();
     // Both inputs redact to the IDENTICAL string 'key: [REDACTED]'.
     await store.store({ id: 'lore:cfg', text: 'key: sk-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', metadata: {} });

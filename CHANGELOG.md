@@ -4,7 +4,1319 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
-## [Unreleased]
+## [3.22.0] — 2026-09-23
+
+Upgrading from 3.21.x: read [`docs/MIGRATION-3.22.md`](docs/MIGRATION-3.22.md) — D4 changes the
+`retrieve()`/`recall` response shape (traversal hops move to `related`).
+
+### Fixed
+- **No publisher-machine paths in the tree; public publish refuses them.**
+  Hardcoded `/Users/<user>/…` defaults in `benchmarks/longmemeval/src/writeMosaic*.ts`
+  and the live-daemon tests (`test/L6-consistency-proof.ts`, `test/sprint-v-smoke.ts`,
+  `test/workspace-lifecycle-adversarial-unit.ts`) now resolve from
+  `import.meta.url` (same locations as before; env overrides unchanged).
+  Docs use `$(ls -d ~/.nvm/versions/node/v22*/bin | tail -1)` for Node 22.
+  Committed eval/benchmark results have local prefixes replaced with
+  `<repo>/` / `<local>/`. `scripts/publish-public.sh` gains fail-closed
+  assertion 3: the staged public tree may not contain the running user's
+  home/username (plain or `-Users-<user>-` form) or `/private/tmp/claude-*`
+  paths. Generic `/Users/<x>` fixtures in redaction tests are unaffected.
+  Note: benchmark runners still record absolute `datasetFile` paths in new
+  results — scrub before committing; the publish guard catches misses.
+  Older public GitHub history keeps the previously published paths (no
+  force-push).
+- **Cross-workspace recall no longer drops a superseded semantic hit.**
+  `runCrossWorkspaceRecall()` (`mcp/tools/recallCrossWorkspace.ts`) resolved
+  each workspace's superseded hits to their live successor via
+  `resolveLiveNodes()`, but the per-workspace RRF still ranked the semantic
+  seed list by the ORIGINAL ids — the lookup missed and the slot vanished, so
+  a superseded vector hit whose successor did not independently match the
+  query returned neither node (both boot-store and per-workspace seeding).
+  `resolveLiveNodes()` now takes an optional `remap` out-param
+  (superseded id → successor id); the fusion rewrites the semantic id list
+  through it (first occurrence keeps the better rank, so a successor that was
+  also its own lower hit collapses onto the superseded slot, matching
+  `retrieve()`). Successors still pass the same actor-scope / ecosystem /
+  archived admit gate. Known limit, unchanged: the aggregate `top_score` /
+  confidence still come from the raw seed score, which may be the superseded
+  node's. Tests: two cases in `d5-recall-surfaces-supersession-unit.ts`
+  (fail before the fix).
+- **D5 supersession replacement now keeps the superseded node's rank slot.**
+  `replaceSupersededInResults()` (`recall/supersessionRecall.ts`) did
+  `delete(old); set(successor)`, and `Map.set` on a new key appends — so the
+  live successor moved to the END of the result order. `retrieve()` (recall,
+  MCP `search`, `/api/search`) and `search`'s legacy `workspace="*"` path
+  read final rank straight from that insertion order with no re-sort, so a
+  superseded rank-1 hit's successor surfaced near the bottom (reviewer probe:
+  position 9 of 10). The map is now rebuilt in order: the successor takes the
+  exact slot (chains A→B→C included), keeping that slot's
+  score/depth/source; similarity/relevance are still the successor's OWN (D1,
+  recomputed by `withOwnRelevance`). Decision: a successor that was already a
+  hit at a LOWER rank moves up into the better slot (no duplicate,
+  `matchedBy` unioned); two superseded hits sharing one successor → it takes
+  the first slot and the second is dropped (refilled by `refillSeedSlots`).
+  `resolveLiveNodes()` (structured_query, `/api/query`, cross-workspace
+  recall, D4 related hops) was already in-place, but dropped the superseded
+  slot when its successor appeared LATER; it now applies the same move-up
+  rule. Tests: `test/d5-followups-unit.ts` §3.
+
+### Tests
+- **D5 follow-ups — closed the last two review-flagged gaps.** The
+  `d5-review-gaps-unit.ts` suite already covered `refillSeedSlots()`
+  reaching `limit`, deduping, never re-introducing a superseded node, and
+  the re-save rule's happy/refusal paths under enforcement ON. Two cases
+  were still untested, both now in a new `test/d5-followups-unit.ts`:
+  - `refillSeedSlots()` when spillover candidates run out before `limit` is
+    reached — must return short of `limit`, never throw, never pad with a
+    dropped/dangling/out-of-scope node. Also confirms a superseded
+    spillover candidate whose live successor falls outside the caller's
+    admit/visibility predicate is skipped rather than inserted.
+  - `runSupersessionValidation` with `supersessionPolicy.enforce: false` —
+    the whole gate (missing-field, near-duplicate, prose-mismatch checks)
+    is a no-op, not just relaxed for resaves, with a same-enforcement-ON
+    control case alongside it to keep the contrast explicit.
+  No production code changed; both additions exercise existing, already-
+  correct behavior. Registered as `test:unit:d5-followups` in the `npm
+  test` chain.
+  (`test/d5-followups-unit.ts`, `package.json`)
+
+### Fixed
+- **E2 — `entities`/`topics`/`project` recall filters now pushed into the
+  candidate query, closing the same crowding-out gap D2 fixed for `types`.**
+  These three filters previously only ran as post-hydration filters, applied
+  after `retrieve()`'s fixed-size candidate window was already filled —
+  meaning a workspace with enough off-`project`/off-`entities`/off-`topics`
+  rows could crowd a correct hit out of the window before the filter ever
+  saw it, exactly D2's defect but unpatched for these three.
+  - `project` is a real `VERBATIM_FILTERABLE_COLUMNS` column, so it gets the
+    same full treatment `types` already had: pushed into both the vector and
+    BM25 legs of `resolveSeedStore()` (`retrieveSeedStore.ts`, as an extra
+    project-scoped query unioned onto the unscoped one — see below) and
+    into the keyword leg via
+    `graph.search()`'s `project`/workspace-scope argument (`retrieve.ts`).
+  - `entities`/`topics` get true query-level pushdown on the **keyword**
+    leg only — `graph.search()` now takes trailing `entities`/`topics`
+    params, matched against the graph node's `metadata` column via
+    `json_each(...)` `EXISTS` subqueries on SQLite
+    (`sqliteGraphReads.ts`) and `string::matches()` regex containment on
+    SurrealDB (`surrealGraphReads.ts` — this build's SurrealDB has no
+    working JSON-decode function, so the fallback is a regex scoped to the
+    right JSON key rather than the `json_each` equivalent). Neither engine's
+    verbatim (vector/BM25) row has a queryable `entities`/`topics` column,
+    so that leg keeps relying on the existing adaptive over-fetch widening
+    loop (`SEED_MAX_HEADROOM`) as its crowding-out mitigation — a
+    bounded-resistance fallback, not an unbounded prefilter like `project`/
+    `types` get.
+  - The old post-hydration `entities`/`topics`/`project` filter in
+    `retrieve()`'s seed stage moved earlier, into `applySeedFilters` itself,
+    so a shortfall it causes is visible to the widening loop's retry
+    condition instead of silently returning a starved window.
+  (`packages/lore/src/recall/retrieveSeedStore.ts`,
+  `packages/lore/src/recall/retrieve.ts`,
+  `packages/lore/src/providers/types.ts`,
+  `packages/lore/src/engines/sqliteGraph.ts`,
+  `packages/lore/src/engines/sqlite/sqliteGraphReads.ts`,
+  `packages/lore/src/engines/surrealGraph.ts`,
+  `packages/lore/src/engines/surreal/surrealGraphReads.ts`,
+  `test/e2-filter-pushdown-unit.ts`, `test/e2-filter-pushdown-e2e-unit.ts`)
+  - Review fixes on top of the above:
+    - SurrealDB: `string::matches(metadata, …)` threw on nodes with no
+      metadata (NONE), failing every entities/topics recall in such a
+      workspace; now guarded with `type::is_string(metadata)`. SQLite:
+      `json_each` threw on malformed metadata; now guarded with
+      `json_valid` / `json_type(…) = 'array'` inside a `CASE`.
+    - The SurrealDB regex dropped valid matches (values containing `"`,
+      `\`, control chars; an earlier element containing `]`; whitespace
+      after `:`). It is now built from the JSON-encoded value and skips
+      earlier elements as whole JSON tokens
+      (`engines/metaArrayFilter.ts`). Both engines also apply the exact
+      `nodeMetaList` membership check to fetched rows before ranking, so
+      `graph.search()` returns exactly what the old post-filter kept.
+    - `project: ""` again means "no project filter" (it had become a
+      filter on `project = ''` and returned nothing).
+    - The vector/BM25 seed leg now UNIONS a project-scoped query onto the
+      unscoped one instead of replacing it: the verbatim row's `project`
+      can differ from the graph node's (bulkIngest writes
+      `nodeData.project ?? ecosystem`, the outbox `?? workspace ?? '*'`),
+      and a pure pushdown silently dropped such rows. Result is a superset
+      of the pre-E2 candidates that still cannot be crowded out.
+    (`packages/lore/src/engines/metaArrayFilter.ts`,
+    `packages/lore/src/recall/ecosystemSeedUnion.ts`,
+    `test/e2-filter-pushdown-edge-unit.ts`)
+
+- **D6 — `skipEmbed`/`embed:false` nodes no longer silently re-embedded.**
+  `nodeUpsert`'s ingest-time autolink hook (`reconnectOneNode`) always ran
+  regardless of `skipEmbed`, and its call site computed `skipStore:
+  !skipEmbed` — so a `skipEmbed:true` node had `skipStore:false`, and
+  `reconnectOneNode` wrote the node's full canonical row into the vector
+  store anyway, making it findable by semantic recall within about a
+  second, contradicting the documented "graph row only, no lancedb write,
+  no semantic recall surface" contract (`store_node`'s `embed` field).
+  `reconnectOneNode` now never writes the canonical row for a `skipEmbed`
+  node unless the caller explicitly opts in via a new internal
+  `allowSkipEmbedStore` autolink flag — only `bulkIngest` sets it (it needs
+  a `skipEmbed` node visible to sibling nodes' similarity search within the
+  same batch before its own later Step 3 embed runs; every other caller,
+  `store_node` and the embedded `nodeUpsert`, leaves it unset, so
+  `skipEmbed` there means no vector row, ever). Reproduced and fixed on
+  both engine pairs (sqlite/sqlite and surreal/lance).
+  (`packages/lore/src/core/nodeService.ts`, `packages/lore/src/mcp/bulkIngest.ts`,
+  `test/d6-skipembed-autolink-leak-unit.ts`)
+
+- **BREAKING (response shape): `retrieve()`/`recall` no longer mix graph-traversal
+  neighbours into ranked results.** `RetrieveOutcome.results` (and the `recall`
+  MCP/REST tools' `hits`/`candidates`) used to interleave graph-traversal hops
+  (`depth >= 1`, `source: 'via:<seedId>'`, a fixed depth-decayed score, no real
+  relevance to the query) into the SAME ranked array as direct query matches,
+  and counted them in `meta.totalMatched`/`directMatches` and the `recall`
+  tools' `shown`/`totalRecalled`. A caller asking "what matched my query" got
+  unrelated graph hops presented as if they had.
+  Fixed: `results` now contains ONLY direct matches (`depth` is always `0`,
+  `source` is always `'seed'`). Traversal neighbours are returned in a NEW,
+  separate `related: RelatedResult[]` field — `{node, via, relation, depth,
+  score}`, where `relation` is the REAL edge relation reported by
+  `graph.traverse()` (never invented) — and are NEVER counted in
+  `totalMatched`/`directMatches`/`shown`/`totalRecalled`. The `recall` MCP
+  tool's/`RecallResultFull`'s `related`/`RecallRelated[]` field and compact
+  mode's `related: RecallRelatedCandidate[]` follow the same split.
+  `depth` still defaults to `1` (unchanged, for compatibility) — it now
+  controls how many `related` neighbours come back, not what counts as a
+  match. `related` is deliberately NOT subject to `maxTokens` truncation
+  (only `results` is). See `packages/lore/src/recall/README.md` and
+  `docs/RETRIEVAL_UNIFICATION.md`'s D4-defect-fix addendum for the full
+  surface-by-surface before/after. (fix/d4-traversal-separate-field)
+**D2 (P1) — node type/kind prefilter, applied inside the ANN + BM25 query.**
+`retrieve()`, `recall`/`search` (MCP), and `resolveSeedStore()` gain a new
+`types?: string[]` option — ANY-of node-type match, composable with `tags`
+and 3.21's `entities`/`topics`/`project`. Unlike those existing filters
+(which post-filter after the fixed-size seed window `resolveSeedStore`
+fetches — `limit × SEED_MAX_HEADROOM`, worst case 160), `types` is pushed
+INTO both the vector ANN query and the BM25/FTS query themselves via the
+shared `buildLanceFilterConditions()`/`buildSqlFilterEntries()` helpers
+(`engines/verbatimHistory.ts`), for both the SQLite and LanceDB engine
+pairs — so it cannot be crowded out of the candidate window by other node
+types (`recall/retrieveSeedStore.ts`'s `withTypes()` wrapper merges it into
+both legs of `seedWithEcosystemUnion`/`bm25WithEcosystemUnion`
+unconditionally, not via the union's own scoped/unscoped split, to avoid
+reintroducing the same defect through the union's unscoped leg).
+`entities`/`topics`/`project` remain post-filters — confirmed unchanged in
+this fix, out of scope for D2. New regression test
+(`test:unit:d2-type-prefilter`, `test/d2-type-prefilter-unit.ts`) sweeps
+0→2000 junk-typed distractor rows (12.5× the worst-case seed window)
+against a real `SqliteVerbatimStore` and asserts hit@1 stays on the
+`knowledge`-typed target throughout, for both the vector and BM25 legs.
+
+**D2 follow-up — coverage + a second gap found and closed.**
+`test/d2-type-prefilter-unit.ts` now also runs the same sweep against a real
+`VerbatimStore` (LanceDB): confirmed `VectorQuery.filter()` is a genuine
+prefilter (not `.postfilter()`, never called in this codebase) in the
+installed `@lancedb/lancedb@0.37.1`, and the FTS/BM25 leg's predicate is
+pushed into the scan the same way. A new end-to-end test,
+`test/d2-type-prefilter-e2e-unit.ts` (`test:unit:d2-type-prefilter-e2e`),
+exercises the real `recall` MCP tool over an embedded `createLore()` on both
+engine pairs and found that the shipped fix was incomplete: `retrieve.ts`'s
+"Finding 5.1" supplementary keyword-seed scan (`runKeywordSeeds()` →
+`graph.search()`, unconditionally unioned into every seed set regardless of
+`mode`) had no `types` awareness at all, so an off-type node could still
+reach the top hit — and, once distractor volume was high enough to saturate
+`graph.search()`'s fixed top-K window with off-type text matches, a
+`types`-scoped recall could return **zero** hits even though the correct
+node existed. Fixed by pushing `types` into the `LoreGraph.search()` query
+itself (`providers/types.ts`, `engines/sqlite/sqliteGraphReads.ts`,
+`engines/surreal/surrealGraphReads.ts`, and their `sqliteGraph.ts`/
+`surrealGraph.ts` wrappers) so the keyword scan's candidate window can no
+longer be filled by off-type rows in the first place, plus a `types` check
+in `retrieve.ts`'s `applySeedFilters()` as a uniform backstop for any
+seed-collection path. A one-off diagnostic,
+`scripts/diagnostics/d2-prefilter-100k.ts`, confirms hit@1 holds at 100,000
+distractor rows on the sqlite/sqlite pair — see
+`scripts/diagnostics/results/` for the run.
+
+- **D3 — prefix-stable ranking (opt-in; defaults unchanged — recall output
+  is byte-identical to 3.21 unless `LORE_RECALL_CANDIDATE_FLOOR` or
+  `LORE_RECALL_LEXICAL_BASE` is set).**
+  An independent review returned "changes required" on round 1: the
+  `anchored` lexical-base default gave keyword-only hits a hard
+  `semFloor * prov` ceiling, burying exact rare-term/identifier queries
+  (reviewer's probe, real 10k fixture, 12 unique-token queries: legacy
+  rank1 10/12 found 12/12 | `anchored` default rank1 **0/12** found
+  **1/12**). Round 2 made the lexical-base ceiling strength-aware
+  (`lexicalSelectivity` + a widened `lexicalOnlyBase(prov, semFloor,
+  semTop, mode, selectivity)`: a selective/rare match's ceiling can reach
+  `semTop`, a broad/common match keeps the original `semFloor` ceiling
+  exactly) and fixed a related RRF-dilution bug in candidate-window
+  widening (`stableProv`: normalizes a fused RRF score by the fixed
+  theoretical single-list-rank-0 max instead of the current query's
+  empirical, window-size-dependent max).
+
+  **Both fixes measurably help** (see the 20-query
+  `scripts/diagnostics/recall-eval/identifiers.json` pass, added this
+  round) but **neither closes the gap to legacy under the project's own
+  gating rule** ("a default may stay ON only if, versus legacy, identifiers
+  rank1/found@10 don't drop, real-question hit@1/hit@3 don't drop,
+  negatives don't worsen — otherwise flip that knob's default back to
+  legacy"):
+  - `LORE_RECALL_LEXICAL_BASE=anchored` (with the strength-aware fix):
+    identifiers rank1 85.0%→**65.0%**, found@10 95.0%→**85.0%** (sqlite);
+    80.0%→**65.0%**, 90.0%→**85.0%** (surreal/lance) — real hit@1/hit@3 and
+    negatives are strictly better than legacy, but identifiers regressed.
+    **Default flipped back to `rrf` (legacy).**
+  - `LORE_RECALL_CANDIDATE_FLOOR=50` isolated (paired with legacy
+    `lexicalBase=rrf`, i.e. this knob alone): real-question hit@1
+    collapsed 87.5%/100% (chatty/terse, legacy) → **4.2%/45.8%** (sqlite),
+    37.5%/66.7% (surreal/lance) — `stableProv`'s fixed normalization has no
+    ceiling in `rrf` mode, so a mid-rank single-list keyword match can
+    normalize up near 1.0 and outrank the true semantic top hit; that
+    inflation is only bounded when `lexicalBase=anchored` is *also* set, a
+    cross-knob dependency the per-knob gating rule does not tolerate.
+    **Default flipped back to `0` (legacy).**
+
+  Both knobs are legacy-by-default (`LORE_RECALL_CANDIDATE_FLOOR=0`,
+  `LORE_RECALL_LEXICAL_BASE=rrf`) — recall output is byte-identical to
+  3.21 (700-trial randomized golden comparison vs `f226d3ec`: results,
+  scores and pre-existing meta identical; only the additive
+  `meta.candidateWindow`/`meta.prefixStableUpTo` fields are new).
+
+  **How to opt in:** `LORE_RECALL_CANDIDATE_FLOOR=50`. Review round 3: any
+  floor > 0 now **forces** `lexicalBase=anchored` (an explicit `rrf` option
+  or env is ignored), so the unsafe floor-only combination above is no
+  longer reachable — re-measured, `floor=50 + rrf` now equals
+  `floor=50 + anchored` on every metric. `LORE_RECALL_LEXICAL_BASE=anchored`
+  alone (floor 0) is also allowed.
+
+  **Trade-off when opted in** (real 10k fixture, sqlite; legacy → opt-in):
+  prefix stability (top-10@10 == first 10 of top-50@50, both phrasings)
+  16.7% → **100%**; negatives with a lexical-only top-1 13/32 → **0/32**;
+  real-question hit@1/hit@3/MRR unchanged (87.5%/100%/0.938 chatty,
+  100%/100%/1.000 terse); **cost:** identifiers rank1 85% → 65%, found@10
+  95% → 85%, MRR 0.875 → 0.738 (surreal/lance: rank1 80% → 65%, found@10
+  90% → 85%). Multi-query `queries[]` (terse + `queries:[chatty]`)
+  hit@1/hit@3 100%/100% on both engines, same as legacy. Pick the opt-in
+  for workloads that value stable, semantically grounded top results over
+  exact-identifier rank-1.
+
+  **Multi-query fix (integration finding).** With the opt-in on,
+  `queries[]` hit@3 had dropped 100% → **83.3%** (both engines; 2/24
+  answers fell out of the top-10). `stableProv` summed a lexical-only row's
+  RRF contribution across every phrasing's bm25 list before its fixed
+  single-list normalization, so any row in the top ~60 of two phrasings'
+  lists clamped to 1.0 and sat at the anchored ceiling (~semTop), while a
+  semantic row's base is its best cosine across phrasings (max) and gains
+  nothing from recurring. `stableProv` now uses the mean per matched list
+  (`rrf / listsMatched`), and `bm25CandidateCount` (selectivity input) is
+  the mean per ranked phrasing rather than the sum — identical phrasings
+  now rank exactly like a single query. Single-query numbers, negatives,
+  identifiers and all defaults are unchanged (per-query result ids
+  verified identical before/after). The candidate-window
+  mechanism (`candLimit = max(limit, candidateFloor)`, deterministic
+  tie-break, minute-bucketed recency clock, starvation retry keyed to
+  `candLimit`) is unchanged — see `docs/design/D3-prefix-stable-ranking.md`
+  and `scripts/diagnostics/recall-eval/results/d3-before-after.md`.
+
+- **D3 follow-up — exact-identifier lane closes the opt-in's identifier gap
+  (opt-in only; defaults unchanged).** With `LORE_RECALL_CANDIDATE_FLOOR > 0`,
+  a query carrying identifier-shaped tokens (D1's detector,
+  `extractIdentifierTokens`, now exported from `recall/abstention.ts` with
+  `containsWholeToken`) runs a lexical lane per token (max 3): the store BM25
+  index and the graph keyword leg are queried with the token alone at a
+  FIXED size (50, never `limit`), lane rows pass the same seed filters
+  (archived, ecosystem, tags, entities/topics/project — NOT superseded; a
+  superseded row can still be pinned and is replaced by its live successor
+  later in `retrieve.ts`, same as any other seed), and rows whose
+  label/content contain a token as a whole, case-sensitive token are
+  pinned (max 10) ahead of the D3-ranked list; D3 ranking fills the rest.
+  Pin order is total (tokens matched desc, rarest matched token, D3 rank,
+  lane rank), so the ranking stays prefix-stable. This reaches exact matches
+  outside the ANN window and outside the whole-query BM25 window (where glue
+  words dilute the token). Not run for `mode:'semantic'` or floor 0. Known
+  limit: with `abstain:true`, the exact-identifier abstention rescue
+  (`hasExactIdentifierRescue`) only sees pre-lane seeds, since abstention is
+  decided before the lane runs — an identifier present only in a row the
+  lane would fetch can still abstain (fails closed). Behaviour unchanged;
+  see `docs/design/D3-prefix-stable-ranking.md` §3.9 "Known limits".
+  Real 10k fixture, floor 50, both engines (before lane → with lane; legacy
+  in brackets): identifiers rank1 65% → **100%** [85%], hit@3 80% → **100%**
+  [90%], found@10 85% → **100%** [95%], MRR 0.738 → **1.000** [0.875];
+  prefix stability 100% (unchanged); real-question hit@1 87.5%/100%,
+  pooled hit@3 100%, `queries[]` hit@1/hit@3 100%/100%, negatives
+  lexical-only top-1 (sqlite 0/32, surreal/lance 3/32) all unchanged;
+  latency p50 sqlite 23.2 → 23.7 ms, surreal/lance 100.7 → 100.1 ms
+  (p90 +3.6 ms / +8.8 ms). Only the primary query's tokens are laned
+  (`queries[]` extra phrasings are not).
+  (`packages/lore/src/recall/identifierLane.ts`,
+  `packages/lore/src/recall/retrieve.ts`, `test/d3-identifier-lane-unit.ts`,
+  `scripts/diagnostics/recall-eval/results/d3-lane-*-real-10k.*`)
+
+### Added
+
+- **D1 — EXPERIMENTAL, opt-in key-term-coverage abstention signal.** New
+  `abstainTermCoverage` option (retrieve / `lore.recall()`) and
+  `LORE_RECALL_ABSTAIN_TERM_COVERAGE` / `LORE_RECALL_TERM_COVERAGE_MIN` env
+  vars (env only on MCP / HTTP; min clamped to [0,1], default 0.1). With
+  abstention on, a query whose z is above the floor but below floor + 2.5
+  also abstains when < 10 % of its weighted content terms occur in the final
+  fused top-5 (after the D3 identifier lane), or when it names strongly
+  code-shaped identifiers none of which is in the ranked set; the
+  exact-identifier rescue still wins. Matching is forgiving (stemming,
+  compound/prefix, acronym <-> expansion, number words, a general synonym
+  table); CJK/Thai queries fail open. Surfaced as `_meta.abstain_reason` and
+  `_meta.term_coverage` only when the flag is on (`_meta` unchanged when
+  off). **Failed unseen validation — ships off and experimental; do not
+  enable by default.** On an independent set written after the parameters
+  were frozen (88 real phrasings, 34 distractors, 12 absent / 12 present
+  identifiers; 10k fixture, both engines) coverage added 4–6 real false
+  abstains over abstention alone (one had the answer at rank 1), caught 0
+  extra distractors, and raised the absent-identifier catch 2/12 → 11/12
+  with 0 present identifiers lost. The dev-set figures (6 → 7 real false
+  abstains, 6/12 → 12/12 absent identifiers) came from the set the synonym
+  table was written against and overstate it. See
+  `docs/design/D1-calibrated-abstention.md` §3.10.5.
+
+**D1 — calibrated relevance scores + optional abstention.** `retrieve()`
+now fits a per-workspace null-similarity distribution from 128 fixed
+off-topic calibration probes (median/IQR, robust to outliers) and reports
+it on every retrieval surface (MCP `search`/`recall`, REST
+`/api/search`/`/api/recall`, embedded `lore.recall()`) as new additive
+`_meta` fields: `top_similarity`, `top_relevance` (a z-score against the
+null fit), `floor`, `below_floor`, `abstained`, `abstain_overridden`, and
+`calibration: {status, version, probes, rows, null_median, null_scale,
+scope}`. Raw `score` and existing field meanings are byte-identical —
+this is purely additive. Optional abstention (`abstain: true` /
+`LORE_RECALL_ABSTAIN=1`, default OFF) gates a query to zero results with
+`abstained: true` when `top_relevance` falls below `relevanceFloor`
+(default `2.0`), unless an exact identifier token in the query appears
+as a whole token in a candidate's label or content (`abstain_overridden:
+"exact_identifier"`).
+Calibration never gates when it isn't trustworthy: workspaces below 50
+verbatim rows report `insufficient_rows` (aligned to the design doc's
+minimum-rows figure; code previously said 20, doc said 50 — doc wins, no
+stated reason favored 20), keyword-mode queries (no
+semantic leg) report a null `top_similarity`, and cross-workspace
+aggregation reports `calibration.status: "not_applicable"` — none of
+these ever abstain. Per-result `similarity`/`relevance` fields are also
+added (additive-only) to `RetrievalResult`/`UnifiedResultItem`. New:
+`packages/lore/src/recall/{calibration,calibrationProbes,abstention,retrieveTypes}.ts`,
+`mcp/http/routes/searchRouteParams.ts` (pure query-param-parsing helpers
+extracted from `search.ts` to stay under the 800-line file-size cap).
+Deviation from the design doc: the calibration cache key omits an
+`embeddingFingerprint` component (documented in `calibration.ts`); the
+cache is instead scoped per underlying verbatim-store object, so any
+reopen (embedder switch, re-embed, a second Lore instance with the same
+workspace name) gets a fresh fit — only an in-place re-embed on the same
+open store with <25% row drift keeps the old fit. Review fixes: keyword
+mode (and a skipped/empty vector leg) no longer runs the 128 calibration
+probes through the embedder; a transient `unavailable` fit is retried
+after 60s instead of being cached until row drift; REST `?abstain` absent
+now defers to `LORE_RECALL_ABSTAIN` instead of forcing `false`;
+`LORE_RECALL_ABSTAIN`/`LORE_RECALL_RELEVANCE_FLOOR` added to the daemon
+env allowlist (previously scrubbed at boot) and `docs/CONFIGURATION.md`. The hybrid-mode RRF fused score
+itself is never calibrated (RRF is rank-position-only and scale-agnostic
+by design; that fusion's separate scale-mixing issue is D3's scope, not
+touched here). Follow-up: the embedded `lore.recall()` surface
+(`recall/inProcessRecall.ts`'s `RecallOpts`) had never had `abstain`/
+`relevanceFloor` added despite being one of the surfaces this design
+covers — found via the recall-eval harness actually exercising
+`lore.recall({abstain: true})`, not by the unit suite (which mocks
+`retrieve()`'s dependencies directly and bypasses this wrapper). Fixed
+by adding both fields to `RecallOpts` and threading them into the
+`retrieve()` call in `inProcessRecallCore`.
+
+**D1 before/after (recall-eval harness, real embedder, 10k code rows,
+`--depth 0 --search-mode hybrid`).** Both engine pairs: pooled hit@3
+(terse+chatty, n=48) 100%, real-questions-abstained 0/48 with abstention
+on, calibration status `ok`. With `abstain: off`, the dev `gibberish.json`
+set (whose queries are drawn from probe-adjacent domains) sees 0%
+zero-hit as expected pre-gating. With `abstain: on` against the
+independent, no-overlap `gibberish-heldout.json` set (60 queries, zero
+token overlap with the corpus/probes/questions/dev-gibberish set), zero-hit
+and abstained are both 100% on sqlite and surreal-lance. In-domain
+`distractors.json` (24 hand-authored plausible-but-unanswered questions,
+deliberately not overlap-filtered) abstain at 87.5% on sqlite and 91.7% on
+surreal-lance (the sqlite figure previously read 91.7% here; re-measured
+87.5% — 3 of 24 answered) — the one open edge
+the design doc's §5 already flags: a handful of coherent, on-topic
+distractor phrasings sit close enough to the real-question score band
+that a similarity floor alone can't cleanly separate them. `queries[]`
+multi-phrasing variant: 100% hit@3, 0% real-abstained, 100% gibberish
+zero-hit on both engines. Mean `recall()` latency with abstention on:
+sqlite 39ms, surreal-lance 81ms. sqlite 100k (`--abstain off` only,
+`results-d1/sqlite-real-100k-abstain-off.md`): fixture build 582s + eval
+34s = 616s total (within the ~20min budget); pooled hit@3 still 100%,
+gibberish zero-hit 0% (pre-gating, as expected), mean `recall()` latency
+259ms. The 100k `--abstain on` run and the design doc's third
+"fixed-cosine-0.836-carryover" row were not attempted — see final report
+for why. Full tables: `scripts/diagnostics/recall-eval/results-d1/`.
+
+**D1 follow-up (independent review response).** (1) First-query calibration
+cost measured directly (real embedder, 10k fixture, `abstain: off`): sqlite
+first `recall()` 165ms / second 16ms (fit not yet landed either time in this
+short window); surreal-lance first `recall()` 2491ms (dominated by cold ONNX
+init in the freshly-spawned process, not calibration) / second 30ms (fit
+landed, `status: ok`). (2) Calibration is now non-blocking when `abstain` is
+off (the default): the first query on a cold workspace returns immediately
+with `_meta.calibration.status: 'pending'` and null relevance fields while
+the 128-probe fit runs in the background (single-flight per store, tracked
+in a module-level `backgroundFits` set); `abstain: true` still blocks
+synchronously as before. A cheap, synchronous row-count check runs even in
+non-blocking mode so a fast `insufficient_rows` decision never races the
+background fit into a cross-surface `_meta` mismatch (this raced and broke
+`retrieval-parity` before the fix). Background fit errors are swallowed to
+`unavailable` (existing 60s retry applies); `dispose()` awaits any in-flight
+background fit via `drainBackgroundCalibrations()`, bounded by an `unref()`'d
+timer so a stuck fit can never keep the process alive. (3) Exact-identifier
+rescue narrowed to token shapes that actually look like identifiers (a
+letter plus a separator/case-change, or length-≥6 alphanumeric mixes) with a
+required verbatim match in hit content — previously any digit-bearing token
+(e.g. `#4821`) rescued, which is the bug the reviewer's identifier-probe run
+caught. *(Superseded by follow-up 2 below: excluding `#N` outright broke
+rescue for genuinely stored numbered references; the real defect was
+bare-digit substring matching.)* Rescue events now recorded in `_meta` (`abstain_overridden:
+"exact_identifier"`) and counted by `runner.mjs`. (4) Doc/code reconciliation:
+`MIN_ROWS_FOR_CALIBRATION` 20→50 (doc's value; see above), degenerate-fit
+threshold, and `not_applicable`'s `floor` field returning `null` instead of a
+numeric default — all already matched the design doc as of this entry.
+(5) `docs/API_REFERENCE.md` documents every `_meta` field. (6) Eval re-run
+against the fixed code, same methodology as the reviewer's pre-fix artifacts
+(`scripts/diagnostics/recall-eval/runner.mjs --engine sqlite --embedder real
+--code-rows 10000 --depth 0 --search-mode hybrid --abstain on
+--gibberish-file gibberish-heldout.json`, fixture reused from cache):
+against the normal `distractors.json` set (n=24, plausible-but-unanswered
+English questions), abstain rate is 87.5% on sqlite (this entry previously
+said 91.7%, which is the surreal-lance figure — corrected against the
+committed `results-d1/sqlite-real-10k-abstain-on.md`; this set was never
+affected by the rescue bug). Against the reviewer's
+`identifiers.json` probe (n=22, identifier-shaped query tokens designed to
+stress-test the rescue path), the exact-identifier-rescue override count is
+now **0** (confirming the bug is fixed — nothing is being wrongly rescued
+any more), and the distractor abstain rate moves from 9.1% pre-fix to 13.6%
+post-fix. This is a smaller recovery than the 91.7% baseline might suggest
+is possible, but it is not a residual rescue bug (rescue count is zero): short,
+jargon-shaped queries like `dispatchBatch` simply produce less discriminative
+embedding similarity against this corpus than full English questions do, so
+more of them sit above the relevance floor on similarity alone. Full tables:
+`../logs-d1r/r-sqlite-10k-on-postfix.md`, `../logs-d1r/r-sqlite-10k-ident-postfix.md`.
+
+**D1 follow-up 2 — exact-identifier rescue missed stored `#N` references.**
+With `abstain: on`, the recall-eval `identifiers.json` set (20 queries that
+name something stored, e.g. "fixture symbol #3" → `fx-code-000003`) fell
+from found@10 95% to 40% (rank1 85% → 40%) on the sqlite 10k fixture: all 12
+"fixture symbol #N" queries were abstained, and the rescue fired once across
+every set. Root cause: the candidate-token regex dropped the `#` sigil, so
+"#3" became the bare digit "3", which the previous follow-up excluded from
+rescue outright — present and absent numbered references score the same
+z≈1.1–1.8 (e5 can't tell "#3" from "#999999"), so only an exact lexical
+match can separate them, and there was none. Fix (`recall/abstention.ts`):
+keep the `#` so a `#<digits>` token is a numbered-reference identifier
+(bare digits still never rescue), strip trailing sentence punctuation from
+tokens, and require a **whole-token** match (non-word or string edge on both
+sides) in the seed's label + content instead of a substring match — so "#3"
+cannot ride on "#3333" and `dispatchBatch` cannot ride on
+`redispatchBatchNow`. Label is now included because a stored code symbol is
+often named only there. Floor unchanged; `abstain: off` output unchanged
+(rankings byte-identical on/off for every non-abstained query). The runner
+gains `--identifiers-file` (`identifiers.json`, same file as D3's) and
+`--absent-identifiers-file` (new `identifiers-absent.json`, 12
+identifier-shaped queries naming nothing stored at `--code-rows ≤ 10000`).
+sqlite 10k, `abstain: on`, before → after: identifiers present rank1 40% →
+85%, found@10 40% → 95% (= the abstain-off numbers; 0 abstained, 12
+rescued); real questions abstained 0/48 → 0/48, pooled hit@3 100% → 100%;
+gibberish zero-hit 100% → 100% (`gibberish.json` and
+`gibberish-heldout.json`); distractors zero-hit 87.5% → 87.5%; absent
+identifiers abstained 50% → 50% with 0 rescues. The other 50% of absent
+identifiers (`fx-code-999999`, `src/billing/chargeInvoice.ts`,
+`ERR_LEASE_EXPIRED`, …) are not abstained because their similarity already
+clears the floor (z 2.2–4.1: path/snake-case fragments look like the code
+rows) — a floor-calibration limit, not the rescue; unchanged by this fix.
+surreal-lance 10k matches (identifiers 85%/95%, 12 rescues, absent 50%
+abstained / 0 rescued, distractors 91.7%). Committed tables:
+`scripts/diagnostics/recall-eval/results-d1/*-real-10k-abstain-{on,off}.md`.
+
+**D1 follow-up 3 — everyday hyphen/slash words no longer cancel abstention.**
+Any `-` or `/` made a query token identifier-shaped, so "on-call",
+"follow-up", "and/or", "read-only" or "e.g." — words that also appear
+verbatim in ordinary stored prose — fired the exact-identifier rescue and
+silently overrode `abstain: on`. `recall/abstention.ts` now treats a
+plain-word `-` compound as prose unless it has at least three segments and
+none is a function word (`to`, `of`, `the`, `and`, …; particles such as
+`in`/`on`/`out` are not, so `sign-in-service` still counts), treats a `/`
+token as prose only when it is a known English pair (`and/or`, `yes/no`,
+`on/off`, `I/O`, …), and treats single-letter dotted abbreviations as prose.
+Slash paths of any length (`packages/lore`, `feature/login`), kebab names
+with 3+ segments, and anything with a digit, `.`, `_` or camelCase are
+unaffected. Trade-off: two-part plain kebab or header names
+(`groundfloor-lore`, `Content-Type`) no longer rescue on their own; some
+acronym pairs (`CI/CD`) and 3+-part idioms (`one-size-fits-all`) still do. `#N` references still rescue by design. sqlite
+10k, `abstain: on`: distractors abstained 87.5% → 91.7% (one false rescue
+removed; rescues 13 → 12); real questions 0/48 abstained, identifiers
+present found@10 95%, absent-identifier abstention 50%, gibberish 100% —
+all unchanged. surreal-lance 10k unchanged (distractors already 91.7%).
+
+**Integration (D1 + D2 + D4 + D5 on one branch).** When all four fixes
+apply together: D5 supersession replacement and seed refill run on the
+direct-match `results` only, before traversal, so every `related[].via`
+names a node in `results`; a successor that takes a slot reports its OWN
+D1 `similarity`/`relevance` (never the superseded node's); successors must
+pass the D2 `types` filter as well as actor-scope/ecosystem/archived
+visibility; a superseded traversal hop is replaced by its live successor
+inside `related`. A `corrects` target that did not itself match the query
+is returned in `related` (`relation: 'corrects'`, `via` = the correcting
+node, `correctedBy` flag on the node) rather than injected into the ranked
+array — D4's "neighbours are never ranked or counted" contract wins; a
+target that did match keeps its own ranked slot, placed after its
+correction. The D1 calibration cache is keyed on the D2 `types` filter,
+since calibration probes run through the type-prefiltered seed store.
+
+**Integration (D3 on top of D1 + D2 + D4 + D5).** D3's `candLimit` window
+(`LORE_RECALL_CANDIDATE_FLOOR`, default 0 = legacy) widens the vector,
+BM25 and graph-keyword candidate legs; every widened leg still carries the
+D2 `types` prefilter. D1's per-hit `similarity`/`relevance` are read from
+each hit's own raw cosine after the final D3 ranking, never from D3's
+anchored lexical base score; abstention's `top_similarity` is taken over the
+widened candidate set, so it can only equal or exceed the legacy value (the
+top vector hit is in every window). D5 replacement + `refillSeedSlots` run
+on the D3-ranked list, with the ranked spillover beyond `limit` as the
+refill source. Because D5 no longer drops superseded rows at the seed stage,
+only archived rows (not superseded ones) drive D3's candLimit-keyed
+starvation retry. `RetrieveMeta` gains D3's `candidateWindow` /
+`prefixStableUpTo` alongside D1's calibration fields.
+
+**D5 — write-time supersession enforcement, `corrects` edge, recall-time
+replacement.** `decision`/`convention`/`architecture` writes now carry an
+optional `supersedes: string[]` field. When a workspace opts in via
+`WorkspaceSupersessionPolicy.enforce` (default **off**, fully
+backward-compatible), `checkSupersessionPolicy()`
+(`core/supersessionPolicy.ts`) rejects a write in three cases:
+`missing_supersedes_field` (no `supersedes` field on a type that needs
+one), `prose_supersedes_mismatch` (body text asserts `SUPERSEDES <id>` but
+that id isn't listed), and `unlisted_near_duplicate` (an existing
+near-duplicate node isn't listed — bypassable with `force: true`).
+Listed ids are then atomically superseded via
+`applyWriteTimeSupersedes()` → `graph.supersedeNode()`, plus a best-effort
+`supersedes` edge write; a failed graph-side apply surfaces as
+`supersedes_apply_failed`.
+
+Adds `corrects` as a first-class edge relation (schema + vocab policy): a
+correction can reference the node it corrects without hiding it.
+
+Recall-time (`recall/retrieve.ts`, new `recall/supersessionRecall.ts`):
+a superseded node's slot in results is now **replaced** by its live
+successor (`replaceSupersededInResults`) rather than merely hidden — no
+duplication if the successor is already present, dropped if unresolved,
+opt-out via `includeSuperseded: true`. Nodes reached via a `corrects` edge
+from a result are pulled in adjacent to the correcting node
+(`applyCorrectsAdjacency`), flagged `correctedBy`. `queryEdges` on the
+graph interfaces used by both files is optional — a graph/test-double that
+doesn't implement it is treated as "no corrects edges available" rather
+than failing.
+
+**D5 round 2 (2026-09-23) — enforcement now reaches every write path, not
+just store_node/POST-api-node.** An independent review found the round-1
+gap above understated the scope: the embedded `createLore()`
+`nodeUpsert()`/`nodeUpsertBatch()`, `bulkIngest()`, REST
+`POST /api/nodes/bulk`, REST `POST /api/import`, and changeset commit
+(MCP `commit_changeset` + REST `POST /api/changesets/:id/commit`) all
+bypassed the policy silently. Fixed by extracting a single
+`resolveSupersessionContext()` helper (`core/supersessionPolicy.ts`) that
+every write path now calls instead of each resolving (or not resolving)
+its own hooks. `bulkIngest()`/embedded `nodeUpsertBatch()` enforce
+per-node with a batch-level `force`; `POST /api/nodes/bulk` and
+`POST /api/import` enforce inline per item (both bypass the
+`nodeService.nodeUpsert()` chokepoint for native batched writes, so D5
+had to be applied directly rather than via hooks) — a rejected item
+surfaces in that path's existing per-item `results[]`, it does not abort
+the batch. `POST /api/import` gains a `supersedes` field-mapping target
+(JSON array or comma-separated column) and a `mapping.force` escape
+hatch for the whole import.
+
+**D5 round 3 (2026-09-23) — host-level enforcement switch (finding #2).**
+`createLore({ supersessionEnforce })` and env var
+`LORE_SUPERSESSION_ENFORCE` (`'1'`/`'true'`) now set a *default* for the
+policy when a workspace has no explicit `supersessionPolicy` entry of its
+own. Precedence: explicit per-workspace policy > `createLore()` option >
+env var > hard default (**off**, unchanged). New exports
+`envSupersessionEnforceDefault()` / `resolveHostSupersessionDefault()`
+(`core/supersessionPolicy.ts`); `getWorkspaceSupersessionPolicy()` takes
+the resolved default as a third optional param instead of hardcoding
+`false` for unregistered workspaces. Threaded through all three write
+surfaces to their `resolveSupersessionContext()` call sites: the embedded
+`createLore()` API, the MCP tool surface (`store_node`,
+`commit_changeset`), and the REST HTTP surface (`POST /api/node`,
+`POST /api/nodes/bulk`, `POST /api/import`,
+`POST /api/changesets/:id/commit`), plus the embedded `bulkIngest()` path.
+
+Still open from the round-2 review (not yet addressed): reusing
+`supersessionCandidates.ts`'s richer near-dup ranking instead of each
+write path's own single-hit search (finding #3); all-or-nothing multi-id
+`supersedes` validation (finding #4); the same successor-replacement /
+corrects-adjacency treatment on `structuredQueryTool.ts`, HTTP
+`search.ts`, `recallCrossWorkspace.ts`, and `searchTool.ts`'s fallback
+(finding #5); several low-priority recall/ranking refinements (finding
+#6); and the accompanying regression test suite (finding #7). See
+`.claude/HANDOFF.md` in the `fix/d5-supersedes-corrects` worktree for the
+detailed state.
+
+**D5 round 4 (2026-09-23) — richer near-dup search, all-or-nothing
+`supersedes`, cross-write-path test coverage (findings #3, #4, #7).**
+`resolveSupersessionContext()`'s `findDuplicate` closure now mirrors
+`supersessionCandidates.ts`: searches the top 5 candidates, filters to the
+same enforced-type family, skips already-superseded/archived hits, and
+fails open with a `supersessionWarning` on the write result if the search
+backend itself errors (a missing backend stays silent, as before — that's
+not a search failure). `validateSupersedesIds()` now validates the WHOLE
+`supersedes` list up front — existence, archived status, and a transitive
+cycle walk (bounded depth 50) — before any write happens, refusing the
+entire write on any single bad id (`supersedes_apply_failed`);
+`applyWriteTimeSupersedes()` still attempts every listed id post-write and
+reports a structured `supersedes_partial` (`applied`/`unapplied`) if any
+of them fails to apply after the fact. New regression tests: a
+cycle-forming `supersedes` and a mixed valid/invalid list (both refuse the
+whole write, `test/d5-supersedes-corrects-unit.ts` "Part 4"); a new
+`test/d5-write-paths-refusal-unit.ts` proves the shared chokepoint is
+reached — with a missing-`supersedes` refusal — from every write surface
+individually (REST `POST /api/node`, `POST /api/nodes/bulk`, `POST
+/api/import`, embedded `nodeUpsert`/`nodeUpsertBatch`/`bulkIngest`,
+`commit_changeset`), plus one real near-duplicate case driven through a
+genuine embedding provider (not a canned search stub) on the default
+sqlite/sqlite engine pair. Still open: the surreal/lance engine-pair
+variant of that near-dup case, and findings #5/#6 (other recall surfaces,
+ranking refinements) — see `.claude/HANDOFF.md` for the current state.
+
+**D5 round 5 (2026-09-23) — remaining recall surfaces routed through
+supersession-replacement (finding #5), refill/batch/ordering/resave fixes
+(finding #6).** Finding #5: four read surfaces previously only HIDED a
+superseded node (`!n.supersededAt`) instead of resolving it to its live
+successor, unlike `retrieve()`'s shared core. All four now route through
+`recall/supersessionRecall.ts`'s helpers: `structuredQueryTool.ts` and
+`POST /api/query` (`routes/search.ts`, hydration extracted into new
+`routes/apiQueryHydration.ts` to stay under the file-size guardrail after
+the fix) get successor **replacement only** — both are documented
+"return exactly what matched" surfaces, so `corrects` adjacency
+(finding #5's other half) is deliberately NOT applied there, per each
+file's own doc comment; `recallCrossWorkspace.ts`'s per-workspace
+seed/keyword hydration and `searchTool.ts`'s legacy `workspace:"*"`
+fallback (previously the ONE `search`-tool path with zero supersession
+handling at all) also get replacement via the same `resolveLiveNodes`/
+`replaceSupersededInResults` helpers. New `refillSeedSlots()`
+(`supersessionRecall.ts`) implements finding #6(a): when
+`replaceSupersededInResults` shrinks `retrieve()`'s seed window below
+`limit` (a dropped seed, or two seeds collapsing onto one live successor),
+the freed slot(s) are refilled from the next-best candidates the original
+limit-slice discarded, themselves resolved through the same
+successor/admit path rather than inserted stale — `retrieve()` no longer
+silently under-returns below the caller's requested `limit`. Finding #6(b)
+(batched edge lookups), #6(c) (a `corrects` target keeps its own
+score/depth and ranks first, flagged `correctedBy`), #6(d) (deterministic
+order for mutual `corrects`), and #6(e) (a re-save of a node that already
+carries supersession state does not re-trigger the missing-`supersedes`
+write-time check) were implemented in earlier rounds of this branch
+(`core/supersessionPolicy.ts`, `recall/supersessionRecall.ts`) and are
+unchanged this round.
+
+New test coverage for finding #5:
+`test/d5-recall-surfaces-supersession-unit.ts` — REST `POST /api/query`
+(successor replacement + no-duplicate-on-collapse), the MCP `search` tool's
+`workspace:"*"` branch, and `runCrossWorkspaceRecall` against a real
+multi-workspace registry, each proving a superseded node's slot is
+replaced rather than dropped.
+
+Still open at the end of round 5: no dedicated regression test yet for
+`refillSeedSlots()` (finding #6a) itself, or for the finding #6(e) resave
+rule specifically (both are exercised incidentally by existing suites but
+have no purpose-built case); the surreal/lance engine-pair variant of the
+round-4 near-dup e2e test remains unadded — investigation this round found
+`createLore()`'s embedded-mode API has no engine-selection knob at all
+(no `LORE_VECTOR_ENGINE`-equivalent production option), and the
+`LORE_TEST_VECTOR_ENGINE` convention (`test/helpers/testVerbatimStore.ts`)
+only applies to suites that construct a bare `VerbatimStore`/
+`SqliteVerbatimStore` directly, not to a full `createLore()` session —
+so the round-4 test's own doc comment ("sqlite/sqlite only") appears to
+describe 3.21's actual embedded-mode default rather than a coverage gap;
+flagging for confirmation rather than forcing an unsupported configuration.
+See `.claude/HANDOFF.md`.
+
+**D5 independent re-review (2026-09-23).** Correction to the round-5 note
+above: engine selection for a fresh `createLore({dataDir})` home IS
+available — `LORE_DEFAULT_GRAPH_ENGINE=surreal` /
+`LORE_DEFAULT_VECTOR_ENGINE=lance` are honoured by `loadWorkspaces()`'s
+first-run bootstrap — and the near-dup refusal, successor replacement and
+`corrects` adjacency e2e now runs on both sqlite/sqlite and surreal/lance
+(`test/d5-review-gaps-unit.ts`). Fixes:
+- `resolveSupersessionContext()` runs on every write, enforcement on or
+  off, but went through `loadWorkspaces()`, which bootstrap-writes a
+  `workspaces.json` (and mkdirs the home) when none exists — for
+  registry-less callers that was the process-wide `loreHome()`. It now
+  probes read-only via `loadWorkspacesIfPresent()`; no file / no entry
+  falls back to the host default, and a corrupt file logs a warning
+  instead of being swallowed silently.
+- Successor lookups in cross-workspace recall and `structured_query` now
+  apply the bound actor's `security_scopes` filter; a restricted-scope
+  successor could previously surface through a visible superseded node.
+- Re-save rule: a re-save that omits `supersedes` now counts the node's
+  already-recorded `supersedes` targets as listed, so unchanged
+  "SUPERSEDES <id>" prose is no longer refused as
+  `prose_supersedes_mismatch`; a NEW prose claim is still refused.
+- `test:unit:d5-recall-surfaces-supersession`, `d5-write-paths-refusal`
+  and the new `d5-review-gaps` are now in the `npm test` chain.
+- `.file-size-baseline.json`: the three NEW D5 entries (`bulkWrite.ts`,
+  `import.ts`, `bulkIngest.ts`) had inaccurate justifications (claimed the
+  growth predated the branch); corrected to the real origin/main sizes.
+  `bulkIngest.ts` trimmed 822 -> 809.
+Verified: with enforcement unset and no supersedes/corrects edges, a
+seeded randomized write+recall run is byte-identical to origin/main on
+sqlite; on surreal the only differences are keyword-tie ordering that
+origin/main also shows between its own runs.
+
+## [3.21.0] — 2026-09-23
+
+**Highlights.** SQLite becomes the default storage engine for **new** local
+workspaces on both substrates — graph (`SqliteGraph`, bit-identical
+behavior to `SurrealGraph`, added in `f43632a7`) and vector
+(`SqliteVerbatimStore`, added in `3fd8f4e3`) — closing out the multi-step
+SQLite-graph-parity + SQLite-vector-and-promotion effort tracked in
+`321-STEP2-SQLITE-VECTOR-AND-PROMOTION-DESIGN.md`. A SQLite-vector
+workspace auto-promotes to LanceDB in the background once it crosses
+`LORE_VECTOR_PROMOTE_ROWS` (default 250,000) rows
+(`engines/verbatimPromotion*.ts`, `67f7ed20`); an existing workspace's
+**graph** engine only changes via the new explicit `lore migrate-graph
+<workspace> --to sqlite [--rollback]` CLI (`29d78389`) — there is no
+automatic graph migration. **No existing workspace changes engine on
+upgrade for either substrate** — `graphEngine`/`vectorEngine` absent in
+`workspaces.json` still resolve to `surreal`/`lance`
+(`resolveWorkspaceGraphEngine`/`resolveWorkspaceVectorEngine`); only
+`createWorkspace()` and fresh-home seeding consult the new `sqlite`-first
+defaults.
+
+Recall gained a standalone BM25/keyword mode that never calls the embedding
+provider (`af760cf4`), a single shared RRF fusion (`rrfFuse`, k=60) used at
+every list-fusion site instead of three independent re-implementations
+(`064e437c`), multi-phrasing recall (`queries[]`, ≤5 extra phrasings, fused
+via the same `rrfFuse`) plus `entities`/`topics`/`project` filters
+(`da47d37b`), compact recall candidates (`compact:true`) and a paired
+`recall_expand` call for fetching full bodies of ≤50 chosen ids
+(`fb98b0f8`), and `recall_outcome` + a per-response `queryId` correlation
+token feeding the existing outcome-weighting mechanism (`13dbe614`).
+Node writes gained `questions[]`/`summary`/`entities`/`topics`: each
+question is written as its own alias-searchable verbatim row, mapped back
+to its parent before scoring, never returned as a result in its own right
+(`486075a1`). `LORE_EMBEDDING_PROVIDER=none` (`NullEmbeddingProvider`,
+`375c5fca`) makes "embeddings are off" explicit and skips vector writes
+proactively rather than queuing doomed outbox retries. An embed/verbatim
+write failure that happens *after* durability was already established (the
+outbox row was recorded) now keeps the graph node (`embedPending: true`)
+instead of rolling it back (`99918c57`) — durability failures still roll
+back, unchanged.
+
+**Upgrade notes.**
+
+- **New local workspaces** now default to `graphEngine: 'sqlite'` and
+  `vectorEngine: 'sqlite'`. Operators not ready to switch: set
+  `LORE_DEFAULT_GRAPH_ENGINE=surreal` and/or `LORE_DEFAULT_VECTOR_ENGINE=lance`
+  to keep creating pre-3.21-style workspaces (`docs/CONFIGURATION.md`).
+- **Existing workspaces are unaffected** on upgrade — see Highlights. Graph
+  migration is explicit and one-way-by-CLI (`lore migrate-graph`); vector
+  promotion (SQLite → LanceDB) is automatic in the background past the row
+  threshold, but the reverse (LanceDB → SQLite) is not offered.
+- **Fixed a real production crash on `SqliteGraph`**: a node write omitting
+  `metadata` (or `type`/`label`/`project`/`ecosystem`) threw `NOT NULL
+  constraint failed: nodes.metadata` on `SqliteGraph` while silently
+  succeeding on schemaless `SurrealGraph` (`aa31d0e7`). Any host that
+  writes nodes without always setting `metadata` explicitly — including via
+  loosely-typed callers — would have hit this the moment it adopted the
+  3.21 SQLite default.
+- **Fixed the matching crash on `SqliteVerbatimStore`**: `store()`/
+  `storeBatch()` read `doc.metadata.contentHash`/`.type`/`.label` directly
+  and threw `Cannot read properties of undefined (reading 'contentHash')`
+  for a `VerbatimDocument` constructed without a `metadata` object, even
+  though `VerbatimDocument.metadata` is typed as required and the LanceDB
+  engine has always tolerated its absence via optional chaining
+  (`cd4cab44`). **Any embedding host that stores `VerbatimDocument`s
+  without always populating `metadata` would hit this in production**, not
+  just in tests, once SQLite became the default vector engine.
+- Fixed a `dispose()` hang specific to `SqliteGraph` becoming the default
+  boot graph: an idle outbox replicator's between-tick sleep previously
+  relied on `SurrealGraph` incidentally pumping the event loop during
+  shutdown to fire its own unref'd timer; `SqliteGraph` (no persistent
+  native handle) pumps nothing, so `stop()`'s await hung forever under a
+  top-level await (`dede4ff7`). Fixed by racing the sleep against a stop
+  signal directly instead of depending on an unrelated substrate handle.
+- Fixed a `KeyedMutex` self-loop deadlock in `addBidirectionalEdge` for a
+  self-loop edge (`sourceId === targetId`, same relation) on both graph
+  engines — inherited by `SqliteGraph` from `SurrealGraph` when it was
+  built (`dede4ff7`).
+- **Known accuracy divergence, measured and disclosed, not a regression to
+  fix in this release**: SQLite's FTS5 porter tokenizer does not strip
+  stopwords the way LanceDB's full-text search does
+  (`removeStopWords: true` default) — SQLite's keyword leg instead joins
+  tokens with `OR` (`b785e80f`) to approximate the same "how many terms
+  match" ranking shape, but the underlying corpus/index differs. Measured
+  on `benchmarks/tapestry-recall`'s 295-question corpus, SQLite-profile
+  (SQLite graph + SQLite vector) vs. the pre-3.21 LanceDB profile: config
+  C1 (pure BM25/keyword) regresses 2.4–2.7pp, and C4 (hybrid + write-time
+  aliases, sharing C1's FTS5 leg) regresses 1.7–3.7pp depending on K.
+  C2/C3/C5/C6 — everything with a real dense-vector leg — hold at parity or
+  fractionally above. **The release's own quality gate, C6 (hybrid +
+  write-time aliases + read-time `queries[]`) ≥80% top-5 overall and on
+  paraphrase questions, is unaffected** — identical or marginally higher on
+  SQLite (`benchmarks/tapestry-recall/RESULTS.md`, "SQLITE-ONLY round").
+- Recall responses now always carry a `queryId` field (summary, full, and
+  compact shapes) — additive, no existing field removed or renamed
+  (`13dbe614`).
+- `bm25_ranked: false` (recall `_meta` / REST `/api/search`) is a new,
+  present-only-on-degrade field marking a response whose BM25 leg fell back
+  to an unranked scan rather than a ranked one (`af760cf4`) — a host
+  parsing recall/search responses strictly should tolerate this new key.
+
+### Added
+
+- `SqliteGraph` — a `better-sqlite3`-backed local graph engine, deterministic
+  cross-engine ordering for `traverse`/`queryEdges`/`getTopology`/
+  `getNodesByIds` (`f43632a7`, `66f2566b`).
+- `SqliteVerbatimStore` — a SQLite-backed `VerbatimStoreApi`, with FTS5
+  keyword search (escaped against query-syntax injection, `8d799bcc`),
+  search-cache + single-flight parity with the LanceDB engine (`52ee310f`),
+  and CJK short-query BM25 fallback (`2467f1cb`).
+- SQLite → LanceDB promotion engine + automatic trigger
+  (`67f7ed20`, `a3878ec9`), plus `LORE_VECTOR_PROMOTE_ROWS` and the
+  `LORE_SQLITE_VECTOR_*` tuning env vars.
+- `lore migrate-graph <workspace> --to sqlite [--rollback]` CLI (`29d78389`).
+- `LORE_DEFAULT_GRAPH_ENGINE` / `LORE_DEFAULT_VECTOR_ENGINE` operator escape
+  hatches for new-workspace defaults (`5df62ec2`, `a3878ec9`;
+  `docs/CONFIGURATION.md`).
+- Standalone BM25/keyword `recall`/`search` mode that never calls the
+  embedding provider (`af760cf4`).
+- `recall`/`search`: `queries[]` (multi-phrasing), `entities`/`topics`/
+  `project` filters (`da47d37b`).
+- `recall`/`search`: `compact:true` candidates + `recall_expand` MCP tool /
+  `POST /api/recall/expand` REST route (`fb98b0f8`).
+- `recall_outcome` MCP tool / `POST /api/recall/outcome` REST route, plus a
+  `queryId` correlation token on every recall response (`13dbe614`).
+- Node write: `questions[]`/`summary`/`entities`/`topics` fields, alias
+  verbatim rows for `questions[]` (`486075a1`, `bb8e5e1f` for the bulk
+  write path).
+- `NullEmbeddingProvider` / `LORE_EMBEDDING_PROVIDER=none` (`375c5fca`).
+
+### Fixed
+
+- `SqliteGraph`: `NOT NULL` crash on a node write omitting `metadata`/
+  `type`/`label`/`project`/`ecosystem` (`aa31d0e7`).
+- `SqliteVerbatimStore`: crash on a `VerbatimDocument` written without
+  `metadata` (`cd4cab44`); FTS5 `OR`-joined tokens for Lance keyword-mode
+  parity (`b785e80f`); FTS5 MATCH-syntax injection escaping (`8d799bcc`);
+  `store()` skip-identical now requires metadata equality too (`471cd41b`);
+  tombstone history, bulk-upsert replace semantics, redaction-bypass,
+  null-embedder support (`9a09a174`); `listIds()` cross-engine parity
+  (`5c131fa9`).
+- An embed/verbatim write failure occurring after durability was already
+  established no longer rolls back the graph node (`99918c57`).
+- `outbox` `dispose()` hang on `SqliteGraph` boot; `KeyedMutex` self-loop
+  deadlock in `addBidirectionalEdge` on both engines (`dede4ff7`).
+- 3.21 r9: keyword/BM25 accuracy race, alias-dilution over-fetch, embedded
+  recall opts parity (`69285c3b`); questions[] alias rows now embedded/
+  written inline for `bulkIngest(embed:'sync')` instead of only via the
+  async outbox replicator (`00acc3d1`).
+
+### Docs
+
+- `docs/PERFORMANCE-MEMORY.md` §14 — per-open-workspace memory cost on the
+  SQLite profile, measured and CI-gated: ~14 MB average / ~0.3 MB
+  incremental steady-state per open store, no post-close floor growth
+  across 50 cycles — vs. the pre-3.21 SurrealDB+LanceDB default's ~125 MB
+  per open and ~+88 MB retained per open/close cycle (same underlying §9
+  leak, now isolated to the close boundary). New CI gate:
+  `test:unit:memory-sqlite-profile-open-close-cycles`.
+- `benchmarks/tapestry-recall/RESULTS.md` — "SQLITE-ONLY round" comparing
+  the SQLite-default engine pair against the prior LanceDB/SurrealDB
+  rounds on the same 295-question corpus.
+- `docs/MIGRATION-3.21.md` (new) — full migration guide for hosts.
+- `docs/releases/3.21.0/ATLAS-ADOPTION.md`,
+  `docs/releases/3.21.0/NIRMAN-TAPESTRY-NOTE.md` (new) — host adoption notes.
+
+## [3.20.2] — 2026-09-22
+
+### Fixed — leftover `node_counts` view (P1, data integrity) made affected nodes undeletable
+
+`LORE_SURREAL_COUNT_VIEW` was default-on from 2026-08-05 to 2026-08-21.
+Flipping it to opt-in only stopped `applySurrealSchema` from *defining* the
+view (`node_counts`); nothing ever removed it, so every workspace that
+booted in that window kept the view forever and SurrealDB kept maintaining
+it on every write, even though nothing read it. Under concurrent writers
+sharing one (project, type) group, surrealdb-core 3.0.2's view-maintenance
+can commit a lost update; once a delete drove that view row's count to
+zero, the row disappeared, and every later statement that re-maintained the
+same group panicked with `unreachable logic: ... Deletion for a view but no
+record exists for that view`. That took out `deleteNode`, `supersedeNode`,
+`unsupersedeNode`, and `markStaleByIds`/`markStaleByTags`, and made
+`stampAccessTimes` silently stamp nothing on the read path — so an affected
+node could be neither deleted nor hidden, and access-time tracking degraded
+without raising an error.
+
+`applySurrealSchema` now runs `REMOVE TABLE IF EXISTS node_counts` whenever
+the flag is off, and recomputes (`REMOVE` + `DEFINE`, which backfills) on
+every open when the flag is on, bounding the concurrency drift to a single
+session instead of forever. Both are pure repair: the view is derived, so
+dropping and re-backfilling it loses no data. **No migration step required**
+— affected workspaces self-repair on their next open. No API surface
+changed; this is an internal schema-maintenance fix.
+
+Covered by `test:unit:surreal-count-view-stale-delete` (reproduces the
+production shape: 300 concurrent upserts into one group with the flag on,
+serial re-upsert of any rejected ones, close, reopen with the flag off —
+asserts `INFO FOR DB` no longer lists `node_counts` and that all 300 serial
+deletes, a supersede, and the plain-UPDATE paths all succeed) and an
+updated case in `test:unit:surreal-feature-matrix`.
+
+Deferred out of this release: wrapping `deleteNode`'s edge/node deletes in a
+single transaction (needs a new multi-statement primitive, unrelated to this
+defect's cause), and removing the `countView` option outright (a public
+config removal, filed for the next minor).
+
+### Fixed — embedded `maintain` and several other tools targeted process-wide `LORE_HOME` instead of the instance's own registry
+
+`mcp/tools/maintain` resolved its target workspace via
+`getWorkspacePath`/`getActiveWorkspaceName`/`loadWorkspaces`, all of which
+defaulted to the process-wide `loreHome()` (`LORE_HOME` env or
+`~/.groundfloor`) instead of an embedded instance's own `dataHome`. An
+embedded host's LanceDB was never compacted by its own `maintain` calls, an
+explicit `workspace` arg threw `workspace_not_found`, and a misdirected call
+could write a stray `workspaces.json` into a home the embedded host doesn't
+own via `loadWorkspaces()`'s first-run migration.
+
+The same wrong-home pattern turned up at four more call sites during review:
+`governance.ts` (`list_workspaces`), `lifecycle.ts` (`prune_nodes` — could
+authorize a hard-delete off a foreign registry's `allowHardDelete` flag),
+`ingestion.ts`'s quota gate (`read_document_for_ingestion`/`import_data` —
+failed closed, denying ingestion outright for a workspace registered only in
+the instance's own registry), and `mcp/server.ts`'s
+`getWorkspaceEntryForQuota` — the most severe of the set, since it fails
+*open*: `checkWorkspaceQuota` treats "no entry found" as "no quota
+configured," so `maxNodes`/`maxStorageBytes` write quotas were silently
+unenforced for embedded hosts. All five now resolve via the same duck-typed
+`deps.graphRegistry.homeDir()` pattern, reading through the existing
+non-bootstrapping `loadWorkspacesIfPresent()` where applicable so a probe
+can no longer side-effect-write into the wrong home. `maintain` also gained
+wiring to prune `versions.sqlite` for embedded hosts (previously
+daemon-only, so the store grew unbounded under embedded deployment).
+
+All changes are additive/optional-parameter with defaults matching prior
+behaviour; no signature is broken. Covered by the `test:unit:maintain`
+family, `test/embedded-maintain-findings-unit.ts`,
+`test/ingestion-embedded-registry-home-unit.ts`, and
+`test/store-node-quota-embedded-registry-home-unit.ts`.
+
+### Fixed — timed-out search-worker calls kept running instead of being cancelled, causing daemon restarts under load
+
+A timed-out `VerbatimSearchWorkerProxy.call()` only rejected locally — the
+child process kept running the call and kept its place in `SearchGate`'s
+FIFO queue forever, since a queued waiter had no way to be removed.
+Separately, every `storeBatch` took `searchGate.exclusive()` unconditionally
+before even checking whether an FTS index rebuild was needed, so every bulk
+write drained all reads regardless. Together these caused 17 daemon
+restarts on 2026-09-17 under load.
+
+Fix: calls now carry an epoch-ms deadline the child checks before and after
+being granted a gate permit; a timed-out proxy call sends an explicit cancel
+message that splices the corresponding queued waiter out of `SearchGate`
+immediately; `ensureFtsIndex` checks whether a build is actually needed
+before taking the exclusive lock; and reads can now fail fast on a bounded
+queue-wait instead of waiting out however long the current holder takes
+(never applied to `exclusive()` — a build must always eventually run). An
+optional abort signal is threaded end-to-end — `VerbatimStore`'s
+search/searchByVector/bm25Search, the worker proxy/entry, `LoreInstance.search`,
+`inProcessRecall`, and now `retrieve.ts`'s seed-store search calls, closing
+the last gap where an aborted `recall()` call stopped the caller's wait but
+left the real seed-store search running and still occupying a gate slot.
+
+Independent review of the first pass found a cross-caller cancellation bleed
+in `VerbatimStore`'s single-flight search cache: two callers sharing one
+in-flight query inherited the *first* caller's cancellation, so aborting
+caller A could reject caller B's unrelated request. Fixed with
+reference-counted per-flight cancellation (`SearchFlight`) — each caller
+races its own abort condition against the shared flight in a private
+wrapper, and the shared native call is aborted only once every referencing
+caller has individually given up.
+
+All changes are additive/optional — no existing call site's behaviour
+changes when the new params are omitted. Covered by
+`test:e2e:search-worker-deadline-cancel`, `test:unit:search-gate`,
+`test:unit:recall-signal-abort`, `test:unit:search-worker-cancellation-repro`,
+`test:unit:verbatim-search-flight-cancellation`,
+`test:unit:retrieve-signal-seed-cancellation`, and
+`test:unit:verbatim-gate-arg-slot`.
+
+### Fixed — embedded vocab-policy and outbox lag-threshold reads targeted process-wide registry
+
+Two further instances of the wrong-home pattern above, found while reviewing
+the `maintain`/quota fixes: `core/nodeService.ts`'s `resolveVocabVerdict()`
+called `getWorkspaceVocabPolicy()` with no `home` argument, so an embedded
+host's `denylist`/`hitl`/`reject` vocab policy failed to resolve against the
+wrong registry (`Unknown workspace`) and silently downgraded to `accept` — a
+write that should have been held for HITL approval or refused was committed
+instead. `outbox/wiring.ts`'s `thresholdResolver` had the same gap: a bare
+`loadWorkspaces()` ignored an embedded host's per-workspace
+`outboxLagThresholdSeconds` override, silently falling back to the global
+default.
+
+Both fixed by threading the instance's own registry home through
+(`deps.graphRegistry?.homeDir()` for the vocab-policy lookup, a new optional
+`getRegistryHome` getter for the outbox resolver), the same lazy-closure
+convention already used by `getGraphForWorkspace`. Additive and optional —
+cloud mode and any caller with no registry keep resolving against the
+process-wide home exactly as before. Covered by
+`test:unit:store-node-vocab-policy-embedded-registry-home` and
+`test:unit:outbox-lag-threshold-embedded-registry-home`.
+
+### Fixed — `LORE_TEST_WORKER_HOOKS` missing from the envScrub allowlist
+
+The search-worker deadline-cancel fix above (D1) introduced
+`LORE_TEST_WORKER_HOOKS` but never added it to `envScrub.ts`'s
+`ALLOWED_VARS`, so the security-hygiene allowlist-coverage test
+(`test/env-scrub-allowlist-unit.ts`) failed on a clean checkout of `main`.
+Fixed by adding the var to the allowlist with a one-line comment describing
+what it controls (test-only search-worker hook exposure, never set in
+production). Covered by `test:unit:env-allowlist` (3/3, was 2/3).
+
+### Fixed — `LORE_SEARCH_QUEUE_WAIT_MS` and `LORE_TEST_WORKER_HOOKS` missing from CONFIGURATION.md
+
+Same root cause as the allowlist gap above (D1 shipped two new env vars
+without a docs follow-up): the `docs/CONFIGURATION.md` completeness drift
+guard (`test/sw24-config-reference-unit.ts`) failed on a clean checkout of
+`main` because `LORE_SEARCH_QUEUE_WAIT_MS` (queue-wait bound for the search
+admission gate) and `LORE_TEST_WORKER_HOOKS` (test-only search-worker hook
+flag) were undocumented. Both added: `LORE_SEARCH_QUEUE_WAIT_MS` in §2.5
+(Batched Embedding Tuning), `LORE_TEST_WORKER_HOOKS` in §14
+(Development / Eval). Covered by `test:unit:sw24-config-reference` (14/14,
+was 13/14).
+
+### Fixed — `LORE_SEARCH_QUEUE_WAIT_MS` missing from the envScrub allowlist, silently inert since 3.20.1
+
+Once `LORE_SEARCH_QUEUE_WAIT_MS` was documented (the fix above), the
+bidirectional docs↔envScrub completeness guard
+(`test/nw2a-envscrub-allowlist-completeness-unit.ts`) caught a gap the
+original source-scan allowlist test never could: the var was never added to
+`envScrub.ts`'s `ALLOWED_VARS`, so `envScrub`'s parent-environment isolation
+has been silently stripping it from every spawned Lore process's environment
+since it shipped in 3.20.1 — the override has never actually taken effect in
+production, regardless of how it was set. `test/env-scrub-allowlist-unit.ts`
+missed this because it only matches literal `process.env.LORE_X` reads;
+`searchGate.ts` reads it through `parseEnvInt('LORE_SEARCH_QUEUE_WAIT_MS')`,
+an indirection the source-scanner doesn't follow.
+
+Fixed by adding the var to `ALLOWED_VARS` with a one-line comment. Covered
+by `test:unit:nw2a-envscrub-allowlist-completeness` (4/4, was 3/4);
+`test:unit:env-allowlist` unaffected (3/3).
+
+## [3.20.1] — 2026-09-21
+
+### Fixed — outbox retry backoff ignored sub-second config, resolve-failure log unthrottled
+
+`packages/lore/src/outbox/`: retry backoff now honours a sub-second
+`retryConfig` value instead of flooring it, the resolve-failure log is
+throttled instead of writing on every failed resolve attempt, and the retry
+budget (attempts before dead-lettering) is tunable rather than hardcoded.
+Covered by `test:unit:outbox-deleted-workspace-retry` (9 cases: env
+retry-config overrides, backoff timing/spacing, log throttling,
+dead-lettering after max attempts, requeue after workspace restoration).
+
+### Added — LongMemEval benchmark harness (`benchmarks/longmemeval/`, dev tooling only)
+
+Eval tooling for measuring Lore's own retrieval quality against the
+LongMemEval question set — no changes under `packages/lore/src/`, no
+production impact. Adds `--structured-facts` / `--preference-facts`
+(auto|all|off), `--recency-tagging`, `--decompose-multi-session`,
+`--retrieval-only`, and `--skip-ingest` flags to the harness; see
+`benchmarks/longmemeval/README.md` for usage. `decompose-multi-session`
+ships default-off — a `--retrieval-only` comparison run (n=180) showed it
+degrading retrieval across every question-type category, including the
+multi-session category it targets.
+
+## [3.20.0] — 2026-09-18
+
+**Highlights.** A memory/resource-lifecycle release, driven by a measurement
+sprint against `docs/PERFORMANCE-MEMORY.md` (§8-§12) and answered directly to
+a host's asks in `docs/ANSWERS-FOR-HOSTS-2026-09.md`. Closes a chain of
+native-handle leaks found across `VerbatimStore` (LanceDB), `LoadJobsStore`,
+the bulk-loader adapter, and Arcade provisioning — all now close their
+`better-sqlite3`/LanceDB handles on shutdown/eviction instead of leaking fds
+and, for LanceDB, RSS. Adds opt-in idle eviction for per-workspace verbatim
+stores (`WorkspaceVerbatimResolver`), opt-in idle-unload for the local
+embedding pipeline, a per-store vector-store role (`'read' | 'write' |
+'both'`) that cuts a write-only store's native handle count from 18 to 2, a
+per-store `searchWorkerPolicy` override, and host-injected `EmbeddingProvider`
+support with a strict fingerprint refusal so a mismatched injected provider
+can't silently corrupt an existing store's vectors. Also fixes two
+integration-only regressions found while merging this sprint's branches
+together: `WorkspaceVerbatimResolver`'s home directory not matching the
+embedded host's actual data root, and the daemon's background retention/
+consistency sweeps resetting a workspace's idle-eviction clock on every pass
+(defeating the new eviction feature for any workspace the sweep touched).
+
+**Upgrade notes.**
+
+- `VerbatimStore.close()` now closes its LanceDB connection and write table
+  deterministically (waits for in-flight writes, up to 5 s, before closing;
+  a still-stuck write after that leaves the store's handles open rather than
+  risk a crash) instead of leaving them for GC. **This is a default-behaviour
+  change** — kill switch `LORE_VERBATIM_NATIVE_CLOSE=0` restores the 3.19.1
+  dereference-only close.
+- `WorkspaceVerbatimResolver`'s background idle-eviction sweep is new and
+  **runs only in the process that owns the daemon timers**
+  (`daemonTimersEnabled(ownsProcess, mode)` — the same ownership gate that
+  already governs the graph registry's sweeper and the crash handlers; see
+  `CLAUDE.md`'s process-ownership note). An embedded host (`ownsProcess:
+  false`, e.g. Atlas) gets no automatic sweep and must drive eviction itself
+  via `getVerbatimResolver().evictIdle(...)` — this is opt-in, not a default
+  change for embedded hosts. Tunable via `LORE_VERBATIM_IDLE_TTL_MS` (default
+  1,800,000 ms / 30 min) and `LORE_VERBATIM_SWEEP_MS` (default 600,000 ms /
+  10 min); a store with queued embed or outbox work is never evicted, and a
+  later access reopens it transparently.
+- Every other new option in this release defaults to 3.19.1 behaviour and is
+  opt-in: `vectorStoreRole` (omitted = today's `'both'`), `searchWorkerPolicy`
+  (omitted = today's global `LORE_SEARCH_WORKER` env gate), `embeddingProvider`
+  injection (omitted = today's local ONNX pipeline), and
+  `LORE_EMBED_IDLE_UNLOAD_MS` (default `0` = never unload, unchanged from
+  3.19.1).
+- **`LocalGraphRegistry`'s background idle-eviction sweep is now OFF by
+  default** — `LORE_REGISTRY_IDLE_TTL_MS` default changed from `1,800,000`
+  ms (30 min) to `0` (disabled). **This is a default-behaviour change** for
+  any daemon that owns its process (`ownsProcess: true`) — that daemon
+  previously evicted-then-reopened an idle workspace graph every 30 min by
+  default; it now keeps a graph open for the life of the process once
+  opened. Why: `docs/PERFORMANCE-MEMORY.md` §9 established that
+  `@surrealdb/node` 3.0.3 never frees a datastore's native allocation on
+  `close()`, so each eviction-then-reopen cost ~100 MB permanently, with
+  nothing given back by the eviction that was supposed to be saving memory
+  — idle graph eviction was net-negative on this driver the whole time.
+  Set `LORE_REGISTRY_IDLE_TTL_MS` to a positive value (e.g. `1800000` to
+  restore the pre-3.20.0 behaviour) to re-enable the sweep; `evictIdle()`
+  called directly with an explicit `idleMs` (as several tests and
+  `scripts/measure-memory-configs.mjs` already do) is unaffected either
+  way. Embedded hosts (Atlas) are unaffected — the embedded path already
+  never ran this sweep (`autoEvict: false`). `LORE_MAX_OPEN_WORKSPACES`
+  over-cap LRU eviction and the vector-store (`WorkspaceVerbatimResolver`)
+  idle sweep above are both separate mechanisms, unchanged by this.
+- `/api/health` gains `workspaces.verbatimResolverOpenCount` (a direct,
+  pure-read count of currently-open verbatim stores) — additive, no existing
+  field changed.
+
+### Fixed
+
+- **`VerbatimStore.close()` releases LanceDB natives instead of
+  dereferencing them, and now drains in-flight writes first.** Closing a
+  store no longer just drops the JS-side handle for GC to eventually collect
+  (or never, under sustained load) — it calls the connection/table close
+  methods deterministically and waits for a pending write to settle (up to
+  5 s) before doing so, so a close racing a write can't close out from under
+  it. Kill switch: `LORE_VERBATIM_NATIVE_CLOSE=0` reverts to 3.19.1's
+  dereference-only behaviour. Stress-tested at 900 close-during-write races,
+  0 crashes.
+- **`LoadJobsStore`, the bulk-loader adapter, and Arcade provisioning now
+  close their `better-sqlite3` handles.** All three opened a SQLite handle
+  and never closed it on shutdown/completion — `LoadJobsStore` joins the
+  shutdown-drain close set, the per-job bulk-loader adapter closes its
+  handle when the job finishes, and Arcade's two provisioning-db handles
+  close on shutdown.
+- **The boot verbatim store is now closed structurally, not by
+  `instanceof`.** Shutdown drain previously identified the boot-time
+  `VerbatimStore` by an `instanceof` check that could miss it depending on
+  construction path; it's now tracked and closed the same way as every
+  other store shutdown drain owns.
+- **`WorkspaceVerbatimResolver`'s home directory now matches the embedded
+  host's actual data root.** An embedded host threading a non-default
+  `dataDir` had the resolver computing workspace paths against the wrong
+  base, a mismatch only surfaced once idle eviction (below) started
+  reopening stores — reopens landed on the resolver's own default home
+  instead of the host's.
+- **Background retention/consistency sweeps no longer reset a workspace's
+  idle-eviction clock.** The daemon's periodic sweep fan-out (retention,
+  consistency) touched every registered workspace's graph/verbatim/table
+  handles to do its work, and that touch alone counted as "access" for
+  idle-eviction purposes — a workspace the sweep reached every cycle could
+  never go idle long enough to evict, silently defeating the eviction
+  feature below for exactly the workspaces most likely to be idle from a
+  user's perspective. `LocalGraphRegistry`/`WorkspaceVerbatimResolver`
+  accessors now take an optional `{ touch?: boolean }` (default `true`,
+  unchanged), and the sweep fan-out passes `{ touch: false }`.
+- **`scripts/ensure-surreal-native.mjs`'s ABI comment was wrong.** It
+  described `@surrealdb/node` as locked to a Node major
+  (`NODE_MODULE_VERSION`). Measured: the addon is Node-API (exports
+  `napi_register_module_v1`), and the same binary loaded and ran a
+  `surrealkv` write+read on both Node 20.20.2 and 22.23.2 — Node-API's
+  whole point is ABI stability across Node versions. Comment corrected;
+  script behaviour unchanged. `better-sqlite3` is the actually
+  ABI-specific native dependency in this repo (see `docs/
+  ANSWERS-FOR-HOSTS-2026-09.md` Q5).
+
+### Added
+
+- **Idle eviction for `WorkspaceVerbatimResolver`.** `evictIdle(nowMs,
+  idleMs)`, `closeWorkspace(name)`, and `openCount()`, reached via the new
+  `lore._daemon.getVerbatimResolver()`. A store with queued embed or outbox
+  work is never evicted; a later access reopens it transparently. The
+  daemon runs its own sweep (see Upgrade notes above for the ownership
+  gate and env vars); measured flat at `openCount` = 1 across 50 workspace
+  cycles where it previously grew unbounded (§10.1).
+- **`vectorStoreRole` — per-store read/write/both LanceDB handle scoping**
+  (`CreateLoreOptions.vectorStoreRole`, value or `(basePath) => role`;
+  `VerbatimStoreRole` type, now re-exported from the package root). A
+  write-only store (`role: 'write'`) holds 2 native handles instead of 18
+  (no read pool); calling `search` on one falls back to the write handle
+  rather than throwing. Measured: `handleCount()` confirms 18/2 exactly
+  (§10.2).
+- **`searchWorkerPolicy` — per-store override for search-worker
+  isolation** (`CreateLoreOptions.searchWorkerPolicy?: (basePath: string)
+  => boolean`), consulted before the global `LORE_SEARCH_WORKER` env gate.
+  A policy function that throws falls back to the env gate rather than
+  failing the store open.
+- **`LORE_EMBED_IDLE_UNLOAD_MS` + `releaseLocalEmbeddingPipeline()` — opt-in
+  idle-unload for the local embedding pipeline.** Off by default (`0` =
+  never unload). Frees the JS-side pipeline cache slot and heap reference
+  deterministically (confirmed by `_pipelineCacheSizeForTests()` and a
+  ~189 MB → ~31 MB heap drop) but see the Known limitation below before
+  relying on it for RSS.
+- **Host-injected `EmbeddingProvider`** (`CreateLoreOptions.embeddingProvider`)
+  with strict fingerprint enforcement: an injected provider whose
+  `embeddingProviderFingerprint()` (model id + dtype) doesn't match an
+  existing store's recorded fingerprint is refused before any write, via
+  the new `EmbeddingFingerprintMismatchError`
+  (`engines/verbatimFingerprintGate.ts`). A store opened with an injected
+  provider never loads the local ONNX pipeline at all — measured 527 MB vs.
+  1,047 MB RSS for the same workload (§10.4).
+- **`/api/health` reports `workspaces.verbatimResolverOpenCount`** — a
+  direct, pure-read `WorkspaceVerbatimResolver.openCount()`, so the
+  resolver's live open-store count is observable without instrumentation.
+
+**Known limitation — three native costs this release does not, and cannot
+from inside Lore, return.** All three are measured in
+`docs/PERFORMANCE-MEMORY.md` and summarized in
+`docs/ANSWERS-FOR-HOSTS-2026-09.md`:
+
+- **`@surrealdb/node@3.0.3` retains ~100 MB resident plus 3 open file
+  descriptors (WAL + sstable) per store open, including a reopen of the
+  same directory, and nothing short of process exit returns it** (§9). Lore's
+  `close()` is correct and complete on its side — the addon's own
+  `Datastore` is never destroyed by any call reachable from JS. Evicting the
+  graph half in-process is therefore **net-negative**: keeping it open costs
+  ~100 MB once, evicting and reopening it costs another ~100 MB per reopen,
+  without bound. Idle eviction in this release deliberately scopes to the
+  vector half only, which *is* net-positive.
+- **Releasing the local embedding pipeline
+  (`releaseLocalEmbeddingPipeline()` / `LORE_EMBED_IDLE_UNLOAD_MS`) frees
+  the JS-side cache and heap but returns approximately zero RSS/vmmap** —
+  RSS actually rose slightly across a release in every measured run
+  (§10.3). This is why idle-unload ships off by default: it is useful for
+  cache-correctness (a reload provably starts from clean state) but hosts
+  should not expect it to shrink a process's memory footprint on this
+  platform/runtime combination.
+- **A long-lived reader process does not see another process's new writes
+  to a shared `VerbatimStore` directory until it reopens.** `count()` and
+  `getById()` are pinned to the table snapshot at `initialize()` and never
+  advance, even minutes into a concurrent writer's run and even when the
+  table demonstrably existed before the reader opened (§12.4). Data
+  integrity is unaffected (no torn writes, no lost rows, exact final
+  counts in every scenario measured) — this is a staleness limitation, not
+  a correctness one. A process sharing a store across processes for
+  read-after-write must reconnect (or otherwise force a fresh table
+  checkout) periodically or per-request.
 
 ## [3.19.1] — 2026-09-06
 

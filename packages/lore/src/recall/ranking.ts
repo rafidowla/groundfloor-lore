@@ -330,9 +330,23 @@ export function reRankLoreNodes<T extends RankInputs['node']>(
             // RankInputs['node'] has no id field; read it via narrowing so
             // callers passing id-less nodes (tests, one-off re-ranks) still
             // get the rank-position fallback instead of a blind cast.
-            const real = ('id' in n && typeof n.id === 'string') ? baseScores?.get(n.id) : undefined;
-            return { n, fs: rankScore({ node: n, baseScore: real ?? 1 / (1 + idx), nowMs: at, curatedTypes }) };
+            const id = ('id' in n && typeof n.id === 'string') ? n.id : undefined;
+            const real = id !== undefined ? baseScores?.get(id) : undefined;
+            return { n, id, idx, fs: rankScore({ node: n, baseScore: real ?? 1 / (1 + idx), nowMs: at, curatedTypes }) };
         })
-        .sort((a, b) => b.fs - a.fs)
+        // D3 §3.3 — explicit deterministic tie-break: final score desc, then
+        // original candidate-order index asc, then id asc. Without this, a
+        // JS sort's tie behaviour is only "stable" w.r.t. input order — which
+        // itself isn't guaranteed identical across calls once id-less nodes
+        // or equal-score ties are involved — so two runs over the same
+        // candidate set could silently differ in output order.
+        .sort((a, b) => {
+            if (b.fs !== a.fs) return b.fs - a.fs;
+            if (a.idx !== b.idx) return a.idx - b.idx;
+            if (a.id === b.id) return 0;
+            if (a.id === undefined) return 1;
+            if (b.id === undefined) return -1;
+            return a.id < b.id ? -1 : 1;
+        })
         .map((x) => x.n);
 }

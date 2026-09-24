@@ -21,6 +21,16 @@
  *   tsx benchmarks/longmemeval/src/extractCountableFacts.ts --dry-run --n 25
  *   tsx benchmarks/longmemeval/src/extractCountableFacts.ts --dry-run --n 25 --question-types multi-session
  *   tsx benchmarks/longmemeval/src/extractCountableFacts.ts --n 25 [--model gpt-4o-mini] [--concurrency 6]
+ *       [--engine surreal-lance|sqlite]
+ *
+ * --engine MUST match whatever runSubset.ts is run with against the same
+ * --data-dir (default: surreal-lance, same default as runSubset.ts). This
+ * script only ever writes to the SQLite-backed countable_events table, never
+ * to the graph/vector stores — but createBenchmarkLore() rewrites
+ * workspaces.json's declared engines on every call, so a mismatched --engine
+ * here would silently flip a --data-dir back to the wrong profile between an
+ * extraction pass and the runSubset.ts run that reads it. See loreClient.ts's
+ * 2026-09-20 note.
  *
  * --concurrency N processes N questions at once (each question's own
  * sessions still run one at a time — see the comment in main() for why).
@@ -32,7 +42,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createBenchmarkLore } from './loreClient.js';
+import { createBenchmarkLore, engineProfileFor } from './loreClient.js';
 import { loadDataset, selectStratifiedSubset, disambiguateSessionIds } from './ingest.js';
 import type { LongMemEvalInstance, LongMemEvalQuestionType } from './types.js';
 import { extractFactsFromSession, ExtractionUnavailableError } from './extractFacts.js';
@@ -61,6 +71,10 @@ interface Args {
      *  so the two scripts can target the identical set for a before/after
      *  comparison. */
     questionIds?: string[];
+    /** Which graph/vector engines the target --data-dir's workspace runs —
+     *  must match whatever runSubset.ts uses against the same --data-dir.
+     *  See loreClient.ts's 2026-09-20 note and this file's header comment. */
+    engine: 'surreal-lance' | 'sqlite';
 }
 
 function parseArgs(argv: string[]): Args {
@@ -69,6 +83,7 @@ function parseArgs(argv: string[]): Args {
         dataset: path.join(BENCH_ROOT, 'data', 'longmemeval_s_cleaned.json'),
         dataDir: path.join(BENCH_ROOT, 'lore-home'),
         dryRun: false,
+        engine: 'surreal-lance',
     };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i]!;
@@ -82,6 +97,13 @@ function parseArgs(argv: string[]): Args {
         else if (a === '--question-types') args.questionTypes = next()!.split(',').map((t) => t.trim()) as LongMemEvalQuestionType[];
         else if (a === '--question-ids') args.questionIds = next()!.split(',').map((s) => s.trim()).filter(Boolean);
         else if (a === '--concurrency') args.concurrency = Number(next());
+        else if (a === '--engine') {
+            const raw = next();
+            if (raw !== 'surreal-lance' && raw !== 'sqlite') {
+                throw new Error(`--engine must be "surreal-lance" or "sqlite", got "${raw}"`);
+            }
+            args.engine = raw;
+        }
         else throw new Error(`Unknown arg: ${a}`);
     }
     return args;
@@ -141,7 +163,7 @@ async function main(): Promise<void> {
         return;
     }
 
-    const { lore } = await createBenchmarkLore(args.dataDir);
+    const { lore } = await createBenchmarkLore(args.dataDir, engineProfileFor(args.engine));
     let processed = 0;
     let totalFacts = 0;
     let sessionsWithFacts = 0;

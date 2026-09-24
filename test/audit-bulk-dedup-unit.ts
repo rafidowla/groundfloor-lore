@@ -18,7 +18,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { runBulkIngest, type BulkIngestDeps } from '../packages/lore/src/mcp/bulkIngest.js';
 import { defaultAutolinkTracker } from '../packages/lore/src/engines/pendingAutolink.js';
 
@@ -30,7 +31,7 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
 
 const DIM = 384;
 
-function makeDeps(graph: SurrealGraph, verbatim: VerbatimStore): BulkIngestDeps {
+function makeDeps(graph: SurrealGraph, verbatim: VerbatimStoreApi): BulkIngestDeps {
     const noop = () => undefined;
     const stub = new Proxy({}, { get: () => noop }) as never;
     return {
@@ -61,7 +62,7 @@ await test('R3#2 re-ingesting the same id (precomputed) keeps ONE canonical row 
     try {
         const graph = new SurrealGraph(gdir);
         await graph.initialize();
-        const verbatim = new VerbatimStore(vdir);
+        const verbatim = makeVerbatimStore(vdir);
         await verbatim.initialize();
         const deps = makeDeps(graph, verbatim);
 
@@ -107,8 +108,8 @@ await test('R4#4 bulk vectors land in each node workspace store (no cross-worksp
     const vBdir = fs.mkdtempSync(path.join(os.tmpdir(), 'r4bulk-vb-'));
     try {
         const graph = new SurrealGraph(gdir); await graph.initialize();
-        const vsA = new VerbatimStore(vAdir); await vsA.initialize();
-        const vsB = new VerbatimStore(vBdir); await vsB.initialize();
+        const vsA = makeVerbatimStore(vAdir); await vsA.initialize();
+        const vsB = makeVerbatimStore(vBdir); await vsB.initialize();
         const noop = () => undefined;
         const stub = new Proxy({}, { get: () => noop }) as never;
         const deps = {

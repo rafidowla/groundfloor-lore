@@ -411,7 +411,7 @@ export interface GraphProvider {
      *                    disagree with. See DECISIONS.md
      *                    DEC-ECOSYSTEM-WILDCARD.
      */
-    search(query: string, limit?: number, project?: string, ecosystem?: string, excludeHidden?: boolean, signals?: { scanCapHit: boolean }): Promise<LoreNode[]>;
+    search(query: string, limit?: number, project?: string, ecosystem?: string, excludeHidden?: boolean, signals?: { scanCapHit: boolean }, types?: string[], entities?: string[], topics?: string[]): Promise<LoreNode[]>;
     listNodes(type?: string, tag?: string, project?: string, ecosystem?: string, limit?: number, opts?: { unbounded?: boolean }): Promise<LoreNode[]>;
     getStats(projectFilter?: string): Promise<GraphStats>;
     getTopology(limit?: number, projects?: string[] | string, edgeLimit?: number): Promise<{ nodes: any[]; edges: any[] }>;
@@ -460,6 +460,23 @@ export interface VerbatimDocument {
 }
 
 /**
+ * D2 (type/kind prefilter) — the shape a caller passes to search()/
+ * bm25Search()'s `filter` param, as opposed to `VerbatimDocument['metadata']`
+ * (the WRITE-time shape, where every field is a single scalar because a row
+ * has exactly one type/label/etc.). Every field stays a plain scalar EXCEPT
+ * `type`, which additionally accepts `string[]` so a caller can request
+ * several node types in one pushdown predicate ("give me decision OR
+ * convention OR architecture nodes") without widening the write-time
+ * contract — `VerbatimDocument.metadata.type` is still exactly `string`.
+ * `VERBATIM_FILTERABLE_COLUMNS` (verbatimHistory.ts) remains the actual
+ * allowlist enforced at every interpolation site; this type only documents
+ * which of those columns may additionally be array-valued for querying.
+ */
+export type VerbatimQueryFilter = Omit<Partial<VerbatimDocument['metadata']>, 'type'> & {
+    type?: string | string[];
+};
+
+/**
  * Contextual search result from similarity search.
  */
 export interface VerbatimSearchResult {
@@ -505,6 +522,17 @@ export interface EmbeddingProvider {
     readonly dimension: number;
     /** Identifier for telemetry / logs (e.g. `'Xenova/all-MiniLM-L6-v2'`). */
     readonly modelId: string;
+    /**
+     * Optional numeric precision / quantization variant of the model
+     * (e.g. `'q8'`, `'fp32'`). LocalEmbeddingProvider always sets it; a
+     * remote or host-injected provider SHOULD declare it when it serves the
+     * same weights, so its fingerprint (`modelId@dtype`, see
+     * embeddingProviderFingerprint()) is identical to the local provider's
+     * and the on-disk store fingerprint can be verified. Under strict
+     * fingerprint checking (an injected provider), a provider that omits
+     * `dtype` is refused against a store whose fingerprint records one.
+     */
+    readonly dtype?: string;
     /**
      * Lazy initialization hook. Idempotent; safe to call multiple times.
      * Vector stores call this from their own `initialize()`.
@@ -603,8 +631,20 @@ export interface VectorProvider {
      * @param opts        - Additional options; `includeHistory` when true
      *                      allows superseded nodes to appear in results.
      * @param actorScopes - Caller's security scopes; restricts result set.
+     * @param gate        - Optional cancellation/deadline
+     *                      (fix/search-worker-call-cancellation, 3.20.2
+     *                      follow-up). Purely additive — a caller that omits
+     *                      it (every pre-existing caller) behaves exactly as
+     *                      before. `VerbatimStore.search`'s own gate param is
+     *                      already at this same 6th positional slot (see
+     *                      engines/verbatimWorkerProtocol.ts's
+     *                      GATE_ARG_SLOT.search = 5, 0-indexed); adding it
+     *                      here lets LoreStorageClient's structurally-typed
+     *                      `LoreVectorHandle` pass it through without a cast.
+     *                      A backend that doesn't support cancellation (e.g.
+     *                      a cloud connector) may simply ignore it.
      */
-    search(query: string, limit?: number, filter?: Partial<VerbatimDocument['metadata']>, opts?: { includeHistory?: boolean }, actorScopes?: ReadonlyArray<string>): Promise<VerbatimSearchResult[]>;
+    search(query: string, limit?: number, filter?: VerbatimQueryFilter, opts?: { includeHistory?: boolean }, actorScopes?: ReadonlyArray<string>, gate?: { signal?: AbortSignal; deadline?: number }): Promise<VerbatimSearchResult[]>;
     delete(id: string): Promise<void>;
     count(): Promise<number>;
     close(): Promise<void>;

@@ -48,6 +48,7 @@ import { keyOfEntry, type EntityFamily } from './supersession.js';
 import type { OutboxLagCache } from './lagCache.js';
 import type { OutboxEntry, OutboxStore } from './types.js';
 import { DeadLetterWatch } from './deadLetterWatch.js';
+import { interruptibleSleep, makeStopSignal, type StopSignal } from './interruptibleSleep.js';
 
 /**
  * Sprint E3 — embed.batch consolidation cap (total merged texts.length,
@@ -230,6 +231,8 @@ export class OutboxReplicator {
     private readonly lagCache?: OutboxLagCache;
     private running = false;
     private loopPromise: Promise<void> | null = null;
+    /** See outbox/interruptibleSleep.ts. Lets stop() wake an in-flight nap. */
+    private stopSignal: StopSignal | null = null;
     private readonly stats: ReplicatorStats = {
         replicated: 0, failures: 0, dead: 0, ticks: 0, lastTickMs: 0,
         selfHealed: 0, selfHealSweeps: 0, selfHealExamined: 0, pruned: 0,
@@ -253,6 +256,7 @@ export class OutboxReplicator {
             return;
         }
         this.running = true;
+        this.stopSignal = makeStopSignal();
         this.loopPromise = this.loop().catch((err) => {
             this.log(`[outbox replicator] loop crashed: ${(err as Error).message}`);
         });
@@ -263,10 +267,9 @@ export class OutboxReplicator {
     async stop(): Promise<void> {
         if (!this.running) return;
         this.running = false;
-        if (this.loopPromise) {
-            await this.loopPromise;
-            this.loopPromise = null;
-        }
+        this.stopSignal?.resolve(); // wake an in-flight nap immediately
+        if (this.loopPromise) { await this.loopPromise; this.loopPromise = null; }
+        this.stopSignal = null;
         this.log('[outbox replicator] stopped');
     }
 
@@ -493,7 +496,7 @@ export class OutboxReplicator {
             this.stats.ticks++;
             this.stats.lastTickMs = Date.now() - started;
             const napMs = processed === 0 ? this.cfg.idleMs : this.cfg.busyMs;
-            await sleep(napMs);
+            await interruptibleSleep(napMs, this.stopSignal?.promise);
         }
     }
 
@@ -822,10 +825,6 @@ export class OutboxReplicator {
  *  `.start()` so test mode can construct without spinning the loop. */
 export function wireReplicator(input: ReplicatorWiring): OutboxReplicator {
     return new OutboxReplicator(input);
-}
-
-function sleep(ms: number): Promise<void> { // UNREF'D so an IDLE replicator cannot hold an embedding host's loop open — referenced, it hung any teardown that missed stop(), invisibly (_getActiveHandles reports no timers). Work in flight holds its own handles. See test/embedded-abandoned-dispose-exit-unit.ts
-    return new Promise((resolve) => { setTimeout(resolve, ms).unref(); });
 }
 
 /**

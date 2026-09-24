@@ -1,0 +1,122 @@
+[
+ {
+  "id": "u-ip01",
+  "query": "where's hydrateSnapshot in the webhook relay",
+  "expectedIds": [
+   "fx-code-000795",
+   "fx-code-001915",
+   "fx-code-004555",
+   "fx-code-008923",
+   "fx-code-009371",
+   "fx-code-009547",
+   "fx-code-009931"
+  ]
+ },
+ {
+  "id": "u-ip02",
+  "query": "src/outbox/serializeProbe.ts",
+  "expectedIds": [
+   "fx-code-000477",
+   "fx-code-003197",
+   "fx-code-005421",
+   "fx-code-007021",
+   "fx-code-007197",
+   "fx-code-007853"
+  ]
+ },
+ {
+  "id": "u-ip03",
+  "query": "show me drainLedger for the rate-limiter",
+  "expectedIds": [
+   "fx-code-000008",
+   "fx-code-000152",
+   "fx-code-000520",
+   "fx-code-002344",
+   "fx-code-004376",
+   "fx-code-006696"
+  ]
+ },
+ {
+  "id": "u-ip04",
+  "query": "purgeCursor.ts cli",
+  "expectedIds": [
+   "fx-code-000575",
+   "fx-code-002287",
+   "fx-code-004559",
+   "fx-code-005439",
+   "fx-code-007183"
+  ]
+ },
+ {
+  "id": "u-ip05",
+  "query": "what does replayOffset do in the scheduler",
+  "expectedIds": [
+   "fx-code-002064",
+   "fx-code-005840",
+   "fx-code-006688",
+   "fx-code-006704",
+   "fx-code-009648",
+   "fx-code-009904"
+  ]
+ },
+ {
+  "id": "u-ip06",
+  "query": "src/dead-letter-queue/replayCheckpoint.ts",
+  "expectedIds": [
+   "fx-code-001575",
+   "fx-code-001591",
+   "fx-code-002343",
+   "fx-code-004039",
+   "fx-code-004167",
+   "fx-code-005287",
+   "fx-code-005383",
+   "fx-code-007719"
+  ]
+ },
+ {
+  "id": "u-ip07",
+  "query": "serializeToken in config-loader",
+  "expectedIds": [
+   "fx-code-000009",
+   "fx-code-002553",
+   "fx-code-003689",
+   "fx-code-004457",
+   "fx-code-007849"
+  ]
+ },
+ {
+  "id": "u-ip08",
+  "query": "who emits riverstone.scheduler.dispatch_ms",
+  "expectedIds": [
+   "fx-convention-metrics-naming"
+  ]
+ },
+ {
+  "id": "u-ip09",
+  "query": "HMAC-SHA256 outbound",
+  "expectedIds": [
+   "fx-convention-webhook-signing"
+  ]
+ },
+ {
+  "id": "u-ip10",
+  "query": "SIGKILL during flush",
+  "expectedIds": [
+   "fx-bug-checkpoint-torn-write"
+  ]
+ },
+ {
+  "id": "u-ip11",
+  "query": "inotify watcher exhaustion",
+  "expectedIds": [
+   "fx-bug-config-loader-hot-reload-leak"
+  ]
+ },
+ {
+  "id": "u-ip12",
+  "query": "generated symbol #4321",
+  "expectedIds": [
+   "fx-code-004321"
+  ]
+ }
+]

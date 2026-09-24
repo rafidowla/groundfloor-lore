@@ -38,6 +38,8 @@ import {
     probeSurrealStore,
     settleSurrealStore,
 } from './surreal/surrealSettle.js';
+import { sqliteGraphDataPath } from './sqlite/sqliteGraphSchema.js';
+import { SqliteGraph } from './sqliteGraph.js';
 import type { GraphVerificationReason } from './backup.js';
 
 export interface RestoreSpec {
@@ -53,7 +55,14 @@ export interface RestoreSpec {
      * (tests, ad-hoc recovery) where there is no registry to consult; absent
      * simply skips the mismatch check rather than inventing an answer.
      */
-    expectedEngine?: 'kuzu' | 'surreal';
+    expectedEngine?: 'kuzu' | 'surreal' | 'sqlite';
+    /**
+     * The VECTOR engine the DESTINATION workspace is registered as (3.21
+     * step 2 part 2) — same contract as `expectedEngine`, for
+     * `WorkspaceEntry.vectorEngine` instead of `graphEngine`. Optional for
+     * the same reason.
+     */
+    expectedVectorEngine?: 'lance' | 'sqlite';
     /**
      * Restore an archive whose manifest says its source graph was NEVER
      * confirmed readable at backup time (`graphNodeCountReason: 'unreadable'`
@@ -167,7 +176,11 @@ export async function restoreWorkspace(spec: RestoreSpec): Promise<RestoreResult
              * on disk. Absent on archives written before this field existed.
              */
             workspace?: string;
-            graphEngine?: 'kuzu' | 'surreal' | 'both' | 'none';
+            graphEngine?: 'kuzu' | 'surreal' | 'sqlite' | 'both' | 'none';
+            /** 3.21 step 2 part 2 — which vector substrate this archive
+             *  contains (see backup.ts's `detectArchivedVectorEngine`).
+             *  Absent on archives written before this field existed. */
+            vectorEngine?: 'lance' | 'sqlite' | 'both' | 'none';
             /**
              * Nodes the SOURCE graph reported when the archive was staged
              * (backup.ts reads it back through a real engine open). Optional:
@@ -297,6 +310,23 @@ export async function restoreWorkspace(spec: RestoreSpec): Promise<RestoreResult
                 + 'open an engine whose store is not there — an empty graph, reported as success. '
                 + `Either restore into a '${manifest.graphEngine}' workspace, or change this workspace's `
                 + 'graphEngine deliberately before restoring.',
+            );
+        }
+
+        // Same guard, for the vector substrate (3.21 step 2 part 2). 'both'
+        // is a normal post-promotion state (see detectArchivedVectorEngine's
+        // doc comment), never refused here either — same reasoning as
+        // graphEngine's 'both'.
+        if (spec.expectedVectorEngine && manifest.vectorEngine
+            && manifest.vectorEngine !== 'none' && manifest.vectorEngine !== 'both'
+            && manifest.vectorEngine !== spec.expectedVectorEngine) {
+            throw new Error(
+                `engine mismatch: this archive contains a '${manifest.vectorEngine}' vector store, but workspace `
+                + `"${path.basename(spec.workspaceDir)}" is registered as '${spec.expectedVectorEngine}'. `
+                + 'Restoring would leave workspaces.json and .lore/ disagreeing, and the daemon would '
+                + 'open an engine whose store is not there — an empty vector store, reported as success. '
+                + `Either restore into a '${manifest.vectorEngine}' workspace, or change this workspace's `
+                + 'vectorEngine deliberately before restoring.',
             );
         }
 
@@ -474,6 +504,47 @@ export async function restoreWorkspace(spec: RestoreSpec): Promise<RestoreResult
                     + `time), but the restored workspace has a real, readable store with ${probe.nodeCount} `
                     + `node(s) — the manifest's reason field does not match this archive's actual contents.`,
                 );
+            }
+        }
+
+        // ── SQLite graph readback (3.21 step 1d) ────────────────────────────
+        //
+        // `graph.sqlite` is one plain file at `.lore/graph.sqlite` — no
+        // URL-reserved-character scattering the way `surrealDataPath` has
+        // (better-sqlite3 opens a literal filesystem path), so there is no
+        // relocation step to mirror. There is also no deferred-flush-after-
+        // close hazard (better-sqlite3's `close()` is synchronous and
+        // complete — see `sqliteGraphSchema.ts`'s `closeSqliteGraph`), so
+        // this is a narrower check than the SurrealDB one above: open it and
+        // confirm the node count matches the archive's record, so a
+        // truncated/corrupt SQLite file that still LOOKS like a valid backup
+        // (bytes arrived, catalog matched) does not report success.
+        const restoredSqlitePath = sqliteGraphDataPath(spec.workspaceDir);
+        if (fs.existsSync(restoredSqlitePath)) {
+            const rollbackHint = sidelinedPriorTo
+                ? ` The prior state is intact at ${sidelinedPriorTo}.`
+                : '';
+            const g = new SqliteGraph(spec.workspaceDir, { workspaceId: spec.targetWorkspaceName ?? 'restore-verify' });
+            try {
+                await g.initialize();
+                const stats = await g.getStats();
+                restoredGraphNodeCount = stats.nodeCount;
+                if (expectedGraphNodeCount !== null && stats.nodeCount !== expectedGraphNodeCount) {
+                    throw new Error(
+                        `restore verification failed: the restored graph holds ${stats.nodeCount} node(s) but `
+                        + `the archive recorded ${expectedGraphNodeCount}. The store at ${restoredSqlitePath} is `
+                        + `readable but its content does not match the archive's record.${rollbackHint}`,
+                    );
+                }
+            } catch (error) {
+                if (error instanceof Error && error.message.startsWith('restore verification failed')) throw error;
+                throw new Error(
+                    `restore verification failed: the restored SQLite graph store at ${restoredSqlitePath} `
+                    + `could not be read back (${(error as Error).message}). The archive extracted and matched `
+                    + `its catalog, so the bytes arrived — the store itself is unusable.${rollbackHint}`,
+                );
+            } finally {
+                await g.close().catch(() => undefined);
             }
         }
 

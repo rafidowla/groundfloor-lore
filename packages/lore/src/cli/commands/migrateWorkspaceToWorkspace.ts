@@ -34,6 +34,7 @@ import type { LoreNode } from '../../providers/types.js';
 import { openWorkspaceGraph, type WorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { tagsToString } from '../../engines/normalizeTags.js';
 import { VerbatimStore } from '../../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../../engines/verbatimStoreApi.js';
 import { getWorkspacePath } from '../../config/workspaces.js';
 import { loreHome } from '../../config/loreHome.js';
 import { isDaemonServingHome, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
@@ -64,8 +65,8 @@ export interface MigrateOptions {
     injected?: {
         srcGraph?: WorkspaceGraph;
         dstGraph?: WorkspaceGraph;
-        srcVerbatim?: VerbatimStore;
-        dstVerbatim?: VerbatimStore;
+        srcVerbatim?: VerbatimStoreApi;
+        dstVerbatim?: VerbatimStoreApi;
     };
 }
 

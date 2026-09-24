@@ -8,7 +8,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { runBulkIngest, type BulkIngestDeps } from '../packages/lore/src/mcp/bulkIngest.js';
 import { defaultAutolinkTracker } from '../packages/lore/src/engines/pendingAutolink.js';
 
@@ -34,7 +35,7 @@ function nodeArgs(id: string, content: string) {
 
 function makeDeps(
     graph: SurrealGraph,
-    verbatim: VerbatimStore,
+    verbatim: VerbatimStoreApi,
     embed: { calls: number; disposeCalls: number; embedDocumentBatch: (texts: string[]) => Promise<number[][]> },
 ): BulkIngestDeps {
     const noop = () => undefined;
@@ -70,7 +71,7 @@ await test('abort before graph writes leaves zero nodes and all cancelled', asyn
     try {
         const graph = new SurrealGraph(gdir);
         await graph.initialize();
-        const verbatim = new VerbatimStore(vdir);
+        const verbatim = makeVerbatimStore(vdir);
         await verbatim.initialize();
         const embed = { calls: 0, disposeCalls: 0, embedDocumentBatch: async (t: string[]) => t.map(() => vec()) };
         const res = await runBulkIngest(
@@ -97,7 +98,7 @@ await test('abort after graph before embed deletes new ids and restores existing
     try {
         const graph = new SurrealGraph(gdir);
         await graph.initialize();
-        const verbatim = new VerbatimStore(vdir);
+        const verbatim = makeVerbatimStore(vdir);
         await verbatim.initialize();
         const embed = { calls: 0, disposeCalls: 0, embedDocumentBatch: async (t: string[]) => t.map(() => vec()) };
         const deps = makeDeps(graph, verbatim, embed);
@@ -152,7 +153,7 @@ await test('abort mid-embed keeps finished chunks and rolls back the rest', asyn
     try {
         const graph = new SurrealGraph(gdir);
         await graph.initialize();
-        const verbatim = new VerbatimStore(vdir);
+        const verbatim = makeVerbatimStore(vdir);
         await verbatim.initialize();
         await graph.upsertNode({
             id: 'old', type: 'note', label: 'old', content: 'healthy-original',
@@ -201,7 +202,7 @@ await test('cancelled run does not report success', async () => {
     try {
         const graph = new SurrealGraph(gdir);
         await graph.initialize();
-        const verbatim = new VerbatimStore(vdir);
+        const verbatim = makeVerbatimStore(vdir);
         await verbatim.initialize();
         const embed = { calls: 0, disposeCalls: 0, embedDocumentBatch: async (t: string[]) => t.map(() => vec()) };
         const res = await runBulkIngest(
@@ -228,7 +229,7 @@ await test('abort during in-flight Lance write waits for the write to finish (no
     try {
         const graph = new SurrealGraph(gdir);
         await graph.initialize();
-        const verbatim = new VerbatimStore(vdir);
+        const verbatim = makeVerbatimStore(vdir);
         await verbatim.initialize();
         let enteredWrite = false;
         let writeFinished = false;

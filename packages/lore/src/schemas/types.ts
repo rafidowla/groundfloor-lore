@@ -560,6 +560,15 @@ export const DEFAULT_SCHEMA_V2: LoreSchemaV2 = {
         { name: 'caused_by', description: 'Caused by another node.' },
         { name: 'applies_to', description: 'Applies to a target node.' },
         { name: 'supersedes', description: 'This node replaces an earlier one.' },
+        // D5 (2026-09-23) — distinct from `supersedes`: the source node
+        // corrects ONE claim of the target while the target's other claims
+        // still hold. `supersedes` retires the whole target from default
+        // recall; `corrects` never hides the target — recall.ts returns the
+        // corrected node adjacent to (right after) its correction and flags
+        // it `correctedBy: <id>`, with the correction ranked first of the
+        // pair. Use `supersedes` when the older node is wholly superseded,
+        // `corrects` when only part of it is wrong.
+        { name: 'corrects', description: 'This node corrects one claim of an earlier one; the earlier node stays otherwise valid and visible (contrast with supersedes, which retires the whole target).' },
         { name: 'related_to', description: 'Generic relation between two nodes.' },
         { name: 'depends_on', description: 'This node depends on another.' },
     ],

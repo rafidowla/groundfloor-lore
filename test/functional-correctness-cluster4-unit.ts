@@ -17,7 +17,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore, testVectorEngine } from './helpers/testVerbatimStore.js';
 import { nodeUpsert } from '../packages/lore/src/core/nodeService.js';
 import { defaultAutolinkTracker } from '../packages/lore/src/engines/pendingAutolink.js';
 import type { LoreNode } from '../packages/lore/src/providers/types.js';
@@ -163,7 +163,7 @@ test('4.1: nodeService.nodeUpsert (the embedded API entry point) writes the ecos
 test('1.3: autolink fires even when skipEmbed:true (the bulkIngest shape) — no longer unreachable', async () => {
     const dir = tmpDir('lore-13-');
     const g = new SurrealGraph(dir, { workspaceId: 'w' });
-    const verbatim = new VerbatimStore(dir);
+    const verbatim = makeVerbatimStore(dir);
     try {
         await g.initialize();
         await verbatim.initialize();
@@ -205,7 +205,7 @@ test('1.4: autolink fires for a non-active workspace when hooks.autolink is corr
     const targetDir = tmpDir('lore-14-target-');
     const bootGraph = new SurrealGraph(bootDir, { workspaceId: 'boot' });
     const targetGraph = new SurrealGraph(targetDir, { workspaceId: 'wsb' });
-    const targetVerbatim = new VerbatimStore(targetDir);
+    const targetVerbatim = makeVerbatimStore(targetDir);
     try {
         await bootGraph.initialize();
         await targetGraph.initialize();
@@ -246,7 +246,7 @@ test('1.4: autolink fires for a non-active workspace when hooks.autolink is corr
 test('3.1: autolink no longer double-writes the canonical verbatim row when nodeService already wrote it', async () => {
     const dir = tmpDir('lore-31-');
     const g = new SurrealGraph(dir, { workspaceId: 'w' });
-    const verbatim = new VerbatimStore(dir);
+    const verbatim = makeVerbatimStore(dir);
     try {
         await g.initialize();
         await verbatim.initialize();
@@ -286,6 +286,14 @@ test('3.1: autolink no longer double-writes the canonical verbatim row when node
  * ──────────────────────────────────────────────────────────────────────── */
 
 test('4.5: migrateEmbeddingModel preserves a store_verbatim (non-lore:) document across the table drop + rebuild', async () => {
+    // Opus review follow-up: migrateEmbeddingModel.ts hardcodes
+    // `new VerbatimStore(...)` internally (production code, doing Lance's
+    // own drop-table-and-rebuild-at-a-new-dimension dance) regardless of
+    // which engine seeded the data — there is no SQLite embedding-model-
+    // migration path to route through yet (a separate, out-of-scope
+    // feature). Skip on sqlite rather than asserting a migration this
+    // engine has no implementation of.
+    if (testVectorEngine() === 'sqlite') { console.log('  (skipped on sqlite — migrateEmbeddingModel.ts is Lance-only, no SQLite embedding-migration path exists yet)'); return; }
     const base = tmpDir('lore-45-');
     fs.mkdirSync(path.join(base, '.lore'), { recursive: true });
     const graph = new SurrealGraph(base, { workspaceId: 'w' });
@@ -304,7 +312,7 @@ test('4.5: migrateEmbeddingModel preserves a store_verbatim (non-lore:) document
             };
         }
         const oldProvider = stubProvider('old-model', 8, 1);
-        const seedVerbatim = new VerbatimStore(base, oldProvider as never);
+        const seedVerbatim = makeVerbatimStore(base, oldProvider as never);
         await seedVerbatim.initialize();
         await seedVerbatim.store({ id: 'lore:gnode', text: 'graph node content', metadata: { type: 'decision', label: 'L', tags: '', project: 'w', ecosystem: '*', updatedAt: new Date().toISOString(), security_scopes: [] } });
         // The non-node document — this has NO graph copy. store_verbatim
@@ -323,7 +331,7 @@ test('4.5: migrateEmbeddingModel preserves a store_verbatim (non-lore:) document
         assert.equal(result.tableDropped, true);
         assert.equal(result.nonNodeRowsPreserved, 1, 'the one non-node document must be counted as preserved');
 
-        const afterVerbatim = new VerbatimStore(base, targetProvider as never);
+        const afterVerbatim = makeVerbatimStore(base, targetProvider as never);
         await afterVerbatim.initialize();
         try {
             const restored = await afterVerbatim.getById('gmail:msg-abc123');

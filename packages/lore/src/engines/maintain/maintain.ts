@@ -55,7 +55,24 @@ export interface MaintainReport {
         totalVersionsRemoved: number;
         /** Dry-run only: eligible old versions + on-disk bytes (reclaimable upper bound). */
         eligibleOldVersions: number;
+        /**
+         * Defect 3 (3.20.2) — renamed from `reclaimableBytesEstimate`. The old
+         * name implied a computed savings estimate; it was always just the sum
+         * of each probed table's OWN on-disk directory size (`p.bytes` from
+         * `probe()`), not an estimate of bytes reclaimable by cleanup. Same
+         * value, clearer name.
+         */
+        tableBytes: number;
+        /** @deprecated Kept as an alias of `tableBytes` (same value) so an
+         *  existing consumer reading the old key does not silently start
+         *  seeing `undefined` — no breaking changes. Use `tableBytes`. */
         reclaimableBytesEstimate: number;
+        /** Defect 3 (3.20.2) — the LanceDB directory this report's lance ops
+         *  actually targeted. Set whenever a lance port is wired, even when
+         *  compaction/versionCleanup are both disabled, so a caller can always
+         *  see which store a maintenance pass looked at. Undefined only when
+         *  no lance port is wired at all (`no-port`). */
+        lancedbDir?: string;
     };
     nodes: {
         inspected: number;
@@ -90,7 +107,7 @@ function emptyReport(opts: RunMaintenanceOptions, now: number): MaintainReport {
         durationMs: 0,
         writeActive: false,
         operations: [],
-        lancedb: { tables: [], totalBytesReclaimed: 0, totalVersionsRemoved: 0, eligibleOldVersions: 0, reclaimableBytesEstimate: 0 },
+        lancedb: { tables: [], totalBytesReclaimed: 0, totalVersionsRemoved: 0, eligibleOldVersions: 0, tableBytes: 0, reclaimableBytesEstimate: 0 },
         nodes: { inspected: 0, protectedSkipped: 0, recentSkipped: 0, archived: 0, deleted: 0, candidates: 0 },
         workspaces: { inspected: 0, tooYoung: 0, expired: [], bytesFreed: 0, pendingSidelines: [] },
     };
@@ -125,6 +142,14 @@ export async function runMaintenance(
         const versionCleanup = opStatus('versionCleanup');
         const wantCompact = compaction.enabled;
         const wantCleanup = versionCleanup.enabled;
+        // Defect 3 (3.20.2) — report which dir a wired lance port targets
+        // regardless of whether compaction/versionCleanup end up disabled,
+        // so a caller (e.g. the `disable: [...]` workaround path) can still
+        // see it resolved the right store. `dir?.()` is optional on the port
+        // so pre-existing fakes without it keep compiling unchanged.
+        if (ports.lance?.dir) {
+            report.lancedb.lancedbDir = ports.lance.dir();
+        }
         if (!ports.lance) {
             if (wantCompact) compaction.skippedReason = 'no-port';
             if (wantCleanup) versionCleanup.skippedReason = 'no-port';
@@ -136,6 +161,7 @@ export async function runMaintenance(
                 const probes = await ports.lance.probe(policy.cleanupVersionsOlderThanMs, now);
                 for (const p of probes) {
                     report.lancedb.eligibleOldVersions += p.eligibleOldVersions;
+                    report.lancedb.tableBytes += p.bytes;
                     report.lancedb.reclaimableBytesEstimate += p.bytes;
                 }
                 if (options.dryRun) {

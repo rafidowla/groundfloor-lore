@@ -53,7 +53,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
+import { createTestGraphEngine, testGraphEngineName } from './helpers/testGraphEngine.js';
 import { DataplaneGraph } from '../packages/lore/src/engines/dataplaneGraph.js';
 import type { LoreNode, LoreEdge } from '../packages/lore/src/providers/types.js';
 
@@ -397,13 +397,13 @@ function assertSameSet(a: Set<string>, b: Set<string>, msg: string): void {
 }
 
 async function main(): Promise<void> {
-    console.log('W5-PARITY-HARNESS — cross-backend parity (SurrealGraph vs DataplaneGraph)');
+    console.log(`W5-PARITY-HARNESS — cross-backend parity (${testGraphEngineName()} local engine vs DataplaneGraph)`);
     console.log('SEARCH_CONTRACT_VERSION = 1');
     console.log('='.repeat(72));
 
     // ── build both backends over the SAME fixture ──
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-parity-'));
-    const local = new SurrealGraph(tmpDir, { workspaceId: 'parity', cacheDisabled: true });
+    const local = createTestGraphEngine(tmpDir, { workspaceId: 'parity', cacheDisabled: true });
     await local.initialize();
 
     const sdk = new StatefulSdkClient();

@@ -34,6 +34,7 @@ import { writeWorkspaceRequired, checkOutboxBackpressure, writeJson, writeError 
 import type { OutboxStore } from '../../../outbox/types.js';
 import { recordHotWrite } from '../../../outbox/hotLane.js';
 import { withNodeLock } from '../../../core/nodeWriteLock.js';
+import { tombstoneQuestionAliases } from '../../../core/nodeServiceVerbatim.js';
 import type { OutboxLagCache } from '../../../outbox/lagCache.js';
 import type { WorkspaceVerbatimResolver } from '../../../outbox/workspaceVerbatimResolver.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
@@ -226,6 +227,13 @@ export async function tryNodeDeleteRoute(
                             payload: { id: `lore:${stripped}`, reason },
                             initiator: 'http:DELETE /api/node',
                             operation: 'verbatim.tombstone',
+                        });
+                        // 3.21 step 3(e) — tombstone this node's question
+                        // aliases too (best-effort).
+                        await tombstoneQuestionAliases({
+                            id: stripped, workspace: effectiveWorkspace,
+                            initiator: 'http:DELETE /api/node', logPrefix: '[Lore HTTP]',
+                            outboxStore: deps.outboxStore,
                         });
                     }
                 } catch (err: unknown) {

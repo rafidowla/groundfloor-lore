@@ -5,18 +5,31 @@
  *
  * - `deploymentMode: 'embedded'` per README.md "Embedding Lore in your
  *   application" — no daemon, no port, in-process.
- * - Uses the default graph engine (SurrealDB, per README). An earlier
- *   version of this harness pinned the legacy graph-engine config value,
- *   believing `createLore()`'s static import of the SurrealDB connection
- *   module threw `ERR_PACKAGE_PATH_NOT_EXPORTED` from a standalone entry
- *   file. That diagnosis did not hold up: re-tested 2026-08-13 from this
- *   exact file location and invocation
- *   (`npx tsx benchmarks/longmemeval/src/...ts`) with no engine override —
- *   `createLore()` + `nodeUpsert()` succeed cleanly and write real
- *   SurrealDB files (`wal`/`manifest`/`sstables` under `.lore/surreal/`).
- *   No workspace on the prior local graph engine (removed 2026-08-21; see
- *   docs/KUZU_REMOVAL.md) is to exist anywhere in this project (settled
- *   decision) — do not reintroduce this pin.
+ * - Uses an explicit engine profile (default: SurrealDB + LanceDB, the
+ *   profile every run before 2026-09-20 used). An earlier version of this
+ *   harness pinned the legacy graph-engine config value, believing
+ *   `createLore()`'s static import of the SurrealDB connection module threw
+ *   `ERR_PACKAGE_PATH_NOT_EXPORTED` from a standalone entry file. That
+ *   diagnosis did not hold up: re-tested 2026-08-13 from this exact file
+ *   location and invocation (`npx tsx benchmarks/longmemeval/src/...ts`)
+ *   with no engine override — `createLore()` + `nodeUpsert()` succeed
+ *   cleanly and write real SurrealDB files (`wal`/`manifest`/`sstables`
+ *   under `.lore/surreal/`). No workspace on the prior local graph engine
+ *   (removed 2026-08-21; see docs/KUZU_REMOVAL.md) is to exist anywhere in
+ *   this project (settled decision) — do not reintroduce THAT pin.
+ * - 2026-09-20: found the same bug tapestry-recall's loreHarness.ts had —
+ *   this file hardcoded `graphEngine: 'surreal'` and never set
+ *   `vectorEngine` at all. The comment that used to justify the hardcode
+ *   ("SurrealDB is now the only graph engine there is to default to") predates
+ *   3.21 adding SQLite as a second option for both substrates; an omitted
+ *   `vectorEngine` field does NOT fall through to 3.21's new-workspace
+ *   default (`resolveNewWorkspaceVectorEngine`, `'sqlite'` — only used by
+ *   `createWorkspace()`, which this harness never calls) but to the
+ *   open-path resolver's pre-3.21 backward-compat fallback (`'lance'`), so
+ *   every run through 2026-09-20 secretly tested SurrealDB+LanceDB even
+ *   after fresh local workspaces started defaulting to SQLite for both
+ *   substrates. Fixed the same way as loreHarness.ts: both fields are now
+ *   always set explicitly from an `EngineProfile` passed in by the caller.
  * - We seed `workspaces.json` ourselves (createLore does not auto-create a
  *   workspace for a fresh `dataDir` — confirmed against
  *   `test/embeddable-capstone-e2e.ts`, which does the same).
@@ -60,11 +73,39 @@ export interface BenchmarkLoreHandle {
     dataDir: string;
 }
 
+/** Which engines back the benchmark workspace's graph/vector substrates —
+ *  see the file header's 2026-09-20 note for why this must always be
+ *  passed explicitly rather than left to an omitted field's fallback. */
+export interface EngineProfile {
+    graphEngine: 'surreal' | 'sqlite';
+    vectorEngine: 'lance' | 'sqlite';
+}
+
+/** The profile every run through 2026-09-20 used. */
+export const SURREAL_LANCE_PROFILE: EngineProfile = { graphEngine: 'surreal', vectorEngine: 'lance' };
+
+/** What a brand-new local workspace gets by default since 3.21. */
+export const SQLITE_ONLY_PROFILE: EngineProfile = { graphEngine: 'sqlite', vectorEngine: 'sqlite' };
+
+/** Shared `--engine surreal-lance|sqlite` → EngineProfile mapping, used by
+ *  every benchmark entry point (runSubset.ts, extractCountableFacts.ts) so a
+ *  script pointed at the same --data-dir as another always agrees on which
+ *  profile that workspace runs — see the file header's 2026-09-20 note for
+ *  why an inconsistent profile silently reproduces the old engines. */
+export function engineProfileFor(engine: 'surreal-lance' | 'sqlite'): EngineProfile {
+    return engine === 'sqlite' ? SQLITE_ONLY_PROFILE : SURREAL_LANCE_PROFILE;
+}
+
 /** Seeds a fresh (or reuses an existing) embedded Lore data directory and
  *  returns a live instance. Idempotent: safe to call against an existing
  *  `dataDir` from a prior run (workspaces.json is rewritten but the
- *  underlying graph/vector data is untouched). */
-export async function createBenchmarkLore(dataDir: string): Promise<BenchmarkLoreHandle> {
+ *  underlying graph/vector data is untouched). `engineProfile` defaults to
+ *  the profile every existing results file used, so callers that don't
+ *  pass it are unaffected. */
+export async function createBenchmarkLore(
+    dataDir: string,
+    engineProfile: EngineProfile = SURREAL_LANCE_PROFILE,
+): Promise<BenchmarkLoreHandle> {
     const absDataDir = path.resolve(dataDir);
     fs.mkdirSync(path.join(absDataDir, '.lore'), { recursive: true });
     fs.writeFileSync(
@@ -77,19 +118,15 @@ export async function createBenchmarkLore(dataDir: string): Promise<BenchmarkLor
                         name: WORKSPACE,
                         path: absDataDir,
                         createdAt: new Date().toISOString(),
-                        // Explicit, not omitted — historically (found
-                        // 2026-08-13, before the prior local graph engine
-                        // was fully removed 2026-08-21) a workspace this
-                        // harness PRE-CREATES in
-                        // workspaces.json (as opposed to letting createLore()
-                        // provision a brand-new one from nothing) did not
-                        // pick up resolveWorkspaceGraphEngine's documented
-                        // default the same way an omitted field does today.
-                        // Kept explicit to match the explicit-not-implicit
-                        // convention used project-wide for real workspaces
-                        // (MIRA, pm-scope-app) and because SurrealDB is now
-                        // the only graph engine there is to default to.
-                        graphEngine: 'surreal',
+                        // Both fields explicit, never omitted — see the file
+                        // header's 2026-09-20 note. An omitted field falls
+                        // through to the pre-3.21 backward-compat default
+                        // ('surreal'/'lance'), not 3.21's new-workspace
+                        // default, so leaving either one out silently
+                        // reproduces the old engines while looking like
+                        // whatever engineProfile the caller asked for.
+                        graphEngine: engineProfile.graphEngine,
+                        vectorEngine: engineProfile.vectorEngine,
                     },
                 ],
             },

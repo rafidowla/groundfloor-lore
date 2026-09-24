@@ -33,7 +33,7 @@ import type { WorkspaceEntry } from '../../config/workspaces.js';
 import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
 import type { OutboxStore } from '../../outbox/types.js';
-import type { VerbatimStore } from '../../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../../engines/verbatimStoreApi.js';
 import type { WriteAheadLog } from '../../engines/syncEngine.js';
 // 1.M7 (2026-08-17 audit) — changeset commit/rollback write through the
 // shared orchestration (outbox + verbatim + embed), not raw graph writes.
@@ -57,12 +57,14 @@ export interface VersioningDeps {
      *  storage facade (cloud / tests). */
     outboxStore?: OutboxStore;
     embedQueue?: { enqueue: (nodeId: string, text: string, workspace?: string) => void };
-    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<VerbatimStore> };
+    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<VerbatimStoreApi> };
     /** ITEM X-walnode (2026-09-03) — threaded into ChangesetWriteDeps so
      *  changeset delete can append a `delete_node` WAL entry (same as
      *  store_node / store_edge / delete_node). Optional: absent (cloud /
      *  tests) keeps prior no-WAL behavior. */
     getWal?: () => WriteAheadLog;
+    /** D5 round 2 (#2) — host-level supersession-enforce default. */
+    supersessionEnforceDefault?: boolean;
 }
 
 /** 1.M7 — build the shared changeset-write deps for one initiator label. */
@@ -76,6 +78,13 @@ function changesetWriteDeps(deps: VersioningDeps, initiator: string): ChangesetW
         activeWorkspace: deps.detectedScope.workspace,
         initiator,
         getWal: deps.getWal,
+        // D5 round 2 (HIGH #1) — lets applyChangesetUpsert resolve the same
+        // shared supersession policy/near-dup hooks every other write path
+        // does.
+        graphRegistryHomeDir: deps.graphRegistry?.homeDir?.(),
+        bootGraph: deps.store.loreGraph,
+        storageClient: deps.store.storageClient,
+        supersessionEnforceDefault: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
     };
 }
 

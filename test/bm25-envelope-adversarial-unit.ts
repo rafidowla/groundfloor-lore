@@ -29,9 +29,18 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
 import { readBm25Envelope, makeBm25Envelope } from '../packages/lore/src/engines/verbatimBm25Result.js';
 import { retrieve } from '../packages/lore/src/recall/retrieve.js';
+// Opus review follow-up (item: excluded suites testing SEMANTICS, not Lance
+// internals). Sections A and B never construct a VerbatimStore (readBm25Envelope
+// is a pure function; retrieve() runs against a bare mock) so they already run
+// identically regardless of LORE_TEST_VECTOR_ENGINE. Section C's two real-store
+// tests are routed through makeVerbatimStore, with a per-engine way to force a
+// genuine native-FTS error (Lance: corrupt the on-disk `_indices` directory;
+// SQLite: corrupt the FTS5 shadow table via db.unsafeMode(true), the
+// documented escape hatch for exactly this kind of test-only sabotage).
+import { makeVerbatimStore, testVectorEngine } from './helpers/testVerbatimStore.js';
+import type { Database as SqliteDatabaseType } from 'better-sqlite3';
 
 let passed = 0;
 let failed = 0;
@@ -180,21 +189,32 @@ console.log('BM25 envelope — adversarial gaps (malformed signal, cross-workspa
         // whenever native FTS returned zero rows, regardless of whether that
         // was a real error or just "no match" — the exact perf cliff the
         // fallback comment warns about, moved onto the common no-match path.
-        // "the" is an English stopword this store's default tokenizer
-        // excludes from the index (removeStopWords:true), so native FTS
-        // correctly, successfully finds zero rows for it — even though "the"
-        // is a literal substring of the corpus text below. Falling back to
-        // LIKE would resurrect it via raw substring matching, contradicting
-        // the tokenizer's own decision. Above minRows so a real index exists
-        // (proving this is "index worked, found nothing", not "no index").
+        //
+        // Lance's default tokenizer profile excludes English stopwords
+        // (removeStopWords:true), so "the" is a genuine, deterministic
+        // zero-match probe there — even though it's a literal substring of
+        // the corpus text below. SQLite FTS5's `porter` tokenizer has NO
+        // stopword list at all (verified empirically: it indexes "the" like
+        // any other word — a real, currently-unaddressed tokenizer-feature
+        // gap between the engines, not a bug this pass fixes), so "the"
+        // would be a FALSE probe there — it doesn't prove "genuine
+        // zero-match", it would just prove the word isn't in this corpus.
+        // Each engine gets its OWN deterministic zero-match query instead:
+        // Lance keeps the stopword-exclusion probe (documents that gap in
+        // situ); SQLite uses a corpus-absent nonsense token (proves the
+        // SAME "genuine zero-match still returns ranked:true, no LIKE
+        // fallback" contract without relying on stopword behavior it
+        // doesn't have). Above minRows so a real index exists (proving
+        // this is "index worked, found nothing", not "no index").
         const dir = tmpDir('genuine-zero');
-        const store = new VerbatimStore(dir, new DeterministicEmbedder());
+        const store = makeVerbatimStore(dir, new DeterministicEmbedder());
         try {
             await store.initialize();
             const filler = Array.from({ length: 30 }, (_, i) => ({ id: `lore:z-${i}`, text: `record number ${i} about gadgets`, metadata: {} }));
             await store.storeBatch([...filler, { id: 'lore:z-target', text: 'the artifact is a teapot', metadata: {} }]);
-            const env = await store.bm25Search('the', 5);
-            assert.deepEqual(env.hits, [], '"the" is stopword-excluded from the index — native FTS genuinely finds nothing');
+            const probe = testVectorEngine() === 'sqlite' ? 'zzzznonexistentword' : 'the';
+            const env = await store.bm25Search(probe, 5);
+            assert.deepEqual(env.hits, [], `"${probe}" must genuinely find nothing (${testVectorEngine() === 'sqlite' ? 'absent from the corpus' : 'stopword-excluded from the index'})`);
             assert.equal(env.ranked, true, 'a genuine (non-erroring) zero-match query must report ranked:true, not degrade to the unranked LIKE-scan fallback');
         } finally {
             await store.close();
@@ -205,8 +225,8 @@ console.log('BM25 envelope — adversarial gaps (malformed signal, cross-workspa
     await test('a genuinely-ranked store and an index-error/LIKE-fallback store queried concurrently in one process do not cross-contaminate their ranked signal', async () => {
         const dirRanked = tmpDir('ranked');
         const dirUnranked = tmpDir('unranked');
-        const rankedStore = new VerbatimStore(dirRanked, new DeterministicEmbedder());
-        const unrankedStore = new VerbatimStore(dirUnranked, new DeterministicEmbedder());
+        const rankedStore = makeVerbatimStore(dirRanked, new DeterministicEmbedder());
+        const unrankedStore = makeVerbatimStore(dirUnranked, new DeterministicEmbedder());
         try {
             await rankedStore.initialize();
             await unrankedStore.initialize();
@@ -218,19 +238,37 @@ console.log('BM25 envelope — adversarial gaps (malformed signal, cross-workspa
                 Array.from({ length: 30 }, (_, i) => ({ id: `lore:r-${i}`, text: `document number ${i} about quarterly widgets`, metadata: {} })),
             );
 
-            // unrankedStore: same shape, but its on-disk FTS index is
+            // unrankedStore: same shape, but its native FTS index is
             // physically corrupted after building — the ONLY thing that
             // should trigger the LIKE-scan fallback post-review-fix (a
             // genuine native-FTS error, not a legitimate zero-match query).
+            // Lance: overwrite the on-disk `_indices` directory with
+            // garbage bytes. SQLite: FTS5 shadow tables refuse a direct
+            // DROP/DELETE by default (SQLite protects them) — `unsafeMode`
+            // is better-sqlite3's documented escape hatch for exactly this
+            // kind of test-only sabotage; deleting every row from the
+            // `_data` shadow table leaves the FTS5 virtual table
+            // structurally present but genuinely unable to answer a MATCH
+            // query, verified empirically to make bm25Search's native path
+            // throw (caught by its own try/catch → LIKE-scan fallback)
+            // while leaving the base `verbatim` table (and thus the LIKE
+            // scan's substrate) untouched.
             await unrankedStore.storeBatch(
                 Array.from({ length: 30 }, (_, i) => ({ id: `lore:u-${i}`, text: `document number ${i} about quarterly gadgets`, metadata: {} })),
             );
-            const lancedbDir = path.join(dirUnranked, '.lore', 'lancedb');
-            const indicesDir = path.join(lancedbDir, 'lore_verbatim.lance', '_indices');
-            for (const f of fs.readdirSync(indicesDir)) {
-                const idxDir = path.join(indicesDir, f);
-                for (const inner of fs.readdirSync(idxDir)) {
-                    fs.writeFileSync(path.join(idxDir, inner), 'CORRUPTGARBAGE');
+            if (testVectorEngine() === 'sqlite') {
+                const db = (unrankedStore as unknown as { db: SqliteDatabaseType }).db;
+                db.unsafeMode(true);
+                db.exec(`DELETE FROM verbatim_fts_data`);
+                db.unsafeMode(false);
+            } else {
+                const lancedbDir = path.join(dirUnranked, '.lore', 'lancedb');
+                const indicesDir = path.join(lancedbDir, 'lore_verbatim.lance', '_indices');
+                for (const f of fs.readdirSync(indicesDir)) {
+                    const idxDir = path.join(indicesDir, f);
+                    for (const inner of fs.readdirSync(idxDir)) {
+                        fs.writeFileSync(path.join(idxDir, inner), 'CORRUPTGARBAGE');
+                    }
                 }
             }
 

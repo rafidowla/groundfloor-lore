@@ -39,7 +39,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
 import { runConsistencySweep } from '../packages/lore/src/diagnostics/sweeper.js';
 import type { EmbeddingProvider, LoreNode } from '../packages/lore/src/providers/types.js';
 import type { GraphReader } from '../packages/lore/src/diagnostics/consistency.js';
@@ -88,7 +88,7 @@ console.log('\n=== sweep → recall end-to-end (real LanceDB) ===\n');
 
 test('E1+E2+E3+E4: orphan cascade-delete actually removes vector from search results', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-pr69-sweeprecall-'));
-    const store = new VerbatimStore(dir, new DeterministicEmbedder());
+    const store = makeVerbatimStore(dir, new DeterministicEmbedder());
     try {
         await store.initialize();
 

@@ -125,6 +125,28 @@ await test('RAN repro: URL-fragment node id is searchable, upsertable, tombstona
         revSearch.every((h) => !isRevisionHistoryId(h.id) && !h.id.includes('#rev')),
         `default search must exclude snapshot rows; got [${revSearch.map((h) => h.id).join(', ')}]`,
     );
+
+    // 6. Opus review (cross-engine listIds parity, follow-up to this same
+    //    audit): a no-prefix listIds() used to return "every stored id",
+    //    which meant every `#rev` snapshot row too — a real divergence
+    //    from SqliteVerbatimStore, which has always been canonical-only
+    //    (it tracks history via a real column, not an id suffix). Fixed
+    //    to be canonical-only by default on THIS engine too, with
+    //    `includeHistory: true` as the explicit escape hatch.
+    const defaultIds = await store.listIds();
+    assert.ok(
+        defaultIds.every((id) => !isRevisionHistoryId(id)),
+        `listIds() must be canonical-only by default; got a snapshot id in [${defaultIds.filter(isRevisionHistoryId).join(', ')}]`,
+    );
+    const withHistoryIds = await store.listIds(undefined, { includeHistory: true });
+    assert.ok(
+        withHistoryIds.some(isRevisionHistoryId),
+        'listIds({ includeHistory: true }) must still surface snapshot rows for a caller that explicitly asks for them',
+    );
+    assert.ok(
+        withHistoryIds.length > defaultIds.length,
+        'includeHistory:true must return MORE ids than the canonical-only default (the snapshot rows on top)',
+    );
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

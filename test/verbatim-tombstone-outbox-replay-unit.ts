@@ -49,7 +49,8 @@ import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { FileOutboxStore } from '../packages/lore/src/outbox/store.js';
 import { nodeUpsert } from '../packages/lore/src/core/nodeService.js';
 import { registerDeleteNodeTool } from '../packages/lore/src/mcp/tools/memory/deleteNode.js';
@@ -101,7 +102,7 @@ class FakeMcpServer {
  * temp dir per call: the replay's own outbox bookkeeping (replication
  * cursors) must not need anything from the write path's in-memory state.
  */
-function realDispatchSubstrates(graph: SurrealGraph, store: VerbatimStore): DispatcherSubstrates {
+function realDispatchSubstrates(graph: SurrealGraph, store: VerbatimStoreApi): DispatcherSubstrates {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-tombstone-replay-wiring-'));
     const wiring = wireOutbox({
         loreDir: tmp,
@@ -128,7 +129,7 @@ test('delete_node (MCP) then a full replicator-shaped replay: graph absent AND v
     const v = mkTmp('lore-tombreplay-v-');
     const o = mkTmp('lore-tombreplay-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();
@@ -180,7 +181,10 @@ test('delete_node (MCP) then a full replicator-shaped replay: graph absent AND v
         const rowsAfterDelete = await outboxStore.listPendingForWorkspace(WORKSPACE, 1000);
         assert.deepEqual(
             rowsAfterDelete.map((r) => r.operationKind),
-            ['node.upsert', 'verbatim.upsert', 'node.delete', 'verbatim.tombstone'],
+            // 3.21 step 3(e) — delete_node also sweeps the fixed MAX_QUESTIONS
+            // alias-tombstone range (best-effort; a no-op on replay for slots
+            // that never held an alias row) AFTER the main verbatim.tombstone.
+            ['node.upsert', 'verbatim.upsert', 'node.delete', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone'],
             `delete must record a verbatim.tombstone row AFTER node.delete — got ${JSON.stringify(rowsAfterDelete.map((r) => r.operationKind))}`,
         );
 
@@ -240,7 +244,7 @@ test('REST DELETE /api/node/:id then a full replay: graph absent AND verbatim to
     const v = mkTmp('lore-tombreplay-rest-v-');
     const o = mkTmp('lore-tombreplay-rest-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();
@@ -271,7 +275,8 @@ test('REST DELETE /api/node/:id then a full replay: graph absent AND verbatim to
         const rowsAfterDelete = await outboxStore.listPendingForWorkspace(ws, 1000);
         assert.deepEqual(
             rowsAfterDelete.map((r) => r.operationKind),
-            ['node.upsert', 'verbatim.upsert', 'node.delete', 'verbatim.tombstone'],
+            // 3.21 step 3(e) — REST DELETE also sweeps the fixed MAX_QUESTIONS alias-tombstone range after the main tombstone.
+            ['node.upsert', 'verbatim.upsert', 'node.delete', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone'],
             `got ${JSON.stringify(rowsAfterDelete.map((r) => r.operationKind))}`,
         );
 
@@ -293,7 +298,7 @@ test('bulk-delete (/api/nodes/bulk-delete) then a full replay: graph absent AND 
     const v = mkTmp('lore-tombreplay-bulk-v-');
     const o = mkTmp('lore-tombreplay-bulk-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();
@@ -347,7 +352,7 @@ test('changeset delete (applyChangesetDelete) then a full replay: graph absent A
     const v = mkTmp('lore-tombreplay-cs-v-');
     const o = mkTmp('lore-tombreplay-cs-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();
@@ -427,7 +432,7 @@ test('prune_nodes hard_delete (MCP) then a full replay: graph absent AND verbati
         const v = mkTmp('lore-tombreplay-prune-v-');
         const o = mkTmp('lore-tombreplay-prune-o-');
         const graph = new SurrealGraph(g.dir);
-        const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+        const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
         const outboxStore = new FileOutboxStore(o.dir);
         await graph.initialize();
         await store.initialize();

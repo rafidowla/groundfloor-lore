@@ -10,7 +10,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import type { VerbatimStore } from '../../../../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../../../../engines/verbatimStoreApi.js';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
 import { isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
@@ -213,7 +213,7 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
                 writeError(res, 400, 'invalid_request', '`id` query param is required (canonical verbatim id, e.g. lore:my-decision)');
                 return true;
             }
-            const store = deps.store.loreVerbatim as unknown as VerbatimStore;
+            const store = deps.store.loreVerbatim as unknown as VerbatimStoreApi;
             if (typeof store.getById !== 'function') {
                 writeError(res, 501, 'not_supported', 'verbatim get not supported by current vector store backend');
                 return true;
@@ -265,7 +265,7 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
                 writeError(res, 400, 'invalid_request', '`id` query param is required (canonical verbatim id, e.g. lore:my-decision)');
                 return true;
             }
-            const store = deps.store.loreVerbatim as unknown as VerbatimStore;
+            const store = deps.store.loreVerbatim as unknown as VerbatimStoreApi;
             if (typeof store.getHistory !== 'function') {
                 writeError(res, 501, 'not_supported', 'history not supported by current vector store backend');
                 return true;
@@ -403,7 +403,7 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
             const targetVerbatim = deps.workspaceVerbatimResolver
                 ? await deps.workspaceVerbatimResolver.getOrOpen(resolvedSearch.resolvedWorkspace)
                 : deps.store.loreVerbatim;
-            const searchStore = targetVerbatim as unknown as VerbatimStore | undefined;
+            const searchStore = targetVerbatim as unknown as VerbatimStoreApi | undefined;
             // Cluster-5 medium (2026-08-18) — this route is documented as
             // hybrid BM25+vector but only ran the vector half. Fuse both
             // scorers (RRF; unranked BM25 fallbacks contribute nothing).

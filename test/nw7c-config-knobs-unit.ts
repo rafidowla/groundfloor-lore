@@ -245,16 +245,23 @@ console.log(n);`,
     // ─── LORE_REGISTRY_IDLE_TTL_MS (localGraphRegistry.ts) ──────────────────
     // The constants are module-level; import them via the exported registry file
     // by testing the parsing logic inline (constants are not directly exported).
-    await test('LORE_REGISTRY_IDLE_TTL_MS defaults to 1800000 when unset', () => {
+    //
+    // Default changed 2026-09-18 (pr/3.20.0-21-graph-idle-unload-off,
+    // docs/PERFORMANCE-MEMORY.md §9/§11): 1800000 (30 min) -> 0 (idle
+    // eviction disabled) — @surrealdb/node never frees a datastore on
+    // close(), so evicting an idle graph and reopening it later costs
+    // ~100 MB per reopen with nothing given back; 0 is now the fallback
+    // localGraphRegistry.ts passes to parseRegistryEnvMs.
+    await test('LORE_REGISTRY_IDLE_TTL_MS defaults to 0 (idle eviction disabled) when unset', () => {
         const out = runScript(
             `function parse(raw: string | undefined, fallback: number): number {
     if (!raw || raw.trim() === '') return fallback;
     const n = Number(raw);
     return Number.isFinite(n) && n > 0 ? n : fallback;
 }
-console.log(parse(process.env.LORE_REGISTRY_IDLE_TTL_MS, 30 * 60 * 1000));`,
+console.log(parse(process.env.LORE_REGISTRY_IDLE_TTL_MS, 0));`,
         );
-        assert.equal(out, '1800000', `expected 1800000, got ${out}`);
+        assert.equal(out, '0', `expected 0, got ${out}`);
     });
 
     await test('LORE_REGISTRY_IDLE_TTL_MS honors env override=60000', () => {
@@ -264,7 +271,7 @@ console.log(parse(process.env.LORE_REGISTRY_IDLE_TTL_MS, 30 * 60 * 1000));`,
     const n = Number(raw);
     return Number.isFinite(n) && n > 0 ? n : fallback;
 }
-console.log(parse(process.env.LORE_REGISTRY_IDLE_TTL_MS, 30 * 60 * 1000));`,
+console.log(parse(process.env.LORE_REGISTRY_IDLE_TTL_MS, 0));`,
             { LORE_REGISTRY_IDLE_TTL_MS: '60000' },
         );
         assert.equal(out, '60000', `expected 60000, got ${out}`);

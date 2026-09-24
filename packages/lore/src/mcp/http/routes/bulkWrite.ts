@@ -54,12 +54,21 @@ import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { recordHotWriteBatch, retractHotWriteOrCompensate } from '../../../outbox/hotLane.js';
 import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE } from '../../../core/nodeWriteLock.js';
 import { flushBulkQueuedEmbeds, buildVerbatimSpec, type VerbatimSpec } from './bulkEmbedFlush.js';
+import { validateQuestionsMeta, mergeQuestionsMetaIntoMetadataJson } from '../../../core/questionAliases.js';
+import { applyBulkQuestionAliases } from '../../../core/bulkQuestionAliases.js';
 import { handleBulkRecall } from './bulkRecall.js';
 import { handleBulkEdges, handleBulkDelete } from './bulkWriteEdgesDelete.js';
+// Round-2 review fix (HIGH #1) — this bulk lane writes via
+// storageClient.upsertNode directly, bypassing core/nodeService's
+// nodeUpsert() chokepoint entirely (perf: one batched bulkUpsertNodes call
+// per lock chunk instead of N chokepoint calls), so D5's write-time
+// supersession enforcement never ran here at all. Same shared helpers
+// storeNode.ts/postNode.ts/the embedded lib paths use, applied per-item.
+import { checkSupersessionPolicy, applyWriteTimeSupersedes, resolveSupersessionContext, validateSupersedesIds, SUPERSESSION_ENFORCED_TYPES } from '../../../core/supersessionPolicy.js';
 import { normaliseBulkNodeScope, buildBulkVerbatimMetadata } from '../../../core/bulkNodeScope.js';
 import type { OutboxEntry, OutboxStore } from '../../../outbox/types.js';
 import type { WorkspaceVerbatimResolver } from '../../../outbox/workspaceVerbatimResolver.js';
-import type { VerbatimStore } from '../../../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../../../engines/verbatimStoreApi.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 
@@ -104,6 +113,8 @@ export interface BulkWriteDeps {
      *  shape change. Absent = no WAL append (unchanged from before this
      *  field existed). */
     getWal?: () => import('../../../engines/writeAheadLog.js').WriteAheadLog;
+    /** D5 round 2 (#2) — host-level supersession-enforce default. */
+    supersessionEnforceDefault?: boolean;
 }
 
 export const ITEM_CAP = 1000;
@@ -111,6 +122,11 @@ export const ITEM_CAP = 1000;
 export interface BulkResult {
     ok: boolean;
     error?: string;
+    /** D5 round 4 (#3) — non-fatal near-duplicate warning surfaced from checkSupersessionPolicy(). */
+    supersessionWarning?: string;
+    /** D5 round 4 (#4) — set when applyWriteTimeSupersedes() partially failed after the write. */
+    applied?: string[];
+    unapplied?: Array<{ id: string; reason: string }>;
 }
 
 export async function resolveGraph(
@@ -152,6 +168,9 @@ interface NodeInput {
     tags?: unknown;
     workspace?: unknown;
     embed?: unknown;
+    /** D5 — per-item supersedes/force, mirrors the single-write surfaces. */
+    supersedes?: unknown;
+    force?: unknown;
 }
 
 export interface EdgeInput {
@@ -217,7 +236,7 @@ export async function tryBulkWriteRoutes(
         return true;
     }
 
-    if (isBulkNodes) return handleBulkNodes(res, parsed as { nodes?: unknown; workspace?: unknown; embed?: unknown }, deps);
+    if (isBulkNodes) return handleBulkNodes(res, parsed as { nodes?: unknown; workspace?: unknown; embed?: unknown; force?: unknown }, deps);
     if (isBulkEdges) return handleBulkEdges(res, parsed as { edges?: unknown; workspace?: unknown }, deps);
     if (isBulkDelete) return handleBulkDelete(res, parsed as { ids?: unknown; workspace?: unknown }, deps);
     if (isBulkRecall) return handleBulkRecall(res, parsed as { topics?: unknown; workspace?: unknown }, deps);
@@ -245,7 +264,7 @@ function parseBulkEmbedMode(raw: unknown, fallback: BulkEmbedMode): BulkEmbedMod
 
 async function handleBulkNodes(
     res: ServerResponse,
-    parsed: { nodes?: unknown; workspace?: unknown; embed?: unknown },
+    parsed: { nodes?: unknown; workspace?: unknown; embed?: unknown; force?: unknown },
     deps: BulkWriteDeps,
 ): Promise<boolean> {
     if (!Array.isArray(parsed.nodes)) {
@@ -285,7 +304,7 @@ async function handleBulkNodes(
     // inline embed path seeds into the same ws the graph node landed in (else a
     // cross-ws bulk write splits row from embedding). Falls back to boot-bound
     // loreVerbatim when no resolver wired. WorkspaceNotFoundError → same 400.
-    let targetVerbatim: VerbatimStore | typeof deps.store.loreVerbatim = deps.store.loreVerbatim;
+    let targetVerbatim: VerbatimStoreApi | typeof deps.store.loreVerbatim = deps.store.loreVerbatim;
     if (deps.workspaceVerbatimResolver && requestedWorkspace) {
         try {
             targetVerbatim = await deps.workspaceVerbatimResolver.getOrOpen(requestedWorkspace);
@@ -326,8 +345,22 @@ async function handleBulkNodes(
     // their slot in `results` via an index map so the final result
     // array matches the request order 1:1.
     const items = parsed.nodes as NodeInput[];
-    const validSpecs: Array<{ idx: number; raw: NodeInput; embedMode: BulkEmbedMode }> = [];
+    const validSpecs: Array<{ idx: number; raw: NodeInput; embedMode: BulkEmbedMode; questions: string[] | undefined; supersedes: string[] | undefined; supersessionWarning: string | undefined }> = [];
     const results: Array<BulkResult & { id?: string }> = new Array(items.length);
+    // D5 — batch-level `force` (request body `force: true`) applies to every
+    // item that doesn't set its own `force`; an item-level `force` wins.
+    const batchForce = (parsed as { force?: unknown }).force === true;
+    // Resolved once for the whole batch (one workspace per bulk request) —
+    // same resolver storeNode.ts/postNode.ts/the embedded paths use.
+    const { policy: supersessionPolicy, findDuplicate: findSupersessionDuplicate } = resolveSupersessionContext({
+        workspace: requestedWorkspace ?? deps.graphRegistry?.activeName() ?? '',
+        targetGraph,
+        homeDir: deps.graphRegistry?.homeDir?.(),
+        bootGraph: deps.store.loreGraph,
+        storageClient: deps.store.storageClient,
+        workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+        hostDefaultEnforce: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+    });
     for (let i = 0; i < items.length; i++) {
         const raw = items[i];
         if (!raw || typeof raw !== 'object'
@@ -373,13 +406,86 @@ async function handleBulkNodes(
             results[i] = { ok: false, id: raw.id as string, error: `unknown_field: ${forbidden.join(', ')}` };
             continue;
         }
+        // 3.21 step 3(e)/3(h) round 2 — summary/entities/topics merge
+        // verbatim into metadata, same as the single-write surfaces
+        // (core/questionAliases.ts). `questions[]` (alias verbatim rows) IS
+        // now supported on this bulk path too (Opus review: the accuracy
+        // benchmark loads 415 memories through this route) — validated here
+        // exactly like the single-write path, applied per-item after each
+        // node's graph write succeeds (see applyBulkQuestionAliases calls
+        // below in both the batchGraph and ARCADE branches), via the SAME
+        // tombstone-then-record primitives nodeServiceVerbatim.ts uses
+        // (core/bulkQuestionAliases.ts) — same alias semantics, limits, and
+        // outbox durability as store_node/POST /api/node.
+        let itemQuestions: string[] | undefined;
+        {
+            const rawRec = raw as Record<string, unknown>;
+            const metaCheck = validateQuestionsMeta({ questions: rawRec.questions, summary: rawRec.summary, entities: rawRec.entities, topics: rawRec.topics });
+            if (!metaCheck.ok) {
+                results[i] = { ok: false, id: raw.id as string, error: `invalid_questions_meta: ${metaCheck.error}` };
+                continue;
+            }
+            if (metaCheck.value.summary !== undefined || metaCheck.value.entities !== undefined || metaCheck.value.topics !== undefined) {
+                rawRec.metadata = mergeQuestionsMetaIntoMetadataJson(
+                    typeof rawRec.metadata === 'string' ? rawRec.metadata : undefined,
+                    metaCheck.value,
+                );
+            }
+            // `questions` itself is never a graph-row field — strip it before
+            // the raw item reaches bulkUpsertNodes/upsertOne (which pass the
+            // item straight to targetGraph.upsertNode), same as the
+            // single-write path never lets `questions` reach `nodeData`.
+            if (rawRec.questions !== undefined) itemQuestions = metaCheck.value.questions;
+            delete rawRec.questions;
+        }
         // project==workspace + ecosystem defaulting, stamped to exactly what
         // rowToLoreNode will report for the graph row — see bulkNodeScope.ts
         // for the invariant and what breaking it costs. (dispatcher guarantees
         // requestedWorkspace is non-empty.)
         normaliseBulkNodeScope(raw as Record<string, unknown>, requestedWorkspace as string);
+        // D5 — round-2 review fix (HIGH #1): enforce per item, BEFORE the
+        // outbox row / substrate write, same as every other rejection above.
+        // `supersedes`/`force` are write-time directives, never real graph
+        // row fields, so strip them before `raw` reaches bulkUpsertNodes/
+        // upsertOne (mirrors how `questions` is captured then deleted above).
+        const rawRec = raw as Record<string, unknown>;
+        const itemSupersedes = Array.isArray(rawRec.supersedes)
+            ? (rawRec.supersedes as unknown[]).filter((v): v is string => typeof v === 'string')
+            : undefined;
+        const itemForce = rawRec.force === true || batchForce;
+        delete rawRec.supersedes;
+        delete rawRec.force;
+        // D5 round 4 (#4) — same shared all-or-nothing pre-write validator
+        // (exists / not archived / no cycle) the single-write chokepoint
+        // (nodeService.ts) uses, instead of this route's own existence-only
+        // inline check.
+        if (itemSupersedes && itemSupersedes.length > 0) {
+            const preCheck = await validateSupersedesIds({ id: raw.id as string, supersedes: itemSupersedes, targetGraph });
+            if (!preCheck.ok) {
+                results[i] = { ok: false, id: raw.id as string, error: `${preCheck.code}: ${preCheck.error.message}` };
+                continue;
+            }
+        }
+        let itemSupersessionWarning: string | undefined;
+        if (SUPERSESSION_ENFORCED_TYPES.has(raw.type as string)) {
+            const verdict = await checkSupersessionPolicy({
+                type: raw.type as string,
+                id: raw.id as string,
+                label: raw.label as string | undefined,
+                content: raw.content as string | undefined,
+                supersedes: itemSupersedes,
+                force: itemForce,
+                policy: supersessionPolicy,
+                findDuplicate: findSupersessionDuplicate,
+            });
+            if (!verdict.ok) {
+                results[i] = { ok: false, id: raw.id as string, error: `${verdict.code}: ${verdict.error.message}` };
+                continue;
+            }
+            itemSupersessionWarning = verdict.supersessionWarning;
+        }
         const embedMode = parseBulkEmbedMode(raw.embed, callEmbedMode);
-        validSpecs.push({ idx: i, raw, embedMode });
+        validSpecs.push({ idx: i, raw, embedMode, questions: itemQuestions, supersedes: itemSupersedes, supersessionWarning: itemSupersessionWarning });
     }
     let succeeded = 0;
     // Sprint E2 — LOCAL queued-embed accumulator (one embed.batch row). Collected
@@ -450,7 +556,7 @@ async function handleBulkNodes(
                     chunk.map((s) => s.raw as unknown as Parameters<typeof batchGraph.bulkUpsertNodes>[0][number]),
                 );
                 for (let k = 0; k < chunk.length; k++) {
-                    const { idx, raw, embedMode } = chunk[k]!;
+                    const { idx, raw, embedMode, questions, supersessionWarning } = chunk[k]!;
                     const br = batchResults[k]!;
                     if (!br.ok) {
                         results[idx] = { ok: false, id: raw.id as string, error: br.error };
@@ -481,7 +587,56 @@ async function handleBulkNodes(
                         continue;
                     }
                     succeeded++;
-                    results[idx] = { ok: true, id: raw.id as string };
+                    results[idx] = { ok: true, id: raw.id as string, ...(supersessionWarning ? { supersessionWarning } : {}) };
+                    // D5 — apply this item's `supersedes` list now that its
+                    // own graph write has durably succeeded (same ordering
+                    // nodeService.nodeUpsert uses: new node first, then
+                    // supersede the old ones). Best-effort per id (matches
+                    // applyWriteTimeSupersedes' own edge-write posture) but a
+                    // FIELD-mutation failure downgrades this item's result to
+                    // ok:false with the applied/unapplied ids named, since the
+                    // caller explicitly asked for that link and it silently
+                    // not happening must not be reported as success.
+                    const itemSupersedes = chunk[k]!.supersedes;
+                    if (itemSupersedes && itemSupersedes.length > 0) {
+                        const applyResult = await applyWriteTimeSupersedes({
+                            targetGraph: batchGraph, supersedes: itemSupersedes, newId: raw.id as string,
+                            workspace: requestedWorkspace!, initiator: 'http:POST /api/nodes/bulk',
+                            outboxStore: deps.outboxStore, logPrefix: '[Lore HTTP bulk]',
+                        });
+                        if (!applyResult.ok) {
+                            // D5 round 4 (#4) — surface applied/unapplied ids
+                            // when applyWriteTimeSupersedes() partially
+                            // succeeded, instead of collapsing to one message.
+                            if (applyResult.code === 'supersedes_partial') {
+                                results[idx] = { ok: false, id: raw.id as string, error: `supersedes_partial: ${applyResult.error.message}`, applied: applyResult.applied, unapplied: applyResult.unapplied };
+                            } else {
+                                results[idx] = { ok: false, id: raw.id as string, error: `supersedes_apply_failed: ${applyResult.error.message}` };
+                            }
+                        }
+                    }
+                    // 3.21 step 3(h) round 2 — same tombstone-then-record alias
+                    // fan-out the single-write path runs, applied now that
+                    // this item's graph write has durably succeeded. Still
+                    // inside this chunk's lock, matching nodeUpsert's own
+                    // "alias fan-out under the same per-id lock" invariant.
+                    try {
+                        await applyBulkQuestionAliases({
+                            outboxStore: deps.outboxStore, workspace: requestedWorkspace!,
+                            initiator: 'http:POST /api/nodes/bulk', logPrefix: '[Lore HTTP bulk]',
+                            node: {
+                                id: raw.id as string, type: raw.type as string,
+                                project: (raw as Record<string, unknown>).project as string,
+                                ecosystem: (raw as Record<string, unknown>).ecosystem as string,
+                            },
+                            questions,
+                        });
+                    } catch (aliasErr) {
+                        // Best-effort, same posture as tombstoneQuestionAliases/
+                        // recordQuestionAliases' own internal catches — never
+                        // fails an already-successful graph write.
+                        console.error(`[Lore HTTP] bulk question-alias fan-out failed for ${raw.id as string} (non-fatal): ${redactError(aliasErr)}`);
+                    }
                     const verbatimText = buildVerbatimText(
                         raw.label as string,
                         (raw.content as string | undefined) ?? '',
@@ -578,10 +733,53 @@ async function handleBulkNodes(
                     }
                 }
                 for (let k = 0; k < chunk.length; k++) {
-                    const { idx, raw, embedMode } = chunk[k]!;
-                    const r = await upsertOne(target, raw, deps, embedMode);
+                    const { idx, raw, embedMode, questions, supersessionWarning } = chunk[k]!;
+                    let r: BulkResult & { id?: string } = await upsertOne(target, raw, deps, embedMode);
                     if (r.ok) {
                         succeeded++;
+                        if (supersessionWarning) r = { ...r, supersessionWarning };
+                        // D5 — same apply-after-success as the batchGraph
+                        // branch above; see that call's comment. ARCADE has
+                        // no `bulkUpsertNodes` primitive so `targetGraph`
+                        // (the resolved workspace graph, not `target` the
+                        // LoreStorageClient facade) is the SupersessionWriteGraph.
+                        const itemSupersedes = chunk[k]!.supersedes;
+                        if (itemSupersedes && itemSupersedes.length > 0) {
+                            const applyResult = await applyWriteTimeSupersedes({
+                                targetGraph, supersedes: itemSupersedes, newId: raw.id as string,
+                                workspace: requestedWorkspace!, initiator: 'http:POST /api/nodes/bulk',
+                                outboxStore: deps.outboxStore, logPrefix: '[Lore HTTP bulk]',
+                            });
+                            if (!applyResult.ok) {
+                                succeeded--;
+                                // D5 round 4 (#4) — surface applied/unapplied
+                                // ids on a partial failure, same as the
+                                // batchGraph branch above.
+                                if (applyResult.code === 'supersedes_partial') {
+                                    r = { ok: false, id: raw.id as string, error: `supersedes_partial: ${applyResult.error.message}`, applied: applyResult.applied, unapplied: applyResult.unapplied };
+                                } else {
+                                    r = { ok: false, id: raw.id as string, error: `supersedes_apply_failed: ${applyResult.error.message}` };
+                                }
+                            }
+                        }
+                    }
+                    if (r.ok) {
+                        // 3.21 step 3(h) round 2 — same alias fan-out as the
+                        // batchGraph branch above; see that call's comment.
+                        try {
+                            await applyBulkQuestionAliases({
+                                outboxStore: deps.outboxStore, workspace: requestedWorkspace!,
+                                initiator: 'http:POST /api/nodes/bulk', logPrefix: '[Lore HTTP bulk]',
+                                node: {
+                                    id: raw.id as string, type: raw.type as string,
+                                    project: (raw as Record<string, unknown>).project as string,
+                                    ecosystem: (raw as Record<string, unknown>).ecosystem as string,
+                                },
+                                questions,
+                            });
+                        } catch (aliasErr) {
+                            console.error(`[Lore HTTP] bulk question-alias fan-out failed for ${raw.id as string} (non-fatal): ${redactError(aliasErr)}`);
+                        }
                         if (embedMode === 'queued') {
                             // ARCADE (non-local): queued embeds ride a WIRED verbatim.upsert
                             // row per node (see bulkEmbedFlush.ts). project was stamped above.

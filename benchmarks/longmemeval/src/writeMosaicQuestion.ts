@@ -17,6 +17,7 @@ import { createBenchmarkLore } from './loreClient.js';
 import { loadDataset, ingestInstance } from './ingest.js';
 import { writePropositions } from './writePropositions.js';
 import type { LongMemEvalInstance } from './types.js';
+import { fileURLToPath } from 'node:url';
 
 interface ManifestEntry {
     index: number;
@@ -44,7 +45,7 @@ async function main(): Promise<void> {
     if (!questionId) throw new Error('No entries.');
 
     const dataset = loadDataset(
-        '/Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/data/longmemeval_s_cleaned.json',
+        fileURLToPath(new URL('../data/longmemeval_s_cleaned.json', import.meta.url)),
     );
     const instance = dataset.find((i) => i.question_id === questionId) as LongMemEvalInstance;
     if (!instance) throw new Error(`Question ${questionId} not found in dataset.`);

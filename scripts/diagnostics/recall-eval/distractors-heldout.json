@@ -1,0 +1,114 @@
+[
+  {
+    "id": "dxh-0",
+    "query": "What programming language is the scheduler written in?"
+  },
+  {
+    "id": "dxh-1",
+    "query": "How many replicas does the job table database run with?"
+  },
+  {
+    "id": "dxh-2",
+    "query": "Which message broker backs the connector bus in production?"
+  },
+  {
+    "id": "dxh-3",
+    "query": "What port does the webhook relay listen on?"
+  },
+  {
+    "id": "dxh-4",
+    "query": "Who approves changes to the rate limiter configuration?"
+  },
+  {
+    "id": "dxh-5",
+    "query": "How do we encrypt checkpoint data at rest?"
+  },
+  {
+    "id": "dxh-6",
+    "query": "What is the maximum payload size a webhook can deliver?"
+  },
+  {
+    "id": "dxh-7",
+    "query": "worker pool kubernetes node type"
+  },
+  {
+    "id": "dxh-8",
+    "query": "tenant router failover to a secondary datacenter"
+  },
+  {
+    "id": "dxh-9",
+    "query": "How are CLI releases versioned and published to customers?"
+  },
+  {
+    "id": "dxh-10",
+    "query": "What license do we ship the Riverstone SDK under?"
+  },
+  {
+    "id": "dxh-11",
+    "query": "How does the audit log get exported to the compliance team?"
+  },
+  {
+    "id": "dxh-12",
+    "query": "Which alerting tool pages the team when the dead-letter queue grows?"
+  },
+  {
+    "id": "dxh-13",
+    "query": "What is the naming convention for git branches?"
+  },
+  {
+    "id": "dxh-14",
+    "query": "How do we benchmark the scheduler before a release?"
+  },
+  {
+    "id": "dxh-15",
+    "query": "scheduler cron expression syntax"
+  },
+  {
+    "id": "dxh-16",
+    "query": "What timezone are scheduled jobs evaluated in?"
+  },
+  {
+    "id": "dxh-17",
+    "query": "How long are metrics retained in the self-hosted stack before downsampling?"
+  },
+  {
+    "id": "dxh-18",
+    "query": "Which CDN serves the static assets for the tenant web console?"
+  },
+  {
+    "id": "dxh-19",
+    "query": "Which team owns the connector bus on-call rotation?"
+  },
+  {
+    "id": "dxh-20",
+    "query": "How do tenants get billed for job execution minutes?"
+  },
+  {
+    "id": "dxh-21",
+    "query": "What is the password complexity policy for the admin console?"
+  },
+  {
+    "id": "dxh-22",
+    "query": "config loader environment variable precedence order"
+  },
+  {
+    "id": "dxh-23",
+    "query": "How do we load test the webhook relay before peak season?"
+  },
+  {
+    "id": "dxh-24",
+    "query": "Why did we pick Postgres for the job table?"
+  },
+  {
+    "id": "dxh-25",
+    "query": "What is the upgrade path from Riverstone 1.x to 2.0 for existing tenants?"
+  },
+  {
+    "id": "dxh-26",
+    "query": "How are secrets injected into worker containers?"
+  },
+  {
+    "id": "dxh-27",
+    "query": "rate limiter per-tenant quota override process"
+  }
+]

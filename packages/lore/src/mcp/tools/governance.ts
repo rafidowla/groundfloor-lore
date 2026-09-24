@@ -156,7 +156,23 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
         {},
         async () => {
             try {
-                const file = loadWorkspaces();
+                // Finding 3 (post-review, 3.20.2) — a bare `loadWorkspaces()`
+                // defaults to the process-wide `loreHome()`, not this
+                // instance's own home. For an embedded host with its own
+                // registry (`deps.graphRegistry`, scoped via
+                // `LocalGraphRegistry.homeDir()` to `deps.dataHome`), that
+                // could both bootstrap a stray workspaces.json in a foreign
+                // home and report a foreign registry's `active`/`workspaces`
+                // as if they were this instance's own. Same defensive,
+                // duck-typed read diagnostic.ts/recallCrossWorkspace.ts/
+                // lifecycle.ts already use; `deps.graphRegistry` is optional,
+                // so guard for it being absent too — falls back to
+                // `loadWorkspaces()`'s own `loreHome()` default there,
+                // exactly as before.
+                const registryHome = deps.graphRegistry && typeof (deps.graphRegistry as { homeDir?: () => string }).homeDir === 'function'
+                    ? (deps.graphRegistry as unknown as { homeDir: () => string }).homeDir()
+                    : undefined;
+                const file = loadWorkspaces(registryHome);
                 return {
                     content: [{
                         type: 'text' as const,

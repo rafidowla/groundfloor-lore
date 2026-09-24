@@ -43,7 +43,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
 import { FileOutboxStore } from '../packages/lore/src/outbox/store.js';
 import { nodeUpsert } from '../packages/lore/src/core/nodeService.js';
 import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
@@ -88,7 +88,7 @@ test('two concurrent nodeUpsert() for the SAME id: final graph content and final
     const v = mkTmp('lore-splitbrain-v-');
     const o = mkTmp('lore-splitbrain-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     try {
         await graph.initialize();
@@ -179,7 +179,7 @@ test('N=8 concurrent nodeUpsert() for the SAME id: graph and verbatim agree on t
     const v = mkTmp('lore-splitbrain-n8-v-');
     const o = mkTmp('lore-splitbrain-n8-o-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     try {
         await graph.initialize();

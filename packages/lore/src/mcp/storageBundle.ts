@@ -11,7 +11,7 @@
 import { createTableStorage } from '../engines/tableStorageFactory.js';
 import { SessionCacheManager } from '../engines/sessionCacheManager.js';
 import type { ISessionCache } from '../engines/sessionCache.js';
-import { VerbatimStore } from '../engines/verbatimStore.js';
+import { isVerbatimStore } from '../engines/verbatimStoreApi.js';
 import { PendingAutolinkTracker } from '../engines/pendingAutolink.js';
 import { LoreStorageClient } from '../storage/loreStorageClient.js';
 import type { ITableStorage } from '../contracts/tables.js';
@@ -123,7 +123,7 @@ export async function createStorageClient(
     // sessionCache, so the probe is false for every current engine — it
     // stays as a capability probe (requireWorkspaceGraph's pattern, not a
     // class check) in case a future engine reintroduces one.
-    if (!(verbatimStore instanceof VerbatimStore)) {
+    if (!isVerbatimStore(verbatimStore)) {
         throw new Error('createStorageClient: local mode requires VerbatimStore for loreVerbatim');
     }
     // TW-7e (conc-dual-sessioncache-clobber-and-unflushed-on-dispose): there

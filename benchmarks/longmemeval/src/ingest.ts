@@ -130,11 +130,21 @@ export function disambiguateSessionIds(sessionIds: string[]): string[] {
  * DECISION" header), retrieve()'s graph-traversal step has nothing to walk:
  * the graph substrate exists but is empty. Left opt-in rather than flipped
  * globally because it's a real ingest-time cost (one extra ONNX search per
- * node) — Mosaic turns it on deliberately; other callers are unaffected. */
+ * node) — Mosaic turns it on deliberately; other callers are unaffected.
+ *
+ * `skipWrite` (default false) — skip the actual bulkIngest call (the ~30s/
+ * instance embedding cost) and return the same shape anyway; `evidenceTurns`
+ * /`totalTurns`/`totalSessions` are computed from `instance` alone above,
+ * never read back from the store, so they're correct either way. For reusing
+ * a `--data-dir` already ingested by a prior run: node ids are deterministic
+ * (buildNodeId keys only on questionId/sessionId/turnIndex), so a second
+ * retrieval-only pass against the same instances needs the write skipped,
+ * not repeated — see runSubset.ts's `--skip-ingest`. Caller is responsible
+ * for knowing the data is actually there; this does not verify it. */
 export async function ingestInstance(
     lore: LoreInstance,
     instance: LongMemEvalInstance,
-    opts: { autolink?: boolean } = {},
+    opts: { autolink?: boolean; skipWrite?: boolean } = {},
 ): Promise<IngestedInstance> {
     const start = Date.now();
     const nodes: BulkIngestNodeArgs[] = [];
@@ -191,13 +201,15 @@ export async function ingestInstance(
         });
     });
 
-    const result = await lore.bulkIngest(nodes, { autolink: opts.autolink ?? false, embed: 'sync' });
-    if (!result.ok) {
-        const failed = result.results.filter((r) => !r.ok);
-        throw new Error(
-            `bulkIngest reported failures for ${instance.question_id}: ${failed.length}/${result.count} failed. ` +
-                `First error: ${JSON.stringify(failed[0])}`,
-        );
+    if (!opts.skipWrite) {
+        const result = await lore.bulkIngest(nodes, { autolink: opts.autolink ?? false, embed: 'sync' });
+        if (!result.ok) {
+            const failed = result.results.filter((r) => !r.ok);
+            throw new Error(
+                `bulkIngest reported failures for ${instance.question_id}: ${failed.length}/${result.count} failed. ` +
+                    `First error: ${JSON.stringify(failed[0])}`,
+            );
+        }
     }
 
     return {

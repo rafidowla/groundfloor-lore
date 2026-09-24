@@ -32,6 +32,13 @@ import type { DispatcherSubstrates } from '../packages/lore/src/outbox/dispatche
 import type {
     OutboxEntry, OutboxStore, OutboxStatus, OutboxReplicationState,
 } from '../packages/lore/src/outbox/types.js';
+// Opus review follow-up (item: excluded suites testing SEMANTICS, not Lance
+// internals). Test B below exercises VerbatimStoreApi.store()'s
+// skip-identical contract — routed through makeVerbatimStore so it runs
+// against both engines. Test A (outbox replicator consolidation) never
+// constructs a VerbatimStore at all — a fake in-memory substrate stands in
+// for it — so it stays engine-independent and unchanged.
+import { makeVerbatimStore, testVectorEngine } from './helpers/testVerbatimStore.js';
 
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sp13-lore-'));
 process.env['LORE_HOME'] = TEST_HOME;
@@ -186,8 +193,7 @@ function verbatimEntry(id: string, workspace: string, seq: number): OutboxEntry 
 
     /* ── B. VerbatimStore.store() skip-identical ───────────────────── */
     await test('B1 — re-storing identical content is a no-op (no rewrite)', async () => {
-        const { VerbatimStore } = await import('../packages/lore/src/engines/verbatimStore.js');
-        const store = new VerbatimStore(path.join(TEST_HOME, 'ws-b'));
+        const store = makeVerbatimStore(path.join(TEST_HOME, 'ws-b'));
         await store.initialize();
         try {
             const doc = { id: 'lore:n1', text: 'stable content', metadata: {} };
@@ -201,15 +207,36 @@ function verbatimEntry(id: string, workspace: string, seq: number): OutboxEntry 
             await store.store(doc);
             const after2 = await store.getById('lore:n1');
             assert.equal(after2?.contentHash, hash1, 'contentHash unchanged after identical re-store');
-            const revs = await store.listIds('lore:n1#rev');
-            assert.equal(revs.length, 0, 'no rev-snapshot created for an unchanged re-store');
+
+            // "No snapshot was created" is probed differently per engine:
+            // Lance encodes history via an `<id>#rev<ts>` id-suffix (see
+            // verbatimHistory.ts) — listIds() is canonical-only BY DEFAULT
+            // now (Opus review follow-up: it used to leak `#rev` snapshot
+            // ids), so `includeHistory: true` is the explicit escape hatch
+            // needed to keep counting snapshot rows via a `#rev`-prefix
+            // search. SQLite tracks history via a real `is_canonical`
+            // column instead — snapshots share the CANONICAL id, so a
+            // `#rev`-suffix prefix search can never find them there; the
+            // engine-native probe is getHistory()'s row count.
+            if (testVectorEngine() === 'sqlite') {
+                const hist = await store.getHistory('lore:n1');
+                assert.equal(hist.length, 1, 'no rev-snapshot created for an unchanged re-store (sqlite: getHistory row count)');
+            } else {
+                const revs = await store.listIds('lore:n1#rev', { includeHistory: true });
+                assert.equal(revs.length, 0, 'no rev-snapshot created for an unchanged re-store (lance: #rev id-suffix count)');
+            }
 
             // Changing the content DOES rewrite (and snapshots the prior rev).
             await store.store({ id: 'lore:n1', text: 'changed content', metadata: {} });
             const after3 = await store.getById('lore:n1');
             assert.notEqual(after3?.contentHash, hash1, 'contentHash changes when text changes');
-            const revs2 = await store.listIds('lore:n1#rev');
-            assert.ok(revs2.length >= 1, 'a rev-snapshot is created on a real change');
+            if (testVectorEngine() === 'sqlite') {
+                const hist2 = await store.getHistory('lore:n1');
+                assert.ok(hist2.length >= 2, 'a rev-snapshot is created on a real change (sqlite: getHistory row count)');
+            } else {
+                const revs2 = await store.listIds('lore:n1#rev', { includeHistory: true });
+                assert.ok(revs2.length >= 1, 'a rev-snapshot is created on a real change (lance: #rev id-suffix count)');
+            }
         } finally {
             await store.close();
         }

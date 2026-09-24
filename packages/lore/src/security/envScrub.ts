@@ -50,6 +50,7 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_WORKSPACE',                           // forces a specific active workspace
     'LORE_DEPLOYMENT_MODE',                     // Q2.1 — pin mode to 'local' or 'cloud'
     'LORE_CACHE_DISABLED',                      // Q1.3 operator killswitch for the read cache
+    'LORE_DEFAULT_GRAPH_ENGINE',                 // 3.21 step 1d — operator escape hatch: NEW local workspaces default to 'sqlite'; set to 'surreal' to keep the pre-3.21 default
     'LORE_OPENAI_BASE_URL',                     // 2026-05-05 OpenAI-compatible gateway override (e.g. OpenRouter)
     'CLERK_ISSUER',                             // RA2-reaudit2 — cloud-mode Clerk JWT issuer; scrubbing it silently disabled cloud auth (read at dispatcher.ts/operator.ts)
 
@@ -141,8 +142,15 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_OUTBOX_PRUNE_REPLICATED_MS',          // outbox: prune replicated entries older than N ms
     'LORE_OUTBOX_BACKEND',                      // outbox storage backend selector
     'LORE_RECALL_RANKING',                      // recall ranking strategy
+    'LORE_SUPERSESSION_ENFORCE',                // D5 — host default for write-time supersession enforcement (0/1; default off)
     'LORE_RECALL_STAGE_TIMING',                 // WP5 — debug JSON stage timings on retrieve (default off)
     'LORE_RECALL_RECENCY_HALF_LIFE_DAYS',       // recall recency decay half-life
+    'LORE_RECALL_ABSTAIN',                      // D1 — default for retrieve()'s `abstain` (0/1; default off)
+    'LORE_RECALL_RELEVANCE_FLOOR',              // D1 — default z-score abstention floor (default 2.0)
+    'LORE_RECALL_ABSTAIN_TERM_COVERAGE',        // D1 — opt-in key-term-coverage abstention signal (0/1; default off)
+    'LORE_RECALL_TERM_COVERAGE_MIN',            // D1 — term-coverage threshold (default 0.1)
+    'LORE_RECALL_CANDIDATE_FLOOR',               // D3 — candidate-generation window floor (0 = legacy)
+    'LORE_RECALL_LEXICAL_BASE',                  // D3 — lexical-only seed base-score mode (anchored|rrf)
     'LORE_LOAD_MAX_CONCURRENT_PER_WORKSPACE',   // bulk-load concurrency cap
     'LORE_LOAD_TEMP_RETENTION_HOURS_COMPLETE',  // bulk-load temp retention (success)
     'LORE_LOAD_TEMP_RETENTION_HOURS_FAILED',    // bulk-load temp retention (failure)
@@ -152,6 +160,7 @@ const ALLOWED_VARS: readonly string[] = [
     // Each knob has the current value as default; operator sets to override.
     'LORE_EMBEDDED_MODEL',                       // embedded LLM model id (default: onnx-community/gemma-3-1b-it-ONNX)
     'LORE_MODEL_IDLE_UNLOAD_MS',                 // embedded model idle-unload timeout in ms (default: 180000)
+    'LORE_EMBED_IDLE_UNLOAD_MS',                 // local embedding pipeline idle-unload timeout in ms (default: 0 = never unload)
     'LORE_LLM_NUM_CTX',                          // Ollama num_ctx context window (default: 32768)
     'LORE_LLM_MAX_TOKENS',                       // Anthropic max_tokens per request (default: 1024)
     'LORE_EMBED_BATCH_MAX',                      // per-provider embed batch size cap (overrides the RAM-adaptive local default; openai_compat 1000)
@@ -186,7 +195,7 @@ const ALLOWED_VARS: readonly string[] = [
     // a caller constructs a SurrealGraph.
     'LORE_SURREAL_BACKEND',                      // surreal: storage backend, 'surrealkv' (default) or 'rocksdb'
     'LORE_SURREAL_DEFINE_INDEXES',               // surreal: '1' opts into secondary indexes (leaks a handle upstream — see surrealConnection.ts)
-    'LORE_SURREAL_COUNT_VIEW',                   // surreal: '0' rolls back the pre-computed getStats view (default on)
+    'LORE_SURREAL_COUNT_VIEW',                   // surreal: '1' opts into the pre-computed getStats view; off by default since 2026-08-21 (turning it off REMOVEs the view on next open, repairing any leftover from before then)
     'LORE_SURREAL_FTS',                          // surreal: '1' opts into full-text search — changes matching to whole-word
     'LORE_SURREAL_OPEN_TIMEOUT_MS',              // surreal: per-attempt connect timeout, guards the never-settling open (default 2000)
     'LORE_SURREAL_OPEN_BUDGET_MS',               // surreal: total open-retry budget before failing loudly (default 15000)
@@ -202,6 +211,7 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_SEARCH_WEIGHT_CONTENT',                // search: ranking weight for content match (default 2)
     'LORE_SEARCH_CONCURRENCY',                   // search admission: max concurrent native searches (default: scales to CPU cores, 2-8)
     'LORE_SEARCH_QUEUE_MAX',                     // search admission: max queued reads before shedding load with a busy error (default: concurrency*8)
+    'LORE_SEARCH_QUEUE_WAIT_MS',                 // search admission: max time (ms) a queued read waits before failing fast with SearchOverloadError (default 30000)
     'LORE_SEARCH_WORKER',                        // opt-in: run the native LanceDB store in a crash-isolated child process (default off)
     'LORE_SEARCH_WORKER_READY_MS',               // search-worker: max wait for a (re)spawned worker to become ready (default 60000)
     'LORE_SEARCH_WORKER_CALL_MS',                // search-worker: per-call IPC timeout, covers big storeBatch/index builds (default 120000)
@@ -211,8 +221,11 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_WORKER_PARENT_EMBEDS',                 // search-worker internal: parent owns embedding, so child must not load a second model
     'LORE_WORKER_EMBED_DIM',                     // search-worker internal: parent provider vector dimension for the child's stub
     'LORE_WORKER_EMBED_MODEL',                   // search-worker internal: parent provider model identity for the child's stub
+    'LORE_WORKER_EMBED_DTYPE',                   // search-worker internal: parent embedder's dtype, so the child's stub fingerprints identically (verbatimFingerprintGate.ts)
+    'LORE_WORKER_STRICT_FINGERPRINT',            // search-worker internal: '1' when the parent opened this workspace with strict fingerprint checking (host-injected provider) — child refuses a mismatch instead of warning
     'LORE_IS_SEARCH_WORKER',                     // search-worker internal: marks a process as a Lore search worker (prevents recursive forking)
     'LORE_SEARCH_WEIGHT_TAGS',                   // search: ranking weight for tags match (default 1)
+    'LORE_TEST_WORKER_HOOKS',                    // test-only: '1' exposes __testHold/__testCounters/checkGateDeadline on the search worker (verbatimStore.ts, verbatimWorkerProtocol.ts), never set in production
     // Observability — Prometheus + OpenTelemetry. Read via
     // metrics.ts:72 (`env.LORE_METRICS`) and otelHooks.ts:52-54
     // (`loadOtelConfig(env)` defaults env to process.env).
@@ -244,14 +257,23 @@ const ALLOWED_VARS: readonly string[] = [
     // before the consumer reads it, making the documented knob a no-op.
     'LORE_OUTBOX_POLL_MS',                   // outbox replicator idle-poll interval (default 250 ms)
     'LORE_OUTBOX_BUSY_MS',                   // outbox replicator busy-tick sleep (default 10 ms)
+    'LORE_OUTBOX_MAX_ATTEMPTS',              // outbox: failed attempts before dead-letter (default 5)
+    'LORE_OUTBOX_RETRY_BASE_MS',             // outbox: first retry-backoff step (default 500 ms)
     'LORE_OUTBOX_CONSOLIDATION_CAP',         // embed.batch consolidation cap (default 1024 texts)
     'LORE_REPLICATOR_CONSOLIDATION_MAX',     // verbatim.upsert consolidation cap (default 256 rows)
     'LORE_SEARCH_CACHE_TTL_MS',              // verbatim search-cache entry TTL (default 1500 ms)
     'LORE_DEFERRED_SCAN_CACHE_TTL_MS',       // deferred-node scan cache TTL (default 60000 ms, 60s)
     'LORE_SEARCH_CACHE_MAX_ENTRIES',         // verbatim search-cache max entries (default 500)
     'LORE_COMPACT_GRACE_MS',                 // LanceDB compact grace window ms (default 600000, 10 min)
-    'LORE_REGISTRY_IDLE_TTL_MS',             // LocalGraphRegistry idle-workspace eviction TTL (default 1800000, 30 min)
+    'LORE_VERBATIM_NATIVE_CLOSE',            // VerbatimStore.close() native-handle kill switch (default on; 0/false/off = 3.19.1 dereference-only)
+    'LORE_REGISTRY_IDLE_TTL_MS',             // LocalGraphRegistry idle-workspace eviction TTL (default 0 = disabled as of 3.20.0, was 1800000/30 min — docs/PERFORMANCE-MEMORY.md §9)
     'LORE_REGISTRY_SWEEP_MS',               // LocalGraphRegistry background sweep interval (default 600000, 10 min)
+    'LORE_VERBATIM_IDLE_TTL_MS',             // WorkspaceVerbatimResolver idle-eviction TTL (default 1800000, 30 min)
+    'LORE_VERBATIM_SWEEP_MS',               // WorkspaceVerbatimResolver background sweep interval (default 600000, 10 min)
+    'LORE_SQLITE_VECTOR_CACHE_MB',           // SqliteVerbatimStore JS-fallback in-memory vector matrix budget (default 64 MB; 0 = always stream)
+    'LORE_SQLITE_VECTOR_DISABLE_NATIVE',     // test/ops escape hatch: force the JS brute-force fallback even when sqlite-vec loads (default off)
+    'LORE_VECTOR_PROMOTE_ROWS',              // SqliteVerbatimStore -> LanceDB promotion row threshold (default 250000; 0 disables)
+    'LORE_DEFAULT_VECTOR_ENGINE',            // 3.21 step 2 part 2 — operator escape hatch: NEW local workspaces default to vectorEngine 'sqlite'; set to 'lance' to keep the pre-3.21 default
     // TW-7e — concurrency/lifecycle knobs (defaults unchanged).
     'LORE_MAX_OPEN_WORKSPACES',              // LocalGraphRegistry max open workspaces before LRU eviction (default 8)
     'LORE_DATAPLANE_HEALTH_TIMEOUT_MS',      // boot Dataplane /health ping timeout ms (default 2000)

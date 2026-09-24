@@ -524,3 +524,161 @@ incurred, and the extrapolated cost/time estimate for the full run.
 just with `--n` set to the full 500 and, obviously, the two blockers above
 resolved first) — this is a documented capability, not a hidden shortcut,
 but it was not invoked.
+
+## 2026-09-20/21 — four accuracy features built, gated behind flags; none defaulted on
+
+Four independent fixes were built on top of the pipeline above, each behind
+its own CLI flag on `runSubset.ts` so the pre-existing default behavior is
+unchanged unless explicitly opted into. All four are uncommitted as of this
+writing (see "Status of this work" below).
+
+- **`--structured-facts auto|all|off`** (default `auto`) — a SQLite side
+  table (`countable_events`, via `extractCountableFacts.ts`) of per-session
+  extracted quantifiable facts, injected into the answering prompt for
+  counting-shaped questions. `auto` = pre-existing `detectCounting.ts`
+  heuristic gate; `all` forces it for every question; `off` disables it.
+  A COUNT-only SQL aggregate (`structuredFactsAggregate.ts`, via Lore's
+  `IAnalyticalStorage`) is prepended above the raw row listing — **SUM was
+  tried and deliberately removed**: `analytical.sum('numeric_value')`
+  returned $2,356 against a $185 gold answer on `gpt4_d84a3211` because the
+  same real-world purchase gets re-extracted as separate rows across session
+  recaps, and no dedup-by-real-world-event step exists anywhere. If SUM is
+  revisited, that dedup step is the prerequisite, not an afterthought.
+- **`--preference-facts auto|all|off`** (default `auto`) — same shape,
+  separate `preference_events` table (`extractPreferenceFacts.ts`), for
+  preference-shaped questions.
+- **`--recency-tagging on|off`** — tags retrieved facts with how stale they
+  are relative to the question date; evidence-based by construction (reads
+  retrieved facts directly, never gated by a pre-search guess).
+  `factRecency.ts`.
+  **Independently validated** (2026-09-21): 7/7 of this session's real
+  `knowledge-update` judged answers were correct with this on — small n, not
+  a controlled comparison, but no regression signal.
+- **`--decompose-multi-session on|off`** — see `retrievalStrategies.ts`'s own
+  header for the full rationale. Originally gated by a pre-search text
+  guess (`detectQuestionType.ts`), measured at only 42.9% accuracy for the
+  one category it existed to help — worse than a coin flip, because a
+  multi-session question's WORDING doesn't reliably signal that its answer
+  is scattered across sessions; only the retrieved evidence does.
+  **Redesigned 2026-09-21** to a post-retrieval signal: run the normal
+  single-query recall first, count how many distinct sessions
+  (`session:<id>` tags) appear among the top 20 ranked results
+  (`countSessionSpread`), and only escalate to decomposition (extra LLM
+  call + N extra `recall()` calls) if that count is ≥5. See "Real paid
+  test" below for how this performed.
+
+### Real paid test of the decompose-multi-session redesign (2026-09-21, n=12)
+
+Stratified 12-question subset, both extraction passes run for real (~$0.32
+combined), then `runSubset.ts --n 12 --structured-facts auto
+--preference-facts auto --recency-tagging on --decompose-multi-session on`
+against the real answer model (`gpt-4o-mini`) and the official judge
+(`gpt-4o-2024-08-06`). Full JSON:
+`results/subset-n12-2026-09-21T11-25-24-157Z.json`.
+
+- Overall judged accuracy: 58.3% (7/12). By category: single-session-user
+  100% (2/2), multi-session 0% (0/3), single-session-preference 100% (1/1),
+  temporal-reasoning 33.3% (1/3), knowledge-update 100% (2/2),
+  single-session-assistant 100% (1/1). PRIMARY retrieval (no judge):
+  recall_any@10 75.0%, recall_all@10 50.0%, ndcg@10 0.404 overall.
+- **The evidence-based trigger has perfect recall but poor precision at
+  n=12.** It fired on all 3 real `multi-session` questions (session spread
+  6, 11, 7 — no misses) but also fired on 7 of the other 9 questions
+  (spread 7, 7, 7, 9, 10, 11, 14) — only 3 of its 10 firings were actually
+  necessary. **Raising `SESSION_SPREAD_THRESHOLD` will not fix this**: the
+  true-positive spreads (6, 7, 11) and false-positive spreads (7, 7, 7, 9,
+  10, 11, 14) overlap directly — there is no cutoff on this signal alone
+  that separates them on this sample. A fix needs either a different
+  signal (e.g. spread as a fraction of total sessions in the haystack
+  rather than a flat count) or a much larger sample to design one against;
+  n=12 is not enough for either.
+- On the 3 true `multi-session` questions the trigger correctly fired for,
+  all 3 were still judged wrong — decomposition recovered *some* evidence
+  (recall_any 66.7%) but never *all* of it (recall_all 0%). n=3, not
+  enough to separate a real limitation from bad luck, but worth tracking
+  if `multi-session` stays weak in future runs.
+- **Decision: do not retune the threshold now.** `SESSION_SPREAD_TOP_K`/
+  `SESSION_SPREAD_THRESHOLD` in `retrievalStrategies.ts` stay as documented
+  starting estimates. Revisit with a larger paid run only once this
+  feature is close to being relied on — not before, given the finding
+  above that simple retuning is a dead end on this signal.
+- No flag-off baseline was run in this pass, so the trigger's net effect
+  on judged accuracy (helping vs. hurting vs. doing nothing) is not yet
+  isolated — only its firing precision/recall is measured here.
+
+### Prior investigation this build responds to (counting-question root causes, 2026-09-20)
+
+Before the flags above existed in their current form, a 7-question
+structured-facts rerun surfaced 4 wrong answers. Root-caused per question
+against the live `countable_events` rows, the dataset's gold evidence
+turns, and the retrieval window:
+
+- `gpt4_d84a3211` (bike spend, gold $185, answered $205): arithmetic slip —
+  the model's own text sums to $185 then states $205. `runSubset.ts`'s
+  `--think auto` (reasoning on for counting questions) only applies to
+  Ollama models, so this documented mitigation was inactive on the
+  `gpt-4o-mini` path. **Open**: route counting questions to a
+  reasoning-capable model on the OpenAI/OpenRouter path too, or instruct
+  the prompt to show its line-by-line sum before answering.
+- `3a704032` (plants, gold 3, answered 2): an extraction miss
+  (`buildExtractionPrompt`'s include list doesn't cover "received as a
+  gift") made fatal by `answerModel.ts:87` telling the model the
+  structured record is "authoritative" — so it dropped a fact that WAS
+  present in the retrieved excerpts at rank 2. **Open**: soften
+  "authoritative" to "supplements the excerpts; a fact stated in the
+  excerpts but absent from the record still counts", with a unit test.
+- `0a995998` (clothing, gold 3, answered 2): all 3 gold rows exist in the
+  table; only one was in the retrieval window. Cause undetermined at n=1
+  (burial among 65 unrelated rows vs. a category-boundary misread).
+  **Open**: hand-filtered ablation (answer with just the 5 clothing rows)
+  before building any read-time relevance filter.
+- `6d550036` (projects led, gold 2, answered 3): a genuine over-broad-
+  category miscount — the model counted a `project`-type row from a
+  DISTRACTOR session as a led project. Category-only filtering would not
+  have fixed it (the correct row and the wrong row share a category).
+- Binding constraints found in code, still in force: `countableEvents.ts`
+  — `formatStructuredFacts` must never merge or drop a row (any relevance
+  filter must GROUP, not drop); `extractFacts.ts` — include-when-unsure,
+  since an omitted row is unrecoverable downstream.
+- A same-day n=10-per-type (60q) `--structured-facts off` vs. `all`
+  comparison (`results/2026-09-20-all-types-60-off.json` /
+  `-60-all.json`) found 39/60 → 41/60 overall, but the per-category moves
+  were NOT monotonic with retrieval quality (`knowledge-update` has
+  90-100% retrieval and got WORSE with facts on; `multi-session` has the
+  weakest retrieval and improved) — likely because the facts table serves
+  superseded values for `knowledge-update` (it records events, not which
+  is current) rather than because retrieval was shaky. At n=10/type every
+  10-point move is one question flipping, so **treat this as an
+  unconfirmed hypothesis, not a result** — a category-conditional default
+  is not deployable anyway without a production-side question classifier,
+  since the benchmark's category label doesn't exist outside this harness.
+- Separately confirmed by code inspection: Lore core's `recall()` already
+  fuses vector + BM25 (RRF) + a graph keyword pass + depth-1 edge traversal
+  on every call — there is no "vector-only" mode to benchmark. Query
+  expansion / multi-query / HyDE is deliberately NOT in core
+  (`recall/retrieve.ts`'s "D3: queries are searched RAW" decision); any
+  query-side fix (e.g. for `single-session-preference`'s weak retrieval)
+  is harness/app-layer only, same as `queryDecompose.ts` already is.
+
+### Status of this work / what "done" requires next
+
+Nothing above is committed. Concretely, to close this out:
+
+1. **Split the branch.** This work is currently uncommitted on top of
+   `fix/outbox-deleted-workspace-retry`, an unrelated outbox fix. It needs
+   its own branch before it can be reviewed or merged independently.
+2. **Typecheck + the harness's usual checks** before any commit — none of
+   the review passes above ran `npx tsc --noEmit -p .` themselves.
+3. Decide on the two still-open counting-question fixes above
+   (`answerModel.ts`'s "authoritative" wording; reasoning-on-OpenAI-path
+   for arithmetic) — both have a concrete proposed change and an expected
+   effect, neither has been made.
+4. Re-run the `--structured-facts off`/`all` category comparison at n≥50
+   per type (or the full 500) before treating the per-category hypothesis
+   above as real — n=10/type cannot separate a real effect from noise.
+5. Run a flag-off baseline for `--decompose-multi-session` to isolate its
+   net effect on judged accuracy, before deciding whether the feature is
+   worth its cost as designed.
+6. Only after 3-5 above have a real signal behind them: a full 500-question
+   run, per the existing go/no-go read further up this file — still
+   blocked on nothing but time/cost, same as before this build.

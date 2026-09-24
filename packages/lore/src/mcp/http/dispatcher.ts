@@ -48,6 +48,7 @@ import { trySchemaRoutes } from './routes/schema.js';
 import { tryOrchestrationsRoutes } from './routes/orchestrations.js';
 import { tryLifecycleRoutes } from './routes/lifecycle.js';
 import { tryOutcomesRoutes } from './routes/outcomes.js';
+import { tryRecallOutcomeRoute } from './routes/recallOutcome.js';
 import { tryVersioningRoutes } from './routes/versioning.js';
 import { tryAnchorsRoutes } from './routes/anchors.js';
 import { tryCorpusRoutes } from './routes/corpus.js';
@@ -201,6 +202,7 @@ async function dispatchAfterGates(
         outboxLagCache: deps.outboxLagCache,
         quotaStore: deps.quotaStore,
         getWorkspaceEntryForQuota: deps.getWorkspaceEntryForQuota,
+        supersessionEnforceDefault: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
     })) return;
 
     // W8 (Sprint W) — DELETE /api/node/:id. Sibling of MCP delete_node;
@@ -261,6 +263,7 @@ async function dispatchAfterGates(
         outboxStore: deps.outboxStore,
         outboxLagCache: deps.outboxLagCache,
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // L-012 — inline embed routes to requested ws's LanceDB.
+        supersessionEnforceDefault: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
     })) return;
 
     // Phase 2.5 item 6 — schema-authoring REST mirror at /api/schema/*.
@@ -340,6 +343,7 @@ async function dispatchAfterGates(
         embedQueue: deps.embedQueue,
         // L-016 — token write-scope gate + workspace-aware write routing.
         graphRegistry: deps.graphRegistry,
+        supersessionEnforceDefault: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
     })) return;
 
     if (await tryTopologyRoutes(req, res, url, pathname, {
@@ -488,6 +492,17 @@ async function dispatchAfterGates(
         graphRegistry: deps.graphRegistry,
     })) return;
 
+    // 3.21 step 3(h) — POST /api/recall/outcome, the recall-vocabulary
+    // mirror of the outcomes route above, feeding the SAME mechanism.
+    if (deps.auxStore && await tryRecallOutcomeRoute(req, res, url, pathname, {
+        store: deps.store,
+        auxStore: deps.auxStore,
+        versionStore: deps.versionStore,
+        deploymentMode: deps.deploymentMode,
+        dataplane: deps.dataplane,
+        graphRegistry: deps.graphRegistry,
+    })) return;
+
     // Feature 8 — versioning REST: history, diff, changesets, snapshot.
     if (deps.versionStore && await tryVersioningRoutes(req, res, url, pathname, {
         versionStore: deps.versionStore,
@@ -501,6 +516,7 @@ async function dispatchAfterGates(
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
         // ITEM X-walnode (2026-09-03) — changeset delete WAL append.
         getWal: () => deps.getSyncEngine().getWal(),
+        supersessionEnforceDefault: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
     })) return;
 
     // Feature 6 — anchors REST: GET /api/nodes/:id/anchors.

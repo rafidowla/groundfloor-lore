@@ -220,8 +220,10 @@ await test('T5 (CLI): restoreCommand refuses a mismatched name naming both works
     const priorHome = process.env['LORE_HOME'];
     process.env['LORE_HOME'] = root;
     try {
-        const { createWorkspace } = await import('../packages/lore/src/config/workspaces.js');
+        const { createWorkspace, setWorkspaceGraphEngine } = await import('../packages/lore/src/config/workspaces.js');
         createWorkspace('cli-other', {}, root);
+        // 3.21 step 1d: new workspaces default to 'sqlite'; this fixture restores SURREAL archives.
+        setWorkspaceGraphEngine('cli-other', 'surreal', root);
 
         const { restoreCommand } = await import('../packages/lore/src/cli/commands/restore.js');
 
@@ -272,9 +274,12 @@ await test('T6: `lore restore --all <dir>` restores each archive into the worksp
     const priorHome = process.env['LORE_HOME'];
     process.env['LORE_HOME'] = root;
     try {
-        const { createWorkspace } = await import('../packages/lore/src/config/workspaces.js');
+        const { createWorkspace, setWorkspaceGraphEngine } = await import('../packages/lore/src/config/workspaces.js');
         createWorkspace('alpha', {}, root);
         createWorkspace('beta', {}, root);
+        // 3.21 step 1d: new workspaces default to 'sqlite'; this fixture restores SURREAL archives.
+        setWorkspaceGraphEngine('alpha', 'surreal', root);
+        setWorkspaceGraphEngine('beta', 'surreal', root);
 
         const alphaTarball = await seedAndBackup('alpha', 'a-node');
         const betaTarball = await seedAndBackup('beta', 'b-node');

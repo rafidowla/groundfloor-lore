@@ -28,10 +28,11 @@
 
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const BASE = process.env['LORE_BASE'] ?? 'http://127.0.0.1:3847';
 const TOKEN_PATH = process.env['LORE_TOKEN_PATH']
-    ?? '/Users/rdowla/Downloads/AiDev/BitBucket/lore/lore-local-data/auth.token';
+    ?? fileURLToPath(new URL('../../lore-local-data/auth.token', import.meta.url));
 
 function loadToken(): string {
     if (!existsSync(TOKEN_PATH)) {

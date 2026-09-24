@@ -28,7 +28,7 @@
 import { loadWorkspaces } from '../config/workspaces.js';
 
 /** The engines that can back the graph substrate of a local workspace. */
-export type GraphEngineKind = 'kuzu' | 'surreal';
+export type GraphEngineKind = 'kuzu' | 'surreal' | 'sqlite';
 
 /**
  * The default, and what an absent selector means — for a workspace that has
@@ -135,8 +135,9 @@ export function resolveWorkspaceGraphEngine(workspace: string, home?: string): G
         // the moment the default could be 'surreal': a workspace that
         // explicitly opted OUT of surreal would have been silently switched
         // onto it anyway, reading a fresh empty store while its real data
-        // sat untouched and invisible.
+        // sat untouched and invisible. Same reasoning covers 'sqlite' now.
         if (entry?.graphEngine === 'surreal') return 'surreal';
+        if (entry?.graphEngine === 'sqlite') return 'sqlite';
         if (entry?.graphEngine === 'kuzu') return 'kuzu';
         return DEFAULT_GRAPH_ENGINE;
     } catch {
@@ -144,5 +145,24 @@ export function resolveWorkspaceGraphEngine(workspace: string, home?: string): G
         // and the incumbent engine is the safe assumption.
         return DEFAULT_GRAPH_ENGINE;
     }
+}
+
+/**
+ * resolveNewWorkspaceGraphEngine — the value `createWorkspace()` and
+ * fresh-home seeding WRITE explicitly for a brand-NEW local workspace (3.21
+ * step 1d). Never used to resolve an EXISTING workspace — that stays
+ * `resolveWorkspaceGraphEngine`, whose absent-field default is unaffected
+ * so no existing workspace changes substrate because of this.
+ *
+ * Defaults to `'sqlite'` (the point of 3.21: new local workspaces get the
+ * indexed, leak-free engine). `LORE_DEFAULT_GRAPH_ENGINE=surreal` is the
+ * documented operator escape hatch (docs/CONFIGURATION.md,
+ * security/envScrub.ts allowlist) for a host that isn't ready to switch —
+ * any other value, or an absent/unset var, is 'sqlite'. Cloud mode never
+ * calls this (D-022: SurrealGraph is local/embedded only, and SqliteGraph
+ * has no cloud counterpart either — this function is local-workspace-only).
+ */
+export function resolveNewWorkspaceGraphEngine(): 'sqlite' | 'surreal' {
+    return process.env['LORE_DEFAULT_GRAPH_ENGINE'] === 'surreal' ? 'surreal' : 'sqlite';
 }
 

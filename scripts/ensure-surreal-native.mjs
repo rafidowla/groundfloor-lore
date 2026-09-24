@@ -17,16 +17,26 @@
  *   - `--ignore-scripts` / partial extraction leaving the addon absent.
  *   - An unsupported platform/arch triple (the package covers darwin
  *     arm64/x64, linux arm64/x64 × gnu/musl, win32 arm64/x64 — nothing else).
- *   - A Node ABI mismatch: the addon is built for a NODE_MODULE_VERSION, and
- *     this package pins Node 22 (`engines.node: ">=22 <23"`). Running it on
- *     another major fails at dlopen with a message most people read as
- *     "the package is broken".
+ *   - A load failure at dlopen for any other reason (corrupted extraction,
+ *     missing OS-level shared libs, etc). The addon is built against
+ *     Node-API (it exports `napi_register_module_v1`, confirmed by loading
+ *     the same binary successfully on both Node 20.20.2 and 22.23.2), so
+ *     unlike a NODE_MODULE_VERSION-pinned addon it is NOT ABI-locked to a
+ *     specific Node major — Node-API's whole point is ABI stability across
+ *     Node versions. Lore's own Node 22 pin (`engines.node: ">=22 <23"`) is
+ *     a project policy choice, not something this addon requires. (The repo
+ *     dependency that IS genuinely ABI-specific, and would need a rebuild
+ *     per Node major/platform, is `better-sqlite3`.) This script still
+ *     dlopen()s the addon below because a load failure — whatever the
+ *     cause — is worth catching at install time with an actionable message
+ *     rather than surfacing as a confusing error at first graph query.
  *
  * FAIL-SOFT by design: this prints an actionable warning and exits 0. The
  * addon ships inside @surrealdb/node's own tarball, so a failure here means
- * the npm install itself went wrong (unsupported platform, ABI mismatch) —
- * aborting the install over it buys nothing the warning at install time
- * plus the loud failure at first graph query don't already provide.
+ * the npm install itself went wrong (unsupported platform, partial
+ * extraction, missing shared libs) — aborting the install over it buys
+ * nothing the warning at install time plus the loud failure at first graph
+ * query don't already provide.
  */
 
 import fs from 'node:fs';
@@ -103,9 +113,9 @@ if (!fs.existsSync(binaryPath)) {
     process.exit(0);
 }
 
-// Actually LOAD it. Presence on disk proves nothing about ABI compatibility,
-// and the ABI mismatch is the failure mode that produces the most confusing
-// error message later.
+// Actually LOAD it. Presence on disk proves nothing about whether dlopen can
+// actually load it here, and a load failure at first graph query is the
+// failure mode that produces the most confusing error message later.
 try {
     process.dlopen({ exports: {} }, binaryPath);
 } catch (err) {

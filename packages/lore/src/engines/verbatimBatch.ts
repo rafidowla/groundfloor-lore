@@ -423,6 +423,43 @@ export async function ensureVectorIndex(
  *     predates this fix) is treated as "not indexed yet" and gets replaced
  *     — `createIndex`'s default `replace: true` swaps it in place.
  */
+/**
+ * Fast, cheap check: does an FTS index already exist on `text` (and not just
+ * some legacy BTree index — see this function's caller-site header)?
+ *
+ * Extracted from ensureFtsIndex's own early-return check
+ * (fix/search-worker-call-cancellation, 3.20.2 — defect 1, requirement 5) so
+ * VerbatimStore.ensureFtsIndex can run this OUTSIDE searchGate.exclusive()
+ * and skip taking the exclusive gate entirely on the common "already
+ * indexed" path — every storeBatch used to call ensureFtsIndex, which took
+ * the exclusive gate (draining every in-flight read) before even checking
+ * whether a build was needed. Deliberately the SAME predicate ensureFtsIndex
+ * still runs as its own first check below — that's what makes hoisting this
+ * out behaviour-preserving: a lost race between the hoisted caller and a
+ * genuine concurrent build just costs one redundant listIndices() call, it
+ * can never produce a wrong "no build needed" answer, because the real
+ * build path re-checks the identical predicate under the exclusive gate
+ * before doing any work.
+ */
+export async function ftsIndexPresent(ctx: VerbatimBatchCtx): Promise<boolean> {
+    if (!ctx.initialized || !ctx.table) return false;
+    try {
+        const indices = await ctx.table.listIndices?.();
+        if (Array.isArray(indices)) {
+            for (const idx of indices) {
+                const idxObj = idx as { columns?: string[]; name?: string; indexType?: string };
+                if (idxObj.columns && idxObj.columns.includes('text') && idxObj.indexType === 'FTS') {
+                    return true;
+                }
+            }
+        }
+        return false;
+    } catch (err) {
+        log.error(`[VerbatimStore] ftsIndexPresent check failed (non-fatal — treated as not-yet-indexed): ${(err as Error).message}`);
+        return false;
+    }
+}
+
 export async function ensureFtsIndex(
     ctx: VerbatimBatchCtx,
     opts: { minRows?: number; tokenizer?: FtsTokenizerSettings } = {},
@@ -432,14 +469,8 @@ export async function ensureFtsIndex(
     try {
         // Already FTS-indexed on `text`? (Not just "some index" — a legacy
         // BTree index from the pre-fix bug above must NOT count as done.)
-        const indices = await ctx.table.listIndices?.();
-        if (Array.isArray(indices)) {
-            for (const idx of indices) {
-                const idxObj = idx as { columns?: string[]; name?: string; indexType?: string };
-                if (idxObj.columns && idxObj.columns.includes('text') && idxObj.indexType === 'FTS') {
-                    return false; // Already FTS-indexed.
-                }
-            }
+        if (await ftsIndexPresent(ctx)) {
+            return false; // Already FTS-indexed.
         }
         const count = await ctx.table.countRows();
         if (count < minRows) return false;

@@ -203,7 +203,11 @@ export async function maintainCommand(args: string[]): Promise<void> {
     for (const name of targets) {
         let wsPath: string;
         try {
-            wsPath = getWorkspacePath(name);
+            // Explicit `loreHome()` (Defect 3, 3.20.2): the CLI always runs as
+            // its own process, so this is the process-wide home either way —
+            // spelled out so it doesn't silently drift if `getWorkspacePath`'s
+            // default ever changes.
+            wsPath = getWorkspacePath(name, loreHome());
         } catch (err) {
             console.error(`[maintain] ${(err as Error).message}`);
             continue;
@@ -277,7 +281,8 @@ export async function maintainCommand(args: string[]): Promise<void> {
             compaction: false, versionCleanup: false, nodeRetention: false, ephemeralExpiry: true,
         });
         const report = await runMaintenance(storePolicy, {
-            workspaces: new WorkspaceRegistry(),
+            // Explicit `loreHome()` (Defect 3, 3.20.2) — same reasoning as above.
+            workspaces: new WorkspaceRegistry(undefined, loreHome()),
             safety: new AlwaysSafe(),
         }, { dryRun, scopeLabel: 'store:ephemeral-workspaces', onProgress: asJson ? undefined : (l) => console.log(`  ${l}`) });
         reports.push(report);

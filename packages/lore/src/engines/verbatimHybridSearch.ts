@@ -26,7 +26,7 @@
  * surfaces only.
  */
 
-import { reciprocalRankFusion } from '../mcp/tools/search/helpers.js';
+import { rrfFuse } from '../recall/rrf.js';
 import { readBm25Envelope } from './verbatimBm25Result.js';
 
 /** One fused result row: the underlying hit object plus its unified score.
@@ -39,20 +39,14 @@ export interface FusedVerbatimHit<T extends { id: string }> {
     matchedBy: { semantic: boolean; bm25: boolean };
 }
 
-/** Per-id RRF score, k=60 — mirrors retrieve.ts's local rrfScores (the
- *  shared helpers.reciprocalRankFusion returns only ordered ids). */
-function rrfScores(semanticIds: string[], bm25Ids: string[], k = 60): Map<string, number> {
-    const scores = new Map<string, number>();
-    const add = (ids: string[]) => ids.forEach((id, idx) => scores.set(id, (scores.get(id) ?? 0) + 1 / (k + idx + 1)));
-    add(semanticIds);
-    add(bm25Ids);
-    return scores;
-}
-
 /** Fuse already-fetched semantic + BM25 result lists. `bm25Value` is the RAW
  *  return of bm25Search() (any shape — the fail-closed envelope reader
  *  decides); pass `undefined` when the store has no bm25Search at all and
- *  the read degrades to semantic-only. */
+ *  the read degrades to semantic-only.
+ *
+ * 3.21 step 3(b) — fusion itself now runs through the ONE shared
+ * reciprocal-rank-fusion implementation (recall/rrf.ts), replacing a local
+ * reimplementation of the same k=60 formula that used to live here. */
 export function fuseHybridVerbatim<T extends { id: string }>(
     semantic: T[],
     bm25Value: unknown,
@@ -61,17 +55,15 @@ export function fuseHybridVerbatim<T extends { id: string }>(
     const bm25 = envelope.ranked ? envelope.hits : [];
     const semanticIds = semantic.map((h) => h.id);
     const bm25Ids = bm25.map((h) => h.id);
-    const fusedIds = reciprocalRankFusion(semanticIds, bm25Ids);
-    const rrf = rrfScores(semanticIds, bm25Ids);
-    const maxRrf = Math.max(1e-9, ...rrf.values());
+    const fused = rrfFuse([semanticIds, bm25Ids]);
     const semanticById = new Map(semantic.map((h) => [h.id, h]));
     const bm25ById = new Map(bm25.map((h) => [h.id, h]));
     const semanticSet = new Set(semanticIds);
     const bm25Set = new Set(bm25Ids);
-    return fusedIds.map((id) => ({
-        hit: semanticById.get(id) ?? bm25ById.get(id)!,
-        score: (rrf.get(id) ?? 0) / maxRrf,
-        matchedBy: { semantic: semanticSet.has(id), bm25: bm25Set.has(id) },
+    return fused.map((f) => ({
+        hit: semanticById.get(f.id) ?? bm25ById.get(f.id)!,
+        score: f.score,
+        matchedBy: { semantic: semanticSet.has(f.id), bm25: bm25Set.has(f.id) },
     }));
 }
 

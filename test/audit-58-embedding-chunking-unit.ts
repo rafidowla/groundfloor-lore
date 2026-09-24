@@ -33,7 +33,7 @@ import * as path from 'node:path';
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-audit58-'));
 process.env['LORE_HOME'] = TEST_HOME;
 
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
 import { LocalEmbeddingProvider } from '../packages/lore/src/providers/localEmbeddingProvider.js';
 
 let passed = 0, failed = 0;
@@ -94,7 +94,7 @@ await test('provider level: short documents keep a normal single-chunk embedding
 });
 
 await test('RAN repro (scaled): tail-phrase doc beats pure-filler decoys in verbatim search', async () => {
-    const store = new VerbatimStore(path.join(TEST_HOME, 'ws'), new LocalEmbeddingProvider());
+    const store = makeVerbatimStore(path.join(TEST_HOME, 'ws'), new LocalEmbeddingProvider());
     await store.initialize();
 
     await store.store({ id: 'doc-head', text: docWithPhraseAt(0), metadata: {} });

@@ -111,6 +111,9 @@ const LITERAL_ALLOWANCES = new Map([
     ['packages/lore/src/engines/graphEngineSelector.ts', ["'kuzu'"]],
     ['packages/lore/src/engines/localGraphRegistry.ts', ["'kuzu'"]],
     ['packages/lore/src/engines/openWorkspaceGraph.ts', ["'kuzu'"]],
+    // migrate-graph's own removed-engine refusal (3.21 step 1e) — same
+    // resolveWorkspaceGraphEngine() === 'kuzu' guard as the three above.
+    ['packages/lore/src/engines/migrateGraphToSqlite.ts', ["'kuzu'"]],
     // The same sentinel surfacing in the config type, the schema-safety
     // engine-agnostic port, the local-substrate migration vocabulary, and
     // backup/restore's archived-engine detection — all read/write the exact

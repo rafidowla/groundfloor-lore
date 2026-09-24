@@ -29,14 +29,14 @@ import type {
     VerbatimSearchOpts,
     VerbatimSearchResult,
 } from '../contracts/verbatim.js';
-import type { VerbatimStore } from './verbatimStore.js';
+import type { VerbatimStoreApi } from './verbatimStoreApi.js';
 import type { VerbatimDocument as LegacyDoc } from '../providers/types.js';
 import { makeBm25Envelope } from './verbatimBm25Result.js';
 import type { Bm25Envelope } from './verbatimBm25Result.js';
 import { hybridVerbatimSearch } from './verbatimHybridSearch.js';
 
 export class VerbatimStoreAdapter implements IVerbatimStore {
-    constructor(private readonly inner: VerbatimStore) {}
+    constructor(private readonly inner: VerbatimStoreApi) {}
 
     async store(doc: VerbatimDocument): Promise<void> {
         await this.inner.store(toLegacy(doc));

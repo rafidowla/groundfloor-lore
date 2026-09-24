@@ -16,14 +16,14 @@
  *   step that didn't complete on the last run.
  */
 
-import type { VerbatimStore } from './verbatimStore.js';
+import type { VerbatimStoreApi } from './verbatimStoreApi.js';
 import { buildVerbatimText } from './verbatimSchema.js';
 import { tagsToString } from './normalizeTags.js';
 import type { DataplaneVectorStore } from './dataplaneVectorStore.js';
 import type { LoreNode } from '../providers/types.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 
-export type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
+export type LoreVectorStore = VerbatimStoreApi | DataplaneVectorStore;
 
 /**
  * Result of a single vector-mirror attempt. NW-7b: previously this

@@ -1,0 +1,295 @@
+{"qid": "q001", "question": "Which of Lucas's two dentists is handling the appointment he's dreading?", "gold": "m0002", "kind": "paraphrase"}
+{"qid": "q002", "question": "What time is Lucas's 6-month cleaning in March?", "gold": "m0001", "kind": "keyword"}
+{"qid": "q003", "question": "Once the load test exposed the problem, what did we switch to for saving clinician records across regions?", "gold": "m0004", "kind": "paraphrase"}
+{"qid": "q004", "question": "Why did we abandon the Postgres row-level-security plan for patient notes?", "gold": "m0004", "kind": "mixed"}
+{"qid": "q005", "question": "Which Denver trip is for a family wedding rather than work?", "gold": "m0006", "kind": "paraphrase"}
+{"qid": "q006", "question": "Who am I meeting with on the May Denver trip?", "gold": "m0005", "kind": "mixed"}
+{"qid": "q007", "question": "What did I flag as Priya's growth area for the quarter?", "gold": "m0007", "kind": "paraphrase"}
+{"qid": "q008", "question": "Which OKR did I personally miss in Q1?", "gold": "m0008", "kind": "paraphrase"}
+{"qid": "q009", "question": "How many car-loan payments are left as of March?", "gold": "m0010", "kind": "keyword"}
+{"qid": "q010", "question": "On what date does the home loan payment come out automatically?", "gold": "m0009", "kind": "paraphrase"}
+{"qid": "q011", "question": "What cheese swap did I make so Ines could still eat the lasagna?", "gold": "m0012", "kind": "paraphrase"}
+{"qid": "q012", "question": "How many cups of parmesan does the regular lasagna recipe call for?", "gold": "m0011", "kind": "keyword"}
+{"qid": "q013", "question": "Do I need to fast before my annual checkup with Dr. Hwang?", "gold": "m0013", "kind": "mixed"}
+{"qid": "q014", "question": "What's the reason behind that upcoming skin-specialist visit?", "gold": "m0014", "kind": "paraphrase"}
+{"qid": "q015", "question": "How much did the work laptop cost?", "gold": "m0016", "kind": "keyword"}
+{"qid": "q016", "question": "Why did Lucas need a new computer?", "gold": "m0015", "kind": "paraphrase"}
+{"qid": "q017", "question": "What gift idea did my friend drop for his October birthday?", "gold": "m0017", "kind": "paraphrase"}
+{"qid": "q018", "question": "How old is Ivy turning this October?", "gold": "m0018", "kind": "keyword"}
+{"qid": "q019", "question": "Who got picked for the kitchen work over a pricier, faster competitor?", "gold": "m0019", "kind": "paraphrase"}
+{"qid": "q020", "question": "What was the higher of the two remodel bids?", "gold": "m0020", "kind": "keyword"}
+{"qid": "q021", "question": "What did the vet say was wrong after the dog started favoring one leg?", "gold": "m0022", "kind": "paraphrase"}
+{"qid": "q022", "question": "Where did the dog get his rabies booster?", "gold": "m0021", "kind": "keyword"}
+{"qid": "q023", "question": "What is Nadia's salary after her raise?", "gold": "m0024", "kind": "keyword"}
+{"qid": "q024", "question": "What earned Nadia a bump in pay this spring?", "gold": "m0024", "kind": "paraphrase"}
+{"qid": "q025", "question": "What did I get Renata for a pottery-related gift?", "gold": "m0026", "kind": "mixed"}
+{"qid": "q026", "question": "Which restaurant did we pick to mark our wedding anniversary this year?", "gold": "m0025", "kind": "paraphrase"}
+{"qid": "q027", "question": "Why did the garden app move off a single local database file?", "gold": "m0028", "kind": "paraphrase"}
+{"qid": "q028", "question": "What database did the plant-tracking app start on?", "gold": "m0027", "kind": "keyword"}
+{"qid": "q029", "question": "Do we owe a deductible on the fender-bender claim?", "gold": "m0030", "kind": "keyword"}
+{"qid": "q030", "question": "What did the insurer quote for the storm-related fix to the garage?", "gold": "m0029", "kind": "paraphrase"}
+{"qid": "q031", "question": "What topic did our son pick for his entry in the school's science showcase?", "gold": "m0031", "kind": "paraphrase"}
+{"qid": "q032", "question": "When is Ivy's spring concert?", "gold": "m0032", "kind": "keyword"}
+{"qid": "q033", "question": "What's the subject of my presentation at the industry event happening in September?", "gold": "m0033", "kind": "paraphrase"}
+{"qid": "q034", "question": "What's the plan for the November Portland trip?", "gold": "m0034", "kind": "mixed"}
+{"qid": "q035", "question": "Why did I finally ditch the card I'd had before switching to the new travel one?", "gold": "m0036", "kind": "paraphrase"}
+{"qid": "q036", "question": "What's the annual fee on the new travel rewards card?", "gold": "m0035", "kind": "keyword"}
+{"qid": "q037", "question": "What incident triggered moving embeddings off the main thread?", "gold": "m0038", "kind": "paraphrase"}
+{"qid": "q038", "question": "Where did embedding generation originally run?", "gold": "m0037", "kind": "keyword"}
+{"qid": "q039", "question": "What was the Mother's Day gift for Renata worth?", "gold": "m0039", "kind": "keyword"}
+{"qid": "q040", "question": "What piece of jewelry did I surprise my spouse with to mark our anniversary?", "gold": "m0040", "kind": "paraphrase"}
+{"qid": "q041", "question": "How much was the airline voucher for the Denver delay?", "gold": "m0041", "kind": "keyword"}
+{"qid": "q042", "question": "What travel mishap happened with my luggage overseas?", "gold": "m0042", "kind": "paraphrase"}
+{"qid": "q043", "question": "Does Lucas need to carry an EpiPen?", "gold": "m0043", "kind": "mixed"}
+{"qid": "q044", "question": "What did my allergy test flag?", "gold": "m0044", "kind": "paraphrase"}
+{"qid": "q045", "question": "If I'm bringing Ivy along, which noodle spot is gentler on her palate?", "gold": "m0046", "kind": "paraphrase"}
+{"qid": "q046", "question": "What time should I avoid at the tonkotsu ramen place?", "gold": "m0045", "kind": "keyword"}
+{"qid": "q047", "question": "What did I use to clear up the bugs that showed up on the herbs?", "gold": "m0048", "kind": "paraphrase"}
+{"qid": "q048", "question": "When did the tomatoes first bloom?", "gold": "m0047", "kind": "keyword"}
+{"qid": "q049", "question": "Which lender did I eventually refinance the mortgage with?", "gold": "m0050", "kind": "paraphrase"}
+{"qid": "q050", "question": "What rate did Riverbend offer that I turned down?", "gold": "m0049", "kind": "keyword"}
+{"qid": "q051", "question": "What was my blood pressure reading at the June physical?", "gold": "m0052", "kind": "keyword"}
+{"qid": "q052", "question": "How much better did my average pulse get by the start of spring?", "gold": "m0051", "kind": "paraphrase"}
+{"qid": "q053", "question": "What number is Bianca targeting for the shortened new-user process?", "gold": "m0054", "kind": "paraphrase"}
+{"qid": "q054", "question": "What was the May 13 meeting with Owen about?", "gold": "m0053", "kind": "keyword"}
+{"qid": "q055", "question": "How much was the storage unit during the remodel?", "gold": "m0055", "kind": "keyword"}
+{"qid": "q056", "question": "Once the kitchen work wrapped up, when did we stop paying for extra off-site space?", "gold": "m0056", "kind": "paraphrase"}
+{"qid": "q057", "question": "What did the outdoor outlet job cost?", "gold": "m0058", "kind": "keyword"}
+{"qid": "q058", "question": "What new appliance needed its own separate power line run?", "gold": "m0057", "kind": "paraphrase"}
+{"qid": "q059", "question": "Why was the third-party vector database SaaS ruled out?", "gold": "m0060", "kind": "paraphrase"}
+{"qid": "q060", "question": "What was decided instead of self-hosting on bare metal?", "gold": "m0059", "kind": "keyword"}
+{"qid": "q061", "question": "How much were we paying for the meal-kit box before cancelling?", "gold": "m0062", "kind": "keyword"}
+{"qid": "q062", "question": "Now that work is fully remote, why did I stop paying for office space downtown?", "gold": "m0061", "kind": "paraphrase"}
+{"qid": "q063", "question": "What did I bring Felix back from Iceland?", "gold": "m0064", "kind": "paraphrase"}
+{"qid": "q064", "question": "Why did I pick a ceramic bowl for Ines?", "gold": "m0063", "kind": "mixed"}
+{"qid": "q065", "question": "How much was our 2025 tax refund?", "gold": "m0065", "kind": "keyword"}
+{"qid": "q066", "question": "Why isn't our accountant worried about a certain side project's tax filing?", "gold": "m0066", "kind": "paraphrase"}
+{"qid": "q067", "question": "How many times a week does the half-marathon training plan call for running?", "gold": "m0067", "kind": "keyword"}
+{"qid": "q068", "question": "What's my reason for signing up for the weekend group bike outings?", "gold": "m0068", "kind": "paraphrase"}
+{"qid": "q069", "question": "What did the emergency plumbing call-out fee cost?", "gold": "m0069", "kind": "keyword"}
+{"qid": "q070", "question": "When the hot water system started failing, did we patch it up or go all-in on a new one?", "gold": "m0070", "kind": "paraphrase"}
+{"qid": "q071", "question": "Was the old rental security deposit returned in full?", "gold": "m0071", "kind": "keyword"}
+{"qid": "q072", "question": "While the house was torn up, what did the temporary place cost us monthly?", "gold": "m0072", "kind": "paraphrase"}
+{"qid": "q073", "question": "Which friend is moving to a different city entirely?", "gold": "m0073", "kind": "paraphrase"}
+{"qid": "q074", "question": "What does Ines need help with for her move?", "gold": "m0074", "kind": "keyword"}
+{"qid": "q075", "question": "What number did we settle on for the scaled-back user-adoption goal?", "gold": "m0076", "kind": "paraphrase"}
+{"qid": "q076", "question": "What was the original Q2 weekly-active-user goal?", "gold": "m0075", "kind": "keyword"}
+{"qid": "q077", "question": "How much cash is needed for the Croatia visa on arrival?", "gold": "m0077", "kind": "keyword"}
+{"qid": "q078", "question": "Before we fly up to Banff, is there some passport-validity rule I should double check?", "gold": "m0078", "kind": "paraphrase"}
+{"qid": "q079", "question": "Who pointed us toward the person giving Ivy her music lessons?", "gold": "m0080", "kind": "paraphrase"}
+{"qid": "q080", "question": "How much does Lucas's soccer season cost?", "gold": "m0079", "kind": "keyword"}
+{"qid": "q081", "question": "Who insisted on an extra safety check before a dosage-related feature shipped?", "gold": "m0081", "kind": "paraphrase"}
+{"qid": "q082", "question": "Which teammate tracked down the sync bug that was quietly losing a small fraction of events?", "gold": "m0082", "kind": "paraphrase"}
+{"qid": "q083", "question": "Why are we retiring the old command-line admin tool?", "gold": "m0083", "kind": "paraphrase"}
+{"qid": "q084", "question": "What infrastructure change of a teammate's got approved after a strong benchmark?", "gold": "m0084", "kind": "paraphrase"}
+{"qid": "q085", "question": "What did the designer redo about a first-time user's very first screen?", "gold": "m0085", "kind": "paraphrase"}
+{"qid": "q086", "question": "What length is Owen asking me to cut the fundraising deck down to?", "gold": "m0086", "kind": "keyword"}
+{"qid": "q087", "question": "What change stopped big data exports from quietly dying partway through?", "gold": "m0087", "kind": "paraphrase"}
+{"qid": "q088", "question": "What leftover config from a prior deploy triggered this week's alert storm?", "gold": "m0088", "kind": "paraphrase"}
+{"qid": "q089", "question": "What competitive worry is keeping us from a public uptime page?", "gold": "m0089", "kind": "paraphrase"}
+{"qid": "q090", "question": "What technical approach is being tested to save phone battery life?", "gold": "m0090", "kind": "paraphrase"}
+{"qid": "q091", "question": "What mistake made by someone on the pilot team changed how deletions work now?", "gold": "m0091", "kind": "paraphrase"}
+{"qid": "q092", "question": "Who's covering infra on-call while Nadia is out?", "gold": "m0092", "kind": "mixed"}
+{"qid": "q093", "question": "What integration did a new medical pilot say was their biggest blocker?", "gold": "m0093", "kind": "paraphrase"}
+{"qid": "q094", "question": "What did user testing reveal people kept missing on a key screen?", "gold": "m0094", "kind": "paraphrase"}
+{"qid": "q095", "question": "What years-overdue technical cleanup did we finally close out?", "gold": "m0095", "kind": "paraphrase"}
+{"qid": "q096", "question": "Why is finance asking for a team-by-team breakdown of who we employ?", "gold": "m0096", "kind": "paraphrase"}
+{"qid": "q097", "question": "What team habit changed after a coworker suggested using our own product internally?", "gold": "m0097", "kind": "paraphrase"}
+{"qid": "q098", "question": "What formatting mistake did a customer complaint surface in our downloadable reports?", "gold": "m0098", "kind": "paraphrase"}
+{"qid": "q099", "question": "What's the suspected culprit behind our unreliable build pipeline?", "gold": "m0099", "kind": "paraphrase"}
+{"qid": "q100", "question": "What messaging channel are we testing with a couple of pilot customers?", "gold": "m0100", "kind": "paraphrase"}
+{"qid": "q101", "question": "What misconfigured key was locking out entire client networks by mistake?", "gold": "m0101", "kind": "paraphrase"}
+{"qid": "q102", "question": "What technical root cause did the incident review land on?", "gold": "m0102", "kind": "paraphrase"}
+{"qid": "q103", "question": "What kept the outdoor concrete work delayed for weeks?", "gold": "m0103", "kind": "paraphrase"}
+{"qid": "q104", "question": "Who got their way on a flooring color choice, and for what practical reason?", "gold": "m0104", "kind": "paraphrase"}
+{"qid": "q105", "question": "What did the home inspection turn up in the attic that needed rewiring?", "gold": "m0105", "kind": "paraphrase"}
+{"qid": "q106", "question": "What neighborhood incident made us rethink our front door's security?", "gold": "m0106", "kind": "paraphrase"}
+{"qid": "q107", "question": "What accident happened during the irrigation installation?", "gold": "m0107", "kind": "paraphrase"}
+{"qid": "q108", "question": "What condition under the house needed addressing before it got worse?", "gold": "m0108", "kind": "paraphrase"}
+{"qid": "q109", "question": "Why did we pay more upfront on a home appliance for the efficiency rebate?", "gold": "m0109", "kind": "paraphrase"}
+{"qid": "q110", "question": "What boundary dispute delayed approval for the new fence?", "gold": "m0110", "kind": "paraphrase"}
+{"qid": "q111", "question": "Why did the nursery repaint take three coats instead of the usual two?", "gold": "m0111", "kind": "keyword"}
+{"qid": "q112", "question": "What did the electrician find that saved us from an unnecessary upgrade?", "gold": "m0112", "kind": "paraphrase"}
+{"qid": "q113", "question": "What was wrong with the old garbage disposal that made us replace it?", "gold": "m0113", "kind": "keyword"}
+{"qid": "q114", "question": "How did the two basement-finishing bids differ on handling the sump pump?", "gold": "m0114", "kind": "mixed"}
+{"qid": "q115", "question": "What went wrong with the deck stain color once it was actually applied?", "gold": "m0115", "kind": "paraphrase"}
+{"qid": "q116", "question": "What everyday habit is apparently wrecking my shoulder, per the PT?", "gold": "m0116", "kind": "paraphrase"}
+{"qid": "q117", "question": "What medical equipment came out of getting tested for a sleep issue?", "gold": "m0117", "kind": "paraphrase"}
+{"qid": "q118", "question": "Who pointed me toward the therapist I'm now seeing?", "gold": "m0118", "kind": "paraphrase"}
+{"qid": "q119", "question": "What injury on a mountain hike knocked my race training off track?", "gold": "m0119", "kind": "paraphrase"}
+{"qid": "q120", "question": "What health worry got me cutting down on caffeine?", "gold": "m0120", "kind": "paraphrase"}
+{"qid": "q121", "question": "Why did an old dental filling need redoing?", "gold": "m0121", "kind": "paraphrase"}
+{"qid": "q122", "question": "What eyewear did the doctor recommend for my late-night screen habit?", "gold": "m0122", "kind": "paraphrase"}
+{"qid": "q123", "question": "What was the outcome of the follow-up on that mole they were watching?", "gold": "m0123", "kind": "paraphrase"}
+{"qid": "q124", "question": "What was the very first thing the new diet consultant had me do?", "gold": "m0124", "kind": "paraphrase"}
+{"qid": "q125", "question": "What was I doing when I pulled my lower back?", "gold": "m0125", "kind": "keyword"}
+{"qid": "q126", "question": "What foot condition did the specialist say I'd basically always had?", "gold": "m0126", "kind": "paraphrase"}
+{"qid": "q127", "question": "What physical scare made me swear off caffeinated energy drinks?", "gold": "m0127", "kind": "paraphrase"}
+{"qid": "q128", "question": "What noisy thing around the house am I fixing before the in-laws show up?", "gold": "m0128", "kind": "paraphrase"}
+{"qid": "q129", "question": "What answer did we give our son about a future pet?", "gold": "m0129", "kind": "paraphrase"}
+{"qid": "q130", "question": "Did our daughter make it through her first night away without a hitch?", "gold": "m0130", "kind": "paraphrase"}
+{"qid": "q131", "question": "What's the financial move that could let my spouse reduce her work hours?", "gold": "m0131", "kind": "paraphrase"}
+{"qid": "q132", "question": "What good thing did the school phone home about regarding our son?", "gold": "m0132", "kind": "paraphrase"}
+{"qid": "q133", "question": "What news am I supposed to break to my parents on my sister's behalf?", "gold": "m0133", "kind": "paraphrase"}
+{"qid": "q134", "question": "How committed was our daughter to her sudden no-meat phase?", "gold": "m0134", "kind": "paraphrase"}
+{"qid": "q135", "question": "What did my spouse tackle solo around the house while I was traveling?", "gold": "m0135", "kind": "paraphrase"}
+{"qid": "q136", "question": "How many retainers has Lucas lost this year?", "gold": "m0136", "kind": "keyword"}
+{"qid": "q137", "question": "Who's on turkey duty for Thanksgiving this year?", "gold": "m0137", "kind": "keyword"}
+{"qid": "q138", "question": "What silly claim did our daughter make about her pretend friend at dinner?", "gold": "m0138", "kind": "paraphrase"}
+{"qid": "q139", "question": "Who's stepping into a mentor role for our son's big church milestone?", "gold": "m0139", "kind": "paraphrase"}
+{"qid": "q140", "question": "What sensitive family situation are we keeping quiet around the kids?", "gold": "m0140", "kind": "paraphrase"}
+{"qid": "q141", "question": "What unusual birthday request is our son pushing for this year?", "gold": "m0141", "kind": "paraphrase"}
+{"qid": "q142", "question": "What big trip is my spouse dreaming up for a milestone anniversary?", "gold": "m0142", "kind": "paraphrase"}
+{"qid": "q143", "question": "What went wrong with our connection that forced an unplanned overnight stop?", "gold": "m0143", "kind": "paraphrase"}
+{"qid": "q144", "question": "Who's to blame for the overnight flight that wrecked our first vacation day?", "gold": "m0144", "kind": "paraphrase"}
+{"qid": "q145", "question": "What travel decision for Queenstown did I end up regretting?", "gold": "m0145", "kind": "paraphrase"}
+{"qid": "q146", "question": "Who connected me to that small family-run place we stayed at in Oaxaca?", "gold": "m0146", "kind": "paraphrase"}
+{"qid": "q147", "question": "What did I almost lose on the flight into Montreal?", "gold": "m0147", "kind": "keyword"}
+{"qid": "q148", "question": "What illness cut short our final day of that Mexico trip?", "gold": "m0148", "kind": "paraphrase"}
+{"qid": "q149", "question": "What reward points did I finally cash in for a nicer seat overseas?", "gold": "m0149", "kind": "paraphrase"}
+{"qid": "q150", "question": "What spoiled the coastal view after that two-hour drive to the lookout point?", "gold": "m0150", "kind": "paraphrase"}
+{"qid": "q151", "question": "Who talked us out of the organized tour in favor of wandering on our own?", "gold": "m0151", "kind": "paraphrase"}
+{"qid": "q152", "question": "What workplace change of Renata's forced a mid-year scramble on our medical coverage forms?", "gold": "m0152", "kind": "paraphrase"}
+{"qid": "q153", "question": "What tax break did our accountant say we'd become eligible for?", "gold": "m0153", "kind": "paraphrase"}
+{"qid": "q154", "question": "What math changed my mind about a kitchen appliance's extended warranty?", "gold": "m0154", "kind": "paraphrase"}
+{"qid": "q155", "question": "What did I set up a dedicated account for?", "gold": "m0155", "kind": "keyword"}
+{"qid": "q156", "question": "What banking annoyance from a recent trip am I trying to avoid repeating?", "gold": "m0156", "kind": "paraphrase"}
+{"qid": "q157", "question": "What error did our accountant catch after the fact on a prior filing?", "gold": "m0157", "kind": "paraphrase"}
+{"qid": "q158", "question": "What's the tradeoff I accepted for more predictable power bills?", "gold": "m0158", "kind": "paraphrase"}
+{"qid": "q159", "question": "What old retirement account of Renata's turned up out of nowhere?", "gold": "m0159", "kind": "paraphrase"}
+{"qid": "q160", "question": "What manual bill-paying habit did I finally stop doing after getting penalized for it?", "gold": "m0160", "kind": "paraphrase"}
+{"qid": "q161", "question": "What did I have to fight to get refunded from that Denver hotel stay?", "gold": "m0161", "kind": "keyword"}
+{"qid": "q162", "question": "What was the actual secret to getting my grandmother's biscuits right?", "gold": "m0162", "kind": "paraphrase"}
+{"qid": "q163", "question": "What mishap happened during that cooking night with friends?", "gold": "m0163", "kind": "paraphrase"}
+{"qid": "q164", "question": "What convinced me to batch-cook at the start of the week instead of cooking each night?", "gold": "m0164", "kind": "paraphrase"}
+{"qid": "q165", "question": "What food quirk of Renata's changed how I season things now?", "gold": "m0165", "kind": "paraphrase"}
+{"qid": "q166", "question": "What ingredient swap fixed the cardboard-tasting pizza base?", "gold": "m0166", "kind": "paraphrase"}
+{"qid": "q167", "question": "What tool did I buy to finally figure out if the oven runs hot?", "gold": "m0167", "kind": "paraphrase"}
+{"qid": "q168", "question": "What dish did Lucas help make for the first time?", "gold": "m0168", "kind": "keyword"}
+{"qid": "q169", "question": "What made me ditch the delivery bottles for a countertop fizzy-water gadget?", "gold": "m0169", "kind": "paraphrase"}
+{"qid": "q170", "question": "What cooking technique surprised me by actually working well?", "gold": "m0170", "kind": "paraphrase"}
+{"qid": "q171", "question": "What am I doing with vegetable peels these days instead of tossing them?", "gold": "m0171", "kind": "paraphrase"}
+{"qid": "q172", "question": "What performance problem made me redo the plant app's data syncing?", "gold": "m0172", "kind": "paraphrase"}
+{"qid": "q173", "question": "Who's the one outside tester whose complaint led to a screen getting rebuilt?", "gold": "m0173", "kind": "paraphrase"}
+{"qid": "q174", "question": "Why were older handsets choking on picture uploads?", "gold": "m0174", "kind": "paraphrase"}
+{"qid": "q175", "question": "What piece of the plant app's logic did I release as a standalone public library?", "gold": "m0175", "kind": "paraphrase"}
+{"qid": "q176", "question": "How many people are actually using the garden app at this point?", "gold": "m0176", "kind": "keyword"}
+{"qid": "q177", "question": "What bug had alerts firing at the wrong hour for some users?", "gold": "m0177", "kind": "paraphrase"}
+{"qid": "q178", "question": "What kind of feature am I deliberately leaving out of the plant-tracking tool, and why?", "gold": "m0178", "kind": "paraphrase"}
+{"qid": "q179", "question": "What visual detail in the plant app finally annoyed me enough to redo it?", "gold": "m0179", "kind": "paraphrase"}
+{"qid": "q180", "question": "Which teammate is stuck on the exact-quote retrieval glitch and needs my sign-off this week?", "gold": "m0180", "kind": "paraphrase"}
+{"qid": "q181", "question": "Which teammate is stuck on payment notifications failing to retry and needs my sign-off this week?", "gold": "m0181", "kind": "paraphrase"}
+{"qid": "q182", "question": "Which teammate is stuck on getting ready for the compliance audit and needs my sign-off this week?", "gold": "m0182", "kind": "paraphrase"}
+{"qid": "q183", "question": "Which teammate is stuck on the new-user signup revamp and needs my sign-off this week?", "gold": "m0183", "kind": "paraphrase"}
+{"qid": "q184", "question": "What old data-export feature are we sunsetting?", "gold": "m0184", "kind": "paraphrase"}
+{"qid": "q185", "question": "What new safeguard did we require for how clinicians sign in?", "gold": "m0185", "kind": "paraphrase"}
+{"qid": "q186", "question": "What new cap did we put on how often each customer can hit our API?", "gold": "m0186", "kind": "paraphrase"}
+{"qid": "q187", "question": "What size limit did we put on a single bulk data upload?", "gold": "m0187", "kind": "paraphrase"}
+{"qid": "q188", "question": "What did Owen Faraday and I get into when we talked about which branding direction to go with?", "gold": "m0188", "kind": "mixed"}
+{"qid": "q189", "question": "What did Priya Ramaswamy and I get into when we talked about who we're planning to hire next quarter?", "gold": "m0189", "kind": "mixed"}
+{"qid": "q190", "question": "What did Bianca Ostrowski and I get into when we talked about who we're planning to hire next quarter?", "gold": "m0190", "kind": "mixed"}
+{"qid": "q191", "question": "Who joined the team as backend engineer, reporting to Owen Faraday?", "gold": "m0191", "kind": "keyword"}
+{"qid": "q192", "question": "Who joined the team as backend engineer, reporting to Priya Ramaswamy?", "gold": "m0192", "kind": "keyword"}
+{"qid": "q193", "question": "Who joined the team as product designer, reporting to Priya Ramaswamy?", "gold": "m0193", "kind": "keyword"}
+{"qid": "q194", "question": "How much did it cost to finish sealing the deck?", "gold": "m0194", "kind": "keyword"}
+{"qid": "q195", "question": "How much did it cost to finish replacing the garage door opener?", "gold": "m0195", "kind": "keyword"}
+{"qid": "q196", "question": "How much did it cost to finish installing new gutters?", "gold": "m0196", "kind": "keyword"}
+{"qid": "q197", "question": "How much did it cost to finish regrouting the bathroom tile?", "gold": "m0197", "kind": "keyword"}
+{"qid": "q198", "question": "Why is the tile going up behind the counter taking longer than expected?", "gold": "m0198", "kind": "paraphrase"}
+{"qid": "q199", "question": "Why is getting the new counters in taking longer than expected?", "gold": "m0199", "kind": "paraphrase"}
+{"qid": "q200", "question": "Why is the cabinets arriving taking longer than expected?", "gold": "m0200", "kind": "paraphrase"}
+{"qid": "q201", "question": "Which workout left me saying \"knees were sore afterward\"?", "gold": "m0201", "kind": "mixed"}
+{"qid": "q202", "question": "Which workout left me saying \"surprisingly easy\"?", "gold": "m0202", "kind": "mixed"}
+{"qid": "q203", "question": "Which workout left me saying \"exhausting but worth it\"?", "gold": "m0203", "kind": "mixed"}
+{"qid": "q204", "question": "Which workout left me saying \"felt great, new personal best\"?", "gold": "m0204", "kind": "mixed"}
+{"qid": "q205", "question": "Any news on Ivy -- I heard has a gap in her smile now?", "gold": "m0205", "kind": "paraphrase"}
+{"qid": "q206", "question": "Any news on Ivy -- I heard began lessons in the pool?", "gold": "m0206", "kind": "paraphrase"}
+{"qid": "q207", "question": "Any news on Ivy -- I heard landed a role in the school production?", "gold": "m0207", "kind": "paraphrase"}
+{"qid": "q208", "question": "Any news on Ivy -- I heard got recognized for grades at school?", "gold": "m0208", "kind": "paraphrase"}
+{"qid": "q209", "question": "What's the school drop-off arrangement with Sofia Deschamps?", "gold": "m0209", "kind": "mixed"}
+{"qid": "q210", "question": "What's the school drop-off arrangement with Ines Delacroix?", "gold": "m0210", "kind": "mixed"}
+{"qid": "q211", "question": "What's the school drop-off arrangement with Tara Whitfield?", "gold": "m0211", "kind": "mixed"}
+{"qid": "q212", "question": "What do I want to do on the upcoming trip to Queenstown?", "gold": "m0212", "kind": "keyword"}
+{"qid": "q213", "question": "What do I want to do on the upcoming trip to Reykjavik?", "gold": "m0213", "kind": "keyword"}
+{"qid": "q214", "question": "What do I want to do on the upcoming trip to Montreal?", "gold": "m0214", "kind": "keyword"}
+{"qid": "q215", "question": "What do I want to do on the upcoming trip to Asheville?", "gold": "m0215", "kind": "keyword"}
+{"qid": "q216", "question": "What would I change next time I cook mushroom risotto?", "gold": "m0216", "kind": "keyword"}
+{"qid": "q217", "question": "What would I change next time I cook lemon ricotta pancakes?", "gold": "m0217", "kind": "keyword"}
+{"qid": "q218", "question": "What would I change next time I cook roasted beet salad?", "gold": "m0218", "kind": "keyword"}
+{"qid": "q219", "question": "What would I change next time I cook braised short ribs?", "gold": "m0219", "kind": "keyword"}
+{"qid": "q220", "question": "When was the cucumbers planted in bed 2?", "gold": "m0220", "kind": "keyword"}
+{"qid": "q221", "question": "When was the snap peas planted in bed 2?", "gold": "m0221", "kind": "keyword"}
+{"qid": "q222", "question": "When was the sunflowers planted in bed 2?", "gold": "m0222", "kind": "keyword"}
+{"qid": "q223", "question": "When was the zucchini planted in bed 2?", "gold": "m0223", "kind": "keyword"}
+{"qid": "q224", "question": "How much had I set aside for a next-car fund by February 8?", "gold": "m0224", "kind": "mixed"}
+{"qid": "q225", "question": "How much had I set aside for lucas's college fund by July 16?", "gold": "m0225", "kind": "mixed"}
+{"qid": "q226", "question": "How much had I set aside for the emergency fund by August 14?", "gold": "m0226", "kind": "mixed"}
+{"qid": "q227", "question": "How much had I set aside for a new-roof fund by September 28?", "gold": "m0227", "kind": "mixed"}
+{"qid": "q228", "question": "How much had I set aside for the emergency fund by October 4?", "gold": "m0228", "kind": "mixed"}
+{"qid": "q229", "question": "Did the water utility charge go up recently?", "gold": "m0229", "kind": "paraphrase"}
+{"qid": "q230", "question": "Did our electricity cost go up recently?", "gold": "m0230", "kind": "paraphrase"}
+{"qid": "q231", "question": "Did our mobile plan cost go up recently?", "gold": "m0231", "kind": "paraphrase"}
+{"qid": "q232", "question": "Did garbage collection service go up recently?", "gold": "m0232", "kind": "paraphrase"}
+{"qid": "q233", "question": "Did our home internet cost go up recently?", "gold": "m0233", "kind": "paraphrase"}
+{"qid": "q234", "question": "Why was I running on so little sleep right after we got back from Japan?", "gold": "m0234", "kind": "paraphrase"}
+{"qid": "q235", "question": "Why was I running on so little sleep while I was fighting off being sick?", "gold": "m0235", "kind": "paraphrase"}
+{"qid": "q236", "question": "Why was I running on so little sleep the week the baby kept waking us up at dawn?", "gold": "m0236", "kind": "paraphrase"}
+{"qid": "q237", "question": "Why was I running on so little sleep right before a big high-stakes work presentation?", "gold": "m0237", "kind": "paraphrase"}
+{"qid": "q238", "question": "What did I finally set up to stop checking work messages at night?", "gold": "m0238", "kind": "paraphrase"}
+{"qid": "q239", "question": "Why haven't we decided on the pricing change yet?", "gold": "m0239", "kind": "paraphrase"}
+{"qid": "q240", "question": "What recurring question has support been getting about CSV exports?", "gold": "m0240", "kind": "mixed"}
+{"qid": "q241", "question": "Why is legal taking a look at Bianca's illustration work?", "gold": "m0241", "kind": "mixed"}
+{"qid": "q242", "question": "What did Tobias build that already caught a latency regression early?", "gold": "m0242", "kind": "mixed"}
+{"qid": "q243", "question": "Who is Priya helping through their first time being on call?", "gold": "m0243", "kind": "mixed"}
+{"qid": "q244", "question": "What feature gap cost us a deal recently?", "gold": "m0244", "kind": "paraphrase"}
+{"qid": "q245", "question": "Who fixed our unreliable end-to-end test suite, and how bad was it before?", "gold": "m0245", "kind": "mixed"}
+{"qid": "q246", "question": "What built-in furniture is Renata hoping to add near the fireplace?", "gold": "m0246", "kind": "mixed"}
+{"qid": "q247", "question": "What deal did I work out over that old clawfoot tub?", "gold": "m0247", "kind": "mixed"}
+{"qid": "q248", "question": "What surprise discovery during the reno saved us some money?", "gold": "m0248", "kind": "paraphrase"}
+{"qid": "q249", "question": "What's delaying the resurfacing work out front?", "gold": "m0249", "kind": "paraphrase"}
+{"qid": "q250", "question": "What's holding up permission to cut back the branches near the roof?", "gold": "m0250", "kind": "paraphrase"}
+{"qid": "q251", "question": "What fixture finish did Renata land on for the primary bathroom?", "gold": "m0251", "kind": "mixed"}
+{"qid": "q252", "question": "What habit did I let slide that led to a few days of limping?", "gold": "m0252", "kind": "paraphrase"}
+{"qid": "q253", "question": "What dietary change seems to have helped my cholesterol?", "gold": "m0253", "kind": "mixed"}
+{"qid": "q254", "question": "What did I get to help with the back pain from sitting too long?", "gold": "m0254", "kind": "paraphrase"}
+{"qid": "q255", "question": "Who's doing the no-sugar challenge with me for accountability?", "gold": "m0255", "kind": "mixed"}
+{"qid": "q256", "question": "What did the eye exam reveal that caught me off guard?", "gold": "m0256", "kind": "paraphrase"}
+{"qid": "q257", "question": "What habit did Renata get me to try that's cut down on late-night scrolling?", "gold": "m0257", "kind": "mixed"}
+{"qid": "q258", "question": "What's brought my brother-in-law to crash at our place for a bit?", "gold": "m0258", "kind": "paraphrase"}
+{"qid": "q259", "question": "How did we dodge the door-to-door part of our daughter's school sale?", "gold": "m0259", "kind": "paraphrase"}
+{"qid": "q260", "question": "What extracurricular did Lucas just get selected for?", "gold": "m0260", "kind": "mixed"}
+{"qid": "q261", "question": "What weekly tradition started with the neighbor's kids?", "gold": "m0261", "kind": "mixed"}
+{"qid": "q262", "question": "What's my mother-in-law been not-so-subtly angling for?", "gold": "m0262", "kind": "paraphrase"}
+{"qid": "q263", "question": "What's been weighing on our son at the dinner table recently?", "gold": "m0263", "kind": "paraphrase"}
+{"qid": "q264", "question": "What is Lucas trying to beat this summer?", "gold": "m0264", "kind": "mixed"}
+{"qid": "q265", "question": "How long did Renata manage to keep the destination a secret?", "gold": "m0265", "kind": "paraphrase"}
+{"qid": "q266", "question": "What documents-related snag might complicate our Portugal trip?", "gold": "m0266", "kind": "paraphrase"}
+{"qid": "q267", "question": "What travel-packing method did a friend finally convert me to?", "gold": "m0267", "kind": "paraphrase"}
+{"qid": "q268", "question": "What made me finally start buying travel insurance?", "gold": "m0268", "kind": "paraphrase"}
+{"qid": "q269", "question": "What unconventional lodging idea is my spouse floating for our next getaway?", "gold": "m0269", "kind": "paraphrase"}
+{"qid": "q270", "question": "What overdue legal document did we finally get done?", "gold": "m0270", "kind": "paraphrase"}
+{"qid": "q271", "question": "What financial realization made me switch where the rainy-day money sits?", "gold": "m0271", "kind": "paraphrase"}
+{"qid": "q272", "question": "What donation strategy did Julia recommend for tax purposes?", "gold": "m0272", "kind": "paraphrase"}
+{"qid": "q273", "question": "What app were we quietly still paying for without using?", "gold": "m0273", "kind": "paraphrase"}
+{"qid": "q274", "question": "What personal milestone unlocked a cheaper auto loan rate?", "gold": "m0274", "kind": "paraphrase"}
+{"qid": "q275", "question": "Whose recipe did I finally get written down before it was lost?", "gold": "m0275", "kind": "paraphrase"}
+{"qid": "q276", "question": "What was the messy part of our first attempt at homemade noodles?", "gold": "m0276", "kind": "paraphrase"}
+{"qid": "q277", "question": "What condiment am I attempting to reverse-engineer at home?", "gold": "m0277", "kind": "paraphrase"}
+{"qid": "q278", "question": "What ran out embarrassingly fast at that get-together with friends?", "gold": "m0278", "kind": "paraphrase"}
+{"qid": "q279", "question": "What did my spouse ask for that's now on my to-build list for the plant app?", "gold": "m0279", "kind": "paraphrase"}
+{"qid": "q280", "question": "Who offered to help translate the garden app, and into what language?", "gold": "m0280", "kind": "mixed"}
+{"qid": "q281", "question": "What silent failure in the garden app did I catch, and what did I add to prevent it recurring?", "gold": "m0281", "kind": "mixed"}
+{"qid": "q282", "question": "How did Renata end up with opinions about our onboarding flow?", "gold": "m0282", "kind": "mixed"}
+{"qid": "q283", "question": "What intern project might get promoted onto the real roadmap?", "gold": "m0283", "kind": "mixed"}
+{"qid": "q284", "question": "What future problem did Marcus warn us about with the electrical panel?", "gold": "m0284", "kind": "mixed"}
+{"qid": "q285", "question": "How did the fence project end up costing less than planned?", "gold": "m0285", "kind": "mixed"}
+{"qid": "q286", "question": "Why did my trainer change up my workout program?", "gold": "m0286", "kind": "mixed"}
+{"qid": "q287", "question": "Whose recommendation got me trying cold-plunge recovery?", "gold": "m0287", "kind": "mixed"}
+{"qid": "q288", "question": "What question has Ivy been obsessively repeating the answer to?", "gold": "m0288", "kind": "mixed"}
+{"qid": "q289", "question": "When did I last see Renata's old college roommate before this visit?", "gold": "m0289", "kind": "mixed"}
+{"qid": "q290", "question": "Why did the airline upgrade us on the flight home from Denver?", "gold": "m0290", "kind": "mixed"}
+{"qid": "q291", "question": "How did we find that unlisted izakaya in Kyoto?", "gold": "m0291", "kind": "mixed"}
+{"qid": "q292", "question": "Who finally got our internet bill reduced, and how?", "gold": "m0292", "kind": "mixed"}
+{"qid": "q293", "question": "Who caught the home-office coverage gap in our insurance before I brought it up?", "gold": "m0293", "kind": "mixed"}
+{"qid": "q294", "question": "What gift from Renata's coworker got me trying to make my own version?", "gold": "m0294", "kind": "mixed"}
+{"qid": "q295", "question": "What happened to most of the first tomato harvest?", "gold": "m0295", "kind": "mixed"}

@@ -59,11 +59,12 @@ const CLEANUP_NAME = /^(close|dispose|stop|shutdown|teardown|destroy|release|unw
  * Wire it up or delete it — do not add to this list without a reason.
  */
 const ORPHAN_ALLOWLIST = [
-    // Deliberate, and labelled as such at the declaration: a test/ops hook for
-    // dropping the cached arcade token-DB handle before deleting the file.
-    // There is no production moment that should close it — the handle is
-    // process-lived by design.
-    'packages/lore/src/engines/arcade/arcadeAuthResolver.ts:closeTokenDb',
+    // (was: arcadeAuthResolver.ts:closeTokenDb, rationalized as "process-lived
+    // by design" — STEP2-CLOSE-PATH-DESIGN.md (d)'s audit found this was
+    // exactly the class of leak this guard exists to catch, alongside its
+    // sibling arcadeRegistryStore.ts:closeRegistryDb (never allowlisted, also
+    // uncalled). Both are now wired into mcp/arcadeBoot.ts's shutdown()/
+    // dispose() — removed from the allowlist, not replaced.)
 ];
 
 function walk(dir, out = []) {

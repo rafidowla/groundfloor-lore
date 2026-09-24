@@ -24,6 +24,15 @@
  * as a constructor argument, not via env — mcp/server.ts reads the env gate
  * once at boot and passes the resulting boolean into the resolver.
  *
+ * 3.21 step 2 part 2 — this proxy-vs-plain branching is a LanceDB-only
+ * concern (resolveSearchWorkerIsolation short-circuits to false for a
+ * 'sqlite'-vector workspace regardless of this policy — see that
+ * function's own doc comment; there is no native crash surface to fence
+ * on that engine). `createWorkspace()` now defaults NEW workspaces to
+ * vectorEngine:'sqlite', so LORE_DEFAULT_VECTOR_ENGINE=lance is set below
+ * to keep these two fixture workspaces on the engine this test actually
+ * exercises.
+ *
  * Run: npx tsx test/workspace-verbatim-isolation-unit.ts
  */
 
@@ -41,6 +50,9 @@ import { createWorkspace } from '../packages/lore/src/config/workspaces.js';
 process.env.LORE_SEARCH_WORKER_READY_MS ??= '90000';
 // Mirrors the production env gate (see header comment above).
 process.env.LORE_SEARCH_WORKER = '1';
+// 3.21 step 2 part 2 — keep these fixture workspaces on the LanceDB engine
+// this test targets (see header comment above).
+process.env.LORE_DEFAULT_VECTOR_ENGINE = 'lance';
 
 let passed = 0, failed = 0;
 async function test(name: string, fn: () => Promise<void>): Promise<void> {

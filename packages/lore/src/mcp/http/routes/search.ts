@@ -13,7 +13,7 @@
  * `?crossProject=true` to widen it to '*' / '*'.
  */
 
-import { resolveQuerySeedStore } from '../../../recall/querySeedStore.js';
+import { randomUUID } from 'node:crypto';
 import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
@@ -25,9 +25,13 @@ import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, writeError, extractWorkspace } from '../helpers.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
+import { parseSearchMode, parseTags, parseQueries, parseCsvParam, parseAbstainParam, denyCrossWorkspaceRead } from './searchRouteParams.js';
 import { retrieve, type RetrieveContext } from '../../../recall/retrieve.js';
+import { hydrateApiQueryHits } from './apiQueryHydration.js';
 import { projectResults, projectKeywordNodes } from '../../../recall/retrievalProjection.js';
-import { buildRecallResult } from '../../../recall/recallPreset.js';
+import { buildRecallResult, buildCompactCandidates, buildRelatedCandidates } from '../../../recall/recallPreset.js';
+import { buildRelevanceMeta, notApplicableRelevanceMeta } from '../../../recall/abstention.js';
+import { expandCandidates, MAX_EXPAND_IDS } from '../../../recall/recallExpand.js';
 import { runCrossWorkspaceRecall } from '../../tools/recallCrossWorkspace.js';
 import { redactError } from '../../../security/logRedact.js';
 import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
@@ -49,62 +53,6 @@ async function readBody(req: IncomingMessage): Promise<unknown> {
 // more than the shared handle? Feature-detect and refuse — do not re-narrow
 // to a class.
 type LoreGraph = LoreGraphHandle;
-
-/** Retrieval mode shared by /api/search + /api/recall (parity with the MCP tools). */
-type RetrievalMode = 'semantic' | 'keyword' | 'hybrid';
-
-/**
- * P7 — parse the optional `search_mode` query param for /api/search and
- * /api/recall, bringing REST to parity with the MCP search/recall tools (which
- * have always accepted it). Absent/empty → 'hybrid' (the prior REST behaviour,
- * so existing callers are unaffected). An unrecognised value returns an error
- * marker the route maps to HTTP 400 rather than silently coercing it.
- */
-function parseSearchMode(params: URLSearchParams): RetrievalMode | { error: string } {
-    const raw = params.get('search_mode');
-    if (raw === null || raw === '') return 'hybrid';
-    if (raw === 'semantic' || raw === 'keyword' || raw === 'hybrid') return raw;
-    return { error: `invalid search_mode "${raw}" — must be one of: semantic, keyword, hybrid` };
-}
-
-/**
- * P8 — parse the optional comma-separated `tags` query param (e.g.
- * `?tags=auth,security`) for /api/search and /api/recall, matching the MCP
- * tools' `tags` filter (keep only nodes carrying ALL listed tags). Absent →
- * undefined (no filter), so existing callers are unaffected.
- */
-function parseTags(params: URLSearchParams): string[] | undefined {
-    const raw = params.get('tags');
-    if (!raw) return undefined;
-    const arr = raw.split(',').map((t) => t.trim()).filter(Boolean);
-    return arr.length > 0 ? arr : undefined;
-}
-
-
-/**
- * denyCrossWorkspaceRead — SP-04 shared read-scope gate for the
- * workspace-scoped read routes (/api/search, /api/nodes, /api/query).
- *
- * Mirrors the writer paths' bindRouteTarget wiring: when a principal is
- * bound (Bearer call), a request for a workspace other than the
- * principal's binding — or `"*"` — requires `cross-workspace-read`. When
- * NO principal is bound, the gate is a no-op so the legacy / local
- * single-workspace happy path and the existing fixtures keep working
- * (same null-principal bypass the write routes use). Returns true when it
- * wrote a 4xx response and the caller must `return` immediately; false
- * when the request may proceed.
- *
- * /api/recall is NOT routed through this helper — it has its own scope
- * gate inline in the handler. (Historic note: recall was on the public
- * allowlist until 2026-06-19; the inline handler still has a defense-in-
- * depth null-principal branch, kept for the sp04 unit tests that bypass
- * middleware.)
- */
-function denyCrossWorkspaceRead(res: ServerResponse, requestedWorkspace: string): boolean {
-    return bindRouteTarget(res, { requested: requestedWorkspace, intent: 'read' }) === null;
-}
-
-
 
 export interface SearchDeps {
     store: StorageBundle;
@@ -130,7 +78,7 @@ export interface SearchDeps {
      * tests omit it and non-active recall degrades to keyword (prior behavior).
      */
     workspaceVerbatimResolver?: {
-        getOrOpen(ws: string): Promise<import('../../../engines/verbatimStore.js').VerbatimStore>;
+        getOrOpen(ws: string): Promise<import('../../../engines/verbatimStoreApi.js').VerbatimStoreApi>;
     };
 }
 
@@ -184,6 +132,23 @@ export async function trySearchRoutes(
             }
             const recallMode = recallModeParsed;
             const recallTags = parseTags(recallParams);
+            // 3.21 step 3(f) — parity with the MCP recall tool: extra
+            // phrasings fused via the shared RRF, plus entities/topics/project
+            // filters over the 3.21 step 3(e) metadata. Absent → today's
+            // single-phrasing, unfiltered behaviour (prior behaviour).
+            const recallQueries = parseQueries(recallParams);
+            const recallEntities = parseCsvParam(recallParams, 'entities');
+            const recallTopics = parseCsvParam(recallParams, 'topics');
+            const recallProject = recallParams.get('project') ?? undefined;
+            // D1 — ?abstain=true / ?relevance_floor=<n>, parity with the MCP
+            // recall tool's abstain/relevance_floor params. Absent → abstain
+            // off (calibration/relevance _meta fields always on regardless).
+            const recallAbstain = parseAbstainParam(recallParams); // undefined when absent → LORE_RECALL_ABSTAIN applies
+            const recallFloorRaw = recallParams.get('relevance_floor');
+            const recallRelevanceFloor = recallFloorRaw !== null && Number.isFinite(Number(recallFloorRaw)) ? Number(recallFloorRaw) : undefined;
+            // 3.21 step 3(g) — ?compact=true returns N compact candidates
+            // instead of full nodes; pair with POST /api/recall/expand.
+            const recallCompact = recallParams.get('compact') === 'true';
             // R4 #3 — `?ecosystem=` on /api/recall, the twin of the same
             // parameter 70 lines below on /api/search. Until now this route
             // hard-wired `deps.detectedScope.ecosystem`, so the sibling routes
@@ -289,6 +254,8 @@ export async function trySearchRoutes(
                 recallOutcome = await retrieve(recallCtx, topic, {
                     workspace: requestedWorkspace, ecosystem: recallEcosystem,
                     mode: recallMode, depth: 1, limit: max, tags: recallTags, includeSuperseded, includeArchived: false, crossProject,
+                    queries: recallQueries, entities: recallEntities, topics: recallTopics, project: recallProject, // 3.21 step 3(f)
+                    abstain: recallAbstain, relevanceFloor: recallRelevanceFloor, // D1
                 });
             } catch (wsErr) {
                 if ((wsErr as { code?: string }).code === 'workspace_not_found') {
@@ -297,6 +264,24 @@ export async function trySearchRoutes(
                     return true;
                 }
                 throw wsErr;
+            }
+            // 3.21 step 3(g) — compact bypasses buildRecallResult entirely,
+            // same short-circuit the MCP `recall` tool takes.
+            if (recallCompact) {
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({
+                    topic, scope: { workspace: requestedWorkspace, ecosystem: recallEcosystem },
+                    // 3.21 step 3(h) — echo back to POST /api/recall/outcome to
+                    // tie an outcome to this specific recall call.
+                    queryId: randomUUID(),
+                    candidates: buildCompactCandidates(recallOutcome),
+                    // D4 fix: graph-traversal neighbours, separate from
+                    // `candidates`. Omitted (not []) when there are none.
+                    ...(recallOutcome.related.length > 0 ? { related: buildRelatedCandidates(recallOutcome) } : {}),
+                    tip: 'POST /api/recall/expand with {ids, workspace} for chosen candidate ids to fetch their full bodies.',
+                    _meta: buildRelevanceMeta(recallOutcome.meta), // D1
+                }));
+                return true;
             }
             const recallGraph = deps.graphRegistry
                 // getGraphHandle honours the workspace's declared engine,
@@ -320,6 +305,68 @@ export async function trySearchRoutes(
             res.end(JSON.stringify(recallResult));
         } catch (recallErr) {
             writeError(res, 500, 'internal_error', redactError(recallErr));
+        }
+        return true;
+    }
+
+    // 3.21 step 3(g) — full node bodies for chosen `compact:true` candidate
+    // ids. Same confinement recall itself enforces (see recallExpand.ts):
+    // an id outside the caller's workspace/ecosystem/actor scope is
+    // silently dropped, not an error.
+    if (pathname === '/api/recall/expand' && req.method === 'POST') {
+        const gate = await gateRoute(
+            { deploymentMode: deps.deploymentMode, dataplane: deps.dataplane },
+            { permission: 'read' },
+        );
+        if (!gate.allowed) { writePermissionDenied(res, gate); return true; }
+        let parsedBody: unknown;
+        try {
+            parsedBody = await readBody(req);
+        } catch (err) {
+            if (isPayloadTooLarge(err)) { writeOversizeError(res); return true; }
+            writeError(res, 400, 'invalid_request', redactError(err));
+            return true;
+        }
+        try {
+            const { ids, ecosystem: rawEcosystem } = parsedBody as { ids?: unknown; ecosystem?: string };
+            const queryParams = new URL(url, 'http://localhost').searchParams;
+            const workspace = extractWorkspace(parsedBody as Record<string, unknown>, queryParams);
+            if (!workspace) {
+                writeWorkspaceRequired(res);
+                return true;
+            }
+            if (workspace === '*') {
+                writeError(res, 400, 'cross_workspace_not_supported', '/api/recall/expand requires a single named workspace, matching the workspace the originating recall ran against');
+                return true;
+            }
+            // SP-04 — token-scoped read gate, same as GET /api/search.
+            if (denyCrossWorkspaceRead(res, workspace)) return true;
+            if (!Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === 'string' && id.length > 0)) {
+                writeError(res, 400, 'ids_required', '`ids` must be a non-empty array of strings');
+                return true;
+            }
+            if (ids.length > MAX_EXPAND_IDS) {
+                writeError(res, 400, 'too_many_ids', `at most ${MAX_EXPAND_IDS} ids per call`, { max: MAX_EXPAND_IDS, requested: ids.length });
+                return true;
+            }
+            const ecosystem = rawEcosystem && rawEcosystem.length > 0 ? rawEcosystem : deps.detectedScope.ecosystem;
+            let expandGraph: LoreGraph = deps.store.loreGraph;
+            if (deps.graphRegistry) {
+                try {
+                    expandGraph = await deps.graphRegistry.getGraphHandle(workspace);
+                } catch (wsErr) {
+                    if (wsErr instanceof WorkspaceNotFoundError) {
+                        writeError(res, 404, 'workspace_not_found', `workspace "${wsErr.requested}" not found`, { requested: wsErr.requested, known: wsErr.known });
+                        return true;
+                    }
+                    throw wsErr;
+                }
+            }
+            const nodes = await expandCandidates(expandGraph, ids as string[], ecosystem);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ requested: ids.length, expanded: nodes.length, nodes }));
+        } catch (expandErr) {
+            writeError(res, 500, 'internal_error', redactError(expandErr));
         }
         return true;
     }
@@ -364,6 +411,10 @@ export async function trySearchRoutes(
             // default (process-global, derived once from process.cwd()).
             const ecoParam = searchParams.get('ecosystem');
             const searchEcosystem = ecoParam && ecoParam.length > 0 ? ecoParam : deps.detectedScope.ecosystem;
+            // D1 — parity with GET /api/recall above.
+            const searchAbstain = parseAbstainParam(searchParams); // undefined when absent → LORE_RECALL_ABSTAIN applies
+            const searchFloorRaw = searchParams.get('relevance_floor');
+            const searchRelevanceFloor = searchFloorRaw !== null && Number.isFinite(Number(searchFloorRaw)) ? Number(searchFloorRaw) : undefined;
             // Retrieval Unification P2 — named workspace routes through the shared
             // retrieve() core (hybrid; REST search was keyword-only before), depth=0
             // = flat ranked list, matchedBy+score per result (D4). "*" = legacy (#9).
@@ -392,7 +443,7 @@ export async function trySearchRoutes(
                 // scopes (local/embedded, no actor bound) ⇒ no filtering.
                 legacy = filterNodesByActorScope(legacy);
                 res.writeHead(200, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ query, workspace, resultCount: legacy.length, vector_index_consulted: false, ...(legacySignals.scanCapHit ? { scan_cap_hit: true } : {}), ...(searchTags ? { tag_filter: searchTags } : {}), results: projectKeywordNodes(legacy) }));
+                res.end(JSON.stringify({ query, workspace, resultCount: legacy.length, vector_index_consulted: false, ...(legacySignals.scanCapHit ? { scan_cap_hit: true } : {}), ...(searchTags ? { tag_filter: searchTags } : {}), results: projectKeywordNodes(legacy), _meta: notApplicableRelevanceMeta('search:*') }));
                 return true;
             }
             const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver };
@@ -407,7 +458,7 @@ export async function trySearchRoutes(
                 // isolation, because the default source (detectedScope) is a
                 // boot-global value. `?ecosystem=` is how a caller supplies a
                 // real per-request scope.
-                outcome = await retrieve(ctx, query, { workspace, ecosystem: searchEcosystem, mode: searchMode, depth: 0, limit: 50, tags: searchTags });
+                outcome = await retrieve(ctx, query, { workspace, ecosystem: searchEcosystem, mode: searchMode, depth: 0, limit: 50, tags: searchTags, abstain: searchAbstain, relevanceFloor: searchRelevanceFloor });
             } catch (wsErr) {
                 if ((wsErr as { code?: string }).code === 'workspace_not_found') {
                     const e = wsErr as { requested?: string; known?: string[] };
@@ -417,7 +468,7 @@ export async function trySearchRoutes(
                 throw wsErr;
             }
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ query, workspace, resultCount: outcome.results.length, vector_index_consulted: outcome.meta.verbatimConsulted, ...(outcome.meta.scanCapHit ? { scan_cap_hit: true } : {}), ...(searchTags ? { tag_filter: searchTags } : {}), results: projectResults(outcome.results) }));
+            res.end(JSON.stringify({ query, workspace, resultCount: outcome.results.length, vector_index_consulted: outcome.meta.verbatimConsulted, ...(outcome.meta.scanCapHit ? { scan_cap_hit: true } : {}), ...(outcome.meta.bm25Ranked === false ? { bm25_ranked: false } : {}), ...(outcome.meta.vectorLegSkipped ? { vector_leg_skipped: true } : {}), ...(searchTags ? { tag_filter: searchTags } : {}), results: projectResults(outcome.results), _meta: buildRelevanceMeta(outcome.meta) }));
         } catch (searchErr) {
             writeError(res, 500, 'internal_error', redactError(searchErr));
         }
@@ -559,8 +610,6 @@ export async function trySearchRoutes(
             }
             const limit = Math.min(typeof rawLimit === 'number' && rawLimit > 0 ? rawLimit : 10, 50);
             const useVerbatim = mode !== 'search';
-            const seenIds = new Set<string>();
-            const hits: LoreNode[] = [];
             // Ecosystem confinement. /api/query is a THIRD read surface over the
             // same substrates and it had none: it seeded from verbatim with no
             // filter and then keyword-searched with a hardcoded '*', so a
@@ -586,59 +635,25 @@ export async function trySearchRoutes(
                 : deps.detectedScope.ecosystem;
             const outsideEcosystem = (n: LoreNode): boolean =>
                 !ecosystemMatches((n as { ecosystem?: string }).ecosystem, queryEcosystem);
+            // D5 #5 — /api/query used to just HIDE a superseded hit
+            // (`!n.supersededAt`), unlike /api/recall + /api/search which
+            // replace it with its live successor via the shared
+            // supersessionRecall helper. This is a raw exact-match surface
+            // (structured_query's sibling — see that file's doc comment for
+            // why it deliberately skips `corrects` adjacency), so only
+            // successor REPLACEMENT applies here, not adjacency injection.
+            const admitD5 = (n: LoreNode): boolean => !outsideEcosystem(n) && n.status !== 'archived';
 
-            if (useVerbatim) {
-                // P2 (isolation) — seed against the REQUESTED workspace's OWN
-                // verbatim store, not the boot-bound (active-workspace) handle.
-                // Mirrors /api/recall + /api/search, which resolve per-workspace
-                // via retrieve()'s resolveSeedStore. Without this, a query for a
-                // non-active workspace count-gates on and seeds from the active
-                // workspace's LanceDB (cross-workspace leak / empty recall).
-                const seedStore = await resolveQuerySeedStore(deps, queryGraph, workspace);
-                // null → no per-workspace verbatim store (non-active ws with no
-                // resolver, or getOrOpen failed). SKIP the vector seed entirely
-                // and fall through to B's OWN keyword scan below — never seed
-                // from the boot/active store (that is the cross-workspace leak).
-                const verbatimCount = seedStore ? await seedStore.count() : 0;
-                if (seedStore && verbatimCount > 0) {
-                    const seeds = await seedStore.search(query, limit);
-                    // SW-16: batch-hydrate seeds in one query; iterate in
-                    // original order to preserve dedupe + result ordering.
-                    const strippedIds = seeds.map((seed) =>
-                        seed.id.startsWith('lore:') ? seed.id.slice(5) : seed.id);
-                    const seedNodes = await queryGraph.getNodesByIds(strippedIds).catch(() => new Map<string, LoreNode>());
-                    seeds.forEach((seed, idx) => {
-                        const stripped = strippedIds[idx]!;
-                        if (seenIds.has(stripped)) return;
-                        const n = seedNodes.get(stripped);
-                        if (n && !n.supersededAt && !outsideEcosystem(n)) { hits.push(n); seenIds.add(n.id); }
-                    });
-                }
-            }
-            const querySignals = { scanCapHit: false };
-            if (hits.length < limit) {
-                const remaining = limit - hits.length;
-                // project scope is '*', NOT `workspace`. localGraphReads.ts's
-                // search() turns the third argument into a strict
-                // `n.project = $project` predicate, and `project` is a
-                // CALLER-OWNED node field that is not guaranteed to equal the
-                // workspace name — Atlas stores project='v3' inside
-                // workspace='default'. retrieve.ts:314-321 documents this exact
-                // mistake as the one that "silently makes keyword fallback
-                // empty while the vector path still appears healthy", and
-                // passes '*' for that reason. The physical workspace boundary
-                // is already enforced by the graph resolution above.
-                const fallback = await queryGraph.search(
-                    query, remaining + seenIds.size,
-                    '*', queryEcosystem, false, querySignals,
-                );
-                for (const n of fallback) {
-                    if (hits.length >= limit) break;
-                    if (seenIds.has(n.id) || n.supersededAt || outsideEcosystem(n)) continue;
-                    hits.push(n);
-                    seenIds.add(n.id);
-                }
-            }
+            // D5 file-size extraction — the seed + keyword-fallback
+            // hydration (verbatim search, batch getNodesByIds, D5
+            // successor-replacement via resolveLiveNodes) lives in
+            // apiQueryHydration.ts now; this route stayed a lift-and-shift
+            // caller to stay under the 800-line file-size guardrail.
+            const { hits, scanCapHit } = await hydrateApiQueryHits({
+                deps, queryGraph, workspace, query, queryEcosystem, limit, useVerbatim,
+                outsideEcosystem, admitD5,
+            });
+            const querySignals = { scanCapHit };
 
             // 3.1 (2026-08-17) — row-level security_scopes confinement on the
             // graph-read results: hide nodes whose security_scopes don't

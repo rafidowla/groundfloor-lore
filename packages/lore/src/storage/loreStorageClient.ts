@@ -52,6 +52,7 @@ import type {
     VectorProvider,
     VerbatimDocument,
     VerbatimSearchResult,
+    VerbatimQueryFilter,
 } from '../providers/types.js';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { Bm25Envelope } from '../engines/verbatimBm25Result.js';
@@ -539,20 +540,27 @@ export class LoreStorageClient {
     }
 
     /** (11) verbatimSearch — vector similarity search.
-     *  1.2: `opts.workspace` routes to that workspace's vector store. */
+     *  1.2: `opts.workspace` routes to that workspace's vector store.
+     *  `gate` (fix/search-worker-call-cancellation, 3.20.2 follow-up): passed
+     *  straight through at `VectorProvider.search`'s own 6th positional slot
+     *  — never re-sloted — so it can never land on `opts`/`actorScopes` the
+     *  way a blind append would. Omitted by every pre-existing caller, so
+     *  this is behavior-preserving for them. */
     async verbatimSearch(
         query: string,
         limit: number = 10,
-        filter?: Partial<VerbatimDocument['metadata']>,
+        filter?: VerbatimQueryFilter,
         opts?: { includeHistory?: boolean; workspace?: string },
         actorScopes?: ReadonlyArray<string>,
+        gate?: { signal?: AbortSignal; deadline?: number },
     ): Promise<VerbatimSearchResult[]> {
         // DataplaneVectorStore.search has the same interface signature;
         // opts + actorScopes are optional so the cloud variant ignores
-        // them harmlessly if its implementation doesn't use them.
+        // them harmlessly if its implementation doesn't use them. Same for
+        // `gate` — a backend without cancellation support just ignores it.
         const store = await this.vFor(opts?.workspace);
         const { workspace: _ws, ...rest } = opts ?? {};
-        return store.search(query, limit, filter, rest, actorScopes);
+        return store.search(query, limit, filter, rest, actorScopes, gate);
     }
 
     /** (12) verbatimCount — total document count (diagnostics).
@@ -570,12 +578,21 @@ export class LoreStorageClient {
     /** (14) verbatimBm25Search — lexical BM25 fallback path. Returns a
      *  `Bm25Envelope`: `hits` plus `ranked` (whether `hits` is a genuine
      *  BM25/lexical ranking or an unranked substring fallback that must be
-     *  excluded from RRF — see engines/verbatimBm25Result.ts). */
+     *  excluded from RRF — see engines/verbatimBm25Result.ts).
+     *  `gate` (fix/search-worker-call-cancellation, 3.20.2 follow-up): the
+     *  `Bm25Fn` cast below is exactly the landmine
+     *  engines/verbatimWorkerProtocol.ts's GATE_ARG_SLOT doc warns about — a
+     *  positionally-dispatched call whose type-cast previously had no slot
+     *  for a trailing arg. `gate` is now an explicit 5th parameter on BOTH
+     *  the cast and the real call, matching GATE_ARG_SLOT.bm25Search = 4
+     *  (0-indexed) on the real VerbatimStore/VerbatimSearchWorkerProxy
+     *  signature, so it can never be silently dropped or misaligned. */
     async verbatimBm25Search(
         query: string,
         limit: number = 10,
-        filter?: Partial<VerbatimDocument['metadata']>,
+        filter?: VerbatimQueryFilter,
         actorScopes?: ReadonlyArray<string>,
+        gate?: { signal?: AbortSignal; deadline?: number },
     ): Promise<Bm25Envelope<VerbatimSearchResult>> {
         // Both VerbatimStore and DataplaneVectorStore implement bm25Search,
         // so this delegates in both modes. The runtime feature-detect stays
@@ -587,12 +604,12 @@ export class LoreStorageClient {
         // Feature-detect: bm25Search is optional on the VectorProvider contract
         // (not every connector supports lexical ranking). Cast to the structural
         // shape we expect rather than importing the concrete VerbatimStore class.
-        type Bm25Fn = (q: string, l: number, f?: Partial<VerbatimDocument['metadata']>, s?: ReadonlyArray<string>) => Promise<Bm25Envelope<VerbatimSearchResult>>;
+        type Bm25Fn = (q: string, l: number, f?: VerbatimQueryFilter, s?: ReadonlyArray<string>, g?: { signal?: AbortSignal; deadline?: number }) => Promise<Bm25Envelope<VerbatimSearchResult>>;
         const fn = (store as { bm25Search?: Bm25Fn }).bm25Search;
         if (typeof fn !== 'function') {
             throw new CloudModeNotImplementedError('bm25Search');
         }
-        return fn.call(store, query, limit, filter, actorScopes);
+        return fn.call(store, query, limit, filter, actorScopes, gate);
     }
 
     /* ── escape hatch ────────────────────────────────────────────── */

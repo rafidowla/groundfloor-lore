@@ -69,6 +69,8 @@ import {
     probeSurrealStore,
     settleSurrealStore,
 } from './surreal/surrealSettle.js';
+import { sqliteGraphDataPath } from './sqlite/sqliteGraphSchema.js';
+import { SqliteGraph } from './sqliteGraph.js';
 
 /**
  * Why the source graph's node count could (or couldn't) be verified at
@@ -237,6 +239,29 @@ export async function backupWorkspace(spec: BackupSpec): Promise<BackupResult> {
         await settleAndWarn(realSurrealPath, warnings, 'post-probe settle (source)');
     }
 
+    // SQLite graph (3.21 step 1d) — no settle needed (better-sqlite3's
+    // close() is synchronous and complete, unlike surrealkv's deferred
+    // flush), so this is just an open-and-count. A workspace normally has
+    // ONE live graph engine, so this only fires when the surreal branch
+    // above did not.
+    const realSqliteGraphPath = sqliteGraphDataPath(spec.workspaceDir);
+    if (graphNodeCount === null && fs.existsSync(realSqliteGraphPath)) {
+        const g = new SqliteGraph(spec.workspaceDir, { workspaceId: 'backup-verify' });
+        try {
+            await g.initialize();
+            graphNodeCount = (await g.getStats()).nodeCount;
+            graphNodeCountReason = 'verified';
+        } catch (error) {
+            graphNodeCountReason = 'unreadable';
+            warnings.push(
+                `graph.sqlite (source at ${realSqliteGraphPath}): could not be read back before copying `
+                + `(${(error as Error).message}) — the copied graph is NOT verified in this archive`,
+            );
+        } finally {
+            await g.close().catch(() => undefined);
+        }
+    }
+
     try {
         // Fixed capture order, with the graph LAST.
         //
@@ -346,7 +371,7 @@ export async function backupWorkspace(spec: BackupSpec): Promise<BackupResult> {
         // same node count the source reported. Throws — a backup that cannot
         // prove it captured the graph is worse than no backup, because the
         // operator will trust it.
-        if (graphNodeCount !== null) {
+        if (graphNodeCount !== null && looksLikeSurrealStore(realSurrealPath)) {
             const stagedSurreal = path.join(stagedLore, 'surreal');
             if (!fs.existsSync(stagedSurreal)) {
                 throw new Error(
@@ -385,6 +410,33 @@ export async function backupWorkspace(spec: BackupSpec): Promise<BackupResult> {
                 // so the hashes describe a store that has stopped moving.
                 await settleAndWarn(stagedSurreal, warnings, 'staged copy settle before catalog');
             }
+        } else if (graphNodeCount !== null && fs.existsSync(realSqliteGraphPath)) {
+            // graph.sqlite already reached stagedLore via the generic
+            // `.sqlite` branch of the copy loop above (backupSqliteOnline —
+            // the same online-backup path every other SQLite substrate in
+            // this archive takes). Verify it the way the surreal branch
+            // verifies its copy: open and require the same node count.
+            const stagedSqlitePath = path.join(stagedLore, 'graph.sqlite');
+            if (!fs.existsSync(stagedSqlitePath)) {
+                throw new Error(
+                    `backup verification failed: the source graph at ${realSqliteGraphPath} reported `
+                    + `${graphNodeCount} node(s) but no graph.sqlite reached the staged tree`,
+                );
+            }
+            const g = new SqliteGraph(stage, { workspaceId: 'backup-verify-staged' });
+            try {
+                await g.initialize();
+                const stagedCount = (await g.getStats()).nodeCount;
+                if (stagedCount !== graphNodeCount) {
+                    throw new Error(
+                        `backup verification failed: the copied graph holds ${stagedCount} node(s) but the `
+                        + `source reported ${graphNodeCount}. The store was copied while it was still being `
+                        + 'written — stop the daemon (or any other writer) and retake the backup.',
+                    );
+                }
+            } finally {
+                await g.close().catch(() => undefined);
+            }
         }
 
         // NW-7h — quiesce window closes here: snapshot complete, clear
@@ -420,6 +472,14 @@ export async function backupWorkspace(spec: BackupSpec): Promise<BackupResult> {
             // the one location that always reflects reality regardless of
             // where the source data physically lived.
             graphEngine: detectArchivedEngine(stagedLore),
+            /**
+             * Which vector substrate this archive CONTAINS — same
+             * observed-not-declared contract as `graphEngine` just above,
+             * 3.21 step 2 part 2. `verbatim.sqlite` reached `stagedLore`
+             * via the generic `.sqlite` branch of the copy loop above
+             * (online backup); `lancedb/` via the directory-copy branch.
+             */
+            vectorEngine: detectArchivedVectorEngine(stagedLore),
             /**
              * What the source graph actually held, read back through a real
              * engine open (null when there was no store, or it could not be
@@ -487,17 +547,51 @@ export async function backupWorkspace(spec: BackupSpec): Promise<BackupResult> {
  * Which graph engine's files are present in this `.lore/`.
  *
  * `both` is reachable and is not an error: a workspace migrated with
- * `lore migrate engine` keeps the source engine's directory as the rollback
- * path. `none` means a workspace that has never been initialised. 'kuzu' is
- * the legacy graph-engine sentinel — it names an archived on-disk directory,
- * not a live engine choice.
+ * `lore migrate engine` (or `lore migrate-graph --to sqlite`) keeps the
+ * source engine's directory as the rollback path — so `both` now covers
+ * ANY two-or-more-present combination (the legacy graph engine + surreal,
+ * surreal + sqlite, …), same imprecise-on-purpose semantics it already had: `restoreWorkspace`'s
+ * mismatch check only refuses when the archive holds EXACTLY one engine
+ * that disagrees with the destination, so `both`/`none` are deliberately
+ * never compared against `expectedEngine`. `none` means a workspace that
+ * has never been initialised. 'kuzu' is the legacy graph-engine sentinel —
+ * it names an archived on-disk directory, not a live engine choice.
  */
-function detectArchivedEngine(loreDir: string): 'kuzu' | 'surreal' | 'both' | 'none' {
+function detectArchivedEngine(loreDir: string): 'kuzu' | 'surreal' | 'sqlite' | 'both' | 'none' {
     const hasLegacyGraph = fs.existsSync(path.join(loreDir, 'graph'));
     const hasSurreal = fs.existsSync(path.join(loreDir, 'surreal'));
-    if (hasLegacyGraph && hasSurreal) return 'both';
+    const hasSqlite = fs.existsSync(path.join(loreDir, 'graph.sqlite'));
+    const presentCount = [hasLegacyGraph, hasSurreal, hasSqlite].filter(Boolean).length;
+    if (presentCount > 1) return 'both';
     if (hasLegacyGraph) return 'kuzu';
     if (hasSurreal) return 'surreal';
+    if (hasSqlite) return 'sqlite';
+    return 'none';
+}
+
+/**
+ * Which VECTOR engine's files are present in this `.lore/` — 3.21 step 2
+ * part 2, same "observed from the files, not from workspaces.json" contract
+ * as `detectArchivedEngine` above. `both` covers a workspace mid-promotion
+ * (a committed promotion renames `verbatim.sqlite` aside rather than
+ * deleting it — see verbatimPromotion.ts — so a `both` archive is a normal,
+ * expected state right after promotion, not corruption).
+ *
+ * `.lore/lancedb/` is NOT itself proof of a Lance-backed workspace: both
+ * engines share ONE embedding-fingerprint sidecar at
+ * `.lore/lancedb/embedding_model.json` (embeddingFingerprint.ts — deliberate,
+ * so promotion never needs to re-stamp), so a pure-SQLite workspace that has
+ * ever been written to also has a `.lore/lancedb/` directory containing
+ * ONLY that JSON file. The real signal is the LanceDB table itself
+ * (`lore_verbatim.lance/`, the on-disk directory `@lancedb/lancedb` creates
+ * for the table) — check for THAT, not the parent folder.
+ */
+function detectArchivedVectorEngine(loreDir: string): 'lance' | 'sqlite' | 'both' | 'none' {
+    const hasLance = fs.existsSync(path.join(loreDir, 'lancedb', 'lore_verbatim.lance'));
+    const hasSqlite = fs.existsSync(path.join(loreDir, 'verbatim.sqlite'));
+    if (hasLance && hasSqlite) return 'both';
+    if (hasLance) return 'lance';
+    if (hasSqlite) return 'sqlite';
     return 'none';
 }
 

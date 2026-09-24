@@ -46,7 +46,8 @@ import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { FileOutboxStore } from '../packages/lore/src/outbox/store.js';
 import { nodeUpsert } from '../packages/lore/src/core/nodeService.js';
 import { handleBulkDelete } from '../packages/lore/src/mcp/http/routes/bulkWriteEdgesDelete.js';
@@ -75,7 +76,7 @@ function delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function realDispatchSubstrates(graph: SurrealGraph, store: VerbatimStore): DispatcherSubstrates {
+function realDispatchSubstrates(graph: SurrealGraph, store: VerbatimStoreApi): DispatcherSubstrates {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-bulkdel-lock-order-wiring-'));
     const wiring = wireOutbox({
         loreDir: tmp,
@@ -140,7 +141,7 @@ test('bulk-delete races a concurrent nodeUpsert on a shared id: outbox order mat
         const v = mkTmp(`lore-bulkdel-lockorder-v${run}-`);
         const o = mkTmp(`lore-bulkdel-lockorder-o${run}-`);
         const graph = new SurrealGraph(g.dir);
-        const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+        const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
         const outboxStore = new FileOutboxStore(o.dir);
         await graph.initialize();
         await store.initialize();
@@ -249,7 +250,7 @@ test('bulk node-upsert (POST /api/nodes/bulk, ARCADE per-id branch) races a conc
         const o = mkTmp(`lore-bulkup-lockorder-o${run}-`);
         const realGraph = new SurrealGraph(g.dir);
         const graph = asArcadeLikeGraph(realGraph);
-        const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+        const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
         const outboxStore = new FileOutboxStore(o.dir);
         await realGraph.initialize();
         await store.initialize();

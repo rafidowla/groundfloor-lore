@@ -28,9 +28,12 @@ export function formatMaintainReport(report: MaintainReport, policy: MaintainPol
 
     // LanceDB
     L.push('LanceDB:');
+    if (report.lancedb.lancedbDir) {
+        L.push(`  dir: ${report.lancedb.lancedbDir}`);
+    }
     if (report.dryRun) {
         L.push(`  eligible old versions: ${report.lancedb.eligibleOldVersions}`);
-        L.push(`  reclaimable (upper bound): ${fmtBytes(report.lancedb.reclaimableBytesEstimate)}`);
+        L.push(`  table bytes (on-disk, upper bound): ${fmtBytes(report.lancedb.tableBytes)}`);
     } else {
         for (const t of report.lancedb.tables) {
             const err = t.error ? ` [ERROR: ${t.error}]` : '';

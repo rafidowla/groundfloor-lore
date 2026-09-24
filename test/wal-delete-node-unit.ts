@@ -50,7 +50,8 @@ import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { nodeUpsert } from '../packages/lore/src/core/nodeService.js';
 import { registerDeleteNodeTool } from '../packages/lore/src/mcp/tools/memory/deleteNode.js';
 import type { MemoryToolsDeps } from '../packages/lore/src/mcp/tools/memory/types.js';
@@ -148,7 +149,7 @@ function fakeReq(method: string): IncomingMessage {
     return { method, on: () => undefined } as unknown as IncomingMessage;
 }
 
-async function seedNode(graph: SurrealGraph, store: VerbatimStore, id: string, workspace: string, content: string) {
+async function seedNode(graph: SurrealGraph, store: VerbatimStoreApi, id: string, workspace: string, content: string) {
     const seed = await nodeUpsert(
         {
             id, workspace, ecosystem: '*', initiator: 'test:seed',
@@ -167,7 +168,7 @@ test('delete_node (MCP) appends exactly one delete_node WAL entry, after its nod
     const v = mkTmp('lore-walnode-mcp-v-');
     const w = mkTmp('lore-walnode-mcp-w-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     await graph.initialize();
     await store.initialize();
     try {
@@ -214,7 +215,7 @@ test('DELETE /api/node/:id (REST) appends exactly one delete_node WAL entry, aft
     const v = mkTmp('lore-walnode-rest-v-');
     const w = mkTmp('lore-walnode-rest-w-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     await graph.initialize();
     await store.initialize();
     try {
@@ -262,7 +263,7 @@ test('changeset delete (applyChangesetDelete) appends exactly one delete_node WA
     const v = mkTmp('lore-walnode-cs-v-');
     const w = mkTmp('lore-walnode-cs-w-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     await graph.initialize();
     await store.initialize();
     try {
@@ -363,7 +364,7 @@ test('prune_nodes hard_delete (MCP) appends exactly one delete_node WAL entry, a
         const v = mkTmp('lore-walnode-prune-v-');
         const w = mkTmp('lore-walnode-prune-w-');
         const graph = new SurrealGraph(g.dir);
-        const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+        const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
         await graph.initialize();
         await store.initialize();
         try {
@@ -425,7 +426,7 @@ test('POST /api/nodes/prune hard_delete (REST) appends exactly one delete_node W
         const v = mkTmp('lore-walnode-prune-rest-v-');
         const w = mkTmp('lore-walnode-prune-rest-w-');
         const graph = new SurrealGraph(g.dir);
-        const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+        const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
         await graph.initialize();
         await store.initialize();
         try {
@@ -486,7 +487,7 @@ test('upsert-then-delete (nodeUpsert then delete_node MCP) leaves the WAL ending
     const v = mkTmp('lore-walnode-seq-v-');
     const w = mkTmp('lore-walnode-seq-w-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     await graph.initialize();
     await store.initialize();
     try {
@@ -552,7 +553,7 @@ test("SyncEngine.pushPending() consumes a delete_node entry the real delete_node
     const v = mkTmp('lore-walnode-syncengine-v-');
     const w = mkTmp('lore-walnode-syncengine-w-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     await graph.initialize();
     await store.initialize();
     try {

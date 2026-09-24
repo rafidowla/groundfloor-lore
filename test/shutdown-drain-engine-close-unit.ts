@@ -100,7 +100,13 @@ await test('T3: a cloud handle with no close() is skipped, not crashed on', asyn
     assert.ok(true);
 });
 
-await test('T4: a throwing close() is contained; the drain still completes', async () => {
+await test('T4: a throwing graph.close() is contained; the drain still closes the verbatim store', async () => {
+    // Finding 0 (STEP2-CLOSE-PATH-DESIGN.md) made the verbatimStore close a
+    // structural (close()-shaped) probe, same as the graph. Pre-fix this test
+    // asserted the OPPOSITE — that a bare close()-shaped fake was skipped
+    // unless it was `instanceof VerbatimStore` — which is the exact
+    // fragility the structural probe removes. What T4 still needs to prove
+    // is unchanged: one step's throw does not strand the next step.
     let verbatimClosed = false;
     const graph = { close: async () => { throw new Error('substrate exploded'); } };
     const verbatimStore = { close: async () => { verbatimClosed = true; } };
@@ -109,8 +115,8 @@ await test('T4: a throwing close() is contained; the drain still completes', asy
     await buildShutdownDrain({ ...inertDeps(), graph, verbatimStore } as never)('test');
     assert.equal(
         verbatimClosed,
-        false,
-        'verbatimStore is only closed when it is a real VerbatimStore; a bare fake is skipped',
+        true,
+        'a throwing graph.close() must not strand the verbatimStore close step that follows it',
     );
 });
 
@@ -144,6 +150,22 @@ await test('T5: a REAL SurrealGraph is closed, and its directory lock released',
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });
     }
+});
+
+await test('T6: a proxy-shaped verbatim stub (not `instanceof VerbatimStore`) is still closed — Finding 0', async () => {
+    // STEP2-CLOSE-PATH-DESIGN.md Finding 0: the drain used to gate the boot
+    // verbatim store's close on `instanceof VerbatimStore`. Verified directly
+    // against this repo's class hierarchy that VerbatimSearchWorkerProxy
+    // actually extends VerbatimStore, so that nominal check was not the
+    // silent-skip bug the design assumed. The structural probe added here is
+    // still load-bearing for any future shape that reaches this deps.graph
+    // verbatimStore field via COMPOSITION rather than inheritance — this stub
+    // stands in for that shape: it is close()-shaped but is a plain object,
+    // not any subclass of VerbatimStore.
+    let closed = false;
+    const proxyLikeStub = { close: async () => { closed = true; } };
+    await buildShutdownDrain({ ...inertDeps(), graph: null, verbatimStore: proxyLikeStub } as never)('test');
+    assert.equal(closed, true, 'drain must close ANY close()-shaped verbatimStore, not just instanceof VerbatimStore');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

@@ -156,8 +156,10 @@ await test('T4: the CLI prints the alarming line for an unverified source, never
     const priorHome = process.env['LORE_HOME'];
     process.env['LORE_HOME'] = root;
     try {
-        const { createWorkspace } = await import('../packages/lore/src/config/workspaces.js');
+        const { createWorkspace, setWorkspaceGraphEngine } = await import('../packages/lore/src/config/workspaces.js');
         createWorkspace('cli-dest', {}, root);
+        // 3.21 step 1d: new workspaces default to 'sqlite'; this fixture restores a SURREAL archive, so force the destination's registered engine to match.
+        setWorkspaceGraphEngine('cli-dest', 'surreal', root);
 
         const { restoreCommand } = await import('../packages/lore/src/cli/commands/restore.js');
         const cap = captureConsole();
@@ -458,8 +460,10 @@ await test(
         const priorHome = process.env['LORE_HOME'];
         process.env['LORE_HOME'] = root;
         try {
-            const { createWorkspace } = await import('../packages/lore/src/config/workspaces.js');
+            const { createWorkspace, setWorkspaceGraphEngine } = await import('../packages/lore/src/config/workspaces.js');
             createWorkspace('t9-cli-dest', {}, root);
+            // 3.21 step 1d: new workspaces default to 'sqlite'; this fixture restores a SURREAL archive, so force the destination's registered engine to match.
+            setWorkspaceGraphEngine('t9-cli-dest', 'surreal', root);
 
             const { restoreCommand } = await import('../packages/lore/src/cli/commands/restore.js');
             const cap = captureConsole();

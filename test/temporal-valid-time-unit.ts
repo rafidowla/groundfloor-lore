@@ -22,7 +22,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
+import type { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
+import type { SqliteGraph } from '../packages/lore/src/engines/sqliteGraph.js';
+import { createTestGraphEngine } from './helpers/testGraphEngine.js';
 import { isValidAsOf, listNodesAsOf } from '../packages/lore/src/core/temporalQuery.js';
 import type { LoreNode } from '../packages/lore/src/providers/types.js';
 
@@ -41,9 +43,9 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
 }
 
 /** Fresh SurrealGraph on a throwaway directory; always closed and removed. */
-async function withGraph(fn: (g: SurrealGraph) => Promise<void>): Promise<void> {
+async function withGraph(fn: (g: SurrealGraph | SqliteGraph) => Promise<void>): Promise<void> {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-temporal-'));
-    const graph = new SurrealGraph(dir, { workspaceId: 'test-ws' });
+    const graph = createTestGraphEngine(dir, { workspaceId: 'test-ws' });
     try {
         await graph.initialize();
         await fn(graph);

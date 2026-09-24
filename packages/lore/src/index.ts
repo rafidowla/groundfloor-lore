@@ -133,6 +133,13 @@ export {
 // the internal core/nodeService.ts path.
 export type { NodeWriteResult } from './core/nodeService.js';
 export type { BulkIngestOpts, BulkIngestResult, BulkIngestNodeArgs } from './mcp/bulkIngest.js';
+// Shape of CreateLoreOptions.searchWorkerPolicy (per-store search-worker isolation).
+export type { SearchWorkerPolicy } from './engines/verbatimSearchWorkerProxy.js';
+
+// VerbatimStore's role-based LanceDB handle-scoping ('read' | 'write' | 'both';
+// see LORE-ASK-VECTOR-STORE-ROLE.md). Re-exported so embedding hosts can type
+// a role option without reaching into engines/verbatimStoreRole.ts directly.
+export type { VerbatimStoreRole } from './engines/verbatimStoreRole.js';
 
 // Re-export the storage-client facade — the cloud-swap point and the
 // surface embedding hosts operate through. See storage/loreStorageClient.ts.
@@ -141,6 +148,19 @@ export { LoreStorageClient } from './storage/loreStorageClient.js';
 // LoreNode is the return type of lore.search() and storageClient.getNode().
 // Re-exported so embedding hosts can type-check without reaching into internals.
 export type { LoreNode, LoreEdge } from './providers/types.js';
+
+// EmbeddingProvider — the interface CreateLoreOptions.embeddingProvider
+// expects. Re-exported so a host implementing its own provider (a remote
+// model, or one instance shared across multiple Lore instances) can
+// type-check against it without reaching into providers/types.js directly.
+export type { EmbeddingProvider } from './providers/types.js';
+
+// Fingerprint helper (`modelId@dtype`): identical for any provider — local,
+// remote or injected — declaring the same modelId + dtype. And the typed error
+// createLore() throws when an INJECTED provider doesn't match an existing
+// store's fingerprint (strict check — engines/verbatimFingerprintGate.ts).
+export { embeddingProviderFingerprint } from './providers/localEmbeddingProvider.js';
+export { EmbeddingFingerprintMismatchError, type FingerprintMismatchKind } from './engines/verbatimFingerprintGate.js';
 
 // P3 (Atlas): Pin the local embedding model contract so cross-device sync
 // can validate dimensions before trusting vectors from another machine.
@@ -155,6 +175,7 @@ export {
     MINILM_L6_V2_MODEL_DIM,
     MULTILINGUAL_E5_SMALL_MODEL_ID,
     MULTILINGUAL_E5_SMALL_MODEL_DIM,
+    releaseLocalEmbeddingPipeline,
     type LocalEmbeddingProviderOptions,
     type ModelDtype,
 } from './providers/localEmbeddingProvider.js';

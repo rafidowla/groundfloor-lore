@@ -1,0 +1,22 @@
+[
+    { "id": "id-01", "query": "fixture symbol #3", "expectedIds": ["fx-code-000003"] },
+    { "id": "id-02", "query": "fixture symbol #99", "expectedIds": ["fx-code-000099"] },
+    { "id": "id-03", "query": "fixture symbol #1234", "expectedIds": ["fx-code-001234"] },
+    { "id": "id-04", "query": "fixture symbol #2500", "expectedIds": ["fx-code-002500"] },
+    { "id": "id-05", "query": "fixture symbol #3333", "expectedIds": ["fx-code-003333"] },
+    { "id": "id-06", "query": "fixture symbol #4444", "expectedIds": ["fx-code-004444"] },
+    { "id": "id-07", "query": "fixture symbol #5555", "expectedIds": ["fx-code-005555"] },
+    { "id": "id-08", "query": "fixture symbol #6666", "expectedIds": ["fx-code-006666"] },
+    { "id": "id-09", "query": "fixture symbol #7777", "expectedIds": ["fx-code-007777"] },
+    { "id": "id-10", "query": "fixture symbol #8888", "expectedIds": ["fx-code-008888"] },
+    { "id": "id-11", "query": "fixture symbol #9750", "expectedIds": ["fx-code-009750"] },
+    { "id": "id-12", "query": "fixture symbol #9999", "expectedIds": ["fx-code-009999"] },
+    { "id": "id-13", "query": "rebalanceLedger.ts checkpoint-store", "expectedIds": ["fx-code-000179"] },
+    { "id": "id-14", "query": "src/job-table/throttleLedger.ts", "expectedIds": ["fx-code-000956"] },
+    { "id": "id-15", "query": "validateCursor.ts checkpoint-store", "expectedIds": ["fx-code-001939"] },
+    { "id": "id-16", "query": "src/audit-log/renewCursor.ts", "expectedIds": ["fx-code-003118"] },
+    { "id": "id-17", "query": "dispatchBatch.ts tenant-router", "expectedIds": ["fx-code-004549"] },
+    { "id": "id-18", "query": "src/lease-manager/reconcileOffset.ts", "expectedIds": ["fx-code-005938"] },
+    { "id": "id-19", "query": "reconcileShard.ts lease-manager", "expectedIds": ["fx-code-007490"] },
+    { "id": "id-20", "query": "src/job-table/renewToken.ts", "expectedIds": ["fx-code-008988"] }
+]

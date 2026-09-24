@@ -34,7 +34,7 @@
 
 import { log } from '../logger.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
-import type { VerbatimStore } from '../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import type { LocalGraphRegistry } from '../engines/localGraphRegistry.js';
 import type { WorkspaceVerbatimResolver } from '../outbox/workspaceVerbatimResolver.js';
 import { buildGraphRegistryForLocalMode, primeWorkspaceVerbatimResolver } from './bootSteps.js';
@@ -156,7 +156,7 @@ export function composeEmbeddedDrain(
 export interface EmbeddedInitDeps {
     deploymentMode: 'local' | 'cloud';
     graph: LoreGraphHandle;
-    verbatimStore: VerbatimStore | { initialize(): Promise<void> };
+    verbatimStore: VerbatimStoreApi | { initialize(): Promise<void> };
     workspaceVerbatimResolver: WorkspaceVerbatimResolver | undefined;
     detectedWorkspace: string;
     dataHome: string;
@@ -254,7 +254,7 @@ export async function runEmbeddedInit(deps: EmbeddedInitDeps): Promise<void> {
             deps.setGraphRegistry(reg);
             primeWorkspaceVerbatimResolver(
                 deps.workspaceVerbatimResolver,
-                deps.verbatimStore as unknown as VerbatimStore,
+                deps.verbatimStore as unknown as VerbatimStoreApi,
                 deps.detectedWorkspace,
                 deps.dataHome,
             );

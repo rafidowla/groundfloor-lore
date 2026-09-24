@@ -203,6 +203,19 @@ while read -r status path; do
       ;;
   esac
 done < <(git -C "$WORK" diff --cached --name-status "origin/$BRANCH")
+# 3. No publisher-machine paths in the staged tree. Targets the running
+#    user's own home/username (plain and in Claude's mangled temp-dir form)
+#    and agent scratch dirs — NOT generic /Users/<x>, which redaction tests
+#    use as fixtures. Fix leaks with a placeholder (<repo>/, <local>/) or a
+#    path derived from import.meta.url, never by adding to the strip list.
+PUB_USER="$(id -un)"
+PUB_USER_RE="$(printf '%s' "$PUB_USER" | sed 's/[][\.*^$/]/\\&/g')"
+LOCAL_PATH_RE="/(Users|home)/${PUB_USER_RE}(/|\$)|-Users-${PUB_USER_RE}-|/private/tmp/claude-[0-9]"
+if LEAKS="$(git -C "$WORK" grep --cached -nIE "$LOCAL_PATH_RE" 2>/dev/null)"; then
+  echo "ERROR: publish tree contains local machine paths — refusing:" >&2
+  printf '%s\n' "$LEAKS" | cut -c1-200 | head -20 >&2
+  exit 1
+fi
 
 # Nothing staged to ship (already in sync).
 if git -C "$WORK" diff --cached --quiet; then

@@ -136,8 +136,20 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                 let totalNodes = 0;
                 let totalEdges = 0;
                 let names: string[] = [];
-                try { names = listWorkspaceNames(); } catch { names = []; }
                 if (deps.graphRegistry) {
+                    // Defect 3 follow-up (3.20.2) — scope the enumeration to
+                    // the SAME home the registry itself reads (an embedded
+                    // instance's own dataHome), not the process-wide
+                    // loreHome() default, or an embedded admin_stats call
+                    // would list the wrong process's workspaces entirely.
+                    // Read defensively: several existing test fixtures pass a
+                    // minimal duck-typed registry (getGraphHandle only, no
+                    // homeDir) — fall back to listWorkspaceNames()'s own
+                    // loreHome() default there, exactly as before.
+                    const registryHome = typeof (deps.graphRegistry as { homeDir?: () => string }).homeDir === 'function'
+                        ? (deps.graphRegistry as unknown as { homeDir: () => string }).homeDir()
+                        : undefined;
+                    try { names = listWorkspaceNames(registryHome); } catch { names = []; }
                     for (const name of names) {
                         try {
                             const g = await deps.graphRegistry.getGraphHandle(name);

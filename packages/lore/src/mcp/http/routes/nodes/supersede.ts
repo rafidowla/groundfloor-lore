@@ -14,6 +14,7 @@ import { writePermissionDenied } from '../../../../security/rebacGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, extractWorkspace, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { WorkspaceNotFoundError } from '../../../../engines/localGraphRegistry.js';
 import { recordHotWrite } from '../../../../outbox/hotLane.js';
+import { tombstoneQuestionAliases } from '../../../../core/nodeServiceVerbatim.js';
 import { log } from '../../../../logger.js';
 import type { LoreGraph, NodesDeps } from './types.js';
 import { redactError } from '../../../../security/logRedact.js';
@@ -123,6 +124,15 @@ export async function handleSupersede(req: IncomingMessage, res: ServerResponse,
                 await targetGraph.addEdge(supersedeEdge);
             } catch (edgeErr) {
                 log.warn(`[Lore] POST /api/node/supersede: supersedes edge ${parsed.newId}->${parsed.oldId} failed (non-fatal; supersededAt is authoritative): ${redactError(edgeErr)}`);
+            }
+            // 3.21 step 3(e) — tombstone the superseded node's question
+            // aliases too (best-effort; parity with the MCP tool).
+            if (deps.outboxStore) {
+                await tombstoneQuestionAliases({
+                    id: parsed.oldId, workspace: supersedeWs,
+                    initiator: 'http:POST /api/node/supersede', logPrefix: '[Lore HTTP]',
+                    outboxStore: deps.outboxStore,
+                });
             }
         }
         deps.auditLog.log({

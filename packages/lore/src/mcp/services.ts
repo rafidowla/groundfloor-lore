@@ -24,13 +24,13 @@ import { collectSupersededEligible } from '../engines/nodePager.js';
 import { hasCapability } from '../engines/connectorCapabilities.js';
 import { DataplaneGraph } from '../engines/dataplaneGraph.js';
 import { createLoreDataplaneSdk } from '../engines/dataplaneSdkCompat.js';
-import { VerbatimStore } from '../engines/verbatimStore.js';
+import { openWorkspaceVerbatim, resolveVerbatimEngineForPath } from '../engines/openWorkspaceVerbatim.js';
+import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js'; import type { VerbatimStoreRole } from '../engines/verbatimStoreRole.js';
+import { log } from '../logger.js';
 import type { PendingAutolinkTracker } from '../engines/pendingAutolink.js';
-import { VerbatimSearchWorkerProxy, searchWorkerIsolationEnabled } from '../engines/verbatimSearchWorkerProxy.js';
+import { VerbatimSearchWorkerProxy, resolveSearchWorkerIsolation, type SearchWorkerPolicy } from '../engines/verbatimSearchWorkerProxy.js';
 import { DataplaneVectorStore } from '../engines/dataplaneVectorStore.js';
 import type { EmbeddingProvider } from '../providers/types.js';
-import { LocalEmbeddingProvider } from '../providers/localEmbeddingProvider.js';
-import { OpenAICompatEmbeddingProvider } from '../providers/openAICompatEmbeddingProvider.js';
 import { TsSdkAdapter } from '../engines/tsSdkAdapter.js';
 import type { TsSdkConfig } from '../engines/tsSdkAdapter.js';
 import { resolveSyncAdapter } from '../engines/syncAdapterRegistry.js';
@@ -64,7 +64,7 @@ import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 // more than the shared handle? Feature-detect and refuse — do not re-narrow
 // to a class.
 export type LoreGraph = LoreGraphHandle;
-export type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
+export type LoreVectorStore = VerbatimStoreApi | DataplaneVectorStore;
 
 /**
  * requireDataplaneOrgId — Cloud-mode tenant-isolation boot gate (D4/G14).
@@ -193,104 +193,28 @@ export async function createGraph(opts: CreateGraphOpts): Promise<LoreGraph> {
 }
 
 /**
- * createEmbeddingProvider — Selects the embedding backend.
- *
- * Selection precedence (highest → lowest):
- *   1. LORE_EMBEDDING_PROVIDER=openai_compat → remote provider
- *      Requires LORE_EMBEDDING_BASE_URL, LORE_EMBEDDING_MODEL,
- *      LORE_EMBEDDING_DIMENSION. LORE_EMBEDDING_API_KEY optional.
- *   2. LORE_LOCAL_EMBEDDING_MODEL=<modelId> → local override
- *      Optional LORE_LOCAL_EMBEDDING_DIM (defaults to 384).
- *   3. (default) LocalEmbeddingProvider — Xenova/all-MiniLM-L6-v2.
- *
- * Reverted 2026-04-30: silent autodetection at boot was wrong design.
- * Embedder swaps belong in a deliberate `lore embedder switch` CLI
- * command (see commands.ts) that runs the migration as part of the swap.
+ * createEmbeddingProvider — the env-var embedding-backend selector,
+ * including `LORE_EMBEDDING_PROVIDER=none` (3.21 step 3(c) —
+ * NullEmbeddingProvider). Moved to mcp/embeddingProviderFactory.ts (this
+ * file is at the 800-line hard cap); re-exported here unchanged so every
+ * existing import site (`from '../mcp/services.js'`) keeps working.
  */
-export async function createEmbeddingProvider(
-    overrides?: import('../providers/localEmbeddingProvider.js').LocalEmbeddingProviderOptions,
-): Promise<EmbeddingProvider> {
-    const providerKind = (process.env['LORE_EMBEDDING_PROVIDER'] ?? '').trim().toLowerCase();
-
-    if (providerKind === 'openai_compat' || providerKind === 'compat' || providerKind === 'remote') {
-        const baseUrl = process.env['LORE_EMBEDDING_BASE_URL'] ?? '';
-        const modelId = process.env['LORE_EMBEDDING_MODEL'] ?? '';
-        const dimRaw = process.env['LORE_EMBEDDING_DIMENSION'] ?? '';
-        const apiKey = process.env['LORE_EMBEDDING_API_KEY'] ?? undefined;
-        const dimension = Number.parseInt(dimRaw, 10);
-
-        const missing: string[] = [];
-        if (!baseUrl) missing.push('LORE_EMBEDDING_BASE_URL');
-        if (!modelId) missing.push('LORE_EMBEDDING_MODEL');
-        if (!Number.isInteger(dimension) || dimension <= 0) missing.push('LORE_EMBEDDING_DIMENSION');
-        if (missing.length > 0) {
-            throw new Error(
-                `[Lore MCP] LORE_EMBEDDING_PROVIDER=${providerKind} requires: ${missing.join(', ')}`
-            );
-        }
-        console.error(
-            `[Lore MCP] Embedding provider: openai_compat (model=${modelId}, dim=${dimension}, base=${baseUrl})`
-        );
-        return new OpenAICompatEmbeddingProvider({ baseUrl, modelId, dimension, apiKey });
-    }
-
-    const localModelOverride = (process.env['LORE_LOCAL_EMBEDDING_MODEL'] ?? '').trim();
-    const localDimRaw = (process.env['LORE_LOCAL_EMBEDDING_DIM'] ?? '').trim();
-    // v1.1 (deferred item #3): operator opt-in for the ONNX execution
-    // provider. Accepts 'cpu' | 'coreml' | 'webgpu' | 'cuda' | 'auto'.
-    // Verify availability via /health.embeddingBackend.providers before
-    // setting — the actual list of compiled-in EPs varies by platform.
-    const localDeviceRaw = (process.env['LORE_LOCAL_EMBEDDING_DEVICE'] ?? '').trim().toLowerCase();
-    const validDevices = new Set(['cpu', 'coreml', 'webgpu', 'cuda', 'auto', 'gpu']);
-    const localDevice = localDeviceRaw && validDevices.has(localDeviceRaw)
-        ? (localDeviceRaw as 'cpu' | 'coreml' | 'webgpu' | 'cuda' | 'auto' | 'gpu')
-        : undefined;
-    if (localDeviceRaw && !localDevice) {
-        console.error(
-            `[Lore MCP] LORE_LOCAL_EMBEDDING_DEVICE=${localDeviceRaw} not recognised; ignoring (valid: ${Array.from(validDevices).join(', ')})`
-        );
-    }
-
-    // Programmatic overrides (from createLore({ embedding: ... })) take
-    // precedence over env vars for the local provider path.
-    const effectiveDevice = overrides?.device ?? localDevice;
-    const effectiveModelId = overrides?.modelId ?? (localModelOverride || undefined);
-    const effectiveDtype = overrides?.dtype;
-
-    if (effectiveModelId) {
-        const dim = overrides?.dimension ?? (localDimRaw ? Number.parseInt(localDimRaw, 10) : undefined);
-        if (localDimRaw && !overrides?.dimension && (!Number.isInteger(dim) || (dim ?? 0) <= 0)) {
-            throw new Error(
-                `[Lore MCP] LORE_LOCAL_EMBEDDING_DIM must be a positive integer (got ${JSON.stringify(localDimRaw)})`
-            );
-        }
-        const provider = new LocalEmbeddingProvider({
-            modelId: effectiveModelId,
-            ...(dim ? { dimension: dim } : {}),
-            ...(effectiveDevice ? { device: effectiveDevice } : {}),
-            ...(effectiveDtype ? { dtype: effectiveDtype } : {}),
-        });
-        console.error(
-            `[Lore MCP] Embedding provider: local override (model=${provider.modelId}, dim=${provider.dimension}${effectiveDevice ? `, device=${effectiveDevice}` : ''})`
-        );
-        return provider;
-    }
-
-    const provider = new LocalEmbeddingProvider({
-        ...(effectiveDevice ? { device: effectiveDevice } : {}),
-        ...(effectiveDtype ? { dtype: effectiveDtype } : {}),
-    });
-    console.error(
-        `[Lore MCP] Embedding provider: local (model=${provider.modelId}, dim=${provider.dimension}${effectiveDevice ? `, device=${effectiveDevice}` : ''})`
-    );
-    return provider;
-}
+export { createEmbeddingProvider } from './embeddingProviderFactory.js';
 
 export interface CreateVectorStoreOpts {
     deploymentMode: 'local' | 'cloud';
     graphBasePath: string;
     embeddingProvider: EmbeddingProvider;
     embedOverrides?: Record<string, unknown>;
+    vectorStoreRole?: VerbatimStoreRole; // affects only the direct-VerbatimStore/SqliteVerbatimStore branch below; omitted = today's default
+    searchWorkerPolicy?: SearchWorkerPolicy; // per-store override for the boot store, consulted before LORE_SEARCH_WORKER; see CreateLoreOptions.searchWorkerPolicy
+    injectedEmbeddingProvider?: boolean; // true when embeddingProvider is host-injected (CreateLoreOptions.embeddingProvider) — threaded to VerbatimStore.strictFingerprintCheck (verbatimFingerprintGate.ts)
+    /** 3.21 step 2 part 2 — same contract as CreateGraphOpts.workspaceId:
+     *  lets the vector engine be resolved by NAME (WorkspaceEntry.vectorEngine)
+     *  instead of matching graphBasePath against workspaces.json. */
+    workspaceId?: string;
+    /** Same contract as CreateGraphOpts.home. */
+    home?: string;
 }
 
 /**
@@ -322,13 +246,35 @@ export async function createVectorStore(opts: CreateVectorStoreOpts): Promise<Lo
                 hasCapability(baseUrl, apiKey || 'pending-keychain', capability),
         });
     }
+    // 3.21 step 2 part 2 — which engine THIS workspace declares
+    // (WorkspaceEntry.vectorEngine; absent = 'lance', unchanged behaviour).
+    const vectorEngine = resolveVerbatimEngineForPath(opts.graphBasePath, { workspaceId: opts.workspaceId, home: opts.home }).engine;
     // Opt-in worker-process isolation (LORE_SEARCH_WORKER, default off): run the
     // native LanceDB store in a child process so a native crash restarts a worker
     // instead of taking the host down. Child rebuilds its provider from env.
-    if (searchWorkerIsolationEnabled()) {
-        return new VerbatimSearchWorkerProxy(opts.graphBasePath, opts.embedOverrides, opts.embeddingProvider);
+    // Per-store host policy, else the env gate; recursion guard + throwing-policy fallback live in the helper.
+    // `vectorEngine` is threaded through so a 'sqlite'-vector workspace never
+    // spawns a search worker regardless of policy/env — see
+    // resolveSearchWorkerIsolation's own doc comment (the worker exists to
+    // fence LanceDB native crashes; there are none here).
+    if (resolveSearchWorkerIsolation(opts.graphBasePath, opts.searchWorkerPolicy, vectorEngine)) {
+        return new VerbatimSearchWorkerProxy(opts.graphBasePath, opts.embedOverrides, opts.embeddingProvider, opts.injectedEmbeddingProvider ?? false);
     }
-    return new VerbatimStore(opts.graphBasePath, opts.embeddingProvider);
+    return openWorkspaceVerbatim(opts.graphBasePath, opts.embeddingProvider, {
+        workspaceId: opts.workspaceId,
+        home: opts.home,
+        role: opts.vectorStoreRole,
+        strictFingerprintCheck: opts.injectedEmbeddingProvider ?? false,
+        // The boot store has no cached-reference of its own to swap on a
+        // background promotion commit — see openWorkspaceVerbatim.ts's
+        // header and this file's `createVectorStore` doc comment. The
+        // resolver (workspaceVerbatimResolver.ts) passes a real callback;
+        // this call site logs instead, matching `lore vectors promote`'s
+        // own "restart the daemon to pick up the promoted store" guidance.
+        onLancePromoted: () => {
+            log.info(`[Lore MCP] workspace at ${opts.graphBasePath} was auto-promoted SQLite → LanceDB; the boot vector store still references the old SQLite path until the daemon restarts.`);
+        },
+    });
 }
 
 /**

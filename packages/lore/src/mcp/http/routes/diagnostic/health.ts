@@ -9,7 +9,7 @@
  */
 
 import type { ServerResponse } from 'node:http';
-import type { VerbatimStore } from '../../../../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../../../../engines/verbatimStoreApi.js';
 import { getBackgroundReconnectStatus } from '../../../../engines/backgroundReconnect.js';
 import { getCachedEmbeddingBackend } from '../../../../providers/embeddingBackend.js';
 import { getActiveWorkspaceName, listWorkspaceNames } from '../../../../config/workspaces.js';
@@ -105,7 +105,7 @@ export async function handleConsistency(res: ServerResponse, url: string, deps: 
         const tableStorage = (isActive
             ? deps.store.tableStorage
             : (deps.graphRegistry ? await deps.graphRegistry.tableStorageFor(workspace) : null)) ?? null;
-        const vectorStore = isActive ? ((deps.store.loreVerbatim as VerbatimStore) ?? null) : null;
+        const vectorStore = isActive ? ((deps.store.loreVerbatim as VerbatimStoreApi) ?? null) : null;
         const report = await diagnoseConsistency(
             targetGraph as { listNodes: typeof deps.store.loreGraph.listNodes },
             vectorStore,
@@ -194,12 +194,12 @@ export async function handleConsistencyCleanup(res: ServerResponse, url: string,
         //    If no resolver is wired we cannot safely run the destructive pass
         //    against the right store, so we REFUSE rather than fall back to the
         //    boot store (which would delete the ACTIVE workspace's vectors).
-        let vectorStore: VerbatimStore | null;
+        let vectorStore: VerbatimStoreApi | null;
         if (isActive || !deps.graphRegistry) {
-            vectorStore = (deps.store.loreVerbatim as VerbatimStore) ?? null;
+            vectorStore = (deps.store.loreVerbatim as VerbatimStoreApi) ?? null;
         } else if (deps.workspaceVerbatimResolver) {
             try {
-                vectorStore = (await deps.workspaceVerbatimResolver.getOrOpen(workspace)) as unknown as VerbatimStore;
+                vectorStore = (await deps.workspaceVerbatimResolver.getOrOpen(workspace)) as unknown as VerbatimStoreApi;
             } catch (err) {
                 writeError(res, 500, 'workspace_verbatim_unavailable', `could not open verbatim store for workspace "${workspace}": ${redactError(err)}`);
                 return;
@@ -450,6 +450,13 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
                 globalTotalsComplete,
                 perWorkspaceStats,
                 globalTotals: { nodeCount: globalNodes, edgeCount: globalEdges },
+                // docs/PERFORMANCE-MEMORY.md §11 — no route previously exposed
+                // WorkspaceVerbatimResolver's own open-store count, so its idle
+                // eviction could only be inferred (RSS / lsof, both unreliable
+                // for LanceDB — see §11.3), never directly observed. `openCount()`
+                // is a pure read (`this.byPath.size`, no touch), so exposing it
+                // here can't itself keep a workspace alive.
+                verbatimResolverOpenCount: deps.workspaceVerbatimResolver?.openCount() ?? null,
             },
             // 2026-05-17: surface the daemon's effective LORE_HOME so
             // `lore doctor` run from a shell without the env var set

@@ -1,0 +1,404 @@
+[
+ {
+  "id": "u-q01",
+  "terse": "how long before a worker loses its claim on a job",
+  "chatty": "if a worker box goes quiet, how many seconds until somebody else can grab its job?",
+  "expectedIds": [
+   "fx-decision-lease-ttl"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q02",
+  "terse": "why not 30s heartbeat expiry",
+  "chatty": "someone suggested dropping the claim expiry to 30s, didn't we reject that for some reason?",
+  "expectedIds": [
+   "fx-decision-lease-ttl"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q03",
+  "terse": "poison message holding time",
+  "chatty": "a message blew through all its retries last week, is it still around or already deleted?",
+  "expectedIds": [
+   "fx-decision-dlq-retention"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q04",
+  "terse": "shard assignment per customer",
+  "chatty": "how do we pick which partition a customer's workload goes to?",
+  "expectedIds": [
+   "fx-decision-tenant-router-hash"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q05",
+  "terse": "why round robin was dropped for tenants",
+  "chatty": "we used to spread tenants round-robin right? what went wrong with that?",
+  "expectedIds": [
+   "fx-decision-tenant-router-hash"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q06",
+  "terse": "yaml norway problem incident",
+  "chatty": "wasn't there some outage where a settings file had 'no' turned into false?",
+  "expectedIds": [
+   "fx-decision-config-loader-format"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q07",
+  "terse": "settings file syntax",
+  "chatty": "what syntax are we supposed to write the service settings files in these days?",
+  "expectedIds": [
+   "fx-decision-config-loader-format"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q08",
+  "terse": "randomized backoff requirement",
+  "chatty": "do I have to add randomness to my retry sleep or is plain exponential ok?",
+  "expectedIds": [
+   "fx-convention-retry-jitter"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q09",
+  "terse": "synchronized retry storm cause",
+  "chatty": "what blows up if thousands of workers all back off by the exact same amount?",
+  "expectedIds": [
+   "fx-convention-retry-jitter"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q10",
+  "terse": "how to name a new gauge",
+  "chatty": "adding a new counter to my service, what should I call it so it doesn't get bounced?",
+  "expectedIds": [
+   "fx-convention-metrics-naming"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q11",
+  "terse": "callback payload signing",
+  "chatty": "how do receivers verify that the http callbacks we push to them really came from us?",
+  "expectedIds": [
+   "fx-convention-webhook-signing"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q12",
+  "terse": "secret rollover overlap for callbacks",
+  "chatty": "when we swap the signing key, how do we avoid customers rejecting deliveries mid-swap?",
+  "expectedIds": [
+   "fx-convention-webhook-signing"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q13",
+  "terse": "progress snapshots storage layout",
+  "chatty": "where do long jobs save their progress, is it just more columns on the jobs table?",
+  "expectedIds": [
+   "fx-architecture-checkpoint-store"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q14",
+  "terse": "2025 scheduler stall root cause",
+  "chatty": "what actually caused that big scheduler freeze back in 2025?",
+  "expectedIds": [
+   "fx-architecture-checkpoint-store"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q15",
+  "terse": "workers calling integrations directly",
+  "chatty": "can my worker just call the partner API itself or is there a middleman?",
+  "expectedIds": [
+   "fx-architecture-connector-bus"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q16",
+  "terse": "per integration throttling outbox",
+  "chatty": "if one downstream integration is dead slow, does it hold up the worker's next task?",
+  "expectedIds": [
+   "fx-architecture-connector-bus"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q17",
+  "terse": "interactive batch background lanes",
+  "chatty": "what are the different queue lanes the dispatcher uses for urgent vs bulk work?",
+  "expectedIds": [
+   "fx-architecture-scheduler-tiers"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q18",
+  "terse": "low priority jobs never running",
+  "chatty": "is there anything guaranteeing background stuff eventually runs when prod is slammed?",
+  "expectedIds": [
+   "fx-architecture-scheduler-tiers"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q19",
+  "terse": "global throughput cap algorithm",
+  "chatty": "how do we keep the total calls per second under the cap when there are lots of shards?",
+  "expectedIds": [
+   "fx-architecture-rate-limiter-token-bucket"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q20",
+  "terse": "half written progress record after crash",
+  "chatty": "we hard killed a worker during a save and it resumed from garbage, known issue?",
+  "expectedIds": [
+   "fx-bug-checkpoint-torn-write"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q21",
+  "terse": "atomic rename fix for checkpoints",
+  "chatty": "why do checkpoints go to a temp file first and then get renamed?",
+  "expectedIds": [
+   "fx-bug-checkpoint-torn-write"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q22",
+  "terse": "job ran twice after gc pause",
+  "chatty": "a task got processed two times after the JVM froze for a while, how did that happen?",
+  "expectedIds": [
+   "fx-bug-lease-double-execution"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q23",
+  "terse": "stale worker completion rejected",
+  "chatty": "what stops a zombie worker from marking a job done after its claim was handed off?",
+  "expectedIds": [
+   "fx-bug-lease-double-execution"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q24",
+  "terse": "cpu spike every 200ms",
+  "chatty": "why were the integrations getting hammered in lockstep every fraction of a second?",
+  "expectedIds": [
+   "fx-bug-rate-limiter-thundering-herd"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q25",
+  "terse": "too many open watches after reloads",
+  "chatty": "long-running box eventually died with a watch descriptor limit error after lots of settings reloads, why?",
+  "expectedIds": [
+   "fx-bug-config-loader-hot-reload-leak"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q26",
+  "terse": "dedupe token on enqueue",
+  "chatty": "if a client retries the submit call, how do we avoid creating the same job twice?",
+  "expectedIds": [
+   "fx-convention-idempotency-key"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q27",
+  "terse": "missing dedupe key behavior",
+  "chatty": "what happens if a caller forgets to send the dedup key when they submit?",
+  "expectedIds": [
+   "fx-convention-idempotency-key"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q28",
+  "terse": "callback service rewrite from node",
+  "chatty": "why did we port the http callback sender off javascript?",
+  "expectedIds": [
+   "fx-decision-webhook-relay-language"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q29",
+  "terse": "telemetry buffer flush interval",
+  "chatty": "how often does the stats shipper actually push data out, and is there a size limit?",
+  "expectedIds": [
+   "fx-architecture-metrics-exporter-batching"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q30",
+  "terse": "big customers piled on one partition",
+  "chatty": "three of our largest customers ended up on the same box and it melted, what was the fix?",
+  "expectedIds": [
+   "fx-bug-tenant-router-hot-shard"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q31",
+  "terse": "virtual nodes count",
+  "chatty": "how many vnodes per physical shard do we configure?",
+  "expectedIds": [
+   "fx-bug-tenant-router-hot-shard"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q32",
+  "terse": "can I rename a column in one deploy",
+  "chatty": "can I drop an old column in the same release where I add its replacement?",
+  "expectedIds": [
+   "fx-convention-schema-migration-additive"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q33",
+  "terse": "scale out signal for workers",
+  "chatty": "what makes us spin up extra worker instances, is it just backlog length?",
+  "expectedIds": [
+   "fx-architecture-worker-pool-autoscale"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q34",
+  "terse": "replayed message vanished during cleanup",
+  "chatty": "I re-ran a failed message and the record of it just disappeared, was that the cleanup job?",
+  "expectedIds": [
+   "fx-bug-dlq-purge-race"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q35",
+  "terse": "why no datadog",
+  "chatty": "why aren't we just paying for a hosted monitoring product like everyone else?",
+  "expectedIds": [
+   "fx-decision-observability-vendor"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q36",
+  "terse": "incident writeup deadline",
+  "chatty": "after an outage, how soon does the retro doc need to be out and can it name people?",
+  "expectedIds": [
+   "fx-convention-postmortem-blameless"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q37",
+  "terse": "jobs per dispatch cycle default",
+  "chatty": "how many jobs does the dispatcher hand out each cycle by default?",
+  "expectedIds": [
+   "fx-dup-batch-size-tuning-a",
+   "fx-dup-batch-size-tuning-b"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q38",
+  "terse": "outbound integration call timeout",
+  "chatty": "how long do we wait on a partner system before giving up on the call?",
+  "expectedIds": [
+   "fx-dup-connector-timeout-default-a",
+   "fx-dup-connector-timeout-default-b"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q39",
+  "terse": "editing audit entries",
+  "chatty": "if an audit record is wrong can I just update it in place?",
+  "expectedIds": [
+   "fx-dup-audit-log-immutability-a",
+   "fx-dup-audit-log-immutability-b"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q40",
+  "terse": "command line token lifetime",
+  "chatty": "how long is the login token from the command-line tool good for?",
+  "expectedIds": [
+   "fx-dup-cli-auth-token-scope-a",
+   "fx-dup-cli-auth-token-scope-b"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q41",
+  "terse": "minimum warm instances overnight",
+  "chatty": "do we ever scale the workers all the way to zero at night?",
+  "expectedIds": [
+   "fx-dup-worker-pool-min-size-a",
+   "fx-dup-worker-pool-min-size-b"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q42",
+  "terse": "max attempts per job lifetime",
+  "chatty": "what's the hard ceiling on how many times one job can be retried overall?",
+  "expectedIds": [
+   "fx-dup-retry-budget-cap-a",
+   "fx-dup-retry-budget-cap-b"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q43",
+  "terse": "components of the platform",
+  "chatty": "give me the big-picture rundown of what pieces make up this platform",
+  "expectedIds": [
+   "fx-hub-system-overview"
+  ],
+  "workspace": "default"
+ },
+ {
+  "id": "u-q44",
+  "terse": "what does tick mean",
+  "chatty": "people keep saying 'tick' and 'tier' in reviews, is there a glossary somewhere?",
+  "expectedIds": [
+   "fx-hub-glossary"
+  ],
+  "workspace": "default"
+ }
+]

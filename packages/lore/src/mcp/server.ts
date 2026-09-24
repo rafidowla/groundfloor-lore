@@ -40,7 +40,8 @@ import { LocalGraphRegistry } from '../engines/localGraphRegistry.js';
 import { SyncEngineRegistry } from '../engines/syncEngineRegistry.js';
 import { WorkspaceVerbatimResolver } from '../outbox/workspaceVerbatimResolver.js';
 import { searchWorkerIsolationEnabled } from '../engines/verbatimSearchWorkerProxy.js';
-import { VerbatimStore } from '../engines/verbatimStore.js';
+import { isVerbatimStore } from '../engines/verbatimStoreApi.js';
+import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import type { EmbeddingProvider } from '../providers/types.js';
 import { FeedbackStore } from '../engines/feedbackStore.js';
 import { SyncEngine } from '../engines/syncEngine.js';
@@ -58,7 +59,7 @@ import {
     applySnapshotToDisk,
     removeWorkspaceFromDisk,
 } from '../sync/syncCallbacks.js';
-import { getActiveWorkspaceName, loadWorkspaces } from '../config/workspaces.js'; // L-033: loadWorkspaces resolves quota entries.
+import { getActiveWorkspaceName, loadWorkspaces, loadWorkspacesIfPresent } from '../config/workspaces.js'; // L-033: loadWorkspaces resolves quota entries.
 import { RateLimiter } from '../security/rateLimit.js'; import { InMemoryWorkspaceQuotaStore } from '../security/workspaceQuota.js'; // L-033: shared write-quota store.
 import { buildDefaultRegistry, ExtractorRegistry } from '../engines/extractors/index.js';
 import { RetentionSweeper } from '../engines/retentionSweep.js';
@@ -118,6 +119,7 @@ import { buildShutdownDrain, collectSqliteStores } from './shutdownDrain.js';
 // W3-SERVICE-LAYER — transport-agnostic guarded node-write orchestration,
 // shared with the MCP store_node tool + POST /api/node route.
 import { nodeUpsert as nodeServiceUpsert, resolveAutolinkHandles, type NodeWriteResult } from '../core/nodeService.js';
+import { resolveSupersessionContext, resolveHostSupersessionDefault } from '../core/supersessionPolicy.js';
 // 1.1 (2026-08-17 functional-correctness audit) — SurrealDB's optimistic
 // concurrency drops writes under overlapping-key contention; the retry
 // wrapper (previously wired ONLY into bulkIngest) now covers the embedded
@@ -134,9 +136,9 @@ import { log } from '../logger.js';
 // attaches no uncaughtException/unhandledRejection handlers to the host.
 import { disposeNativePoolSafetyNet } from '../engines/nativePoolSafetyNet.js';
 import { scrubEnvIfOwned, armNativePoolSafetyNetIfOwned, daemonTimersEnabled } from './processOwnership.js';
+import { selectEmbeddingProvider, type EmbeddingInjectionOptions } from './embeddingProviderSelection.js';
 import {
     createGraph,
-    createEmbeddingProvider,
     createVectorStore,
     createPendingOpsStore,
     resolveSyncAdapterFromEnv,
@@ -158,8 +160,9 @@ import {
  *  switchable backend (see cloud_invariant / DEC-CLOUD-READY). */
 export type LoreDeploymentMode = 'local' | 'cloud' | 'embedded' | 'arcade';
 
-/** Options for {@link createLore}. */
-export interface CreateLoreOptions {
+/** Options for {@link createLore}. `embeddingProvider` (host injection) is in
+ *  EmbeddingInjectionOptions — mcp/embeddingProviderSelection.ts. */
+export interface CreateLoreOptions extends EmbeddingInjectionOptions {
     /** Per-instance Lore data root. Threaded through resolveLoreHome so a
      *  host embedding Lore can pin one instance's home without mutating the
      *  process-wide LORE_HOME env var. */
@@ -173,6 +176,17 @@ export interface CreateLoreOptions {
      * (env scrub, crash handlers). NOT `deploymentMode`: processOwnership.ts.
      */
     ownsProcess?: boolean;
+    /**
+     * D5 round 2 (#2, host switch) — host-level default for write-time
+     * supersession enforcement, applied to every workspace this instance
+     * writes to that has no explicit per-workspace `supersessionPolicy`
+     * (`setWorkspaceSupersessionPolicy` always wins when set). Precedence:
+     * per-workspace setting > this option > `LORE_SUPERSESSION_ENFORCE` env
+     * var > `false`. See core/supersessionPolicy.ts's
+     * `resolveHostSupersessionDefault`, and CHANGELOG.md's "D5 round 3"
+     * entry for the full precedence writeup.
+     */
+    supersessionEnforce?: boolean;
     /**
      * Local embedding provider overrides. Programmatic alternative to the
      * LORE_LOCAL_EMBEDDING_DEVICE / LORE_LOCAL_EMBEDDING_MODEL env vars.
@@ -201,6 +215,8 @@ export interface CreateLoreOptions {
      * was selected.
      */
     embedding?: import('../providers/localEmbeddingProvider.js').LocalEmbeddingProviderOptions;
+    vectorStoreRole?: import('../engines/verbatimStoreRole.js').VerbatimStoreRole | ((basePath: string) => import('../engines/verbatimStoreRole.js').VerbatimStoreRole); // boot store + outbox resolver role; fn = resolved per basePath; omitted = today's default
+    /** Decide per store whether to isolate search in a worker. Consulted before the LORE_SEARCH_WORKER env gate; omit for today's global behaviour. */ searchWorkerPolicy?: (basePath: string) => boolean;
 }
 
 /**
@@ -216,6 +232,16 @@ export interface CreateLoreOptions {
  * embedded transport + dispose wiring detail is finished in
  * W3-EMBEDDED-MODE.
  */
+/** fix/search-worker-call-cancellation (3.20.2, req. 3): shared abort-reason
+ *  shaping for LoreInstance.search's light-touch signal support. */
+function toSearchAbortError(signal: AbortSignal): Error {
+    const reason = (signal as { reason?: unknown }).reason;
+    if (reason instanceof Error) return reason;
+    const err = new Error(reason !== undefined ? String(reason) : 'aborted');
+    err.name = 'AbortError';
+    return err;
+}
+
 export interface LoreInstance {
     /** Unified storage bundle (sdk: GroundfloorClient in cloud mode, null in local mode). */
     readonly store: Awaited<ReturnType<typeof createStorageClient>>;
@@ -250,6 +276,9 @@ export interface LoreInstance {
         nodeData: Record<string, unknown>;
         skipEmbed?: boolean;
         asyncEmbed?: boolean;
+        /** D5: typed pass-through to nodeServiceUpsert()'s supersession args. See core/supersessionPolicy.ts. */
+        supersedes?: string[];
+        force?: boolean;
     }): Promise<NodeWriteResult>;
     /**
      * Bulk-ingest N nodes optimised for structured import (repo indexing,
@@ -288,6 +317,9 @@ export interface LoreInstance {
         ecosystem: string;
         nodeData: Record<string, unknown>;
         skipEmbed?: boolean;
+        /** D5: see nodeUpsert() above; enforced per-node, a rejection lands in that node's own result slot. */
+        supersedes?: string[];
+        force?: boolean;
     }>): Promise<NodeWriteResult[]>;
     /**
      * Resolves when all pending async embeds have been persisted to LanceDB.
@@ -302,8 +334,12 @@ export interface LoreInstance {
     awaitEmbeds(): Promise<void>;
     /** P2/Atlas — in-process hybrid recall (semantic+BM25+traversal). Returns a typed JS object; no MCP transport. */
     recall(topic: string, opts: RecallOpts): Promise<RecallResult>;
-    /** P2/Atlas — vector+keyword node search. Thin wrapper over storageClient.search(); workspace/ecosystem default to '*'. */
-    search(query: string, limit?: number, workspace?: string, ecosystem?: string): Promise<import('../providers/types.js').LoreNode[]>;
+    /** P2/Atlas — vector+keyword node search. Thin wrapper over storageClient.search(); workspace/ecosystem default to '*'.
+     *  `opts.signal` (fix/search-worker-call-cancellation, 3.20.2, req. 3) is
+     *  light-touch: it rejects this outer promise on abort, but this path runs
+     *  through the graph engine's own search (not the LanceDB SearchGate this
+     *  defect fixes), so it cannot cancel in-flight native work — see openIssues. */
+    search(query: string, limit?: number, workspace?: string, ecosystem?: string, opts?: { signal?: AbortSignal }): Promise<import('../providers/types.js').LoreNode[]>;
     /** Ordered async graceful-shutdown drain; does NOT close any HTTP server or call process.exit (daemon owns those).
      *  TW-7b: closes the graph engine + LanceDB handles deterministically LAST, so an embedder awaiting dispose() exits NATURALLY without process.exit() (no native SIGSEGV; idempotent). See test/tw2a-embedded-lifecycle-unit.ts. */
     dispose(reason?: string): Promise<void>;
@@ -328,7 +364,7 @@ export interface LoreInstance {
  * inside server.ts; it is never the public contract.
  */
 export interface LoreInternalHandles {
-    getGraphRegistry(): LocalGraphRegistry | undefined;
+    getGraphRegistry(): LocalGraphRegistry | undefined; getVerbatimResolver(): WorkspaceVerbatimResolver | undefined;
     outboxWiring: ReturnType<typeof wireOutbox>;
 }
 
@@ -362,6 +398,8 @@ interface DaemonWiring {
     embedQueue: ReturnType<typeof wireEmbedQueue>;
     outboxWiring: ReturnType<typeof wireOutbox>;
     workspaceVerbatimResolver: WorkspaceVerbatimResolver | undefined; workspaceQuotaStore: import('../security/workspaceQuota.js').IWorkspaceQuotaStore; getWorkspaceEntryForQuota: (ws: string) => import('../config/workspaces.js').WorkspaceEntry | undefined; // L-033 shared write quota (REST + MCP).
+    /** D5 round 2 (#2) — host-level supersession-enforce default, resolved once via `resolveHostSupersessionDefault`. */
+    supersessionEnforceDefault: boolean | undefined;
     loadJobsStore: LoadJobsStore;
     loadConcurrencyManager: WorkspaceConcurrencyManager;
     loadTempFileSweeper: TempFileSweeper;
@@ -395,7 +433,7 @@ interface DaemonWiring {
     auxStore: AuxStore | undefined;
     versionStore: VersionStore | undefined;
     getGraphRegistry(): LocalGraphRegistry | undefined;
-    setGraphRegistry(r: LocalGraphRegistry | undefined): void;
+    setGraphRegistry(r: LocalGraphRegistry | undefined): void; getVerbatimResolver(): WorkspaceVerbatimResolver | undefined;
     /** Wave 4.3 — per-workspace SyncEngine registry. */
     getSyncEngineRegistry(): SyncEngineRegistry | undefined;
     setSyncEngineRegistry(r: SyncEngineRegistry | undefined): void;
@@ -524,16 +562,9 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         cacheDisabled,
     });
 
-    // Q2.2 slice 6a/6b/7 — single EmbeddingProvider injected into both
-    // vector stores. Selection precedence (highest → lowest):
-    //   1. LORE_EMBEDDING_PROVIDER=openai_compat → remote provider.
-    //   2. LORE_LOCAL_EMBEDDING_MODEL=<modelId> → local override.
-    //   3. (default) LocalEmbeddingProvider — Xenova/all-MiniLM-L6-v2.
-    //
-    // W2-CORE-SPLIT: the top-level `await createEmbeddingProvider()` moved
-    // HERE (inside the factory) so importing the library never triggers the
-    // embedding-provider load.
-    const embeddingProvider: EmbeddingProvider = await createEmbeddingProvider(opts.embedding);
+    // Q2.2 slice 6a/6b/7 + injected provider — ONE EmbeddingProvider for every
+    // store; precedence + strict-fingerprint rule in embeddingProviderSelection.ts.
+    const { embeddingProvider, injectedEmbeddingProvider } = await selectEmbeddingProvider(opts);
     // v1.1 (deferred item #3 partial): probe + log the actual ONNX runtime
     // backend so operators see ground truth instead of the legacy
     // "Wasm CPU" misnomer. Surfaced on /health and /api/health.
@@ -546,19 +577,42 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         log.warn(`[Lore MCP] ORT backend probe failed (non-fatal): ${(probeErr as Error).message}`);
     }
 
-    // Q2.2 slice 3 — Mode-conditional vector-store factory.
-    //   local mode: embedded LanceDB VerbatimStore at the active workspace path.
-    //   cloud mode: DataplaneVectorStore fronting groundfloor-ts-sdk's vector
-    //               extension. Both implement VectorProvider.
+    // Q2.2 slice 3 — Mode-conditional vector-store factory (local: embedded LanceDB VerbatimStore; cloud: DataplaneVectorStore). Both implement VectorProvider.
     const verbatimStore: LoreVectorStore = await createVectorStore({
         deploymentMode,
         graphBasePath,
         embeddingProvider,
         embedOverrides: opts.embedding as Record<string, unknown> | undefined,
+        vectorStoreRole: typeof opts.vectorStoreRole === 'function' ? opts.vectorStoreRole(graphBasePath) : opts.vectorStoreRole, searchWorkerPolicy: opts.searchWorkerPolicy, injectedEmbeddingProvider, workspaceId: getActiveWorkspaceName(dataHome), home: dataHome, // 3.21 step 2 part 2: resolves ITS OWN vectorEngine by name, same as createGraph() above.
     });
 
-    // SP-F3 — per-workspace verbatim resolver for the outbox replicator (local mode).
-    const workspaceVerbatimResolver = deploymentMode === 'cloud' ? undefined : new WorkspaceVerbatimResolver(embeddingProvider, searchWorkerIsolationEnabled(), opts.embedding as Record<string, unknown> | undefined); const workspaceQuotaStore = new InMemoryWorkspaceQuotaStore(); const getWorkspaceEntryForQuota = (ws: string) => loadWorkspaces().workspaces.find((w) => w.name === ws); // L-033 shared write quota (REST + MCP).
+    // SP-F3 — per-workspace verbatim resolver (local mode); autoEvict gated on OWNERSHIP (processOwnership.ts), not mode alone — a 'local'-mode caller that never claimed ownership must start no more recurring loops than 'embedded' does (tw2a-embedded-lifecycle-unit.ts (d)). vectorStoreRole threads the same per-path role resolution as the boot verbatimStore above. LORE-ASK-SEARCH-WORKER-POLICY: resolver ctor treats "no policy" as undecided, so this call site applies the env fallback, same as pre-policy. injectedEmbeddingProvider threads strictFingerprintCheck the same way as the boot verbatimStore.
+    const workspaceVerbatimResolver = deploymentMode === 'cloud' ? undefined : new WorkspaceVerbatimResolver(embeddingProvider, opts.searchWorkerPolicy ?? searchWorkerIsolationEnabled(), opts.embedding as Record<string, unknown> | undefined, { autoEvict: daemonTimersEnabled(opts.ownsProcess, effectiveMode), home: dataHome, vectorStoreRole: opts.vectorStoreRole, strictFingerprintCheck: injectedEmbeddingProvider }); const workspaceQuotaStore = new InMemoryWorkspaceQuotaStore();
+    // Finding 2 (post-review, 3.20.2, follow-up to e2abf06a) — a bare
+    // `loadWorkspaces()` defaults to the process-wide `loreHome()`, not this
+    // instance's own home. For an embedded host whose workspace (and its
+    // quota) is registered ONLY in its own registry (`graphRegistry`, scoped
+    // via `LocalGraphRegistry.homeDir()` to `dataHome` — assigned below once
+    // boot reaches setGraphRegistry, but not yet at this line's TEXTUAL
+    // position; safe because this arrow is only ever INVOKED later, at
+    // write time, exactly like the `resolveStores`/`graphForWorkspace`
+    // closures above/below that already capture `graphRegistry` the same
+    // way), `getWorkspaceEntryForQuota` would silently fail to find the
+    // entry and `checkWorkspaceQuota` (security/workspaceQuota.ts) treats
+    // "no entry" as "no quota configured, allow anything" — quota
+    // enforcement fails OPEN for embedded hosts instead of just misfiring.
+    // Same defensive, duck-typed read governance.ts/lifecycle.ts/
+    // ingestion.ts already use for the identical wrong-home bug.
+    // Uses `loadWorkspacesIfPresent` (not `loadWorkspaces`) because this is
+    // a read-only quota probe with no business bootstrap-writing a stray
+    // workspaces.json into whatever home it resolves — the same failure
+    // mode already fixed elsewhere on this branch.
+    const getWorkspaceEntryForQuota = (ws: string) => {
+        const registryHome = graphRegistry && typeof (graphRegistry as { homeDir?: () => string }).homeDir === 'function'
+            ? (graphRegistry as unknown as { homeDir: () => string }).homeDir()
+            : undefined;
+        return loadWorkspacesIfPresent(registryHome)?.workspaces.find((w) => w.name === ws);
+    }; // L-033 shared write quota (REST + MCP).
 
     // Architecture gap #2 — async embed queue (factory in embed/wiring.ts).
     // RA2-reaudit2 — resolveStores routes a job to its own workspace's graph +
@@ -601,6 +655,20 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     // Phase 1 — Unified storage client (Dataplane SDK shape).
     const store = await createStorageClient(graph, verbatimStore, deploymentMode, graphBasePath);
 
+    // D5 round 2 (#2): host-level default, precedence createLore() option >
+    // LORE_SUPERSESSION_ENFORCE env > false. Threaded into every write path
+    // below (embedded + MCP + REST) via DaemonWiring.supersessionEnforceDefault.
+    const hostSupersessionDefault = resolveHostSupersessionDefault(opts.supersessionEnforce);
+
+    // D5 round 2 (HIGH #1): shared resolver for the embedded nodeUpsert/nodeUpsertBatch
+    // call sites below, so each doesn't repeat the same param block. graphRegistry is
+    // assigned later in this function but only read when this closure actually runs.
+    const resolveEmbeddedSupersession = (workspace: string, targetGraph: unknown) => resolveSupersessionContext({
+        workspace, targetGraph, homeDir: graphRegistry?.homeDir?.(),
+        bootGraph: store.loreGraph, storageClient: store.storageClient, workspaceVerbatimResolver,
+        hostDefaultEnforce: hostSupersessionDefault,
+    });
+
     // Merge core vocabulary into store_node / store_edge enums.
     const { nodeTypesEnum, nodeTypesDescription, edgeRelationsEnum } =
         buildMergedEnums({
@@ -641,7 +709,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         ? () => guardEmbeddedGraph(requireWorkspaceGraph(graph, 'outbox replication', 'local-mode outbox substrate'))
         : undefined;
     const outboxGetVerbatim = isLocal
-        ? () => verbatimStore as unknown as VerbatimStore
+        ? () => verbatimStore as unknown as VerbatimStoreApi
         : undefined;
     const outboxGetEmbedder = isLocal ? () => embeddingProvider : undefined;
     const outboxGetGraphForWorkspace = isLocal
@@ -657,6 +725,11 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                   ? (ws: string) => workspaceVerbatimResolver.getOrOpen(ws)
                   : undefined
         : undefined;
+    // 3.20.2 follow-up — same lazy-closure convention as
+    // outboxGetGraphForWorkspace above (graphRegistry isn't assigned until
+    // later in boot); threads this instance's own registry home into the
+    // outbox-lag threshold resolver's workspaces.json read.
+    const outboxGetRegistryHome = isLocal ? () => graphRegistry?.homeDir() : undefined;
     const outboxWiring = wireOutbox({
         loreDir,
         getSyncEngine: () => syncEngine,
@@ -665,7 +738,8 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         getEmbedder: outboxGetEmbedder,
         getGraphForWorkspace: outboxGetGraphForWorkspace,
         getVerbatimForWorkspace: outboxGetVerbatimForWorkspace,
-    });
+        getRegistryHome: outboxGetRegistryHome,
+    }); workspaceVerbatimResolver?.setGuardrails({ hasPendingEmbeds: (ws) => embedQueue.hasPendingForWorkspace(ws), hasPendingOutbox: async (ws) => !!(await outboxWiring.store.listPendingForWorkspace?.(ws, 1))?.length }); // late-bound eviction guardrail
     // Sprint Z1 — load_jobs SQLite store backs POST /api/load + GET /api/load/jobs.
     const loadJobsStore = new LoadJobsStore(loreDir);
     // Sprint Z3 — shared per-workspace concurrency manager + temp-file sweeper.
@@ -844,7 +918,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         embedQueue,
         workspace: detectedScope.workspace,
         // RC-round4 — fan sweeps per-workspace (local). Lazy graphRegistry: assigned later in boot. See daemonTimers.
-        workspaceVerbatimResolver, auditLog, graphRegistry: { getGraphHandle: (ws: string) => graphRegistry!.getGraphHandle(ws), tableStorageFor: (ws: string) => graphRegistry!.tableStorageFor(ws) }, versionStore });
+        workspaceVerbatimResolver, auditLog, graphRegistry: { getGraphHandle: (ws: string, o?: { touch?: boolean }) => graphRegistry!.getGraphHandle(ws, o), tableStorageFor: (ws: string, o?: { touch?: boolean }) => graphRegistry!.tableStorageFor(ws, o) }, versionStore });
 
     /** C6b (Phase 4) — MCP client runtime (connects outward to external MCP servers). */
     const mcpClientRuntime = new McpClientRuntime();
@@ -873,6 +947,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
             detectedScope,
             loreDir,
             graphBasePath,
+            dataHome, // Defect 3 (3.20.2) — this instance's own data root; lets `maintain` (and friends) target it instead of the process-wide LORE_HOME.
             deploymentMode, runMode: effectiveMode, // ITEM 3 (launch-fixes-2026-08) — un-collapsed run mode so schema_approve's HITL gate refuses destructive approvals in embedded mode.
             nodeTypesEnum,
             nodeTypesDescription,
@@ -889,6 +964,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
             auxStore,
             versionStore,
             outboxStore: outboxWiring.store, outboxLagCache: outboxWiring.lagCache, quotaStore: workspaceQuotaStore, getWorkspaceEntryForQuota, // SP-F3 outbox rows + L-033 MCP store_node shared write quota.
+            supersessionEnforceDefault: hostSupersessionDefault, // D5 round 2 (#2) host switch.
         });
     }
 
@@ -913,7 +989,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         authTokenSweeper,
         rateLimiter,
         graphRegistry, syncEngineRegistry, workspaceVerbatimResolver,
-        sqliteStores: collectSqliteStores({ outboxStore: outboxWiring.store, auxStore, versionStore, pendingOpsStore, tableStorage: store.tableStorage }),
+        sqliteStores: collectSqliteStores({ outboxStore: outboxWiring.store, auxStore, versionStore, pendingOpsStore, tableStorage: store.tableStorage, loadJobsStore }),
         stopAllLocalWatchers,
     });
     // TW-2b — after the ordered drain completes, remove any process-global
@@ -952,6 +1028,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         deploymentMode,
         graphBasePath,
         loreDir,
+        supersessionEnforceDefault: hostSupersessionDefault,
         embeddingProvider,
         detectedScope,
         domainSchema,
@@ -993,7 +1070,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         phaseAServices,
         auxStore,
         versionStore,
-        getGraphRegistry: () => graphRegistry,
+        getGraphRegistry: () => graphRegistry, getVerbatimResolver: () => workspaceVerbatimResolver,
         // 1.2 (2026-08-17 audit) — when the registry lands, also wire the
         // storage facade's per-workspace read routers so
         // store.storageClient.getNode/listNodes/search/getStats +
@@ -1092,12 +1169,16 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                     targetGraph,
                     tracker: store.autolinkTracker,
                 });
+                // D5 round 2 (HIGH #1): this path never resolved a supersession
+                // policy/near-dup finder, so enforcement silently skipped createLore() hosts.
+                const { policy: supersessionPolicy, findDuplicate: findSupersessionDuplicate } =
+                    resolveEmbeddedSupersession(args.workspace, targetGraph);
                 value = await withTransactionConflictRetry(() => nodeServiceUpsert(
                     { ...args, targetGraph, initiator: 'lib:nodeUpsert', isActiveWorkspace: isActive },
                     {
                         outboxStore: outboxWiring.store, embedQueue, verbatim: store.storageClient,
                         getWal: () => wal, versionStore, previousState, versionPrincipal: 'lib',
-                        autolink,
+                        autolink, supersessionPolicy, findSupersessionDuplicate,
                     },
                 ));
             } catch (err) {
@@ -1130,12 +1211,16 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                         targetGraph,
                         tracker: store.autolinkTracker,
                     });
+                    // D5 round 2 (HIGH #1): per-node resolution — a batch spanning
+                    // workspaces with different policies is enforced correctly per node.
+                    const { policy: supersessionPolicy, findDuplicate: findSupersessionDuplicate } =
+                        resolveEmbeddedSupersession(n.workspace, targetGraph);
                     value = await withTransactionConflictRetry(() => nodeServiceUpsert(
                         { ...n, asyncEmbed: true, targetGraph, initiator: 'lib:nodeUpsertBatch', isActiveWorkspace: isActive },
                         {
                             outboxStore: outboxWiring.store, embedQueue, verbatim: store.storageClient,
                             getWal: () => wal, versionStore, previousState, versionPrincipal: 'lib',
-                            autolink,
+                            autolink, supersessionPolicy, findSupersessionDuplicate,
                         },
                     ));
                 } catch (err) {
@@ -1180,6 +1265,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                 versionStore,
                 // R4 #4 — each node's vector → ITS workspace's LanceDB; tracker → ITS dispose().
                 workspaceVerbatimResolver, autolinkTracker: store.autolinkTracker,
+                supersessionEnforceDefault: hostSupersessionDefault, // D5 round 2 (#2) host switch.
             });
         },
         awaitEmbeds: async () => {
@@ -1212,8 +1298,23 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         // facade's per-workspace read routers) instead of silently landing
         // in the `project` positional of the boot graph. '*' keeps the
         // legacy boot-graph read.
-        search: (query, limit = 20, workspace = '*', ecosystem = '*') =>
-            store.storageClient.search(query, limit, '*', ecosystem, { workspace: workspace === '*' ? undefined : workspace }),
+        search: (query, limit = 20, workspace = '*', ecosystem = '*', opts) => {
+            const work = store.storageClient.search(query, limit, '*', ecosystem, { workspace: workspace === '*' ? undefined : workspace });
+            // fix/search-worker-call-cancellation (3.20.2, req. 3) — light-touch:
+            // see the LoreInstance.search doc for why this can't cancel in-flight
+            // native work on this particular path.
+            const signal = opts?.signal;
+            if (!signal) return work;
+            if (signal.aborted) return Promise.reject(toSearchAbortError(signal));
+            return new Promise((resolve, reject) => {
+                const onAbort = () => { reject(toSearchAbortError(signal)); };
+                signal.addEventListener('abort', onAbort, { once: true });
+                work.then(
+                    (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+                    (e) => { signal.removeEventListener('abort', onAbort); reject(e); },
+                );
+            });
+        },
         // W3-EMBEDDED-MODE — host-owned dispose. makeDispose wraps the ordered
         // drain (built once over this instance's live singletons) into an
         // idempotent async dispose that is fully decoupled from signal handlers
@@ -1371,7 +1472,7 @@ async function main(): Promise<LoreInstance | void> {
             concurrencyManager: loadConcurrencyManager,
             sweeper: loadTempFileSweeper,
             buildDispatcherDeps: async (_job) => {
-                const localVerbatim = deploymentMode === 'cloud' ? null : (verbatimStore as unknown as VerbatimStore);
+                const localVerbatim = deploymentMode === 'cloud' ? null : (verbatimStore as unknown as VerbatimStoreApi);
                 const sqlite = new SqliteBulkLoaderAdapter({ loreDir });
                 // See selectGraphAdapter.ts for why the graph adapter is
                 // chosen by capability, not by class.
@@ -1416,7 +1517,7 @@ async function main(): Promise<LoreInstance | void> {
             migrationWiring = wireMigrationCoordinator({
                 loreDir,
                 outboxStore: outboxWiring.store,
-                verbatim: deploymentMode === 'cloud' ? undefined : (verbatimStore as unknown as VerbatimStore),
+                verbatim: deploymentMode === 'cloud' ? undefined : (verbatimStore as unknown as VerbatimStoreApi),
             });
             log.info('[Lore MCP] Migration coordinator: wired (sqlite + lance adapters)');
         } catch (migErr) {
@@ -1485,14 +1586,14 @@ async function main(): Promise<LoreInstance | void> {
         log.info(`[Lore MCP] Tool tier: ${toolTier} (LORE_TOOL_TIER)`);
     }
 
-    await startFileWatcher({ graph: d.getGraph(), verbatimStore: verbatimStore instanceof VerbatimStore ? verbatimStore : undefined });
+    await startFileWatcher({ graph: d.getGraph(), verbatimStore: isVerbatimStore(verbatimStore) ? verbatimStore : undefined });
 
     // v1.1 background first-install reconnect (2026-04-30). Skipped in cloud mode.
     if (deploymentMode === 'local') {
         // requireWorkspaceGraph, not requireLocalGraph: needs a local ENGINE,
         // not the removed LocalGraph class, which would now refuse a Surreal boot workspace.
         const localGraph = requireWorkspaceGraph(d.getGraph(), 'backgroundReconnect', 'local-mode boot path');
-        if (!(verbatimStore instanceof VerbatimStore)) {
+        if (!isVerbatimStore(verbatimStore)) {
             throw new Error('backgroundReconnect: local mode requires VerbatimStore');
         }
         await runBackgroundReconnectIfFresh({
@@ -1520,7 +1621,7 @@ async function main(): Promise<LoreInstance | void> {
     d.setGraphRegistry(graphRegistry);
 
     // SP-F3 — prime the per-workspace verbatim resolver with the boot store.
-    primeWorkspaceVerbatimResolver(d.workspaceVerbatimResolver, verbatimStore as unknown as import('../engines/verbatimStore.js').VerbatimStore, detectedScope.workspace);
+    primeWorkspaceVerbatimResolver(d.workspaceVerbatimResolver, verbatimStore as unknown as import('../engines/verbatimStoreApi.js').VerbatimStoreApi, detectedScope.workspace);
 
     // Wave 4.3 — per-workspace SyncEngine registry (see bootSteps). routes/sync.ts
     // now resolves push/pull/now/status against the CALLER's workspace.
@@ -1581,6 +1682,7 @@ async function main(): Promise<LoreInstance | void> {
                 planOrchestrator: orchestrationWiring.planOrchestrator,
                 embedQueue,
                 graphRegistry, workspaceVerbatimResolver: d.workspaceVerbatimResolver, quotaStore: d.workspaceQuotaStore, getWorkspaceEntryForQuota: d.getWorkspaceEntryForQuota, // L-018 routing + L-033 REST shares the MCP write-quota store.
+                supersessionEnforceDefault: d.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
                 coreNodeTypes: domainSchema.nodeTypes,
                 getOutboxStats: () => outboxWiring.store.aggregateStats!(), outboxStore: outboxWiring.store, outboxLagCache: outboxWiring.lagCache,
                 loadJobsStore, loadJobsRunner: loadJobsRunner ?? undefined,
@@ -1649,7 +1751,7 @@ async function main(): Promise<LoreInstance | void> {
                 authTokenSweeper,
                 rateLimiter,
                 graphRegistry, syncEngineRegistry, workspaceVerbatimResolver: d.workspaceVerbatimResolver,
-                sqliteStores: collectSqliteStores({ outboxStore: outboxWiring.store, auxStore: d.auxStore, versionStore: d.versionStore, pendingOpsStore: d.pendingOpsStore, tableStorage: d.store.tableStorage }),
+                sqliteStores: collectSqliteStores({ outboxStore: outboxWiring.store, auxStore: d.auxStore, versionStore: d.versionStore, pendingOpsStore: d.pendingOpsStore, tableStorage: d.store.tableStorage, loadJobsStore: d.loadJobsStore }),
                 stopAllLocalWatchers,
             })),
         });

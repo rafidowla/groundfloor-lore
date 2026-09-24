@@ -50,6 +50,7 @@ import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 import { ReadCache, type CacheStats } from './cache.js';
 import { LoreGraphError } from './loreGraphError.js';
 import { KeyedMutex } from './writeQueue.js';
+import { runBidirectionalEdgeWrite } from './graphShared/bidirectionalEdgeLock.js';
 import { log } from '../logger.js';
 import {
     applySurrealSchema,
@@ -369,15 +370,12 @@ export class SurrealGraph implements LoreGraphHandle {
     }
 
     async search(
-        query: string,
-        limit: number = 20,
-        project: string = '*',
-        ecosystem: string = '*',
-        excludeHidden: boolean = false,
-        signals?: { scanCapHit: boolean },
+        query: string, limit: number = 20, project: string = '*', ecosystem: string = '*',
+        excludeHidden: boolean = false, signals?: { scanCapHit: boolean }, types?: string[],
+        entities?: string[], topics?: string[],
     ): Promise<LoreNode[]> {
         await this.initialize();
-        return readSearch(this.readCtx, query, limit, project, ecosystem, excludeHidden, signals);
+        return readSearch(this.readCtx, query, limit, project, ecosystem, excludeHidden, signals, types, entities, topics);
     }
 
     async listNodes(
@@ -481,12 +479,10 @@ export class SurrealGraph implements LoreGraphHandle {
         };
         const forwardKey = `${edge.sourceId}|${edge.targetId}|${edge.relation}`;
         const reverseKey = `${edge.targetId}|${edge.sourceId}|${edge.relation}`;
-        const [outerKey, innerKey] = forwardKey <= reverseKey ? [forwardKey, reverseKey] : [reverseKey, forwardKey];
-        await this.edgeWriteChain.run(outerKey, () =>
-            this.edgeWriteChain.run(innerKey, async () => {
-                await writes.addEdge(this.query, edge);
-                await writes.addEdge(this.query, reverseEdge);
-            }));
+        await runBidirectionalEdgeWrite(this.edgeWriteChain, forwardKey, reverseKey, async () => {
+            await writes.addEdge(this.query, edge);
+            await writes.addEdge(this.query, reverseEdge);
+        });
         this.bumpWriteEpoch();
     }
 

@@ -7,13 +7,16 @@
  * collects hits from each, merges by score, dedupes by id (highest-
  * scoring source wins), and tags each row with the source workspace.
  *
- * Scoring: when the global verbatim store is populated, each seed's
- * semantic similarity score is the primary ranker — looked up against
- * each workspace's LocalGraph via getNode (so nodes present in multiple
- * workspaces under the same id only surface from the workspace where
- * they actually live, satisfying the no-double-count constraint). The
- * keyword fallback synthesizes a small score per workspace based on
- * rank position so keyword-only hits also participate in the merge.
+ * Scoring: EACH WORKSPACE's own semantic seed list and keyword-hit list are
+ * fused via the shared reciprocal-rank-fusion (recall/rrf.ts, 3.21 step 3(b))
+ * — not Math.max of two incomparable scales, which is what this used to do
+ * (raw cosine similarity 0..1 vs a synthetic keyword-rank score capped at
+ * 0.3; a node found by both kept whichever number was numerically larger).
+ * A node present in multiple workspaces under the same id only surfaces from
+ * the workspace where it actually lives (looked up against each workspace's
+ * LocalGraph via getNode, satisfying the no-double-count constraint); ACROSS
+ * workspaces the higher FUSED score wins — a "which physical copy wins" pick
+ * between two same-shape scores, not a fusion of two retrieval methods.
  *
  * Out of scope (P1.C): per-workspace verbatim partitioning, traversal
  * expansion (depth always 0 here — cross-workspace traversal opens an
@@ -22,7 +25,7 @@
 
 import type { LoreNode } from '../../providers/types.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
-import type { VerbatimStore } from '../../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../../engines/verbatimStoreApi.js';
 import type { DataplaneVectorStore } from '../../engines/dataplaneVectorStore.js';
 import type { ISessionCache } from '../../engines/sessionCache.js';
 import { listWorkspaceNames } from '../../config/workspaces.js';
@@ -30,10 +33,13 @@ import { curatedTypesFromSchema, rankScore } from '../../recall/ranking.js';
 import { DEFAULT_SCHEMA_V2 } from '../../schemas/types.js';
 import { ecosystemMatches } from '../../core/ecosystemMatch.js';
 import { resolveRecallFanoutWsCap, resolveRecallFanoutConcurrency, mapWithConcurrency } from '../../recall/recallFanout.js';
+import { rrfFuse } from '../../recall/rrf.js';
 import { redactError } from '../../security/logRedact.js';
+import { notApplicableRelevanceMeta } from '../../recall/abstention.js';
 import { applyActorScopeFilter } from '../../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../../security/actorContext.js';
 import type { LoreGraphHandle } from '../../storage/loreStorageClient.js';
+import { resolveLiveNodes } from '../../recall/supersessionRecall.js';
 
 /**
  * D2-recall-1/2 — Row-level security_scopes enforcement for the cross-workspace
@@ -54,7 +60,7 @@ function filterNodesByActorScope(nodes: LoreNode[]): LoreNode[] {
 // more than the shared handle? Feature-detect and refuse — do not re-narrow
 // to a class.
 type LoreGraph = LoreGraphHandle;
-type LoreVerbatim = VerbatimStore | DataplaneVectorStore;
+type LoreVerbatim = VerbatimStoreApi | DataplaneVectorStore;
 
 export interface CrossWorkspaceRecallArgs {
     topic: string;
@@ -127,9 +133,21 @@ export async function runCrossWorkspaceRecall(
     const allowSet = allowedWorkspaces && allowedWorkspaces.length > 0
         ? new Set(allowedWorkspaces)
         : null;
+    // Defect 3 follow-up (3.20.2) — scope the enumeration to the SAME home
+    // `registry` itself reads (an embedded instance's own dataHome), not the
+    // process-wide loreHome() default; otherwise an embedded cross-workspace
+    // recall would fan out over the wrong process's workspace list entirely.
+    // `homeDir` is read defensively: `registry` is typed as LocalGraphRegistry
+    // but several existing callers pass a minimal duck-typed fake (only
+    // `getGraphHandle`, no `homeDir`) — falling back to `undefined` there
+    // preserves the exact prior behavior (listWorkspaceNames()'s own
+    // loreHome() default) instead of throwing.
+    const registryHome = typeof (registry as { homeDir?: () => string }).homeDir === 'function'
+        ? (registry as { homeDir: () => string }).homeDir()
+        : undefined;
     const workspaceNames = allowSet
-        ? listWorkspaceNames().filter((ws) => allowSet.has(ws))
-        : listWorkspaceNames();
+        ? listWorkspaceNames(registryHome).filter((ws) => allowSet.has(ws))
+        : listWorkspaceNames(registryHome);
     // P2 (scalability): when a per-workspace verbatim resolver is wired, each
     // fanned-out workspace seeds from its OWN verbatim store (below), so we skip
     // the single boot-store seed entirely — a node that lives only in workspace
@@ -182,7 +200,7 @@ export async function runCrossWorkspaceRecall(
     const perWs = await mapWithConcurrency(
         candidateWorkspaces,
         resolveRecallFanoutConcurrency(),
-        async (ws): Promise<{ ws: string; seedNodes: Map<string, LoreNode>; wsSeeds: Array<{ id: string; score: number }>; kwHits: LoreNode[]; scanCapHit: boolean } | null> => {
+        async (ws): Promise<{ ws: string; seedNodes: Map<string, LoreNode>; wsSeeds: Array<{ id: string; score: number }>; kwHits: LoreNode[]; scanCapHit: boolean; liveId: Map<string, string> } | null> => {
             let wsGraph: LoreGraph;
             try {
                 wsGraph = await registry.getGraphHandle(ws);
@@ -233,11 +251,38 @@ export async function runCrossWorkspaceRecall(
             // pushdown above never sees them.
             const inEcosystem = (n: LoreNode): boolean =>
                 ecosystemMatches((n as { ecosystem?: string }).ecosystem, ecosystemScope);
-            const filteredSeedNodes = new Map(
-                filterNodesByActorScope([...seedNodes.values()]).filter(inEcosystem).map((n) => [n.id, n] as const),
-            );
-            const filteredKwHits = filterNodesByActorScope(kwHits).filter(inEcosystem);
-            return { ws, seedNodes: filteredSeedNodes, wsSeeds, kwHits: filteredKwHits, scanCapHit: kwSignals.scanCapHit };
+            const scopedSeedNodes = filterNodesByActorScope([...seedNodes.values()]).filter(inEcosystem);
+            const scopedKwHits = filterNodesByActorScope(kwHits).filter(inEcosystem);
+            // D5 #5 — this per-workspace hydration used to just HIDE a
+            // superseded hit at merge time (`if (!includeSuperseded &&
+            // node.supersededAt) continue`, below in the caller). Resolve
+            // to the live successor HERE instead, per workspace (each
+            // workspace's own graph is the only place that can answer "who
+            // superseded this"), so a stale node's slot in the merged
+            // cross-workspace list is replaced rather than dropped-with-no-
+            // trace. `includeSuperseded:true` skips resolution entirely —
+            // the caller explicitly asked to see superseded nodes as-is.
+            // D5 re-review — a successor is fetched fresh from wsGraph AFTER
+            // the actor-scope filter above ran on the original hits, so it
+            // must pass that same filter here or a restricted-scope successor
+            // would leak through a visible superseded node.
+            const admitD5 = (n: LoreNode): boolean =>
+                inEcosystem(n) && (includeArchived === true || n.status !== 'archived')
+                && filterNodesByActorScope([n]).length > 0;
+            // superseded id → live successor id, so the RRF below can rank
+            // the successor in the superseded hit's slot (the fused lists are
+            // id-keyed; without this the old id missed every lookup and the
+            // slot was silently dropped).
+            const liveId = new Map<string, string>();
+            const [resolvedSeedNodes, resolvedKwHits] = includeSuperseded
+                ? [scopedSeedNodes, scopedKwHits]
+                : await Promise.all([
+                    resolveLiveNodes(scopedSeedNodes, wsGraph, admitD5, liveId),
+                    resolveLiveNodes(scopedKwHits, wsGraph, admitD5, liveId),
+                ]);
+            const filteredSeedNodes = new Map(resolvedSeedNodes.map((n) => [n.id, n] as const));
+            const filteredKwHits = resolvedKwHits;
+            return { ws, seedNodes: filteredSeedNodes, wsSeeds, kwHits: filteredKwHits, scanCapHit: kwSignals.scanCapHit, liveId };
         },
     );
 
@@ -257,25 +302,41 @@ export async function runCrossWorkspaceRecall(
             const wsTop = wsSeeds[0]!.score;
             if (topSemanticScore === null || wsTop > topSemanticScore) topSemanticScore = wsTop;
         }
-        for (const seed of wsSeeds) {
-            const node = seedNodes.get(seed.id);
+
+        // 3.21 step 3(b) — fuse THIS workspace's semantic seed list with its
+        // keyword-hit list via the ONE shared RRF (recall/rrf.ts), instead of
+        // taking Math.max of two INCOMPARABLE scales (raw cosine similarity
+        // 0..1 vs a synthetic keyword-rank score capped at 0.3) — the fusion
+        // bug the owner flagged: a node found by both a workspace's semantic
+        // pass and its keyword scan kept whichever scale happened to produce
+        // the larger number, not a genuine fused rank. RRF fuses rank
+        // POSITION, so the two scales never get compared directly.
+        //
+        // Cross-WORKSPACE dedup (the `byId` map below, same id physically
+        // present in two workspaces) still picks the higher FUSED score —
+        // that is a "which physical copy wins" choice between two rows of
+        // the SAME kind of score, not a fusion of two retrieval methods, so
+        // it stays a plain max.
+        // Rewrite superseded ids to their live successor (first occurrence
+        // keeps the better rank; a successor that was also its own hit
+        // lower down collapses onto the superseded slot, as in retrieve()).
+        const toLive = (ids: string[]): string[] =>
+            [...new Set(ids.map((id) => entry.liveId.get(id) ?? id))];
+        const semanticIds = toLive(wsSeeds.map((s) => s.id));
+        const kwIds = kwHits.map((n) => n.id);
+        const fused = rrfFuse([semanticIds, kwIds]);
+        const semSet = new Set(semanticIds);
+        const kwById = new Map(kwHits.map((n) => [n.id, n] as const));
+        for (const f of fused) {
+            const node = seedNodes.get(f.id) ?? kwById.get(f.id);
             if (!node) continue;
             if (!includeSuperseded && node.supersededAt) continue;
             if (!includeArchived && node.status === 'archived') continue;
             const existing = byId.get(node.id);
-            if (!existing || seed.score > existing.score) {
-                byId.set(node.id, { node, workspace: ws, score: seed.score, source: 'semantic' });
+            if (!existing || f.score > existing.score) {
+                byId.set(node.id, { node, workspace: ws, score: f.score, source: semSet.has(f.id) ? 'semantic' : 'keyword' });
             }
         }
-        kwHits.forEach((n, rank) => {
-            if (!includeSuperseded && n.supersededAt) return;
-            if (!includeArchived && n.status === 'archived') return;
-            const synth = 0.3 / (1 + rank);
-            const existing = byId.get(n.id);
-            if (!existing || synth > existing.score) {
-                byId.set(n.id, { node: n, workspace: ws, score: synth, source: existing?.source === 'semantic' ? 'semantic' : 'keyword' });
-            }
-        });
     }
 
     // Whether the semantic (vector) substrate was consulted at all — drives the
@@ -334,6 +395,12 @@ export async function runCrossWorkspaceRecall(
             vector_index_consulted: semanticConsulted, // P14 freshness signal
             ...(anyScanCapHit ? { scan_cap_hit: true } : {}),
             ...tokenMeta,
+            // D1: cross-workspace aggregation merges scores via Math.max across
+            // workspaces (a D3-scoped scale-mixing issue, not touched here) and
+            // has no single workspace to calibrate against, so it reports
+            // "not applicable" rather than a calibrated relevance/abstention
+            // verdict. Never abstains.
+            ...notApplicableRelevanceMeta('cross_workspace'),
         };
         return {
             content: [{

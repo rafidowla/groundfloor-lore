@@ -26,6 +26,7 @@ import { surrealError } from './surrealError.js';
 import { DEFAULT_LIST_NODES_CAP } from '../loreNodeRow.js';
 import { shapeDepth, shapeLimit } from '../callTally.js';
 import { EDGE_TABLE, NODE_TABLE, ridToId, toNodeRid } from './surrealRecordId.js';
+import { runDirectedTraverseBfs } from '../graphShared/traverseBfs.js';
 
 /** Same bound and reason as the prior engine's side: a high-degree node. */
 const TRAVERSE_NODE_CAP = 10_000;
@@ -92,48 +93,18 @@ export async function traverseDirected(
     });
     return ctx.readCache.memoize<DirectedTraversalResult[]>(memoKey, async () => {
         try {
-            const visited = new Set<string>([nodeId]);
-            const results: DirectedTraversalResult[] = [];
             // Audit cluster 5 (2026-08-17): emit EVERY distinct directed edge,
             // not just the first one that reached each node — the documented
             // contract is "rebuild a directed subgraph", which needs all of
-            // them. `visited` still gates EXPANSION (a node is expanded once);
-            // `emitted` dedupes exact (via, direction, relation, to) triples.
-            const emitted = new Set<string>();
-            let frontier: string[] = [nodeId];
-            let capped = false;
-
-            bfs:
-            for (let depth = 1; depth <= clampedDepth; depth++) {
-                const byFrontier = await fetchDirectedFrontier(ctx, frontier);
-                const nextFrontier: string[] = [];
-                // Iterate the FRONTIER in order, not the query result, so the
-                // same-depth sub-order matches LocalGraph's.
-                for (const currentId of frontier) {
-                    for (const edge of byFrontier.get(currentId) ?? []) {
-                        // Contract: the seed itself is never returned.
-                        if (edge.to === nodeId) continue;
-                        const edgeKey = `${currentId}|${edge.direction}|${edge.relation}|${edge.to}`;
-                        if (!emitted.has(edgeKey)) {
-                            emitted.add(edgeKey);
-                            results.push({
-                                node: { id: edge.to } as DirectedTraversalResult['node'],
-                                depth,
-                                relation: edge.relation,
-                                direction: edge.direction,
-                                via: currentId,
-                            });
-                            if (results.length >= TRAVERSE_NODE_CAP) { capped = true; break bfs; }
-                        }
-                        if (!visited.has(edge.to)) {
-                            visited.add(edge.to);
-                            nextFrontier.push(edge.to);
-                        }
-                    }
-                }
-                if (nextFrontier.length === 0) break;
-                frontier = nextFrontier;
-            }
+            // them. The walk (visited-set bookkeeping, node-cap enforcement,
+            // the emitted-quadruple dedupe) is the SHARED
+            // `runDirectedTraverseBfs` — see graphShared/traverseBfs.ts.
+            const { steps, capped } = await runDirectedTraverseBfs(
+                nodeId,
+                clampedDepth,
+                TRAVERSE_NODE_CAP,
+                (frontier) => fetchDirectedFrontier(ctx, frontier),
+            );
             if (capped) {
                 console.error(`[SurrealGraph] traverseDirected from '${nodeId}' hit the ${TRAVERSE_NODE_CAP}-node cap — results truncated (high-degree subgraph)`);
             }
@@ -148,11 +119,14 @@ export async function traverseDirected(
                 throw surrealError('traverseDirected requires readGetNodesByIds on the read context',
                     'traverseDirected', null);
             }
-            const hydrated = await ctx.readGetNodesByIds(results.map((r) => r.node.id));
-            for (const r of results) {
-                const full = hydrated.get(r.node.id);
-                if (full) r.node = full;
-            }
+            const hydrated = await ctx.readGetNodesByIds(steps.map((s) => s.to));
+            const results: DirectedTraversalResult[] = steps.map((s) => ({
+                node: hydrated.get(s.to) ?? ({ id: s.to } as DirectedTraversalResult['node']),
+                depth: s.depth,
+                relation: s.relation,
+                direction: s.direction,
+                via: s.via,
+            }));
             return results.sort((a, b) => a.depth - b.depth);
         } catch (error) {
             throw surrealError(`Failed to traverse from '${nodeId}'`, 'traverseDirected', error);

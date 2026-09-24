@@ -119,7 +119,7 @@ export function resolveGraphPath(home: string = loreHome()): string {
         return home;
     }
 }
-import type { VerbatimStore } from '../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import type { McpClientRuntime } from '../engines/mcpClient/runtime.js';
 import { scrubEnv } from '../security/envScrub.js';
 import { lockDownDataDir } from '../security/permissions.js';
@@ -237,7 +237,7 @@ export interface FileWatcherStartupDeps {
      * in the vector store for semantic recall. Leave unset to skip embedding
      * (graph write still happens; embedding can be backfilled later).
      */
-    verbatimStore?: VerbatimStore | null;
+    verbatimStore?: VerbatimStoreApi | null;
 }
 
 /**
@@ -264,7 +264,7 @@ export async function startFileWatcher(deps: FileWatcherStartupDeps): Promise<vo
 export interface BackgroundReconnectDeps {
     loreDir: string;
     graph: WorkspaceGraph;
-    verbatim: VerbatimStore;
+    verbatim: VerbatimStoreApi;
     /** The booting instance's `StorageBundle.sweepTracker`. Threaded so the
      *  first-install sweep is per-instance, seal-gated and cooperatively
      *  abortable — see engines/backgroundReconnect.ts. */
@@ -327,7 +327,7 @@ let _lastSweepMs = 0;
 export function makeFileIngestCallback(
     graph: WorkspaceGraph,
     workspace: string,
-    verbatimStore?: VerbatimStore | null,
+    verbatimStore?: VerbatimStoreApi | null,
     // audit 2026-06-25 (re-audit) — injectable allowlist so the path gate is
     // testable; defaults to the same production loader the other ingestion
     // paths use (active workspace root + ingestion.json / LORE_WATCH_PATHS).
@@ -511,8 +511,8 @@ export function buildGraphRegistryForLocalMode(
  * resolver is typed structurally to avoid importing the concrete class here.
  */
 export function primeWorkspaceVerbatimResolver(
-    resolver: { prime: (workspace: string, store: VerbatimStore) => void } | undefined,
-    bootVerbatim: VerbatimStore,
+    resolver: { prime: (workspace: string, store: VerbatimStoreApi) => void } | undefined,
+    bootVerbatim: VerbatimStoreApi,
     detectedWorkspace: string,
     home: string = loreHome(),
 ): void {

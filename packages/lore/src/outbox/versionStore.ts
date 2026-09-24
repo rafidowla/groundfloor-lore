@@ -199,6 +199,30 @@ export class VersionStore {
     }
 
     /**
+     * Fix Requirement 4 (Defect 3, 3.20.2) — read-only counterpart to
+     * `pruneVersions()`/`hardDeleteCompacted()`, mirroring their exact WHERE
+     * clauses without writing anything. Lets a caller (embedded `maintain`'s
+     * dry-run) preview a versions.sqlite prune the same way every other
+     * maintain op already supports a preview.
+     */
+    countPrunable(olderThanDays: number): { eligibleForCompact: number; alreadyCompacted: number } {
+        const cutoff = new Date(Date.now() - olderThanDays * 86_400_000).toISOString();
+        const compactRow = this.db
+            .prepare(
+                `SELECT COUNT(*) as n FROM node_versions
+                 WHERE timestamp < ?
+                   AND compacted = 0
+                   AND (previous_state IS NULL
+                        OR previous_state NOT LIKE '%"status":"protected"%')
+                   AND (new_state IS NULL
+                        OR new_state NOT LIKE '%"status":"protected"%')`,
+            )
+            .get(cutoff) as { n: number };
+        const compactedRow = this.db.prepare(`SELECT COUNT(*) as n FROM node_versions WHERE compacted = 1`).get() as { n: number };
+        return { eligibleForCompact: compactRow.n, alreadyCompacted: compactedRow.n };
+    }
+
+    /**
      * Hard-delete rows already marked `compacted=1`. Every read path
      * (getVersionHistory, getChangesSince) already excludes compacted rows —
      * nothing in this codebase ever reads one — so retaining them serves no

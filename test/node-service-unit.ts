@@ -13,18 +13,27 @@
  *   B1. skipEmbed=true  → graph-only write; no verbatim, no autolink.
  *   B2. asyncEmbed=true + embedQueue  → enqueue called; no blocking write.
  *   B3. outboxStore wired  → outbox-first ordering; verbatim.upsert recorded;
- *       on verbatim failure: graph deleted + node.upsert outbox row retracted
- *       (TW-4a rollback invariant).
+ *       on a FAILURE TO RECORD that outbox row (not an embed failure — a
+ *       durability failure): graph deleted + node.upsert outbox row
+ *       retracted (TW-4a rollback invariant, unchanged by 3.21 step 3(d)).
  *   B3b. outbox + inlineVerbatim (cloud) → adapter store() runs on the
- *        request path; adapter failure rolls back the graph.
+ *        request path; 3.21 step 3(d): an adapter (embed) failure no longer
+ *        rolls back — the verbatim.upsert outbox row already recorded IS
+ *        the durable retry, so the node is KEPT with `embedPending: true`.
  *   B4. inline verbatim (verbatim hook, no outbox)  → verbatimStore called;
- *       on failure: graph deleted; error surfaced (TW-4a error signal).
+ *       3.21 step 3(d): on failure the node is KEPT (`embedPending: true`,
+ *       best-effort embedQueue retry if supplied) — no outbox is wired for
+ *       this caller, so there is no durable-across-restart guarantee here,
+ *       but deleting real content over an index failure is still wrong.
  *
  * Additional scenarios:
  *   S5. Outbox-first ordering proof: node.upsert outbox row recorded BEFORE
  *       targetGraph.upsertNode (durability-first invariant).
  *   S6. Rollback throws when deleteNode fails (incomplete rollback surfaces
  *       as throw rather than clean {ok:false}) — TW-4a error-surface fix.
+ *       3.21 step 3(d) retargeted this from the (now-non-rolling-back) B4
+ *       verbatim-hook failure onto the one branch that still rolls back:
+ *       the outbox 'verbatim.upsert' RECORD call itself failing.
  *   S7. WAL append fires for active-workspace writes when wired.
  *   S8. Version record fires (non-fatal) when wired.
  *   S9. Autolink fires for active-workspace !skipEmbed when supplied.
@@ -339,7 +348,7 @@ test('B3b — outbox + inlineVerbatim: adapter store runs (cloud primary path)',
     assert.ok(outboxState.recordOrder.includes('verbatim.upsert'), 'outbox row still recorded');
 });
 
-test('B3b — inlineVerbatim failure rolls back graph + retracts node.upsert', async () => {
+test('B3b — 3.21 step 3(d): inlineVerbatim failure KEEPS the graph node, embedPending:true, node.upsert row NOT retracted', async () => {
     const { graph, state: graphState } = makeFakeGraph();
     const { store, state: outboxState } = makeFakeOutboxStore('normal');
     const result = await nodeUpsert(baseArgs('b3-inline-fail', graph), {
@@ -348,11 +357,17 @@ test('B3b — inlineVerbatim failure rolls back graph + retracts node.upsert', a
             verbatimStore: async () => { throw new Error('cloud vector down'); },
         },
     });
-    assert.ok(result.ok === false, 'nodeUpsert must return failure');
-    assert.equal(result.ok === false ? result.code : undefined, 'verbatim_unavailable');
-    assert.ok(!graphState.live.has('b3-inline-fail'), 'graph node must be deleted by rollback');
+    // The verbatim.upsert outbox row (recorded successfully one step
+    // earlier, before inlineVerbatim's eager mirror attempt) IS the durable
+    // retry — inlineVerbatim failing must not undo the graph write or that
+    // already-queued retry.
+    assert.ok(result.ok === true, `expected ok:true (node kept), got ${JSON.stringify(result)}`);
+    assert.equal(result.ok === true ? result.embedPending : undefined, true, 'expected embedPending:true');
+    assert.ok(graphState.live.has('b3-inline-fail'), 'graph node must be KEPT, not deleted');
     const pendingNodeUpserts = outboxState.entries.filter((e) => e.operationKind === 'node.upsert');
-    assert.equal(pendingNodeUpserts.length, 0, 'node.upsert outbox row must be retracted');
+    assert.equal(pendingNodeUpserts.length, 1, 'node.upsert outbox row must NOT be retracted');
+    const pendingVerbatimUpserts = outboxState.entries.filter((e) => e.operationKind === 'verbatim.upsert');
+    assert.equal(pendingVerbatimUpserts.length, 1, 'the verbatim.upsert outbox row (the durable retry) must still be pending');
 });
 
 test('B3 — TW-4a rollback: verbatim outbox failure → graph deleted + node.upsert retracted', async () => {
@@ -424,7 +439,7 @@ test('B4 — inline verbatim: verbatimStore called with correct id shape', async
     assert.ok(written[0].text.length > 0, 'verbatim text must be non-empty');
 });
 
-test('B4 — TW-4a error surface: inline verbatim failure → graph deleted + {ok:false} returned', async () => {
+test('B4 — 3.21 step 3(d): inline verbatim failure (no outbox) KEEPS the graph node, embedPending:true, no best-effort retry queue supplied', async () => {
     const { graph, state: graphState } = makeFakeGraph();
     const verbatim = {
         async verbatimStore() {
@@ -433,18 +448,26 @@ test('B4 — TW-4a error surface: inline verbatim failure → graph deleted + {o
     };
     const result = await nodeUpsert(baseArgs('b4-fail', graph), { verbatim });
 
-    // TW-4a: error must be surfaced, not swallowed as success.
-    assert.ok(result.ok === false, 'verbatim failure must return {ok:false}, not swallow the error');
-    assert.equal(
-        result.ok === false ? result.code : undefined,
-        'verbatim_unavailable',
-    );
-
-    // Graph node must be deleted (rollback).
+    // Deleting real content because a search index failed to update is the
+    // bug 3.21 step 3(d) closes — the node must be KEPT, not rolled back.
+    assert.ok(result.ok === true, `expected ok:true (node kept), got ${JSON.stringify(result)}`);
+    assert.equal(result.ok === true ? result.embedPending : undefined, true, 'expected embedPending:true');
     assert.ok(
-        !graphState.live.has('b4-fail'),
-        'graph node must be deleted after inline verbatim failure',
+        graphState.live.has('b4-fail'),
+        'graph node must be KEPT after inline verbatim failure',
     );
+});
+
+test('B4b — 3.21 step 3(d): inline verbatim failure (no outbox) with embedQueue supplied — best-effort retry is enqueued', async () => {
+    const { graph } = makeFakeGraph();
+    const verbatim = { async verbatimStore() { throw new Error('injected verbatim store failure'); } };
+    const enqueued: Array<{ nodeId: string; text: string; workspace?: string }> = [];
+    const embedQueue = { enqueue(nodeId: string, text: string, workspace?: string) { enqueued.push({ nodeId, text, workspace }); } };
+    const result = await nodeUpsert(baseArgs('b4b-fail-with-queue', graph), { verbatim, embedQueue });
+    assert.ok(result.ok === true);
+    assert.equal(result.ok === true ? result.embedPending : undefined, true);
+    assert.equal(enqueued.length, 1, 'a best-effort retry must be enqueued via embedQueue when one is supplied');
+    assert.equal(enqueued[0].nodeId, 'b4b-fail-with-queue');
 });
 
 /* ─── S5: outbox-first ordering (standalone) ─────────────────────────── */
@@ -496,17 +519,19 @@ test('S5 — outbox-first: outbox.record fires BEFORE any graph write', async ()
 /* ─── S6: rollback throws when deleteNode fails (TW-4a error surface) ── */
 
 test('S6 — rollback throws when graph deleteNode itself fails (incomplete rollback)', async () => {
+    // 3.21 step 3(d) retargeted this test: the `verbatim` (no-outbox) hook
+    // failure branch no longer rolls back at all (see B4 above), so it can
+    // no longer exercise "rollback itself fails". The ONE branch that still
+    // rolls back on an embed-adjacent failure is the outbox 'verbatim.upsert'
+    // RECORD call failing (a durability failure, not an embed failure) —
+    // use that instead to keep pinning the TW-4a incomplete-rollback throw.
     const deleteError = new Error('injected deleteNode failure');
     const { graph } = makeFakeGraph({ deleteThrows: deleteError });
-    const verbatim = {
-        async verbatimStore() {
-            throw new Error('injected verbatim store failure');
-        },
-    };
+    const { store } = makeFakeOutboxStore('fail-verbatim');
 
     let threw: Error | null = null;
     try {
-        await nodeUpsert(baseArgs('s6-incomplete', graph), { verbatim });
+        await nodeUpsert(baseArgs('s6-incomplete', graph), { outboxStore: store });
     } catch (err) {
         threw = err as Error;
     }

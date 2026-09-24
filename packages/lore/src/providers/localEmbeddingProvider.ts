@@ -99,8 +99,119 @@ export const MINILM_L6_V2_MODEL_DIM = 384;
  *       failed with the same error, even after the root cause was resolved;
  *   (b) requesting a second modelId silently returned the first model's
  *       pipeline because the slot was already filled.
+ *
+ * LORE-ASK-EMBED-IDLE-UNLOAD (2026-09-18): the entry now also tracks
+ * `lastUsedAt` + `inFlight`, mirroring `providers/llmDispatch.ts`'s
+ * `embeddedPipelineCache`/`CachedPipeline` for the embedded-LLM pipeline.
+ * Unlike that cache, ours defaults to NEVER unloading (see
+ * `EMBED_IDLE_UNLOAD_MS` below) — this pipeline was measured leak-free
+ * per document indexing cycle (`docs/PERFORMANCE-MEMORY.md` §8.3), so
+ * idle-unload here is a pure opt-in memory-management knob for hosts
+ * that index in bursts and then idle, not a fix for a leak.
  */
-const pipelineCache = new Map<string, Promise<any>>();
+interface CachedPipelineEntry {
+    promise: Promise<any>;
+    lastUsedAt: number;
+    /**
+     * Active-consumer refcount, bumped by `acquirePipeline()` BEFORE it
+     * awaits the (possibly still-loading) pipeline promise, and released by
+     * the caller once it's done using the resolved pipeline object — not
+     * merely once the promise resolves. This mirrors llmDispatch.ts's
+     * documented fix for the same race: an idle sweeper must never dispose
+     * an entry a caller is actively resolving or running inference on.
+     * The sweeper skips any entry with `inFlight > 0`.
+     */
+    inFlight: number;
+}
+
+const pipelineCache = new Map<string, CachedPipelineEntry>();
+
+/**
+ * Parse an integer env var with a fallback default. Duplicated from
+ * llmDispatch.ts's identical helper (each provider file keeps its own
+ * small copy rather than sharing a util module — see the repo's
+ * "no misc.ts/utils.ts" file-size-budget rule).
+ */
+function parseEnvInt(name: string, fallback: number): number {
+    const raw = process.env[name];
+    if (!raw || raw.trim() === '') return fallback;
+    const n = parseInt(raw, 10);
+    return Number.isFinite(n) ? n : fallback;
+}
+
+/**
+ * Idle-unload timeout for the local embedding pipeline — env override:
+ * `LORE_EMBED_IDLE_UNLOAD_MS`.
+ *
+ * Default is **0 (never unload)** — deliberately DIFFERENT from
+ * llmDispatch.ts's embedded-LLM sweeper (which defaults to 3 minutes).
+ * That pipeline was found to leak/pin ~1.2-1.5 GB and always idle-unloads.
+ * This one was measured NOT to leak per embed cycle
+ * (`docs/PERFORMANCE-MEMORY.md` §8.3 — `embed-only` config: ~0 MB/cycle,
+ * R²=0.686 noise), so keeping it hot forever is today's correct default
+ * and existing behavior for every host that doesn't opt in. Setting this
+ * to a positive value is a pure memory-management opt-in for hosts (e.g.
+ * Tapestry) that index in bursts and want ~0 resident RAM while idle.
+ */
+const EMBED_IDLE_UNLOAD_MS_DEFAULT = 0;
+const EMBED_IDLE_UNLOAD_MS = parseEnvInt('LORE_EMBED_IDLE_UNLOAD_MS', EMBED_IDLE_UNLOAD_MS_DEFAULT);
+/**
+ * Sweeper check interval. 30s matches llmDispatch.ts's fixed interval for
+ * its realistic (minutes-scale) default window — but unlike that sweeper,
+ * ours must also behave sanely for a short test/opt-in window: a fixed 30s
+ * interval would mean `LORE_EMBED_IDLE_UNLOAD_MS=1000` could wait up to
+ * ~31s to actually evict, which defeats the point of a short window and
+ * doesn't match this feature's own acceptance contract (a 1s window should
+ * be observably swept within a couple of seconds). So the interval scales
+ * down for small windows — never above 30s, never below 250ms (avoid a
+ * busy-loop) — and is exactly 30s for anything at/above 60s, preserving
+ * the LLM-side behavior for realistic multi-minute windows.
+ */
+const EMBED_IDLE_CHECK_INTERVAL_MS = EMBED_IDLE_UNLOAD_MS > 0
+    ? Math.min(30 * 1000, Math.max(250, Math.floor(EMBED_IDLE_UNLOAD_MS / 2)))
+    : 30 * 1000;
+let embedIdleSweeper: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Lazily arm the idle-unload sweeper. Not armed at module-eval time and
+ * not armed at all when `EMBED_IDLE_UNLOAD_MS <= 0` (the default) — so
+ * importing this module, or using it with idle-unload left disabled,
+ * registers no timers. Mirrors llmDispatch.ts 4.6 (2026-08-17): "the idle
+ * sweeper is armed lazily on the first embedded-model load ... so
+ * importing this module registers no timers." Called unconditionally
+ * (not gated on `ownsProcess`/deploymentMode) — see CLAUDE.md's
+ * process-ownership section and the LORE-ASK's rules: this is a pure
+ * memory-management timer, unref'd, stoppable, and harmless to leave
+ * ticking in a host that never disposes.
+ */
+function ensureEmbedIdleSweeper(): void {
+    if (embedIdleSweeper !== null || EMBED_IDLE_UNLOAD_MS <= 0) return;
+    embedIdleSweeper = setInterval(() => {
+        const now = Date.now();
+        for (const [key, entry] of pipelineCache.entries()) {
+            // Never dispose an entry with an active consumer — see
+            // CachedPipelineEntry.inFlight.
+            if (entry.inFlight > 0) continue;
+            if (now - entry.lastUsedAt < EMBED_IDLE_UNLOAD_MS) continue;
+            pipelineCache.delete(key);
+            // Transformers.js pipelines may expose an optional dispose()
+            // hook on some architectures; call it defensively/best-effort.
+            void entry.promise.then((p) => {
+                try { p?.dispose?.(); } catch { /* ignore */ }
+            }).catch(() => { /* ignore — a rejected load has nothing to dispose */ });
+        }
+    }, EMBED_IDLE_CHECK_INTERVAL_MS);
+    // Don't keep the event loop alive for this timer alone.
+    embedIdleSweeper.unref?.();
+}
+
+/** Stop the local-embedding idle-unload sweeper (host dispose). Idempotent. */
+export function stopEmbedIdleSweeper(): void {
+    if (embedIdleSweeper !== null) {
+        clearInterval(embedIdleSweeper);
+        embedIdleSweeper = null;
+    }
+}
 
 /**
  * Optional ONNX execution provider for the in-process pipeline.
@@ -133,8 +244,16 @@ type LoadDevice = 'cpu' | 'coreml' | 'webgpu' | 'cuda' | 'auto' | 'gpu';
  */
 export type ModelDtype = 'fp32' | 'fp16' | 'q8' | 'q4';
 
-async function loadPipeline(modelId: string, device?: LoadDevice, dtype?: ModelDtype): Promise<any> {
-    const key = `${modelId}:${device ?? 'cpu'}:${dtype ?? 'default'}`;
+function cacheKeyFor(modelId: string, device?: LoadDevice, dtype?: ModelDtype): string {
+    return `${modelId}:${device ?? 'cpu'}:${dtype ?? 'default'}`;
+}
+
+/** Get the cache entry for (modelId, device, dtype), creating and kicking
+ *  off the pipeline() load if it doesn't exist yet. Does NOT bump
+ *  `inFlight` — callers that will actually use the resolved pipeline must
+ *  go through `acquirePipeline()` instead, which claims the entry first. */
+function getOrCreateEntry(modelId: string, device?: LoadDevice, dtype?: ModelDtype): CachedPipelineEntry {
+    const key = cacheKeyFor(modelId, device, dtype);
     const existing = pipelineCache.get(key);
     if (existing) return existing;
     // pipeline() accepts `device` (ORT executionProviders) and `dtype`
@@ -142,13 +261,96 @@ async function loadPipeline(modelId: string, device?: LoadDevice, dtype?: ModelD
     const opts: { device?: LoadDevice; dtype?: ModelDtype } = {};
     if (device) opts.device = device;
     if (dtype) opts.dtype = dtype;
-    const p = pipeline('feature-extraction', modelId, opts).catch((err: unknown) => {
+    const promise = pipeline('feature-extraction', modelId, opts).catch((err: unknown) => {
         // Remove the rejected entry so a subsequent call can retry cleanly.
         pipelineCache.delete(key);
         return Promise.reject(err);
     });
-    pipelineCache.set(key, p);
-    return p;
+    const entry: CachedPipelineEntry = { promise, lastUsedAt: Date.now(), inFlight: 0 };
+    pipelineCache.set(key, entry);
+    return entry;
+}
+
+/**
+ * Acquire the pipeline for (modelId, device, dtype) for active use.
+ *
+ * Claims an in-flight slot on the cache entry BEFORE awaiting its
+ * (possibly still-loading) promise, exactly like llmDispatch.ts's embedded
+ * pipeline does — "claim the entry BEFORE we await its promise so the
+ * sweeper can't dispose it out from under us." The returned `release()`
+ * MUST be called in a `finally` once the caller is done using the
+ * resolved pipeline object (not merely once this function returns) — the
+ * in-flight window has to cover the actual ONNX forward pass / tokenizer
+ * call, not just the cache lookup, or the sweeper could race a call that's
+ * about to start running inference.
+ *
+ * `release()` is idempotent and safe to call multiple times.
+ */
+async function acquirePipeline(
+    modelId: string,
+    device?: LoadDevice,
+    dtype?: ModelDtype,
+    // Return type intentionally left as `any` (matches the pre-existing
+    // `loadPipeline(): Promise<any>` contract): the upstream pipeline is
+    // callable both as `embedder(text, opts)` (runEmbed) and
+    // `embedder(texts[], opts)` (runEmbedBatch), which a single structural
+    // interface can't express without weakening EmbedderPipeline's own
+    // (deliberately narrow) tokenizer-focused shape used by
+    // splitTextIntoChunks.
+): Promise<{ embedder: any; release: () => void }> {
+    const entry = getOrCreateEntry(modelId, device, dtype);
+    entry.inFlight++;
+    // Arm the sweeper only once a pipeline is actually cached (mirrors
+    // where llmDispatch.ts calls ensureIdleSweeper(), right after
+    // embeddedPipelineCache.set()) — never at module-eval time.
+    ensureEmbedIdleSweeper();
+    let released = false;
+    const release = (): void => {
+        if (released) return;
+        released = true;
+        entry.lastUsedAt = Date.now();
+        entry.inFlight = Math.max(0, entry.inFlight - 1);
+    };
+    try {
+        const embedder = await entry.promise;
+        return { embedder, release };
+    } catch (err) {
+        release();
+        throw err;
+    }
+}
+
+/**
+ * Release the cached local-embedding pipeline(s), freeing RAM immediately
+ * rather than waiting for the idle sweeper. Exported for hosts that know
+ * they're about to go idle (e.g. after a bulk-index burst) and don't want
+ * to wait out `LORE_EMBED_IDLE_UNLOAD_MS`.
+ *
+ * Semantics for an entry currently in use (`inFlight > 0`): this function
+ * does NOT force-release it and does NOT wait for it to finish — it skips
+ * that entry and moves on. Rationale: an explicit caller here is a host
+ * managing its own memory, not a background sweeper, but ripping a
+ * pipeline out from under an in-progress ONNX forward pass is the exact
+ * "Session already disposed" failure llmDispatch.ts's inFlight guard was
+ * built to prevent (see CachedPipelineEntry.inFlight); silently skipping
+ * is safer than either force-releasing or blocking. If a caller needs a
+ * guaranteed release, it should await its own embed calls to complete
+ * first (there is no in-progress embed left running once `embed*()`
+ * promises have resolved).
+ *
+ * Returns `true` if at least one pipeline was actually released.
+ */
+export function releaseLocalEmbeddingPipeline(): boolean {
+    let releasedAny = false;
+    for (const [key, entry] of pipelineCache.entries()) {
+        if (entry.inFlight > 0) continue;
+        pipelineCache.delete(key);
+        releasedAny = true;
+        void entry.promise.then((p) => {
+            try { p?.dispose?.(); } catch { /* ignore */ }
+        }).catch(() => { /* ignore — a rejected load has nothing to dispose */ });
+    }
+    return releasedAny;
 }
 
 /**
@@ -158,6 +360,39 @@ async function loadPipeline(modelId: string, device?: LoadDevice, dtype?: ModelD
  */
 export function _resetLocalEmbeddingPipelineForTests(): void {
     pipelineCache.clear();
+}
+
+/**
+ * Test-only: number of distinct ONNX pipelines currently loaded (keyed by
+ * `${modelId}:${device}:${dtype}` — see loadPipeline). Used both by the
+ * idle-unload assertions (current pipeline-cache size) and by the
+ * injected-embedding-provider acceptance test to assert a child process
+ * that only ever used an INJECTED provider never triggered a real model
+ * load (`pipeline('feature-extraction', ...)` from @huggingface/transformers)
+ * — the count must stay 0 for the whole run.
+ */
+export function _pipelineCacheSizeForTests(): number {
+    return pipelineCache.size;
+}
+
+/**
+ * Cross-device fingerprint helper (Q2.2 follow-up — injected-embedding-
+ * provider sprint). `LocalEmbeddingProvider.dtype`'s own doc comment has
+ * always said "the cross-device fingerprint is `modelId + '@' + dtype`",
+ * but until now that was only a comment — nothing computed it. Exported so
+ * a host embedding Lore (or Lore's own fingerprint-compatibility code) can
+ * derive the same string without duplicating the concatenation rule.
+ *
+ * Parity contract: any provider — local, remote or host-injected — that
+ * declares the same `modelId` and `dtype` (EmbeddingProvider.dtype) yields
+ * the IDENTICAL string. A provider that declares no dtype is fingerprinted
+ * by `modelId` alone (and is refused by strict fingerprint checking against
+ * a store that recorded a dtype — see engines/verbatimFingerprintGate.ts).
+ */
+export function embeddingProviderFingerprint(
+    provider: Pick<EmbeddingProvider, 'modelId' | 'dtype'>,
+): string {
+    return provider.dtype ? `${provider.modelId}@${provider.dtype}` : provider.modelId;
 }
 
 export interface LocalEmbeddingProviderOptions {
@@ -269,7 +504,11 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     }
 
     async initialize(): Promise<void> {
-        await loadPipeline(this.modelId, this.device, this.dtype);
+        // Warm-up only — nothing here touches the resolved pipeline
+        // afterward, so it's safe to release the in-flight claim as soon
+        // as the load settles.
+        const { release } = await acquirePipeline(this.modelId, this.device, this.dtype);
+        release();
     }
 
     /**
@@ -296,8 +535,16 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         if (Buffer.byteLength(text, 'utf8') <= EMBED_CHUNK_TOKENS) {
             return this.runEmbed(this.asymmetric ? `passage: ${text}` : text);
         }
-        const embedder = await loadPipeline(this.modelId, this.device, this.dtype);
-        const chunks = await this.splitTextIntoChunks(embedder, text);
+        // Claim the pipeline for the duration of the tokenizer-backed split
+        // below — this IS active use of the pipeline (its tokenizer), not
+        // just a cache lookup, so it must hold inFlight until done.
+        const { embedder, release } = await acquirePipeline(this.modelId, this.device, this.dtype);
+        let chunks: string[];
+        try {
+            chunks = await this.splitTextIntoChunks(embedder, text);
+        } finally {
+            release();
+        }
         const inputs = this.asymmetric ? chunks.map((c) => `passage: ${c}`) : chunks;
         const vecs = await this.runEmbedBatch(inputs);
         return vecs.length === 1 ? vecs[0] : poolMeanNormalized(vecs, this.dimension);
@@ -326,11 +573,18 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
      */
     async embedDocumentBatch(texts: string[]): Promise<number[][]> {
         if (texts.length === 0) return [];
-        const embedder = await loadPipeline(this.modelId, this.device, this.dtype);
-        // 1. Split each document into context-sized overlapping chunks.
-        const chunkLists = await Promise.all(
-            texts.map((t) => this.splitTextIntoChunks(embedder, t)),
-        );
+        // Claim the pipeline for the duration of the tokenizer-backed split
+        // below (see embedDocument's identical comment).
+        const { embedder, release } = await acquirePipeline(this.modelId, this.device, this.dtype);
+        let chunkLists: string[][];
+        try {
+            // 1. Split each document into context-sized overlapping chunks.
+            chunkLists = await Promise.all(
+                texts.map((t) => this.splitTextIntoChunks(embedder, t)),
+            );
+        } finally {
+            release();
+        }
         const flat: string[] = [];
         const counts: number[] = [];
         for (const chunks of chunkLists) {
@@ -397,24 +651,32 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
      *  bounding each ONNX call so a multi-MB document (thousands of
      *  chunks) can't OOM the host. */
     private async runEmbedBatch(texts: string[]): Promise<number[][]> {
-        const embedder = await loadPipeline(this.modelId, this.device, this.dtype);
-        const out: number[][] = [];
-        for (let i = 0; i < texts.length; i += EMBED_FORWARD_BATCH) {
-            const slice = texts.slice(i, i + EMBED_FORWARD_BATCH);
-            const output = await embedder(slice, { pooling: 'mean', normalize: true });
-            const data = output.data as Float32Array;
-            const dim = output.dims?.[1] ?? this.dimension;
-            for (let r = 0; r < slice.length; r++) {
-                out.push(Array.from(data.subarray(r * dim, (r + 1) * dim)));
+        const { embedder, release } = await acquirePipeline(this.modelId, this.device, this.dtype);
+        try {
+            const out: number[][] = [];
+            for (let i = 0; i < texts.length; i += EMBED_FORWARD_BATCH) {
+                const slice = texts.slice(i, i + EMBED_FORWARD_BATCH);
+                const output = await embedder(slice, { pooling: 'mean', normalize: true });
+                const data = output.data as Float32Array;
+                const dim = output.dims?.[1] ?? this.dimension;
+                for (let r = 0; r < slice.length; r++) {
+                    out.push(Array.from(data.subarray(r * dim, (r + 1) * dim)));
+                }
             }
+            return out;
+        } finally {
+            release();
         }
-        return out;
     }
 
     /** Inner: tokenize, mean-pool, L2-normalize. */
     private async runEmbed(text: string): Promise<number[]> {
-        const embedder = await loadPipeline(this.modelId, this.device, this.dtype);
-        const output = await embedder(text, { pooling: 'mean', normalize: true });
-        return Array.from(output.data) as number[];
+        const { embedder, release } = await acquirePipeline(this.modelId, this.device, this.dtype);
+        try {
+            const output = await embedder(text, { pooling: 'mean', normalize: true });
+            return Array.from(output.data) as number[];
+        } finally {
+            release();
+        }
     }
 }

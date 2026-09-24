@@ -36,19 +36,46 @@ raw query
 
 ### `RetrieveOutcome`
 
+> ⚠️ **Response shape change (2026-09-23, fix/d4-traversal-separate-field —
+> a DIFFERENT "D4" than the "one result contract" decision above, an
+> unfortunate naming collision, see the CHANGELOG entry).** `results` used to
+> interleave graph-traversal neighbours (`depth >= 1`, `source:
+> 'via:<seedId>'`, a fixed depth-decayed score, no real relevance to the
+> query) into the SAME ranked array as direct matches, and counted them in
+> `meta.totalMatched`/`directMatches`. `results` now contains ONLY direct
+> matches — `depth` is always `0`, `source` is always `'seed'`. Traversal
+> neighbours are returned in a separate `related: RelatedResult[]` field and
+> are NEVER counted in `totalMatched`/`directMatches` (or any downstream
+> `shown`/`totalRecalled`). `depth` still defaults to `1` (compatibility) —
+> it now controls how many `related` neighbours come back, not what counts
+> as a match. `related` is exempt from `maxTokens` truncation (only
+> `results` is truncated).
+
 ```ts
 interface RetrievalResult {
   node: LoreNode;
   score: number;                 // relative confidence within THIS set (0..1)
   matchedBy: ('semantic'|'bm25'|'keyword'|'traversal')[];
-  depth: number;                 // 0 = direct seed; >0 = traversal hop
-  source: string;                // 'seed' | 'via:<seedId>'
+  depth: number;                 // always 0 — results is direct-matches-only
+  source: string;                // always 'seed'
+}
+interface RelatedResult {        // graph-traversal neighbours (D4 fix)
+  node: LoreNode;
+  via: string;                   // seed id this node was reached from
+  relation: string;              // REAL edge relation from graph.traverse(), never invented
+  depth: number;                 // hop distance, >= 1
+  score: number;                 // depth-decayed weight (0.3/(1+depth)); not comparable to RetrievalResult.score
+}
+interface RetrieveOutcome {
+  results: RetrievalResult[];    // direct matches only
+  related: RelatedResult[];      // graph-traversal neighbours, separate array
+  meta: RetrieveMeta;
 }
 interface RetrieveMeta {
   topScore: number | null;
   sourcesConsulted: number;      // 1 = keyword only; 2 = vector index also consulted
   totalMatched: number; truncated: boolean; droppedCount: number;
-  directMatches: number;         // count of depth-0 matches
+  directMatches: number;         // == results.length (results is direct-matches-only)
   verbatimConsulted: boolean;    // P14 freshness: was the vector index consulted?
 }
 ```
@@ -56,6 +83,10 @@ interface RetrieveMeta {
 `verbatimConsulted=false` means semantic results are absent (just-written /
 not-yet-embedded content, or a non-active workspace) — keyword still ran. It is
 surfaced to callers as `vector_index_consulted` (see below), never blocks.
+
+Types live in `retrieveTypes.ts` (split out of `retrieve.ts` to stay under
+the repo's file-size cap) and are re-exported from `retrieve.ts`, so existing
+`import type {...} from './retrieve.js'` call sites are unaffected.
 
 ## The two projections (presentation only — no retrieval)
 
@@ -76,7 +107,13 @@ interface UnifiedResultItem {
 For surfaces that return the richer `RecallResult` (`recall`). `buildRecallResult()`
 turns a `retrieve(depth>=1)` outcome into a `summary` | `full` result: snippet
 hits / full bodies, the `_meta` confidence envelope, the deferred-Lore sidecar,
-the cross-language hint, and high-confidence auto-escalation. Key `_meta` fields,
+the cross-language hint, and high-confidence auto-escalation. Since the D4 fix,
+`outcome.related` is mapped to its own `related: RecallRelated[]` field
+(`{id, type, label, project, snippet, via, relation, depth}`) — omitted (not an
+empty array) when `depth:0` or no neighbours were found; `connectedMatches` on
+the full-mode result is `related.length`, a pure count kept for backward-compat
+callers. Compact mode (`compact:true`) pairs `buildCompactCandidates()` with a
+new `buildRelatedCandidates()` for the same split. Key `_meta` fields,
 identical on every recall surface:
 
 ```ts

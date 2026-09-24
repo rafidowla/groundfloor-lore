@@ -32,6 +32,7 @@ import { log } from '../logger.js';
 import { VERSION } from '../version.js';
 import { AuditLog } from '../security/audit.js';
 import { SqliteOutboxStore } from '../outbox/sqliteStore.js';
+import { readEnvRetryConfig } from '../outbox/retryConfig.js';
 import { ensureAuthToken, getAuthTokenPath } from '../security/authToken.js';
 import { runWithPrincipal, type Principal } from '../auth/principal.js';
 import { runWithRouteBindingSlot } from '../security/routeWorkspaceBinding.js';
@@ -44,6 +45,7 @@ import { tryArcadeDataRoutes } from './http/routes/arcadeData.js';
 import {
     ARCADE_BASE_URL,
     provisioningDbPath,
+    closeRegistryDb,
 } from '../engines/arcade/arcadeProvisioner.js';
 import { getRootSecretStore, resolveRootPassword } from '../engines/arcade/arcadeSecretStore.js';
 import { ArcadeCellPool, setArcadeCellPool } from '../engines/arcade/arcadeCellPool.js';
@@ -55,7 +57,7 @@ import {
     classifyArcadeRequest,
     arcadeTenantKeyFromPath,
 } from '../security/arcadeRateClassifier.js';
-import { hashToken } from '../engines/arcade/arcadeAuthResolver.js';
+import { hashToken, closeTokenDb } from '../engines/arcade/arcadeAuthResolver.js';
 import { preflightKmsSelfTest } from '../engines/arcade/arcadeSecretStore.js';
 import type { LoreInstance } from './server.js';
 
@@ -398,7 +400,7 @@ export async function createArcadeInstance(input: {
     // under loreDir) so the following data-plane slice can outbox-first arcade
     // writes; the provisioning/token registry migrations run lazily on the
     // first provisioner/authResolver call (openRegistryDb / openTokenDb).
-    const outboxStore = new SqliteOutboxStore(loreDir);
+    const outboxStore = new SqliteOutboxStore(loreDir, { retryBaseMs: readEnvRetryConfig().retryBaseMs }); // LORE_OUTBOX_RETRY_BASE_MS
     // Touch the registry path so a misconfigured LORE_HOME fails at boot, not
     // on the first provision call.
     log.info(`[Lore MCP] arcade provisioning registry at ${provisioningDbPath()}`);
@@ -486,6 +488,11 @@ export async function createArcadeInstance(input: {
             void arcadeReplicator.stop();
             try { httpServer?.close(); } catch { /* already closing */ }
             try { outboxStore.close(); } catch { /* already closed */ }
+            // STEP2-CLOSE-PATH-DESIGN.md (d) — two module-level cached sqlite
+            // connections onto arcade-provisioning.sqlite (registry + auth
+            // token) that nothing on this shutdown path ever closed.
+            try { closeTokenDb(); } catch { /* already closed */ }
+            try { closeRegistryDb(); } catch { /* already closed */ }
             process.exit(0);
         };
         process.on('SIGINT', () => shutdown('SIGINT'));
@@ -520,6 +527,8 @@ export async function createArcadeInstance(input: {
             try { await arcadeReplicator.stop(); } catch { /* ignore */ }
             try { httpServer?.close(); } catch { /* ignore */ }
             try { outboxStore.close(); } catch { /* ignore */ }
+            try { closeTokenDb(); } catch { /* ignore */ }
+            try { closeRegistryDb(); } catch { /* ignore */ }
         },
         _daemon: daemonHandle as unknown as LoreInstance['_daemon'],
     };

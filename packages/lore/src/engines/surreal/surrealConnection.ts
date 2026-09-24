@@ -405,10 +405,50 @@ const INDEX_STATEMENTS: readonly string[] = [
  * that view", surrealdb-core-3.0.2 doc/table.rs:434). The edge count stays a
  * live `count()`, which measured 1.9 ms at 20 000 edges — it was never the
  * expensive half.
+ *
+ * RECOMPUTED ON EVERY OPEN (added alongside the node_counts leak fix, see
+ * COUNT_VIEW_ROLLBACK_STATEMENTS below). Even with the flag ON the view is
+ * still unsafe under concurrent writers sharing one (project, type) group —
+ * surrealdb-core 3.0.2's view-maintenance can commit a lost update — and
+ * because the DEFINE is `IF NOT EXISTS`, a count that drifted low in one
+ * session used to stay wrong forever, across every later restart. Leading
+ * with `REMOVE TABLE IF EXISTS` before the DEFINE forces a fresh
+ * backfill (property 1 above) on every open, which does not fix the
+ * concurrency bug but bounds its damage to the single session that caused
+ * it. Costs one full GROUP BY aggregate per open of a flag-on workspace.
+ * Deleting the `countView` option outright remains the recommended
+ * long-term fix and is filed as a follow-up for the next minor.
  */
 const COUNT_VIEW_STATEMENTS: readonly string[] = [
+    `REMOVE TABLE IF EXISTS ${NODE_COUNT_VIEW}`,
     `DEFINE TABLE IF NOT EXISTS ${NODE_COUNT_VIEW} AS`
     + ` SELECT project, type, count() AS c FROM ${NODE_TABLE} GROUP BY project, type`,
+];
+
+/**
+ * The rollback half of COUNT_VIEW_STATEMENTS — and a REPAIR.
+ *
+ * `countView` was default-ON from 2026-08-05 (6d1a35d8) to 2026-08-21
+ * (7eafa5ec). Flipping the default to opt-in stopped new workspaces from
+ * DEFINING the view; it did not remove it from the ones that already had it.
+ * SurrealDB keeps maintaining a view nobody reads, and that maintenance is
+ * where the damage is: under concurrent writers sharing one (project, type)
+ * group the maintained count loses updates (SurrealFeatures.countView), then
+ * deletes drive it to zero, the view row disappears, and every FURTHER write
+ * that re-maintains that group row panics —
+ * `unreachable logic: … Deletion for a view but no record exists for that
+ * view` (surrealdb-core-3.0.2 doc/table.rs:434). That takes out `deleteNode`
+ * AND `supersedeNode`, so an affected node can neither be removed nor hidden.
+ * Measured on this branch: 231/300 serial deletes fail, and superseding a
+ * stuck node fails too.
+ *
+ * The view is derived, so dropping it loses nothing — re-enabling the flag
+ * re-DEFINEs it and it backfills (property 1 above). Running the REMOVE on
+ * every flag-off open is therefore both the rollback and the migration-free
+ * repair of every already-damaged workspace.
+ */
+const COUNT_VIEW_ROLLBACK_STATEMENTS: readonly string[] = [
+    `REMOVE TABLE IF EXISTS ${NODE_COUNT_VIEW}`,
 ];
 
 /**
@@ -445,7 +485,7 @@ const FTS_STATEMENTS: readonly string[] = [
 export async function applySurrealSchema(db: Surreal, features: SurrealFeatures): Promise<void> {
     const statements = [
         ...SCHEMA_STATEMENTS,
-        ...(features.countView ? COUNT_VIEW_STATEMENTS : []),
+        ...(features.countView ? COUNT_VIEW_STATEMENTS : COUNT_VIEW_ROLLBACK_STATEMENTS),
         ...(features.indexes ? INDEX_STATEMENTS : []),
         ...(features.fts ? FTS_STATEMENTS : []),
     ];

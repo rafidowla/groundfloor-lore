@@ -18,8 +18,9 @@ import { nodeUpsert as nodeServiceUpsert, type VerbatimWriter } from '../core/no
 import { withNodeLock } from '../core/nodeWriteLock.js';
 import type { NodeWriteGraph } from '../core/nodeService.js';
 import type { OutboxStore } from '../outbox/types.js';
+import { resolveSupersessionContext } from '../core/supersessionPolicy.js';
 import { recordHotWrite } from '../outbox/hotLane.js';
-import type { VerbatimStore } from '../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import type { WriteAheadLog } from '../engines/syncEngine.js';
 
 export interface ChangesetWriteDeps {
@@ -32,7 +33,7 @@ export interface ChangesetWriteDeps {
     verbatim: VerbatimWriter;
     /** Per-workspace verbatim resolver for delete tombstones (L-056).
      *  Structural (not the class) so the MCP/HTTP dep shapes both fit. */
-    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<VerbatimStore> };
+    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<VerbatimStoreApi> };
     /** Boot verbatim store — fallback when no resolver is wired (cloud/tests). */
     bootVerbatim: unknown;
     /** Boot/active workspace name — drives isActiveWorkspace gating. */
@@ -49,6 +50,21 @@ export interface ChangesetWriteDeps {
      * fixtures that don't wire a WAL keep prior behavior.
      */
     getWal?: () => WriteAheadLog;
+    /**
+     * D5 round 2 (HIGH #1) — changeset upsert was the one `nodeUpsert()`
+     * caller that never resolved supersession hooks, so a `decision`/
+     * `convention`/`architecture` write buffered through a changeset and
+     * committed bypassed enforcement entirely even when the target
+     * workspace has it on. Structural (not `LocalGraphRegistry`/
+     * `LoreStorageClient` directly) so this module doesn't need to import
+     * either just to plumb them through — same shape
+     * `resolveSupersessionContext`'s own params already accept.
+     */
+    graphRegistryHomeDir?: string;
+    bootGraph?: unknown;
+    storageClient?: { verbatimSearch(q: string, n: number): Promise<Array<{ id: string; score: number }>> };
+    /** D5 round 2 (#2) — host-level supersession-enforce default. */
+    supersessionEnforceDefault?: boolean;
 }
 
 /**
@@ -63,6 +79,24 @@ export async function applyChangesetUpsert(
     workspace: string,
     nodeData: Record<string, unknown>,
 ): Promise<void> {
+    // D5 round 2 (HIGH #1) — same shared helper every other write path
+    // resolves through (storeNode.ts/postNode.ts/server.ts embedded
+    // nodeUpsert/nodeUpsertBatch/bulkIngest.ts/bulkWrite.ts/import.ts).
+    // `supersedes`/`force` ride in nodeData like any other buffered
+    // changeset field (there's no separate typed args shape at this layer).
+    const { policy: supersessionPolicy, findDuplicate: findSupersessionDuplicate } = resolveSupersessionContext({
+        workspace,
+        targetGraph,
+        homeDir: deps.graphRegistryHomeDir,
+        bootGraph: deps.bootGraph,
+        storageClient: deps.storageClient,
+        workspaceVerbatimResolver: deps.workspaceVerbatimResolver as
+            | { getOrOpen(ws: string): Promise<{ search(q: string, n: number): Promise<Array<{ id: string; score: number }>> }> }
+            | undefined,
+        hostDefaultEnforce: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+    });
+    const rawSupersedes = nodeData['supersedes'];
+    const supersedes = Array.isArray(rawSupersedes) ? rawSupersedes.map(String) : undefined;
     const res = await nodeServiceUpsert(
         {
             id: String(nodeData['id'] ?? ''),
@@ -72,6 +106,8 @@ export async function applyChangesetUpsert(
             targetGraph,
             initiator: deps.initiator,
             isActiveWorkspace: workspace === deps.activeWorkspace,
+            supersedes,
+            force: nodeData['force'] === true,
         },
         {
             outboxStore: deps.outboxStore,
@@ -80,6 +116,8 @@ export async function applyChangesetUpsert(
             // versionStore deliberately NOT passed: changeset commit/rollback
             // records its own version rows (principal 'changeset' +
             // changesetId) — passing it here would double-record.
+            supersessionPolicy,
+            findSupersessionDuplicate,
         },
     );
     if (!res.ok) throw res.error;

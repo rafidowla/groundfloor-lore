@@ -81,6 +81,14 @@ function node(id: string, over: Partial<LoreNode> = {}): Omit<LoreNode, 'created
     };
 }
 
+/** `INFO FOR DB`'s table list, via the engine's own private query fn. */
+async function tableNames(g: SurrealGraph): Promise<string[]> {
+    const rows = await (g as unknown as { query: (sql: string) => Promise<Record<string, unknown>[]> })
+        .query('INFO FOR DB');
+    const tables = (rows[0]?.['tables'] ?? {}) as Record<string, unknown>;
+    return Object.keys(tables);
+}
+
 /** Seed the same corpus into a graph regardless of which flags are on. */
 async function seed(g: SurrealGraph): Promise<void> {
     await g.upsertNode(node('d1', { type: 'decision', project: 'p0' }));
@@ -261,13 +269,19 @@ await test('countView ROLLBACK: turning it off on a store that has one still wor
         const expected = await withView.getStats();
         await withView.close();
 
-        // The view stays on disk; the engine simply stops reading it. Backing
-        // the flag out must not require dropping anything.
+        // Turning the flag off now DROPS the view on this open (it did not
+        // always — see surreal-count-view-stale-delete-unit.ts for why a
+        // view left maintained-but-unread corrupts under concurrent writers
+        // and eventually makes deletes/supersedes panic). Getting stats right
+        // after the drop must still work, since getStats falls back to a
+        // live GROUP BY when the flag is off.
         const without = new SurrealGraph(dir, { cacheDisabled: true, features: { countView: false } });
         await without.initialize();
+        assert.ok(!(await tableNames(without)).includes('node_counts'),
+            'flag-off open must REMOVE the leftover view, not merely stop reading it');
         assert.deepEqual(await without.getStats(), expected);
         await without.upsertNode(node('post-rollback', { type: 'note' }));
-        assert.equal((await without.getStats()).nodeCount, 6, 'writes still work with the view present but unused');
+        assert.equal((await without.getStats()).nodeCount, 6, 'writes still work with the view gone');
         await without.close();
     } finally {
         fs.rmSync(dir, { recursive: true, force: true });

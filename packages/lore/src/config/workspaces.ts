@@ -105,6 +105,44 @@ export interface WorkspaceVocabPolicy {
     onMismatch: WorkspaceVocabOnMismatch;
 }
 
+/**
+ * D5 (2026-09-23) — write-time supersession enforcement. Absent (default) =
+ * `enforce: false`, today's behaviour: a `decision`/`convention`/`architecture`
+ * write can silently duplicate or contradict an existing node with no link
+ * ever recorded. Mirrors `WorkspaceVocabPolicy`'s absent-is-permissive shape
+ * on purpose, for the same reason: an existing workspace must never change
+ * write behaviour because a field was added at upgrade time — enforcement is
+ * opt-in per workspace, turned on with `setWorkspaceSupersessionPolicy`.
+ *
+ * When `enforce: true`, `core/supersessionPolicy.ts`'s `checkSupersessionPolicy`
+ * rejects a `decision`/`convention`/`architecture` write when: (round 2,
+ * 2026-09-23 — every write path resolves its policy/near-dup hooks through
+ * the one shared `resolveSupersessionContext()` helper in
+ * `supersessionPolicy.ts`, so MCP store_node, REST POST /api/node, the
+ * embedded `createLore()` nodeUpsert()/nodeUpsertBatch(), bulkIngest(),
+ * REST POST /api/nodes/bulk and REST POST /api/import all enforce it
+ * uniformly — not just the three original chokepoint callers.)
+ *   - the write omits `supersedes` entirely (pass `[]` to assert "supersedes
+ *     nothing" explicitly);
+ *   - the write's content/label contains a `SUPERSEDES <id>` prose claim
+ *     whose id is not also listed in `supersedes`;
+ *   - a near-duplicate existing node (same workspace, same type, similarity
+ *     >= `duplicateThreshold`) is found and its id is not listed in
+ *     `supersedes`, unless the write passes `force: true`.
+ * Every listed id gets a `supersedes` edge + its `supersededBy` field set,
+ * same durable effect as the existing `supersede_node` MCP tool.
+ */
+export interface WorkspaceSupersessionPolicy {
+    /** Turn write-time enforcement on for this workspace. Default false. */
+    enforce: boolean;
+    /**
+     * Near-duplicate similarity threshold (0-1) reusing the same scoring as
+     * `GET /api/node/supersession-candidates`. Absent = that route's own
+     * default (0.78).
+     */
+    duplicateThreshold?: number;
+}
+
 export interface WorkspaceEntry {
     name: string;
     /** Human-readable display name. Defaults to name if not set. */
@@ -136,14 +174,48 @@ export interface WorkspaceEntry {
      *
      * Absent is the default on purpose: an existing workspace must never
      * change substrate because a field was added.
+     *
+     * 3.21 step 1d adds `'sqlite'` (`engines/sqliteGraph.ts`). NEW local
+     * workspaces write it explicitly at creation
+     * (`createWorkspace()`/fresh-home seeding); an absent field still means
+     * `'surreal'` for every workspace created before that change. See
+     * `graphEngineSelector.ts`'s `DEFAULT_GRAPH_ENGINE` and
+     * `resolveNewWorkspaceGraphEngine`.
      */
-    graphEngine?: 'kuzu' | 'surreal';
+    graphEngine?: 'kuzu' | 'surreal' | 'sqlite';
+    /**
+     * 3.21 step 2 part 2 (design section 2) — which engine backs this
+     * workspace's VECTOR substrate (embeddings + semantic search).
+     *
+     * Absent (default) = LanceDB (`engines/verbatimStore.ts`'s
+     * `VerbatimStore`). NEW local workspaces write `'sqlite'` explicitly at
+     * creation (`createWorkspace()`/fresh-home seeding), same rule
+     * `graphEngine` follows — an existing workspace must never change
+     * substrate because a field was added. See
+     * `vectorEngineSelector.ts`'s `DEFAULT_VECTOR_ENGINE` and
+     * `resolveNewWorkspaceVectorEngine`.
+     *
+     * A `'sqlite'` workspace can be promoted to `'lance'` automatically in
+     * the background once its `verbatim.sqlite` crosses
+     * `LORE_VECTOR_PROMOTE_ROWS` rows (`engines/verbatimPromotion.ts`) — the
+     * promotion commit flips this field the same way `lore migrate-graph`
+     * flips `graphEngine`. This field selects ONE substrate, not the whole
+     * workspace: a `'sqlite'`-vector workspace can run either graph engine,
+     * independently.
+     */
+    vectorEngine?: 'lance' | 'sqlite';
     retention?: WorkspaceRetentionPolicy;
     /**
      * Phase 6 P2 — accepted-vocabulary policy. Absent or `mode: 'open'`
      * means no restriction (back-compat default).
      */
     vocabPolicy?: WorkspaceVocabPolicy;
+    /**
+     * D5 (2026-09-23) — opt-in write-time supersession enforcement. Absent =
+     * disabled (back-compat default). See `WorkspaceSupersessionPolicy`'s doc
+     * comment for the full behaviour.
+     */
+    supersessionPolicy?: WorkspaceSupersessionPolicy;
     /**
      * Sprint O4 — per-workspace override for the outbox lag threshold
      * (seconds). When unset the global `LORE_OUTBOX_LAG_THRESHOLD_SECONDS`
@@ -275,11 +347,47 @@ export function loadWorkspaces(home: string = loreHome()): WorkspacesFile {
                 name: 'default',
                 path: paths.home,
                 createdAt: new Date().toISOString(),
+                // 3.21 step 1d — ONLY for a genuinely FRESH home (no legacy
+                // `.lore` adopted): a brand-new local workspace still gets
+                // `graphEngine` written explicitly, same rule createWorkspace()
+                // applies. Adopting an EXISTING `.lore` must leave the field
+                // absent — that directory's real data is already on whatever
+                // engine wrote it (surreal, pre-3.21), and this first-run path
+                // has no way to know which; absent correctly resolves to
+                // 'surreal' via graphEngineSelector.ts's default.
+                ...(hasLegacy ? {} : { graphEngine: process.env['LORE_DEFAULT_GRAPH_ENGINE'] === 'surreal' ? 'surreal' : 'sqlite' as const }),
+                // 3.21 step 2 part 2 — same rule, same reasoning, as the
+                // graphEngine field just above: only a genuinely FRESH home
+                // gets the new default; adopting an existing `.lore` must
+                // leave the field absent (its real vectors are wherever
+                // they already are — 'lance' via vectorEngineSelector.ts's
+                // default).
+                ...(hasLegacy ? {} : { vectorEngine: process.env['LORE_DEFAULT_VECTOR_ENGINE'] === 'lance' ? 'lance' : 'sqlite' as const }),
             },
         ],
     };
     writeControl(file, home);
     return file;
+}
+
+/**
+ * Read `workspaces.json` for `home` WITHOUT running `loadWorkspaces`'s
+ * first-run migration — returns `null` when no control file exists there
+ * instead of creating one.
+ *
+ * Defect 3 (3.20.2) — a maintenance pass (or any other read-only probe)
+ * against an embedded instance's own `dataHome` must never bootstrap a
+ * `workspaces.json` as a side effect of merely checking "what's the active
+ * workspace?". `loadWorkspaces()` is correct for callers that actually want
+ * a registry (CLI, daemon boot); this is for callers that want to know
+ * whether one exists first.
+ */
+export function loadWorkspacesIfPresent(home: string = loreHome()): WorkspacesFile | null {
+    const { controlFile } = workspacePaths(home);
+    if (!fs.existsSync(controlFile)) {
+        return null;
+    }
+    return loadWorkspaces(home);
 }
 
 /** Returns the disk path for the currently-active workspace. */
@@ -320,6 +428,24 @@ export function createWorkspace(
         ...(opts?.template ? { template: opts.template } : {}),
         path: workspacePath,
         createdAt: new Date().toISOString(),
+        // 3.21 step 1d — NEW local workspaces write this EXPLICITLY (never
+        // absent), so `graphEngineSelector.ts`'s absent-field default stays
+        // 'surreal' forever for every pre-3.21 workspace. `resolveNewWorkspaceGraphEngine`
+        // is not imported here on purpose: `engines/graphEngineSelector.ts`
+        // itself imports `loadWorkspaces` from THIS module, so importing
+        // back from it would be circular. The rule is one line — kept
+        // inline, with `graphEngineSelector.ts`'s
+        // `resolveNewWorkspaceGraphEngine` doc comment as the canonical
+        // explanation of the `LORE_DEFAULT_GRAPH_ENGINE` escape hatch.
+        graphEngine: process.env['LORE_DEFAULT_GRAPH_ENGINE'] === 'surreal' ? 'surreal' : 'sqlite',
+        // 3.21 step 2 part 2 — NEW local workspaces write this EXPLICITLY
+        // too (never absent), same reasoning as graphEngine above: an
+        // absent field must keep meaning 'lance' forever for every
+        // pre-3.21 workspace. `resolveNewWorkspaceVectorEngine` is the
+        // canonical explanation of the `LORE_DEFAULT_VECTOR_ENGINE` escape
+        // hatch; not imported here for the same circular-import reason
+        // graphEngine's inline duplicate exists.
+        vectorEngine: process.env['LORE_DEFAULT_VECTOR_ENGINE'] === 'lance' ? 'lance' : 'sqlite',
     };
     file.workspaces.push(entry);
     writeControl(file, home);
@@ -385,6 +511,60 @@ export function switchWorkspace(name: string, home: string = loreHome()): Worksp
     file.active = name;
     writeControl(file, home);
     return file;
+}
+
+/**
+ * setWorkspaceGraphEngine — 3.21 step 1e: flip which engine a workspace's
+ * `graphEngine` field names, atomically (`writeControl`'s tmp-file +
+ * `renameSync`, same primitive every other mutator in this file uses).
+ *
+ * This is `lore migrate-graph`'s FINAL step, on purpose — everything before
+ * it (backup, stream, importRaw, digest/read-probe verification) must
+ * complete first, so a crash or refusal anywhere upstream of this call
+ * leaves the registry, and therefore which store every reader opens,
+ * completely unchanged. `--rollback` calls this the same way, in reverse.
+ */
+export function setWorkspaceGraphEngine(
+    name: string,
+    engine: 'surreal' | 'sqlite',
+    home: string = loreHome(),
+): WorkspaceEntry {
+    const file = loadWorkspaces(home);
+    const entry = file.workspaces.find((w) => w.name === name);
+    if (!entry) {
+        throw new Error(`Unknown workspace "${name}"`);
+    }
+    entry.graphEngine = engine;
+    writeControl(file, home);
+    return entry;
+}
+
+/**
+ * setWorkspaceVectorEngine — 3.21 step 2 part 2: flip which engine a
+ * workspace's `vectorEngine` field names, atomically (same `writeControl`
+ * tmp-file + `renameSync` primitive as `setWorkspaceGraphEngine`).
+ *
+ * This is `verbatimPromotion.ts`'s auto-promotion hook's FINAL step, same
+ * ordering discipline as the graph migration: staging, the tail copy, index
+ * build, and verification all happen BEFORE this call, so a crash or a
+ * failed verify anywhere upstream leaves the registry — and therefore which
+ * store the resolver opens next — completely unchanged. The manual
+ * `lore vectors promote` CLI deliberately does NOT call this (see its own
+ * header) — only the automatic background hook does.
+ */
+export function setWorkspaceVectorEngine(
+    name: string,
+    engine: 'lance' | 'sqlite',
+    home: string = loreHome(),
+): WorkspaceEntry {
+    const file = loadWorkspaces(home);
+    const entry = file.workspaces.find((w) => w.name === name);
+    if (!entry) {
+        throw new Error(`Unknown workspace "${name}"`);
+    }
+    entry.vectorEngine = engine;
+    writeControl(file, home);
+    return entry;
 }
 
 /**
@@ -550,4 +730,68 @@ export function setWorkspaceVocabPolicy(name: string, policy: WorkspaceVocabPoli
     };
     writeControl(file, home);
     return entry.vocabPolicy;
+}
+
+/**
+ * D5 (2026-09-23) — read a workspace's supersession-enforcement policy.
+ * Returns `{ enforce: false }` when the entry has no explicit policy
+ * (back-compat default — see `WorkspaceSupersessionPolicy`'s doc comment).
+ * Throws when the workspace name is unknown, same as `getWorkspaceVocabPolicy`.
+ *
+ * Round 2 (#2, host switch): `hostDefaultEnforce` is the fallback used ONLY
+ * when this workspace has no explicit `supersessionPolicy` entry — an
+ * explicit per-workspace entry (true OR false) always wins outright. The
+ * caller (core/supersessionPolicy.ts's `resolveSupersessionContext`) is
+ * responsible for computing it from `createLore({supersessionEnforce})` and
+ * `LORE_SUPERSESSION_ENFORCE`; this function just applies the final
+ * precedence rule (per-workspace > everything else).
+ */
+export function getWorkspaceSupersessionPolicy(
+    name: string,
+    home: string = loreHome(),
+    hostDefaultEnforce?: boolean,
+): WorkspaceSupersessionPolicy {
+    const file = loadWorkspaces(home);
+    const entry = file.workspaces.find((w) => w.name === name);
+    if (!entry) throw new Error(`Unknown workspace "${name}"`);
+    const policy = entry.supersessionPolicy;
+    if (!policy) return { enforce: hostDefaultEnforce === true };
+    return {
+        enforce: policy.enforce === true,
+        ...(typeof policy.duplicateThreshold === 'number' ? { duplicateThreshold: policy.duplicateThreshold } : {}),
+    };
+}
+
+/**
+ * D5 (2026-09-23) — persist a workspace's supersession-enforcement policy.
+ * Replaces any prior policy in full. Pass `null` to clear (back to disabled).
+ */
+export function setWorkspaceSupersessionPolicy(
+    name: string,
+    policy: WorkspaceSupersessionPolicy | null,
+    home: string = loreHome(),
+): WorkspaceSupersessionPolicy | null {
+    const file = loadWorkspaces(home);
+    const entry = file.workspaces.find((w) => w.name === name);
+    if (!entry) throw new Error(`Unknown workspace "${name}"`);
+    if (policy === null) {
+        delete entry.supersessionPolicy;
+        writeControl(file, home);
+        return null;
+    }
+    if (typeof policy.enforce !== 'boolean') {
+        throw new Error('Invalid supersessionPolicy.enforce (expected boolean)');
+    }
+    if (
+        policy.duplicateThreshold !== undefined
+        && (typeof policy.duplicateThreshold !== 'number' || policy.duplicateThreshold < 0 || policy.duplicateThreshold > 1)
+    ) {
+        throw new Error('Invalid supersessionPolicy.duplicateThreshold (expected a number between 0 and 1)');
+    }
+    entry.supersessionPolicy = {
+        enforce: policy.enforce,
+        ...(typeof policy.duplicateThreshold === 'number' ? { duplicateThreshold: policy.duplicateThreshold } : {}),
+    };
+    writeControl(file, home);
+    return entry.supersessionPolicy;
 }

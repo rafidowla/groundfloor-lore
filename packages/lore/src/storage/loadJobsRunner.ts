@@ -506,6 +506,11 @@ export class LoadJobsRunner {
             throw err;
         } finally {
             this.abort.clear(job.jobId);
+            // STEP2-CLOSE-PATH-DESIGN.md (d) — the sqlite bulk-loader adapter
+            // owns its own `bulk-verbatim.sqlite` handle (bulkLoader/sqliteAdapter.ts);
+            // commit()/rollback() only reset in-memory state, never close it.
+            // Every completed/failed/cancelled job used to leak one handle.
+            dispatcher.close();
         }
     }
 

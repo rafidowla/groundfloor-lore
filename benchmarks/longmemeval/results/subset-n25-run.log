@@ -1,12 +1,12 @@
 Args: {
   n: 25,
   ks: [ 5, 10, 20 ],
-  dataset: '/Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/data/longmemeval_s_cleaned.json',
-  dataDir: '/Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/lore-home',
+  dataset: '<repo>/benchmarks/longmemeval/data/longmemeval_s_cleaned.json',
+  dataDir: '<repo>/benchmarks/longmemeval/lore-home',
   contextK: 10,
   resultsFile: 'benchmarks/longmemeval/results/subset-n25-smoketest.json'
 }
-Loaded 500 instances from /Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/data/longmemeval_s_cleaned.json
+Loaded 500 instances from <repo>/benchmarks/longmemeval/data/longmemeval_s_cleaned.json
 Selected stratified subset of 25: {
   'single-session-user': 4,
   'multi-session': 7,
@@ -235,7 +235,7 @@ Wrote full results to benchmarks/longmemeval/results/subset-n25-smoketest.json
 LongMemEval x Lore — subset report
 ==============================================================================
 generated:    2026-08-13T00:15:59.272Z
-dataset:      /Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/data/longmemeval_s_cleaned.json
+dataset:      <repo>/benchmarks/longmemeval/data/longmemeval_s_cleaned.json
 subset size:  25
 k values:     5, 10, 20
 

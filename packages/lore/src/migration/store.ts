@@ -182,7 +182,11 @@ export class MigrationsStore {
         return rows.map(rowToMigration);
     }
 
+    /** Tests + graceful shutdown (daemonWiring.close() calls this). Idempotent,
+     *  same pattern as LoadJobsStore.close() — a second close() hits an
+     *  already-closed better-sqlite3 handle, which throws; swallow it rather
+     *  than letting the shutdown drain's step-3 log a spurious error. */
     close(): void {
-        this.db.close();
+        try { this.db.close(); } catch { /* ignore double-close */ }
     }
 }

@@ -50,7 +50,8 @@ import { OutboxReplicator } from '../packages/lore/src/outbox/replicator.js';
 import type { DispatcherSubstrates } from '../packages/lore/src/outbox/dispatcher.js';
 import type { OutboxEntry } from '../packages/lore/src/outbox/types.js';
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { runBulkIngest, type BulkIngestDeps } from '../packages/lore/src/mcp/bulkIngest.js';
 import { defaultAutolinkTracker } from '../packages/lore/src/engines/pendingAutolink.js';
 import { EmbedQueue } from '../packages/lore/src/embed/queue.js';
@@ -145,12 +146,12 @@ function entryStatus(store: SqliteOutboxStore, id: string): string {
 async function makeOutboxHarness(): Promise<{
     store: SqliteOutboxStore;
     replicator: OutboxReplicator;
-    verbatim: VerbatimStore;
+    verbatim: VerbatimStoreApi;
 }> {
     const outboxDir = tmp('c3-outbox-');
     const verbatimDir = tmp('c3-verb-');
     const store = new SqliteOutboxStore(outboxDir, { retryBaseMs: 500 });
-    const verbatim = new VerbatimStore(verbatimDir, stubProvider());
+    const verbatim = makeVerbatimStore(verbatimDir, stubProvider());
     await verbatim.initialize();
     // Mirrors outbox/wiring.ts: per-row → store(), consolidated → storeBatch().
     const substrates: DispatcherSubstrates = {
@@ -184,7 +185,7 @@ async function makeOutboxHarness(): Promise<{
 
 /** Canonical-row count for an exact id (listIds is prefix-matched and would
  *  also return #rev history rows). */
-async function canonicalRows(verbatim: VerbatimStore, id: string): Promise<string[]> {
+async function canonicalRows(verbatim: VerbatimStoreApi, id: string): Promise<string[]> {
     const ids = await verbatim.listIds(id);
     return ids.filter((x) => x === id);
 }
@@ -244,7 +245,7 @@ await test("3.4 bulkIngest 16 entries = 8 ids × {OLD, NEW} embed:'sync' → one
     const vdir = tmp('c3-bulk-v-');
     const graph = new SurrealGraph(gdir);
     await graph.initialize();
-    const verbatim = new VerbatimStore(vdir, stubProvider());
+    const verbatim = makeVerbatimStore(vdir, stubProvider());
     await verbatim.initialize();
 
     const noop = () => undefined;
@@ -302,7 +303,7 @@ await test("3.4 bulkIngest 16 entries = 8 ids × {OLD, NEW} embed:'sync' → one
 //    10 ids × (OLD then NEW) ──
 await test('3.5a embed queue: 10 node ids enqueued OLD-then-NEW drain to NEW in every vector row', async () => {
     const vdir = tmp('c3-q-v-');
-    const verbatim = new VerbatimStore(vdir, stubProvider());
+    const verbatim = makeVerbatimStore(vdir, stubProvider());
     await verbatim.initialize();
     const graphNode = (id: string) => ({
         id, type: 'note', label: id, content: id, tags: [] as string[],
@@ -405,7 +406,7 @@ await test('3.5b queue coalescing: supersede-in-place, in-flight hold, stale-ret
 // ── medium — cold-workspace first-write table-creation race ──
 await test('medium: concurrent first writes to a cold workspace do not throw "already exists" and all rows land', async () => {
     const vdir = tmp('c3-race-v-');
-    const verbatim = new VerbatimStore(vdir, stubProvider());
+    const verbatim = makeVerbatimStore(vdir, stubProvider());
     await verbatim.initialize(); // NOTE: table itself not yet created
     const settled = await Promise.allSettled(
         Array.from({ length: 6 }, (_, i) =>
@@ -421,7 +422,7 @@ await test('medium: concurrent first writes to a cold workspace do not throw "al
 // ── medium — tombstone() is one atomic mergeInsert (was delete-then-add) ──
 await test('medium: tombstone replaces the canonical row atomically (tombstone text visible, single row, history snapshot kept)', async () => {
     const vdir = tmp('c3-tomb-v-');
-    const verbatim = new VerbatimStore(vdir, stubProvider());
+    const verbatim = makeVerbatimStore(vdir, stubProvider());
     await verbatim.initialize();
     await verbatim.store({ id: 'lore:t1', text: 'original content to tombstone', metadata: { type: 'note' } });
 
@@ -459,7 +460,7 @@ await test('low: re-embedding a node updates (not duplicates) its semantic edge 
     });
     const graph = new SurrealGraph(gdir);
     await graph.initialize();
-    const verbatim = new VerbatimStore(vdir, provider);
+    const verbatim = makeVerbatimStore(vdir, provider);
     await verbatim.initialize();
 
     const mkNode = (id: string, content: string) => ({
@@ -492,7 +493,7 @@ await test('low: re-embedding a node updates (not duplicates) its semantic edge 
 //    showed the same duplicate-source-key defect ──
 await test('3.2b bulkUpsertPrebuiltRows with duplicate ids in the SOURCE batch lands ONE row, keep-last (embed.batch consolidation sink)', async () => {
     const vdir = tmp('c3-emb-v-');
-    const verbatim = new VerbatimStore(vdir, stubProvider());
+    const verbatim = makeVerbatimStore(vdir, stubProvider());
     await verbatim.initialize();
     const mkRow = (id: string, text: string) => ({
         vector: new Array<number>(DIM).fill(0.1),

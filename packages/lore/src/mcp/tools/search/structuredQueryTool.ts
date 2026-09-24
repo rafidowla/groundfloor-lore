@@ -13,6 +13,8 @@ import { ensureAccessTracker } from '../../../engines/accessTracker.js';
 import { assertMcpScope } from '../mcpScope.js';
 import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
 import { resolveQuerySeedStore } from '../../../recall/querySeedStore.js';
+import { resolveLiveNodes } from '../../../recall/supersessionRecall.js';
+import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
 import type { LoreGraph, SearchToolsDeps } from './types.js';
 import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
@@ -91,6 +93,16 @@ export function registerStructuredQueryTool(mcpServer: McpServer, deps: SearchTo
                 const queryEcosystem = ecosystem ?? deps.detectedScope.ecosystem;
                 const outsideEcosystem = (n: { ecosystem?: string }): boolean =>
                     !ecosystemMatches(n.ecosystem, queryEcosystem);
+                // D5 #5 — successor replacement (not a bare hide filter) for
+                // a superseded hit. `corrects` adjacency is deliberately NOT
+                // applied here — see this tool's own doc comment above: it
+                // exists to return exactly what matched the query for the
+                // caller to reshape, and injecting extra `corrects` targets
+                // would violate that contract. Documented in CHANGELOG too.
+                // Successors are fresh graph reads: admit only ones the bound
+                // actor may see (no bound actor => no filtering).
+                const admitD5 = (n: LoreNode): boolean =>
+                    !outsideEcosystem(n) && n.status !== 'archived' && filterNodesByActorScope([n]).length > 0;
 
                 if (useVerbatim) {
                     // Seed from the REQUESTED workspace's own verbatim store.
@@ -110,6 +122,7 @@ export function registerStructuredQueryTool(mcpServer: McpServer, deps: SearchTo
                     const verbatimCount = seedStore ? await seedStore.count() : 0;
                     if (seedStore && verbatimCount > 0) {
                         const seeds = await seedStore.search(query, limit);
+                        const seedCandidates: LoreNode[] = [];
                         for (const seed of seeds) {
                             const stripped = seed.id.startsWith('lore:') ? seed.id.slice(5) : seed.id;
                             if (seenIds.has(stripped)) continue;
@@ -118,7 +131,13 @@ export function registerStructuredQueryTool(mcpServer: McpServer, deps: SearchTo
                             // is the authoritative copy of `ecosystem` (the
                             // verbatim row's metadata copy can be stale — see
                             // core/bulkNodeScope.ts).
-                            if (n && !n.supersededAt && !outsideEcosystem(n)) { hits.push(n); seenIds.add(n.id); }
+                            if (n && !outsideEcosystem(n)) seedCandidates.push(n);
+                        }
+                        const resolvedSeeds = await resolveLiveNodes(seedCandidates, graphForQuery, admitD5);
+                        for (const n of resolvedSeeds) {
+                            if (seenIds.has(n.id)) continue;
+                            hits.push(n);
+                            seenIds.add(n.id);
                         }
                     }
                 }
@@ -132,9 +151,15 @@ export function registerStructuredQueryTool(mcpServer: McpServer, deps: SearchTo
                     const fallback = await graphForQuery.search(
                         query, remaining + seenIds.size, '*', queryEcosystem, false, querySignals,
                     );
+                    const fallbackCandidates: LoreNode[] = [];
                     for (const n of fallback) {
+                        if (seenIds.has(n.id) || outsideEcosystem(n)) continue;
+                        fallbackCandidates.push(n);
+                    }
+                    const resolvedFallback = await resolveLiveNodes(fallbackCandidates, graphForQuery, admitD5);
+                    for (const n of resolvedFallback) {
                         if (hits.length >= limit) break;
-                        if (seenIds.has(n.id) || n.supersededAt || outsideEcosystem(n)) continue;
+                        if (seenIds.has(n.id)) continue;
                         hits.push(n);
                         seenIds.add(n.id);
                     }

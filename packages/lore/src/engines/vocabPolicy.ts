@@ -61,6 +61,20 @@ export const STORE_NODE_KNOWN_FIELDS: ReadonlyArray<string> = Object.freeze([
     // providers/types.ts. Core never sets these; it only stores/filters them.
     'validFrom',
     'validUntil',
+    // 3.21 step 3(e) — optional recall-enhancement fields. questions[] each
+    // become their own ALIAS verbatim row; summary/entities/topics merge
+    // verbatim into the node's metadata. See core/questionAliases.ts.
+    'questions',
+    'summary',
+    'entities',
+    'topics',
+    // D5 (2026-09-23) — write-time supersession. `supersedes` lists the ids
+    // this write replaces (empty array = explicit "supersedes nothing");
+    // required when the workspace's supersessionPolicy has enforce:true and
+    // the node's type is decision/convention/architecture. `force` bypasses
+    // the near-duplicate check for one write. See core/supersessionPolicy.ts.
+    'supersedes',
+    'force',
 ]);
 
 // store_edge / recall strict-field arrays land in a follow-up slice

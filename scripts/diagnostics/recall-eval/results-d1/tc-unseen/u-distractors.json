@@ -1,0 +1,138 @@
+[
+ {
+  "id": "u-d01",
+  "query": "What's the max payload size we allow on an outgoing webhook?"
+ },
+ {
+  "id": "u-d02",
+  "query": "which postgres version is the job table running on"
+ },
+ {
+  "id": "u-d03",
+  "query": "Where do we keep the credentials for partner integrations, Vault or env vars?"
+ },
+ {
+  "id": "u-d04",
+  "query": "what's the start-latency SLA we promise tenants for interactive jobs"
+ },
+ {
+  "id": "u-d05",
+  "query": "How do we canary a new scheduler build before full rollout?"
+ },
+ {
+  "id": "u-d06",
+  "query": "how long do we keep audit log entries before archiving them"
+ },
+ {
+  "id": "u-d07",
+  "query": "How many physical shards does the tenant router have in production?"
+ },
+ {
+  "id": "u-d08",
+  "query": "what's the max runtime before the scheduler kills a stuck job"
+ },
+ {
+  "id": "u-d09",
+  "query": "Do we support cron-style recurring job schedules?"
+ },
+ {
+  "id": "u-d10",
+  "query": "default per-tenant concurrency limit"
+ },
+ {
+  "id": "u-d11",
+  "query": "How are checkpoints encrypted at rest?"
+ },
+ {
+  "id": "u-d12",
+  "query": "is the connector bus backed by kafka or rabbitmq"
+ },
+ {
+  "id": "u-d13",
+  "query": "Does the CLI support logging in with SSO / Okta?"
+ },
+ {
+  "id": "u-d14",
+  "query": "what's our process for deprecating a public API endpoint"
+ },
+ {
+  "id": "u-d15",
+  "query": "How do we roll out feature flags to a subset of tenants?"
+ },
+ {
+  "id": "u-d16",
+  "query": "which load testing tool do we use, k6 or locust"
+ },
+ {
+  "id": "u-d17",
+  "query": "How is the webhook payload schema versioned?"
+ },
+ {
+  "id": "u-d18",
+  "query": "what DLQ depth triggers a page to on-call"
+ },
+ {
+  "id": "u-d19",
+  "query": "What language is the scheduler written in?"
+ },
+ {
+  "id": "u-d20",
+  "query": "how is tenant usage metered for invoicing"
+ },
+ {
+  "id": "u-d21",
+  "query": "What's the backup schedule for the job table?"
+ },
+ {
+  "id": "u-d22",
+  "query": "how long does prometheus keep metrics before downsampling"
+ },
+ {
+  "id": "u-d23",
+  "query": "Is there a GraphQL API for submitting jobs?"
+ },
+ {
+  "id": "u-d24",
+  "query": "what timezone are scheduled job times interpreted in"
+ },
+ {
+  "id": "u-d25",
+  "query": "How do we do blue-green deploys of the worker pool?"
+ },
+ {
+  "id": "u-d26",
+  "query": "who has to sign off before a production table drop"
+ },
+ {
+  "id": "u-d27",
+  "query": "What's the maximum number of tenants allowed on one shard?"
+ },
+ {
+  "id": "u-d28",
+  "query": "kubernetes memory limit for worker pods"
+ },
+ {
+  "id": "u-d29",
+  "query": "Which logging library do services use and how is sampling configured?"
+ },
+ {
+  "id": "u-d30",
+  "query": "per API key request quota on the public REST API"
+ },
+ {
+  "id": "u-d31",
+  "query": "How do we deal with clock skew between regions when comparing lease deadlines?"
+ },
+ {
+  "id": "u-d32",
+  "query": "what's the onboarding checklist for a new backend engineer"
+ },
+ {
+  "id": "u-d33",
+  "query": "How do we handle a tenant asking to export all their job history?"
+ },
+ {
+  "id": "u-d34",
+  "query": "which regions do we currently run in and what are their names"
+ }
+]

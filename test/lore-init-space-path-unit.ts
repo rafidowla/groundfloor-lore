@@ -58,6 +58,12 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-init-space-test-'));
 const home = path.join(root, 'with space', 'lore-home');
 fs.mkdirSync(home, { recursive: true });
 process.env['LORE_HOME'] = home;
+// 3.21 step 1d: a fresh home now defaults its seeded workspace's
+// graphEngine to 'sqlite'. This test is specifically about a SurrealDB
+// path-scattering bug (surrealDataPath's percent-encoding), so it opts
+// back into 'surreal' for this fresh home rather than testing something
+// the new default engine has no equivalent bug for.
+process.env['LORE_DEFAULT_GRAPH_ENGINE'] = 'surreal';
 
 await test('initCommand completes without throwing', async () => {
     const { initCommand } = await import('../packages/lore/src/cli/commands/init.js');

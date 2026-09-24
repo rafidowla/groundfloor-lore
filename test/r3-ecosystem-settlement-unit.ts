@@ -249,8 +249,11 @@ await test('D2: retrieve() HOPS agree — a "*" neighbour is kept, a foreign one
         },
     } as unknown as RetrieveContext;
     const out = await retrieve(ctx, 'q', { workspace: 'w', depth: 1, ecosystem: 'alpha', limit: 10 });
+    // D4: traversal neighbours live in `related`, not the ranked `results`.
     const ids = out.results.map((r) => r.node.id).sort();
-    assert.deepEqual(ids, ['hop-global', 'hop-mine', 'seed'], `hop filter disagrees with the seed filter: ${ids.join(', ')}`);
+    assert.deepEqual(ids, ['seed'], `ranked results must hold direct matches only: ${ids.join(', ')}`);
+    const hopIds = (out.related ?? []).map((r) => r.node.id).sort();
+    assert.deepEqual(hopIds, ['hop-global', 'hop-mine'], `hop filter disagrees with the seed filter: ${hopIds.join(', ')}`);
 });
 
 await test('D2: two CONCRETE ecosystems are still isolated — the settlement is not a switch-off', async () => {

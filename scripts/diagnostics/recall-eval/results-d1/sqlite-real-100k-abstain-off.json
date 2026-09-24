@@ -1,0 +1,2072 @@
+{
+  "generatedAt": "2026-09-23T13:33:58.630Z",
+  "config": {
+    "engine": "sqlite",
+    "graphEngine": "sqlite",
+    "vectorEngine": "sqlite",
+    "embedder": "real",
+    "codeRows": 100000,
+    "depth": 0,
+    "searchMode": "hybrid",
+    "max": 10,
+    "wideMax": 50,
+    "abstain": false,
+    "relevanceFloor": null,
+    "gibberishFile": "gibberish.json",
+    "distractorsFile": null,
+    "withQueries": false
+  },
+  "fixture": {
+    "dataDir": "/var/folders/c_/wq1jc0xn3yz3kcl00ff68bch0000gn/T/recall-eval-wKILDK/fixture-8b692b1d01256e81",
+    "reused": false,
+    "counts": {
+      "knowledge": 80,
+      "notes": 300,
+      "code": 100000,
+      "edges": 36,
+      "edgesWritten": 36
+    },
+    "buildMs": 581849
+  },
+  "timings": {
+    "fixtureMs": 581849,
+    "evalMs": 34132,
+    "totalMs": 616029,
+    "meanRecallMs": 258.57575757575756
+  },
+  "perQuestion": [
+    {
+      "id": "q-fx-decision-lease-ttl",
+      "expectedIds": [
+        "fx-decision-lease-ttl"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-lease-ttl",
+          "fx-note-0198",
+          "fx-note-0164",
+          "fx-note-0276",
+          "fx-note-0177",
+          "fx-note-0029",
+          "fx-note-0121",
+          "fx-note-0115",
+          "fx-note-0246",
+          "fx-note-0175"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.869,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.25
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-lease-ttl",
+          "fx-dup-connector-timeout-default-b",
+          "fx-dup-connector-timeout-default-a",
+          "fx-code-062033",
+          "fx-code-085681",
+          "fx-code-067121",
+          "fx-code-048049",
+          "fx-code-034065",
+          "fx-code-022545",
+          "fx-code-048033"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.89,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.11
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-decision-dlq-retention",
+      "expectedIds": [
+        "fx-decision-dlq-retention"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-dlq-retention",
+          "fx-note-0256",
+          "fx-note-0191",
+          "fx-note-0108",
+          "fx-note-0107",
+          "fx-code-096055",
+          "fx-code-082519",
+          "fx-code-073031",
+          "fx-code-010631",
+          "fx-code-078215"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.919,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.31
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-dlq-retention",
+          "fx-note-0212",
+          "fx-note-0141",
+          "fx-note-0014",
+          "fx-note-0242",
+          "fx-note-0108",
+          "fx-note-0019",
+          "fx-note-0201",
+          "fx-note-0133",
+          "fx-note-0227"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.922,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.42
+      },
+      "prefixStable": false,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-decision-tenant-router-hash",
+      "expectedIds": [
+        "fx-decision-tenant-router-hash"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-tenant-router-hash",
+          "fx-filler-bug_pattern-003",
+          "fx-bug-tenant-router-hot-shard",
+          "fx-code-053941",
+          "fx-code-011941",
+          "fx-code-003541",
+          "fx-code-002469",
+          "fx-code-065189",
+          "fx-code-029141",
+          "fx-code-050533"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.88,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.68
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-tenant-router-hash",
+          "fx-bug-tenant-router-hot-shard",
+          "fx-filler-bug_pattern-003",
+          "fx-code-073445",
+          "fx-code-009013",
+          "fx-code-006213",
+          "fx-code-014565",
+          "fx-code-072693",
+          "fx-code-043237",
+          "fx-code-088581"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.89,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.1
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 1,
+      "top3SetEqual": true,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-decision-config-loader-format",
+      "expectedIds": [
+        "fx-decision-config-loader-format"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-config-loader-format",
+          "fx-note-0041",
+          "fx-note-0017",
+          "fx-note-0259",
+          "fx-note-0203",
+          "fx-note-0128",
+          "fx-note-0088",
+          "fx-note-0269",
+          "fx-note-0077",
+          "fx-note-0179"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.916,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.18
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-config-loader-format",
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-bug-checkpoint-torn-write",
+          "fx-code-041913",
+          "fx-code-075433",
+          "fx-code-079081",
+          "fx-code-034713",
+          "fx-code-080953",
+          "fx-code-011353",
+          "fx-code-007017"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.849,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.41
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-convention-retry-jitter",
+      "expectedIds": [
+        "fx-convention-retry-jitter"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-note-0046",
+          "fx-convention-retry-jitter",
+          "fx-note-0120",
+          "fx-note-0086",
+          "fx-note-0255",
+          "fx-note-0164",
+          "fx-note-0115",
+          "fx-note-0271",
+          "fx-note-0200",
+          "fx-note-0130"
+        ],
+        "rank": 2,
+        "hit1": false,
+        "hit3": true,
+        "topScore": 0.845,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.25
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-retry-jitter",
+          "fx-note-0255",
+          "fx-note-0034",
+          "fx-note-0130",
+          "fx-note-0237",
+          "fx-note-0152",
+          "fx-note-0236",
+          "fx-note-0046",
+          "fx-note-0137",
+          "fx-filler-architecture-034"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.89,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.09
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-convention-metrics-naming",
+      "expectedIds": [
+        "fx-convention-metrics-naming"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-convention-metrics-naming",
+          "fx-architecture-metrics-exporter-batching",
+          "fx-note-0158",
+          "fx-filler-architecture-014",
+          "fx-note-0145",
+          "fx-note-0127",
+          "fx-note-0092",
+          "fx-note-0012",
+          "fx-note-0210",
+          "fx-note-0230"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.884,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.87
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-metrics-naming",
+          "fx-note-0158",
+          "fx-convention-postmortem-blameless",
+          "fx-filler-convention-037",
+          "fx-filler-convention-041",
+          "fx-filler-convention-001",
+          "fx-filler-convention-009",
+          "fx-code-077082",
+          "fx-code-018666",
+          "fx-code-070954"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.864,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.04
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-convention-webhook-signing",
+      "expectedIds": [
+        "fx-convention-webhook-signing"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-convention-webhook-signing",
+          "fx-note-0047",
+          "fx-decision-dlq-retention",
+          "fx-convention-metrics-naming",
+          "fx-dup-connector-timeout-default-a",
+          "fx-note-0123",
+          "fx-code-027163",
+          "fx-code-041931",
+          "fx-code-061099",
+          "fx-code-030603"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.888,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.02
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-webhook-signing",
+          "fx-filler-convention-025",
+          "fx-decision-observability-vendor",
+          "fx-filler-bug_pattern-023",
+          "fx-code-087003",
+          "fx-code-098603",
+          "fx-code-074731",
+          "fx-code-034603",
+          "fx-code-080075",
+          "fx-code-062779"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.893,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.21
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-architecture-checkpoint-store",
+      "expectedIds": [
+        "fx-architecture-checkpoint-store"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-checkpoint-store",
+          "fx-note-0131",
+          "fx-note-0169",
+          "fx-note-0177",
+          "fx-note-0028",
+          "fx-filler-decision-028",
+          "fx-filler-convention-021",
+          "fx-filler-convention-033",
+          "fx-filler-convention-013",
+          "fx-code-050764"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.919,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.29
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-checkpoint-store",
+          "fx-filler-convention-021",
+          "fx-filler-decision-028",
+          "fx-code-050131",
+          "fx-code-052531",
+          "fx-code-018531",
+          "fx-code-002563",
+          "fx-code-074515",
+          "fx-code-057635",
+          "fx-code-035763"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.868,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.21
+      },
+      "prefixStable": false,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-architecture-connector-bus",
+      "expectedIds": [
+        "fx-architecture-connector-bus"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-connector-bus",
+          "fx-dup-connector-timeout-default-b",
+          "fx-filler-architecture-018",
+          "fx-filler-convention-029",
+          "fx-architecture-worker-pool-autoscale",
+          "fx-dup-connector-timeout-default-a",
+          "fx-note-0285",
+          "fx-note-0080",
+          "fx-note-0209",
+          "fx-note-0143"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.892,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.21
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-connector-bus",
+          "fx-filler-bug_pattern-035",
+          "fx-dup-connector-timeout-default-b",
+          "fx-filler-convention-029",
+          "fx-filler-architecture-018",
+          "fx-dup-connector-timeout-default-a",
+          "fx-note-0197",
+          "fx-filler-decision-016",
+          "fx-note-0072",
+          "fx-code-025044"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.884,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.85
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-architecture-scheduler-tiers",
+      "expectedIds": [
+        "fx-architecture-scheduler-tiers"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-scheduler-tiers",
+          "fx-note-0207",
+          "fx-dup-batch-size-tuning-a",
+          "fx-note-0270",
+          "fx-hub-glossary",
+          "fx-dup-batch-size-tuning-b",
+          "fx-note-0092",
+          "fx-note-0211",
+          "fx-architecture-checkpoint-store",
+          "fx-note-0062"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.905,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.73
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-scheduler-tiers",
+          "fx-note-0207",
+          "fx-hub-glossary",
+          "fx-filler-bug_pattern-023",
+          "fx-dup-batch-size-tuning-a",
+          "fx-note-0270",
+          "fx-note-0204",
+          "fx-note-0065",
+          "fx-note-0211",
+          "fx-note-0092"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.904,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.69
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-architecture-rate-limiter-token-bucket",
+      "expectedIds": [
+        "fx-architecture-rate-limiter-token-bucket"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-decision-tenant-router-hash",
+          "fx-convention-retry-jitter",
+          "fx-dup-retry-budget-cap-a",
+          "fx-bug-tenant-router-hot-shard",
+          "fx-code-001128",
+          "fx-code-035704",
+          "fx-code-058168",
+          "fx-code-027128",
+          "fx-code-025896"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.869,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.23
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-filler-bug_pattern-007",
+          "fx-filler-architecture-030",
+          "fx-filler-bug_pattern-039",
+          "fx-bug-rate-limiter-thundering-herd",
+          "fx-dup-cli-auth-token-scope-b",
+          "fx-code-090728",
+          "fx-code-083608",
+          "fx-dup-cli-auth-token-scope-a",
+          "fx-code-043528"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.919,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.29
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-bug-checkpoint-torn-write",
+      "expectedIds": [
+        "fx-bug-checkpoint-torn-write"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-bug-checkpoint-torn-write",
+          "fx-note-0124",
+          "fx-note-0227",
+          "fx-note-0247",
+          "fx-architecture-checkpoint-store",
+          "fx-filler-architecture-010",
+          "fx-filler-architecture-002",
+          "fx-filler-architecture-030",
+          "fx-filler-decision-040",
+          "fx-code-002001"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.878,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.61
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-checkpoint-torn-write",
+          "fx-note-0227",
+          "fx-architecture-checkpoint-store",
+          "fx-bug-lease-double-execution",
+          "fx-filler-bug_pattern-023",
+          "fx-code-071991",
+          "fx-code-051925",
+          "fx-code-040053",
+          "fx-code-036965",
+          "fx-code-018277"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.895,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.31
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-bug-lease-double-execution",
+      "expectedIds": [
+        "fx-bug-lease-double-execution"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-bug-lease-double-execution",
+          "fx-bug-dlq-purge-race",
+          "fx-note-0121",
+          "fx-note-0198",
+          "fx-note-0276",
+          "fx-convention-idempotency-key",
+          "fx-note-0010",
+          "fx-decision-lease-ttl",
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-code-000620"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.886,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.94
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-lease-double-execution",
+          "fx-bug-dlq-purge-race",
+          "fx-convention-idempotency-key",
+          "fx-decision-lease-ttl",
+          "fx-filler-bug_pattern-031",
+          "fx-dup-batch-size-tuning-a",
+          "fx-dup-batch-size-tuning-b",
+          "fx-code-036604",
+          "fx-code-087820",
+          "fx-code-025980"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.872,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.34
+      },
+      "prefixStable": false,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-bug-rate-limiter-thundering-herd",
+      "expectedIds": [
+        "fx-bug-rate-limiter-thundering-herd"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-bug-rate-limiter-thundering-herd",
+          "fx-filler-architecture-026",
+          "fx-note-0186",
+          "fx-note-0105",
+          "fx-note-0298",
+          "fx-note-0199",
+          "fx-note-0223",
+          "fx-filler-bug_pattern-007",
+          "fx-note-0119"
+        ],
+        "rank": 2,
+        "hit1": false,
+        "hit3": true,
+        "topScore": 0.855,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.65
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-rate-limiter-thundering-herd",
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-filler-bug_pattern-039",
+          "fx-filler-bug_pattern-011",
+          "fx-filler-bug_pattern-007",
+          "fx-note-0119",
+          "fx-note-0199",
+          "fx-note-0263",
+          "fx-note-0298",
+          "fx-note-0223"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.876,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.53
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-bug-config-loader-hot-reload-leak",
+      "expectedIds": [
+        "fx-bug-config-loader-hot-reload-leak"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-note-0203",
+          "fx-decision-config-loader-format",
+          "fx-note-0150",
+          "fx-note-0235",
+          "fx-note-0041",
+          "fx-note-0017",
+          "fx-note-0259",
+          "fx-note-0269",
+          "fx-note-0088"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.903,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.65
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-code-091545",
+          "fx-code-087545",
+          "fx-code-080857",
+          "fx-code-072537",
+          "fx-code-067657",
+          "fx-code-002409",
+          "fx-code-095209",
+          "fx-code-086345",
+          "fx-code-038345"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.917,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.2
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-convention-idempotency-key",
+      "expectedIds": [
+        "fx-convention-idempotency-key"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-convention-idempotency-key",
+          "fx-bug-lease-double-execution",
+          "fx-convention-schema-migration-additive",
+          "fx-dup-worker-pool-min-size-b",
+          "fx-dup-retry-budget-cap-a",
+          "fx-dup-batch-size-tuning-a",
+          "fx-dup-worker-pool-min-size-a",
+          "fx-dup-batch-size-tuning-b",
+          "fx-code-006700",
+          "fx-code-076796"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.897,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.4
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-idempotency-key",
+          "fx-filler-convention-013",
+          "fx-code-006700",
+          "fx-code-060732",
+          "fx-code-054268",
+          "fx-code-006252",
+          "fx-code-078716",
+          "fx-code-084236",
+          "fx-code-037036",
+          "fx-code-052284"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.921,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.39
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-decision-webhook-relay-language",
+      "expectedIds": [
+        "fx-decision-webhook-relay-language"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-webhook-relay-language",
+          "fx-filler-convention-025",
+          "fx-note-0137",
+          "fx-filler-decision-000",
+          "fx-filler-architecture-006",
+          "fx-filler-decision-004",
+          "fx-decision-config-loader-format",
+          "fx-code-073515",
+          "fx-code-077851",
+          "fx-code-010395"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.9,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.51
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-webhook-relay-language",
+          "fx-filler-convention-025",
+          "fx-filler-decision-000",
+          "fx-note-0269",
+          "fx-convention-retry-jitter",
+          "fx-note-0123",
+          "fx-code-003211",
+          "fx-code-064699",
+          "fx-code-088299",
+          "fx-code-050459"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.913,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.04
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-architecture-metrics-exporter-batching",
+      "expectedIds": [
+        "fx-architecture-metrics-exporter-batching"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-metrics-exporter-batching",
+          "fx-note-0145",
+          "fx-note-0210",
+          "fx-filler-architecture-014",
+          "fx-note-0230",
+          "fx-note-0127",
+          "fx-bug-dlq-purge-race",
+          "fx-code-005418",
+          "fx-code-052778",
+          "fx-code-012058"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.914,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.1
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-metrics-exporter-batching",
+          "fx-note-0230",
+          "fx-note-0145",
+          "fx-note-0237",
+          "fx-note-0046",
+          "fx-code-075450",
+          "fx-code-041530",
+          "fx-code-048586",
+          "fx-code-050314",
+          "fx-code-005370"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.9,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.5
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-bug-tenant-router-hot-shard",
+      "expectedIds": [
+        "fx-bug-tenant-router-hot-shard"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-tenant-router-hash",
+          "fx-bug-tenant-router-hot-shard",
+          "fx-note-0135",
+          "fx-filler-bug_pattern-003",
+          "fx-note-0128",
+          "fx-note-0104",
+          "fx-note-0090",
+          "fx-note-0040",
+          "fx-note-0267",
+          "fx-note-0219"
+        ],
+        "rank": 2,
+        "hit1": false,
+        "hit3": true,
+        "topScore": 0.882,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.78
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-tenant-router-hot-shard",
+          "fx-decision-tenant-router-hash",
+          "fx-code-090741",
+          "fx-code-050485",
+          "fx-code-062037",
+          "fx-code-051893",
+          "fx-code-097813",
+          "fx-code-098453",
+          "fx-code-006997",
+          "fx-code-046485"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.89,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.1
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-convention-schema-migration-additive",
+      "expectedIds": [
+        "fx-convention-schema-migration-additive"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-convention-schema-migration-additive",
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-decision-config-loader-format",
+          "fx-architecture-checkpoint-store",
+          "fx-dup-audit-log-immutability-a",
+          "fx-architecture-worker-pool-autoscale",
+          "fx-dup-worker-pool-min-size-b",
+          "fx-convention-retry-jitter",
+          "fx-architecture-rate-limiter-token-bucket",
+          "fx-filler-convention-001"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.86,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.88
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-schema-migration-additive",
+          "fx-convention-webhook-signing",
+          "fx-dup-retry-budget-cap-b",
+          "fx-dup-retry-budget-cap-a",
+          "fx-decision-tenant-router-hash",
+          "fx-code-076384",
+          "fx-code-076240",
+          "fx-code-050912",
+          "fx-code-052976",
+          "fx-code-043216"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.853,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.57
+      },
+      "prefixStable": false,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-architecture-worker-pool-autoscale",
+      "expectedIds": [
+        "fx-architecture-worker-pool-autoscale"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-architecture-worker-pool-autoscale",
+          "fx-dup-worker-pool-min-size-a",
+          "fx-dup-worker-pool-min-size-b",
+          "fx-note-0247",
+          "fx-filler-decision-032",
+          "fx-note-0173",
+          "fx-note-0029",
+          "fx-note-0266",
+          "fx-note-0189",
+          "fx-note-0210"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.847,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.32
+      },
+      "terse": {
+        "ids": [
+          "fx-architecture-worker-pool-autoscale",
+          "fx-filler-decision-036",
+          "fx-code-053665",
+          "fx-code-043281",
+          "fx-code-048177",
+          "fx-code-041521",
+          "fx-code-051953",
+          "fx-code-057681",
+          "fx-code-044993",
+          "fx-code-048865"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.908,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.85
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-bug-dlq-purge-race",
+      "expectedIds": [
+        "fx-bug-dlq-purge-race"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-bug-dlq-purge-race",
+          "fx-note-0116",
+          "fx-note-0117",
+          "fx-note-0282",
+          "fx-convention-schema-migration-additive",
+          "fx-convention-idempotency-key",
+          "fx-note-0288",
+          "fx-note-0280",
+          "fx-decision-dlq-retention",
+          "fx-code-091991"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.907,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.8
+      },
+      "terse": {
+        "ids": [
+          "fx-bug-dlq-purge-race",
+          "fx-bug-lease-double-execution",
+          "fx-filler-bug_pattern-031",
+          "fx-filler-bug_pattern-023",
+          "fx-code-017991",
+          "fx-filler-bug_pattern-035",
+          "fx-code-017399",
+          "fx-code-093767",
+          "fx-code-014455",
+          "fx-code-077783"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.905,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.73
+      },
+      "prefixStable": false,
+      "top3AgreementFrac": 0.2,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-decision-observability-vendor",
+      "expectedIds": [
+        "fx-decision-observability-vendor"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-decision-observability-vendor",
+          "fx-note-0146",
+          "fx-note-0158",
+          "fx-note-0111",
+          "fx-note-0115",
+          "fx-note-0127",
+          "fx-note-0012",
+          "fx-note-0086",
+          "fx-note-0092",
+          "fx-note-0011"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.901,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.57
+      },
+      "terse": {
+        "ids": [
+          "fx-decision-observability-vendor",
+          "fx-note-0158",
+          "fx-filler-convention-001",
+          "fx-filler-decision-016",
+          "fx-filler-convention-021",
+          "fx-filler-convention-033",
+          "fx-code-077082",
+          "fx-code-034586",
+          "fx-code-083690",
+          "fx-code-057434"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.895,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.31
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    },
+    {
+      "id": "q-fx-convention-postmortem-blameless",
+      "expectedIds": [
+        "fx-convention-postmortem-blameless"
+      ],
+      "chatty": {
+        "ids": [
+          "fx-convention-postmortem-blameless",
+          "fx-bug-checkpoint-torn-write",
+          "fx-note-0086",
+          "fx-note-0074",
+          "fx-note-0046",
+          "fx-note-0103",
+          "fx-note-0141",
+          "fx-note-0115",
+          "fx-note-0045",
+          "fx-note-0001"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.853,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.57
+      },
+      "terse": {
+        "ids": [
+          "fx-convention-postmortem-blameless",
+          "fx-decision-dlq-retention",
+          "fx-bug-checkpoint-torn-write",
+          "fx-filler-architecture-010",
+          "fx-filler-architecture-002",
+          "fx-filler-architecture-030",
+          "fx-filler-decision-040",
+          "fx-bug-config-loader-hot-reload-leak",
+          "fx-code-071575",
+          "fx-code-075463"
+        ],
+        "rank": 1,
+        "hit1": true,
+        "hit3": true,
+        "topScore": 0.875,
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.48
+      },
+      "prefixStable": true,
+      "top3AgreementFrac": 0.5,
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 100380,
+        "null_median": 0.7904558479785919,
+        "null_scale": 0.024249201420945887,
+        "scope": "default"
+      }
+    }
+  ],
+  "gibberish": [
+    {
+      "id": "g-0",
+      "query": "marmalade tapestry bassoon",
+      "hitCount": 10,
+      "topScore": 0.779,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.47
+    },
+    {
+      "id": "g-1",
+      "query": "chowder sphinx",
+      "hitCount": 10,
+      "topScore": 0.81,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.79
+    },
+    {
+      "id": "g-2",
+      "query": "pulsar tuba cyclops flannel",
+      "hitCount": 10,
+      "topScore": 0.785,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.21
+    },
+    {
+      "id": "g-3",
+      "query": "basalt comet damask",
+      "hitCount": 10,
+      "topScore": 0.777,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.54
+    },
+    {
+      "id": "g-4",
+      "query": "chimera gingham",
+      "hitCount": 10,
+      "topScore": 0.783,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.32
+    },
+    {
+      "id": "g-5",
+      "query": "harmonica biscotti comet obsidian",
+      "hitCount": 10,
+      "topScore": 0.785,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.24
+    },
+    {
+      "id": "g-6",
+      "query": "falafel trombone chimera",
+      "hitCount": 10,
+      "topScore": 0.784,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.26
+    },
+    {
+      "id": "g-7",
+      "query": "feldspar kraken",
+      "hitCount": 10,
+      "topScore": 0.763,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -1.14
+    },
+    {
+      "id": "g-8",
+      "query": "orbit cyclops tuba tapestry",
+      "hitCount": 10,
+      "topScore": 0.788,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.11
+    },
+    {
+      "id": "g-9",
+      "query": "asteroid croissant taffeta",
+      "hitCount": 10,
+      "topScore": 0.788,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.11
+    },
+    {
+      "id": "g-10",
+      "query": "bassoon kraken",
+      "hitCount": 10,
+      "topScore": 0.775,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.63
+    },
+    {
+      "id": "g-11",
+      "query": "centaur granite quasar souffle",
+      "hitCount": 10,
+      "topScore": 0.8,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.4
+    },
+    {
+      "id": "g-12",
+      "query": "comet pegasus ukulele",
+      "hitCount": 10,
+      "topScore": 0.785,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.24
+    },
+    {
+      "id": "g-13",
+      "query": "strudel organza",
+      "hitCount": 10,
+      "topScore": 0.797,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.29
+    },
+    {
+      "id": "g-14",
+      "query": "schist flannel chiffon centaur",
+      "hitCount": 10,
+      "topScore": 0.788,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.11
+    },
+    {
+      "id": "g-15",
+      "query": "biscotti schist ukulele",
+      "hitCount": 10,
+      "topScore": 0.802,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.48
+    },
+    {
+      "id": "g-16",
+      "query": "minotaur kazoo",
+      "hitCount": 10,
+      "topScore": 0.787,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.14
+    },
+    {
+      "id": "g-17",
+      "query": "chimera quasar souffle meteor",
+      "hitCount": 10,
+      "topScore": 0.807,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.7
+    },
+    {
+      "id": "g-18",
+      "query": "comet paisley organza",
+      "hitCount": 10,
+      "topScore": 0.785,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.21
+    },
+    {
+      "id": "g-19",
+      "query": "marble bassoon",
+      "hitCount": 10,
+      "topScore": 0.768,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.92
+    },
+    {
+      "id": "g-20",
+      "query": "gazpacho sphinx griffin clarinet",
+      "hitCount": 10,
+      "topScore": 0.787,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.12
+    },
+    {
+      "id": "g-21",
+      "query": "marble comet minotaur",
+      "hitCount": 10,
+      "topScore": 0.787,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.13
+    },
+    {
+      "id": "g-22",
+      "query": "velvet bassoon",
+      "hitCount": 10,
+      "topScore": 0.792,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.06
+    },
+    {
+      "id": "g-23",
+      "query": "velvet pumice quartz marble",
+      "hitCount": 10,
+      "topScore": 0.803,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.53
+    },
+    {
+      "id": "g-24",
+      "query": "limestone kazoo centaur",
+      "hitCount": 10,
+      "topScore": 0.802,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.48
+    },
+    {
+      "id": "g-25",
+      "query": "meteor xylophone",
+      "hitCount": 10,
+      "topScore": 0.795,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.19
+    },
+    {
+      "id": "g-26",
+      "query": "dumpling damask cashmere velvet",
+      "hitCount": 10,
+      "topScore": 0.792,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.06
+    },
+    {
+      "id": "g-27",
+      "query": "orbit meringue gorgon",
+      "hitCount": 10,
+      "topScore": 0.785,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.22
+    },
+    {
+      "id": "g-28",
+      "query": "xylophone chiffon",
+      "hitCount": 10,
+      "topScore": 0.783,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.33
+    },
+    {
+      "id": "g-29",
+      "query": "accordion galaxy eclipse strudel",
+      "hitCount": 10,
+      "topScore": 0.779,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.47
+    },
+    {
+      "id": "g-30",
+      "query": "souffle brocade taffeta",
+      "hitCount": 10,
+      "topScore": 0.786,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.17
+    },
+    {
+      "id": "g-31",
+      "query": "souffle phoenix",
+      "hitCount": 10,
+      "topScore": 0.793,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.09
+    },
+    {
+      "id": "g-32",
+      "query": "meteor harmonica hydra cyclops",
+      "hitCount": 10,
+      "topScore": 0.815,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 1.02
+    },
+    {
+      "id": "g-33",
+      "query": "nebula orbit gingham",
+      "hitCount": 10,
+      "topScore": 0.772,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.77
+    },
+    {
+      "id": "g-34",
+      "query": "gorgon phoenix",
+      "hitCount": 10,
+      "topScore": 0.769,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.87
+    },
+    {
+      "id": "g-35",
+      "query": "mandolin risotto croissant feldspar",
+      "hitCount": 10,
+      "topScore": 0.78,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.41
+    },
+    {
+      "id": "g-36",
+      "query": "strudel clarinet kraken",
+      "hitCount": 10,
+      "topScore": 0.781,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.4
+    },
+    {
+      "id": "g-37",
+      "query": "obsidian tapestry",
+      "hitCount": 10,
+      "topScore": 0.797,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.26
+    },
+    {
+      "id": "g-38",
+      "query": "feldspar kraken clarinet mandolin",
+      "hitCount": 10,
+      "topScore": 0.765,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -1.07
+    },
+    {
+      "id": "g-39",
+      "query": "gazpacho falafel trombone",
+      "hitCount": 10,
+      "topScore": 0.781,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.38
+    },
+    {
+      "id": "g-40",
+      "query": "accordion harmonica",
+      "hitCount": 10,
+      "topScore": 0.772,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.76
+    },
+    {
+      "id": "g-41",
+      "query": "pegasus basalt pumice chowder",
+      "hitCount": 10,
+      "topScore": 0.797,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.28
+    },
+    {
+      "id": "g-42",
+      "query": "eclipse hydra harmonica",
+      "hitCount": 10,
+      "topScore": 0.813,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.95
+    },
+    {
+      "id": "g-43",
+      "query": "dumpling paisley",
+      "hitCount": 10,
+      "topScore": 0.787,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.14
+    },
+    {
+      "id": "g-44",
+      "query": "sandstone taffeta brocade taffeta",
+      "hitCount": 10,
+      "topScore": 0.803,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.54
+    },
+    {
+      "id": "g-45",
+      "query": "granite quartz kazoo",
+      "hitCount": 10,
+      "topScore": 0.801,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.44
+    },
+    {
+      "id": "g-46",
+      "query": "phoenix paisley",
+      "hitCount": 10,
+      "topScore": 0.789,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.06
+    },
+    {
+      "id": "g-47",
+      "query": "brocade nebula obsidian eclipse",
+      "hitCount": 10,
+      "topScore": 0.786,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.17
+    },
+    {
+      "id": "g-48",
+      "query": "basalt cashmere damask",
+      "hitCount": 10,
+      "topScore": 0.78,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.44
+    },
+    {
+      "id": "g-49",
+      "query": "limestone clarinet",
+      "hitCount": 10,
+      "topScore": 0.808,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.71
+    },
+    {
+      "id": "g-50",
+      "query": "risotto centaur kazoo brocade",
+      "hitCount": 10,
+      "topScore": 0.778,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.5
+    },
+    {
+      "id": "g-51",
+      "query": "meteor pulsar hydra",
+      "hitCount": 10,
+      "topScore": 0.81,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.8
+    },
+    {
+      "id": "g-52",
+      "query": "gingham chimera",
+      "hitCount": 10,
+      "topScore": 0.779,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.48
+    },
+    {
+      "id": "g-53",
+      "query": "cashmere sandstone pulsar sandstone",
+      "hitCount": 10,
+      "topScore": 0.801,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.44
+    },
+    {
+      "id": "g-54",
+      "query": "pumice griffin sphinx",
+      "hitCount": 10,
+      "topScore": 0.808,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.72
+    },
+    {
+      "id": "g-55",
+      "query": "asteroid griffin",
+      "hitCount": 10,
+      "topScore": 0.774,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.67
+    },
+    {
+      "id": "g-56",
+      "query": "quasar organza paisley minotaur",
+      "hitCount": 10,
+      "topScore": 0.798,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.3
+    },
+    {
+      "id": "g-57",
+      "query": "falafel marmalade chiffon",
+      "hitCount": 10,
+      "topScore": 0.774,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.67
+    },
+    {
+      "id": "g-58",
+      "query": "mandolin griffin",
+      "hitCount": 10,
+      "topScore": 0.764,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -1.09
+    },
+    {
+      "id": "g-59",
+      "query": "tuba eclipse chowder nebula",
+      "hitCount": 10,
+      "topScore": 0.79,
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0
+    }
+  ],
+  "distractors": null,
+  "aggregate": {
+    "n_questions": 24,
+    "n_gibberish": 60,
+    "hit1": 0.875,
+    "hit3": 1,
+    "mrr": 0.9375,
+    "hit1Terse": 1,
+    "hit3Terse": 1,
+    "mrrTerse": 1,
+    "pooledHit3": 1,
+    "pooledHit3Count": 48,
+    "pooledHit3N": 48,
+    "prefixStablePct": 0.7916666666666666,
+    "top3AgreementMean": 0.3708333333333334,
+    "top3SetEqualPct": 0.041666666666666664,
+    "meanPairwiseJaccard": 0.01985794513389074,
+    "zeroHitGibberishPct": 0,
+    "abstainedGibberishPct": 0,
+    "realAbstainedCount": 0,
+    "realAbstainedN": 48,
+    "topScoreQuantiles": {
+      "real": {
+        "0": 0.845,
+        "1": 0.919,
+        "0.1": 0.853,
+        "0.25": 0.869,
+        "0.5": 0.888,
+        "0.75": 0.905,
+        "0.9": 0.916
+      },
+      "gibberish": {
+        "0": 0.763,
+        "1": 0.815,
+        "0.1": 0.772,
+        "0.25": 0.78,
+        "0.5": 0.787,
+        "0.75": 0.798,
+        "0.9": 0.808
+      }
+    },
+    "calibration": {
+      "statuses": [
+        "ok"
+      ],
+      "nullMedianMean": 0.7904558479785919,
+      "nullScaleMean": 0.024249201420945887
+    },
+    "distractors": null,
+    "withQueries": null
+  }
+}

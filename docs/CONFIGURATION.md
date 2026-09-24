@@ -148,6 +148,50 @@ Source: `src/engines/localGraph.ts`, `src/engines/verbatimStore.ts`
 
 ---
 
+### `LORE_DEFAULT_GRAPH_ENGINE`
+
+| | |
+|---|---|
+| **Default** | `sqlite` (3.21 step 1d) |
+| **Values** | `surreal` to opt out; any other value (or unset) is `sqlite` |
+| **Surface** | `lore workspaces create`, fresh-home seeding (first daemon boot with no `workspaces.json`) |
+
+Which graph engine a brand-**new** local workspace's `graphEngine` field is
+written as. Only affects workspace *creation* — an EXISTING workspace's
+`graphEngine` field (including an absent one, which still means `surreal`)
+is never rewritten by this variable. Set `LORE_DEFAULT_GRAPH_ENGINE=surreal`
+to keep creating pre-3.21-style SurrealDB-backed workspaces on a host that
+is not ready to switch (e.g. relies on a workflow the SQLite engine does not
+support yet, such as `lore migrate-graph`'s upstream direction).
+
+Source: `src/config/workspaces.ts` (`createWorkspace`, fresh-home seeding),
+`src/engines/graphEngineSelector.ts` (`resolveNewWorkspaceGraphEngine`).
+
+---
+
+### `LORE_DEFAULT_VECTOR_ENGINE`
+
+| | |
+|---|---|
+| **Default** | `sqlite` (3.21 step 2) |
+| **Values** | `lance` to opt out; any other value (or unset) is `sqlite` |
+| **Surface** | `lore workspaces create`, fresh-home seeding (first daemon boot with no `workspaces.json`) |
+
+Which vector engine a brand-**new** local workspace's `vectorEngine` field is
+written as. Same shape as `LORE_DEFAULT_GRAPH_ENGINE`: only affects workspace
+*creation* — an EXISTING workspace's `vectorEngine` field (including an
+absent one, which still means `lance`) is never rewritten by this variable.
+Set `LORE_DEFAULT_VECTOR_ENGINE=lance` to keep creating pre-3.21-style
+LanceDB-backed workspaces on a host that is not ready to switch. A
+`sqlite`-vector workspace can still be promoted to `lance` automatically in
+the background — see `LORE_VECTOR_PROMOTE_ROWS` below — independent of this
+variable, which only governs what a NEW workspace starts on.
+
+Source: `src/config/workspaces.ts` (`createWorkspace`, fresh-home seeding),
+`src/engines/vectorEngineSelector.ts` (`resolveNewWorkspaceVectorEngine`).
+
+---
+
 ### `LORE_ARCHIVE_DIR`
 
 | | |
@@ -251,7 +295,7 @@ Source: `src/engines/extractors/whisperBin.ts`
 | | |
 |---|---|
 | **Default** | auto-detected (Ollama if running, else local ONNX) |
-| **Values** | `openai_compat` \| `local` \| `xenova` |
+| **Values** | `openai_compat` \| `local` \| `xenova` \| `none` |
 | **Surface** | daemon (embedding pipeline) |
 
 Explicitly selects the embedding backend. When unset, the daemon probes for
@@ -262,8 +306,18 @@ Ollama and falls back to the local ONNX provider.
   `LORE_EMBEDDING_DIMENSION`.
 - `local` / `xenova` — in-process ONNX via `@huggingface/transformers`; see
   `LORE_LOCAL_EMBEDDING_MODEL`.
+- `none` (also accepts `disabled` / `off`; 3.21) — disables embeddings
+  entirely via `NullEmbeddingProvider`. Node writes succeed with no vector
+  write attempted; recall's semantic leg degrades cleanly to the
+  keyword/BM25/graph path (flagging `vector_leg_skipped` on the
+  response) instead of erroring. The on-disk embedding fingerprint is
+  never stamped or compared for a `none`-provider workspace. Programmatic
+  equivalent: `createLore({ embeddingProvider: new NullEmbeddingProvider() })`
+  (`src/providers/nullEmbeddingProvider.ts`), which also takes precedence
+  over this env var when both are set.
 
-Source: `src/providers/pickEmbeddingProvider.ts`, `src/mcp/services.ts`
+Source: `src/providers/pickEmbeddingProvider.ts`, `src/mcp/services.ts`,
+`src/mcp/embeddingProviderFactory.ts`
 
 ---
 
@@ -531,6 +585,23 @@ Source: `src/engines/searchGate.ts`
 
 ---
 
+#### `LORE_SEARCH_QUEUE_WAIT_MS`
+
+| | |
+|---|---|
+| **Default** | `30000` (30s) |
+| **Surface** | daemon / embedded (search admission gate) |
+
+Max time a queued **read** may wait for admission before it fails fast with
+`SearchOverloadError` instead of riding out the caller's full call timeout.
+Generous enough that it never trims a normal read under bounded concurrency,
+but puts a ceiling under a stuck or slow holder. Never applied to
+`exclusive()` — an index build must always be admitted eventually.
+
+Source: `src/engines/searchGate.ts`
+
+---
+
 #### `LORE_SEARCH_WORKER`
 
 | | |
@@ -554,7 +625,19 @@ inherited env, so results match the in-process path. Not applicable in `cloud`
 mode (the Dataplane fronts storage). Never engages inside a worker
 (`LORE_IS_SEARCH_WORKER`) to prevent recursive forking.
 
-Source: `src/engines/verbatimSearchWorkerProxy.ts`, `src/mcp/services.ts`
+**Per-store override (programmatic, not an env var):** a host embedding Lore
+can pass `searchWorkerPolicy?: (basePath: string) => boolean` to `createLore()`
+to decide isolation per store instead of process-wide — e.g. keep a tiny
+knowledge store in-process (a forked child costs ~90MB of duplicated runtime
+for one table handle) while isolating a large one. The policy is consulted
+once per store path, at first open, and its answer is authoritative for that
+store; when omitted, this env gate applies exactly as above. The recursion
+guard still wins regardless — inside a worker the answer is always
+in-process, policy or not.
+
+Source: `src/engines/verbatimSearchWorkerProxy.ts`, `src/mcp/services.ts`,
+`src/mcp/server.ts` (`CreateLoreOptions.searchWorkerPolicy`),
+`src/outbox/workspaceVerbatimResolver.ts`
 
 ---
 
@@ -573,11 +656,14 @@ calls fast (so a genuinely broken workspace surfaces instead of crash-looping).
 
 `LORE_WORKER_BASE_PATH`, `LORE_WORKER_EMBED_OVERRIDES`,
 `LORE_WORKER_PARENT_EMBEDS`, `LORE_WORKER_EMBED_DIM`,
-`LORE_WORKER_EMBED_MODEL`, and `LORE_IS_SEARCH_WORKER` are **internal** — the
-parent sets them on the child when it forks a worker (workspace path, serialized
-embedding overrides, whether embedding stays in the parent, the parent
-provider's vector dimension/model identity, and the recursion guard). Do not
-set them yourself.
+`LORE_WORKER_EMBED_MODEL`, `LORE_WORKER_EMBED_DTYPE`,
+`LORE_WORKER_STRICT_FINGERPRINT`, and `LORE_IS_SEARCH_WORKER` are **internal**
+— the parent sets them on the child when it forks a worker (workspace path,
+serialized embedding overrides, whether embedding stays in the parent, the
+parent provider's vector dimension/model identity/dtype, whether the parent
+opened this workspace with strict fingerprint checking — see
+`verbatimFingerprintGate.ts` — and the recursion guard). Do not set them
+yourself.
 
 Source: `src/engines/verbatimSearchWorkerProxy.ts`
 
@@ -680,6 +766,32 @@ acceleration, set `=coreml`. Run `lore embedder check` to see which
 providers are available on the host.
 
 Source: `src/providers/localEmbeddingProvider.ts`, `src/mcp/services.ts`
+
+---
+
+#### `LORE_EMBED_IDLE_UNLOAD_MS`
+
+| | |
+|---|---|
+| **Default** | `0` (never unload — today's behavior, unchanged unless set) |
+| **Surface** | daemon / embedding host (in-process ONNX pipeline) |
+
+Idle timeout in milliseconds before the in-process local-embedding ONNX
+pipeline is unloaded from memory. Unlike `LORE_MODEL_IDLE_UNLOAD_MS` (the
+embedded-LLM pipeline, which always idle-unloads), this defaults to **0 —
+never unload** because the local embedding pipeline was measured to be
+leak-free per embed cycle (`docs/PERFORMANCE-MEMORY.md` §8.3), so keeping it
+resident is the correct default rather than a workaround for a leak. Setting
+this to a positive value is a pure opt-in for hosts that index in bursts and
+want the pipeline to release memory while idle (e.g. an embedding host
+targeting near-zero resident memory between indexing runs). A subsequent
+embed call transparently reloads the pipeline; correctness never depends on
+whether the cache is warm. A pipeline actively running an embed call is never
+unloaded regardless of this setting. Call `releaseLocalEmbeddingPipeline()`
+(exported from the package root) to release immediately rather than waiting
+for the idle window.
+
+Source: `src/providers/localEmbeddingProvider.ts`
 
 ---
 
@@ -1375,6 +1487,43 @@ Source: `src/outbox/replicator.ts`
 
 ---
 
+### `LORE_OUTBOX_MAX_ATTEMPTS`
+
+| | |
+|---|---|
+| **Default** | `5` |
+| **Surface** | daemon + embedded (outbox replicator) |
+
+Number of failed replay attempts before an outbox row is dead-lettered
+(`status = 'dead'`, with the last error as its reason). Retries in between
+are spaced by the exponential backoff below. A row whose target workspace
+was deleted fails with `workspace_not_found` on every attempt, so this is
+also how long such rows stay retryable. With the defaults, that is about
+14 s after the first failure. Dead rows are recoverable: once the
+workspace is back, `lore outbox requeue-dead` returns them to the queue.
+Must be a positive integer; anything else falls back to the default.
+
+Source: `src/outbox/retryConfig.ts`
+
+---
+
+### `LORE_OUTBOX_RETRY_BASE_MS`
+
+| | |
+|---|---|
+| **Default** | `500` |
+| **Surface** | daemon + embedded (outbox replicator, SQLite backend) |
+
+First step of the per-row retry backoff, in milliseconds. After a failed
+attempt, the row's next attempt is scheduled `base × 2^attempts` later,
+capped at 30 s: 1 s, 2 s, 4 s, 8 s with the default. The legacy
+`LORE_OUTBOX_BACKEND=json` store has no backoff and ignores this knob.
+Must be a positive integer; anything else falls back to the default.
+
+Source: `src/outbox/retryConfig.ts`, `src/outbox/sqliteStore.ts`
+
+---
+
 ### `LORE_OUTBOX_CONSOLIDATION_CAP`
 
 | | |
@@ -1536,6 +1685,26 @@ Source: `src/bulkLoader/lanceAdapter.ts`
 
 ---
 
+### `LORE_SUPERSESSION_ENFORCE`
+
+| | |
+|---|---|
+| **Default** | off |
+| **Values** | `1` / `true` to enable |
+| **Surface** | daemon, stdio, embedded (write paths for decision/convention/architecture) |
+
+Host-level default for write-time supersession enforcement (D5). When on,
+storing a `decision`, `convention` or `architecture` node requires an explicit
+`supersedes` list (empty is a valid answer), refuses a store whose nearest
+near-duplicate is not listed unless forced, and refuses prose containing
+`SUPERSEDES <id>` without the matching edge. A per-workspace setting overrides
+it; `createLore({ supersessionEnforce })` overrides the env var. Successor
+replacement at recall time is always on regardless of this flag.
+
+Source: `src/core/supersessionPolicy.ts`
+
+---
+
 ## 8. Recall & Ranking
 
 ### `LORE_RECALL_RANKING`
@@ -1552,6 +1721,91 @@ access frequency. Set `=off` to disable all signals and return raw vector
 scores (useful for debugging or benchmarking the embedding quality).
 
 Source: `src/recall/ranking.ts`
+
+---
+
+### `LORE_RECALL_CANDIDATE_FLOOR`
+
+| | |
+|---|---|
+| **Default** | `0` (legacy — flipped back from `50` by the review round 2 gating rule, see below) |
+| **Values** | integer `0`-`200`; `0` = legacy (candidate window equals `limit` exactly); `50` is the recommended opt-in value |
+| **Surface** | daemon (`/api/recall`, `/api/search`, recall MCP tools, embedded `lore.recall()`) |
+
+D3 (prefix-stable ranking): the candidate-generation window (vector seed
+fetch, keyword `graph.search`, the starvation-retry bound) is sized as
+`candLimit = max(limit, candidateFloor)`, and only the final result slice
+uses the caller's `limit`. This makes `top-k@k` a true prefix of
+`top-50@50` for every `limit <= candidateFloor` — the same query no longer
+surfaces a materially different top result just because a caller asked for
+fewer results. Values above `200` clamp to `200`; invalid/garbage input
+falls back to `0` (legacy), never to `50`.
+
+**Review round 2 gating decision (2026-09-23):** the default was `50`
+through round 1. Real-10k re-measurement
+(`scripts/diagnostics/recall-eval/results/d3-before-after.md`) showed
+`candidateFloor=50` combined with `LORE_RECALL_LEXICAL_BASE=rrf` (this knob
+in isolation, holding the other at its legacy value) collapses real-question
+hit@1 from 87.5%/100% (chatty/terse, legacy) to 4.2%/45.8% on sqlite
+(37.5%/66.7% on surreal-lance) — `stableProv`'s fixed RRF normalization
+(added to fix a separate identifiers regression) has no ceiling in `rrf`
+mode, so a mid-rank single-list keyword match can normalize up near 1.0 and
+outrank the true semantic top hit. That inflation is only bounded when
+`LORE_RECALL_LEXICAL_BASE=anchored` is ALSO set — a cross-knob dependency
+the gating rule (per-knob, no regression vs legacy) does not tolerate.
+**Review round 3:** any floor > 0 now FORCES `LORE_RECALL_LEXICAL_BASE=anchored`
+(an explicit `rrf` option/env is ignored while the floor is active), so the
+unsafe floor-only combination above is no longer reachable. To opt in to
+prefix-stable ranking, set `LORE_RECALL_CANDIDATE_FLOOR=50`; nothing else is
+required. Trade-off (real 10k fixture, sqlite, legacy → opt-in): prefix
+stability 16.7% → 100%, negatives with a lexical-only top-1 13/32 → 0/32,
+real-question hit@1/hit@3 unchanged (single query and multi-query
+`queries[]`, 100% hit@3 both); identifiers rank1 85% → 65% and
+found@10 95% → 85% (surreal/lance: 80% → 65%, 90% → 85%).
+
+Source: `src/recall/candidateWindow.ts`
+
+---
+
+### `LORE_RECALL_LEXICAL_BASE`
+
+| | |
+|---|---|
+| **Default** | `rrf` (legacy — flipped back from `anchored` by the review round 2 gating rule, see below) |
+| **Values** | `rrf` (default, legacy), `anchored` (opt-in) |
+| **Surface** | daemon (`/api/recall`, `/api/search`, recall MCP tools, embedded `lore.recall()`) |
+
+D3 (prefix-stable ranking): controls the base score assigned to a seed with
+no semantic (vector) score — a bm25-only or keyword-only hit. `anchored`
+caps that seed's base score at a strength-aware ceiling between `semFloor`
+and `semTop` (round 2: a selective/rare match, e.g. an exact identifier, can
+reach near `semTop`; a broad/common match stays capped near `semFloor`,
+byte-identical to the round-1 `semFloor * prov` formula at zero selectivity)
+— see `lexicalOnlyBase`/`lexicalSelectivity` in `src/recall/candidateWindow.ts`.
+`rrf` (default) keeps the seed's raw RRF/keyword-rank provenance score
+unchanged (pre-D3 behaviour). Has no effect on a query with no semantic leg
+at all (nothing to anchor against).
+
+**Review round 2 gating decision (2026-09-23):** the default was `anchored`
+through round 1, then made strength-aware to fix a HIGH review finding
+(anchored-default identifiers rank1 0/12, found@10 1/12 vs legacy 10/12,
+12/12). The strength-aware fix closed most of that gap, but the real-10k
+re-measurement still shows the `anchored` default short of legacy on the
+identifiers pass — rank1 85.0%→65.0%, found@10 95.0%→85.0% (sqlite);
+80.0%→65.0%, 90.0%→85.0% (surreal-lance). The gating rule requires
+identifiers rank1/found@10 not drop vs legacy; this drops, so the default
+reverts to `rrf`. `anchored`'s real-question hit@1/hit@3 and negatives
+numbers are strictly better than legacy (negatives top-1-lexical-only:
+9/20→0/20 offtopic, 4/12→0/12 unanswerable, sqlite) — only the identifiers
+pass regressed — so it remains available as an explicit opt-in for
+workloads that don't need top identifier recall. Setting it alone (floor 0)
+gives the anchored scoring without the prefix guarantee (sqlite: identifiers
+rank1 70%, found@10 85%; negatives lexical-only top-1 3/32). It is ignored —
+always `anchored` — whenever `LORE_RECALL_CANDIDATE_FLOOR` > 0. See
+`scripts/diagnostics/recall-eval/results/d3-before-after.md` for full
+numbers.
+
+Source: `src/recall/candidateWindow.ts`
 
 ---
 
@@ -1701,6 +1955,58 @@ Source: `src/migration/adapters/lanceMigrationAdapter.ts`
 
 ---
 
+### `LORE_SQLITE_VECTOR_CACHE_MB`
+
+| | |
+|---|---|
+| **Default** | `64` |
+| **Surface** | daemon + embedded (`SqliteVerbatimStore` JS vector-search fallback) |
+
+Memory budget in megabytes for `SqliteVerbatimStore`'s JS brute-force vector
+search fallback (used when the optional `sqlite-vec` native extension fails
+to load). Below this budget the fallback caches every canonical row's
+decoded vector in memory as a `Float32Array` matrix, rebuilt lazily and
+invalidated on every write. Above it, a query streams rows from SQLite in
+chunks instead — slower per query, but bounded memory regardless of store
+size. `0` always streams (never caches).
+
+Source: `src/engines/sqliteVerbatimVector.ts`
+
+---
+
+### `LORE_SQLITE_VECTOR_DISABLE_NATIVE`
+
+| | |
+|---|---|
+| **Default** | off |
+| **Surface** | daemon + embedded (`SqliteVerbatimStore`) |
+
+Test/ops escape hatch: forces the JS brute-force vector-search fallback even
+when the `sqlite-vec` native extension is installed and would otherwise
+load successfully. Set to `1` to exercise (or benchmark) the fallback path
+on a machine where `sqlite-vec` is present.
+
+Source: `src/engines/sqliteVerbatimSchema.ts`
+
+---
+
+### `LORE_VECTOR_PROMOTE_ROWS`
+
+| | |
+|---|---|
+| **Default** | `250000` |
+| **Surface** | daemon (SQLite → LanceDB verbatim-store promotion trigger) |
+
+Canonical-row threshold at which a `SqliteVerbatimStore` workspace becomes
+eligible for automatic promotion to LanceDB (checked as a cheap counter
+compare after each committed write, not a `COUNT(*)`). `0` disables the
+automatic trigger entirely — promotion can still be run manually via
+`lore vectors promote <workspace>`.
+
+Source: `src/engines/verbatimPromotion.ts`
+
+---
+
 ### `LORE_SEARCH_CACHE_TTL_MS`
 
 | | |
@@ -1828,6 +2134,91 @@ Source: `src/mcp/http/routes/search.ts`
 
 ---
 
+### `LORE_RECALL_ABSTAIN`
+
+| | |
+|---|---|
+| **Default** | unset (off) |
+| **Surface** | daemon + embedded (`search`/`recall` MCP tools, `GET /api/search`, `GET /api/recall`, `lore.recall()`) |
+
+D1 calibrated abstention. `1`/`true` makes a named-workspace search/recall
+return zero results (`_meta.abstained: true`) when the primary query's top
+vector-leg similarity, z-scored against the workspace's own off-topic null
+distribution (128 fixed probes, fitted on first use per open store), falls
+below `LORE_RECALL_RELEVANCE_FLOOR`. An explicit per-call `abstain`
+(MCP param, `?abstain=true|false`, `RecallOpts.abstain`) always wins. Never
+applies to `mode:'keyword'`, `workspace="*"`, or a calibration status other
+than `ok`. `_meta` fields (`top_similarity`, `top_relevance`, `floor`,
+`below_floor`, `abstained`, `abstain_overridden`, `calibration{status,…}`)
+and per-hit `similarity`/`relevance` are reported regardless of this flag;
+raw `score` is unchanged. See `docs/design/D1-calibrated-abstention.md`.
+
+Source: `src/recall/retrieve.ts`
+
+---
+
+### `LORE_RECALL_RELEVANCE_FLOOR`
+
+| | |
+|---|---|
+| **Default** | `2.0` |
+| **Surface** | same as `LORE_RECALL_ABSTAIN` |
+
+Default z-score floor for abstention (per-call `relevance_floor` /
+`relevanceFloor` wins). Only consulted when abstention is on. A non-numeric
+value disables gating (fails open).
+
+Source: `src/recall/retrieve.ts`
+
+---
+
+### `LORE_RECALL_ABSTAIN_TERM_COVERAGE`
+
+| | |
+|---|---|
+| **Default** | unset (off) |
+| **Surface** | env only for MCP / HTTP (no per-call switch on those surfaces); the embedded `lore.recall()` / `retrieve()` per-call `abstainTermCoverage` option wins over the env |
+
+**Experimental — failed unseen validation; leave off.** On an independent
+question set it added 4–6 wrongly-refused real answers out of 88 and caught no
+extra distractors; its only proven benefit is refusing questions about
+identifiers that do not exist (D1 §3.10.5).
+
+Opt-in second abstention signal (D1 §3.10). Only consulted when abstention is
+on. For a query whose z-score is above the floor but below floor + 2.5, recall
+also abstains when the weighted fraction of the query's content terms found in
+the top-5 FINAL ranked hits (after lexical fusion and the D3 identifier lane)
+is below `LORE_RECALL_TERM_COVERAGE_MIN`, or when the query names strongly
+code-shaped identifiers (snake_case, paths, `#123`, camelCase methods, dotted
+member paths) and none of them occurs in any ranked seed. Matching is
+forgiving: stemming, compound/prefix match, acronym <-> expansion, number
+words and a small general synonym table. Queries in unsegmented scripts (CJK,
+Thai, ...) are never judged (fail open). The exact-identifier rescue still
+overrides. Surfaced in `_meta` as `abstain_reason` and `term_coverage`; with
+this flag off, `_meta` carries neither field (identical to before D1 §3.10).
+No model, no network; measured cost about 0.1 ms p50 / 0.5 ms p99 per query.
+
+Source: `src/recall/termCoverage.ts`
+
+---
+
+### `LORE_RECALL_TERM_COVERAGE_MIN`
+
+| | |
+|---|---|
+| **Default** | `0.1` |
+| **Surface** | same as `LORE_RECALL_ABSTAIN_TERM_COVERAGE` (env only for MCP / HTTP) |
+
+Weighted term-coverage threshold for the term-coverage abstention signal.
+Clamped to [0, 1]; a non-numeric value falls back to the default. Tuned on the
+recall-eval dev set (D1 §3.10.2): higher values catch few extra distractors
+and cost real answers. Even at 0.1 the signal failed unseen validation
+(D1 §3.10.5) — experimental.
+
+Source: `src/recall/termCoverage.ts`
+
+---
+
 ### `LORE_SEARCH_WEIGHT_LABEL` / `LORE_SEARCH_WEIGHT_CONTENT` / `LORE_SEARCH_WEIGHT_TAGS`
 
 | | |
@@ -1857,6 +2248,25 @@ Source: `src/engines/verbatimStore.ts`
 
 ---
 
+### `LORE_VERBATIM_NATIVE_CLOSE`
+
+| | |
+|---|---|
+| **Default** | `1` (natives close) |
+| **Surface** | daemon / embedded (VerbatimStore) |
+
+Kill switch for STEP2-CLOSE-PATH-DESIGN.md (a): by default, `VerbatimStore.close()`
+calls the native LanceDB `Table.close()` / `Connection.close()` so the memory those
+handles hold is actually released, instead of merely dereferencing them. Setting
+this to `0`, `false`, or `off` restores the 3.19.1 dereference-only close — an
+escape hatch if a future LanceDB version's native close ever regresses. On a
+write-drain timeout the natives are never closed for that round regardless of
+this setting (logged, dereferenced only) — the same worst case as 3.19.1.
+
+Source: `src/engines/verbatimStore.ts`, `src/engines/verbatimWriteGate.ts`
+
+---
+
 ### `LORE_COMPACT_GRACE_MS`
 
 | | |
@@ -1878,13 +2288,31 @@ Source: `src/engines/verbatimStore.ts`
 
 | | |
 |---|---|
-| **Default** | `1800000` (30 minutes) |
+| **Default** | `0` (idle eviction disabled) — **changed in 3.20.0**, was `1800000` (30 min) |
 | **Surface** | daemon (LocalGraphRegistry) |
 
-Idle-eviction threshold for cached workspace handles. Workspaces that have not
-been accessed within this window are closed and their SurrealDB + LanceDB handles
-released. Each open workspace consumes ~10–50 MB RSS; lowering this value
-reduces steady-state memory on daemons that touch many workspaces.
+Idle-eviction threshold for cached workspace (graph) handles. **As of
+3.20.0, 0/unset disables the background sweep entirely** — a workspace
+graph opened once stays open for the life of the process. Set to a
+positive value (e.g. `1800000` for the pre-3.20.0 behaviour) to re-enable
+the periodic sweep at that TTL; the sweep then closes SurrealDB handles
+idle longer than the configured window, same as before.
+
+**Why the default changed:** `@surrealdb/node` 3.0.3 never frees a
+datastore's native allocation on `close()` (docs/PERFORMANCE-MEMORY.md §9)
+— every eviction-then-reopen of a graph costs ~100 MB, permanently, with no
+corresponding memory returned by the eviction that supposedly justified it.
+Idle graph eviction is therefore net-negative on this driver until that
+upstream bug is fixed (docs/PERFORMANCE-MEMORY.md §9 "What it means for
+hosts", §11). `LORE_MAX_OPEN_WORKSPACES`'s own over-cap LRU eviction (a
+separate mechanism, unaffected by this default) still bounds the number of
+simultaneously-open workspace graphs. The vector-store (LanceDB) side does
+NOT share this problem — see `LORE_VERBATIM_IDLE_TTL_MS` below, unchanged.
+
+Calling `evictIdle(now, idleMs)` directly with an explicit `idleMs` (as
+`scripts/measure-memory-configs.mjs` and several tests do) still works
+exactly as before regardless of this default — only the *background timer*
+is gated on it.
 
 Source: `src/engines/localGraphRegistry.ts`
 
@@ -1897,11 +2325,49 @@ Source: `src/engines/localGraphRegistry.ts`
 | **Default** | `600000` (10 minutes) |
 | **Surface** | daemon (LocalGraphRegistry) |
 
-Interval between background idle-workspace eviction sweeps. The sweep closes
-handles idle longer than `LORE_REGISTRY_IDLE_TTL_MS`. Lower values keep memory
-tighter at the cost of more frequent sweep overhead.
+Interval between background idle-workspace eviction sweeps. Only relevant
+when `LORE_REGISTRY_IDLE_TTL_MS` is set to a positive value — with the
+3.20.0 default (`0`), no sweep timer is armed at all, so this interval has
+nothing to trigger. The sweep, when enabled, closes handles idle longer
+than `LORE_REGISTRY_IDLE_TTL_MS`. Lower values keep memory tighter at the
+cost of more frequent sweep overhead.
 
 Source: `src/engines/localGraphRegistry.ts`
+
+---
+
+### `LORE_VERBATIM_IDLE_TTL_MS`
+
+| | |
+|---|---|
+| **Default** | `1800000` (30 minutes) |
+| **Surface** | daemon (WorkspaceVerbatimResolver) |
+
+Idle-eviction threshold for cached per-workspace LanceDB (verbatim) handles —
+the vector-store sibling of `LORE_REGISTRY_IDLE_TTL_MS`. Same default so the
+graph and vector halves of an idle workspace go idle together. Skipped for a
+workspace with pending embed-queue or outbox work regardless of idle time
+(eviction releases handles, never queued data).
+
+Source: `src/outbox/workspaceVerbatimResolver.ts`
+
+---
+
+### `LORE_VERBATIM_SWEEP_MS`
+
+| | |
+|---|---|
+| **Default** | `600000` (10 minutes) |
+| **Surface** | daemon (WorkspaceVerbatimResolver) |
+
+Interval between background idle-workspace eviction sweeps for the verbatim
+resolver — the vector-store sibling of `LORE_REGISTRY_SWEEP_MS`. This sweep
+is INDEPENDENT of the graph registry's: SurrealDB's native addon does not
+release memory on close (see docs/PERFORMANCE-MEMORY.md §9), so only the
+LanceDB/verbatim half evicts automatically — the graph half is evicted only
+by `LocalGraphRegistry`'s own, separately-gated sweep.
+
+Source: `src/outbox/workspaceVerbatimResolver.ts`
 
 ---
 
@@ -2263,6 +2729,22 @@ Source: `src/security/envScrub.ts` (allowlisted for eval use).
 
 ---
 
+### `LORE_TEST_WORKER_HOOKS`
+
+| | |
+|---|---|
+| **Default** | off |
+| **Surface** | search worker (test-only) |
+
+When set to `1`, exposes `__testHold` / `__testCounters` / `checkGateDeadline`
+test hooks on the search worker so unit tests can deterministically hold a
+call open or inspect gate/queue counters. Never set in production.
+
+Source: `src/engines/verbatimStore.ts`, `src/engines/verbatimWorkerProtocol.ts`,
+`src/security/envScrub.ts` (allowlisted for test use).
+
+---
+
 ## 15. Embedded mode (library)
 
 This section covers the `createLore()` programmatic options. Environment
@@ -2398,11 +2880,33 @@ comes with a real correctness risk, so it is opt-in, not the default.
 share a (project, type) group — the normal shape of a bulk ingest into one
 workspace — surrealdb-core 3.0.2's view-maintenance transactions can commit
 with a lost update. The node rows themselves all land correctly; only the
-view's running count silently drifts low, permanently, with no self-healing.
-Reproduced directly: 300 concurrent distinct-id upserts into one group left
-the view at 63–64/300 while all 300 nodes were genuinely present. Serial
-writes, or writers spread across distinct (project, type) groups, are
+view's running count silently drifts low. Every open of a flag-on workspace
+now drops and re-defines the view (a full backfill from the live table), so
+the drift no longer survives a restart — but it is not self-healing within
+a session, and it is still a real correctness risk while the process stays
+up. Reproduced directly: 300 concurrent distinct-id upserts into one group
+left the view at 63–64/300 while all 300 nodes were genuinely present.
+Serial writes, or writers spread across distinct (project, type) groups, are
 unaffected — `test/surreal-feature-matrix-unit.ts` pins that correctness.
+
+**A leftover view also made deletes fail (fixed in 3.20.2).** Every
+workspace that ever booted with this flag on between 2026-08-05 and
+2026-08-21 kept the view even after the flag flipped to opt-in, because
+nothing ever removed it — SurrealDB kept maintaining a view nobody read.
+Once concurrent writers drove that unread view's count to zero for a group,
+every later write that touched the same group (`deleteNode`, `supersedeNode`,
+`unsupersedeNode`, `markStaleByIds`/`markStaleByTags`, and silently on the
+read-path `stampAccessTimes`) failed with:
+
+```
+The database encountered unreachable logic: id#... Deletion for a view but
+no record exists for that view
+```
+
+As of 3.20.2, `applySurrealSchema` runs `REMOVE TABLE IF EXISTS node_counts`
+whenever the flag is off, which drops any leftover view on the workspace's
+next open and repairs the failure above with no migration step. If you hit
+this error on an older build, upgrade and reopen the workspace once.
 
 Turn it on only if you can guarantee the workspace never receives
 concurrent bulk writes into one (project, type) group, or don't rely on
@@ -2415,8 +2919,10 @@ concurrent bulk writes into one (project, type) group, or don't rely on
   the workspace can still be reopened.
 
 Set `LORE_SURREAL_COUNT_VIEW=1` to enable. Set back to unset/`0` to roll
-back — the view stays on disk and is simply not read; no migration and no
-restart-with-cleanup is required either direction.
+back — as of 3.20.2 this **drops** the view on the workspace's next open
+(`REMOVE TABLE IF EXISTS node_counts`), it does not leave it on disk. That is
+both the rollback and the repair for the failure described above; still no
+migration step and no manual cleanup either direction.
 
 Not extended to edge counts: a view over the `edge` RELATION table is broken
 upstream (the count never decrements, and one combination panics the engine —
@@ -2651,6 +3157,8 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_OUTBOX_PRUNE_REPLICATED_MS` | `604800000` (7 days) | Outbox |
 | `LORE_OUTBOX_POLL_MS` | `250` | Outbox |
 | `LORE_OUTBOX_BUSY_MS` | `10` | Outbox |
+| `LORE_OUTBOX_MAX_ATTEMPTS` | `5` | Outbox |
+| `LORE_OUTBOX_RETRY_BASE_MS` | `500` | Outbox |
 | `LORE_OUTBOX_CONSOLIDATION_CAP` | `1024` | Outbox |
 | `LORE_REPLICATOR_CONSOLIDATION_MAX` | `256` | Outbox |
 | `LORE_LOAD_MAX_BYTES` | `10737418240` (10 GiB) | Load |
@@ -2663,10 +3171,17 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_STREAM_CONSUMER` | built-in | Streaming |
 | `LORE_LANCE_BATCH_ROWS` | `5000` | Load/LanceDB |
 | `LORE_RECALL_RANKING` | enabled | Recall |
+| `LORE_RECALL_CANDIDATE_FLOOR` | `0` (opt-in `50`) | Recall |
+| `LORE_RECALL_LEXICAL_BASE` | `rrf` (opt-in `anchored`) | Recall |
+| `LORE_SUPERSESSION_ENFORCE` | off | Write/Supersession |
 | `LORE_RECALL_STAGE_TIMING` | off | Recall |
 | `LORE_RECALL_RECENCY_HALF_LIFE_DAYS` | `30` | Recall |
 | `LORE_RECALL_FANOUT_WS_CAP` | `50` | Recall |
 | `LORE_RECALL_FANOUT_CONCURRENCY` | `8` | Recall |
+| `LORE_RECALL_ABSTAIN` | unset (off) | Recall |
+| `LORE_RECALL_RELEVANCE_FLOOR` | `2.0` | Recall |
+| `LORE_RECALL_ABSTAIN_TERM_COVERAGE` | unset (off) | Recall |
+| `LORE_RECALL_TERM_COVERAGE_MIN` | `0.1` | Recall |
 | `LORE_LANCE_POOL_SIZE` | `16` | DB Internals |
 | `LORE_POOL_MAX_WAITERS` | `200` | DB Internals |
 | `LORE_POOL_ACQUIRE_TIMEOUT_MS` | `30000` | DB Internals |
@@ -2687,14 +3202,19 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_WORKER_PARENT_EMBEDS` | _(internal)_ | Search |
 | `LORE_WORKER_EMBED_DIM` | _(internal)_ | Search |
 | `LORE_WORKER_EMBED_MODEL` | _(internal)_ | Search |
+| `LORE_WORKER_EMBED_DTYPE` | _(internal)_ | Search |
+| `LORE_WORKER_STRICT_FINGERPRINT` | _(internal)_ | Search |
 | `LORE_IS_SEARCH_WORKER` | _(internal)_ | Search |
 | `LORE_SEARCH_WEIGHT_TAGS` | `1` | Search |
 | `LORE_LANCE_ADD_COLUMN_SUPPORTED` | `true` | DB Internals |
+| `LORE_SQLITE_VECTOR_CACHE_MB` | `64` | DB Internals |
+| `LORE_SQLITE_VECTOR_DISABLE_NATIVE` | off | DB Internals |
+| `LORE_VECTOR_PROMOTE_ROWS` | `250000` | DB Internals |
 | `LORE_SEARCH_CACHE_TTL_MS` | `1500` | DB Internals |
 | `LORE_DEFERRED_SCAN_CACHE_TTL_MS` | `60000` | DB Internals |
 | `LORE_SEARCH_CACHE_MAX_ENTRIES` | `500` | DB Internals |
 | `LORE_COMPACT_GRACE_MS` | `600000` (10 min) | DB Internals |
-| `LORE_REGISTRY_IDLE_TTL_MS` | `1800000` (30 min) | DB Internals |
+| `LORE_REGISTRY_IDLE_TTL_MS` | `0` (idle eviction disabled — was `1800000`/30 min pre-3.20.0) | DB Internals |
 | `LORE_REGISTRY_SWEEP_MS` | `600000` (10 min) | DB Internals |
 | `LORE_MAX_OPEN_WORKSPACES` | `8` | DB Internals |
 | `LORE_DATAPLANE_HEALTH_TIMEOUT_MS` | `2000` (2 s) | DB Internals |
@@ -2717,6 +3237,7 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_MODEL_IDLE_UNLOAD_MS` | `180000` (3 min) | LLM Dispatch |
 | `LORE_LLM_NUM_CTX` | `32768` | LLM Dispatch |
 | `LORE_LLM_MAX_TOKENS` | `1024` | LLM Dispatch |
+| `LORE_EMBED_IDLE_UNLOAD_MS` | `0` (never unload) | Embedding |
 | `LORE_EMBED_BATCH_MAX` | RAM-adaptive / `1000` | Embedding |
 | `LORE_EMBED_MEM_PCT` | `70` | Embedding |
 | `LORE_EMBED_MEM_WAIT_MS` | `15000` | Embedding |

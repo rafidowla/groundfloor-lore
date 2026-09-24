@@ -15,12 +15,16 @@ import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
 import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
 import { retrieve, type RetrieveContext, type MatchKind } from '../../../recall/retrieve.js';
 import { projectScored } from '../../../recall/retrievalProjection.js';
+import { rrfFuse } from '../../../recall/rrf.js';
+import { buildRelevanceMeta, notApplicableRelevanceMeta } from '../../../recall/abstention.js';
+import { replaceSupersededInResults } from '../../../recall/supersessionRecall.js';
+import type { RetrievalResult } from '../../../recall/retrieve.js';
 import type { LoreGraph, SearchToolsDeps } from './types.js';
 import type { LoreNode } from '../../../providers/types.js';
 import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
 
-type Scored = { node: LoreNode; matchedBy: MatchKind[]; score: number };
+type Scored = { node: LoreNode; matchedBy: MatchKind[]; score: number; similarity?: number | null; relevance?: number | null };
 
 export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps): void {
     mcpServer.tool(
@@ -31,11 +35,18 @@ export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps):
             limit: z.number().int().min(1).max(200).optional().describe('Max results (default: 20, max 200)'), // RA2-reaudit2 — cap (uncapped limit → LanceDB DoS)
             queryLanguage: z.string().optional().describe('ISO 639-1 code for the query language (e.g., "es"). When provided and the corpus is mostly in a different language, the response includes a cross-language hint. Core does not auto-detect — callers tag explicitly if they want the hint.'),
             tags: z.array(z.string()).optional().describe('Gap #2: when provided, filter results to only nodes where ALL specified tags are present in the node\'s tags field. Useful for scoping results to a known tag set (e.g. ["orientation-pack"]).'),
+            queries: z.array(z.string().max(2000)).max(5).optional().describe('3.21 step 3(f): up to 5 extra phrasings of `query`, run alongside it and fused into ONE ranked list via the shared reciprocal-rank-fusion. Omitted/empty is exactly today\'s single-phrasing behaviour. Only applies to a NAMED workspace (ignored on workspace="*").'),
+            entities: z.array(z.string().max(100)).max(20).optional().describe('3.21 step 3(f): keep only nodes whose stored `entities` (set via store_node, 3.21 step 3(e)) contain ALL of these values. Only applies to a NAMED workspace.'),
+            topics: z.array(z.string().max(100)).max(20).optional().describe('3.21 step 3(f): keep only nodes whose stored `topics` (set via store_node, 3.21 step 3(e)) contain ALL of these values. Only applies to a NAMED workspace.'),
+            project: z.string().optional().describe('3.21 step 3(f): keep only nodes whose `project` field equals this value exactly. Only applies to a NAMED workspace.'),
+            types: z.array(z.string().max(100)).max(20).optional().describe('D2: keep only nodes whose `type` is one of these values (ANY match). PREFILTER applied inside the vector + BM25 query itself, not after ranking. Only applies to a NAMED workspace.'),
             workspace: z.string().min(1).describe('Workspace scope (required — Sprint L1e: no silent fallback).'),
             ecosystem: z.string().min(1).optional().describe('Ecosystem scope. Defaults to the daemon-detected scope. Pass "*" to search every ecosystem in the workspace. A host serving several tenants out of ONE workspace must pass the caller\'s ecosystem here — the detected default is derived once at boot from process.cwd() and is identical for every request.'),
-            search_mode: z.enum(['semantic', 'keyword', 'hybrid']).default('hybrid').describe('Retrieval mode. For a NAMED workspace, "hybrid" (default) = semantic + BM25 fused via reciprocal-rank-fusion (keyword fallback when the vector index is empty / non-active workspace). NOTE: for workspace="*" (the legacy cross-project boot graph, not yet folded into the shared core) "hybrid" is a simpler keyword + semantic dedupe-merge — NOT reciprocal-rank-fusion. "semantic" = vector-only. "keyword" = graph text match only.'),
+            search_mode: z.enum(['semantic', 'keyword', 'hybrid']).default('hybrid').describe('Retrieval mode. For a NAMED workspace, "hybrid" (default) = semantic + BM25 fused via reciprocal-rank-fusion (keyword fallback when the vector index is empty / non-active workspace). For workspace="*" (the legacy cross-project boot graph, not yet folded into the shared core) "hybrid" also fuses via the same shared reciprocal-rank-fusion (recall/rrf.ts) as of 3.21. "semantic" = vector-only (embeds the query). "keyword" = standalone lexical recall — the store\'s BM25 index + the graph\'s own text search, NEVER the embedding provider.'),
+            abstain: z.boolean().optional().describe('D1: when true, a query whose calibrated relevance falls below `relevance_floor` returns zero results with `_meta.abstained: true` instead of low-relevance filler. Default false (off) — calibration/relevance `_meta` fields are always reported regardless of this flag. Only applies to a NAMED workspace.'),
+            relevance_floor: z.number().optional().describe('D1: the z-score floor abstention gates on (default 2.0). Only meaningful when `abstain: true`.'),
         },
-        async ({ query, limit, queryLanguage, tags, workspace, search_mode, ecosystem }) => {
+        async ({ query, limit, queryLanguage, tags, queries, entities, topics, project, types, workspace, search_mode, ecosystem, abstain, relevance_floor }) => {
             try {
                 if (!workspace || typeof workspace !== 'string' || workspace.length === 0) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'workspace_required', hint: 'pass workspace=<name>' }, null, 2) }], isError: true };
@@ -52,6 +63,9 @@ export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps):
                 let sourcesConsulted = 1;
                 let vectorConsulted = false; // P14 freshness signal
                 let scanCapHit = false; // P16 incomplete-results signal
+                let bm25Ranked = true; // 3.21 step 3(a) — bm25Search() ranked signal (see retrieve.ts)
+                let vectorLegSkipped = false; // 3.21 step 3(c) — embeddings-disabled degrade signal
+                let relevanceMeta = notApplicableRelevanceMeta('search:*'); // D1 — overwritten below on the named-workspace path
 
                 if (workspace !== '*') {
                     // ── Shared core path (named workspace) ─────────────────────
@@ -92,7 +106,7 @@ export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps):
                         // value"). The `ecosystem` PARAMETER above is the
                         // per-request scope a multi-tenant host must supply;
                         // detectedScope is only the fallback when it doesn't.
-                        outcome = await retrieve(ctx, query, { workspace, ecosystem: effectiveEcosystem, mode, depth: 0, limit: effectiveLimit, tags });
+                        outcome = await retrieve(ctx, query, { workspace, ecosystem: effectiveEcosystem, mode, depth: 0, limit: effectiveLimit, tags, queries, entities, topics, project, types, abstain, relevanceFloor: relevance_floor });
                     } catch (err) {
                         if ((err as { code?: string }).code === 'workspace_not_found') {
                             const e = err as { requested?: string; known?: string[] };
@@ -100,10 +114,13 @@ export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps):
                         }
                         throw err;
                     }
-                    scored = outcome.results.map((r) => ({ node: r.node as unknown as LoreNode, matchedBy: r.matchedBy, score: r.score }));
+                    scored = outcome.results.map((r) => ({ node: r.node as unknown as LoreNode, matchedBy: r.matchedBy, score: r.score, similarity: r.similarity, relevance: r.relevance }));
                     sourcesConsulted = outcome.meta.sourcesConsulted;
                     vectorConsulted = outcome.meta.verbatimConsulted;
                     scanCapHit = outcome.meta.scanCapHit;
+                    bm25Ranked = outcome.meta.bm25Ranked;
+                    vectorLegSkipped = outcome.meta.vectorLegSkipped;
+                    relevanceMeta = buildRelevanceMeta(outcome.meta);
                 } else {
                     // ── Legacy "*" path (boot graph, all projects) ─────────────
                     // TODO(P2 #9): fold into the core once cross-workspace lands.
@@ -111,7 +128,9 @@ export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps):
                     // boot/active graph across projects. Kept inline + degenerate
                     // until the cross-workspace fold replaces it.
                     const graphForSearch: LoreGraph = deps.store.loreGraph;
-                    const seen = new Map<string, Scored>();
+                    const nodeById = new Map<string, LoreNode>();
+                    let kwIds: string[] = [];
+                    let semanticIds: string[] = [];
                     if (mode !== 'semantic') {
                         const kwSignals = { scanCapHit: false };
                         // Push the scope down (optimisation only — the JS filter
@@ -119,7 +138,8 @@ export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps):
                         // hardcoded '*'.
                         const kw = await graphForSearch.search(query, effectiveLimit, '*', effectiveEcosystem, false, kwSignals);
                         scanCapHit = kwSignals.scanCapHit;
-                        kw.forEach((n, i) => seen.set(n.id, { node: n, matchedBy: ['keyword'], score: 1 / (i + 1) }));
+                        kwIds = kw.map((n) => n.id);
+                        kw.forEach((n) => nodeById.set(n.id, n));
                     }
                     if (mode !== 'keyword') {
                         const verbatimHits = await deps.store.storageClient.verbatimSearch(query, effectiveLimit);
@@ -127,13 +147,28 @@ export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps):
                         vectorConsulted = true;
                         const stripped = verbatimHits.map((h) => (h.id.startsWith('lore:') ? h.id.slice(5) : h.id));
                         const semanticNodes = (await Promise.all(stripped.map((id) => graphForSearch.getNode(id).catch(() => null)))).filter((n): n is LoreNode => n !== null);
-                        semanticNodes.forEach((n, i) => {
-                            const existing = seen.get(n.id);
-                            if (existing) existing.matchedBy.push('semantic');
-                            else seen.set(n.id, { node: n, matchedBy: ['semantic'], score: 1 / (i + 1) });
-                        });
+                        semanticIds = semanticNodes.map((n) => n.id);
+                        semanticNodes.forEach((n) => { if (!nodeById.has(n.id)) nodeById.set(n.id, n); });
                     }
-                    scored = [...seen.values()];
+                    // 3.21 step 3(b) — fuse via the ONE shared RRF (recall/rrf.ts),
+                    // not a "first list registered wins" Map.set skip-if-present —
+                    // that WAS the bug this branch's own doc comment used to call
+                    // out ("hybrid" here is a simpler keyword + semantic
+                    // dedupe-merge — NOT reciprocal-rank-fusion): a node found by
+                    // BOTH lists kept whichever score got written first and
+                    // dropped the other list's rank information entirely.
+                    const kwSet = new Set(kwIds);
+                    const semSet = new Set(semanticIds);
+                    scored = rrfFuse([kwIds, semanticIds])
+                        .map((f): Scored | null => {
+                            const node = nodeById.get(f.id);
+                            if (!node) return null;
+                            const matchedBy: MatchKind[] = [];
+                            if (kwSet.has(f.id)) matchedBy.push('keyword');
+                            if (semSet.has(f.id)) matchedBy.push('semantic');
+                            return { node, matchedBy, score: f.score };
+                        })
+                        .filter((s): s is Scored => s !== null);
                     // R4 #1 — the ecosystem filter belongs on BOTH branches.
                     // This one merges a keyword scan with an UNFILTERED
                     // verbatimSearch (the vector store's `filter` argument was
@@ -151,6 +186,29 @@ export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps):
                     // unscoped ('*'/'') NODES visible (DEC-ECOSYSTEM-WILDCARD).
                     scored = scored.filter((s) =>
                         ecosystemMatches((s.node as { ecosystem?: string }).ecosystem, effectiveEcosystem));
+
+                    // D5 #5 — the legacy workspace="*" fallback (this whole
+                    // `else` branch) had NO supersession handling at all
+                    // (unlike the shared retrieve() core above, and unlike
+                    // this tool's own doc comment claiming parity with
+                    // `recall`) — a superseded node's stale content was
+                    // returned unchanged. Route through the SAME
+                    // `replaceSupersededInResults` helper retrieve() uses,
+                    // via a throwaway RetrievalResult wrapper (depth/source
+                    // are retrieve()-internal bookkeeping this tool doesn't
+                    // otherwise use), so a superseded hit's slot is replaced
+                    // by its live successor — same behaviour, one shared
+                    // implementation, instead of a second copy of the walk.
+                    {
+                        const admitD5 = (n: LoreNode): boolean =>
+                            ecosystemMatches((n as { ecosystem?: string }).ecosystem, effectiveEcosystem) && n.status !== 'archived';
+                        const wrapped = new Map<string, RetrievalResult>(
+                            scored.map((s) => [s.node.id, { node: s.node, score: s.score, matchedBy: s.matchedBy, depth: 0, source: 'seed' }]),
+                        );
+                        const resolved = await replaceSupersededInResults(wrapped, graphForSearch, admitD5);
+                        scored = [...resolved.values()].map((r) => ({ node: r.node, score: r.score, matchedBy: r.matchedBy }));
+                    }
+
                     if (tags && tags.length > 0) {
                         const lowerTags = tags.map((t) => t.toLowerCase().trim());
                         scored = scored.filter((s) => lowerTags.every((t) => s.node.tags.includes(t)));
@@ -202,8 +260,11 @@ export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps):
                         sources_consulted: sourcesConsulted,
                         vector_index_consulted: vectorConsulted,
                         ...(scanCapHit ? { scan_cap_hit: true } : {}),
+                        ...(bm25Ranked === false ? { bm25_ranked: false } : {}),
+                        ...(vectorLegSkipped ? { vector_leg_skipped: true } : {}),
+                        ...relevanceMeta,
                     }
-                    : { confidence: 1, sources_consulted: sourcesConsulted, vector_index_consulted: vectorConsulted, ...(scanCapHit ? { scan_cap_hit: true } : {}) };
+                    : { confidence: 1, sources_consulted: sourcesConsulted, vector_index_consulted: vectorConsulted, ...(scanCapHit ? { scan_cap_hit: true } : {}), ...(bm25Ranked === false ? { bm25_ranked: false } : {}), ...(vectorLegSkipped ? { vector_leg_skipped: true } : {}), ...relevanceMeta };
 
                 return {
                     content: [{

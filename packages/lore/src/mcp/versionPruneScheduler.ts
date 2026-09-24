@@ -70,7 +70,14 @@ export interface VersionPruneSweepDeps {
 
 const DEFAULT_RETENTION_DAYS = 90;
 
-function resolveRetentionDays(): number {
+/**
+ * Exported (Fix Requirement 4, Defect 3 3.20.2 review) so `maintain`'s
+ * dry-run preview (`VersionStore.countPrunable`) can default to the SAME
+ * retention window `runVersionPruneSweep` itself would use when no explicit
+ * override is given — otherwise the preview and the real sweep could silently
+ * disagree on what counts as "prunable".
+ */
+export function resolveRetentionDays(): number {
     const raw = Number(process.env['LORE_VERSION_RETENTION_DAYS']);
     return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_RETENTION_DAYS;
 }

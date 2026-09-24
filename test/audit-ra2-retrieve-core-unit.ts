@@ -7,10 +7,14 @@
  * graph traversal, tags filter, token-budget truncation, the raw-query rule
  * (D3 — no preprocessing), and the verbatim freshness signal. Fully mocked
  * context (no DB) so it's fast + deterministic.
+ *
+ * fix/d4-traversal-separate-field: traversal neighbours now surface in
+ * `out.related` (never `out.results`) — see the 'traversal' tests below,
+ * which cover depth 0, 1 and 2.
  */
 
 import assert from 'node:assert/strict';
-import { retrieve, type RetrieveContext, type RetrieveOutcome, type RetrievalResult } from '../packages/lore/src/recall/retrieve.js';
+import { retrieve, type RetrieveContext, type RetrieveOutcome, type RetrievalResult, type RelatedResult } from '../packages/lore/src/recall/retrieve.js';
 
 let passed = 0, failed = 0;
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
@@ -29,7 +33,7 @@ interface MockCfg {
     bm25?: Array<{ id: string; score?: number }>;
     nodes?: Record<string, Node>;          // graph store keyed by stripped id
     searchHits?: Node[];                    // graph.search() result
-    traverse?: Record<string, Array<{ node: Node; depth: number }>>;
+    traverse?: Record<string, Array<{ node: Node; depth: number; relation: string }>>;
 }
 
 function mockCtx(cfg: MockCfg): {
@@ -63,6 +67,8 @@ function mockCtx(cfg: MockCfg): {
 
 const byId = (out: RetrieveOutcome, id: string): RetrievalResult | undefined =>
     out.results.find((r) => r.node.id === id);
+const byRelatedId = (out: RetrieveOutcome, id: string): RelatedResult | undefined =>
+    out.related.find((r) => r.node.id === id);
 
 console.log('RA2 — shared retrieve() core');
 
@@ -101,28 +107,66 @@ await test('keyword fallback: no vector index → graph.search, matchedBy=keywor
     assert.equal(calls.semantic.length, 0, 'no vector search when count is 0');
 });
 
-await test('traversal (depth=1): neighbours surface as matchedBy=traversal at depth 1', async () => {
+await test('traversal (depth=1): neighbours surface in `related`, NEVER in `results` (D4 fix)', async () => {
+    // fix/d4-traversal-separate-field — pins the fixed contract: a graph
+    // neighbour with zero relevance to the query must never sit inside the
+    // ranked `results` array or count toward `directMatches`/`totalMatched`.
+    // Fails on pre-fix code, where 'n1' would appear in `results` with
+    // `source: 'via:s'` and be counted in both totals.
     const { ctx } = mockCtx({
         verbatimCount: 1,
         semantic: [{ id: 'lore:s', score: 0.9 }],
         bm25: [{ id: 'lore:s', score: 1 }],
         nodes: { s: node('s') },
-        traverse: { s: [{ node: node('n1'), depth: 1 }] },
+        traverse: { s: [{ node: node('n1'), depth: 1, relation: 'relates_to' }] },
     });
     const out = await retrieve(ctx, 'q', { workspace: 'w', depth: 1 });
-    const seed = byId(out, 's')!; const neigh = byId(out, 'n1')!;
-    assert.equal(seed.depth, 0); assert.equal(neigh.depth, 1);
-    assert.deepEqual(neigh.matchedBy, ['traversal']);
-    assert.equal(neigh.source, 'via:s');
-    assert.ok(seed.score > neigh.score, 'seed outranks its traversal neighbour');
+    // `results` contains ONLY the direct seed match.
+    assert.deepEqual(out.results.map((r) => r.node.id), ['s']);
+    const seed = byId(out, 's')!;
+    assert.equal(seed.depth, 0); assert.equal(seed.source, 'seed');
+    assert.equal(byId(out, 'n1'), undefined, 'n1 must NOT appear in results');
+    // `related` carries the traversal neighbour, with the REAL edge relation.
+    assert.equal(out.related.length, 1);
+    const neigh = byRelatedId(out, 'n1')!;
+    assert.equal(neigh.via, 's');
+    assert.equal(neigh.relation, 'relates_to');
+    assert.equal(neigh.depth, 1);
+    assert.ok(seed.score > neigh.score, 'seed score outranks its traversal neighbour\'s weight');
+    // Neither total counts a traversal neighbour.
     assert.equal(out.meta.directMatches, 1);
+    assert.equal(out.meta.totalMatched, 1);
 });
 
-await test('depth=0 does NOT traverse (the `search` preset)', async () => {
-    const { ctx } = mockCtx({ verbatimCount: 1, semantic: [{ id: 'lore:s', score: 0.9 }], bm25: [{ id: 'lore:s', score: 1 }], nodes: { s: node('s') }, traverse: { s: [{ node: node('n1'), depth: 1 }] } });
+await test('traversal (depth=2): neighbours at both hop distances land in `related`, still never in `results`', async () => {
+    const { ctx } = mockCtx({
+        verbatimCount: 1,
+        semantic: [{ id: 'lore:s', score: 0.9 }],
+        bm25: [{ id: 'lore:s', score: 1 }],
+        nodes: { s: node('s') },
+        traverse: {
+            s: [
+                { node: node('n1'), depth: 1, relation: 'relates_to' },
+                { node: node('n2'), depth: 2, relation: 'derived_from' },
+            ],
+        },
+    });
+    const out = await retrieve(ctx, 'q', { workspace: 'w', depth: 2 });
+    assert.deepEqual(out.results.map((r) => r.node.id), ['s'], 'results is still direct-matches-only at depth 2');
+    assert.equal(out.related.length, 2);
+    const n1 = byRelatedId(out, 'n1')!; const n2 = byRelatedId(out, 'n2')!;
+    assert.equal(n1.depth, 1); assert.equal(n1.relation, 'relates_to');
+    assert.equal(n2.depth, 2); assert.equal(n2.relation, 'derived_from');
+    assert.equal(out.meta.directMatches, 1);
+    assert.equal(out.meta.totalMatched, 1);
+});
+
+await test('depth=0 does NOT traverse (the `search` preset) — `related` is empty', async () => {
+    const { ctx } = mockCtx({ verbatimCount: 1, semantic: [{ id: 'lore:s', score: 0.9 }], bm25: [{ id: 'lore:s', score: 1 }], nodes: { s: node('s') }, traverse: { s: [{ node: node('n1'), depth: 1, relation: 'relates_to' }] } });
     const out = await retrieve(ctx, 'q', { workspace: 'w', depth: 0 });
     assert.equal(out.results.length, 1, 'only the seed, no neighbours');
     assert.equal(byId(out, 'n1'), undefined);
+    assert.equal(out.related.length, 0, 'depth=0 → related is empty, not just results');
 });
 
 await test('tags filter keeps only nodes carrying ALL tags', async () => {
@@ -156,6 +200,7 @@ await test('empty result set returns clean meta', async () => {
     const { ctx } = mockCtx({ verbatimCount: 0, searchHits: [] });
     const out = await retrieve(ctx, 'q', { workspace: 'w', depth: 1 });
     assert.equal(out.results.length, 0);
+    assert.equal(out.related.length, 0);
     assert.equal(out.meta.totalMatched, 0);
     assert.equal(out.meta.directMatches, 0);
 });

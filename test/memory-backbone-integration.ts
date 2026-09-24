@@ -28,7 +28,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore, testVectorEngine } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { buildVerbatimText } from '../packages/lore/src/engines/verbatimSchema.js';
 import { computeContentHash } from '../packages/lore/src/engines/contentHash.js';
 import { runConsistencySweep } from '../packages/lore/src/diagnostics/sweeper.js';
@@ -80,10 +81,10 @@ class DeterministicMockEmbedder implements EmbeddingProvider {
     }
 }
 
-function mkStore(): { dir: string; embedder: DeterministicMockEmbedder; store: VerbatimStore } {
+function mkStore(): { dir: string; embedder: DeterministicMockEmbedder; store: VerbatimStoreApi } {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-pr69-int-'));
     const embedder = new DeterministicMockEmbedder();
-    const store = new VerbatimStore(dir, embedder);
+    const store = makeVerbatimStore(dir, embedder);
     return { dir, embedder, store };
 }
 
@@ -150,6 +151,16 @@ test('I-2: second store() of SAME text → 0 additional embedDocument calls (the
 });
 
 test('I-3: contentHash survives reopen — second process finds hash via LanceDB query', async () => {
+    // Opus review follow-up (mechanical parameterization): this is
+    // VerbatimStore's PRIVATE `lookupByContentHash` — a cross-id, cross-
+    // process content-hash-to-vector cache with a DB-query fallback on a
+    // cache miss (not part of VerbatimStoreApi's public surface).
+    // SqliteVerbatimStore's skip-identical check is scoped to "does THIS
+    // id already have this content hash", not "has ANY id, ever, stored
+    // this exact text" — a different, narrower dedup guarantee, by
+    // design (see sqliteVerbatimWrite.ts's resolveVector). Skip under
+    // sqlite rather than asserting a feature this engine doesn't have.
+    if (testVectorEngine() === 'sqlite') { console.log('  (skipped on sqlite — Lance-specific cross-id hashCache/lookupByContentHash, see comment)'); return; }
     // Process A: write the row.
     const { dir, store: storeA } = mkStore();
     try {
@@ -162,7 +173,7 @@ test('I-3: contentHash survives reopen — second process finds hash via LanceDB
 
         // Process B: reopen the same dir with a fresh store (fresh hashCache).
         const embedderB = new DeterministicMockEmbedder();
-        const storeB = new VerbatimStore(dir, embedderB);
+        const storeB = makeVerbatimStore(dir, embedderB);
         await storeB.initialize();
 
         // Write the SAME text again under a NEW id — this proves the
@@ -314,6 +325,12 @@ test('I-6: sweep cascade-deletes orphan from real LanceDB (tombstone)', async ()
 });
 
 test('I-7: end-to-end — repeated identical store calls produce exactly 1 embed (the live writer guarantee)', async () => {
+    // Opus review follow-up: same Lance-specific cross-id hashCache this
+    // file's I-3 already skips on sqlite — 100 DIFFERENT ids sharing
+    // IDENTICAL text rely on VerbatimStore's in-memory hashCache to embed
+    // once and reuse the vector for the other 99. SqliteVerbatimStore has
+    // no cross-id content-hash cache (see I-3's comment above).
+    if (testVectorEngine() === 'sqlite') { console.log('  (skipped on sqlite — Lance-specific cross-id hashCache, see I-3\'s comment)'); return; }
     // The brief's pre-fix pathology: 6,500 re-embeds per sweep on
     // unchanged data. This is the per-write equivalent: 100 identical
     // writes → 1 embed.

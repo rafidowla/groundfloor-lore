@@ -20,7 +20,7 @@
 import type { LoreNode, LoreEdge } from '../providers/types.js';
 import type { SyncEngine } from '../engines/syncEngine.js';
 import type { WorkspaceGraph } from '../engines/openWorkspaceGraph.js';
-import type { VerbatimStore } from '../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import type { EmbeddingProvider } from '../providers/types.js';
 import type { BatchedEmbedder } from '../embed/batchedEmbedder.js';
 import { batchedEmbedderFor } from '../embed/batchedEmbedder.js';
@@ -36,8 +36,10 @@ import {
 } from './recovery.js';
 import type { DispatcherSubstrates } from './dispatcher.js';
 import { OutboxReplicator, wireReplicator, readEnvSelfHealConfig, readEnvPollConfig } from './replicator.js';
+import { readEnvRetryConfig } from './retryConfig.js';
+import { logResolveFailure } from './resolveFailureLog.js';
 import { OutboxLagCache, readEnvLagCacheConfig } from './lagCache.js';
-import { loadWorkspaces } from '../config/workspaces.js';
+import { loadWorkspacesIfPresent } from '../config/workspaces.js';
 
 export interface OutboxWiring {
     /** Active store — SqliteOutboxStore by default (O3c+) or
@@ -69,7 +71,7 @@ export function wireOutbox(input: {
      * cloud mode leaves them undefined (cloud writes don't route
      * through this outbox today). */
     getGraph?: () => WorkspaceGraph;
-    getVerbatim?: () => VerbatimStore;
+    getVerbatim?: () => VerbatimStoreApi;
     /** SP-F2 (2026-06-10) — embedding-provider getter used to wire the
      *  dispatcher's `embed.batch` substrates (batchedEmbedder +
      *  storeEmbedBatch). Before this, NO production wiring supplied
@@ -95,7 +97,21 @@ export function wireOutbox(input: {
      *  Closes the gap localGraphRegistry.ts:20-21 documents (verbatim was
      *  left global). Falls back to the boot verbatim store when absent /
      *  workspace undefined / resolution throws. */
-    getVerbatimForWorkspace?: () => ((workspace: string) => Promise<VerbatimStore>) | undefined;
+    getVerbatimForWorkspace?: () => ((workspace: string) => Promise<VerbatimStoreApi>) | undefined;
+    /** 3.20.2 follow-up — the lag-threshold resolver below reads
+     *  workspaces.json for a per-workspace `outboxLagThresholdSeconds`
+     *  override. A bare read resolves against the process-wide
+     *  `loreHome()`, not an embedded instance's own registry — the same
+     *  wrong-home pattern already fixed elsewhere (see
+     *  mcp/server.ts's `getWorkspaceEntryForQuota` doc). Low severity
+     *  (alerting threshold only, not a correctness/authorization gap):
+     *  an embedded host's override is silently ignored and the global
+     *  default threshold is used instead. Getter (not value) because
+     *  the LocalGraphRegistry is constructed after wireOutbox runs —
+     *  same lazy-closure convention as getGraphForWorkspace. Optional
+     *  so cloud mode / no-registry callers keep resolving against the
+     *  process-wide home exactly as before. */
+    getRegistryHome?: () => string | undefined;
 }): OutboxWiring {
     // SP-F3 — resolve the TARGET workspace's graph for a replayed row.
     // Falls back to the boot-bound graph when: no resolver wired (cloud /
@@ -125,11 +141,11 @@ export function wireOutbox(input: {
         try {
             return await resolver(workspace);
         } catch (err) {
-            console.error(`[outbox] graph resolve for workspace "${workspace}" failed; leaving row PENDING for retry (NOT routing to boot, to preserve workspace isolation): ${(err as Error).message}`);
+            logResolveFailure('graph', workspace, (err as Error).message);
             throw err;
         }
     };
-    const resolveVerbatim = async (workspace?: string): Promise<VerbatimStore> => {
+    const resolveVerbatim = async (workspace?: string): Promise<VerbatimStoreApi> => {
         const boot = input.getVerbatim!();
         if (!workspace) return boot;
         const resolver = input.getVerbatimForWorkspace?.();
@@ -140,7 +156,7 @@ export function wireOutbox(input: {
         try {
             return await resolver(workspace);
         } catch (err) {
-            console.error(`[outbox] verbatim resolve for workspace "${workspace}" failed; leaving row PENDING for retry (NOT routing to boot store, to preserve workspace isolation): ${(err as Error).message}`);
+            logResolveFailure('verbatim', workspace, (err as Error).message);
             throw err;
         }
     };
@@ -152,7 +168,7 @@ export function wireOutbox(input: {
     if (backend === 'json') {
         store = new FileOutboxStore(input.loreDir);
     } else {
-        const sqliteStore = new SqliteOutboxStore(input.loreDir);
+        const sqliteStore = new SqliteOutboxStore(input.loreDir, { retryBaseMs: readEnvRetryConfig().retryBaseMs });
         // Auto-migrate outbox.json → SQLite on first boot. Idempotent.
         try {
             const report = sqliteStore.migrateFromJson();
@@ -556,8 +572,12 @@ export function wireOutbox(input: {
         depthThreshold: envCfg.depthThreshold,
         thresholdResolver: (workspace: string): number => {
             try {
-                const file = loadWorkspaces();
-                const entry = file.workspaces.find((w) => w.name === workspace);
+                // 3.20.2 follow-up — resolve against THIS instance's own
+                // registry when one is wired (see getRegistryHome doc
+                // above); loadWorkspacesIfPresent falls back to the
+                // process-wide loreHome() when it isn't, same as before.
+                const file = loadWorkspacesIfPresent(input.getRegistryHome?.());
+                const entry = file?.workspaces.find((w) => w.name === workspace);
                 const override = entry?.outboxLagThresholdSeconds;
                 if (typeof override === 'number' && override > 0) return override;
             } catch {
@@ -573,9 +593,12 @@ export function wireOutbox(input: {
     // before this release; 60-second cadence after).
     const selfHealCfg = readEnvSelfHealConfig();
     const pollCfg = readEnvPollConfig();
+    // Retry budget (LORE_OUTBOX_MAX_ATTEMPTS / LORE_OUTBOX_RETRY_BASE_MS) —
+    // defaults equal the prior hard-coded values; see retryConfig.ts.
+    const { maxAttempts } = readEnvRetryConfig();
     const replicator = wireReplicator({
         store, substrates, lagCache,
-        config: { ...selfHealCfg, ...pollCfg },
+        config: { ...selfHealCfg, ...pollCfg, maxAttempts },
     });
 
     return { store, handlers, runBootRecovery, replicator, lagCache };

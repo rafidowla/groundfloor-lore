@@ -65,8 +65,9 @@ export interface NodeMetaRow {
 export interface SchemaGraphOps {
     /** Which engine is answering. Used for error messages and reporting.
      *  'kuzu' is the legacy graph-engine sentinel — kept to match archived
-     *  data/manifests, never a live engine choice. */
-    readonly engine: 'kuzu' | 'surreal';
+     *  data/manifests, never a live engine choice. 'sqlite' added for the
+     *  3.21 step 1b SQLite graph engine (SqliteSchemaGraphOps). */
+    readonly engine: 'kuzu' | 'surreal' | 'sqlite';
 
     /* ── counts (blast radius) ─────────────────────────────────────── */
 

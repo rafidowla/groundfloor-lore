@@ -17,6 +17,7 @@
 import type { LocalGraphRegistry } from '../engines/localGraphRegistry.js';
 import type { StorageBundle } from '../mcp/services.js';
 import { retrieve, type RetrieveContext } from './retrieve.js';
+import type { LexicalBaseMode } from './candidateWindow.js';
 import { buildRecallResult } from './recallPreset.js';
 import { runCrossWorkspaceRecall } from '../mcp/tools/recallCrossWorkspace.js';
 
@@ -57,6 +58,76 @@ export interface RecallOpts {
     filePaths?: string[];
     /** Maximum number of candidate seed nodes. Default: 10. */
     max?: number;
+    /**
+     * 3.21 step 4 (r9 recall-quality fix) — up to 5 EXTRA phrasings of
+     * `topic`, run alongside it and fused into ONE ranked list via the
+     * shared reciprocal-rank-fusion (recall/rrf.ts). Mirrors the `recall`
+     * MCP tool's `queries` param and retrieve()'s own `queries` option —
+     * this was the one gap between the embeddable `lore.recall()` surface
+     * and the MCP tool (both call the same shared retrieve() core, which
+     * has always supported it). Omitted/empty is exactly today's
+     * single-phrasing behaviour — default unchanged.
+     */
+    queries?: string[];
+    /** Keep only nodes whose stored `entities` (set via `questions`/
+     *  `entities` at write time) contain ALL of these values. Mirrors the
+     *  `recall` MCP tool's `entities` param. */
+    entities?: string[];
+    /** Same as `entities`, over stored `topics`. Mirrors the `recall` MCP
+     *  tool's `topics` param. */
+    topics?: string[];
+    /** Keep only nodes whose `project` field equals this value exactly.
+     *  Mirrors the `recall` MCP tool's `project` param. */
+    project?: string;
+    /**
+     * D1 (calibrated relevance + abstention) — when true, gate results to
+     * empty (with `_meta.abstained: true`) when the query's calibrated
+     * relevance falls below `relevanceFloor`, unless an exact identifier
+     * token rescues it. Default false/unset — calibration + `_meta` are
+     * always computed and reported; this option only controls whether a
+     * low-relevance query is GATED. Mirrors the `recall`/`search` MCP
+     * tools' `abstain` param and `LORE_RECALL_ABSTAIN`.
+     */
+    abstain?: boolean;
+    /** D1 — override the default relevance floor (z-score, default 2.0)
+     *  used when `abstain` is true. Mirrors the MCP tools' `relevance_floor`
+     *  param and `LORE_RECALL_RELEVANCE_FLOOR`. */
+    relevanceFloor?: number;
+    /** D1 — opt into the key-term coverage abstention signal (only used when
+     *  `abstain` is on). Mirrors `LORE_RECALL_ABSTAIN_TERM_COVERAGE`. */
+    abstainTermCoverage?: boolean;
+    /** Optional cancellation (fix/search-worker-call-cancellation, 3.20.2, req.
+     *  3; follow-up closed the gap noted below). An abort rejects the OUTER
+     *  recall promise immediately so a caller who gave up doesn't wait out
+     *  the whole retrieve() pipeline — AND, as of the follow-up, is now
+     *  threaded into `retrieve()`'s own options (see the single-workspace
+     *  path below), which forwards it through resolveSeedStore() to the
+     *  actual seed-store search()/bm25Search() calls. An abort therefore
+     *  frees the SearchGate permit/queue slot the underlying native call was
+     *  holding or waiting on, not just this promise's own wait. (Previously:
+     *  "does NOT interrupt native work already under way inside retrieve()" —
+     *  that gap is what this follow-up closes for the single-workspace path;
+     *  the cross-workspace path (runCrossWorkspaceRecall) is unchanged and
+     *  still only gets the outer-promise-level cancellation.) */
+    signal?: AbortSignal;
+    /** D3 (docs/design/D3-prefix-stable-ranking.md §3.1/§3.6) — per-call
+     *  override for the candidate-generation window floor and the
+     *  lexical-only base-score mode. Only the in-process embedding surface
+     *  (this call) gets these as explicit params; MCP tool schemas and the
+     *  REST route are intentionally NOT extended — the env knobs
+     *  (LORE_RECALL_CANDIDATE_FLOOR / LORE_RECALL_LEXICAL_BASE) cover those
+     *  surfaces. Undefined on both ⇒ falls through to the env/default via
+     *  retrieve()'s own resolution. */
+    candidateFloor?: number;
+    lexicalBase?: LexicalBaseMode;
+}
+
+function toAbortError(signal: AbortSignal): Error {
+    const reason = (signal as { reason?: unknown }).reason;
+    if (reason instanceof Error) return reason;
+    const err = new Error(reason !== undefined ? String(reason) : 'aborted');
+    err.name = 'AbortError';
+    return err;
 }
 
 export interface InProcessRecallDeps {
@@ -72,13 +143,34 @@ export interface InProcessRecallDeps {
      * embedded single-workspace hosts) ⇒ non-active recall degrades to keyword.
      */
     workspaceVerbatimResolver?: {
-        getOrOpen(ws: string): Promise<import('../engines/verbatimStore.js').VerbatimStore>;
+        getOrOpen(ws: string): Promise<import('../engines/verbatimStoreApi.js').VerbatimStoreApi>;
     };
 }
 
 /* ─── Implementation ───────────────────────────────────────────── */
 
 export async function inProcessRecall(
+    topic: string,
+    opts: RecallOpts,
+    deps: InProcessRecallDeps,
+): Promise<RecallResult> {
+    // fix/search-worker-call-cancellation (3.20.2, req. 3): check + race the
+    // signal at this outer boundary — see RecallOpts.signal's doc for scope.
+    if (opts.signal?.aborted) throw toAbortError(opts.signal);
+    const work = inProcessRecallCore(topic, opts, deps);
+    if (!opts.signal) return work;
+    const signal = opts.signal;
+    return new Promise<RecallResult>((resolve, reject) => {
+        const onAbort = () => { reject(toAbortError(signal)); };
+        signal.addEventListener('abort', onAbort, { once: true });
+        work.then(
+            (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+            (e) => { signal.removeEventListener('abort', onAbort); reject(e); },
+        );
+    });
+}
+
+async function inProcessRecallCore(
     topic: string,
     opts: RecallOpts,
     deps: InProcessRecallDeps,
@@ -97,6 +189,13 @@ export async function inProcessRecall(
         queryLanguage,
         filePaths,
         max = 10,
+        queries,
+        entities,
+        topics,
+        project,
+        abstain,
+        relevanceFloor,
+        abstainTermCoverage,
     } = opts;
 
     // Cross-workspace path — delegate to the shared aggregation and unwrap.
@@ -124,6 +223,17 @@ export async function inProcessRecall(
         outcome = await retrieve(ctx, topic, {
             workspace, ecosystem, mode: searchMode, depth, limit: max,
             tags, includeArchived, includeSuperseded, maxTokens, crossProject,
+            queries, entities, topics, project,
+            abstain, relevanceFloor, abstainTermCoverage,
+            // fix/search-worker-call-cancellation (3.20.2 follow-up): this was
+            // the confirmed root gap — opts.signal was accepted on RecallOpts
+            // and used to race the OUTER promise (see inProcessRecall() above)
+            // but never forwarded into retrieve()'s own options, so the real
+            // seed-store search/bm25Search calls never saw it and kept running
+            // (and holding/queuing on SearchGate) after the caller gave up.
+            signal: opts.signal,
+            candidateFloor: opts.candidateFloor,
+            lexicalBase: opts.lexicalBase,
         });
     } catch (err) {
         if ((err as { code?: string }).code === 'workspace_not_found') {

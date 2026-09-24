@@ -16,6 +16,7 @@ import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceR
 import { enforceStrictFields, enforceVocabPolicy } from '../storeNodeGates.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../../security/routeWorkspaceBinding.js';
 import { nodeUpsert, resolveAutolinkHandles } from '../../../../core/nodeService.js';
+import { resolveSupersessionContext } from '../../../../core/supersessionPolicy.js';
 // 1.1 (2026-08-17 audit) — retry SurrealDB transaction-conflict write drops
 // (same wrapper bulkIngest already uses; no-op for engines that serialize
 // writes internally).
@@ -223,6 +224,22 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
             targetGraph,
             tracker: deps.store.autolinkTracker,
         });
+        // D5 — resolve the workspace's supersession policy + a near-
+        // duplicate finder bound to this write's workspace, mirroring
+        // supersessionCandidates.ts's resolveCandidateSearch: active/boot
+        // graph → boot storageClient; non-active with a resolver → that
+        // workspace's own LanceDB; otherwise skip the near-dup check (the
+        // missing-field/prose checks still run).
+        const { policy: supersessionPolicy, findDuplicate: findSupersessionDuplicate } = resolveSupersessionContext({
+            workspace: requestedWorkspace,
+            targetGraph,
+            homeDir: deps.graphRegistry?.homeDir?.(),
+            bootGraph: deps.store.loreGraph,
+            storageClient: deps.store.storageClient,
+            workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+            hostDefaultEnforce: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+        });
+
         const writeResult = await withTransactionConflictRetry(() => nodeUpsert(
             {
                 // nodeData.id is validated as a string above (line ~73); the
@@ -235,15 +252,56 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
                 targetGraph,
                 initiator: 'http:POST /api/node',
                 skipEmbed,
+                // 3.21 step 3(e) — optional recall-enhancement fields; see
+                // core/questionAliases.ts. Validated inside nodeUpsert() —
+                // an invalid_questions_meta failure is mapped to 400 below.
+                questions: Array.isArray(nodeData.questions) ? nodeData.questions as string[] : undefined,
+                summary: typeof nodeData.summary === 'string' ? nodeData.summary : undefined,
+                entities: Array.isArray(nodeData.entities) ? nodeData.entities as string[] : undefined,
+                topics: Array.isArray(nodeData.topics) ? nodeData.topics as string[] : undefined,
+                supersedes: Array.isArray(nodeData.supersedes) ? nodeData.supersedes as string[] : undefined,
+                force: nodeData.force === true,
             },
             {
                 outboxStore: deps.outboxStore,
                 verbatim: deps.inlineVerbatim,
                 inlineVerbatim: deps.inlineVerbatim,
                 autolink,
+                supersessionPolicy,
+                findSupersessionDuplicate,
             },
         ));
         if (!writeResult.ok) {
+            // 3.21 step 3(e) — a questions/summary/entities/topics cap
+            // violation is a caller input error (400), not a substrate
+            // failure (500).
+            if (writeResult.code === 'invalid_questions_meta') {
+                writeError(res, 400, 'invalid_questions_meta', writeResult.error.message);
+                return;
+            }
+            // D5 — the write-time supersession rejection codes are caller
+            // input errors (400), not substrate unavailability (500).
+            // round 4 (#4) — `supersedes_partial` means the NEW node's own
+            // write already succeeded but one or more `supersedes` ids
+            // failed to apply after the fact; still surfaced as a 400 (the
+            // caller's supersedes list needs attention) but with the
+            // applied/unapplied partition in the body so nothing is hidden.
+            if (writeResult.code === 'supersedes_partial') {
+                writeError(res, 400, writeResult.code, writeResult.error.message, {
+                    applied: writeResult.applied,
+                    unapplied: writeResult.unapplied,
+                });
+                return;
+            }
+            if (
+                writeResult.code === 'missing_supersedes_field' ||
+                writeResult.code === 'prose_supersedes_mismatch' ||
+                writeResult.code === 'unlisted_near_duplicate' ||
+                writeResult.code === 'supersedes_apply_failed'
+            ) {
+                writeError(res, 400, writeResult.code, writeResult.error.message);
+                return;
+            }
             writeError(res, 500, 'internal_error', writeResult.error.message);
             return;
         }
@@ -260,7 +318,10 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
         // for idempotent re-puts. `isNew` in the body lets callers branch
         // without parsing the status line.
         res.writeHead(__isNew ? 201 : 200, okHeaders);
-        res.end(JSON.stringify({ ok: true, id: nodeData.id, isNew: __isNew, ...(typeWarning ? { warning: typeWarning } : {}) }));
+        // 3.21 step 3(d) — true only when the embed/verbatim write failed
+        // but the node was KEPT (a durable or best-effort retry is queued)
+        // rather than rolled back. Absent on the ordinary success path.
+        res.end(JSON.stringify({ ok: true, id: nodeData.id, isNew: __isNew, ...(writeResult.embedPending ? { embedPending: true } : {}), ...(typeWarning ? { warning: typeWarning } : {}), ...(writeResult.supersessionWarning ? { supersessionWarning: writeResult.supersessionWarning } : {}) }));
     } catch (saveErr) {
         if (isInvalidJsonBody(saveErr)) { writeInvalidJson(res, saveErr); return; }
         writeError(res, 500, 'internal_error', redactError(saveErr));

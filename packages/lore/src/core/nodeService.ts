@@ -43,80 +43,38 @@ import { log } from '../logger.js';
 import { recordHotWrite } from '../outbox/hotLane.js';
 import { withNodeLock } from './nodeWriteLock.js';
 import { applyVerbatimFanout, rollbackPartialWrite } from './nodeServiceVerbatim.js';
+import { validateQuestionsMeta, mergeQuestionsMetaIntoMetadataJson } from './questionAliases.js';
 import {
     checkVocab,
     type VocabCheckResult,
 } from '../engines/vocabPolicy.js';
 import { getWorkspaceVocabPolicy } from '../config/workspaces.js';
+import {
+    runSupersessionValidation,
+    runSupersessionApply,
+    type FindNearDuplicate,
+    type WorkspaceSupersessionPolicy,
+} from './supersessionPolicy.js';
 import type { LoreNode } from '../providers/types.js';
 import type { OutboxStore } from '../outbox/types.js';
 import type { VersionStore } from '../outbox/versionStore.js';
 import type { WriteAheadLog } from '../engines/syncEngine.js';
 
 /* ─── Minimal substrate contracts (local | cloud) ──────────────────── */
-
-/** The subset of a graph the write core needs. Both LocalGraph and
- *  DataplaneGraph satisfy this — no cloud hard-wiring. */
-export interface NodeWriteGraph {
-    upsertNode(node: Record<string, unknown>): Promise<LoreNode>;
-    deleteNode(id: string): Promise<unknown>;
-    /** Optional read-back used to mirror the existing row's security_scopes
-     *  onto the verbatim row (2.1/2.2). Both LocalGraph and DataplaneGraph
-     *  satisfy it; minimal test fakes may omit it (falls back to []). */
-    getNode?(id: string): Promise<LoreNode | null>;
-}
-
-/** The subset of the storage-client facade used for the inline (no-outbox)
- *  verbatim path. Mirrors LoreStorageClient.verbatimStore. */
-export interface VerbatimWriter {
-    verbatimStore(write: {
-        id: string;
-        text: string;
-        metadata: Record<string, unknown>;
-    }): Promise<unknown>;
-}
-
-/** Local graph + verbatim handles the autolink (reconnect) hook reads from.
- *  Supplied only when the write landed in the active local workspace. */
-export interface AutolinkHandles {
-    graph: Parameters<typeof reconnectOneNode>[0];
-    verbatim: Parameters<typeof reconnectOneNode>[1];
-    /**
-     * The OWNING Lore instance's in-flight autolink registry (lives on the
-     * StorageBundle — one per `createLore()`). REQUIRED, not optional: the
-     * fire-and-forget hook below is only drainable because something holds a
-     * handle on it, and a call site that quietly omitted the tracker would
-     * re-open the exact use-after-close race pendingAutolink.ts exists to
-     * close — silently, since the write still returns ok. Making it required
-     * puts that check on tsc instead of on a reviewer. Test callers that
-     * construct handles by hand fall back to `defaultAutolinkTracker` at
-     * runtime.
-     */
-    tracker: PendingAutolinkTracker;
-}
+// Split into nodeServiceTypes.ts (2026-09-23, D5) to keep this file under
+// the 800-line arch cap — re-exported here so no import site changes.
+import type { NodeWriteGraph, VerbatimWriter, AutolinkHandles } from './nodeServiceTypes.js';
+export type { NodeWriteGraph, VerbatimWriter, AutolinkHandles };
 
 /**
  * resolveAutolinkHandles — the ONE copy of the per-workspace autolink wiring
- * every write surface shares: the REST POST /api/node route
- * (mcp/http/routes/nodes/postNode.ts), the MCP store_node tool
- * (mcp/tools/memory/storeNode.ts), and the embedded lib:nodeUpsert /
- * lib:nodeUpsertBatch wrappers (mcp/server.ts).
- *
- * 2026-08-19 (launch-readiness backlog item 4 follow-up) — this block used to
- * be FOUR inline copies of the same "Audit fix #5" resolution. The original
- * defect (REST never fired autolink at all, so REST-written nodes were
- * permanently edgeless while identical MCP writes were not) existed precisely
- * because the wiring lived per-surface and drifted; one shared function makes
- * the next drift a deliberate edit here instead of a silent per-surface
- * omission. The REST-vs-MCP runtime parity is pinned by
- * test/rest-mcp-autolink-parity-e2e.ts.
- *
- * Semantics (unchanged from all four prior copies): default to the BOOT
- * store's graph + verbatim; when a per-workspace verbatim resolver is wired
- * (local multi-workspace), open the TARGET workspace's verbatim store and
- * pair it with the caller's already-resolved target graph. A resolver failure
- * falls back to the boot stores — autolink is a best-effort hook and must
- * never fail the write.
+ * every write surface shares (REST postNode.ts, MCP storeNode.ts, embedded
+ * lib:nodeUpsert). 2026-08-19: replaces four drifted inline copies (REST
+ * never fired autolink at all — see test/rest-mcp-autolink-parity-e2e.ts).
+ * Semantics: default to the BOOT store's graph + verbatim; when a per-
+ * workspace verbatim resolver is wired, open the TARGET workspace's verbatim
+ * store paired with the caller's target graph. Resolver failure falls back
+ * to boot stores — autolink is best-effort and must never fail the write.
  */
 export async function resolveAutolinkHandles(opts: {
     /** Boot-bound fallback graph, used when no per-workspace resolver is wired. */
@@ -174,6 +132,33 @@ export interface NodeUpsertArgs {
     /** Whether the write landed in the active workspace — gates WAL append
      *  + autolink, exactly as the MCP tool did (P1.C scope). */
     isActiveWorkspace?: boolean;
+
+    /**
+     * 3.21 step 3(e) — optional recall-enhancement fields. Every one is
+     * optional; a caller sending none of them gets exactly today's
+     * behaviour (see questionAliases.ts's module doc — this stays a pure
+     * database feature, no model call happens here).
+     *
+     *   - `questions`: up to MAX_QUESTIONS phrasings, each embedded +
+     *     indexed as its own ALIAS verbatim row (nodeServiceVerbatim.ts) so
+     *     a query sharing no words with the content can still find this
+     *     node. Alias rows are never returned as results themselves —
+     *     recall/retrieve.ts maps a hit back to this node's id.
+     *   - `summary`/`entities`/`topics`: merged verbatim into the node's
+     *     `metadata` JSON (questionAliases.ts's mergeQuestionsMetaIntoMetadataJson).
+     *     entities/topics become filterable in recall (3.21 step 3(f)).
+     */
+    questions?: string[];
+    summary?: string;
+    entities?: string[];
+    topics?: string[];
+
+    /** D5 — ids this write supersedes. `undefined` = omitted (distinct from
+     *  `[]` = "supersedes nothing"); required when policy enforces it. See
+     *  core/supersessionPolicy.ts. */
+    supersedes?: string[];
+    /** D5 — bypass the near-duplicate check for this one write. */
+    force?: boolean;
 }
 
 /** Optional orchestration hooks. Each transport wires the subset it used
@@ -216,6 +201,11 @@ export interface NodeUpsertHooks {
     /** Local autolink handles (reconnect). Supplied only when the write is
      *  active-workspace local mode AND embedding is not skipped. */
     autolink?: AutolinkHandles;
+    /** D5 — caller's resolved workspace supersession policy (transport looks
+     *  it up via getWorkspaceSupersessionPolicy). Absent = no enforcement. */
+    supersessionPolicy?: WorkspaceSupersessionPolicy;
+    /** D5 — near-duplicate lookup bound to the write's workspace. */
+    findSupersessionDuplicate?: FindNearDuplicate;
 }
 
 /** Discriminated result. Plain data — no transport envelope. */
@@ -224,13 +214,35 @@ export type NodeWriteResult =
           ok: true;
           /** The upserted node as returned by the graph layer. */
           node: LoreNode;
+          /**
+           * 3.21 step 3(d): true when the embed/verbatim write failed but the
+           * node was KEPT rather than rolled back — a durable retry is
+           * already queued (or, when no outbox is wired for this caller, a
+           * best-effort in-process retry via embedQueue). Omitted (not
+           * `false`) on the ordinary success path, so existing callers that
+           * only check `ok` are unaffected. See nodeServiceVerbatim.ts.
+           */
+          embedPending?: boolean;
+          /** D5 round 4 (#3) — set when the write-time near-duplicate check
+           *  failed open (a search engine error, not "no backend wired") so
+           *  the caller can see the check was skipped rather than silently
+           *  reading "no duplicate found". Omitted on the ordinary path. */
+          supersessionWarning?: string;
       }
     | {
           ok: false;
           /** Stable, branchable failure code. */
-          code: 'verbatim_unavailable' | 'invalid_node_id' | 'field_too_large' | 'protected_field' | 'write_failed';
+          code: 'verbatim_unavailable' | 'invalid_node_id' | 'field_too_large' | 'protected_field' | 'write_failed' | 'invalid_questions_meta'
+              // D5 (2026-09-23) — write-time supersession enforcement/effect.
+              | 'missing_supersedes_field' | 'prose_supersedes_mismatch' | 'unlisted_near_duplicate' | 'supersedes_apply_failed'
+              // D5 round 4 (#4) — supersedeNode failed for some (not all) ids
+              // AFTER the new node's own write already succeeded.
+              | 'supersedes_partial';
           /** Underlying error (already logged + rolled back here). */
           error: Error;
+          /** Present only when code === 'supersedes_partial'. */
+          applied?: string[];
+          unapplied?: Array<{ id: string; reason: string }>;
       };
 
 /* ─── Vocab-policy verdict (shared lookup, transport-shaped envelope) ─ */
@@ -246,15 +258,24 @@ export type VocabVerdict =
  * verdict; the caller shapes it (MCP envelope vs HTTP status). Soft policy-
  * read failures (e.g. workspaces.json edited mid-request) downgrade to
  * `accept` after logging — identical to both prior call sites.
+ *
+ * `home` — 3.20.2 follow-up (docs/releases/3.20.2/ATLAS-ADOPTION.md): a bare
+ * `getWorkspaceVocabPolicy(workspace)` resolves against the process-wide
+ * `loreHome()`, not an embedded instance's own registry (same wrong-home
+ * pattern fixed in governance/lifecycle/ingestion/server.ts). An embedded
+ * host's vocab policy (incl. `hitl`/reject) then silently fails to resolve,
+ * the `catch` downgrades to `accept`, and a held write gets committed.
+ * Optional: cloud mode / no-registry callers keep the process-wide home.
  */
 export function resolveVocabVerdict(input: {
     workspace: string;
     type: string;
     coreTypes: ReadonlyArray<string>;
     logPrefix: string;
+    home?: string;
 }): VocabVerdict {
     try {
-        const policy = getWorkspaceVocabPolicy(input.workspace);
+        const policy = getWorkspaceVocabPolicy(input.workspace, input.home);
         const verdict = checkVocab({
             policy,
             type: input.type,
@@ -324,16 +345,30 @@ export function resolveVocabVerdict(input: {
  *   3. Verbatim fan-out under the canonical `lore:<id>` key:
  *        - skipEmbed → nothing (graph-only node).
  *        - asyncEmbed + embedQueue → enqueue; consistency sweeper heals drift.
- *        - outbox wired → record `verbatim.upsert`; rollback graph on failure.
- *        - else → inline `verbatim.verbatimStore`; rollback graph on failure.
- *      On verbatim failure BOTH traces are retracted (the graph node is
- *      deleted AND the node.upsert outbox row is removed so the replicator
- *      can't resurrect it) and `{ ok: false }` is returned — NO partial
- *      state. If a retraction itself fails, nodeUpsert THROWS rather than
- *      masking the orphan as a clean handled failure (TW-4a).
+ *        - outbox wired → record `verbatim.upsert` (durable); a subsequent
+ *          `inlineVerbatim` failure (cloud's eager best-effort mirror) no
+ *          longer rolls back — the durable row already exists, so the node
+ *          is KEPT with `embedPending: true` (3.21 step 3(d)). Only a
+ *          failure to RECORD the durable row itself is still fatal
+ *          (nothing to keep the node pending against) and rolls back.
+ *        - else (no outbox) → inline `verbatim.verbatimStore`; a failure
+ *          here ALSO keeps the node (`embedPending: true`, best-effort
+ *          retry via `embedQueue` if supplied) rather than rolling back —
+ *          deleting real content because a search index failed to update
+ *          is the bug 3.21 step 3(d) closes. There is no durable-across-
+ *          restart guarantee in this branch specifically (no outbox is
+ *          wired at all for this caller).
+ *      The ONE remaining rollback case (the `verbatim.upsert` outbox
+ *      RECORD call itself failing) still retracts both traces (the graph
+ *      node is deleted AND the node.upsert outbox row is removed so the
+ *      replicator can't resurrect it) and returns `{ ok: false }` — no
+ *      partial state. If a retraction itself fails, nodeUpsert THROWS
+ *      rather than masking the orphan as a clean handled failure (TW-4a).
  *   4. WAL append (active-workspace only, when wired).
  *   5. Version record (non-fatal, when wired).
- *   6. Ingest-time autolink (active-workspace local, when supplied + !skipEmbed).
+ *   6. Ingest-time autolink, when `hooks.autolink` is supplied — runs
+ *      regardless of `skipEmbed` (bulkIngest draws edges for skipEmbed nodes
+ *      too), but never writes the canonical row itself (D6 fix, 2026-09-23).
  */
 export async function nodeUpsert(
     args: NodeUpsertArgs,
@@ -527,6 +562,32 @@ export async function nodeUpsert(
         }
     }
 
+    // 3.21 step 3(e) — optional questions/summary/entities/topics. Validate
+    // BEFORE any write (same "fail before any write" discipline as 0a-2/0b
+    // above); a caller sending none of these fields never reaches this block
+    // meaningfully (validateQuestionsMeta returns ok:true with an empty
+    // `questions` array and no metadata patch — today's behaviour,
+    // unchanged). On success, summary/entities/topics are merged verbatim
+    // into nodeData.metadata (mergeQuestionsMetaIntoMetadataJson) so they
+    // ride the SAME atomic graph upsert as everything else; `questions`
+    // itself is not a graph column — nodeServiceVerbatim.ts's alias fan-out
+    // (step 3, below) reads it directly off `args`.
+    {
+        const metaCheck = validateQuestionsMeta({
+            questions: args.questions, summary: args.summary, entities: args.entities, topics: args.topics,
+        });
+        if (!metaCheck.ok) {
+            return { ok: false, code: 'invalid_questions_meta', error: new Error(metaCheck.error) };
+        }
+        if (metaCheck.value.summary !== undefined || metaCheck.value.entities !== undefined || metaCheck.value.topics !== undefined) {
+            const existingMeta = (nodeData as Record<string, unknown>).metadata;
+            (nodeData as Record<string, unknown>).metadata = mergeQuestionsMetaIntoMetadataJson(
+                typeof existingMeta === 'string' ? existingMeta : undefined,
+                metaCheck.value,
+            );
+        }
+    }
+
     // 2.1/2.2 (2026-08-17) — the verbatim/vector mirror must carry the node's
     // effective security_scopes, or row-level scope filtering fails open on the
     // primary surfaces (store_node / POST /api/node never send scopes). Read the
@@ -540,6 +601,15 @@ export async function nodeUpsert(
         }
     }
 
+    // 0d. D5 — write-time supersession-policy enforcement (opt-in) + round-4
+    //     (#4) all-or-nothing `supersedes` id pre-check, regardless of enforcement.
+    const supersessionVerdict = await runSupersessionValidation({
+        supersessionPolicy: hooks.supersessionPolicy, findSupersessionDuplicate: hooks.findSupersessionDuplicate,
+        nodeData: nodeData as Record<string, unknown>, id, supersedes: args.supersedes, force: args.force === true, targetGraph,
+    });
+    if (!supersessionVerdict.ok) return { ok: false, code: supersessionVerdict.code, error: supersessionVerdict.error };
+    const supersessionWarning = supersessionVerdict.supersessionWarning;
+
     // 1-3. Outbox `node.upsert` record → substrate graph upsert →
     //      verbatim/vector fan-out. These are the three externally-visible
     //      writes of a node write; they now run under ONE per-(workspace,id)
@@ -547,7 +617,7 @@ export async function nodeUpsert(
     //      for the same id cannot land their graph and verbatim/vector
     //      writes in different relative orders (split-brain — see the lock's
     //      doc comment for the full root-cause account).
-    const writeOutcome = await withNodeLock(workspace, id, async (): Promise<{ node: LoreNode } | { verbatimError: Error }> => {
+    const writeOutcome = await withNodeLock(workspace, id, async (): Promise<{ node: LoreNode; embedPending: boolean } | { verbatimError: Error }> => {
         // 1. Outbox-first node.upsert (durability + replay + per-workspace replication).
         //    TW-4a — capture the recorded entry so the verbatim-failure rollback
         //    below can RETRACT it. Without this, deleting the graph node on a
@@ -597,9 +667,14 @@ export async function nodeUpsert(
             throw graphErr;
         }
 
-        // 3. Verbatim fan-out (canonical `lore:<id>` key) + rollback on failure.
-        //    Lives in nodeServiceVerbatim.ts (file-size split).
-        const verbatimWriteFailed = await applyVerbatimFanout({
+        // 3. Verbatim fan-out (canonical `lore:<id>` key). 3.21 step 3(d):
+        //    an embed/verbatim write failure no longer ALWAYS rolls back —
+        //    see nodeServiceVerbatim.ts's module doc for the two cases where
+        //    the node is now kept (`embedPending: true`) vs the one
+        //    remaining fatal case (durability itself couldn't be
+        //    established, so there's nothing to keep the node pending
+        //    against).
+        const fanoutOutcome = await applyVerbatimFanout({
             skipEmbed,
             asyncEmbed: args.asyncEmbed,
             id,
@@ -611,16 +686,28 @@ export async function nodeUpsert(
             targetGraph,
             hooks,
             nodeUpsertOutboxEntryId,
+            questions: args.questions,
         });
-        if (verbatimWriteFailed) {
-            return { verbatimError: verbatimWriteFailed };
+        if (fanoutOutcome.error) {
+            return { verbatimError: fanoutOutcome.error };
         }
-        return { node };
+        return { node, embedPending: fanoutOutcome.embedPending };
     });
     if ('verbatimError' in writeOutcome) {
         return { ok: false, code: 'verbatim_unavailable', error: writeOutcome.verbatimError };
     }
-    const { node } = writeOutcome;
+    const { node, embedPending } = writeOutcome;
+
+    // 3.5 D5 — apply `supersedes` (if any), independent of enforcement, AFTER
+    // the new node's own write succeeded. See supersessionPolicy.ts.
+    const supersedeApplied = await runSupersessionApply({
+        targetGraph, supersedes: args.supersedes, newId: id, workspace, initiator, outboxStore: hooks.outboxStore, logPrefix,
+    });
+    if (!supersedeApplied.ok) {
+        return supersedeApplied.code === 'supersedes_partial'
+            ? { ok: false, code: 'supersedes_partial', error: supersedeApplied.error, applied: supersedeApplied.applied, unapplied: supersedeApplied.unapplied }
+            : { ok: false, code: 'supersedes_apply_failed', error: supersedeApplied.error };
+    }
 
     // 4. WAL append — active-workspace only (P1.C scope), when wired.
     if (args.isActiveWorkspace && hooks.getWal) {
@@ -699,17 +786,14 @@ export async function nodeUpsert(
                 project: workspace,
                 ecosystem,
             }, {
-                // 3.1 — when this call already wrote (or queued) the
-                // canonical verbatim row above (i.e. !skipEmbed), don't let
-                // reconnectOneNode write it again — two independent,
-                // unserialized writers of the same row produced permanent
-                // duplicate canonical rows under concurrency. When skipEmbed
-                // is true, step 3 above wrote NOTHING, so reconnectOneNode's
-                // own store() is the only writer and must run.
-                skipStore: !skipEmbed,
+                // D6 fix (2026-09-23) — skipEmbed means graph-only FOREVER for
+                // store_node/embedded nodeUpsert (old "must run" reasoning was
+                // backwards, re-embedded nodes within ~1s). Only bulkIngest
+                // opts in via allowSkipEmbedStore. !skipEmbed: step 3 wrote it.
+                skipStore: skipEmbed ? !hooks.autolink.allowSkipEmbedStore : true,
             }).catch((err) => log.error(`${logPrefix} ingest-hook reconnect failed for ${redactId(id)}: ${redactError(err)}`)));
         }
     }
 
-    return { ok: true, node };
+    return { ok: true, node, ...(embedPending ? { embedPending: true } : {}), ...(supersessionWarning ? { supersessionWarning } : {}) };
 }

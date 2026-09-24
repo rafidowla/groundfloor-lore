@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { StorageBundle } from '../../services.js';
-import type { VerbatimStore } from '../../../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../../../engines/verbatimStoreApi.js';
 import type { DataplaneVectorStore } from '../../../engines/dataplaneVectorStore.js';
 import type { ConsentManager } from '../../../security/consent.js';
 import type { AuditLog } from '../../../security/audit.js';
@@ -61,7 +61,7 @@ import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 // classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
 // more than the shared handle? Feature-detect and refuse — do not re-narrow to a class.
 type LoreGraph = LoreGraphHandle;
-type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
+type LoreVectorStore = VerbatimStoreApi | DataplaneVectorStore;
 
 // F-LOW-E06 — TOCTOU-safe read. assertPathAllowed() stats the file for the
 // size cap, but the file can change/grow between that check and the actual

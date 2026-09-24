@@ -35,6 +35,7 @@ import {
 } from './surrealRecordId.js';
 import { clampLimit } from '../topologyOverviewFold.js';
 import { assertIdent } from '../whereClause.js';
+import { buildKeysetPage } from '../graphShared/keysetPage.js';
 
 /**
  * queryEdges — paginated edge query, mirroring the GET /api/edges contract
@@ -49,16 +50,27 @@ export async function queryEdges(query: SurrealQuery, q: EdgeQuery): Promise<Lor
     const where = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
     try {
         const rows = await query(
-            // NO `ORDER BY`. It used to sort by relation, which is not in the
-            // EdgeQuery contract, is not what LocalGraph does (its Cypher has
-            // no ORDER BY either), and cost a full sort of every matching edge
-            // on EVERY page. Enumerating 51,934 edges in 1,000-row pages spent
-            // ~150 ms per page sorting the same 51,934 rows again — 9,227 ms
-            // total, against 407 ms unsorted, with all 51,934 distinct edges
-            // still recovered. SurrealDB returns record-id order, which is
-            // stable across pages, so pagination stays coherent.
+            // ORDER BY in, out, relation — 3.21 step 1c (Opus review of the
+            // SQLite graph engine PR): the two engines must return
+            // OBSERVABLY identical order, not merely each be internally
+            // stable, so `graph-engine-parity-unit.ts` can compare
+            // `queryEdges` page-for-page instead of set-only. This reverses
+            // an earlier, deliberate, MEASURED decision (below) to drop
+            // ORDER BY for performance — that cost is real, has NOT been
+            // eliminated (no index on `(in, out, relation)` was added: the
+            // `LORE_SURREAL_DEFINE_INDEXES` DEFINE INDEX statements leak a
+            // live libuv handle on this @surrealdb/node build and stay
+            // opt-in-only — see surrealConnection.ts's INDEX_STATEMENTS doc
+            // comment), and is measured again in graph-engine-latency-unit.ts
+            // rather than hidden. Original finding, unchanged: sorting
+            // 51,934 edges in 1,000-row pages cost ~150 ms/page — 9,227 ms
+            // total, against 407 ms unsorted, all 51,934 distinct edges
+            // recovered either way. Determinism is now a harder requirement
+            // than that page-latency number; if this trade needs revisiting
+            // at real scale, add the composite index behind the same
+            // opt-in flag first.
             `SELECT in, out, relation, confidence, confidenceScore FROM ${EDGE_TABLE}${where}`
-            + ' LIMIT $limit START $offset',
+            + ' ORDER BY in, out, relation LIMIT $limit START $offset',
             vars,
         );
         return rows.map((row) => ({
@@ -169,8 +181,11 @@ export async function getTopology(
     const scoped = projectsList.length > 0;
 
     try {
+        // ORDER BY id — the record id IS the node table's primary storage
+        // key, so this is native storage order, not a sort step. Matches
+        // SqliteGraph's getTopology (ORDER BY id, its PRIMARY KEY too).
         const nodeRows = await query(
-            `SELECT * FROM ${NODE_TABLE}${scoped ? ' WHERE project IN $projects' : ''} LIMIT $limit`,
+            `SELECT * FROM ${NODE_TABLE}${scoped ? ' WHERE project IN $projects' : ''} ORDER BY id LIMIT $limit`,
             scoped ? { projects: projectsList, limit: nodeLimit } : { limit: nodeLimit },
         );
         const nodes = nodeRows.map((raw) => {
@@ -192,8 +207,11 @@ export async function getTopology(
         });
 
         const visible = new Set(nodes.map((n) => String(n.id)));
+        // ORDER BY in, out, relation — same determinism trade as
+        // `queryEdges` above (see that function's doc comment for the
+        // measured unsorted-vs-sorted cost this reintroduces).
         const edgeRows = await query(
-            `SELECT in, out, relation, confidence, confidenceScore FROM ${EDGE_TABLE} LIMIT $limit`,
+            `SELECT in, out, relation, confidence, confidenceScore FROM ${EDGE_TABLE} ORDER BY in, out, relation LIMIT $limit`,
             { limit: eLimit },
         );
         const edges: Array<Record<string, unknown>> = [];
@@ -274,16 +292,9 @@ export async function bulkList(query: SurrealQuery, q: BulkListQuery): Promise<B
             + ' ORDER BY updatedAt DESC, id ASC LIMIT $limit',
             vars,
         );
-        const hasMore = rows.length > limit;
-        const page = (hasMore ? rows.slice(0, limit) : rows).map((row) => normalizeRow(row));
-        const last = page[page.length - 1];
-        return {
-            nodes: page,
-            hasMore,
-            nextCursor: hasMore && last
-                ? { updatedAt: String(last['updatedAt'] ?? ''), id: String(last['id'] ?? '') }
-                : null,
-        };
+        const normalized = rows.map((row) => normalizeRow(row));
+        const { page, hasMore, nextCursor } = buildKeysetPage(normalized, limit);
+        return { nodes: page, hasMore, nextCursor };
     } catch (error) {
         throw surrealError('Failed to bulk-list nodes', 'bulkList', error);
     }
@@ -333,15 +344,9 @@ export async function bulkListProjected(
             + ' ORDER BY updatedAt DESC, id ASC LIMIT $limit',
             vars,
         );
-        const hasMore = rows.length > limit;
-        const page = (hasMore ? rows.slice(0, limit) : rows).map((row) => normalizeRow(row));
-        const last = page[page.length - 1];
-        return {
-            rows: page,
-            nextCursor: hasMore && last
-                ? { updatedAt: String(last['updatedAt'] ?? ''), id: String(last['id'] ?? '') }
-                : null,
-        };
+        const normalized = rows.map((row) => normalizeRow(row));
+        const { page, nextCursor } = buildKeysetPage(normalized, limit);
+        return { rows: page, nextCursor };
     } catch (error) {
         throw surrealError('Failed to page nodes', 'bulkListProjected', error);
     }

@@ -27,7 +27,7 @@ Dataplane swap point.
 
 | Tool | Purpose | Key params |
 |---|---|---|
-| `store_node` | Upsert a knowledge node (decision, convention, bug_pattern, …) | `id`, `type`, `label`, `content?`, `tags?`, `workspace`, `ephemeral?`, `ttl_ms?`, `embed?`, `async_embed?`, `evidence?`, `anchors?`, `changeset_id?`, `validFrom?`, `validUntil?` |
+| `store_node` | Upsert a knowledge node (decision, convention, bug_pattern, …) | `id`, `type`, `label`, `content?`, `tags?`, `workspace`, `ephemeral?`, `ttl_ms?`, `embed?`, `async_embed?`, `evidence?`, `anchors?`, `changeset_id?`, `validFrom?`, `validUntil?`, `questions?` (≤5, ≤300 chars each — indexed as alias rows, never returned as their own result), `summary?` (≤500 chars), `entities?` / `topics?` (≤20 items, ≤100 chars each — stored on the node's metadata, filterable via `recall`/`search`) |
 | `store_edge` | Relate two nodes | `source_id`, `target_id`, `relation`, `bidirectional?`, `confidence?`, `workspace` |
 | `delete_node` | Remove a node (and its edges) | `id`, `workspace` |
 | `delete_edge` | Remove a specific edge | `source_id`, `target_id`, `relation`, `workspace` |
@@ -38,8 +38,9 @@ Dataplane swap point.
 
 | Tool | Purpose | Key params |
 |---|---|---|
-| `recall` | Semantic search + graph traversal combined — the primary retrieval tool | `topic`, `depth?`, `project?`, `tags?`, `workspace?`, `mode?`, `search_mode?`, `max_tokens?`, `include_archived?` |
-| `search` | Vector + keyword search over nodes | `query`, `limit?`, `tags?`, `language?`, `workspace?`, `search_mode?` |
+| `recall` | Semantic search + graph traversal combined — the primary retrieval tool | `topic`, `depth?`, `project?`, `tags?`, `workspace?`, `mode?`, `search_mode?`, `max_tokens?`, `include_archived?`, `queries?` (≤5 extra phrasings, fused with `topic` via the shared RRF), `entities?` / `topics?` (≤20 each — match the node's `store_node` `entities`/`topics`), `project?` (exact match), `compact?` (return thin `{id,label,snippet≤240,score,matchedBy,updatedAt}` candidates instead of full nodes — pair with `recall_expand`), `abstain?` (default `false` — return zero results below the relevance floor; see `_meta` in the embedded-mode section), `relevance_floor?` (default `2.0`). Every response (summary, full, and compact) now carries a `queryId` — pass it to `recall_outcome` to tie an outcome to this call. |
+| `search` | Vector + keyword search over nodes | `query`, `limit?`, `tags?`, `language?`, `workspace?`, `search_mode?`, `queries?` (≤5 extra phrasings, fused with `query`), `entities?` / `topics?`, `project?`, `abstain?`, `relevance_floor?` |
+| `recall_expand` | Full node bodies for ids chosen from a `recall` `compact:true` response | `ids` (≤50), `workspace`, `ecosystem?` — confined to the same workspace/ecosystem/actor scope `recall` itself enforces; an id outside that scope is silently dropped, not an error |
 | `traverse` | Walk the graph from a node | `node_id`, `depth?`, `workspace?` |
 | `structured_query` | Filtered structured node query | filter args (`type`, `tags`, `project`, …) |
 | `list_nodes` | List nodes in a workspace | `workspace?`, `type?`, `limit?`, `offset?` |
@@ -115,6 +116,7 @@ HITL exception queue.
 | `get_prune_status` | Status of the prune pipeline |
 | `record_outcome` | Record a success/failure/partial outcome for a node |
 | `get_node_outcomes` | Read accumulated outcomes for a node |
+| `recall_outcome` | Front door onto the SAME outcome-weighting mechanism as `record_outcome` (3.21 step 3(h); no new ranking math, no new vocabulary). **This is outcome feedback (did acting on the recalled memory work?), not relevance feedback (was the recall on-topic?) — 3.21 has no relevance-based ranking signal.** | `nodeId`, `workspace`, `outcome` (`success`\|`failure`\|`partial` — identical to `record_outcome`'s own field; `failure` ranks the node HIGHER afterward, by ranking.ts's existing failure-boost design — this is a warning signal, not a downrank), `queryId?` (a prior recall/search response's `queryId`) |
 | `redact_evidence` | Redact source-attribution evidence from a node |
 | `check_anchors` | Verify a node's external anchors are still fresh |
 | `corpus_health` | Corpus-wide health report |
@@ -299,11 +301,12 @@ delete an X" without hunting through every family's own table below.
 | `GET /api/nodes/:id/history` | Version history for a node |
 | `GET /api/nodes/:id/anchors` | Inspect a node's anchor references |
 | `POST /api/nodes/:id/outcomes` · `GET /api/nodes/:id/outcomes` | Record / read node outcomes |
+| `POST /api/recall/outcome` | Mirror of the route above, entered from a recall-adjacent surface (3.21 step 3(h); same mechanism, no new ranking math, no new vocabulary). Body: `{node_id, workspace, outcome, query_id?}` — `outcome` is `success`\|`failure`\|`partial`, identical meaning to `record_outcome`'s own field (outcome of ACTING on the memory, not relevance). 501 `not_configured` when outcome tracking isn't wired. |
 | `POST /api/edge` · `POST /api/edges` | Create edge(s) |
 | `GET /api/edges` | List edges (`?ecosystem=` keeps only edges with BOTH endpoints in scope) |
 | `DELETE /api/edge` | Delete an edge |
 | `POST /api/edges/bulk` | Bulk edge create |
-| `POST /api/nodes/bulk` · `POST /api/nodes/bulk-delete` | Bulk node upsert / delete |
+| `POST /api/nodes/bulk` · `POST /api/nodes/bulk-delete` | Bulk node upsert / delete. Bulk upsert supports `questions?`/`summary?`/`entities?`/`topics?` per row (3.21 step 3(h) round 2 — same caps, alias semantics, and outbox durability as `store_node`/`POST /api/node`; applied per item after that item's graph write succeeds, via `core/bulkQuestionAliases.ts`, not the single-write fan-out directly — see that file for why). Re-upserting a row replaces its aliases, exactly like the single-write path. `POST /api/nodes/bulk-delete` does **not** currently tombstone a deleted row's aliases (known gap — file if this affects you). `runBulkIngest()` (the library-level bulk path used by `bulkIngest`) accepts the same four fields directly on each `BulkIngestNodeArgs` item. |
 | `POST /api/nodes/prune` | Retention-driven node pruning |
 | `POST /api/nodes/:id/restore` | Restore a pruned/archived node |
 | `GET /api/prune-jobs/:id` | Poll a prune job's status |
@@ -344,7 +347,8 @@ Response: `{ at, count, nodes: LoreNode[] }`. Embeddable-surface equivalent:
 
 | Method · Path | Purpose |
 |---|---|
-| `GET /api/recall` | Semantic recall (search + traverse) |
+| `GET /api/recall` | Semantic recall (search + traverse). Accepts repeated `?queries=<phrasing>` (≤5 extras, fused with `topic` via the shared RRF) and `?entities=`/`?topics=` (comma-separated, match `store_node`'s `entities`/`topics`) plus `?project=` (exact match). All optional — omitted ⇒ today's behaviour. `?compact=true` returns thin `{id,label,snippet≤240,score,matchedBy,updatedAt}` candidates instead of full nodes. `?abstain=true\|false` (default off — omit for the env default `LORE_RECALL_ABSTAIN`) and `?relevance_floor=` (default `2.0`) control D1 calibrated abstention; every response's `_meta` carries the calibration/relevance fields regardless (see the embedded-mode `_meta` reference). Every response carries a `queryId` for `POST /api/recall/outcome`. |
+| `POST /api/recall/expand` | Full node bodies for ids chosen from a `?compact=true` response. Body: `{ids}` (≤50), `workspace`, `ecosystem?`. Same confinement `GET /api/recall` enforces — an id outside the caller's workspace/ecosystem/actor scope is silently dropped, not an error. |
 | `POST /api/recall/bulk` | Batched recall |
 | `GET /api/search` | Full-text / hybrid content search |
 | `POST /api/query` | Structured query |
@@ -596,7 +600,36 @@ const result = await lore.recall('embedded lifecycle', {
 
 `RecallOpts` fields: `workspace` (required), `ecosystem?`, `depth?`, `mode?`,
 `crossProject?`, `includeSuperseded?`, `tags?`, `maxTokens?`,
-`includeArchived?`, `searchMode?`, `queryLanguage?`, `filePaths?`, `max?`.
+`includeArchived?`, `searchMode?`, `queryLanguage?`, `filePaths?`, `max?`,
+`abstain?` (default `false` — see `_meta` below), `relevanceFloor?` (default
+`2.0`).
+
+##### `_meta` — calibrated relevance & abstention (D1)
+
+Every `recall`/`search` response (MCP tool, REST route, and
+`lore.recall()`) carries a shared snake_case `_meta` block, built once in
+`packages/lore/src/recall/abstention.ts` so the fields and semantics can't
+drift surface-by-surface:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `top_similarity` | `number \| null` | Raw top-1 vector-leg cosine similarity for the query's primary phrasing. `null` when no semantic leg ran (keyword mode) or no hits. |
+| `top_relevance` | `number \| null` | `top_similarity` converted to a z-score against the workspace's calibrated "nothing relevant" null distribution. `null` whenever `calibration.status !== 'ok'`. |
+| `floor` | `number \| null` | The z-score floor abstention gates on (`relevanceFloor`, default `2.0`). `null` when calibration doesn't apply at all (keyword mode, cross-workspace fan-out) — there's no floor to report because no z-score was ever computed against one. |
+| `below_floor` | `boolean` | `top_relevance !== null && top_relevance < floor`. Reported even when `abstain` is off, so hosts can build their own gating on top of the raw signal. |
+| `abstained` | `boolean` | `true` only when `abstain: true` was passed, the query is below floor, and no rescue overrode it. When `true`, `results`/`hits` are empty. |
+| `abstain_overridden` | `'exact_identifier'` (optional) | Present when an otherwise-abstained decision was rescued because the query contains an identifier-shaped token (dotted/underscored/slashed/hyphenated, camelCase/PascalCase, a ≥6-char letter+digit mix, or a `#`-sigil numbered reference like `#4821` — bare digits never qualify) that appears as a whole token (not a substring of a longer token) in a candidate's label or content. |
+| `calibration` | object | `{status, version, probes, rows, null_median, null_scale, scope}`. `status` is one of `ok`, `insufficient_rows` (store has fewer than 50 rows), `degenerate` (probes had no meaningful spread, `null_scale < 0.005`), `unavailable` (probe run failed or hasn't completed), `not_applicable` (keyword mode / cross-workspace), or **`pending`** — the fit is running in the background (see below) and hasn't landed yet; `top_relevance`/`below_floor`/`abstained` are not meaningful until a later call sees a non-`pending` status. |
+
+**Non-blocking calibration (D1 follow-up):** the first calibration fit for a
+workspace costs roughly 1-2s (128 fixed probe queries through the same
+search path a real query uses). A host that never passes `abstain: true` has
+no correctness reason to pay that cost synchronously — `_meta.calibration`
+comes back `pending` immediately on that first call while the real fit
+completes in the background; a subsequent call sees the landed status. A
+host that passes `abstain: true` still blocks on the first call, since
+abstention gating needs the floor to mean something from the very first
+query.
 
 #### `lore.nodeUpsert(args)` → `Promise<NodeWriteResult>`
 

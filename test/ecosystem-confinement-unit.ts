@@ -74,10 +74,12 @@
  *   B9 — every confinement test above runs retrieve()'s DEFAULT (hybrid)
  *        mode. The leak this file documents was originally confirmed against
  *        the default mode only, yet the fix's load-bearing pieces differ per
- *        mode: 'keyword' never consults the verbatim store at all (the
- *        graph.search scan is PRIMARY there), and 'hybrid' fuses the
- *        semantic+BM25 unions via RRF before the same post-hydration filter
- *        runs. B9 pins the combined assertion across ALL THREE modes at
+ *        mode: 'keyword' (3.21 step 3(a)) consults the store's bm25Search
+ *        leg ALONGSIDE the graph.search scan — never the embedding provider
+ *        — with the graph scan still PRIMARY/supplementary as before, and
+ *        'hybrid' fuses the semantic+BM25 unions via RRF before the same
+ *        post-hydration filter runs. B9 pins the combined assertion across
+ *        ALL THREE modes at
  *        once: one workspace, two same-topic ecosystems, the foreign rows
  *        ranked FIRST by every unscoped seed query, a deliberately degraded
  *        keyword scan, and a cross-ecosystem traversal edge — zero foreign
@@ -230,8 +232,8 @@ const traversalCfg = {
     semantic: [{ id: 'lore:seed-a', score: 0.9 }],
     traverse: {
         'seed-a': [
-            { node: node('hop-alpha', 'question-alpha'), depth: 1 },
-            { node: node('hop-beta', 'question-beta'), depth: 1 },
+            { node: node('hop-alpha', 'question-alpha'), depth: 1, relation: 'relates_to' },
+            { node: node('hop-beta', 'question-beta'), depth: 1, relation: 'relates_to' },
         ],
     },
 };
@@ -240,29 +242,32 @@ await test('B2: traversal does NOT walk into another ecosystem', async () => {
     const out = await retrieve(mockCtx(traversalCfg), 'q', {
         workspace: 'shared-ws', ecosystem: 'question-alpha', depth: 1,
     });
-    const ids = out.results.map((r) => r.node.id);
+    // fix/d4-traversal-separate-field: neighbours live in `related`, never `results`.
+    const ids = [...out.results.map((r) => r.node.id), ...out.related.map((r) => r.node.id)];
     assert.ok(!ids.includes('hop-beta'), `foreign-ecosystem node leaked via traversal: ${ids.join(', ')}`);
 });
 
 await test('B2: traversal STILL returns same-ecosystem neighbours', async () => {
-    // Guard against "fixing" the leak by disabling traversal.
+    // Guard against "fixing" the leak by disabling traversal. D4 fix: the
+    // neighbour surfaces in `related`, not `results` — `results` is
+    // direct-matches-only.
     const out = await retrieve(mockCtx(traversalCfg), 'q', {
         workspace: 'shared-ws', ecosystem: 'question-alpha', depth: 1,
     });
-    const ids = out.results.map((r) => r.node.id);
-    assert.ok(ids.includes('seed-a'), 'seed must survive');
-    assert.ok(ids.includes('hop-alpha'), 'same-ecosystem neighbour must still be traversed');
+    assert.ok(out.results.map((r) => r.node.id).includes('seed-a'), 'seed must survive');
+    assert.ok(out.related.map((r) => r.node.id).includes('hop-alpha'), 'same-ecosystem neighbour must still be traversed');
 });
 
 await test('B2: crossProject search-everything still traverses both ecosystems', async () => {
     // ecosystemScope resolves to '*' under crossProject; confinement must be
-    // a no-op there, exactly like the existing seed filter.
+    // a no-op there, exactly like the existing seed filter. D4 fix: both
+    // hops are expected in `related`, not `results`.
     const out = await retrieve(mockCtx(traversalCfg), 'q', {
         workspace: 'shared-ws', ecosystem: 'question-alpha', crossProject: true, depth: 1,
     });
-    const ids = out.results.map((r) => r.node.id);
-    assert.ok(ids.includes('hop-beta'), 'crossProject must not be confined');
-    assert.ok(ids.includes('hop-alpha'), 'crossProject keeps same-ecosystem hops too');
+    const relatedIds = out.related.map((r) => r.node.id);
+    assert.ok(relatedIds.includes('hop-beta'), 'crossProject must not be confined');
+    assert.ok(relatedIds.includes('hop-alpha'), 'crossProject keeps same-ecosystem hops too');
 });
 
 /* ─── B3 fakes: the BULK sweep (reconnectGraph) over the same index ───── */
@@ -507,8 +512,16 @@ await test('B4: the unfiltered top-up must NOT leak a foreign-ecosystem node', a
  */
 const LIMIT = 4;
 /** retrieve()'s SEED_HIDDEN_HEADROOM — the scoped query must return at least
- *  this many rows for the window to count as FULL. */
-const FULL_WINDOW = LIMIT * 4;
+ *  this many rows for the window to count as FULL.
+ *
+ * D3 (prefix-stable ranking, docs/design/D3-prefix-stable-ranking.md §3.1):
+ * every candidate-generation fetch is now sized off `candLimit =
+ * max(limit, candidateFloor)`, not `limit` directly — and the default
+ * candidateFloor is 50. So for LIMIT=4 the window retrieve() actually
+ * requests is `max(LIMIT, 50) * SEED_HIDDEN_HEADROOM(4)`, not `LIMIT * 4`.
+ * Previously (pre-D3) this was the same number by coincidence of LIMIT being
+ * small; it no longer is. */
+const FULL_WINDOW = Math.max(LIMIT, 50) * 4;
 
 function fullWindowCtx(cfg: {
     ecosystem: string;
@@ -980,11 +993,15 @@ await test('B7: topScore is null when the tags filter removes EVERY semantic see
  *     first (b-vec at 0.99 above a-vec at 0.9) — if hybrid's RRF or the
  *     semantic seed pass ever surfaced raw candidates unfiltered, the
  *     foreign node would come out on top;
- *   - the keyword scan is DELIBERATELY DEGRADED — it ignores its ecosystem
- *     argument and returns both ecosystems' keyword-only rows — so in
- *     'keyword' mode (which never consults the verbatim store) the
- *     post-hydration graph check is the ONLY thing standing between a
- *     foreign row and the result set;
+ *   - the keyword scan (graph.search) is DELIBERATELY DEGRADED — it ignores
+ *     its ecosystem argument and returns both ecosystems' keyword-only rows.
+ *     3.21 step 3(a): 'keyword' mode now ALSO consults the store's
+ *     bm25Search leg (never the embedding provider) — this fixture's
+ *     bm25Search is properly ecosystem-scoped via the pushdown filter, but
+ *     `bm25WithEcosystemUnion` always unions in the UNSCOPED half too, so a
+ *     foreign row can still reach the raw candidate set through either leg;
+ *     the post-hydration graph check remains what actually decides
+ *     membership;
  *   - the graph carries a CROSS-ECOSYSTEM edge (a-vec <-> b-vec), so the
  *     depth-1 traversal hop is exercised in every mode too.
  *
@@ -1049,10 +1066,14 @@ await test('B9: one workspace, two ecosystems — zero cross-contamination acros
                 workspace: 'shared-ws', ecosystem: scope, mode, depth: 1, limit: 10,
             });
             const ids = out.results.map((r) => r.node.id);
-            const leaked = ids.filter((id) => id.startsWith(foreignPrefix));
+            const relatedIds = out.related.map((r) => r.node.id);
+            // fix/d4-traversal-separate-field: leak check covers BOTH arrays —
+            // a foreign-ecosystem node must never appear as a direct match OR
+            // as a traversal neighbour.
+            const leaked = [...ids, ...relatedIds].filter((id) => id.startsWith(foreignPrefix));
             assert.equal(
                 leaked.length, 0,
-                `[${mode}] recall(${scope}) leaked foreign-ecosystem node(s): ${leaked.join(', ')} (all: ${ids.join(', ')})`,
+                `[${mode}] recall(${scope}) leaked foreign-ecosystem node(s): ${leaked.join(', ')} (results: ${ids.join(', ')}; related: ${relatedIds.join(', ')})`,
             );
             assert.ok(
                 ids.some((id) => id.startsWith(ownPrefix)),
@@ -1066,18 +1087,33 @@ await test('B9: one workspace, two ecosystems — zero cross-contamination acros
                 `[${mode}] recall(${scope}) lost the embed:false node: ${ids.join(', ')}`,
             );
             // Mode-path honesty: a vacuous green is impossible if the mode
-            // never took its intended seed path.
+            // never took its intended seed path. 3.21 step 3(a) changed what
+            // this means for 'keyword': it now ALSO consults the store (its
+            // bm25Search leg — never the embedding provider), so
+            // verbatimConsulted is true for ALL THREE modes against this
+            // populated store; the mode-specific signal that keyword took
+            // its OWN defining path is bm25Ranked (the fixture's bm25Search
+            // returns a genuinely ranked envelope).
             assert.equal(
-                out.meta.verbatimConsulted, mode !== 'keyword',
-                `[${mode}] verbatimConsulted=${out.meta.verbatimConsulted} — the mode did not exercise its defining seed path`,
+                out.meta.verbatimConsulted, true,
+                `[${mode}] verbatimConsulted=${out.meta.verbatimConsulted} — every mode here must consult the populated store`,
             );
+            if (mode === 'keyword') {
+                assert.equal(
+                    out.meta.bm25Ranked, true,
+                    `[keyword] bm25Ranked=${out.meta.bm25Ranked} — the mode's defining bm25 seed path did not come back ranked`,
+                );
+            }
             // The vector-seeded modes must also surface the same-ecosystem
             // traversal hop while dropping the foreign one (the leaked check
             // above covers the drop; this pins the hop actually RAN).
+            // fix/d4-traversal-separate-field: the hop is a traversal
+            // neighbour, not a direct match — it now lands in `related`,
+            // never in `results`.
             if (mode !== 'keyword') {
                 assert.ok(
-                    ids.includes(`${ownPrefix}hop`),
-                    `[${mode}] recall(${scope}) never traversed — the cross-ecosystem edge premise is untested: ${ids.join(', ')}`,
+                    relatedIds.includes(`${ownPrefix}hop`),
+                    `[${mode}] recall(${scope}) never traversed — the cross-ecosystem edge premise is untested: results=${ids.join(', ')}; related=${relatedIds.join(', ')}`,
                 );
             }
         }

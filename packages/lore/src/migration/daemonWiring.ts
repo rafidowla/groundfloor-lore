@@ -40,7 +40,7 @@ import { MigrationsStore } from './store.js';
 import { SqliteMigrationAdapter } from './adapters/sqliteMigrationAdapter.js';
 import { LanceMigrationAdapter, type LanceConnectionShim } from './adapters/lanceMigrationAdapter.js';
 import type { OutboxStore } from '../outbox/types.js';
-import type { VerbatimStore } from '../engines/verbatimStore.js';
+import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 
 export interface MigrationDaemonWiring {
     coordinator: MigrationCoordinator;
@@ -53,7 +53,7 @@ export interface MigrationDaemonWiring {
 export interface MigrationDaemonOptions {
     loreDir: string;
     outboxStore: OutboxStore;
-    verbatim?: VerbatimStore;
+    verbatim?: VerbatimStoreApi;
 }
 
 /**
@@ -66,7 +66,7 @@ export interface MigrationDaemonOptions {
  * registers so capabilities() returns the H1-shipped surface and the
  * coordinator can route lance specs to a deterministic failure.
  */
-function buildLanceShim(_verbatim: VerbatimStore): LanceConnectionShim {
+function buildLanceShim(_verbatim: VerbatimStoreApi): LanceConnectionShim {
     const notWired = (op: string) => async (): Promise<never> => {
         throw new Error(`lance migration ${op} not yet wired in daemon (H4 scope guard — verbatim store lacks direct table-rebuild surface)`);
     };

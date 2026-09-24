@@ -148,11 +148,15 @@ const NGRAM_SETTINGS: FtsTokenizerSettings = {
 };
 
 /**
- * Sample-driven tokenizer choice. Pure function, deterministic on the given
- * sample, no I/O. Empty/unclassifiable input is the Latin default — a
- * fresh or tiny workspace should not jump to `ngram` on zero evidence.
+ * The CJK/Latin fraction-sampling decision, factored out of
+ * `detectTokenizerProfile` (3.21 step 2 part 1) so a second engine's
+ * tokenizer selector (SqliteVerbatimStore's `porter unicode61
+ * remove_diacritics 2` vs `trigram` choice) can share the SAME threshold
+ * policy instead of re-deriving it — this is the ONE place
+ * CJK_FRACTION_THRESHOLD / CJK_MIN_SAMPLES is applied. Pure, deterministic,
+ * no I/O.
  */
-export function detectTokenizerProfile(sampleTexts: readonly string[]): FtsTokenizerSettings {
+export function isCjkCorpus(sampleTexts: readonly string[]): boolean {
     // CJK decision: script-based, so it survives samples too short for
     // statistical language ID (see hasCjkScript). Every non-empty sample
     // counts here — unlike the language vote below, nothing is skipped for
@@ -165,11 +169,22 @@ export function detectTokenizerProfile(sampleTexts: readonly string[]): FtsToken
         scriptSamples++;
         if (hasCjkScript(text)) cjkSamples++;
     }
-    if (
+    return (
         scriptSamples > 0 &&
         cjkSamples >= CJK_MIN_SAMPLES &&
         cjkSamples / scriptSamples >= CJK_FRACTION_THRESHOLD
-    ) {
+    );
+}
+
+/**
+ * Sample-driven tokenizer choice. Pure function, deterministic on the given
+ * sample, no I/O. Empty/unclassifiable input is the Latin default — a
+ * fresh or tiny workspace should not jump to `ngram` on zero evidence.
+ */
+export function detectTokenizerProfile(sampleTexts: readonly string[]): FtsTokenizerSettings {
+    // CJK decision: script-based (see isCjkCorpus / hasCjkScript), so it
+    // survives samples too short for statistical language ID.
+    if (isCjkCorpus(sampleTexts)) {
         return { ...NGRAM_SETTINGS };
     }
 

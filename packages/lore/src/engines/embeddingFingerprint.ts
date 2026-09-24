@@ -56,6 +56,17 @@ export interface EmbeddingFingerprint {
     writtenAt: string;
     /** Schema version; lets us add fields without breaking older daemons. */
     version: number;
+    /**
+     * Optional ONNX dtype (injected-embedding-provider sprint). Mirrors
+     * LocalEmbeddingProvider's `modelId + '@' + dtype` cross-device
+     * fingerprint (see providers/localEmbeddingProvider.ts and its exported
+     * `embeddingProviderFingerprint()`). Absent on every fingerprint written
+     * before this field existed, and on any provider — local or injected —
+     * that doesn't expose a `dtype` property. `checkCompatibility()` only
+     * compares dtype when BOTH sides recorded one; an absent dtype is never
+     * itself treated as a mismatch.
+     */
+    dtype?: string;
 }
 
 function fingerprintPath(basePath: string): string {
@@ -96,6 +107,7 @@ export function readFingerprint(basePath: string): EmbeddingFingerprint | null {
         dimension: obj['dimension'] as number,
         writtenAt: obj['writtenAt'] as string,
         version: typeof obj['version'] === 'number' ? (obj['version'] as number) : FINGERPRINT_VERSION,
+        ...(typeof obj['dtype'] === 'string' && obj['dtype'] ? { dtype: obj['dtype'] as string } : {}),
     };
 }
 
@@ -116,7 +128,7 @@ export function readFingerprintOrLegacy(basePath: string): EmbeddingFingerprint 
 /** Atomically write the fingerprint. Creates the parent directory if missing. */
 export function writeFingerprint(
     basePath: string,
-    opts: { modelId: string; dimension: number },
+    opts: { modelId: string; dimension: number; dtype?: string },
 ): EmbeddingFingerprint {
     const fp = fingerprintPath(basePath);
     fs.mkdirSync(path.dirname(fp), { recursive: true });
@@ -125,6 +137,7 @@ export function writeFingerprint(
         dimension: opts.dimension,
         writtenAt: new Date().toISOString(),
         version: FINGERPRINT_VERSION,
+        ...(opts.dtype ? { dtype: opts.dtype } : {}),
     };
     // Atomic write: stage to a tmp file and rename. Avoids a half-written
     // JSON if the daemon is killed mid-write (LanceDB shares the dir).
@@ -148,28 +161,50 @@ export interface CompatibilityResult {
     expectedDimension: number;
     /** Human-readable explanation; empty string when matches=true. */
     message: string;
+    /**
+     * Which property disagreed first (dimension > model > dtype), or null
+     * when `matches`. A `'dtype'` mismatch can only occur when BOTH sides
+     * recorded a dtype, so it never fires against a fingerprint written
+     * before that field existed. checkCompatibility() never throws — the
+     * caller decides warn vs. refuse (see verbatimFingerprintGate.ts).
+     */
+    mismatch: 'dimension' | 'model' | 'dtype' | null;
 }
 
 export function checkCompatibility(
     basePath: string,
-    expected: { modelId: string; dimension: number },
+    expected: { modelId: string; dimension: number; dtype?: string },
 ): CompatibilityResult {
     const actual = readFingerprintOrLegacy(basePath);
     const sameModel = actual.modelId === expected.modelId;
     const sameDim = actual.dimension === expected.dimension;
-    if (sameModel && sameDim) {
-        return { matches: true, actual, expectedModelId: expected.modelId, expectedDimension: expected.dimension, message: '' };
+    // Dtype is only comparable when BOTH sides recorded one — an absent
+    // dtype (every pre-existing fingerprint, or any provider without one)
+    // is "unknown", never a mismatch on its own.
+    const bothHaveDtype = !!actual.dtype && !!expected.dtype;
+    const sameDtype = !bothHaveDtype || actual.dtype === expected.dtype;
+    if (sameModel && sameDim && sameDtype) {
+        return { matches: true, actual, expectedModelId: expected.modelId, expectedDimension: expected.dimension, message: '', mismatch: null };
     }
     const lines: string[] = [];
     lines.push(`Embedding model fingerprint mismatch on ${basePath}:`);
-    lines.push(`  on-disk: model="${actual.modelId}", dim=${actual.dimension}, writtenAt=${actual.writtenAt}`);
-    lines.push(`  configured: model="${expected.modelId}", dim=${expected.dimension}`);
+    lines.push(`  on-disk: model="${actual.modelId}", dim=${actual.dimension}${actual.dtype ? `, dtype=${actual.dtype}` : ''}, writtenAt=${actual.writtenAt}`);
+    lines.push(`  configured: model="${expected.modelId}", dim=${expected.dimension}${expected.dtype ? `, dtype=${expected.dtype}` : ''}`);
+    let mismatch: CompatibilityResult['mismatch'];
     if (!sameDim) {
+        mismatch = 'dimension';
         lines.push(`  Vector dimension differs — LanceDB will reject any write. Run:`);
         lines.push(`    lore migrate embedding-model --to "${expected.modelId}" --dim ${expected.dimension} --apply`);
-    } else {
+    } else if (!sameModel) {
+        mismatch = 'model';
         lines.push(`  Same dimension, different model — vectors live in different spaces.`);
         lines.push(`  Retrieval quality is silently degraded until you re-embed:`);
+        lines.push(`    lore migrate embedding-model --to "${expected.modelId}" --apply`);
+    } else {
+        // sameModel && sameDim && !sameDtype — quantization differs even
+        // though shapes match. Historically invisible (dtype wasn't on disk).
+        mismatch = 'dtype';
+        lines.push(`  Same model and dimension, different ONNX dtype ("${actual.dtype}" on disk vs "${expected.dtype}" configured) — quantization differs, so the vectors are numerically incompatible even though shapes match.`);
         lines.push(`    lore migrate embedding-model --to "${expected.modelId}" --apply`);
     }
     return {
@@ -178,6 +213,7 @@ export function checkCompatibility(
         expectedModelId: expected.modelId,
         expectedDimension: expected.dimension,
         message: lines.join('\n'),
+        mismatch,
     };
 }
 

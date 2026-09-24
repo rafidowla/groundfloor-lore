@@ -34,12 +34,17 @@ import { fileURLToPath } from 'url';
 import { log } from '../logger.js';
 import { redactSecrets } from '../security/secretScan.js';
 import { VerbatimStore } from './verbatimStore.js';
+import { EmbeddingFingerprintMismatchError, type FingerprintMismatchKind } from './verbatimFingerprintGate.js';
 import {
-    FORWARDED_METHODS,
+    forwardableMethods,
     WORKER_ENV,
+    SearchWorkerDeadlineError,
+    GATE_ARG_SLOT,
+    GATE_OPT_METHODS,
     type CallMessage,
+    type CancelMessage,
     type ChildToParent,
-    type ForwardedMethod,
+    type DispatchableMethod,
 } from './verbatimWorkerProtocol.js';
 
 import type { EmbeddingProvider, VerbatimSearchResult, VerbatimDocument } from '../providers/types.js';
@@ -59,11 +64,76 @@ export class SearchWorkerRestartError extends Error {
  * Off by default; a self-inflicted native crash then only restarts the worker
  * (which self-heals a corrupt index on re-open) rather than crashing the host.
  * Disabled inside a worker (LORE_IS_SEARCH_WORKER) to prevent recursive forking.
+ *
+ * This is the process-GLOBAL, env-only gate — unchanged behaviour. A host that
+ * wants PER-STORE control supplies a `searchWorkerPolicy` (see
+ * `CreateLoreOptions.searchWorkerPolicy` / `CreateVectorStoreOpts.searchWorkerPolicy`)
+ * which is consulted BEFORE this function and, when defined, is authoritative —
+ * this function is then never called for that store. `basePath` is accepted
+ * (and, when given, only used for a diagnostic log line) purely for call-site
+ * symmetry with the policy shape; it does not change this function's answer.
  */
-export function searchWorkerIsolationEnabled(): boolean {
+export function searchWorkerIsolationEnabled(basePath?: string): boolean {
     if (process.env[WORKER_ENV.IS_WORKER] === '1') return false;
     const v = (process.env['LORE_SEARCH_WORKER'] ?? '').trim().toLowerCase();
-    return v === '1' || v === 'true' || v === 'on' || v === 'yes';
+    const enabled = v === '1' || v === 'true' || v === 'on' || v === 'yes';
+    if (basePath) {
+        log.debug(`[searchWorkerIsolationEnabled] env gate for ${basePath}: ${enabled}`);
+    }
+    return enabled;
+}
+
+/** Host-supplied per-store isolation policy (LORE-ASK-SEARCH-WORKER-POLICY):
+ *  called once per store, at first open, with the store's resolved base path. */
+export type SearchWorkerPolicy = (basePath: string) => boolean;
+
+/** Base paths whose policy already threw — so the warning is logged once per
+ *  store path, not on every re-open attempt. */
+const policyFailureWarned = new Set<string>();
+
+/**
+ * The single place the per-store isolation decision is made — used by the boot
+ * store (mcp/services.ts createVectorStore) and WorkspaceVerbatimResolver.
+ *
+ *   1. Recursion guard first: inside a worker (LORE_IS_SEARCH_WORKER=1) the
+ *      answer is always false — the policy is not even called.
+ *   2. A boolean is an already-resolved decision; returned as-is.
+ *   3. A policy function is authoritative for that store. If it THROWS, the
+ *      store must still open: log a warning (once per basePath) and fall back
+ *      to the env gate — i.e. exactly what would have happened with no policy,
+ *      not a new default.
+ *   4. No policy ⇒ the env gate, unchanged.
+ *
+ * `engineKind` (3.21 step 2 part 1): 'sqlite' short-circuits to `false`
+ * BEFORE the worker-env / policy / env-gate checks above — worker isolation
+ * exists to fence a native LanceDB crash into a child process; a SQLite
+ * store has no such native crash surface (better-sqlite3 calls are
+ * synchronous, in-process, and any error is a catchable JS exception), so
+ * spawning a worker for it would only add IPC latency for zero safety
+ * benefit. Selection wiring (which engine a workspace actually uses) is
+ * out of scope here — this only guarantees the answer is correct once a
+ * caller has an engine kind to pass. Omitted or 'lance' preserves the
+ * existing behaviour exactly.
+ */
+export function resolveSearchWorkerIsolation(
+    basePath: string,
+    policy?: boolean | SearchWorkerPolicy,
+    engineKind?: 'lance' | 'sqlite',
+): boolean {
+    if (engineKind === 'sqlite') return false;
+    if (process.env[WORKER_ENV.IS_WORKER] === '1') return false;
+    if (typeof policy === 'boolean') return policy;
+    if (typeof policy === 'function') {
+        try {
+            return Boolean(policy(basePath));
+        } catch (err) {
+            if (!policyFailureWarned.has(basePath)) {
+                policyFailureWarned.add(basePath);
+                log.warn(`[searchWorkerPolicy] policy threw for ${basePath}; falling back to the LORE_SEARCH_WORKER env gate: ${redactSecrets((err as Error)?.message ?? String(err))}`);
+            }
+        }
+    }
+    return searchWorkerIsolationEnabled(basePath);
 }
 
 function positiveIntEnv(name: string, fallback: number): number {
@@ -78,6 +148,62 @@ interface Pending {
     reject: (e: Error) => void;
     timer: ReturnType<typeof setTimeout>;
     method: string;
+}
+
+/** Methods with a gate-shaped slot in their VerbatimStore signature. Used to
+ *  pull the caller's own `{signal, deadline}` back out of the (already-
+ *  positioned) args array so `call()` can (a) reject its own pending promise
+ *  immediately on abort, without waiting for a child round trip, and (b)
+ *  honour a per-call deadline TIGHTER than this proxy instance's own
+ *  LORE_SEARCH_WORKER_CALL_MS budget (requirement 3 — per-call cancellation).
+ *  Safe even when no gate was passed: property access on a plain value
+ *  (string/array/undefined) just yields `undefined`. */
+function extractGateOpts(method: string, args: unknown[]): { signal?: AbortSignal; deadline?: number } {
+    if (method === 'searchByVector') {
+        const opts = args[1] as { signal?: AbortSignal; deadline?: number } | undefined;
+        return { signal: opts?.signal, deadline: opts?.deadline };
+    }
+    const slot = GATE_ARG_SLOT[method as keyof typeof GATE_ARG_SLOT];
+    if (slot === undefined) return {};
+    const gate = args[slot] as { signal?: AbortSignal; deadline?: number } | undefined;
+    return { signal: gate?.signal, deadline: gate?.deadline };
+}
+
+/**
+ * A live AbortSignal cannot cross a child_process IPC boundary — it's an
+ * EventTarget with internal slots, outside what v8's structured-clone
+ * ('advanced' serialization) supports, and `child.send()` would fail to
+ * serialize it. Before fix/search-worker-call-cancellation this was a latent
+ * bug: `search`'s non-parentEmbedder branch sent the caller's `gate` object
+ * (which can carry a live `.signal`) straight into `args`. Strip `.signal`
+ * from the gate-shaped slot before it goes on the wire — the child doesn't
+ * need the caller's own signal object anyway: it derives its OWN
+ * cancellation from this call's `deadline` plus an explicit `cancel` message
+ * (see verbatimSearchWorkerEntry.ts), both of which DO survive the boundary.
+ */
+function sanitizeArgsForWire(method: string, args: unknown[]): unknown[] {
+    if (method === 'searchByVector') {
+        const opts = args[1] as Record<string, unknown> | undefined;
+        if (!opts || !('signal' in opts)) return args;
+        const { signal: _signal, ...rest } = opts;
+        return [args[0], rest];
+    }
+    const slot = GATE_ARG_SLOT[method as keyof typeof GATE_ARG_SLOT];
+    if (slot === undefined || args[slot] === undefined || args[slot] === null) return args;
+    const gate = args[slot] as Record<string, unknown>;
+    if (!('signal' in gate)) return args;
+    const { signal: _signal, ...rest } = gate;
+    const copy = args.slice();
+    copy[slot] = rest;
+    return copy;
+}
+
+function toCallAbortError(signal: AbortSignal): Error {
+    const reason = (signal as { reason?: unknown }).reason;
+    if (reason instanceof Error) return reason;
+    const err = new Error(reason !== undefined ? String(reason) : 'aborted');
+    err.name = 'AbortError';
+    return err;
 }
 
 export class VerbatimSearchWorkerProxy extends VerbatimStore {
@@ -98,7 +224,16 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
     private parentEmbedder?: EmbeddingProvider;
     private readonly workerBasePath: string;
     private readonly embedOverridesJson: string | undefined;
-    constructor(basePath: string, embedOverrides?: Record<string, unknown>, parentEmbedder?: EmbeddingProvider) {
+    /** Set when the child refused to open on a strict fingerprint mismatch —
+     *  deterministic, so the proxy stops respawning and fails every call fast. */
+    private fatalInitError: Error | null = null;
+    constructor(
+        basePath: string,
+        embedOverrides?: Record<string, unknown>,
+        parentEmbedder?: EmbeddingProvider,
+        /** Forwarded to the child as WORKER_ENV.STRICT_FINGERPRINT (see verbatimFingerprintGate.ts). */
+        private readonly forwardStrictFingerprint = false,
+    ) {
         // Base ctor only sets up paths + a (never-initialized) default provider
         // for schema sizing; it does NOT open LanceDB. We never call
         // super.initialize(), so no native handle is ever created in-process.
@@ -110,11 +245,13 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         // Generic forwarding: shadow every forwarded method with an IPC call.
         // (initialize/close have bespoke lifecycle below; search/store/storeBatch
         // are overridden to embed locally when a parentEmbedder is set.)
-        for (const method of FORWARDED_METHODS) {
+        // forwardableMethods() (not the raw allowlist) so the LORE_TEST_WORKER_HOOKS
+        // test hooks (__testHold/__testCounters) get shadowed too when enabled.
+        for (const method of forwardableMethods()) {
             if (method === 'initialize' || method === 'close') continue;
             if (method === 'search' || method === 'store' || method === 'storeBatch') continue;
             (this as unknown as Record<string, unknown>)[method] =
-                (...args: unknown[]): Promise<unknown> => this.call(method, args);
+                (...args: unknown[]): Promise<unknown> => this.call(method, args, extractGateOpts(method, args));
         }
     }
 
@@ -130,12 +267,14 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         filter?: Partial<VerbatimDocument['metadata']>,
         opts?: { includeHistory?: boolean },
         actorScopes?: ReadonlyArray<string>,
+        // fix/search-worker-call-cancellation (3.20.2): optional, additive.
+        gate?: { signal?: AbortSignal; deadline?: number },
     ): Promise<VerbatimSearchResult[]> {
         if (!this.parentEmbedder) {
-            return this.call('search', [query, limit, filter, opts, actorScopes]) as Promise<VerbatimSearchResult[]>;
+            return this.call('search', [query, limit, filter, opts, actorScopes, gate], { signal: gate?.signal, deadline: gate?.deadline }) as Promise<VerbatimSearchResult[]>;
         }
         const queryVector = await this.parentEmbedder.embedQuery(query);
-        return this.call('searchByVector', [queryVector, { topK: limit, filter, includeHistory: opts?.includeHistory, actorScopes }]) as Promise<VerbatimSearchResult[]>;
+        return this.call('searchByVector', [queryVector, { topK: limit, filter, includeHistory: opts?.includeHistory, actorScopes, signal: gate?.signal, deadline: gate?.deadline }], { signal: gate?.signal, deadline: gate?.deadline }) as Promise<VerbatimSearchResult[]>;
     }
 
     /**
@@ -233,6 +372,7 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
 
     private ensureChild(): Promise<void> {
         if (this.closed) return Promise.reject(new Error('search worker proxy is closed'));
+        if (this.fatalInitError) return Promise.reject(this.fatalInitError);
         if (this.ready) return Promise.resolve();
         if (this.startInFlight) return this.startInFlight;
         this.startInFlight = this.spawn().finally(() => { this.startInFlight = null; });
@@ -256,7 +396,9 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
             env[WORKER_ENV.PARENT_EMBEDS] = '1';
             env[WORKER_ENV.EMBED_DIM] = String(this.parentEmbedder.dimension);
             env[WORKER_ENV.EMBED_MODEL] = this.parentEmbedder.modelId;
+            if (this.parentEmbedder.dtype) env[WORKER_ENV.EMBED_DTYPE] = this.parentEmbedder.dtype;
         }
+        if (this.forwardStrictFingerprint) env[WORKER_ENV.STRICT_FINGERPRINT] = '1';
 
         // execArgv defaults to the parent's, so a tsx-loaded parent runs the
         // worker under tsx too (native ABI match); a compiled parent runs .js.
@@ -292,6 +434,7 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         }
         if (msg.type === 'init-error') {
             const err = reviveError(msg.error);
+            if (err instanceof EmbeddingFingerprintMismatchError) this.fatalInitError = err;
             const waiters = this.readyWaiters; this.readyWaiters = [];
             for (const w of waiters) w.reject(err);
             return;
@@ -321,7 +464,7 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         for (const [, p] of this.pending) { clearTimeout(p.timer); p.reject(crashErr); }
         this.pending.clear();
 
-        if (this.closed) return; // expected shutdown
+        if (this.closed || this.fatalInitError) return; // expected shutdown / deterministic refusal — don't respawn
 
         if (wasReady || code !== 0) {
             log.error(`[VerbatimSearchWorkerProxy] search worker exited unexpectedly (${detail}) — restarting to keep the host alive.`);
@@ -339,27 +482,107 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         });
     }
 
-    private async call(method: ForwardedMethod, args: unknown[]): Promise<unknown> {
+    /**
+     * fix/search-worker-call-cancellation (3.20.2, defect 1): a timed-out call
+     * used to delete its pending entry and reject LOCALLY only — the child
+     * never learned, kept running the call, and kept its place in the child's
+     * SearchGate forever (a queued waiter could never be removed). Now every
+     * call carries a `deadline` the child checks before starting and after
+     * acquiring a gate permit, and a timeout (or caller-supplied `signal`
+     * abort) sends `{type:'cancel', id}` as a best-effort courtesy so a
+     * still-queued child-side call is removed instead of waiting it out.
+     *
+     * `callOpts.deadline` (requirement 3) is a caller-supplied per-call
+     * deadline (epoch ms), pulled from the gate-shaped arg the caller passed
+     * to `search`/`bm25Search`/`searchByVector`. It is honoured only when
+     * STRICTER than this proxy instance's own LORE_SEARCH_WORKER_CALL_MS
+     * budget — never looser, so a caller can't extend a wait past what the
+     * proxy itself is configured to tolerate. Both the wire-level deadline
+     * (sent to the child, so it can fail fast before/while queued) and this
+     * proxy's OWN local timeout timer are derived from the same tightened
+     * value, so the caller's promise settles at ITS deadline, not the
+     * proxy's default one.
+     *
+     * 3.20.2 review, finding 6: a wire-level deadline is computed/sent ONLY
+     * for GATE_OPT_METHODS (search/searchByVector/bm25Search) — see the
+     * inline comment at `instanceDeadline` below for why every other
+     * forwarded method (plain writes) must never get one.
+     */
+    private async call(method: DispatchableMethod, args: unknown[], callOpts?: { signal?: AbortSignal; deadline?: number }): Promise<unknown> {
         if (this.closed) throw new Error('search worker proxy is closed');
         await this.ensureChild();
         const child = this.child;
         if (!child || !this.ready) {
             throw new SearchWorkerRestartError(`search worker not ready for ${method}`);
         }
+        const signal = callOpts?.signal;
+        if (signal?.aborted) throw toCallAbortError(signal);
+
         const id = this.nextId++;
+        // 'close' is exempt — it must always be allowed to run so the child
+        // can shut down cleanly; 'initialize' never goes through call().
+        //
+        // 3.20.2 review, finding 6: a wire-level `deadline` must be computed
+        // (and sent to the child at all) ONLY for the gate-aware methods
+        // (search/searchByVector/bm25Search) — this used to run for every
+        // method except 'close', so plain WRITES (store/storeBatch/delete/
+        // tombstone/...) carried a wire deadline the entry's generic
+        // "cancelled.has(id) || deadline already passed" admission check
+        // then applied to THEM too, contrary to this file's own header
+        // ("no existing call site changes behaviour") and to CallMessage's
+        // own doc ("omitted for calls that must always run regardless of
+        // caller timeout"). Non-gate methods now behave exactly as they did
+        // before this fix: no wire deadline, and the local proxy-side timer
+        // below falls back to the plain instance budget (`this.callTimeoutMs`)
+        // — the ONLY thing bounding a write's total wait, same as pre-fix.
+        const instanceDeadline = (method === 'close' || !GATE_OPT_METHODS.has(method))
+            ? undefined
+            : Date.now() + this.callTimeoutMs;
+        const deadline = instanceDeadline === undefined
+            ? undefined
+            : (callOpts?.deadline !== undefined ? Math.min(instanceDeadline, callOpts.deadline) : instanceDeadline);
+        // The local timer mirrors `deadline` exactly (falling back to the
+        // instance budget when there's no deadline at all, e.g. 'close' or a
+        // non-gate method) — this is what makes the PROXY's own promise
+        // reject at the caller's tighter deadline instead of waiting out the
+        // full instance timeout, for the methods that actually accept one.
+        const timerMs = deadline !== undefined ? Math.max(0, deadline - Date.now()) : this.callTimeoutMs;
+        const wireArgs = sanitizeArgsForWire(method, args);
+
         return new Promise<unknown>((resolve, reject) => {
+            let settled = false;
+            let onAbort: (() => void) | undefined;
+            const cleanup = () => { if (onAbort && signal) signal.removeEventListener('abort', onAbort); };
+            const settleResolve = (v: unknown) => { if (settled) return; settled = true; cleanup(); resolve(v); };
+            const settleReject = (e: Error) => { if (settled) return; settled = true; cleanup(); reject(e); };
+            const cancelChild = () => {
+                try { child.send({ type: 'cancel', id } satisfies CancelMessage); } catch { /* best-effort */ }
+            };
+
             const timer = setTimeout(() => {
                 this.pending.delete(id);
-                reject(new Error(`search worker call '${method}' timed out after ${this.callTimeoutMs}ms`));
-            }, this.callTimeoutMs);
-            this.pending.set(id, { resolve, reject, timer, method });
-            const payload: CallMessage = { type: 'call', id, method, args };
+                cancelChild();
+                settleReject(new Error(`search worker call '${method}' timed out after ${timerMs}ms`));
+            }, timerMs);
+
+            if (signal) {
+                onAbort = () => {
+                    this.pending.delete(id);
+                    clearTimeout(timer);
+                    cancelChild();
+                    settleReject(toCallAbortError(signal));
+                };
+                signal.addEventListener('abort', onAbort, { once: true });
+            }
+
+            this.pending.set(id, { resolve: settleResolve, reject: settleReject, timer, method });
+            const payload: CallMessage = { type: 'call', id, method, args: wireArgs, ...(deadline !== undefined ? { deadline } : {}) };
             child.send(payload, (err) => {
                 if (err) {
                     // send failed (channel gone) — treat as a crash for this call.
-                    const p = this.pending.get(id);
-                    if (p) { this.pending.delete(id); clearTimeout(p.timer); }
-                    reject(new SearchWorkerRestartError(`failed to send '${method}' to worker: ${err.message}`));
+                    this.pending.delete(id);
+                    clearTimeout(timer);
+                    settleReject(new SearchWorkerRestartError(`failed to send '${method}' to worker: ${err.message}`));
                 }
             });
         });
@@ -386,8 +609,14 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
     }
 }
 
-function reviveError(shape?: { name: string; message: string }): Error {
+function reviveError(shape?: { name: string; message: string; kind?: string }): Error {
     if (!shape) return new Error('unknown worker error');
+    if (shape.name === 'EmbeddingFingerprintMismatchError') {
+        return new EmbeddingFingerprintMismatchError(shape.message, shape.kind as FingerprintMismatchKind | undefined);
+    }
+    if (shape.name === 'SearchWorkerDeadlineError') {
+        return new SearchWorkerDeadlineError(shape.message);
+    }
     const e = new Error(shape.message);
     e.name = shape.name;
     return e;

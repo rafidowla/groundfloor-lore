@@ -25,7 +25,7 @@ import * as lancedb from '@lancedb/lancedb';
  * targeted `listIds('lore:')` reap into a workspace-wide scan, and leaking
  * an id-enumeration surface (`%secret%`).
  */
-function escapeLanceLike(s: string): string {
+export function escapeLikeWildcards(s: string): string {
     return s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
 }
 
@@ -86,6 +86,70 @@ export const HISTORY_ID_LIKE_PATTERN = '%#rev____-__-__T__:__:__.___Z';
 export const VERBATIM_FILTERABLE_COLUMNS: ReadonlySet<string> = new Set([
     'id', 'type', 'label', 'tags', 'project', 'ecosystem', 'updatedAt', 'contentHash',
 ]);
+
+/**
+ * D2 (type/kind prefilter) — build allowlisted, escaped LanceDB WHERE-clause
+ * fragments for a verbatim metadata filter. A scalar value becomes
+ * `key = '...'`; a non-empty array becomes `key IN ('...', '...')` so a
+ * caller can request several node types (or several ids, etc.) in one
+ * pushdown predicate instead of only ever matching exactly one value. An
+ * empty array yields NO condition for that key (matches the scalar path's
+ * existing "falsy value ⇒ skip" behaviour) rather than forging a
+ * contradiction like `1=0` — an empty `types: []` from a caller means "no
+ * filter", not "match nothing", consistent with `tags`/`entities`/`topics`
+ * elsewhere in retrieve.ts. Shared by VerbatimStore's vector and BM25
+ * search paths (verbatimStore.ts) so both stay in lockstep, exactly the way
+ * `escapeSqlLiteral` already is.
+ */
+export function buildLanceFilterConditions(filter: Record<string, unknown> | undefined | null): string[] {
+    const conditions: string[] = [];
+    if (!filter) return conditions;
+    for (const [key, value] of Object.entries(filter)) {
+        if (!VERBATIM_FILTERABLE_COLUMNS.has(key)) continue;
+        if (Array.isArray(value)) {
+            const vals = value.filter((v): v is string => typeof v === 'string' && v.length > 0);
+            if (vals.length === 0) continue;
+            conditions.push(`${key} IN (${vals.map((v) => `'${escapeSqlLiteral(v)}'`).join(', ')})`);
+        } else if (value) {
+            conditions.push(`${key} = '${escapeSqlLiteral(String(value))}'`);
+        }
+    }
+    return conditions;
+}
+
+/**
+ * D2 — SQLite analogue of `buildLanceFilterConditions`: same allowlist and
+ * same scalar-vs-array semantics, but parameterized (`?` placeholders)
+ * rather than string-interpolated, matching how sqliteVerbatimStore.ts and
+ * sqliteVerbatimFts.ts already build their WHERE clauses. `rowValue` is the
+ * same value reshaped for the JS brute-force fallback's `RowFilter`
+ * (sqliteVerbatimVector.ts), so the native and fallback paths stay in
+ * lockstep the same way the Lance path's single helper keeps vector/BM25
+ * in lockstep.
+ */
+export interface SqlFilterEntry {
+    column: string;
+    /** Condition fragment AFTER the column name, e.g. `= ?` or `IN (?, ?)`. */
+    op: string;
+    params: string[];
+    rowValue: string | string[];
+}
+
+export function buildSqlFilterEntries(filter: Record<string, unknown> | undefined | null): SqlFilterEntry[] {
+    const out: SqlFilterEntry[] = [];
+    if (!filter) return out;
+    for (const [key, value] of Object.entries(filter)) {
+        if (!VERBATIM_FILTERABLE_COLUMNS.has(key)) continue;
+        if (Array.isArray(value)) {
+            const vals = value.filter((v): v is string => typeof v === 'string' && v.length > 0);
+            if (vals.length === 0) continue;
+            out.push({ column: key, op: `IN (${vals.map(() => '?').join(', ')})`, params: vals, rowValue: vals });
+        } else if (value) {
+            out.push({ column: key, op: '= ?', params: [String(value)], rowValue: String(value) });
+        }
+    }
+    return out;
+}
 
 /**
  * SECURITY: node-id validation before interpolation into LanceDB where()
@@ -249,7 +313,7 @@ export async function listIds(
     table: lancedb.Table | null,
     initialized: boolean,
     prefix?: string,
-    opts?: { project?: string },
+    opts?: { project?: string; includeHistory?: boolean },
 ): Promise<string[]> {
     try {
         if (!initialized || !table) return [];
@@ -260,12 +324,29 @@ export async function listIds(
             // breakout) AND the LIKE wildcards (% _ \). The trailing `%`
             // is the intended prefix wildcard; the user's own % / _ are
             // escaped + neutralised via the ESCAPE clause.
-            const safe = escapeLanceLike(prefix).replace(/'/g, "''");
+            const safe = escapeLikeWildcards(prefix).replace(/'/g, "''");
             clauses.push(`id LIKE '${safe}%' ESCAPE '\\'`);
         }
         if (opts?.project) {
             const safe = opts.project.replace(/'/g, "''");
             clauses.push(`project = '${safe}'`);
+        }
+        // Opus review (parity follow-up): "list every stored id" used to
+        // mean every PHYSICAL row, including `<id>#rev<timestamp>` history
+        // snapshots — a real cross-engine divergence, since
+        // SqliteVerbatimStore tracks history via a real is_canonical
+        // column and its listIds() was always canonical-only. Every
+        // production caller (mcp/http/routes/retention/verbatim.ts,
+        // cli/commands/verbatim.ts, diagnostics/consistency.ts) was
+        // ALREADY independently filtering `isRevisionHistoryId()` out of
+        // the result afterward — none of them wanted the leak — so
+        // excluding it here by default is zero-behavior-change for every
+        // existing caller and just removes their now-redundant filter's
+        // reason to exist. `includeHistory: true` is the explicit escape
+        // hatch for a caller that genuinely wants every physical row (none
+        // do today).
+        if (!opts?.includeHistory) {
+            clauses.push(`id NOT LIKE '${HISTORY_ID_LIKE_PATTERN}'`);
         }
         if (clauses.length > 0) q.where(clauses.join(' AND '));
         const rows = await q.select(['id']).toArray();
@@ -402,7 +483,7 @@ export async function getHistory(
         // additionally neutralises wildcards (SP-05) so an id containing
         // `%`/`_` doesn't widen the `#rev` snapshot match.
         const safeEq = id.replace(/'/g, "''");
-        const safeLike = escapeLanceLike(id).replace(/'/g, "''");
+        const safeLike = escapeLikeWildcards(id).replace(/'/g, "''");
         const rows = await table
             .query()
             .where(`id = '${safeEq}' OR id LIKE '${safeLike}#rev%' ESCAPE '\\'`)

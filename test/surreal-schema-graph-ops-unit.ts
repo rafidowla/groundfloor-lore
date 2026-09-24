@@ -34,6 +34,11 @@ process.env['LORE_LOG_LEVEL'] ??= 'error';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-schema-ops-test-'));
 process.env['LORE_HOME'] = dataDir;
+// 3.21 step 1d: a fresh home now defaults its seeded workspace to
+// graphEngine 'sqlite'. This file is specifically the SurrealDB half of
+// the schema-safety port (see SqliteSchemaGraphOps for the SQLite half) —
+// force 'surreal' so it keeps testing what its name says.
+process.env['LORE_DEFAULT_GRAPH_ENGINE'] = 'surreal';
 
 const { createLore } = await import('../packages/lore/src/index.js');
 

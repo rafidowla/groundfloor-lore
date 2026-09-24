@@ -11,6 +11,14 @@
 import assert from 'node:assert/strict';
 import { SearchGate, SearchOverloadError } from '../packages/lore/src/engines/searchGate.js';
 
+// fix/search-worker-call-cancellation (3.20.2, defect 1): a timed-out caller
+// used to keep its FIFO place forever — a queued waiter could never be
+// removed. The tests below (added alongside req. 2/4) cover that directly at
+// the SearchGate layer: an aborted read() OR exclusive() waiter is spliced
+// out immediately (never granted later), and a read honours a queue-wait
+// bound so it fails fast with SearchOverloadError instead of riding out
+// however long the thing ahead of it in the queue takes.
+
 let passed = 0;
 let failed = 0;
 const pending: Array<Promise<void>> = [];
@@ -112,6 +120,87 @@ test('FIFO fairness: a queued exclusive is not starved by a steady read stream',
     assert.ok(buildRan, 'exclusive ran as soon as the original reads drained (not starved by later reads)');
     laters.forEach((l) => l.resolve());
     await Promise.all(laterReads);
+});
+
+test('an aborted queued read is removed immediately, never granted later', async () => {
+    const gate = new SearchGate({ maxConcurrent: 1, maxQueue: 100 });
+    const hold = deferred();
+    const holder = gate.read(async () => { await hold.promise; });
+    await tick();
+
+    const controller = new AbortController();
+    let ran = false;
+    const queued = gate.read(async () => { ran = true; }, { signal: controller.signal });
+    await tick();
+    assert.equal(gate.stats().queued, 1, 'the queued read holds a FIFO slot before abort');
+
+    controller.abort(new Error('gave up'));
+    await assert.rejects(queued, /gave up/, 'abort rejects immediately, without waiting for the hold');
+    assert.equal(gate.stats().queued, 0, 'the aborted waiter is spliced out of the queue right away');
+
+    hold.resolve();
+    await holder;
+    await tick();
+    assert.equal(ran, false, 'the aborted waiter never runs, even once a permit frees up');
+});
+
+test('an aborted queued exclusive() is removed immediately, never granted later', async () => {
+    const gate = new SearchGate({ maxConcurrent: 2, maxQueue: 100 });
+    const hold = deferred();
+    const holder = gate.read(async () => { await hold.promise; });
+    await tick();
+
+    const controller = new AbortController();
+    let ran = false;
+    const queued = gate.exclusive(async () => { ran = true; }, { signal: controller.signal });
+    await tick();
+    assert.equal(gate.stats().queued, 1, 'the queued exclusive() holds a FIFO slot before abort');
+
+    controller.abort(new Error('build abandoned'));
+    await assert.rejects(queued, /build abandoned/, 'abort rejects immediately');
+    assert.equal(gate.stats().queued, 0, 'the aborted exclusive() waiter is spliced out right away');
+
+    hold.resolve();
+    await holder;
+    await tick();
+    assert.equal(ran, false, 'the aborted exclusive() waiter never runs later');
+});
+
+test('queueWaitMs fails a queued read fast with SearchOverloadError, without waiting out the holder', async () => {
+    const gate = new SearchGate({ maxConcurrent: 1, maxQueue: 100, queueWaitMs: 30 });
+    const hold = deferred();
+    const holder = gate.read(async () => { await hold.promise; });
+    await tick();
+
+    const started = Date.now();
+    await assert.rejects(
+        gate.read(async () => { /* never — must not run */ }),
+        (e: Error) => e instanceof SearchOverloadError && (e as SearchOverloadError).code === 'search_overloaded',
+    );
+    const waited = Date.now() - started;
+    assert.ok(waited < 500, `queue-wait bound should fail in ~30ms, took ${waited}ms`);
+    assert.equal(gate.stats().queued, 0, 'the queue-wait-expired waiter is removed from the queue');
+
+    hold.resolve();
+    await holder;
+});
+
+test('queueWaitMs never applies to exclusive() — a build is always eventually admitted', async () => {
+    const gate = new SearchGate({ maxConcurrent: 1, maxQueue: 100, queueWaitMs: 20 });
+    const hold = deferred();
+    const holder = gate.read(async () => { await hold.promise; });
+    await tick();
+
+    let buildRan = false;
+    const exP = gate.exclusive(async () => { buildRan = true; });
+    // Wait well past queueWaitMs — the exclusive() must still be pending, not rejected.
+    await new Promise((r) => setTimeout(r, 80));
+    assert.equal(buildRan, false, 'still queued (holder has not released yet)');
+
+    hold.resolve();
+    await holder;
+    await exP;
+    assert.ok(buildRan, 'exclusive() was eventually admitted — queueWaitMs never sheds it');
 });
 
 await Promise.all(pending);

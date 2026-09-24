@@ -131,3 +131,46 @@ Every retrieval surface now routes through the shared core:
 - P6 fixed (commit `b8d4873`): the `search` tool's description no longer falsely
   claims "BM25 + semantic RRF" — it now states the actual keyword+semantic
   dedupe-merge and points callers to `recall` for the full hybrid.
+
+## Addendum (2026-09-23, fix/d4-traversal-separate-field) — defect fix, NOT the
+## D4 decision above
+
+This is a *different* "D4" than the "one result contract" decision locked
+above — an unfortunate naming collision (this fix predates being given its own
+identifier; kept as "D4" in the branch/commit history rather than renamed
+after the fact, to avoid rewriting already-shared references).
+
+**The defect.** `retrieve()`'s `results` array mixed two fundamentally
+different kinds of node together: direct query matches (semantic/BM25/keyword
+hits, `depth: 0`) and graph-traversal neighbours reached by walking edges from
+those matches (`depth >= 1`, `source: 'via:<seedId>'`, a fixed
+depth-decayed score `0.3/(1+depth)` with **no relevance to the query
+whatsoever**). Both were ranked/counted together — a traversal hop with zero
+query relevance could sit inside the same array, and was counted in
+`meta.totalMatched`/`directMatches` (and the `recall` tools' downstream
+`shown`/`totalRecalled`), as if it had matched the query.
+
+**The fix.** `results` now contains ONLY direct matches (`depth` and `source`
+are constant `0`/`'seed'` on every element). Traversal neighbours are returned
+in a new, separate `RetrieveOutcome.related: RelatedResult[]` field —
+`{node, via, relation, depth, score}` — where `relation` is the REAL edge
+relation `graph.traverse()` reported for that hop (never synthesised). They
+are never counted in `totalMatched`/`directMatches` or any downstream
+`shown`/`totalRecalled`. `depth` (the `RetrieveOptions` param) still defaults
+to `1`, unchanged, for compatibility — it now controls how many `related`
+neighbours come back, not what counts as a match. `maxTokens` truncation
+applies to `results` only; `related` is deliberately exempt (it is
+presentational context attached to an already-counted direct match, not
+itself a counted result).
+
+**Every consumer updated:** `recallPreset.ts` (`RecallRelated`,
+`buildRelatedCandidates`, `RecallResultSummary.related`/
+`RecallResultFull.related`, `connectedMatches` redefined as `related.length`),
+the `recall` MCP tool's `depth` param description, `/api/recall`'s compact
+payload, and the unit tests covering traversal (`audit-ra2-retrieve-core-unit.ts`,
+`rc321g-recall-candidates-unit.ts`, `retrieval-parity-unit.ts`) plus a new
+dedicated fixture-based regression test. `mapSource()`'s `via:`-prefix branch
+in `recallPreset.ts` is kept (defensive/back-compat) but is unreachable via
+`results` post-fix. See `packages/lore/src/recall/README.md` for the full
+type shapes and the CHANGELOG `[Unreleased]` entry for the response-shape
+summary.

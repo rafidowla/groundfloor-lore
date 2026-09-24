@@ -336,7 +336,10 @@ await test('(10) verbatimStore routes to verbatim.store (Sprint O write path pre
 await test('(11) verbatimSearch forwards full positional arg list', async () => {
     const { client, v } = freshClient();
     await client.verbatimSearch('q', 7, { project: 'p' }, { includeHistory: true }, ['scope:a']);
-    assert.deepEqual(v.calls[0]!.args, ['q', 7, { project: 'p' }, { includeHistory: true }, ['scope:a']]);
+    // fix/search-worker-call-cancellation (3.20.2 follow-up): verbatimSearch now
+    // forwards a trailing `gate` positional (signal/deadline for cancellation),
+    // additive + backward-compatible — omitted here, so it forwards as `undefined`.
+    assert.deepEqual(v.calls[0]!.args, ['q', 7, { project: 'p' }, { includeHistory: true }, ['scope:a'], undefined]);
 });
 
 await test('(12) verbatimCount routes to verbatim.count', async () => {
@@ -355,7 +358,9 @@ await test('(13) verbatimDelete forwards id', async () => {
 await test('(14) verbatimBm25Search forwards query + limit + filter + scopes', async () => {
     const { client, v } = freshClient();
     await client.verbatimBm25Search('jwt', 4, { project: 'p' }, ['scope:a']);
-    assert.deepEqual(v.calls[0]!.args, ['jwt', 4, { project: 'p' }, ['scope:a']]);
+    // fix/search-worker-call-cancellation (3.20.2 follow-up): verbatimBm25Search
+    // now forwards a trailing `gate` positional too — omitted here, so `undefined`.
+    assert.deepEqual(v.calls[0]!.args, ['jwt', 4, { project: 'p' }, ['scope:a'], undefined]);
 });
 
 /* ─── Section C: cloud-mode routing (W4-CLOUD-FACADE-ROUTING) ─────── */

@@ -238,6 +238,10 @@ export interface DispatcherDeps {
      *  Optional so cloud-mode boots without it still type. */
     versionStore?: VersionStore;
 
+    /** D5 round 2 (#2) — host-level supersession-enforce default, threaded
+     *  to every route that resolves `resolveSupersessionContext`. */
+    supersessionEnforceDefault?: boolean;
+
     /** L-030 — per-request actor resolver (Clerk JWT → operator identity).
      *  Boot-injected; threaded into runHttpGates so getCurrentActor() /
      *  getCurrentActorScopes() are populated downstream. Optional so local

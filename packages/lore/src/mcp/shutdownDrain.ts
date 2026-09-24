@@ -14,11 +14,12 @@
  * component can't strand the others.
  */
 
-import { VerbatimStore } from '../engines/verbatimStore.js';
 import { awaitBackgroundReconnect } from '../engines/backgroundReconnect.js';
+import { drainBackgroundCalibrations } from '../recall/calibration.js';
 import { stopAllAccessTrackers } from '../engines/accessTracker.js';
 import { stopAllRetentionSweeps } from './retentionScheduler.js';
 import { stopIdleSweeper } from '../providers/llmDispatch.js';
+import { stopEmbedIdleSweeper } from '../providers/localEmbeddingProvider.js';
 import {
     defaultAutolinkTracker,
     DEFAULT_AUTOLINK_DRAIN_TIMEOUT_MS,
@@ -101,7 +102,7 @@ export interface ShutdownDrainDeps {
      *  to exit anyway. The BOOT store is deliberately NOT closed here (the
      *  resolver skips primed paths) — step 10 owns that one, same split as
      *  graphRegistry.disposeAll() vs graph.close(). */
-    workspaceVerbatimResolver?: { closeAll(): Promise<void> };
+    workspaceVerbatimResolver?: { closeAll(): Promise<void>; stopEvictionSweep?(): void };
     /** SQLite sidecar handles opened per data directory, closed in step 11.
      *  Production passes the outbox store, aux store, version store,
      *  pending-ops store and table storage; entries may be undefined when a
@@ -264,6 +265,15 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
             try { await deps.versionPruneSweeper.stop(); } catch (e) { logStepError('versionPruneSweep.stop', e); }
         }
 
+        // 7.8 D1 (calibrated abstention) — wait briefly for any background
+        //     calibration fit still running (launched non-blocking when a
+        //     host leaves abstain off; see calibration.ts's getCalibration).
+        //     It calls seedStore.search() against the verbatim store, so this
+        //     MUST run before step 10 closes that handle. Bounded — never
+        //     hangs dispose() on an abandoned fit (its own race timer is
+        //     unref()'d).
+        try { await drainBackgroundCalibrations(); } catch (e) { logStepError('calibration.drainBackground', e); }
+
         // 8. Await any in-flight first-install background reconnect so a
         //    near-complete run lands its cursor + edges before the
         //    substrate handles close. No-op when idle.
@@ -372,7 +382,14 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
             // interval outlived every teardown. Unref'd, so it never held a
             // process open; it just kept running in the host forever.
             stopIdleSweeper();
+            // providers/localEmbeddingProvider.ts's local-embedding
+            // idle-unload sweeper (opt-in, off by default — see
+            // LORE_EMBED_IDLE_UNLOAD_MS). Stopped beside its LLM-side
+            // counterpart for the same reason: unref'd so it never holds
+            // a process open, but still worth cleaning up on dispose.
+            stopEmbedIdleSweeper();
             deps.graphRegistry?.stopEvictionSweep();
+            deps.workspaceVerbatimResolver?.stopEvictionSweep?.();
             deps.stopAllLocalWatchers();
         } catch { /* non-fatal */ }
 
@@ -424,8 +441,19 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
         if (typeof closableGraph?.close === 'function') {
             try { await closableGraph.close(); } catch (e) { logStepError('graph.close', e); }
         }
-        if (deps.verbatimStore instanceof VerbatimStore) {
-            try { await deps.verbatimStore.close(); } catch (e) { logStepError('verbatimStore.close', e); }
+        // Finding 0 (STEP2-CLOSE-PATH-DESIGN.md) — CAPABILITY-probed, not
+        // `instanceof VerbatimStore`. Verified directly against this repo's
+        // current class hierarchy: `VerbatimSearchWorkerProxy extends
+        // VerbatimStore` (engines/verbatimSearchWorkerProxy.ts), so a real
+        // proxy instance already satisfies `instanceof VerbatimStore` today —
+        // the nominal check was NOT silently skipping it on this version.
+        // The structural probe is kept anyway as the same defensive pattern
+        // used for `graph` above: it stops this step from silently regressing
+        // if the proxy is ever changed to wrap VerbatimStore by composition
+        // instead of inheritance, and it costs nothing behaviourally now.
+        const closableVerbatim = deps.verbatimStore as { close?: () => Promise<void> | void } | null;
+        if (closableVerbatim && typeof closableVerbatim.close === 'function') {
+            try { await closableVerbatim.close(); } catch (e) { logStepError('verbatimStore.close', e); }
         }
 
         // 11. Close the SQLite sidecars, after the substrates above. Last

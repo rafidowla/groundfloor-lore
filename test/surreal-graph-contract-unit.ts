@@ -42,8 +42,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import type { LoreEdge, LoreNode, TraversalResult } from '../packages/lore/src/providers/types.js';
+import { createTestGraphEngine, testGraphEngineName } from './helpers/testGraphEngine.js';
+import type { LoreEdge, LoreNode, TraversalResult, BulkListPage } from '../packages/lore/src/providers/types.js';
 
 /* ─── harness ────────────────────────────────────────────────────── */
 
@@ -189,10 +189,11 @@ async function main(): Promise<void> {
     console.log('SEARCH_CONTRACT_VERSION = 1');
     console.log('='.repeat(72));
 
+    console.log(`engine = ${testGraphEngineName()}`);
     const surrealDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-surreal-contract-'));
 
     // cacheDisabled: assert ENGINE answers, not a memoization layer.
-    const g = new SurrealGraph(surrealDir, { workspaceId: 'contract', cacheDisabled: true });
+    const g = createTestGraphEngine(surrealDir, { workspaceId: 'contract', cacheDisabled: true });
     await g.initialize();
 
     try {
@@ -511,7 +512,13 @@ async function main(): Promise<void> {
             const walked: string[] = [];
             let cursor: { updatedAt: string; id: string } | null = null;
             for (let guard = 0; guard < 100; guard++) {
-                const page = await g.bulkListProjected('*', [], 2, cursor);
+                // Explicit annotation: `g` is now a `SurrealGraph |
+                // SqliteGraph` union (via createTestGraphEngine), and
+                // `tsc -p tsconfig.test.json` cannot resolve `page`'s type
+                // across a union method call inside this cursor-walk loop
+                // without one — TS7022.
+                const page: { rows: Array<Record<string, unknown>>; nextCursor: { updatedAt: string; id: string } | null } =
+                    await g.bulkListProjected('*', [], 2, cursor);
                 for (const r of page.rows) walked.push(String(r['id']));
                 cursor = page.nextCursor;
                 if (!cursor) break;
@@ -759,7 +766,9 @@ async function main(): Promise<void> {
             const pages: string[][] = [];
             let cursor: { updatedAt: string; id: string } | null = null;
             for (let i = 0; i < 50; i++) {
-                const page = await g.bulkList({ limit: 4, cursor });
+                // Explicit annotation — see the bulkListProjected walk
+                // above for why the union `g` type needs it here (TS7022).
+                const page: BulkListPage = await g.bulkList({ limit: 4, cursor });
                 pages.push(page.nodes.map((n) => String(n['id'])));
                 if (!page.hasMore || !page.nextCursor) break;
                 cursor = page.nextCursor;

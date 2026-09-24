@@ -43,10 +43,20 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
 import { nodeUpsert } from '../packages/lore/src/core/nodeService.js';
 import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
+// Opus review follow-up (item: excluded suites testing SEMANTICS, not Lance
+// internals). Routed through makeVerbatimStore. Parts A-C (round-trip,
+// nodeUpsert chokepoint, hostile-id battery) exercise bound-parameter query
+// safety, which both engines provide (SQLite via better-sqlite3's `?`
+// placeholders throughout sqliteVerbatimWrite.ts/sqliteVerbatimHistory.ts;
+// Lance via assertSafeLanceId + escaped string-literal predicates, since its
+// filter API has no bound parameters at all — see verbatimHistory.ts). Part D
+// (NUL/oversized/non-string id "loud refusal") has a genuine, VERIFIED
+// engine divergence for the store-level probe — see the per-engine branch
+// at that test.
+import { makeVerbatimStore, testVectorEngine } from './helpers/testVerbatimStore.js';
 
 /* ─── tiny test harness (consistent with every other test/ file) ─────── */
 
@@ -96,7 +106,7 @@ console.log('\nid-alphabet round-trip — bracketed ids + injection battery + lo
 
 test('A: bracketed ids store, read back, snapshot, tombstone, delete', async () => {
     const t = mkTmp('lore-idalpha-a-');
-    const store = new VerbatimStore(t.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(t.dir, new ConstEmbedProvider());
     try {
         await store.initialize();
 
@@ -112,14 +122,23 @@ test('A: bracketed ids store, read back, snapshot, tombstone, delete', async () 
         const listed = (await store.listIds('next:')).filter((id) => !id.includes('#rev')).sort();
         assert.deepEqual(listed, [...NEXT_IDS].sort(), 'prefix LIKE must list all three bracketed ids');
 
-        // re-store → snapshot: getHistory (#rev LIKE path) returns canonical
-        // + exactly one snapshot, correctly flagged.
+        // re-store → snapshot: getHistory returns canonical + exactly one
+        // snapshot, correctly flagged. Lance encodes the snapshot's id via
+        // an `<id>#rev<ts>` SUFFIX (verbatimHistory.ts); SQLite tracks
+        // canonical-vs-history via a real `is_canonical` column instead, so
+        // the snapshot row SHARES the canonical id there (see
+        // sqliteVerbatimHistory.ts's getHistory doc comment) — the bracketed
+        // prefix survives either way, just encoded differently.
         await store.store({ id: NEXT_IDS[0], text: 'v2 content', metadata: meta('web') });
         const hist = await store.getHistory(NEXT_IDS[0]);
-        assert.equal(hist.length, 2, 'canonical + one #rev snapshot');
+        assert.equal(hist.length, 2, 'canonical + one snapshot');
         assert.equal(hist[0].isCanonical, true, 'canonical sorts first');
         assert.equal(hist[0].text, 'v2 content');
-        assert.ok(hist[1].id.startsWith(`${NEXT_IDS[0]}#rev`), 'snapshot id keeps the bracketed prefix');
+        if (testVectorEngine() === 'sqlite') {
+            assert.equal(hist[1].id, NEXT_IDS[0], 'sqlite: snapshot shares the canonical bracketed id (is_canonical=0 column, not an id suffix)');
+        } else {
+            assert.ok(hist[1].id.startsWith(`${NEXT_IDS[0]}#rev`), 'lance: snapshot id keeps the bracketed prefix under the #rev suffix');
+        }
         assert.equal(hist[1].isCanonical, false);
 
         // tombstone: canonical becomes a readable tombstone; history intact.
@@ -146,7 +165,7 @@ test('B: nodeUpsert accepts bracketed ids; the two nodes join in an edge', async
     const g = mkTmp('lore-idalpha-b-g-');
     const v = mkTmp('lore-idalpha-b-v-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     try {
         await graph.initialize();
         await store.initialize();
@@ -208,7 +227,7 @@ const HOSTILE_IDS = [
 
 test('C: hostile ids store + read back byte-identically, no match-widening', async () => {
     const t = mkTmp('lore-idalpha-c-');
-    const store = new VerbatimStore(t.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(t.dir, new ConstEmbedProvider());
     try {
         await store.initialize();
         for (const id of HOSTILE_IDS) {
@@ -239,12 +258,24 @@ test('C: hostile ids store + read back byte-identically, no match-widening', asy
             'no foreign rows in wildcard id history');
 
         // The table still holds exactly the rows we wrote — no injection
-        // deleted or duplicated anything.
-        const all = (await store.listIds('')).sort();
-        // (six canonical + one #rev snapshot from the re-store)
+        // deleted or duplicated anything. Opus review follow-up (listIds()
+        // cross-engine parity): canonical-only is now the default (it used
+        // to leak `#rev` snapshot ids on Lance) — `includeHistory: true` is
+        // the explicit escape hatch this assertion needs since it counts
+        // the snapshot row too.
+        const all = (await store.listIds('', { includeHistory: true })).sort();
+        // (six canonical + one snapshot from the re-store)
         assert.equal(all.length, 7, 'row count unchanged by hostile predicates');
+        // Isolating "canonical only" from `all` by filtering out a `#rev`
+        // substring only works on Lance's id-suffix encoding — SQLite's
+        // snapshot row shares the CANONICAL id verbatim (no suffix to
+        // filter on), so filtering `all` would keep a duplicate there.
+        // listIds() WITHOUT includeHistory is canonical-only by contract on
+        // BOTH engines (the same parity fix above), so asking for it
+        // directly is the engine-neutral probe.
+        const canonicalOnly = (await store.listIds('')).sort();
         assert.deepEqual(
-            all.filter((id) => !id.includes('#rev')),
+            canonicalOnly,
             [...HOSTILE_IDS].sort(),
             'canonical set intact',
         );
@@ -260,7 +291,7 @@ test('D: NUL / oversized / non-string ids fail loudly, naming the id', async () 
     const g = mkTmp('lore-idalpha-d-g-');
     const v = mkTmp('lore-idalpha-d-v-');
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     try {
         await graph.initialize();
         await store.initialize();
@@ -304,20 +335,42 @@ test('D: NUL / oversized / non-string ids fail loudly, naming the id', async () 
             assert.ok(num.error.message.includes('5'), 'offending value carried');
         }
 
-        // Nothing persisted on any refusal — no partial orphan. The read
-        // path refuses the NUL id just as loudly (guard, not silent null) —
-        // SurrealGraph's getNode throws rather than returning null, unlike
-        // the legacy engine's silent-miss read path.
+        // Nothing persisted on any refusal — no partial orphan. The graph
+        // read path refuses the NUL id just as loudly (guard, not silent
+        // null) — SurrealGraph's getNode throws rather than returning null,
+        // unlike the legacy engine's silent-miss read path. This part is
+        // engine-agnostic: SurrealGraph's own guard, unrelated to which
+        // verbatim store backs the workspace.
         await assert.rejects(
             () => graph.getNode('bad\x00route/[id].ts'),
             /NUL byte/,
             'graph read path refuses the NUL id loudly too',
         );
-        await assert.rejects(
-            () => store.getById('lore:bad\x00route/[id].ts'),
-            /NUL byte/,
-            'verbatim read path refuses the NUL id loudly too',
-        );
+
+        // The verbatim STORE's own read path is where the two engines
+        // genuinely diverge — VERIFIED empirically, not assumed. Lance's
+        // getById calls assertSafeLanceId (its filter API interpolates the
+        // id into a raw SQL-like predicate string, so a NUL byte is a real
+        // hazard it must refuse). SqliteVerbatimStore's getById binds the
+        // id as a `?` parameter throughout (sqliteVerbatimHistory.ts) —
+        // better-sqlite3's bound TEXT parameters carry an explicit byte
+        // length (not a NUL-terminated C string), so a NUL byte round-trips
+        // as ordinary content with no hazard to guard against. The correct
+        // SQLite behavior is therefore MORE permissive here, not a bug to
+        // replicate Lance's refusal for: it simply returns null (no such
+        // row was ever stored under this raw NUL-containing id, since
+        // nodeUpsert's chokepoint guard above already refused to persist
+        // it) rather than throwing.
+        if (testVectorEngine() === 'sqlite') {
+            const missing = await store.getById('lore:bad\x00route/[id].ts');
+            assert.equal(missing, null, 'sqlite: a NUL-byte id is not rejected (bound parameters make it safe) — simply not found, since nothing was ever stored under it');
+        } else {
+            await assert.rejects(
+                () => store.getById('lore:bad\x00route/[id].ts'),
+                /NUL byte/,
+                'lance: verbatim read path refuses the NUL id loudly too (raw string-interpolated filter predicate)',
+            );
+        }
     } finally {
         await store.close().catch(() => undefined);
         await graph.close().catch(() => undefined);

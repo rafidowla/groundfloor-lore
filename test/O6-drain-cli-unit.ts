@@ -232,6 +232,15 @@ const repoRoot = path.resolve(path.dirname(selfPath), '..');
 const tsxBin = path.join(repoRoot, 'node_modules', '.bin', 'tsx');
 const SERVER_ENTRY = path.join(repoRoot, 'packages/lore/src/mcp/server.ts');
 
+// 3.21 step 1d: a fresh LORE_HOME's seeded workspace now defaults to
+// graphEngine 'sqlite'. Every scenario here holds a genuine on-disk lock
+// via a REAL SurrealGraph handle (holdGraphStore) and asserts the command
+// under test collides with THAT lock — which only happens if the command
+// also opens SurrealGraph for this workspace. Set BEFORE any spawn below
+// (which all inherit process.env) so every fresh child home stays on
+// 'surreal', matching the fixture's own SurrealGraph holder.
+process.env['LORE_DEFAULT_GRAPH_ENGINE'] = 'surreal';
+
 function findFreePort(): Promise<number> {
     return new Promise((resolve, reject) => {
         const srv = net.createServer();

@@ -80,6 +80,16 @@ export interface CreateMcpServerDeps {
     detectedScope: { workspace: string; ecosystem: string };
     loreDir: string;
     graphBasePath: string;
+    /**
+     * Defect 3 (3.20.2) — this instance's OWN data root (`LoreInstance.dataHome`,
+     * from `resolveLoreHome({dataDir})`), distinct from the PROCESS-WIDE
+     * `loreHome()` (env `LORE_HOME` / `~/.groundfloor`) that `maintain` and a
+     * few other tools used to default to unconditionally. An embedded host
+     * with its own `dataDir` has a `dataHome` that differs from `loreHome()`;
+     * threading it through here is what lets `maintain` target the instance
+     * that's actually running it instead of whatever the process env says.
+     */
+    dataHome: string;
     deploymentMode: 'local' | 'cloud';
     /**
      * ITEM 3 (launch-fixes-2026-08) — the instance's FULL run mode
@@ -135,7 +145,7 @@ export interface CreateMcpServerDeps {
      * global store. Optional so cloud-mode (resolver undefined there) and
      * tests that don't wire it keep the boot-singleton fallback.
      */
-    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<import('../engines/verbatimStore.js').VerbatimStore> };
+    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<import('../engines/verbatimStoreApi.js').VerbatimStoreApi> };
 
     /**
      * Phase 6 P2 — pending-ops store for HITL routing of writes whose
@@ -188,6 +198,8 @@ export interface CreateMcpServerDeps {
      * are registered, and write tools auto-record version entries.
      */
     versionStore?: VersionStore;
+    /** D5 round 2 (#2) — host-level supersession-enforce default. */
+    supersessionEnforceDefault?: boolean;
 }
 
 export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
@@ -299,6 +311,14 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
         detectedScope: deps.detectedScope,
         graphRegistry: deps.graphRegistry,
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // P2 — non-active recall seeds its own verbatim store.
+        // 3.21 step 3(h) — recall_outcome feeds the SAME outcome tracking
+        // record_outcome does; absent (cloud/tests without it wired) ⇒ the
+        // tool itself returns a `not_configured` envelope rather than
+        // gating tool REGISTRATION (unlike the REST route, which gates
+        // mounting entirely — a fixed MCP tool surface is simpler to keep
+        // stable across a session than a route table that changes shape).
+        auxStore: deps.auxStore,
+        versionStore: deps.versionStore,
     });
 
     registerTraverseTool(mcpServer, { store: deps.store, graphRegistry: deps.graphRegistry, detectedScope: deps.detectedScope });
@@ -325,6 +345,7 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
         getWorkspaceEntryForQuota: deps.getWorkspaceEntryForQuota, // L-033.
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // L-056 — delete_node tombstones in the resolved workspace.
         inlineVerbatim: deps.deploymentMode === 'cloud' ? deps.store.storageClient : undefined,
+        supersessionEnforceDefault: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
     });
 
     /* ─── Step #5a: universal Core surfaces (verbatim + analytical) ─ */
@@ -406,8 +427,16 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
     registerMaintainTools(mcpServer, {
         store: deps.store,
         graphBasePath: deps.graphBasePath,
+        dataHome: deps.dataHome,
         deploymentMode: deps.deploymentMode,
+        runMode: deps.runMode,
         graphRegistry: deps.graphRegistry,
+        // Fix Requirement 4 (Defect 3, 3.20.2 review, Finding 2) — thread the
+        // boot-bound VersionStore through so embedded hosts gain a path to
+        // bound versions.sqlite growth (previously daemon-only via the gated
+        // versionPruneSweeper). Optional: absent in cloud mode or when the
+        // boot-time VersionStore.open() failed.
+        versionStore: deps.versionStore,
     });
 
     // Feature 8 — versioning tools. versionStore optional.
@@ -426,6 +455,7 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
             workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
             // ITEM X-walnode (2026-09-03) — changeset delete WAL append.
             getWal: deps.getWal,
+            supersessionEnforceDefault: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
         });
     }
 

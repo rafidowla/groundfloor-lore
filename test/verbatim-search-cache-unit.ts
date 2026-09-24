@@ -19,9 +19,18 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
 import { LocalEmbeddingProvider } from '../packages/lore/src/providers/localEmbeddingProvider.js';
 import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
+// Opus review follow-up (item: excluded suites testing SEMANTICS, not Lance
+// internals). This file was originally excluded on the theory that the
+// short-TTL cache + single-flight wrapper was a Lance-only mechanism —
+// WRONG: `ReadCache` (cache.ts) is a generic, already-shared class (also
+// used by SurrealGraph), and the missing piece was that SqliteVerbatimStore
+// simply didn't wrap its search()/bm25Search() with it yet. Fixed directly
+// in sqliteVerbatimStore.ts (same cachedRead()/cacheKey()/epoch-bump
+// pattern VerbatimStore uses) as part of this review pass — this suite now
+// runs unmodified against both engines via makeVerbatimStore.
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
 
 let passed = 0;
 let failed = 0;
@@ -53,7 +62,7 @@ async function run() {
 
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-verbatim-cache-'));
     const counting = new CountingEmbedProvider(new LocalEmbeddingProvider());
-    const store = new VerbatimStore(tmp, counting);
+    const store = makeVerbatimStore(tmp, counting);
     try {
         await store.initialize();
 

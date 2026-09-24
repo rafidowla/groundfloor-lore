@@ -30,6 +30,7 @@ import {
 import { EDGE_TABLE, NODE_TABLE, ridToId } from './surrealRecordId.js';
 import { surrealError } from './surrealError.js';
 import { withTransactionConflictRetry } from '../transactionConflictRetry.js';
+import { formatOrphanMessage } from '../graphShared/lintMessages.js';
 
 /** The row-returning query runner SurrealGraph threads in. */
 export type SurrealQuery = (sql: string, vars?: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
@@ -172,7 +173,7 @@ export async function lintGraph(query: SurrealQuery): Promise<string[]> {
             + ` WHERE type != 'note'`
             + ` AND count(SELECT id FROM ${EDGE_TABLE} WHERE in = $parent.id OR out = $parent.id) = 0`,
         );
-        return rows.map((r) => `Orphan: ${String(r['type'])} node '${ridToId(r['id'])}' has no relationships.`);
+        return rows.map((r) => formatOrphanMessage(String(r['type']), ridToId(r['id'])));
     } catch (error) {
         throw surrealError('Failed to lint graph', 'lintGraph', error);
     }

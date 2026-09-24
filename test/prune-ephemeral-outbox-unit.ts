@@ -47,7 +47,8 @@ import * as path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore } from './helpers/testVerbatimStore.js';
+import type { VerbatimStoreApi } from '../packages/lore/src/engines/verbatimStoreApi.js';
 import { FileOutboxStore } from '../packages/lore/src/outbox/store.js';
 import { nodeUpsert } from '../packages/lore/src/core/nodeService.js';
 import { registerGovernanceTools, type GovernanceToolsDeps } from '../packages/lore/src/mcp/tools/governance.js';
@@ -77,7 +78,7 @@ function mkTmp(prefix: string): { dir: string; cleanup: () => void } {
 
 interface Stack {
     graph: SurrealGraph;
-    store: VerbatimStore;
+    store: VerbatimStoreApi;
     outboxStore: FileOutboxStore;
     close: () => Promise<void>;
 }
@@ -87,7 +88,7 @@ async function openStack(prefix: string): Promise<Stack> {
     const v = mkTmp(`${prefix}-v-`);
     const o = mkTmp(`${prefix}-o-`);
     const graph = new SurrealGraph(g.dir);
-    const store = new VerbatimStore(v.dir, new ConstEmbedProvider());
+    const store = makeVerbatimStore(v.dir, new ConstEmbedProvider());
     const outboxStore = new FileOutboxStore(o.dir);
     await graph.initialize();
     await store.initialize();
@@ -145,7 +146,7 @@ function raceOnListExpired(real: SurrealGraph, onListed: () => Promise<unknown>)
     };
 }
 
-function realDispatchSubstrates(graph: SurrealGraph, store: VerbatimStore): DispatcherSubstrates {
+function realDispatchSubstrates(graph: SurrealGraph, store: VerbatimStoreApi): DispatcherSubstrates {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-prune-ephemeral-wiring-'));
     const wiring = wireOutbox({
         loreDir: tmp,

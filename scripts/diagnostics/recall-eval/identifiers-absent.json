@@ -1,0 +1,14 @@
+[
+    { "id": "ida-01", "query": "fixture symbol #999999" },
+    { "id": "ida-02", "query": "fixture symbol #10000" },
+    { "id": "ida-03", "query": "fixture symbol #123456" },
+    { "id": "ida-04", "query": "fixture symbol #48213" },
+    { "id": "ida-05", "query": "fx-code-999999" },
+    { "id": "ida-06", "query": "compactGrimoire" },
+    { "id": "ida-07", "query": "src/billing/chargeInvoice.ts" },
+    { "id": "ida-08", "query": "transmuteWidget.ts checkpoint-store" },
+    { "id": "ida-09", "query": "ERR_LEASE_EXPIRED" },
+    { "id": "ida-10", "query": "ctx.quantum_router.teleport" },
+    { "id": "ida-11", "query": "src/lease-manager/frobnicateShard.ts" },
+    { "id": "ida-12", "query": "where is harmonizeVortex defined?" }
+]

@@ -3,13 +3,13 @@
   "entries": [
     {
       "path": "packages/lore/src/engines/verbatimStore.ts",
-      "lines": 1820,
-      "justification": "pre-existing; ratcheted DOWN 1843->1820 by fix/verbatim-worker-nested-metadata (batch vector resolution moved to verbatimBatch.ts, orphaned wrapper removed)"
+      "lines": 1996,
+      "justification": "pre-existing; ratcheted DOWN 1843->1820 by fix/verbatim-worker-nested-metadata (batch vector resolution moved to verbatimBatch.ts, orphaned wrapper removed), then refreshed 1820->1770 on main (unrelated to this change). Separately, +212 by fix/search-worker-call-cancellation (defect 1, 3.20.2), based off the pre-refresh 1820 count: +27 for an additive optional `gate` param threaded through search/searchByVector/bm25Search, the ensureFtsIndex two-phase (fast-path-then-exclusive) rewrite, and the LORE_TEST_WORKER_HOOKS-gated __testHold/__testCounters/checkGateDeadline test surface; +135 in the 3.20.2 independent-review remediation (same branch, follow-up commit) — finding 1 (BLOCKING): cachedRead()'s single-flight promise redesigned as a reference-counted SearchFlight (own AbortController, refCount, per-caller buildOwnAbort() wrapper) so a caller's own signal/deadline rejects only that caller, and the shared native call is aborted only once every joined caller has individually given up. Merged total (1770 base + 212) verified against the actual post-merge file via `wc -l`, not summed blindly across the two branches' independent deltas. Then +14 by the 3.21 i2 sync-main merge (3.21 step 3(c)'s NullEmbeddingProvider no-op guards in store()/the batch path + listIds' optional includeHistory, additive and in regions disjoint from 3.20.2's changes); merged total verified via `wc -l`."
     },
     {
       "path": "packages/lore/src/mcp/server.ts",
-      "lines": 1707,
-      "justification": "pre-existing"
+      "lines": 1809,
+      "justification": "pre-existing at 1707; +20 by fix/embedded-maintain-target (Finding 2, post-review, 3.20.2) — getWorkspaceEntryForQuota wrong-home fix in createLore(). Separately, +23 by fix/search-worker-call-cancellation (defect 1, 3.20.2) — LoreInstance.search gained an optional trailing `opts?: {signal}` (light-touch abort of the outer promise; graph-engine search itself isn't cancellable, documented on the interface) plus its small toSearchAbortError helper. Both changes are additive, touch different regions of the file, and merged cleanly with no textual conflict; combined total verified via `wc -l` on the merged file, not summed blindly. Separately, +6 by fix/embedded-vocab-policy-home (3.20.2 side-issue follow-up) — a lazy `outboxGetRegistryHome` closure (same convention as outboxGetGraphForWorkspace) threaded into wireOutbox() so the outbox lag-threshold resolver reads workspaces.json from THIS instance's own registry, not the process-wide default. Then +1 by the 3.21 i2 sync-main merge (3.21 step 2's net +1 from the VerbatimStore -> VerbatimStoreApi/isVerbatimStore import swap, disjoint from 3.20.2's regions); merged total verified via `wc -l`. Then +45 (1763->1808) by fix/d5-supersedes-corrects round 2 (finding #2) — the host-level supersession-enforce switch (createLore() option `supersessionEnforce` + LORE_SUPERSESSION_ENFORCE env, precedence per-workspace > createLore option > env > default off): the new CreateLoreOptions field + doc comment, the hostSupersessionDefault computation + resolveEmbeddedSupersession closure (replacing two duplicated inline resolveSupersessionContext blocks in nodeUpsert/nodeUpsertBatch, itself a net reduction), the DaemonWiring field, and one-line supersessionEnforceDefault additions at each of the 4 downstream construction points (createMcpServer call, bulkIngest call, HTTP dispatch deps). Not extracted further: each addition is a single field on an existing DI object at its one construction site — pulling these into a separate module would require passing the whole CreateLoreOptions/DaemonWiring shape across a file boundary for a one-line value, which fragments the same dependency-injection pattern used throughout this file rather than shrinking it. Verified via `wc -l`. (Re-verified via `wc -l` at 1809 after a one-line doc-comment fix on the same branch.)"
     },
     {
       "path": "packages/lore/src/engines/syncEngine.ts",
@@ -25,6 +25,21 @@
       "path": "packages/lore/src/outbox/replicator.ts",
       "lines": 863,
       "justification": "pre-existing; +6 for the dead-letter watchdog hook (fix/verbatim-worker-nested-metadata). The policy itself lives in outbox/deadLetterWatch.ts rather than inline; these lines are the field, its comment, the import and the one call site."
+    },
+    {
+      "path": "packages/lore/src/mcp/http/routes/bulkWrite.ts",
+      "lines": 919,
+      "justification": "NEW oversize, entirely by fix/d5-supersedes-corrects: origin/main is 793 lines (under the cap); D5 added +126 across rounds 1-4 (per-row resolveSupersessionContext() + supersedes/force passthrough, shared validateSupersedesIds() pre-check, host-default threading, supersedes_partial/near-dup warning reporting). Not split in this defect: the added code is route wiring into core/supersessionPolicy.ts + core/nodeService.ts, but it is D5's growth, not pre-existing size. Follow-up: split request validation from write application. Corrected by the D5 re-review (2026-09-23); the earlier text wrongly said the growth predated the branch and was 2 lines."
+    },
+    {
+      "path": "packages/lore/src/mcp/http/routes/import.ts",
+      "lines": 907,
+      "justification": "NEW oversize, entirely by fix/d5-supersedes-corrects: origin/main is 791 lines (under the cap); D5 added +116 across rounds 1-4 (per-row resolveSupersessionContext(), shared validateSupersedesIds() run regardless of enforce, host-default threading, `warnings` on ImportResponse, supersedes_partial row errors). Not split in this defect; follow-up: extract per-row supersession handling from the route. Corrected by the D5 re-review (2026-09-23); the earlier text understated D5's share of the growth."
+    },
+    {
+      "path": "packages/lore/src/mcp/bulkIngest.ts",
+      "lines": 809,
+      "justification": "NEW oversize, entirely by fix/d5-supersedes-corrects: origin/main is 787 lines (under the cap); D5 added the per-node resolveSupersessionContext() call, supersedes/force args and host-default dep (+35, trimmed to +22 by the D5 re-review's comment condensing). Remaining 9 over the cap are D5 wiring, not pre-existing size. Corrected by the D5 re-review (2026-09-23); the earlier text wrongly said the added code was 2 lines and the size predated the branch."
     }
   ]
 }

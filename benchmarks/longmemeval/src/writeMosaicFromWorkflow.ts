@@ -15,6 +15,7 @@ import { loadDataset } from './ingest.js';
 import { ingestInstance } from './ingest.js';
 import { writePropositions } from './writePropositions.js';
 import type { LongMemEvalInstance } from './types.js';
+import { fileURLToPath } from 'node:url';
 
 interface ManifestEntry {
     index: number;
@@ -40,7 +41,7 @@ async function main(): Promise<void> {
     const resultByIndex = new Map(workflowResults.map((r) => [r.index, r]));
 
     const dataset = loadDataset(
-        '/Users/rdowla/Downloads/AiDev/BitBucket/lore/groundfloor-lore/benchmarks/longmemeval/data/longmemeval_s_cleaned.json',
+        fileURLToPath(new URL('../data/longmemeval_s_cleaned.json', import.meta.url)),
     );
     const byId = new Map(dataset.map((i) => [i.question_id, i]));
 

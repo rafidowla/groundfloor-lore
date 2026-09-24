@@ -34,7 +34,9 @@ import type { SurrealFeatures } from './surrealConnection.js';
 import { redactSurrealLog, surrealError } from './surrealError.js';
 import { DEFAULT_LIST_NODES_CAP, rowToLoreNode } from '../loreNodeRow.js';
 import { rankSearchResults, SEARCH_SCAN_CAP, keywordSearchTerms } from '../searchRanking.js';
+import { metaArrayContainsPattern, metaArraysContainAll } from '../metaArrayFilter.js';
 import { EDGE_TABLE, NODE_TABLE, normalizeRow, ridToId, toNodeRid } from './surrealRecordId.js';
+import { runTraverseBfs, type FrontierEdgeCandidate } from '../graphShared/traverseBfs.js';
 
 /**
  * Runs one SurrealQL statement and returns its rows. Bound from SurrealGraph
@@ -106,10 +108,14 @@ export async function getNode(ctx: SurrealReadCtx, id: string): Promise<LoreNode
  */
 export async function getNodesByIds(ctx: SurrealReadCtx, ids: string[]): Promise<Map<string, LoreNode>> {
     ctx.tally?.record('getNodesByIds', shapeLimit(ids.length));
-    const out = new Map<string, LoreNode>();
     const unique = Array.from(new Set(ids.filter((id) => typeof id === 'string' && id.length > 0)));
-    if (unique.length === 0) return out;
+    if (unique.length === 0) return new Map();
     try {
+        // Hydrate into a scratch map first (chunk fetch order is not the
+        // requested order), then build the RETURNED map by walking `unique`
+        // — so Map iteration order always follows the caller's requested id
+        // order, on every engine, regardless of fetch/row order.
+        const hydrated = new Map<string, LoreNode>();
         for (let i = 0; i < unique.length; i += CHUNK_SIZE) {
             const chunk = unique.slice(i, i + CHUNK_SIZE);
             const rows = await ctx.query('SELECT * FROM $ids', {
@@ -120,8 +126,13 @@ export async function getNodesByIds(ctx: SurrealReadCtx, ids: string[]): Promise
                 // records come back empty and must not become phantom nodes.
                 if (row['id'] == null) continue;
                 const node = rowToLoreNode(normalizeRow(row));
-                out.set(node.id, node);
+                hydrated.set(node.id, node);
             }
+        }
+        const out = new Map<string, LoreNode>();
+        for (const id of unique) {
+            const node = hydrated.get(id);
+            if (node) out.set(id, node);
         }
         return out;
     } catch (error) {
@@ -144,12 +155,9 @@ export async function traverse(
 }
 
 /** One frontier hop: the edges touching a set of nodes, either direction. */
-interface FrontierEdge {
+interface FrontierEdge extends FrontierEdgeCandidate {
     /** The frontier node this edge was reached FROM. */
     from: string;
-    /** The node on the other end. */
-    to: string;
-    relation: string;
 }
 
 async function traverseUncached(
@@ -163,42 +171,19 @@ async function traverseUncached(
     }
 
     try {
-        const visited = new Set<string>([nodeId]);
-        const results: TraversalResult[] = [];
-        let frontier: string[] = [nodeId];
-        let capped = false;
-
-        bfs:
-        for (let depth = 1; depth <= clampedDepth; depth++) {
-            // ONE query per depth level, not one per frontier node: SurrealDB
-            // matches the whole frontier in a single edge scan. The prior local
-            // graph engine issued 2 queries per frontier node because it couldn't
-            // parse the recursive form — the round-trip count differs, the
-            // observable result does not.
-            const byFrontier = await fetchFrontierEdges(ctx, frontier);
-            const nextFrontier: string[] = [];
-            // Iterate in FRONTIER order (not result order) so the same-depth
-            // sub-order is deterministic and matches the BFS discovery order
-            // LocalGraph produces. SEARCH_CONTRACT only fixes depth ordering;
-            // this pins the sub-order too, which Phase 2 needs.
-            for (const currentId of frontier) {
-                for (const edge of byFrontier.get(currentId) ?? []) {
-                    if (visited.has(edge.to)) continue;
-                    visited.add(edge.to);
-                    nextFrontier.push(edge.to);
-                    results.push({
-                        // Hydrated below in one batch — placeholder keeps the
-                        // push order (and therefore the sub-order) intact.
-                        node: { id: edge.to } as LoreNode,
-                        depth,
-                        relation: edge.relation,
-                    });
-                    if (results.length >= TRAVERSE_NODE_CAP) { capped = true; break bfs; }
-                }
-            }
-            if (nextFrontier.length === 0) break;
-            frontier = nextFrontier;
-        }
+        // ONE query per depth level, not one per frontier node: SurrealDB
+        // matches the whole frontier in a single edge scan. The prior local
+        // graph engine issued 2 queries per frontier node because it couldn't
+        // parse the recursive form — the round-trip count differs, the
+        // observable result does not. The walk itself (visited-set
+        // bookkeeping, node-cap enforcement, discovery sub-order) is the
+        // SHARED `runTraverseBfs` — see graphShared/traverseBfs.ts.
+        const { steps, capped } = await runTraverseBfs(
+            nodeId,
+            clampedDepth,
+            TRAVERSE_NODE_CAP,
+            (frontier) => fetchFrontierEdges(ctx, frontier),
+        );
         if (capped) {
             console.error(redactSurrealLog(
                 `[SurrealGraph] traverse from '${nodeId}' hit the ${TRAVERSE_NODE_CAP}-node cap `
@@ -211,11 +196,12 @@ async function traverseUncached(
         // node shape (the projection LocalGraph uses is a documented subset —
         // see the traverse RETURN alias list), so a Surreal traversal result
         // is never *less* hydrated than a search result.
-        const hydrated = await getNodesByIds(ctx, results.map((r) => r.node.id));
-        for (const result of results) {
-            const node = hydrated.get(result.node.id);
-            if (node) result.node = node;
-        }
+        const hydrated = await getNodesByIds(ctx, steps.map((s) => s.id));
+        const results: TraversalResult[] = steps.map((s) => ({
+            node: hydrated.get(s.id) ?? ({ id: s.id } as LoreNode),
+            depth: s.depth,
+            relation: s.relation,
+        }));
         return results.sort((a, b) => a.depth - b.depth);
     } catch (error) {
         throw surrealError(`Failed to traverse from '${nodeId}'`, 'traverse', error);
@@ -254,8 +240,12 @@ async function fetchFrontierEdges(
         for (const row of rows) {
             const from = ridToId(row['id']);
             const edges: FrontierEdge[] = [];
-            // Outgoing first, then incoming — LocalGraph's discovery order.
-            for (const key of ['outgoing', 'incoming'] as const) {
+            // Tagged with direction so the SHARED `sortFrontierEdges`
+            // (graphShared/traverseBfs.ts) can enforce "outgoing before
+            // incoming, then (relation, other id)" regardless of what order
+            // this query happens to return rows in — this loop's own order
+            // is no longer load-bearing.
+            for (const [key, direction] of [['outgoing', 'out'], ['incoming', 'in']] as const) {
                 const list = row[key];
                 if (!Array.isArray(list)) continue;
                 for (const entry of list) {
@@ -265,6 +255,7 @@ async function fetchFrontierEdges(
                     edges.push({
                         from,
                         to,
+                        direction,
                         relation: typeof e.relation === 'string' ? e.relation : 'related_to',
                     });
                 }
@@ -338,6 +329,9 @@ export async function search(
     ecosystem: string = '*',
     excludeHidden: boolean = false,
     signals?: { scanCapHit: boolean },
+    types?: string[],
+    entities?: string[],
+    topics?: string[],
 ): Promise<LoreNode[]> {
     ctx.tally?.record('search', shapeLimit(limit));
     const clampedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000);
@@ -347,6 +341,9 @@ export async function search(
         project,
         ecosystem,
         excludeHidden,
+        types,
+        entities,
+        topics,
     });
     const cached = await ctx.readCache.memoize<{ nodes: LoreNode[]; scanCapHit: boolean }>(key, async () => {
         try {
@@ -374,6 +371,34 @@ export async function search(
                 filters.push('(status = NONE OR status != "archived")');
                 filters.push('(supersededAt = NONE OR supersededAt = "")');
             }
+            if (types && types.length > 0) {
+                filters.push('type IN $types');
+                vars['types'] = types;
+            }
+            // E2 — entities/topics pushdown into the keyword leg. `metadata`
+            // is stored as a JSON STRING and this SurrealDB build has no
+            // JSON-string decode function (parse::json, encoding::json::decode,
+            // type::object and <object> are all rejected), so the predicate is
+            // a regex over the encoded string — see metaArrayFilter.ts for the
+            // pattern and why it can over- but never under-match. The
+            // `type::is_string` guard comes first: string::matches() THROWS on
+            // NONE/NULL/non-string, and nodes written without metadata store
+            // NONE, which would fail the whole search. Values are bound as
+            // `$eN` / `$tpN`, never interpolated. Exactness is restored on the
+            // fetched rows below (metaArraysContainAll) before ranking.
+            // The plain `string::contains` on the JSON-encoded value is
+            // implied by the regex (same needle) and rejects most rows before
+            // the regex runs.
+            entities?.forEach((e, i) => {
+                filters.push(`(type::is_string(metadata) AND string::contains(metadata, $en${i}) AND string::matches(metadata, $e${i}))`);
+                vars[`en${i}`] = JSON.stringify(e);
+                vars[`e${i}`] = metaArrayContainsPattern('entities', e);
+            });
+            topics?.forEach((t, i) => {
+                filters.push(`(type::is_string(metadata) AND string::contains(metadata, $tpn${i}) AND string::matches(metadata, $tp${i}))`);
+                vars[`tpn${i}`] = JSON.stringify(t);
+                vars[`tp${i}`] = metaArrayContainsPattern('topics', t);
+            });
             const scoped = filters.length > 0 ? ` AND ${filters.join(' AND ')}` : '';
             const tail = ' ORDER BY updatedAt DESC, id ASC LIMIT $scanCap';
 
@@ -409,8 +434,11 @@ export async function search(
                     vars,
                 );
 
-            const candidates = rows.map((row) => rowToLoreNode(normalizeRow(row)));
-            const scanCapHit = candidates.length >= SEARCH_SCAN_CAP;
+            const fetched = rows.map((row) => rowToLoreNode(normalizeRow(row)));
+            const scanCapHit = fetched.length >= SEARCH_SCAN_CAP;
+            const candidates = (entities?.length || topics?.length)
+                ? fetched.filter((n) => metaArraysContainAll(n.metadata, entities, topics))
+                : fetched;
             if (scanCapHit) {
                 // The query text is caller content — the double quotes make
                 // redactError hash it, so operators still see WHICH query

@@ -33,7 +33,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { reconnectGraph } from '../packages/lore/src/engines/reconnect.js';
-import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
+import { makeVerbatimStore, testVectorEngine } from './helpers/testVerbatimStore.js';
 import type { BulkListQuery, BulkListPage } from '../packages/lore/src/providers/types.js';
 
 const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'sw20-lore-'));
@@ -196,8 +196,19 @@ function makeNodes(n: number): FakeNode[] {
 
     /* ── C (E7): storeBatch resolves hashes via chunked contentHash IN ── */
     await test('C1 — storeBatch resolves contentHashes in CHUNKED `contentHash IN (...)`', async () => {
+        // Opus review follow-up: this test monkey-patches VerbatimStore's
+        // PRIVATE `table` (a LanceDB Table object)'s query().where() to
+        // record raw SQL predicate shapes — Lance's own internals, with
+        // no SqliteVerbatimStore equivalent (`.db`, a better-sqlite3
+        // handle, has a completely different query API). The chunking
+        // BEHAVIOR itself (ceil(N/500) calls instead of N) is exercised
+        // engine-agnostically by getContentHashesByIds's own contract,
+        // covered elsewhere (B1 above); skip this Lance-internals-
+        // specific instrumentation on sqlite rather than reimplementing
+        // it against a structurally different query API.
+        if (testVectorEngine() === 'sqlite') { console.log('  (skipped on sqlite — monkey-patches VerbatimStore\'s private LanceDB `table` field, see comment)'); return; }
         const ws = path.join(TEST_HOME, 'ws-c');
-        const store = new VerbatimStore(ws);
+        const store = makeVerbatimStore(ws);
         await store.initialize();
         try {
             // Seed one doc so the live LanceDB table exists, then instrument
@@ -251,7 +262,7 @@ function makeNodes(n: number): FakeNode[] {
     /* ── E11: FTS index ensure path exists ─────────────────────────── */
     await test('D1 — ensureFtsIndex exists and is non-fatal below threshold', async () => {
         const ws = path.join(TEST_HOME, 'ws-d');
-        const store = new VerbatimStore(ws);
+        const store = makeVerbatimStore(ws);
         await store.initialize();
         try {
             await store.store({ id: 'lore:fts', text: 'hello world', metadata: {} });

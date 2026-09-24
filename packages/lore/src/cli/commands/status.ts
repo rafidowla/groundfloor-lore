@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { openWorkspaceGraph, resolveGraphEngineForPath } from '../../engines/openWorkspaceGraph.js';
+import { resolveVerbatimEngineForPath } from '../../engines/openWorkspaceVerbatim.js';
 import { SyncEngine } from '../../engines/syncEngine.js';
 import { ConfigManager } from '../../config/configManager.js';
 import { loreHomePath } from '../../config/loreHome.js';
@@ -105,8 +106,17 @@ export async function statusCommand(_args: string[]): Promise<void> {
     // unconditionally, so a Surreal-backed workspace was described as
     // running an engine it does not run, with a path that does not exist.
     const engine = resolveGraphEngineForPath(basePath).engine;
-    console.log(`  Engine:     ${engine === 'surreal' ? 'SurrealDB' : 'legacy graph engine'} (local graph)`);
-    console.log(`  Graph:      ${path.join(loreDir, engine === 'surreal' ? 'surreal' : 'graph')}`);
+    const engineLabel = engine === 'surreal' ? 'SurrealDB' : engine === 'sqlite' ? 'SQLite' : 'legacy graph engine';
+    const graphSubpath = engine === 'surreal' ? 'surreal' : engine === 'sqlite' ? 'graph.sqlite' : 'graph';
+    console.log(`  Engine:     ${engineLabel} (local graph)`);
+    console.log(`  Graph:      ${path.join(loreDir, graphSubpath)}`);
+    // 3.21 step 2 part 2 — same "reported, not assumed" reasoning as the
+    // graph engine line above, for the vector substrate.
+    const vectorEngine = resolveVerbatimEngineForPath(basePath).engine;
+    const vectorEngineLabel = vectorEngine === 'sqlite' ? 'SQLite' : 'LanceDB';
+    const vectorSubpath = vectorEngine === 'sqlite' ? 'verbatim.sqlite' : 'lancedb';
+    console.log(`  Vectors:    ${vectorEngineLabel} (local verbatim)`);
+    console.log(`  Verbatim:   ${path.join(loreDir, vectorSubpath)}`);
     console.log(`  Project:    ${projectName}`);
     console.log(`  Ecosystem:  ${ecosystem}`);
     console.log('');

@@ -1,0 +1,50 @@
+[
+ {
+  "id": "u-ia01",
+  "query": "where's hydrateManifest defined"
+ },
+ {
+  "id": "u-ia02",
+  "query": "src/scheduler/enqueueWatermark.ts"
+ },
+ {
+  "id": "u-ia03",
+  "query": "riverstone.scheduler.enqueue_ms"
+ },
+ {
+  "id": "u-ia04",
+  "query": "what throws LeaseFencingError"
+ },
+ {
+  "id": "u-ia05",
+  "query": "ctx.tenant_router.migrate"
+ },
+ {
+  "id": "u-ia06",
+  "query": "RIVERSTONE_MAX_LEASE_MS env var"
+ },
+ {
+  "id": "u-ia07",
+  "query": "ERR_TOKEN_BUCKET_EMPTY"
+ },
+ {
+  "id": "u-ia08",
+  "query": "drainQuota.ts rate-limiter"
+ },
+ {
+  "id": "u-ia09",
+  "query": "how does serializeSession work in the cli"
+ },
+ {
+  "id": "u-ia10",
+  "query": "fx-code-012345"
+ },
+ {
+  "id": "u-ia11",
+  "query": "generated symbol #20517"
+ },
+ {
+  "id": "u-ia12",
+  "query": "WebhookRelayClient.retryWithBackoff"
+ }
+]

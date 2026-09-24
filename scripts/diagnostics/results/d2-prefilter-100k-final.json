@@ -1,0 +1,13 @@
+{
+  "generatedAt": "2026-09-23T12:58:00.000Z",
+  "note": "surreal/lance N=100000 leg did not complete in reasonable time (hung >13min at 781% CPU during table seed/index, well past the 300000ms per-measurement budget) and was killed (PID 79639/79638, SIGTERM) rather than left running further; all other legs captured from the live diagnostic run's stdout log (logs-d2b/diag100k.log in the worktree's sibling log dir).",
+  "sweep": [0, 100000],
+  "sqliteSqlite": {
+    "0": { "vector": { "hitAt1": true, "seedMs": 49, "queryMs": 5 }, "bm25": { "hitAt1": true, "seedMs": 49, "queryMs": 1 } },
+    "100000": { "vector": { "hitAt1": true, "seedMs": 10051, "queryMs": 22 }, "bm25": { "hitAt1": true, "seedMs": 10051, "queryMs": 11 } }
+  },
+  "surrealLance": {
+    "0": { "vector": { "hitAt1": true, "seedMs": 632, "queryMs": 17 }, "bm25": { "hitAt1": true, "seedMs": 632, "queryMs": 8 } },
+    "100000": { "skipped": "did not complete within budget; process hung >13min seeding the Lance table and was killed" }
+  }
+}

@@ -1,0 +1,75 @@
+# recall-eval baseline — sqlite / real / 10000 code rows
+
+Generated: 2026-09-23T20:12:17.318Z
+Config: candidateFloor=(default) lexicalBase=(default)
+Fixture: <local>/logs-e1/cache/sqlite/fixture-f4b536ccd6b5d820 (reused=true), counts: {"knowledge":80,"notes":300,"code":10000,"edges":36,"edgesWritten":36}
+Timings: fixture 2ms, eval 8342ms, total 9269ms
+
+## Baseline numbers
+
+| metric | value |
+|---|---|
+| hit@1 (chatty) | 87.5% |
+| hit@3 (chatty) | 100.0% |
+| MRR (chatty) | 0.938 |
+| hit@1 (terse) | 100.0% |
+| hit@3 (terse) | 100.0% |
+| MRR (terse) | 1.000 |
+| terse/chatty top-3 agreement (mean Jaccard) | 40.4% |
+| terse/chatty top-3 exact-set-equal | 8.3% |
+| anchor in both top-3 (expected node ranks <=3 under BOTH phrasings) | 100.0% |
+| top-1 equal (terse vs chatty) | 87.5% |
+| prefix stability chatty (top-10@10 == first10@50) | 58.3% |
+| prefix stability terse | 33.3% |
+| prefix stability BOTH phrasings | 16.7% |
+| mean pairwise Jaccard of top-10 (unrelated questions) | 0.021 |
+| gibberish zero-hit rate | 100.0% |
+| recall() latency p50 / p90 / p95 / p99 (n=332) | 21.4ms / 28.8ms / 33.5ms / 37.5ms |
+| pooled hit@3 (terse+chatty, n=48) | 100.0% (48/48) |
+
+## D1 — calibration / abstention (abstain=on, gibberish file=gibberish-heldout.json)
+
+| metric | value |
+|---|---|
+| real questions abstained (of 48 terse+chatty phrasings) | 0 |
+| exact-identifier rescue overrides (across all sets) | 12 |
+| gibberish abstained % | 100.0% |
+| gibberish zero-hit % | 100.0% |
+| calibration status(es) seen | ok |
+| null_median (mean across questions) | 0.790 |
+| null_scale (mean across questions) | 0.024 |
+| calibration build cost | fixture 2ms (includes 128-probe fit; single-flight cached across the run) |
+| mean recall() latency | 25.1ms |
+| distractors zero-hit % (n=28, no pass bar) | 75.0% |
+| distractors abstained % | 75.0% |
+| identifiers present (n=20) rank1 / hit@3 / found@10 | 85.0% / 90.0% / 95.0% |
+| identifiers present abstained % / rescued | 0.0% / 12 |
+| identifiers absent (n=12, no pass bar) zero-hit % / abstained % / rescued | 100.0% / 100.0% / 0 |
+| queries[] variant hit@1 / hit@3 / MRR (terse + queries:[chatty]) | 100.0% / 100.0% / 1.000 |
+| queries[] variant real-abstained % | 0.0% |
+| queries[] variant gibberish zero-hit % | 100.0% |
+
+## Real vs. gibberish top_score quantiles
+
+| set | p0 | p10 | p25 | p50 | p75 | p90 | p100 |
+|---|---|---|---|---|---|---|---|
+| real (n=24) | 0.845 | 0.853 | 0.869 | 0.888 | 0.905 | 0.916 | 0.919 |
+| gibberish (n=60) | n/a | n/a | n/a | n/a | n/a | n/a | n/a |
+| distractors (n=28) | 0.842 | 0.842 | 0.847 | 0.851 | 0.867 | 0.878 | 0.878 |
+
+## Negatives (D3 §5.3)
+
+| set | n | topScore null | top-1 lexical-only | top-3 lexical-only slots |
+|---|---|---|---|---|
+| offtopic | 20 | 20 | 0 | 0/60 |
+| unanswerable | 12 | 12 | 0 | 0/36 |
+
+## Identifiers / rare-term (review round 2 item 1)
+
+| metric | value |
+|---|---|
+| n | 20 |
+| rank1 | 85.0% |
+| hit@3 | 90.0% |
+| found@10 | 95.0% |
+| MRR | 0.875 |

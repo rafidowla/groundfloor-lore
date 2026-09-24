@@ -170,7 +170,13 @@ async function childUnrelatedDaemon(cmd: CommandUnderTest): Promise<void> {
     const { threw, elapsedMs } = await runCommand(cmd, home);
     server.close();
 
-    const surrealDirExists = fs.existsSync(path.join(home, '.lore', 'surreal'));
+    // 3.21 step 1d: a brand-new home (no legacy .lore adopted, as every
+    // fixture here is) now defaults graphEngine to 'sqlite', so the store
+    // this scenario opens may land at .lore/graph.sqlite instead of
+    // .lore/surreal — check for either; the assertion this feeds is about
+    // "the store got created", not which engine backs it.
+    const surrealDirExists = fs.existsSync(path.join(home, '.lore', 'surreal'))
+        || fs.existsSync(path.join(home, '.lore', 'graph.sqlite'));
     console.log('===RESULT_START===');
     console.log(`THREW=${threw === null ? '' : JSON.stringify(threw)}`);
     console.log(`SURREAL_DIR_EXISTS=${surrealDirExists}`);
@@ -261,7 +267,13 @@ async function childOwnDaemon(cmd: CommandUnderTest): Promise<void> {
     const { threw, elapsedMs } = await runCommand(cmd, home);
     server.close();
 
-    const surrealDirExists = fs.existsSync(path.join(home, '.lore', 'surreal'));
+    // 3.21 step 1d: a brand-new home (no legacy .lore adopted, as every
+    // fixture here is) now defaults graphEngine to 'sqlite', so the store
+    // this scenario opens may land at .lore/graph.sqlite instead of
+    // .lore/surreal — check for either; the assertion this feeds is about
+    // "the store got created", not which engine backs it.
+    const surrealDirExists = fs.existsSync(path.join(home, '.lore', 'surreal'))
+        || fs.existsSync(path.join(home, '.lore', 'graph.sqlite'));
     console.log('===RESULT_START===');
     console.log(`THREW=${threw === null ? '' : JSON.stringify(threw)}`);
     console.log(`SURREAL_DIR_EXISTS=${surrealDirExists}`);
@@ -479,6 +491,7 @@ async function scenarioLockConflict(cmd: CommandUnderTest): Promise<void> {
     const holder = spawn(tsxBin, [selfPath, '--child', 'holder'], {
         env: { ...process.env, LORE_HOME: home },
         stdio: ['ignore', 'pipe', 'inherit'],
+        detached: true,
     });
     try {
         await new Promise<void>((resolve, reject) => {
@@ -513,7 +526,7 @@ async function scenarioLockConflict(cmd: CommandUnderTest): Promise<void> {
         assert.ok(elapsedMs < 8_000,
             `expected ${cmd} to hit the shortened lock-probe budget (well under the old 15s storm); took ${elapsedMs}ms`);
     } finally {
-        holder.kill('SIGKILL');
+        if (holder.pid) { try { process.kill(-holder.pid, 'SIGKILL'); } catch { /* already gone */ } } else { holder.kill('SIGKILL'); }
     }
 }
 
@@ -541,6 +554,7 @@ async function scenarioMismatchLocked(cmd: CommandUnderTest): Promise<void> {
     const holder = spawn(tsxBin, [selfPath, '--child', 'holder'], {
         env: { ...process.env, LORE_HOME: home },
         stdio: ['ignore', 'pipe', 'inherit'],
+        detached: true,
     });
     try {
         await new Promise<void>((resolve, reject) => {
@@ -575,7 +589,7 @@ async function scenarioMismatchLocked(cmd: CommandUnderTest): Promise<void> {
         assert.ok(elapsedMs < 8_000,
             `expected ${cmd} to hit the shortened lock-probe budget (well under the old 15s storm); took ${elapsedMs}ms`);
     } finally {
-        holder.kill('SIGKILL');
+        if (holder.pid) { try { process.kill(-holder.pid, 'SIGKILL'); } catch { /* already gone */ } } else { holder.kill('SIGKILL'); }
     }
 }
 
@@ -601,6 +615,7 @@ async function scenarioCredentialRejectedLocked(cmd: CommandUnderTest): Promise<
     const holder = spawn(tsxBin, [selfPath, '--child', 'holder'], {
         env: { ...process.env, LORE_HOME: home },
         stdio: ['ignore', 'pipe', 'inherit'],
+        detached: true,
     });
     try {
         await new Promise<void>((resolve, reject) => {
@@ -635,7 +650,7 @@ async function scenarioCredentialRejectedLocked(cmd: CommandUnderTest): Promise<
         assert.ok(elapsedMs < 8_000,
             `expected ${cmd} to hit the shortened lock-probe budget (well under the old 15s storm); took ${elapsedMs}ms`);
     } finally {
-        holder.kill('SIGKILL');
+        if (holder.pid) { try { process.kill(-holder.pid, 'SIGKILL'); } catch { /* already gone */ } } else { holder.kill('SIGKILL'); }
     }
 }
 

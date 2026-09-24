@@ -1,44 +1,19 @@
 /**
  * helpers.ts — retrieval helpers shared by the search/recall tools.
  *
- *   - reciprocalRankFusion: merge semantic + BM25 ranked lists (recall).
  *   - buildLanguageHint: cross-language hint when the corpus is mostly in
  *     a different language than the query (search + recall).
  *   - estimateTokens: rough token cost of one node (recall token budget).
+ *
+ * 3.21 step 3(b): the reciprocal-rank-fusion helper that used to live here
+ * (`reciprocalRankFusion`) moved to `recall/rrf.ts` (`rrfFuse` /
+ * `rrfFuseIds` / `rrfFuseScores`) — that module is now the ONE shared
+ * fusion implementation for every list-fusion site in core, replacing three
+ * separately-reimplemented copies of the same formula. Import from there.
  */
 
 import type { LoreNode } from '../../../providers/types.js';
 import type { WorkspaceGraph } from '../../../engines/openWorkspaceGraph.js';
-
-/**
- * reciprocalRankFusion — Merge two ranked result lists into one.
- *
- * Fix #1 (hybrid retrieval): fuses semantic (vector) and BM25 (keyword)
- * result lists so that nodes appearing in BOTH lists rank higher than
- * nodes appearing in only one. Classic RRF formula:
- *   RRF(doc) = Σ 1 / (k + rank_in_list_i)
- * where k=60 is the standard constant that prevents rank-1 items from
- * completely dominating the merged list.
- *
- * Returns ids in descending RRF score order.
- */
-export function reciprocalRankFusion(
-    semanticIds: string[],
-    keywordIds: string[],
-    k: number = 60,
-): string[] {
-    const scores = new Map<string, number>();
-    const add = (ids: string[]) => {
-        ids.forEach((id, idx) => {
-            scores.set(id, (scores.get(id) ?? 0) + 1 / (k + idx + 1));
-        });
-    };
-    add(semanticIds);
-    add(keywordIds);
-    return Array.from(scores.entries())
-        .sort((a, b) => b[1] - a[1])
-        .map(([id]) => id);
-}
 
 /**
  * `getLanguageBreakdown` sits in an awkward spot: `LocalGraph`, `SurrealGraph`

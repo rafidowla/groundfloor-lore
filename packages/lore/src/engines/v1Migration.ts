@@ -51,7 +51,7 @@ import { createHash } from 'node:crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { WorkspaceGraph } from './openWorkspaceGraph.js';
-import type { VerbatimStore } from './verbatimStore.js';
+import type { VerbatimStoreApi } from './verbatimStoreApi.js';
 import { reconnectOneNode } from './reconnect.js';
 import { defaultAutolinkTracker, type PendingAutolinkTracker } from './pendingAutolink.js';
 
@@ -96,7 +96,7 @@ export interface MigrationOptions {
     apply?: boolean;                  // false = dry-run (default)
     archive?: boolean;                // on --apply, move the .db to archive
     /** If present, also re-embed imported nodes via ingest hook. */
-    verbatimStore?: VerbatimStore;
+    verbatimStore?: VerbatimStoreApi;
     /**
      * The owning Lore instance's autolink registry. Optional because the
      * primary caller is the CLI (`cli/commands/migrate.ts`), which owns the

@@ -386,14 +386,19 @@ export class SqliteOutboxStore implements IOutboxStore {
 
     async listPendingForWorkspace(workspace: string, limit: number): Promise<OutboxEntry[]> {
         // SP-21: exclude 'failed' rows whose nextAttemptAt is in the future.
-        // Wrap in datetime() on both sides: ISO-8601 'T'-format timestamps (stored
+        // Normalise both sides — never raw string compare: ISO-8601 'T'-format timestamps (stored
         // by Date#toISOString) compare lexicographically GREATER than SQLite's
         // space-format 'YYYY-MM-DD HH:MM:SS', so raw string compare is wrong.
-        // datetime() normalises both to the same format for a correct UTC comparison.
+        // julianday() normalises both to a fractional day number for a correct
+        // UTC comparison. NOT datetime(): it truncates to whole seconds, so a
+        // sub-second backoff (the first step is retryBaseMs = 500 ms) was
+        // ignored — a row failed at hh:mm:05.100 with nextAttemptAt
+        // hh:mm:05.600 compared equal to 'now' and retried on the very next
+        // 10 ms busy tick, and every later step could fire up to 1 s early.
         const rows = this.db.prepare(
             `SELECT * FROM outbox_entries
              WHERE workspace = ? AND status IN ('pending', 'failed')
-               AND (nextAttemptAt IS NULL OR datetime(nextAttemptAt) <= datetime('now'))
+               AND (nextAttemptAt IS NULL OR julianday(nextAttemptAt) <= julianday('now'))
              ORDER BY sequenceId ASC
              LIMIT ?`,
         ).all(workspace, Math.max(0, limit)) as Row[];

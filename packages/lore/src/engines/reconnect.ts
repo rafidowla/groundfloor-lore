@@ -17,7 +17,7 @@ import { createHash } from 'node:crypto';
 import { tagsToString } from './normalizeTags.js';
 import { isUnscopedEcosystem } from '../core/ecosystemMatch.js';
 import type { LoreNode } from '../providers/types.js';
-import type { VerbatimStore } from './verbatimStore.js';
+import type { VerbatimStoreApi } from './verbatimStoreApi.js';
 import type { DataplaneVectorStore } from './dataplaneVectorStore.js';
 import { buildVerbatimText } from './verbatimSchema.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
@@ -39,7 +39,7 @@ export type ReconnectableGraph = LoreGraphHandle & {
     }>;
 };
 type LoreGraph = ReconnectableGraph;
-type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
+type LoreVectorStore = VerbatimStoreApi | DataplaneVectorStore;
 
 const SEMANTIC_PREFIX = 'semantic_neighbor';
 const PREFIX_LORE = 'lore:';

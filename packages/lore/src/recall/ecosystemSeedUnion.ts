@@ -139,3 +139,47 @@ export async function bm25WithEcosystemUnion(
     };
 }
 
+
+/**
+ * E2 — union an ADDITIONAL scoped seed query into an existing seed result.
+ * Used for the `project` recall filter: the vector row's `project` is a
+ * write-time copy that can disagree with the graph node's (several verbatim
+ * writers fall back to the workspace/ecosystem name when the node has none,
+ * and the autolink store path writes the workspace name), so a project-scoped
+ * query alone could drop a node the graph-level post-filter would keep. The
+ * base (unscoped-by-project) result is kept whole — same rows as before E2 —
+ * and the scoped result only ADDS rows, which is what defeats crowding-out.
+ * Scoped hits win on id collision; merged order is by score, like the
+ * ecosystem union above.
+ */
+export async function unionSeedHits(
+    base: Promise<VerbatimSeedHit[]>,
+    extra: Promise<VerbatimSeedHit[]>,
+): Promise<VerbatimSeedHit[]> {
+    const [b, e] = await Promise.all([base, extra]);
+    if (e.length === 0) return b;
+    if (b.length === 0) return e;
+    const merged = new Map<string, VerbatimSeedHit>();
+    for (const h of e) merged.set(h.id, h);
+    for (const h of b) if (!merged.has(h.id)) merged.set(h.id, h);
+    return [...merged.values()].sort((x, y) => (y.score ?? 0) - (x.score ?? 0));
+}
+
+/** BM25 twin of {@link unionSeedHits}; `ranked` only when both were ranked. */
+export async function unionBm25Envelopes(
+    base: Promise<Bm25Envelope<VerbatimSeedHit>>,
+    extra: Promise<Bm25Envelope<VerbatimSeedHit>>,
+): Promise<Bm25Envelope<VerbatimSeedHit>> {
+    const [bRaw, eRaw] = await Promise.all([base, extra]);
+    const b = readBm25Envelope<VerbatimSeedHit>(bRaw);
+    const e = readBm25Envelope<VerbatimSeedHit>(eRaw);
+    if (e.hits.length === 0) return bRaw;
+    if (b.hits.length === 0) return eRaw;
+    const merged = new Map<string, VerbatimSeedHit>();
+    for (const h of e.hits) merged.set(h.id, h);
+    for (const h of b.hits) if (!merged.has(h.id)) merged.set(h.id, h);
+    return {
+        hits: [...merged.values()].sort((x, y) => (y.score ?? 0) - (x.score ?? 0)),
+        ranked: b.ranked && e.ranked,
+    };
+}

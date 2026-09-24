@@ -32,7 +32,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { ReconnectableGraph } from './reconnect.js';
-import type { VerbatimStore } from './verbatimStore.js';
+import type { VerbatimStoreApi } from './verbatimStoreApi.js';
 import type { PendingAutolinkTracker } from './pendingAutolink.js';
 import { DEFAULT_SWEEP_DRAIN_TIMEOUT_MS } from './pendingAutolink.js';
 interface BackgroundReconnectStatus {
@@ -123,7 +123,7 @@ export async function awaitBackgroundReconnect(
 export async function maybeRunBackgroundReconnect(opts: {
     loreDir: string;
     graph: ReconnectableGraph;
-    verbatim: VerbatimStore;
+    verbatim: VerbatimStoreApi;
     /** Skip the auto-trigger entirely (e.g., for tests). */
     disabled?: boolean;
     /**
@@ -185,7 +185,7 @@ export async function maybeRunBackgroundReconnect(opts: {
 async function runReconnectInBackground(opts: {
     loreDir: string;
     graph: ReconnectableGraph;
-    verbatim: VerbatimStore;
+    verbatim: VerbatimStoreApi;
     shouldAbort?: () => boolean;
 }): Promise<void> {
     const startedIso = new Date().toISOString();

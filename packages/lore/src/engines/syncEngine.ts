@@ -33,7 +33,7 @@ import fs from 'fs';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 import path from 'path';
 import type { LoreNode, LoreEdge } from '../providers/types.js';
-import type { VerbatimStore } from './verbatimStore.js';
+import type { VerbatimStoreApi } from './verbatimStoreApi.js';
 import type { DataplaneVectorStore } from './dataplaneVectorStore.js';
 import { sweepFreshness, type IFreshnessGraph } from './freshnessEngine.js';
 import { upsertVectorMirror, recoverVectorMirrors, type VectorMirrorResult } from './syncVectorMirror.js';
@@ -55,7 +55,7 @@ export { CURRENT_DATA_VERSION };
 export { WriteAheadLog };
 export type { WalOperation, WalEntry };
 
-type LoreVectorStore = VerbatimStore | DataplaneVectorStore;
+type LoreVectorStore = VerbatimStoreApi | DataplaneVectorStore;
 
 /** Architecture backlog #3 — chunk size for pullRemote's two-pass
  *  apply (graph upserts serial within a chunk, vector mirrors parallel).
