@@ -23,9 +23,14 @@
  * *new* high/critical finding too. It's replaced by
  * `scripts/audit-dependencies.mjs`, which parses `npm audit --json` and
  * hard-fails on anything not in its explicit `ALLOWLIST`. This file now
- * also asserts the allowlist is exactly the two tracked advisories, and
+ * also asserts the allowlist is exactly the tracked advisories, and
  * exercises the script's pass/fail behavior against fixture JSON (no
  * network access — `npm audit` itself is never invoked here).
+ *
+ * UPDATE (3.22.3): pdfjs-dist 5 -> 6 fixes GHSA-hq66-cqwq-w95j, so its
+ * ALLOWLIST entry is gone and adm-zip is the only tracked exception. The
+ * pdfjs fixture below is kept as a real-world offender: the gate must now
+ * fail on it rather than ignore it.
  */
 
 import assert from 'node:assert/strict';
@@ -168,15 +173,15 @@ const test = async (name: string, fn: () => void | Promise<void>) => {
         ) => { ignored: unknown[]; failing: unknown[] };
     };
 
-    await test('ALLOWLIST is exactly the two tracked advisories, each with a reason', () => {
+    await test('ALLOWLIST is exactly the one tracked advisory (adm-zip), with a reason', () => {
         const ids = auditModule.ALLOWLIST.map((entry) => entry.id).sort();
         assert.deepEqual(
             ids,
-            ['GHSA-hq66-cqwq-w95j', 'GHSA-xcpc-8h2w-3j85'],
-            `ALLOWLIST ids changed — expected exactly the two tracked advisories, got: ${ids.join(', ')}`,
+            ['GHSA-xcpc-8h2w-3j85'],
+            `ALLOWLIST ids changed — expected exactly the one tracked advisory, got: ${ids.join(', ')}`,
         );
         const packages = auditModule.ALLOWLIST.map((entry) => entry.package).sort();
-        assert.deepEqual(packages, ['adm-zip', 'pdfjs-dist']);
+        assert.deepEqual(packages, ['adm-zip']);
         for (const entry of auditModule.ALLOWLIST) {
             assert.ok(
                 typeof entry.reason === 'string' && entry.reason.length > 20,
@@ -237,11 +242,10 @@ const test = async (name: string, fn: () => void | Promise<void>) => {
     const ALLOWLISTED_ONLY_FIXTURE = {
         vulnerabilities: {
             'adm-zip': ADM_ZIP_ADVISORY,
-            'pdfjs-dist': PDFJS_ADVISORY,
             'onnxruntime-node': { name: 'onnxruntime-node', severity: 'high', isDirect: false, via: ['adm-zip'], effects: ['@huggingface/transformers'] },
             '@huggingface/transformers': { name: '@huggingface/transformers', severity: 'high', isDirect: true, via: ['onnxruntime-node'], effects: [] },
         },
-        metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 4, critical: 0, total: 4 } },
+        metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 3, critical: 0, total: 3 } },
     };
     const NEW_ADVISORY_FIXTURE = {
         vulnerabilities: {
@@ -264,14 +268,24 @@ const test = async (name: string, fn: () => void | Promise<void>) => {
                 effects: [],
             },
         },
-        metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 4, critical: 1, total: 5 } },
+        metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 3, critical: 1, total: 4 } },
+    };
+    const PDFJS_UNFIXED_FIXTURE = {
+        vulnerabilities: { ...ALLOWLISTED_ONLY_FIXTURE.vulnerabilities, 'pdfjs-dist': PDFJS_ADVISORY },
+        metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 4, critical: 0, total: 4 } },
     };
     const CLEAN_FIXTURE = { vulnerabilities: {}, metadata: { vulnerabilities: { info: 0, low: 0, moderate: 0, high: 0, critical: 0, total: 0 } } };
 
-    await test('evaluate() ignores the two allowlisted advisories and finds nothing failing', () => {
+    await test('evaluate() ignores the allowlisted advisory and finds nothing failing', () => {
         const { ignored, failing } = auditModule.evaluate(ALLOWLISTED_ONLY_FIXTURE);
         assert.equal(failing.length, 0, `expected no failing advisories, got: ${JSON.stringify(failing)}`);
-        assert.equal(ignored.length, 2, `expected exactly 2 ignored advisories, got: ${JSON.stringify(ignored)}`);
+        assert.equal(ignored.length, 1, `expected exactly 1 ignored advisory, got: ${JSON.stringify(ignored)}`);
+    });
+
+    await test('evaluate() fails on pdfjs-dist GHSA-hq66 (exception removed in 3.22.3)', () => {
+        const { failing } = auditModule.evaluate(PDFJS_UNFIXED_FIXTURE);
+        assert.equal(failing.length, 1, `expected exactly 1 failing advisory, got: ${JSON.stringify(failing)}`);
+        assert.equal((failing[0] as { id: string }).id, 'GHSA-hq66-cqwq-w95j');
     });
 
     await test('evaluate() fails on a non-allowlisted high/critical advisory', () => {
@@ -302,7 +316,7 @@ const test = async (name: string, fn: () => void | Promise<void>) => {
         assert.equal(status, 0, `expected exit 0, got ${status}. stdout:\n${stdout}`);
         assert.match(stdout, /ignoring tracked advisories/i);
         assert.match(stdout, /GHSA-xcpc-8h2w-3j85/);
-        assert.match(stdout, /GHSA-hq66-cqwq-w95j/);
+        assert.doesNotMatch(stdout, /GHSA-hq66-cqwq-w95j/);
     });
 
     await test('script run: exits 0 on a clean audit with no vulnerabilities', () => {
@@ -315,10 +329,9 @@ const test = async (name: string, fn: () => void | Promise<void>) => {
         assert.notEqual(status, 0, `expected a non-zero exit, got ${status}. stdout:\n${stdout}`);
         assert.match(stderr, /FAILING/i);
         assert.match(stderr, /left-pad/);
-        // The two tracked advisories in the same fixture must still be
-        // reported as ignored, not folded into the failure.
+        // The tracked advisory in the same fixture must still be reported
+        // as ignored, not folded into the failure.
         assert.match(stdout, /GHSA-xcpc-8h2w-3j85/);
-        assert.match(stdout, /GHSA-hq66-cqwq-w95j/);
     });
 
     fs.rmSync(tmpDir, { recursive: true, force: true });

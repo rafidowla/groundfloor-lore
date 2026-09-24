@@ -76,6 +76,12 @@ export const pdfExtractor: IExtractor = {
         }
         const pageTexts: string[] = [];
         const allTextItems: PdfTextItem[] = [];
+        // Best-effort metadata extraction. The shape differs across
+        // pdfjs versions; treat all fields as optional. Must run before the
+        // `finally` below destroys `doc` — getMetadata() on a destroyed doc
+        // throws, which the catch swallowed, so title/author/dates were
+        // always undefined before 3.22.3.
+        let meta: any = {};
         try {
             for (let pageNum = 1; pageNum <= doc.numPages; pageNum++) {
                 const page = await doc.getPage(pageNum);
@@ -93,6 +99,10 @@ export const pdfExtractor: IExtractor = {
                     .trim();
                 if (text) pageTexts.push(text);
             }
+            try {
+                const info = await doc.getMetadata?.();
+                meta = info?.info ?? {};
+            } catch { /* ignore */ }
         } finally {
             // Free PDF internals
             try { await doc.cleanup(); } catch { /* ignore */ }
@@ -104,14 +114,6 @@ export const pdfExtractor: IExtractor = {
         const tables = detectPdfTables(allTextItems);
 
         const joinedText = pageTexts.join('\n\n');
-
-        // Best-effort metadata extraction. The shape differs across
-        // pdfjs versions; treat all fields as optional.
-        let meta: any = {};
-        try {
-            const info = await doc.getMetadata?.();
-            meta = info?.info ?? {};
-        } catch { /* ignore */ }
 
         const charsPerPage = doc.numPages > 0 ? joinedText.length / doc.numPages : 0;
         const isScanned = joinedText.length === 0;

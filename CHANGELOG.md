@@ -4,6 +4,38 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.22.3] — 2026-09-24
+
+Patch release: PDF reader upgrade.
+
+### Security
+- **`pdfjs-dist` `^5.6.205` → `^6.3.289`** (GHSA-hq66-cqwq-w95j, fixed in
+  6.2.108). Not reachable before either — Lore never enables pdf.js
+  scripting — but its `ALLOWLIST` entry in `scripts/audit-dependencies.mjs`
+  is now removed, so the CI gate fails if it ever comes back. adm-zip
+  (`GHSA-xcpc-8h2w-3j85`) is the only remaining tracked exception.
+  Lockfile: `pdfjs-dist` 5.7.284 → 6.3.289 and `@napi-rs/canvas`
+  0.1.100 → 1.0.9; nothing else.
+
+### Changed
+- **`engines.node` `>=22 <23` → `>=22.13 <23`.** `pdfjs-dist` 6 declares
+  `node >=22.13.0`. CI (`node:22`) and dev (22.18) already satisfy it.
+
+### Fixed
+- **PDF metadata was always empty.** `pdfExtractor` called
+  `doc.getMetadata()` after the `finally` block had destroyed the document;
+  the resulting throw was swallowed, so `title` / `author` / `subject` /
+  creator / producer / dates were always `undefined`. It now reads metadata before cleanup.
+
+### Tests
+- `test/extractors/pdf-extract-real-unit.ts` — first test to drive the real
+  `pdfjs-dist` end to end, on PDFs generated in-test: multi-page text +
+  page count, Info metadata, a 3×3 grid reaching table detection, a PDF
+  with a JavaScript OpenAction (does not run), empty/corrupt inputs.
+  Wired into `test:extractors` as `test:extractors:pdf-real`.
+- `test/ci-dependency-audit-unit.ts` — allowlist is now adm-zip only; the
+  pdfjs fixture is asserted to fail the gate.
+
 ## [3.22.2] — 2026-09-24
 
 Patch release: host-install dependency hygiene. 3.22.1 was merged (PR #142)

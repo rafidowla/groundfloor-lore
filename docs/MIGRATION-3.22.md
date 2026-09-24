@@ -131,7 +131,20 @@ Add both to the host's root `package.json`, then `npm install`:
 ```
 
 These match the versions Lore's own test suite runs against. With them, a
-clean install's `npm audit --omit=dev` is left with only the `pdfjs-dist`
-finding documented in `docs/SECURITY_MODEL.md` §12. That finding is not
-reachable, and its fix, the `pdfjs-dist` 5→6 upgrade, ships in the next
-release.
+clean install of 3.22.2's `npm audit --omit=dev` is left with only the
+`pdfjs-dist` finding documented in `docs/SECURITY_MODEL.md` §12. That
+finding is not reachable, and 3.22.3 fixes it by upgrading `pdfjs-dist`
+5→6 (see §7).
+
+## 7. `pdfjs-dist` 6 (3.22.3)
+
+`pdfjs-dist` (an optional dependency, used only for PDF extraction) moves
+from `^5.6.205` to `^6.3.289`, fixing GHSA-hq66-cqwq-w95j. Hosts need no
+code change; keep the §6 overrides. `pdfjs-dist` 6 declares
+`node >=22.13.0`, so Lore's `engines.node` is now `>=22.13 <23` (tested on
+22.18). Hosts on Node 22.0–22.12 must upgrade Node.
+
+PDF extraction now also returns document metadata (`title`, `author`,
+`subject`, `creator`, `producer`, `creationDate`, `modificationDate`).
+Before 3.22.3 these were always `undefined` because they were read after
+the document was closed.

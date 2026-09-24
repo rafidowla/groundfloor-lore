@@ -1,6 +1,6 @@
 {
   "name": "@groundfloor/lore",
-  "version": "3.22.2",
+  "version": "3.22.3",
   "description": "Knowledge database for agentic AI — a local-first, schema-agnostic SurrealDB + LanceDB knowledge graph exposed to any AI tool over MCP, with optional Dataplane team sync.",
   "type": "module",
   "license": "Elastic-2.0",
@@ -308,7 +308,7 @@
     "test:extractors:xlsx": "tsx test/extractors/xlsx.test.ts",
     "test:extractors:pptx": "tsx test/extractors/pptx.test.ts",
     "test:extractors:epub": "tsx test/extractors/epub.test.ts",
-    "test:extractors": "npm run test:extractors:video && npm run test:extractors:html && npm run test:extractors:rtf && npm run test:extractors:xlsx && npm run test:extractors:pptx && npm run test:extractors:epub && npm run test:extractors:docx-tables && npm run test:extractors:pdf-tables",
+    "test:extractors": "npm run test:extractors:video && npm run test:extractors:html && npm run test:extractors:rtf && npm run test:extractors:xlsx && npm run test:extractors:pptx && npm run test:extractors:epub && npm run test:extractors:docx-tables && npm run test:extractors:pdf-tables && npm run test:extractors:pdf-real",
     "test:unit:audit-zipbomb": "tsx test/audit-zipbomb-docx-import-unit.ts",
     "test:unit:audit-v1migration-inject": "tsx test/audit-v1migration-no-shell-injection-unit.ts",
     "test:unit:audit-migration-ddl": "tsx test/audit-migration-ddl-injection-unit.ts",
@@ -554,6 +554,7 @@
     "test:unit:tabular-import": "tsx test/tabular-import-unit.ts",
     "test:extractors:docx-tables": "tsx test/extractors/docx-tables-unit.ts",
     "test:extractors:pdf-tables": "tsx test/extractors/pdf-tables-unit.ts",
+    "test:extractors:pdf-real": "tsx test/extractors/pdf-extract-real-unit.ts",
     "test:unit:remediation-phase2": "tsx test/remediation-phase2-unit.ts",
     "test:unit:remediation-phase3-4": "tsx test/remediation-phase3-4-unit.ts",
     "test:unit:remediation-gap2": "tsx test/remediation-gap2-neighbor-leak-unit.ts",
@@ -625,7 +626,7 @@
     "exceljs": "^4.4.0",
     "mailparser": "^3.9.8",
     "mammoth": "^1.12.0",
-    "pdfjs-dist": "^5.6.205",
+    "pdfjs-dist": "^6.3.289",
     "sharp": "^0.35.4",
     "sqlite-vec": "0.1.9",
     "tesseract.js": "^7.0.0"
@@ -645,6 +646,6 @@
     "sharp": "^0.35.4"
   },
   "engines": {
-    "node": ">=22 <23"
+    "node": ">=22.13 <23"
   }
 }

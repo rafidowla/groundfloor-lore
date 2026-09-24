@@ -469,7 +469,8 @@ before this gate existed, and no reachable fix exists yet:
   architecturally absent from the `pdf.mjs` entry point it imports.
   Fixed in `pdfjs-dist@6.2.108`, a breaking major-version bump (5→6),
   deliberately deferred rather than taken as part of this dependency-audit
-  pass.
+  pass. **Resolved in 3.22.3:** `pdfjs-dist` `^6.3.289`; the ALLOWLIST
+  entry is removed and the gate now fails on this advisory.
 
 **Update (2026-09-04, decision by Rafi):** the blanket `|| echo ...`
 soft-fail above has been replaced. The CI step now runs
@@ -480,7 +481,8 @@ high/critical advisory except the two GHSA IDs named above
 which are matched explicitly against an `ALLOWLIST` const in that script
 (kept in sync with this section). A genuinely new high/critical finding
 now blocks the merge instead of only printing a warning. Remove an entry
-from `ALLOWLIST` (and this section) once its fix lands.
+from `ALLOWLIST` (and this section) once its fix lands. As of 3.22.3 the
+only remaining entry is `GHSA-xcpc-8h2w-3j85` (adm-zip).
 
 ### Host installs (3.22.2)
 
@@ -492,7 +494,8 @@ that Lore's gate never sees. As of 3.22.2 there are two: `sharp` 0.33.x, via
 8.x, via `exceljs`. Neither is reachable from Lore. Each host pins both
 itself; the exact `overrides` block is in `docs/MIGRATION-3.22.md` §6.
 Upgrading `@lancedb/lancedb` does not help, because 0.39.0 still declares
-the same optional dependency.
+the same optional dependency. The one finding left after those pins,
+`pdfjs-dist` GHSA-hq66-cqwq-w95j, is fixed in 3.22.3.
 
 ---
 

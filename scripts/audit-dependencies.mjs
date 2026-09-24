@@ -56,19 +56,6 @@ export const ALLOWLIST = [
       'no non-breaking fix exists yet. Planned fix: major bump once ' +
       '@huggingface/transformers repins onnxruntime-node.',
   },
-  {
-    id: 'GHSA-hq66-cqwq-w95j',
-    package: 'pdfjs-dist',
-    // pdfjs-dist >=5.6.83 <6.2.108. The vulnerable scripting-sandbox path
-    // requires enableScripting: true, which packages/lore/src/engines/
-    // extractors/pdf.ts never sets and which is architecturally absent
-    // from the pdf.mjs entry point it imports. Fixed in pdfjs-dist@6.2.108,
-    // a breaking major bump (5->6), deliberately deferred.
-    reason:
-      'requires enableScripting: true, which this repo never sets and the ' +
-      'pdf.mjs entry point it imports cannot reach. Planned fix: major ' +
-      'bump to pdfjs-dist@6.2.108+ once scheduled.',
-  },
 ];
 
 const GATED_SEVERITIES = new Set(['high', 'critical']);

@@ -23,7 +23,7 @@
  *     the same binary successfully on both Node 20.20.2 and 22.23.2), so
  *     unlike a NODE_MODULE_VERSION-pinned addon it is NOT ABI-locked to a
  *     specific Node major — Node-API's whole point is ABI stability across
- *     Node versions. Lore's own Node 22 pin (`engines.node: ">=22 <23"`) is
+ *     Node versions. Lore's own Node 22 pin (`engines.node: ">=22.13 <23"`) is
  *     a project policy choice, not something this addon requires. (The repo
  *     dependency that IS genuinely ABI-specific, and would need a rebuild
  *     per Node major/platform, is `better-sqlite3`.) This script still
@@ -123,7 +123,7 @@ try {
     warn(
         `the native addon failed to load on Node ${process.versions.node} `
         + `(NODE_MODULE_VERSION ${process.versions.modules}): ${err.message}\n`
-        + `       Lore pins Node 22 (package.json engines: ">=22 <23"); you are on Node ${nodeMajor}. `
+        + `       Lore pins Node 22 (package.json engines: ">=22.13 <23"); you are on Node ${nodeMajor}. `
         + 'Switch to Node 22 (`nvm use`, this repo ships a .nvmrc) if you intend to use the SurrealDB engine.',
     );
     process.exit(0);
