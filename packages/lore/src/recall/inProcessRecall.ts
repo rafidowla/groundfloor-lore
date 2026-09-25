@@ -148,6 +148,15 @@ export interface RecallOpts {
      *  retrieve()'s own resolution. */
     candidateFloor?: number;
     lexicalBase?: LexicalBaseMode;
+    /** D8d — rescore the top hits with a local cross-encoder for tighter
+     *  ordering. Mirrors the `recall` MCP tool's `rerank` param. Default ON.
+     *  Per-call `false`, or a workspace-level off (authoritative — wins even
+     *  over a per-call `true`), turns it off with output byte-identical to
+     *  pre-D8; otherwise per-call true > workspace on > host/env > default
+     *  on — see rerankConfig.ts for the full precedence table. Fails open
+     *  (order unchanged) if the model is not cached. Threaded into both the
+     *  single-workspace and cross-workspace ("*") paths below. */
+    rerank?: boolean;
 }
 
 function toAbortError(signal: AbortSignal): Error {
@@ -224,6 +233,7 @@ async function inProcessRecallCore(
         abstain,
         relevanceFloor,
         abstainTermCoverage,
+        rerank,
     } = opts;
 
     // fix/3.22.1-recall-parity review fix (1) — clamp `max` to [1, 100],
@@ -240,6 +250,7 @@ async function inProcessRecallCore(
         }
         const mcpResult = await runCrossWorkspaceRecall({
             topic, depth, includeSuperseded, includeArchived, tags, types,
+            rerank, // D8b
             registry: deps.graphRegistry,
             verbatimStore: deps.store.loreVerbatim as Parameters<typeof runCrossWorkspaceRecall>[0]['verbatimStore'],
             sessionCache: deps.store.sessionCache,
@@ -269,6 +280,7 @@ async function inProcessRecallCore(
             signal: opts.signal,
             candidateFloor: opts.candidateFloor,
             lexicalBase: opts.lexicalBase,
+            rerank, // D8b
         });
     } catch (err) {
         if ((err as { code?: string }).code === 'workspace_not_found') {

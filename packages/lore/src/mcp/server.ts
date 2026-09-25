@@ -119,7 +119,7 @@ import { buildShutdownDrain, collectSqliteStores } from './shutdownDrain.js';
 // W3-SERVICE-LAYER — transport-agnostic guarded node-write orchestration,
 // shared with the MCP store_node tool + POST /api/node route.
 import { nodeUpsert as nodeServiceUpsert, resolveAutolinkHandles, type NodeWriteResult } from '../core/nodeService.js';
-import { resolveSupersessionContext, resolveHostSupersessionDefault } from '../core/supersessionPolicy.js';
+import { resolveSupersessionContext, resolveHostSupersessionDefault } from '../core/supersessionPolicy.js'; import { setHostRerankDefault } from '../recall/rerankConfig.js';
 // 1.1 (2026-08-17 functional-correctness audit) — SurrealDB's optimistic
 // concurrency drops writes under overlapping-key contention; the retry
 // wrapper (previously wired ONLY into bulkIngest) now covers the embedded
@@ -186,7 +186,7 @@ export interface CreateLoreOptions extends EmbeddingInjectionOptions {
      * `resolveHostSupersessionDefault`, and CHANGELOG.md's "D5 round 3"
      * entry for the full precedence writeup.
      */
-    supersessionEnforce?: boolean;
+    supersessionEnforce?: boolean; /** D8d — host default for rerank `enabled` (workspace/per-query win; see recall/rerankConfig.ts). */ recallRerank?: boolean;
     /**
      * Local embedding provider overrides. Programmatic alternative to the
      * LORE_LOCAL_EMBEDDING_DEVICE / LORE_LOCAL_EMBEDDING_MODEL env vars.
@@ -217,6 +217,7 @@ export interface CreateLoreOptions extends EmbeddingInjectionOptions {
     embedding?: import('../providers/localEmbeddingProvider.js').LocalEmbeddingProviderOptions;
     vectorStoreRole?: import('../engines/verbatimStoreRole.js').VerbatimStoreRole | ((basePath: string) => import('../engines/verbatimStoreRole.js').VerbatimStoreRole); // boot store + outbox resolver role; fn = resolved per basePath; omitted = today's default
     /** Decide per store whether to isolate search in a worker. Consulted before the LORE_SEARCH_WORKER env gate; omit for today's global behaviour. */ searchWorkerPolicy?: (basePath: string) => boolean;
+    /** D7 (3.23) — host-level default for piece-level vectors; precedence per-workspace > this option > LORE_RECALL_PIECE_VECTORS env > off. See engines/pieces/pieceSettings.ts. */ pieceVectors?: boolean;
 }
 
 /**
@@ -583,11 +584,11 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         graphBasePath,
         embeddingProvider,
         embedOverrides: opts.embedding as Record<string, unknown> | undefined,
-        vectorStoreRole: typeof opts.vectorStoreRole === 'function' ? opts.vectorStoreRole(graphBasePath) : opts.vectorStoreRole, searchWorkerPolicy: opts.searchWorkerPolicy, injectedEmbeddingProvider, workspaceId: getActiveWorkspaceName(dataHome), home: dataHome, // 3.21 step 2 part 2: resolves ITS OWN vectorEngine by name, same as createGraph() above.
+        vectorStoreRole: typeof opts.vectorStoreRole === 'function' ? opts.vectorStoreRole(graphBasePath) : opts.vectorStoreRole, searchWorkerPolicy: opts.searchWorkerPolicy, injectedEmbeddingProvider, workspaceId: getActiveWorkspaceName(dataHome), home: dataHome, pieceVectors: opts.pieceVectors, // 3.21 step 2 part 2: resolves ITS OWN vectorEngine by name, same as createGraph() above.
     });
 
     // SP-F3 — per-workspace verbatim resolver (local mode); autoEvict gated on OWNERSHIP (processOwnership.ts), not mode alone — a 'local'-mode caller that never claimed ownership must start no more recurring loops than 'embedded' does (tw2a-embedded-lifecycle-unit.ts (d)). vectorStoreRole threads the same per-path role resolution as the boot verbatimStore above. LORE-ASK-SEARCH-WORKER-POLICY: resolver ctor treats "no policy" as undecided, so this call site applies the env fallback, same as pre-policy. injectedEmbeddingProvider threads strictFingerprintCheck the same way as the boot verbatimStore.
-    const workspaceVerbatimResolver = deploymentMode === 'cloud' ? undefined : new WorkspaceVerbatimResolver(embeddingProvider, opts.searchWorkerPolicy ?? searchWorkerIsolationEnabled(), opts.embedding as Record<string, unknown> | undefined, { autoEvict: daemonTimersEnabled(opts.ownsProcess, effectiveMode), home: dataHome, vectorStoreRole: opts.vectorStoreRole, strictFingerprintCheck: injectedEmbeddingProvider }); const workspaceQuotaStore = new InMemoryWorkspaceQuotaStore();
+    const workspaceVerbatimResolver = deploymentMode === 'cloud' ? undefined : new WorkspaceVerbatimResolver(embeddingProvider, opts.searchWorkerPolicy ?? searchWorkerIsolationEnabled(), opts.embedding as Record<string, unknown> | undefined, { autoEvict: daemonTimersEnabled(opts.ownsProcess, effectiveMode), home: dataHome, vectorStoreRole: opts.vectorStoreRole, strictFingerprintCheck: injectedEmbeddingProvider, pieceVectors: opts.pieceVectors }); const workspaceQuotaStore = new InMemoryWorkspaceQuotaStore();
     // Finding 2 (post-review, 3.20.2, follow-up to e2abf06a) — a bare
     // `loadWorkspaces()` defaults to the process-wide `loreHome()`, not this
     // instance's own home. For an embedded host whose workspace (and its
@@ -658,7 +659,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     // D5 round 2 (#2): host-level default, precedence createLore() option >
     // LORE_SUPERSESSION_ENFORCE env > false. Threaded into every write path
     // below (embedded + MCP + REST) via DaemonWiring.supersessionEnforceDefault.
-    const hostSupersessionDefault = resolveHostSupersessionDefault(opts.supersessionEnforce);
+    const hostSupersessionDefault = resolveHostSupersessionDefault(opts.supersessionEnforce); if (opts.recallRerank !== undefined) setHostRerankDefault(opts.recallRerank); // D8d; guarded (N11): the setter is process-global, so an unset option must not clear another host's default
 
     // D5 round 2 (HIGH #1): shared resolver for the embedded nodeUpsert/nodeUpsertBatch
     // call sites below, so each doesn't repeat the same param block. graphRegistry is

@@ -25,12 +25,13 @@ import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, writeError, extractWorkspace } from '../helpers.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
-import { parseSearchMode, parseTags, parseQueries, parseCsvParam, parseAbstainParam, denyCrossWorkspaceRead, validateTypesParam } from './searchRouteParams.js';
+import { parseSearchMode, parseTags, parseQueries, parseCsvParam, parseAbstainParam, parseRerankParam, denyCrossWorkspaceRead, validateTypesParam } from './searchRouteParams.js';
 import { retrieve, type RetrieveContext } from '../../../recall/retrieve.js';
 import { hydrateApiQueryHits } from './apiQueryHydration.js';
 import { projectResults, projectKeywordNodes } from '../../../recall/retrievalProjection.js';
 import { buildRecallResult, buildCompactCandidates, buildRelatedCandidates } from '../../../recall/recallPreset.js';
 import { buildRelevanceMeta, notApplicableRelevanceMeta } from '../../../recall/abstention.js';
+import { toSnakeRerankMeta } from '../../../recall/rerankStage.js';
 import { expandCandidates, MAX_EXPAND_IDS } from '../../../recall/recallExpand.js';
 import { runCrossWorkspaceRecall } from '../../tools/recallCrossWorkspace.js';
 import { redactError } from '../../../security/logRedact.js';
@@ -159,6 +160,9 @@ export async function trySearchRoutes(
             // recall tool's abstain/relevance_floor params. Absent → abstain
             // off (calibration/relevance _meta fields always on regardless).
             const recallAbstain = parseAbstainParam(recallParams); // undefined when absent → LORE_RECALL_ABSTAIN applies
+            // D8b — ?rerank=1|0, parity with the MCP recall tool's `rerank`
+            // param. Absent → undefined (workspace/env precedence applies).
+            const recallRerank = parseRerankParam(recallParams);
             const recallFloorRaw = recallParams.get('relevance_floor');
             const recallRelevanceFloor = recallFloorRaw !== null && Number.isFinite(Number(recallFloorRaw)) ? Number(recallFloorRaw) : undefined;
             // 3.21 step 3(g) — ?compact=true returns N compact candidates
@@ -247,6 +251,7 @@ export async function trySearchRoutes(
                     // named-workspace branch enforces.
                     ecosystem: recallEcosystem,
                     tags: recallTags, types: recallTypes, // fix/3.22.1-d1-recall-option-parity — tags was already parsed above but never threaded into this branch; types is the new parity fix
+                    rerank: recallRerank, // D8b
                     registry: deps.graphRegistry, verbatimStore: deps.store.loreVerbatim,
                     sessionCache: deps.store.sessionCache, responseMode: 'summary',
                     allowedWorkspaces,
@@ -272,6 +277,7 @@ export async function trySearchRoutes(
                     mode: recallMode, depth: 1, limit: max, tags: recallTags, types: recallTypes, includeSuperseded, includeArchived: false, crossProject,
                     queries: recallQueries, entities: recallEntities, topics: recallTopics, project: recallProject, // 3.21 step 3(f)
                     abstain: recallAbstain, relevanceFloor: recallRelevanceFloor, // D1
+                    rerank: recallRerank, // D8b
                 });
             } catch (wsErr) {
                 if ((wsErr as { code?: string }).code === 'workspace_not_found') {
@@ -295,7 +301,11 @@ export async function trySearchRoutes(
                     // `candidates`. Omitted (not []) when there are none.
                     ...(recallOutcome.related.length > 0 ? { related: buildRelatedCandidates(recallOutcome) } : {}),
                     tip: 'POST /api/recall/expand with {ids, workspace} for chosen candidate ids to fetch their full bodies.',
-                    _meta: buildRelevanceMeta(recallOutcome.meta), // D1
+                    _meta: {
+                        ...buildRelevanceMeta(recallOutcome.meta), // D1
+                        // D8b — absent unless rerank actually ran for this call.
+                        ...(recallOutcome.meta.rerank ? { rerank: toSnakeRerankMeta(recallOutcome.meta.rerank) } : {}),
+                    },
                 }));
                 return true;
             }

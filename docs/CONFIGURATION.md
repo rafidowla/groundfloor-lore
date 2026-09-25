@@ -657,12 +657,16 @@ calls fast (so a genuinely broken workspace surfaces instead of crash-looping).
 `LORE_WORKER_BASE_PATH`, `LORE_WORKER_EMBED_OVERRIDES`,
 `LORE_WORKER_PARENT_EMBEDS`, `LORE_WORKER_EMBED_DIM`,
 `LORE_WORKER_EMBED_MODEL`, `LORE_WORKER_EMBED_DTYPE`,
-`LORE_WORKER_STRICT_FINGERPRINT`, and `LORE_IS_SEARCH_WORKER` are **internal**
+`LORE_WORKER_STRICT_FINGERPRINT`, `LORE_WORKER_PIECE_VECTORS`, and
+`LORE_IS_SEARCH_WORKER` are **internal**
 — the parent sets them on the child when it forks a worker (workspace path,
 serialized embedding overrides, whether embedding stays in the parent, the
 parent provider's vector dimension/model identity/dtype, whether the parent
 opened this workspace with strict fingerprint checking — see
-`verbatimFingerprintGate.ts` — and the recursion guard). Do not set them
+`verbatimFingerprintGate.ts` —, the workspace's already-resolved
+piece-vectors intent (D7c, 3.23 — so the child's own `VerbatimStore`
+construction doesn't have to re-resolve `LORE_RECALL_PIECE_VECTORS` /
+per-workspace overrides itself), and the recursion guard). Do not set them
 yourself.
 
 Source: `src/engines/verbatimSearchWorkerProxy.ts`
@@ -1758,7 +1762,8 @@ the gating rule (per-knob, no regression vs legacy) does not tolerate.
 unsafe floor-only combination above is no longer reachable. To opt in to
 prefix-stable ranking, set `LORE_RECALL_CANDIDATE_FLOOR=50`; nothing else is
 required. Trade-off (real 10k fixture, sqlite, legacy → opt-in): prefix
-stability 16.7% → 100%, negatives with a lexical-only top-1 13/32 → 0/32,
+stability 16.7% → 100%, negatives with a lexical-only top-1 11/32 → 0/32
+(re-measured after the 3.22.1 result-window fix; 13/32 before it),
 real-question hit@1/hit@3 unchanged (single query and multi-query
 `queries[]`, 100% hit@3 both); identifiers rank1 85% → 65% and
 found@10 95% → 85% (surreal/lance: 80% → 65%, 90% → 85%).
@@ -1796,7 +1801,8 @@ identifiers pass — rank1 85.0%→65.0%, found@10 95.0%→85.0% (sqlite);
 identifiers rank1/found@10 not drop vs legacy; this drops, so the default
 reverts to `rrf`. `anchored`'s real-question hit@1/hit@3 and negatives
 numbers are strictly better than legacy (negatives top-1-lexical-only:
-9/20→0/20 offtopic, 4/12→0/12 unanswerable, sqlite) — only the identifiers
+7/20→0/20 offtopic, 4/12→0/12 unanswerable, sqlite; re-measured after
+the 3.22.1 result-window fix) — only the identifiers
 pass regressed — so it remains available as an explicit opt-in for
 workloads that don't need top identifier recall. Setting it alone (floor 0)
 gives the anchored scoring without the prefix guarantee (sqlite: identifiers
@@ -1985,6 +1991,15 @@ Test/ops escape hatch: forces the JS brute-force vector-search fallback even
 when the `sqlite-vec` native extension is installed and would otherwise
 load successfully. Set to `1` to exercise (or benchmark) the fallback path
 on a machine where `sqlite-vec` is present.
+
+Only affects the canonical/pooled vector column
+(`sqliteVerbatimVector.ts`'s `nativeVectorSearch`/`BruteForceVectorCache`).
+D7's piece index (`sqlitePieceIndex.ts`) never reads this var and has no
+`sqlite-vec` fast path at all — its `searchPieces()` is JS brute-force
+unconditionally, by design (piece-search raw query speed was out of scope
+for D7a/D7b). `scripts/diagnostics/piece-bench.mjs --sqlite-vector-path
+brute-force` sets this before opening either of its fixtures, but only the
+piece-vectors-off leg's timing moves as a result.
 
 Source: `src/engines/sqliteVerbatimSchema.ts`
 
@@ -2216,6 +2231,201 @@ and cost real answers. Even at 0.1 the signal failed unseen validation
 (D1 §3.10.5) — experimental.
 
 Source: `src/recall/termCoverage.ts`
+
+---
+
+### `LORE_RECALL_PIECE_VECTORS`
+
+| | |
+|---|---|
+| **Default** | unset (off) |
+| **Values** | `1` / `true` (case-insensitive) to enable |
+| **Surface** | daemon, stdio, embedded (`createLore({ pieceVectors })`, `lore migrate piece-vectors`, seed search inside `recall`/`search`) |
+
+D7 (3.23) piece-level vectors: opt-in. Host-level default for whether a
+workspace's verbatim seed search routes through the piece index (title row +
+overlapping 128-token windows, 32-token overlap) instead of the single
+canonical per-node vector. Precedence, highest first: an explicit
+per-workspace override (`workspaces.json`'s `pieceVectors.enabled` for that
+entry — set via `setWorkspacePieceVectors()`; there is no CLI subcommand for
+it yet, only `lore migrate piece-vectors` for the index itself) — then
+`createLore({ pieceVectors })` — then this env var — then off. Turning intent
+on does not by itself populate the index: a live-write workspace builds it
+incrementally as new/updated nodes are stored (`verbatimStore.ts`'s write
+paths call `pieceIndex.upsertForRows()`), but a workspace with existing
+content needs a one-time `lore migrate piece-vectors` backfill. Until the
+index is `active` (see `_meta.piece_vectors` in `docs/API_REFERENCE.md`), seed
+search silently falls back to the pooled/canonical path — turning this on
+never breaks retrieval, it only makes it start using pieces once they exist.
+
+Source: `src/engines/pieces/pieceSettings.ts`, `src/engines/openWorkspaceVerbatim.ts`
+
+---
+
+### `LORE_RECALL_PIECE_FANOUT`
+
+| | |
+|---|---|
+| **Default** | `8` |
+| **Surface** | same as `LORE_RECALL_PIECE_VECTORS`, only consulted when piece routing is active |
+
+Over-fetch multiplier for piece-aware seed search. `pieceAwareSearch` asks the
+piece index for `limit * LORE_RECALL_PIECE_FANOUT` rows (clamped to
+`[64, 2000]`) before grouping hits back down to one score per node (max
+across that node's matching pieces) and truncating to `limit` — multiple
+pieces from the same node otherwise crowd out distinct nodes in the raw
+top-N. If the grouped result is still under-filled and the first fetch hit
+its cap exactly, one requery doubles `n` (capped at `4000`). Clamped to
+`[2, 32]`; a non-numeric value falls back to the default.
+
+Source: `src/recall/pieceSeedSearch.ts`
+
+---
+
+### `LORE_RECALL_RERANK` / `LORE_RECALL_RERANK_MODEL` / `LORE_RECALL_RERANK_K` / `LORE_RECALL_RERANK_MARGIN`
+
+| | |
+|---|---|
+| **Default** | **ON** (D8d); model `Xenova/ms-marco-MiniLM-L-6-v2`; `k=10`; `margin=1.0` |
+| **Surface** | daemon + embedded (`recall` MCP tool, `GET /api/recall`, `lore.recall()`, cross-workspace recall) |
+
+D8 local cross-encoder re-rank, **on by default as of D8d**. With no
+opinion anywhere in the precedence chain, retrieve() now attempts a rerank
+on every call. If the model isn't cached yet (the common case until an
+operator runs `lore models fetch-rerank`), this fails open exactly like any
+other rerank failure — original order, `_meta.rerank = {applied:false,
+reason:'model_absent', model}` — so a fresh install still behaves correctly,
+just without reordering, until the model is fetched.
+
+**Off switches** (any one of these disables rerank for that scope):
+- Per query: `rerank:false` (MCP `rerank` param / `?rerank=0` — REST's
+  primary, documented form; `?rerank=false`, case-insensitive, is also
+  accepted as an alias — / `RecallOpts.rerank:false`).
+- Per workspace: `lore workspaces set-rerank <name> off`.
+- Process-wide: `LORE_RECALL_RERANK=0` (or `false`/`off`).
+
+**Precedence (highest to lowest)**:
+1. Per-query `rerank:false` — always wins, unconditionally off.
+2. Per-workspace `off` — **authoritative**: even an explicit per-query
+   `rerank:true` does NOT override a workspace set to off.
+   `_meta.rerank = {applied:false, reason:'workspace_disabled'}`.
+3. Per-query `rerank:true` — on (unless #1/#2 above already decided it).
+4. Per-workspace `on` — on.
+5. Host default (`createLore({ recallRerank })` option) — whatever that
+   host configured.
+6. `LORE_RECALL_RERANK` env var — `1`/`true`/`on` or `0`/`false`/`off`.
+7. **Default: ON** (D8d). No opinion anywhere above means "attempt rerank."
+
+`model`/`k`/`margin`: per-workspace override (`--model`/`--k`/`--margin` on
+`set-rerank`) > matching env var > default. Cross-workspace recall
+(`workspace:'*'`) has no single workspace to consult, so its precedence
+collapses to per-call > host default > env > default-on. `k` is clamped to
+`[2, 20]`.
+
+**Explicit-off is byte-identical to pre-D8 output.** Any of the three off
+switches above (`rerank:false`, workspace off, `LORE_RECALL_RERANK=0`)
+produces the exact same response shape as before rerank existed — no
+`_meta.rerank`, no `rerank_score`, original order, nothing added. Only the
+*default* (no opinion) path now differs from pre-D8d behavior, by attempting
+a rerank and reporting `_meta.rerank` either way (applied or fail-open).
+
+When enabled, retrieve()'s top-K candidates are rescored by a local
+cross-encoder and reordered, protected by a margin gate: the incumbent #1
+result only moves if the challenger beats it by at least `margin` — this
+prevents a marginal re-rank score flip from bumping a confidently-correct
+top hit. `_meta.rerank` (`{model, applied, gate_held, replaced_top, reason?,
+k, margin, latency_ms, pieces_scored, pieces_capped?}`) and a per-hit
+`rerank_score` are added to the response — snake_case, alongside the
+existing camelCase-vs-snake_case boundary the rest of `_meta` already
+follows.
+
+**Fail-open, always.** Any failure returns the original, unmodified
+retrieve() order with `_meta.rerank.applied: false` and a `reason`. Re-rank
+never throws and never silently reorders on partial failure. Full `reason`
+enum:
+
+| `reason` | Meaning |
+|---|---|
+| `model_absent` | Model not cached under `<LORE_HOME>/models/<modelId>/` (no `.complete` marker) — run `lore models fetch-rerank`. This is the expected reason on a fresh install now that default is ON. |
+| `workspace_disabled` | The workspace's `set-rerank` policy is `off` — authoritative, overrides even a per-query `rerank:true`. |
+| `invalid_model` | Configured model id fails the `"org/name"`-shape check (F3). |
+| `integrity_failed` | Cached files exist but don't match the pinned sha256 manifest (default model only, F4) — treated as compromised/corrupt, never trusted. |
+| `busy` | Process-wide concurrency limit reached; call proceeds unranked rather than queuing (F2). |
+| `timeout` | `LORE_RECALL_RERANK_TIMEOUT_MS` (default `3000`) exceeded — enforced by a real `Promise.race`, not cooperative cancellation alone, so it fires even against a scorer that ignores its abort signal. |
+| `too_few_results` | Fewer than 2 candidates — nothing meaningful to reorder. |
+| `error` | Any other load/scoring exception. |
+
+**English-only by default.** The default model
+(`Xenova/ms-marco-MiniLM-L-6-v2`) is English-only. For a non-English
+workspace, set a multilingual cross-encoder's Transformers.js ONNX model id
+via `LORE_RECALL_RERANK_MODEL` or `lore workspaces set-rerank <name> on
+--model <id>` — availability of a suitable ONNX export must be verified per
+model; Lore does not hard-code one. `LORE_RECALL_RERANK_DTYPE`
+(`fp32`/`fp16`/`q8`/`q4`, default `q8`) is a single process-wide setting
+(no per-call or per-workspace dtype surface).
+
+**Offline / no-download rule.** Every re-rank code path on the retrieve()
+hot path (`recall/rerankStage.ts` → `providers/localRerankProvider.ts`)
+always passes `local_files_only: true` and fails open with
+`reason:'model_absent'` if the model isn't already cached under
+`<LORE_HOME>/models/<modelId>/` — it never downloads. The **only** way to
+fetch a re-rank model is the explicit, operator-run CLI command:
+
+```
+lore models fetch-rerank [--model <id>] [--dtype fp32|fp16|q8|q4] [--revision <rev>]
+```
+
+This is the one code path in the whole feature allowed `local_files_only:
+false`. `lore models prune` always keeps whichever re-rank model is
+currently configured (env or default), so a routine prune never deletes
+what `fetch-rerank` just downloaded. An idle-loaded model is released after
+`LORE_RECALL_RERANK_IDLE_UNLOAD_MS` (default `300000`, 5 min) of no
+re-rank calls. There is no "never unload" value: `<= 0` or a non-number
+falls back to the 5-minute default (unlike `LORE_EMBED_IDLE_UNLOAD_MS`,
+where `0` means never); set a large value to keep it resident. Up to
+`LORE_RECALL_RERANK_MAX_CACHED_MODELS` (default `3`, minimum `1`) distinct
+model+dtype sessions are kept resident at once (LRU, idle-evicted first) —
+relevant once a workspace overrides `model`/`dtype` away from the default.
+`LORE_RECALL_RERANK_MAX_CONCURRENT` (default `2`, minimum `1`) caps how
+many re-rank scoring runs may execute at once across the whole process; a
+call arriving while the cap is reached is not queued — it returns the
+original order with `reason:'busy'` (F2 — bounds the CPU any caller can
+force onto the cross-encoder).
+
+**Pin + verify (F4/F5, D8d).** The default model at the default dtype
+(`q8`) is pinned to an exact upstream commit (`DEFAULT_RERANK_REVISION` in
+`providers/rerankManifest.ts`) and every one of its 4 files is checked
+against a hardcoded sha256 manifest before it's trusted. `fetch-rerank`
+downloads into a `.staging-<random>` directory first, verifies all 4
+hashes, and only then atomically renames the verified directory into place
+and writes a `.complete` marker — `rerankModelCached()` requires that
+marker, so a partial, failed, or unverified download is never mistaken for
+"ready to use," and a hash mismatch aborts with nothing written to the
+cache (`reason:'integrity_failed'` if a previously-good cache is later
+tampered with or corrupted on disk). A non-default `--model`/`--dtype` has
+no manifest coverage — pass `--revision` to pin it to a specific commit
+anyway; integrity for a non-default model rests on that pin plus the
+`.complete` marker requirement alone, not a content hash.
+
+**Memory.** The cross-encoder session is created with `session_options:
+{enableCpuMemArena: true, enableMemPattern: false}`. ONNX Runtime's default
+`enableMemPattern` caches memory layout keyed by input tensor *shape*, which
+speeds up repeated inference at a fixed shape but grows unboundedly on this
+workload — the batch remainder and per-piece sequence length (up to the
+truncation cap) both vary almost every call, so the cache is never reused.
+`enableCpuMemArena` stays on; disabling it makes RSS more erratic, not less.
+Measured against real production-shaped queries (K=10, ~37-41 pieces/query):
+RSS plateaus around **~890MB** after model load plus sustained querying, vs
+**~1.3GB** under ORT's defaults, on an M-series Mac — a ~32% reduction with
+no change to latency or reranked order (verified identical across 198
+queries, 2 independent runs each way). Forward batch size stays at 32:
+smaller batches reduce memory further but were rejected after producing
+measurable, non-float-noise reranking-order drift under the q8-quantized
+model. Full methodology and variant matrix (build-time evidence, not
+shipped): `evidence/d8c/memory-matrix.md`.
+
+Source: `src/recall/rerankConfig.ts`, `src/recall/rerankStage.ts`,
+`src/providers/localRerankProvider.ts`, `src/cli/commands/modelsFetch.ts`
 
 ---
 
@@ -3182,6 +3392,17 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_RECALL_RELEVANCE_FLOOR` | `2.0` | Recall |
 | `LORE_RECALL_ABSTAIN_TERM_COVERAGE` | unset (off) | Recall |
 | `LORE_RECALL_TERM_COVERAGE_MIN` | `0.1` | Recall |
+| `LORE_RECALL_PIECE_VECTORS` | unset (off) | Recall |
+| `LORE_RECALL_PIECE_FANOUT` | `8` | Recall |
+| `LORE_RECALL_RERANK` | ON | Recall |
+| `LORE_RECALL_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Recall |
+| `LORE_RECALL_RERANK_K` | `10` | Recall |
+| `LORE_RECALL_RERANK_MARGIN` | `1.0` | Recall |
+| `LORE_RECALL_RERANK_TIMEOUT_MS` | `3000` | Recall |
+| `LORE_RECALL_RERANK_DTYPE` | `q8` | Recall |
+| `LORE_RECALL_RERANK_IDLE_UNLOAD_MS` | `300000` | Recall |
+| `LORE_RECALL_RERANK_MAX_CONCURRENT` | `2` | Recall |
+| `LORE_RECALL_RERANK_MAX_CACHED_MODELS` | `3` | Recall |
 | `LORE_LANCE_POOL_SIZE` | `16` | DB Internals |
 | `LORE_POOL_MAX_WAITERS` | `200` | DB Internals |
 | `LORE_POOL_ACQUIRE_TIMEOUT_MS` | `30000` | DB Internals |
@@ -3204,6 +3425,7 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_WORKER_EMBED_MODEL` | _(internal)_ | Search |
 | `LORE_WORKER_EMBED_DTYPE` | _(internal)_ | Search |
 | `LORE_WORKER_STRICT_FINGERPRINT` | _(internal)_ | Search |
+| `LORE_WORKER_PIECE_VECTORS` | _(internal)_ | Search |
 | `LORE_IS_SEARCH_WORKER` | _(internal)_ | Search |
 | `LORE_SEARCH_WEIGHT_TAGS` | `1` | Search |
 | `LORE_LANCE_ADD_COLUMN_SUPPORTED` | `true` | DB Internals |

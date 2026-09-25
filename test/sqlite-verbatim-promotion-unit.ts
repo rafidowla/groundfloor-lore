@@ -35,6 +35,7 @@ import {
 } from '../packages/lore/src/engines/verbatimPromotionState.js';
 import { ensureChangesLogTable } from '../packages/lore/src/engines/sqliteVerbatimSchema.js';
 import { streamStage, copyTail } from '../packages/lore/src/engines/verbatimPromotionStage.js';
+import { readPieceSidecar } from '../packages/lore/src/engines/pieces/pieceLayout.js';
 import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
 
 let passed = 0, failed = 0;
@@ -354,6 +355,76 @@ async function main(): Promise<void> {
         await store.close();
         const result = await promoteWorkspace(ws, DIM);
         assert.ok(result.committed && result.verify.ok, 'an unsabotaged promotion of the same workspace commits normally');
+    });
+
+    await test('B2: promotion no longer rebuilds pieces inline — commits normally, post-promotion piece status is not "active", and no embedding call happens once promoteWorkspace is invoked', async () => {
+        const ws = tmpWorkspace();
+        const inner = new DetEmbedProvider();
+        let embedCalls = 0;
+        // Wraps DetEmbedProvider and counts every call so the assertion
+        // below is a real measurement, not an inference from "the import
+        // was removed" — this is the concrete proof that promoteWorkspace()
+        // itself never touches an embedding provider (vectors are copied,
+        // never re-embedded — see verbatimPromotionStage.ts's header) and,
+        // specifically for B2, that the old inline post-commit piece
+        // rebuild (which called createEmbeddingProvider()+buildPieceIndex)
+        // is gone.
+        const counting: EmbeddingProvider = {
+            dimension: inner.dimension,
+            modelId: inner.modelId,
+            dtype: inner.dtype,
+            initialize: () => inner.initialize(),
+            embed: async (text: string) => { embedCalls++; return inner.embed(text); },
+            embedQuery: async (text: string) => { embedCalls++; return inner.embedQuery(text); },
+            embedDocument: async (text: string) => { embedCalls++; return inner.embedDocument(text); },
+        };
+
+        // Seed a small SQLite-backed workspace opted into piece vectors
+        // FROM CREATION (canonical starts empty, so SqlitePieceIndex's
+        // initialize() auto-creates an empty, valid, complete index — see
+        // sqlitePieceIndex.ts's initialize()/createEmpty()) and let the
+        // ordinary write path build it incrementally (store()'s
+        // pieceIndex?.upsertForRows() calls, sqliteVerbatimStore.ts:262).
+        // This is D7's normal "opt-in" scenario, distinct from the
+        // migration-CLI's retrofit-onto-existing-data path, and is a
+        // simpler/more direct way to land at a complete pre-promotion
+        // sidecar than driving buildPieceIndex() by hand (confirmed:
+        // buildPieceIndex() on this same store reports 'noop'/'already
+        // built', since the incremental writes already left it complete).
+        const store = new SqliteVerbatimStore(ws, counting, { pieceVectors: true });
+        await store.initialize();
+        for (let i = 0; i < 10; i++) {
+            await store.store({ id: `piece-doc${i}`, text: `document number ${i} covers subject area ${i % 3}`, metadata: {} });
+        }
+        const statusBefore = store.pieceIndexStatus();
+        assert.ok(statusBefore.open && statusBefore.valid, `precondition: piece index must be open+valid before promotion, got: ${JSON.stringify(statusBefore)}`);
+        await store.close();
+
+        const sidecarBefore = readPieceSidecar(ws);
+        assert.ok(sidecarBefore?.complete, 'precondition: piece sidecar must be complete before promotion');
+
+        // Reset the counter AFTER seeding+piece-build (which legitimately
+        // embed) and BEFORE promoteWorkspace: from here on nothing should
+        // ever call the embedding provider again.
+        embedCalls = 0;
+
+        const promoted = await promoteWorkspace(ws, DIM);
+        assert.ok(promoted.committed, `expected promotion to commit, got: ${promoted.verify.reasons.join('; ')}`);
+        assert.equal(embedCalls, 0, 'promoteWorkspace must not call the embedding provider at all (B2: no inline piece rebuild)');
+
+        // The old sidecar (and, on Lance, the old piece table) were swept
+        // into the .stale-<ts> aside directory by finishCommitRenames, and
+        // nothing rebuilds a new one anymore — so the promoted workspace
+        // root has no sidecar, and the promoted Lance store must report the
+        // piece index as not active (not_built/absent), never "active".
+        assert.equal(readPieceSidecar(ws), null, 'no new piece sidecar should exist in the promoted workspace root');
+
+        const lance = new VerbatimStore(ws, counting, { pieceVectors: true });
+        await lance.initialize();
+        const statusAfter = lance.pieceIndexStatus();
+        assert.ok(!(statusAfter.open && statusAfter.valid), `piece index must not be active after promotion, got: ${JSON.stringify(statusAfter)}`);
+        assert.equal(embedCalls, 0, 'opening the promoted store to check piece status must not trigger any embedding calls either');
+        await lance.close();
     });
 
     console.log(`\n${passed} passed, ${failed} failed`);

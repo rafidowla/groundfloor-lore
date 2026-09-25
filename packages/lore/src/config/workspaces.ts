@@ -205,6 +205,7 @@ export interface WorkspaceEntry {
      */
     vectorEngine?: 'lance' | 'sqlite';
     retention?: WorkspaceRetentionPolicy;
+    recallRerank?: import('../recall/rerankConfig.js').WorkspaceRecallRerank;
     /**
      * Phase 6 P2 — accepted-vocabulary policy. Absent or `mode: 'open'`
      * means no restriction (back-compat default).
@@ -276,6 +277,7 @@ export interface WorkspaceEntry {
      * not yet enforced by auto-demotion (deferred to Feature 6 Phase 2).
      */
     anchorDemotionGraceDays?: number;
+    pieceVectors?: import('../engines/pieces/pieceSettings.js').WorkspacePieceVectors;
 }
 
 export interface WorkspacesFile {
@@ -646,7 +648,7 @@ export function listWorkspaceNames(home: string = loreHome()): string[] {
     return loadWorkspaces(home).workspaces.map((w) => w.name);
 }
 
-function writeControl(file: WorkspacesFile, home: string = loreHome()): void {
+export function writeControl(file: WorkspacesFile, home: string = loreHome()): void {
     const controlFile = workspacePaths(home).controlFile;
     const tmp = `${controlFile}.tmp.${process.pid}.${Date.now()}`;
     fs.writeFileSync(tmp, JSON.stringify(file, null, 2), 'utf8');

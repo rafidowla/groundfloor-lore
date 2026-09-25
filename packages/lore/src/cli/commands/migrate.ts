@@ -5,6 +5,7 @@ import { loreHome, loreHomePath } from '../../config/loreHome.js';
 import { migrateV1Sqlite } from '../../engines/v1Migration.js';
 import { migrateEmbeddingModelCommand } from './migrateEmbedding.js';
 import { migrateWorkspaceToWorkspaceCli } from './migrateWorkspaceToWorkspace.js';
+import { migratePieceVectorsCommand } from './migratePieceVectors.js';
 import { openGraphForCli } from './shared.js';
 
 export async function migrateCommand(args: string[]): Promise<void> {
@@ -15,6 +16,13 @@ export async function migrateCommand(args: string[]): Promise<void> {
     }
     if (target === 'workspace-to-workspace') {
         await migrateWorkspaceToWorkspaceCli(args.slice(1));
+        return;
+    }
+    // D7c (3.23) — piece-level vectors: build/rebuild/drop the derived
+    // lore_verbatim_pieces index. See migratePieceVectors.ts's docblock for
+    // why this command has no --apply flag (bare invocation is idempotent).
+    if (target === 'piece-vectors') {
+        await migratePieceVectorsCommand(args.slice(1));
         return;
     }
     // Sprint H1 (2026-05-24) — online-schema-migration subcommands.
@@ -41,6 +49,10 @@ export async function migrateCommand(args: string[]): Promise<void> {
         console.error('  workspace-to-workspace --from <a> --to <b> [filters] [--apply]');
         console.error('      Move filtered nodes (and optionally edges + vectors) from one');
         console.error('      workspace to another. Default --dry-run. See --help for flags.');
+        console.error('  piece-vectors [--dry-run] [--force] [--drop]');
+        console.error('      Build/rebuild the derived piece-level index (D7, 3.23). Bare');
+        console.error('      invocation builds and is idempotent (no-op once current).');
+        console.error('      --dry-run counts only; --force rebuilds; --drop removes + disables.');
         console.error('  list [--substrate <name>] [--workspace <name>] [--status <s>]');
         console.error('      Sprint H1: list online schema migrations tracked in migrations.sqlite.');
         console.error('  status <id>');

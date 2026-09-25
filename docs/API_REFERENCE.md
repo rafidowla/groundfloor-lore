@@ -38,7 +38,7 @@ Dataplane swap point.
 
 | Tool | Purpose | Key params |
 |---|---|---|
-| `recall` | Semantic search + graph traversal combined — the primary retrieval tool | `topic`, `depth?`, `project?`, `tags?`, `workspace?`, `mode?`, `search_mode?`, `max_tokens?`, `include_archived?`, `queries?` (≤5 extra phrasings, fused with `topic` via the shared RRF), `entities?` / `topics?` (≤20 each — match the node's `store_node` `entities`/`topics`), `project?` (exact match), `compact?` (return thin `{id,label,snippet≤240,score,matchedBy,updatedAt}` candidates instead of full nodes — pair with `recall_expand`), `abstain?` (default `false` — return zero results below the relevance floor; see `_meta` in the embedded-mode section), `relevance_floor?` (default `2.0`). Every response (summary, full, and compact) now carries a `queryId` — pass it to `recall_outcome` to tie an outcome to this call. |
+| `recall` | Semantic search + graph traversal combined — the primary retrieval tool | `topic`, `depth?`, `project?`, `tags?`, `workspace?`, `mode?`, `search_mode?`, `max_tokens?`, `include_archived?`, `queries?` (≤5 extra phrasings, fused with `topic` via the shared RRF), `entities?` / `topics?` (≤20 each — match the node's `store_node` `entities`/`topics`), `project?` (exact match), `compact?` (return thin `{id,label,snippet≤240,score,matchedBy,updatedAt}` candidates instead of full nodes — pair with `recall_expand`), `abstain?` (default `false` — return zero results below the relevance floor; see `_meta` in the embedded-mode section), `relevance_floor?` (default `2.0`), `rerank?` (default no per-call opinion, falls through to workspace/host/env precedence, which defaults to ON as of D8d — D8 local cross-encoder re-rank; see `_meta.rerank`). Every response (summary, full, and compact) now carries a `queryId` — pass it to `recall_outcome` to tie an outcome to this call. |
 | `search` | Vector + keyword search over nodes | `query`, `limit?`, `tags?`, `language?`, `workspace?`, `search_mode?`, `queries?` (≤5 extra phrasings, fused with `query`), `entities?` / `topics?`, `project?`, `abstain?`, `relevance_floor?` |
 | `recall_expand` | Full node bodies for ids chosen from a `recall` `compact:true` response | `ids` (≤50), `workspace`, `ecosystem?` — confined to the same workspace/ecosystem/actor scope `recall` itself enforces; an id outside that scope is silently dropped, not an error |
 | `traverse` | Walk the graph from a node | `node_id`, `depth?`, `workspace?` |
@@ -347,7 +347,7 @@ Response: `{ at, count, nodes: LoreNode[] }`. Embeddable-surface equivalent:
 
 | Method · Path | Purpose |
 |---|---|
-| `GET /api/recall` | Semantic recall (search + traverse). Accepts repeated `?queries=<phrasing>` (≤5 extras, fused with `topic` via the shared RRF) and `?entities=`/`?topics=` (comma-separated, match `store_node`'s `entities`/`topics`) plus `?project=` (exact match). All optional — omitted ⇒ today's behaviour. `?compact=true` returns thin `{id,label,snippet≤240,score,matchedBy,updatedAt}` candidates instead of full nodes. `?abstain=true\|false` (default off — omit for the env default `LORE_RECALL_ABSTAIN`) and `?relevance_floor=` (default `2.0`) control D1 calibrated abstention; every response's `_meta` carries the calibration/relevance fields regardless (see the embedded-mode `_meta` reference). Every response carries a `queryId` for `POST /api/recall/outcome`. |
+| `GET /api/recall` | Semantic recall (search + traverse). Accepts repeated `?queries=<phrasing>` (≤5 extras, fused with `topic` via the shared RRF) and `?entities=`/`?topics=` (comma-separated, match `store_node`'s `entities`/`topics`) plus `?project=` (exact match). All optional — omitted ⇒ today's behaviour. `?compact=true` returns thin `{id,label,snippet≤240,score,matchedBy,updatedAt}` candidates instead of full nodes. `?abstain=true\|false` (default off — omit for the env default `LORE_RECALL_ABSTAIN`) and `?relevance_floor=` (default `2.0`) control D1 calibrated abstention; every response's `_meta` carries the calibration/relevance fields regardless (see the embedded-mode `_meta` reference). `?rerank=1\|0` (primary, documented form; `true`\|`false`, case-insensitive, is also accepted as an alias — N16, 3.23 final review) (default omitted — no per-call opinion, falls through to workspace/host/env precedence, which defaults to ON as of D8d) controls the D8 local cross-encoder re-rank; see `_meta.rerank` below. Every response carries a `queryId` for `POST /api/recall/outcome`. |
 | `POST /api/recall/expand` | Full node bodies for ids chosen from a `?compact=true` response. Body: `{ids}` (≤50), `workspace`, `ecosystem?`. Same confinement `GET /api/recall` enforces — an id outside the caller's workspace/ecosystem/actor scope is silently dropped, not an error. |
 | `POST /api/recall/bulk` | Batched recall |
 | `GET /api/search` | Full-text / hybrid content search |
@@ -553,6 +553,7 @@ const lore = await createLore({
 |---|---|---|---|
 | `deploymentMode` | `'embedded' \| 'local' \| 'cloud'` | `LORE_DEPLOYMENT_MODE` env / config / `'local'` | Selects the substrate and transport mode. Use `'embedded'` for in-process library use. |
 | `dataDir` | `string` | `LORE_HOME` / `~/.groundfloor` | Per-instance Lore data root. Set to a unique path when running multiple instances in one process; they will be fully isolated on disk. |
+| `pieceVectors` | `boolean` | `LORE_RECALL_PIECE_VECTORS` env / off | D7 (3.23) host-level default for piece-level vector seed search (title row + overlapping token-window rows, beside the canonical per-node vector). A per-workspace override in `workspaces.json` always wins over this option. See `docs/CONFIGURATION.md`'s `LORE_RECALL_PIECE_VECTORS` for full precedence, and `lore migrate piece-vectors` (CLI) for backfilling an already-populated workspace — a fresh workspace opened with this `true` builds its piece index incrementally as nodes are written, no separate backfill needed. |
 
 ### `LoreInstance` members
 
@@ -602,7 +603,10 @@ const result = await lore.recall('embedded lifecycle', {
 `crossProject?`, `includeSuperseded?`, `tags?`, `maxTokens?`,
 `includeArchived?`, `searchMode?`, `queryLanguage?`, `filePaths?`, `max?`,
 `abstain?` (default `false` — see `_meta` below), `relevanceFloor?` (default
-`2.0`).
+`2.0`), `rerank?` (default no per-call opinion — falls through to
+workspace/host/env precedence, which now **defaults to ON** as of D8d; see
+`_meta.rerank` below and `docs/CONFIGURATION.md`'s `LORE_RECALL_RERANK`
+section for the full precedence chain and off switches).
 
 ##### `_meta` — calibrated relevance & abstention (D1)
 
@@ -620,6 +624,7 @@ drift surface-by-surface:
 | `abstained` | `boolean` | `true` only when `abstain: true` was passed, the query is below floor, and no rescue overrode it. When `true`, `results`/`hits` are empty. |
 | `abstain_overridden` | `'exact_identifier'` (optional) | Present when an otherwise-abstained decision was rescued because the query contains an identifier-shaped token (dotted/underscored/slashed/hyphenated, camelCase/PascalCase, a ≥6-char letter+digit mix, or a `#`-sigil numbered reference like `#4821` — bare digits never qualify) that appears as a whole token (not a substring of a longer token) in a candidate's label or content. |
 | `calibration` | object | `{status, version, probes, rows, null_median, null_scale, scope}`. `status` is one of `ok`, `insufficient_rows` (store has fewer than 50 rows), `degenerate` (probes had no meaningful spread, `null_scale < 0.005`), `unavailable` (probe run failed or hasn't completed), `not_applicable` (keyword mode / cross-workspace), or **`pending`** — the fit is running in the background (see below) and hasn't landed yet; `top_relevance`/`below_floor`/`abstained` are not meaningful until a later call sees a non-`pending` status. |
+| `piece_vectors` | object (optional) | D7 (3.23). Present only when this workspace's piece-vectors intent is on (`createLore({ pieceVectors })` / `LORE_RECALL_PIECE_VECTORS` / the workspace's own override — off by default, key omitted entirely so a default response stays byte-identical to pre-D7 Lore). Snake_case on the wire like every other `_meta` field (the internal `RetrieveMeta` TypeScript type names this field camelCase `pieceVectors`, but every presentation surface — single-workspace and cross-workspace alike — projects it to `piece_vectors` before it's ever serialized). `{status, layout?, reason?}`: `status` is `'active'` (index open + valid — seed search is actually routing through it), `'not_built'` (intent is on but no `lore migrate piece-vectors` backfill / incremental build has happened yet — falls back to canonical search), `'stale'` (a sidecar exists but disagrees with the live layout or embedding fingerprint — also falls back), or `'unsupported'` (this store engine doesn't implement the D7 hooks, e.g. cloud/Dataplane). `layout: 'pieces-v1'` is present only when `status: 'active'`; `reason` is present for `'not_built'`/`'stale'`. |
 
 **Non-blocking calibration (D1 follow-up):** the first calibration fit for a
 workspace costs roughly 1-2s (128 fixed probe queries through the same
@@ -630,6 +635,36 @@ completes in the background; a subsequent call sees the landed status. A
 host that passes `abstain: true` still blocks on the first call, since
 abstention gating needs the floor to mean something from the very first
 query.
+
+##### `_meta.rerank` — local cross-encoder re-rank (D8, default ON since D8d)
+
+Present whenever rerank was attempted for the call — which, as of D8d, is
+**every call** that doesn't hit an explicit off switch (per-query
+`rerank:false`, workspace `set-rerank off`, or `LORE_RECALL_RERANK=0`; see
+`docs/CONFIGURATION.md`'s `LORE_RECALL_RERANK` section for the full
+precedence chain). Only those three explicit-off paths omit `_meta.rerank`
+entirely and produce byte-identical-to-pre-D8 output. Everywhere else —
+including the new default-on "no opinion" path — `_meta.rerank` is present
+with `applied:true` (reordered) or `applied:false` plus a `reason` (most
+commonly `model_absent` on a host that hasn't run `lore models fetch-rerank`
+yet).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `model` | `string` | The cross-encoder model id used for this call. |
+| `applied` | `boolean` | `true` if the stage actually rescored and (potentially) reordered results. `false` on any failure, in which case the original retrieve() order is returned unmodified. |
+| `gate_held` | `boolean` | `true` when the incumbent #1 result was kept in place because no challenger beat it by at least `margin`. |
+| `replaced_top` | `boolean` | `true` when the #1 result changed as a result of re-ranking. |
+| `reason` | `string` (optional) | Present only when `applied: false`. One of `model_absent`, `workspace_disabled`, `invalid_model`, `integrity_failed`, `busy`, `timeout`, `too_few_results`, `error` — see `docs/CONFIGURATION.md` for what each means. |
+| `k` | `number` | How many top candidates were rescored (clamped `[2, 20]`). |
+| `margin` | `number` | The gate margin used for this call. |
+| `latency_ms` | `number` | Wall-clock time spent in the re-rank stage. |
+| `pieces_scored` | `number` | How many (query, passage) pairs were actually scored. |
+| `pieces_capped` | `boolean` (optional) | Present when the scored set was capped below what `k` would otherwise imply. |
+
+Each hit also carries a `rerank_score` field (the raw cross-encoder logit)
+in `summary`, `full`, and `compact` shapes alike, and `mode: 'full'` bodies
+/ `auto_full` follow the reranked order when applied.
 
 #### `lore.nodeUpsert(args)` → `Promise<NodeWriteResult>`
 

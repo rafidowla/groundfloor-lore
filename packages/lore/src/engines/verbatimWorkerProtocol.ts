@@ -29,7 +29,20 @@
  *  `typeof store.tombstone === 'function'` check is true via inheritance), so
  *  under LORE_SEARCH_WORKER=1 'delete this note' did nothing forever. The
  *  worker entry dispatches generically by name against this allowlist and the
- *  proxy shadows every listed name, so listing a method wires BOTH sides. */
+ *  proxy shadows every listed name, so listing a method wires BOTH sides.
+ *
+ *  D7c (3.23) — searchPieces / pieceIndexStatus were the SAME bug class as
+ *  1.11: pieceSeedSearch.ts's retrieval routing detects piece-search
+ *  capability via `typeof store.searchPieces === 'function'`, which is true
+ *  on the proxy purely via inheritance from VerbatimStore — so under
+ *  LORE_SEARCH_WORKER=1 the capability check passed while the call itself
+ *  silently ran against the dead in-process half (empty/closed piece
+ *  index) instead of forwarding to the child that actually holds the real
+ *  LancePieceIndex. `pieceVectorsIntentOn` deliberately does NOT need to be
+ *  listed here — it's a plain in-memory field read (VerbatimStore's ctor
+ *  sets `this.pieceVectorsIntent` synchronously, before any IPC/init), so
+ *  the proxy answers it correctly on its own once its constructor forwards
+ *  `pieceVectors` into `super()` — see verbatimSearchWorkerProxy.ts. */
 export const FORWARDED_METHODS = [
     'initialize',
     'store',
@@ -56,6 +69,9 @@ export const FORWARDED_METHODS = [
     'getHistory',
     'exportRows',
     'compact',
+    // D7c — piece-level vector search surface (see header).
+    'searchPieces',
+    'pieceIndexStatus',
 ] as const;
 
 export type ForwardedMethod = (typeof FORWARDED_METHODS)[number];
@@ -90,6 +106,8 @@ export type DispatchableMethod = ForwardedMethod | TestWorkerHookMethod;
 export const GATE_ARG_SLOT: Partial<Record<ForwardedMethod, number>> = {
     search: 5,
     bm25Search: 4,
+    // D7c — VerbatimStore.searchPieces(query, topK, filter?, actorScopes?, gate?).
+    searchPieces: 4,
 };
 
 /** The set of methods that may carry a per-call gate (signal/deadline) at
@@ -113,7 +131,7 @@ export const GATE_ARG_SLOT: Partial<Record<ForwardedMethod, number>> = {
  *  it to decide whether to compute/send a wire-level `deadline` at all —
  *  previously each side kept its own copy of this same list, which is how
  *  the proxy's copy silently diverged from what it should have gated. */
-export const GATE_OPT_METHODS: ReadonlySet<DispatchableMethod> = new Set<DispatchableMethod>(['search', 'searchByVector', 'bm25Search']);
+export const GATE_OPT_METHODS: ReadonlySet<DispatchableMethod> = new Set<DispatchableMethod>(['search', 'searchByVector', 'bm25Search', 'searchPieces']);
 
 /** The full set of method names the entry may dispatch and the proxy may shadow
  *  — the real allowlist, plus the test hooks above ONLY under
@@ -205,6 +223,16 @@ export const WORKER_ENV = {
     IS_WORKER: 'LORE_IS_SEARCH_WORKER',
     /** Set to '1' when the parent process handles all embedding — child skips model load. */
     PARENT_EMBEDS: 'LORE_WORKER_PARENT_EMBEDS' as const,
+    /** D7c — set to '1' when the parent resolved piece-vectors intent as ON
+     *  for this workspace (openWorkspaceVerbatim's own resolveHostPieceVectorsDefault
+     *  + resolvePieceVectorsIntent precedence, run ONCE in the parent — see
+     *  verbatimSearchWorkerProxy.ts/mcp/services.ts/workspaceVerbatimResolver.ts).
+     *  The child threads this straight into its own VerbatimStore construction
+     *  so its (otherwise always-off-by-default) pieceVectorsIntent matches what
+     *  the parent already decided, instead of re-deriving it from scratch (which
+     *  would need workspaceId/home threaded across IPC as new env vars for no
+     *  benefit — a single resolved boolean is the minimal correct plumbing). */
+    PIECE_VECTORS: 'LORE_WORKER_PIECE_VECTORS' as const,
     /** Embedding vector dimension, passed so the child's stub provider reports it correctly. */
     EMBED_DIM: 'LORE_WORKER_EMBED_DIM' as const,
     /** Embedding model id, passed so the child's stub provider reports it correctly. */

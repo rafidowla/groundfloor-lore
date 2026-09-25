@@ -138,7 +138,16 @@ async function main(): Promise<void> {
         }
         // Strict fingerprint policy (host-injected provider in the parent) is
         // forwarded by the proxy, so the child refuses exactly as in-process would.
-        store = new VerbatimStore(basePath, embeddingProvider, { strictFingerprintCheck: process.env[WORKER_ENV.STRICT_FINGERPRINT] === '1' });
+        // D7c — piece-vectors intent is likewise forwarded by the proxy
+        // (WORKER_ENV.PIECE_VECTORS): without this, this store's own
+        // pieceVectorsIntent would default to false regardless of what the
+        // parent resolved, and searchPieces/pieceIndexStatus (now forwarded —
+        // see verbatimWorkerProtocol.ts) would silently query an index this
+        // store never populates.
+        store = new VerbatimStore(basePath, embeddingProvider, {
+            strictFingerprintCheck: process.env[WORKER_ENV.STRICT_FINGERPRINT] === '1',
+            pieceVectors: process.env[WORKER_ENV.PIECE_VECTORS] === '1',
+        });
         await store.initialize(); // opens LanceDB + runs the crash-safe self-heal
     } catch (err) {
         post({ type: 'init-error', error: toErrorShape(err) });

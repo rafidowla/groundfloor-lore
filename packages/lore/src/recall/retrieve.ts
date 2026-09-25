@@ -75,6 +75,7 @@ export type {
 } from './retrieveTypes.js';
 import { replaceSupersededInResults, applyCorrectsAdjacency, refillSeedSlots } from './supersessionRecall.js';
 import { withOwnRelevance, collectRelated, splitCorrectsInjections } from './retrieveRelated.js';
+import { applyRerankStageIfEnabled } from './rerankStage.js';
 
 /** Same shape/behavior as inProcessRecall.ts's own toAbortError and
  *  searchGate.ts's — deliberately NOT shared (see those files' notes on the
@@ -651,6 +652,7 @@ async function retrieveInner(
                 topRelevance: abstention.topRelevance !== null ? parseFloat(abstention.topRelevance.toFixed(2)) : null,
                 relevanceFloor, belowFloor: abstention.belowFloor, abstained: abstention.abstained, ...abstentionMeta,
                 calibration: { status: calibration.status, version: calibration.version, probes: calibration.probes, rows: calibration.rows, nullMedian: calibration.nullMedian, nullScale: calibration.nullScale, scope: workspace },
+                ...(seedStore?.pieceStatus ? { pieceVectors: seedStore.pieceStatus } : {}),
             },
         };
     }
@@ -709,6 +711,7 @@ async function retrieveInner(
         related = related.filter((r) => passesEntitiesTopicsProject(r.node, entitiesFilter, topicsFilter, projectFilter));
     }
 
+    let rerankMeta; ({ results, rerankMeta } = await applyRerankStageIfEnabled(results, query, opts.rerank, workspace)); // D8: fail-open top-K re-rank (rerankStage.ts)
     // D5: corrects pairs adjacent (before truncation). Injected, non-matching
     // corrects targets move to `related` (D4 contract: never ranked/counted).
     ({ results, related } = splitCorrectsInjections(await applyCorrectsAdjacency(results, graph, admitD5), related));
@@ -789,6 +792,7 @@ async function retrieveInner(
                 status: calibration.status, version: calibration.version, probes: calibration.probes, rows: calibration.rows,
                 nullMedian: calibration.nullMedian, nullScale: calibration.nullScale, scope: workspace,
             },
+            ...(seedStore?.pieceStatus ? { pieceVectors: seedStore.pieceStatus } : {}), ...(rerankMeta ? { rerank: rerankMeta } : {}),
         },
     };
 }

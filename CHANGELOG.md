@@ -4,6 +4,317 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.23.0] — 2026-09-25
+
+Upgrading from 3.22.x: read [`docs/MIGRATION-3.23.md`](docs/MIGRATION-3.23.md) — D8 re-rank is on by
+default but inert until `lore models fetch-rerank` is run; D7 piece vectors stay opt-in.
+
+### D7
+
+#### Added
+- **Piece-level vectors (D7, 3.23) — opt-in.** A second, derived seed-search
+  index alongside the canonical per-node vector: each verbatim node is split
+  into a title row plus overlapping 128-token windows (32-token overlap),
+  each embedded and indexed on its own. Retrieval can then match a specific
+  passage inside a long node instead of only the node's single pooled
+  vector, which historically diluted precision on long documents. Off by
+  default; nothing about default recall behavior changes unless a workspace
+  opts in.
+  - **Precedence, highest to lowest:** a per-workspace override in
+    `workspaces.json` (`setWorkspacePieceVectors()`; there is no CLI
+    subcommand for setting it yet) — `createLore({ pieceVectors })` — the
+    `LORE_RECALL_PIECE_VECTORS` env var — off. See
+    `docs/CONFIGURATION.md`'s `LORE_RECALL_PIECE_VECTORS` /
+    `LORE_RECALL_PIECE_FANOUT` sections for the full resolution rules and
+    the over-fetch/grouping behavior of piece-aware seed search.
+  - **Storage** (`src/engines/pieces/`): `pieceLayout.ts` (windowing),
+    `pieceSettings.ts` (precedence resolution), `LancePieceIndex` /
+    `SqlitePieceIndex` (per-engine CRUD), with write-path hooks in
+    `verbatimStore.ts` / `sqliteVerbatimStore.ts` so a live workspace with
+    piece-vectors on builds its index incrementally as nodes are
+    stored/updated — no separate step needed for a workspace that opts in
+    from the start. The sidecar `piece_layout.json` lives beside the
+    embedding fingerprint inside `.lore/lancedb/`, engine-agnostic (used
+    even for SQLite-engine workspaces).
+  - **Retrieval** (`src/recall/pieceSeedSearch.ts`,
+    `src/recall/retrieveSeedStore.ts`): `pieceAwareSearch()` over-fetches by
+    `LORE_RECALL_PIECE_FANOUT` (default 8, clamped `[2, 32]`), groups hits
+    back down to one score per node (max across that node's matching
+    pieces), and falls back cleanly to the canonical/pooled path whenever
+    the piece index isn't actually usable. Wired into both single-workspace
+    (`retrieve.ts`) and cross-workspace (`recallCrossWorkspace.ts`) recall.
+  - **`_meta.piece_vectors`** (snake_case on the wire for both the
+    single-workspace and cross-workspace/MCP surfaces alike — the internal
+    `RetrieveMeta` TypeScript type names this field camelCase `pieceVectors`,
+    but both `recallPreset.ts` and `recallCrossWorkspace.ts` project it to
+    snake_case before it's ever serialized, same as every other `_meta`
+    field): `{status, layout?, reason?}` reports whether
+    seed search actually routed through the piece index this call —
+    `'active'` (routed; `layout: 'pieces-v1'`), `'not_built'` (intent on,
+    no index yet), `'stale'` (sidecar disagrees with the live layout or
+    embedding fingerprint), or `'unsupported'` (store engine doesn't
+    implement the D7 hooks, e.g. cloud/Dataplane). The key is omitted
+    entirely when piece-vectors intent is off, so a default response stays
+    byte-identical to pre-D7 Lore. See `docs/API_REFERENCE.md`.
+  - **Migration CLI**: `lore migrate piece-vectors [--dry-run] [--force]
+    [--drop]` backfills (or previews, or removes) the piece index for an
+    already-populated workspace. Idempotent — a bare run on an
+    already-valid, complete index is a no-op — so unlike `migrate embedding`
+    there is no separate `--apply` flag; `--dry-run` opts into a
+    count-only preview instead. Engine-agnostic (SQLite and Lance both
+    supported, unlike the Lance-only `migrate embedding`). Refuses fast
+    with actionable recovery steps if the daemon holds the single-writer
+    lock.
+  - **Engine lifecycle**: a SQLite→Lance vector-engine promotion no longer
+    rebuilds the piece index inline after commit (revised per the 3.23
+    final review, finding B2 — the inline rebuild widened the promotion's
+    lost-write window and used the default embedding provider rather than
+    the host's injected one, which could silently produce a
+    fingerprint-mismatched/stale sidecar). Promotion now logs a warning and
+    leaves the piece index `not_built`; recall falls back to canonical
+    vectors until an operator runs `lore migrate piece-vectors` on the
+    promoted workspace. The worker-isolation proxy forwards piece search to
+    the search-worker child
+    (which receives the parent's already-resolved piece-vectors intent via
+    the internal `LORE_WORKER_PIECE_VECTORS` env var, so it doesn't
+    re-resolve `LORE_RECALL_PIECE_VECTORS` / per-workspace overrides
+    itself); an embedding-model migration drops the now-stale piece index
+    rather than serving pieces embedded under the old model.
+  - **Bench script**: `scripts/diagnostics/piece-bench.mjs` measures
+    recall/seed-search p50/p90 latency with piece-vectors off vs. on
+    against identical fixture content, flags a >2x SQLite p90 regression,
+    and documents that SQLite's piece search has no `sqlite-vec` fast path
+    at all (`sqlitePieceIndex.ts`'s `searchPieces()` is unconditionally JS
+    brute-force, unlike the canonical vector column). Manual diagnostics
+    tool, not part of `npm test` — same precedent as
+    `recall-eval/runner.mjs`.
+  - **Recall-eval fixtures**: `scripts/diagnostics/recall-eval/`'s
+    `buildFixture.mjs` / `runner.mjs` gained a `--piece-vectors on|off`
+    flag folded into the fixture cache-key hash, so an on-fixture and an
+    off-fixture for the same (engine, rows, embedder) no longer collide in
+    the fixture cache.
+
+#### Tests
+- `test/d7-piece-index-unit.ts` (+ `:sqlite`) — T1: piece layout, per-engine
+  index CRUD, write-path incremental build.
+- `test/d7-piece-recall-unit.ts` (+ `:sqlite`) — T2: `pieceAwareSearch`
+  routing, grouping/fanout, `_meta` status surfacing, cross-workspace
+  wiring.
+- `test/d7-piece-vectors-e2e.ts` — mandatory design-§5 integration trace
+  covering both engines via runtime vector-engine mutation.
+- `test/d7-piece-migration-unit.ts` (+ `:sqlite`) — T3: migration CLI
+  (`--dry-run`/`--force`/`--drop`), engine-lifecycle handling
+  (embedding-migration drop).
+- `test/sqlite-verbatim-promotion-unit.ts` — B2 (3.23 final review): a real
+  `promoteWorkspace()` run on a small SQLite workspace with a complete piece
+  index commits normally, the promoted workspace has no piece sidecar
+  (status not `active`), and no embedding-provider call happens once
+  promotion is invoked.
+- `test/d7c-worker-proxy-piece-search-unit.ts` — worker-isolation proxy
+  forwards piece search correctly.
+
+### D8
+
+Optional local cross-encoder re-rank stage (`Xenova/ms-marco-MiniLM-L-6-v2`
+by default, `q8` quantized). Off by default — no behavior or output change
+until enabled.
+
+- **`rerank` threaded through every production recall surface**: the
+  `recall` MCP tool (single- and cross-workspace), `GET /api/recall`
+  (`?rerank=1|0`; `true|false`, case-insensitive, also accepted as an
+  alias since N16, 3.23 final review), `recall/inProcessRecall.ts`, and
+  `recallCrossWorkspace.ts` (applied once to the merged list, after sort/
+  filters, before the cap slice — per-workspace retrieves inside never
+  rerank on their own). `search`/`GET /api/search` intentionally get no
+  per-call param — they inherit workspace/env.
+- **Precedence**: `enabled` = per-call > workspace (`lore workspaces
+  set-rerank <name> on|off|default [--model] [--k] [--margin]` /
+  `get-rerank`) > `LORE_RECALL_RERANK` env > off. `model`/`k`/`margin` =
+  workspace > env > default. Cross-workspace recall collapses to per-call >
+  env > off (no single workspace to consult).
+- **`_meta.rerank`** (snake_case: `model`, `applied`, `gate_held`,
+  `replaced_top`, `reason?`, `k`, `margin`, `latency_ms`, `pieces_scored`,
+  `pieces_capped?`) and a per-hit `rerank_score` in summary, full and
+  compact shapes — present only when rerank was enabled for the call.
+  `mode:'full'` bodies and `auto_full` follow the reranked order.
+- **Fail-open**: model not cached, load/scoring error, or timeout
+  (`LORE_RECALL_RERANK_TIMEOUT_MS`, default 3000ms) always returns the
+  original unmodified order with `applied:false` and a `reason` — never
+  throws.
+- **`lore models fetch-rerank [--model <id>] [--dtype fp32|fp16|q8|q4]`** —
+  the only code path allowed `local_files_only:false`; every retrieve()-path
+  caller stays offline and fails open if the model isn't already cached.
+  `lore models prune` now keeps the configured rerank model.
+- **Diagnostics**: `scripts/diagnostics/recall-eval/runner.mjs --rerank
+  on|off` and `scripts/diagnostics/rerank-bench.mjs` (RSS + rerank-stage
+  latency measurement, design §7 item 5).
+- Docs: `docs/CONFIGURATION.md` (`LORE_RECALL_RERANK*` env vars, precedence,
+  offline rule, multilingual override) and `docs/API_REFERENCE.md`
+  (`rerank?` param, `_meta.rerank` reference).
+- **D8c memory fix.** Real Atlas node bodies (198 queries, K=10, ~37-41
+  pieces/query, `max_length` 320) exposed RSS growing to a ~1.3GB plateau —
+  the shipped `rerank-bench.mjs` under-measured this because it scored one
+  short synthetic passage per candidate instead of the real full-node piece
+  expansion. Root cause: ONNX Runtime's `enableMemPattern` (default `true`)
+  caches memory layout keyed by input tensor *shape*, but this workload's
+  shape varies almost every call (batch remainder + variable sequence
+  length up to the truncation cap), so the cache never gets reused and
+  grows unboundedly. Fix: `session_options: {enableCpuMemArena: true,
+  enableMemPattern: false}` on the cross-encoder session (forward batch
+  size unchanged at 32) — plateau RSS ~890MB, **-32%** vs the ORT-default
+  baseline's ~1.3GB, on an M-series Mac. Latency unchanged (K=10 p50
+  ~272ms / p90 ~310ms, both runs within noise of baseline) and reranked
+  order identical to baseline on all 198 queries across 2 independent runs
+  each way (0/198 mismatches). Batch-size reduction was measured as an
+  alternative (down to near-zero RSS growth at batch=4) and **rejected**:
+  it produces real, non-float-noise reranking-order drift under the
+  q8-quantized model's kernels (up to 39/198 mismatches at batch=4,
+  including one query's top-1/top-2 rank flip), which fails this feature's
+  order-identity bar. `rerank-bench.mjs` rewritten to build realistic
+  full-node candidate bodies (deterministic synthetic text sampled to match
+  the real corpus's content-length distribution, p50/p90 ~2.7k/4.4k chars)
+  and drive the real `applyRerankStage` piece-expansion path instead of one
+  short passage per candidate — its own re-run now reports pieces/query
+  p50/p90 37/43, matching the real-data measurement. Methodology, full
+  8-variant matrix, and order-identity verification:
+  `evidence/d8c/memory-matrix.md` (build-time evidence, not shipped).
+
+### D8d
+
+Security hardening (F1-F9, `SECURITY-D8.md`) plus the owner-directed flip of
+re-rank to **on by default**. Supersedes D8/D8c's "off by default" framing
+above — see this section for current behavior.
+
+- **Default flip: re-rank is now ON.** With no `rerank` opinion anywhere in
+  the precedence chain, `retrieve()` attempts a rerank on every call. A host
+  that hasn't run `lore models fetch-rerank` yet still behaves correctly —
+  fail-open, `_meta.rerank = {applied:false, reason:'model_absent', model}`
+  — just without reordering, until the model is fetched.
+- **Off switches**: per-query `rerank:false`, per-workspace `lore workspaces
+  set-rerank <name> off`, or `LORE_RECALL_RERANK=0`. Each is byte-identical
+  to pre-D8 output (no `_meta.rerank`, no `rerank_score`, original order).
+- **New precedence**: per-query `false` > **workspace `off` (authoritative —
+  a per-query `rerank:true` does NOT override it)** > per-query `true` >
+  workspace `on` > host `createLore({recallRerank})` default > env
+  `LORE_RECALL_RERANK` > **default ON**.
+- **F4/F5 — pin + verify.** The default model at `q8` is pinned to an exact
+  upstream commit (`DEFAULT_RERANK_REVISION`, `providers/rerankManifest.ts`)
+  and its 4 files are sha256-verified against a hardcoded manifest before
+  being trusted. `fetch-rerank` downloads into a `.staging-<random>` dir,
+  verifies, then atomically renames into place and writes a `.complete`
+  marker last — `rerankModelCached()` now requires that marker, so a
+  partial/unverified download is never mistaken for ready-to-use. New
+  `reason` values: `invalid_model` (F3, model id fails `"org/name"`-shape
+  validation), `integrity_failed` (F4, cached files don't match the pinned
+  hash), `busy` (F2, process-wide concurrency limit reached). `reason`
+  value renamed: `model_unavailable` → `model_absent`.
+- **Bug found and fixed during the pin+verify proof run**: `fetchRerankCommand`
+  passed `revision` straight through to `@huggingface/transformers`, which
+  writes downloads to `<cache_dir>/<modelId>/<revision>/...` (nested) rather
+  than the flat `<cache_dir>/<modelId>/...` layout the verify/install step
+  and the runtime scoring path (`localRerankProvider.ts`, which never passes
+  `revision`) both expect — every default-model fetch failed integrity
+  verification even on a byte-correct download, misreported as "downloaded
+  content does not match the pinned manifest" (confirmed by hand: the
+  nested files' sha256s matched the manifest exactly). Fixed by flattening
+  the nested revision directory into the flat layout before verify/install
+  (`flattenRevisionDir()` in `cli/commands/modelsFetch.ts`).
+- **F2 — real timeout race.** `rerankStage.ts`'s `withTimeout()` now uses an
+  actual `Promise.race()` against a timer (previous version relied solely on
+  the scorer cooperatively checking `signal.aborted`, so a non-cooperative
+  scorer — including some test doubles — would never fail open on timeout).
+  The `AbortSignal` is still passed/aborted for cooperative early-exit, but
+  the timeout guarantee no longer depends on the callee honoring it.
+- **F7 — idle unload: 5-minute default, no "never" value.** The loaded
+  model is released after `LORE_RECALL_RERANK_IDLE_UNLOAD_MS` (default now
+  `300000`, 5 min; was `600000`) of no re-rank calls. `<= 0` or a
+  non-number now falls back to the default instead of meaning "never
+  unload", so a typo can't pin ~400-900MB for the process lifetime; set a
+  large value to keep it resident. Owner decision 2026-09-25.
+- **Re-measured after the fixes above** (`scripts/diagnostics/rerank-bench.mjs`,
+  same cached default model, M-series Mac): K10 p50 210.7ms / p90 256.3ms
+  (D8c baseline: p50 ~272ms); RSS plateau ~768MB after model load + 100
+  queries (D8c baseline: ~890MB). Both within normal run-to-run variance for
+  this measurement — D8d touched config resolution, the CLI fetch path, and
+  the timeout race, not the scoring hot path itself, so no regression is
+  expected or observed.
+- **English-only default model note** carried forward unchanged from D8:
+  `Xenova/ms-marco-MiniLM-L-6-v2` is English-only; a non-English workspace
+  needs a multilingual cross-encoder set via `LORE_RECALL_RERANK_MODEL` /
+  `set-rerank --model` (no manifest coverage for non-default models beyond
+  the `.complete` marker requirement).
+- Docs: `docs/CONFIGURATION.md` and `docs/API_REFERENCE.md` updated for the
+  default flip, full off-switch list, new precedence order, and the
+  complete `reason` enum.
+
+### Measurements (integration branch `83620fbd`, 2026-09-25)
+
+Apple M5 Max (Mac17,6, 18 cores, 128 GB), Node 22.18.0, e5-small q8, serial
+runs. Machine load average was 4–10 from unrelated work, so treat
+absolute latencies as upper bounds; the relative comparisons are the signal.
+Raw JSON/MD per run are kept outside the repo; commands are design §7.
+
+**recall-eval** (`runner.mjs --embedder real --code-rows 10000 --depth 0
+--search-mode hybrid`, off = `--rerank off`):
+
+| run | chatty hit@1/@3 | terse hit@1/@3 | identifiers rank1/hit@3/found@10 | recall p50 / p90 |
+|---|---|---|---|---|
+| sqlite off | 87.5% / 100% | 100% / 100% | 85% / 90% / 95% | 23.2 / 52.6 ms |
+| sqlite D7 | 87.5% / 100% | 100% / 100% | **45% / 60% / 85%** | 126.2 / 348.9 ms |
+| sqlite D8 | 95.8% / 100% | 95.8% / 95.8% | 95% / 95% / 95% | 49.4 / 91.7 ms |
+| sqlite D7+D8 | 95.8% / 100% | 95.8% / 95.8% | 85% / 85% / 85% | 167.6 / 513.7 ms |
+| surreal-lance off | 87.5% / 100% | 100% / 100% | 85% / 90% / 95% | 94.1 / 112.5 ms |
+| surreal-lance D7 | 87.5% / 100% | 100% / 100% | **45% / 60% / 85%** | 88.0 / 104.3 ms |
+| surreal-lance D8 | 95.8% / 100% | 95.8% / 95.8% | 95% / 95% / 95% | 129.1 / 150.8 ms |
+| surreal-lance D7+D8 | 95.8% / 100% | 95.8% / 95.8% | 85% / 85% / 85% | 119.5 / 135.5 ms |
+
+- The synthetic Riverstone question set is saturated (hit@3 = 100% with
+  everything off), so it cannot show D7's accuracy gain; the Atlas 198-case
+  eval remains the acceptance gate. Gibberish abstention (`--abstain on`)
+  is 100% for off and D7 on both engines (no D1 shift).
+- **Known D7 regression — identifier queries.** With pieces on, 10 of 20
+  identifier queries (`fixture symbol #N`) lose their code row from rank 1,
+  on both engines; each is displaced by a short note whose label carries a
+  similar number (`Chat note 33` vs `#3333`). On this fixture every node has
+  exactly 2 pieces (title row + one body window; 20,760 pieces / 10,380
+  nodes), so the title-only row is half the piece table, and MAX-over-pieces
+  lets a bare label win on surface similarity. Root cause not yet confirmed;
+  **D7 must not be enabled by default until this is diagnosed** (candidate
+  levers: drop or down-weight the title row, or fuse the canonical vector
+  with the piece MAX). D8 on top recovers rank1 to 85% but found@10 stays at
+  85%.
+- D8 moves one terse question out of rank 1 (100% → 95.8%) while lifting
+  chatty rank 1 (87.5% → 95.8%) and identifiers (85% → 95%).
+
+**D7 storage and build** (10k fixture, 10,380 nodes → 20,760 pieces):
+SQLite data dir 55,980 KB → 98,852 KB (+77%); Lance 56,880 KB → 91,504 KB
+(+61%). Fixture build with pieces took ~254 s vs ~64 s without on SQLite
+(`/usr/bin/time -l`, peak RSS 1.49 GB vs 1.15 GB), so a piece build costs
+roughly 3× a plain build here. Real workspaces with longer bodies will have
+a much higher pieces-per-node ratio (Atlas measured ~37–41 pieces per 10
+candidates) — measure on a copy of a real workspace before any rollout.
+
+**D7 query latency** (`piece-bench.mjs`, 200 warm queries):
+
+| engine / path | off retrieve p50/p90 | on retrieve p50/p90 | off seed p90 | on seed p90 |
+|---|---|---|---|---|
+| sqlite, sqlite-vec native | 38.9 / 47.2 ms | 122.1 / 137.3 ms | 10.2 ms | 48.7 ms |
+| sqlite, brute-force | 41.3 / 53.8 ms | 120.3 / 132.0 ms | 11.1 ms | 90.8 ms |
+| surreal-lance | 50.9 / 123.9 ms | 41.8 / 111.4 ms | 9.3 ms | 8.2 ms |
+
+**SQLite exceeds the design's 2× p90 regression flag** (piece search is
+JS brute force by design, `sqlitePieceIndex.ts`). Lance is at parity.
+Another reason D7 stays opt-in.
+
+**D8 memory and latency** (`rerank-bench.mjs`, real `applyRerankStage`,
+synthetic bodies matched to Atlas's length distribution, 37 pieces/query at
+K=10): first-call model load 449 ms; RSS 148 MB → 716 MB after load
+(+568 MB) → 766 MB after 100 queries (+618 MB). Rerank stage K=5 p50/p90
+143/163 ms, **K=10 p50/p90 260/304 ms** (target ≤400 ms p50 met), K=20
+531/589 ms. The RSS cost is higher than the design's +~330 MB simulation and
+applies to every host once the first recall runs, because re-rank is on by
+default; the idle-unload timer (default 5 min) returns it.
+
 ## [3.22.3] — 2026-09-24
 
 Patch release: PDF reader upgrade.

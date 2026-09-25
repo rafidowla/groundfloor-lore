@@ -16,6 +16,7 @@ import { runCrossWorkspaceRecall } from '../recallCrossWorkspace.js';
 import { retrieve, type RetrieveContext } from '../../../recall/retrieve.js';
 import { buildRecallResult, buildCompactCandidates, buildRelatedCandidates } from '../../../recall/recallPreset.js';
 import { buildRelevanceMeta } from '../../../recall/abstention.js';
+import { toSnakeRerankMeta } from '../../../recall/rerankStage.js';
 import { assertMcpScope } from '../mcpScope.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import type { LoreGraph, SearchToolsDeps } from './types.js';
@@ -51,8 +52,9 @@ export function registerRecallTool(mcpServer: McpServer, deps: SearchToolsDeps):
             abstain: z.boolean().optional().describe('D1: when true, a topic whose calibrated relevance falls below `relevance_floor` returns zero results with `_meta.abstained: true` instead of low-relevance filler. Default false (off) — calibration/relevance `_meta` fields are always reported regardless of this flag. Ignored on the workspace="*" cross-workspace path.'),
             relevance_floor: z.number().optional().describe('D1: the z-score floor abstention gates on (default 2.0). Only meaningful when `abstain: true`.'),
             max: z.number().int().min(1).max(100).optional().describe('D2 (3.22.1): cap on the number of ranked hits returned (default 10, max 100). Raises the seed/retrieval limit AND the summary-mode display cap together — full, summary and compact modes all honour it. A value above 10 can push the response past the ~2KB summary budget; still governed by `max_tokens` if that is also set. Ignored on the workspace="*" cross-workspace path, which always returns its own fixed cap of 10 summary hits (full mode there is unbounded) regardless of `max`.'),
+            rerank: z.boolean().optional().describe('D8d: rescore the top hits with a local cross-encoder for tighter ordering. Default ON. Per-call false, or a workspace-level off (which is authoritative and wins even over a per-call true), turns it off with output byte-identical to pre-D8. Otherwise: per-call true > workspace on > host/env > default on. Fails open (order unchanged) if the model is not cached.'),
         },
-        async ({ topic, depth, queryLanguage, filePaths, mode, crossProject, includeSuperseded, tags, queries, entities, topics, project, types, workspace, ecosystem, max_tokens, include_archived, search_mode, compact, abstain, relevance_floor, max }) => {
+        async ({ topic, depth, queryLanguage, filePaths, mode, crossProject, includeSuperseded, tags, queries, entities, topics, project, types, workspace, ecosystem, max_tokens, include_archived, search_mode, compact, abstain, relevance_floor, max, rerank }) => {
             try {
                 if (!workspace || typeof workspace !== 'string' || workspace.length === 0) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'workspace_required', hint: 'pass workspace=<name>' }, null, 2) }], isError: true };
@@ -99,6 +101,7 @@ export function registerRecallTool(mcpServer: McpServer, deps: SearchToolsDeps):
                             // the caller's scope too, or `recall` repeats the
                             // exact search-tool defect on its own legacy branch.
                             ecosystem: effectiveEcosystem,
+                            rerank, // D8b
                             registry: deps.graphRegistry, verbatimStore: deps.store.loreVerbatim,
                             sessionCache: deps.store.sessionCache, responseMode, queryLanguage, maxTokens: max_tokens,
                             allowedWorkspaces,
@@ -120,6 +123,7 @@ export function registerRecallTool(mcpServer: McpServer, deps: SearchToolsDeps):
                         queries, entities, topics, project, // 3.21 step 3(f)
                         types, // D2 — vector/BM25-level type prefilter
                         abstain, relevanceFloor: relevance_floor, // D1
+                        rerank, // D8b
                     });
                 } catch (err) {
                     if ((err as { code?: string }).code === 'workspace_not_found') {
@@ -148,7 +152,11 @@ export function registerRecallTool(mcpServer: McpServer, deps: SearchToolsDeps):
                                 // query"). Omitted (not []) when there are none.
                                 ...(outcome.related.length > 0 ? { related: buildRelatedCandidates(outcome) } : {}),
                                 tip: 'Call recall_expand({ids, workspace}) with chosen candidate ids to fetch their full bodies.',
-                                _meta: buildRelevanceMeta(outcome.meta), // D1
+                                _meta: {
+                                    ...buildRelevanceMeta(outcome.meta), // D1
+                                    // D8b — absent unless rerank actually ran for this call.
+                                    ...(outcome.meta.rerank ? { rerank: toSnakeRerankMeta(outcome.meta.rerank) } : {}),
+                                },
                             }, null, 2),
                         }],
                     };

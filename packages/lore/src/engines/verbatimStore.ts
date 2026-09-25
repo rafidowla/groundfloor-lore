@@ -42,6 +42,7 @@ import type { FtsReconcileCtx } from './verbatimFtsReconcile.js';
 import { makeBm25Envelope } from './verbatimBm25Result.js';
 import type { VerbatimFtsRow, Bm25Envelope } from './verbatimBm25Result.js';
 import { assertWritableRole, shouldOpenWriteTable, shouldBuildReadPool, canSearchWithoutTable, shouldLogWriteRoleFallback, WRITE_ROLE_FALLBACK_LOG_MESSAGE, countHandles, type VerbatimStoreRole } from './verbatimStoreRole.js';
+import { LancePieceIndex, type PieceSourceRow, type PieceSearchHit, type PieceIndexStatus } from './pieces/lancePieceIndex.js';
 export type { VerbatimDocument, VerbatimSearchResult };
 
 /** Optional per-call cancellation/deadline for search/searchByVector/
@@ -158,13 +159,19 @@ export class VerbatimStore implements VectorProvider {
     /** `strictFingerprintCheck` (default false): refuse, rather than warn on, a fingerprint
      *  mismatch at open — set only for host-injected providers; see verbatimFingerprintGate.ts. */
     private readonly strictFingerprintCheck: boolean;
+    /** D7 (3.23) — derived piece-level vector index (pieces/lancePieceIndex.ts).
+     *  Constructed unconditionally (no I/O until initialize()); only ever
+     *  populated when `pieceVectorsIntent` is on AND its sidecar is valid. */
+    private readonly pieceIndex: LancePieceIndex;
+    private readonly pieceVectorsIntent: boolean;
     /** Test-only: how many times each gated method reached native execution
      *  (after its deadline check + gate permit). null/zero-cost unless
      *  LORE_TEST_WORKER_HOOKS=1. See checkGateAborted. */
     private readonly testCounters: Record<string, number> | null =
         process.env.LORE_TEST_WORKER_HOOKS === '1' ? Object.create(null) : null;
-    constructor(basePath: string, embeddingProvider?: EmbeddingProvider, opts?: { role?: VerbatimStoreRole; strictFingerprintCheck?: boolean }) {
+    constructor(basePath: string, embeddingProvider?: EmbeddingProvider, opts?: { role?: VerbatimStoreRole; strictFingerprintCheck?: boolean; pieceVectors?: boolean }) {
         this.basePath = basePath; this.role = opts?.role ?? 'both'; this.strictFingerprintCheck = opts?.strictFingerprintCheck ?? false;
+        this.pieceVectorsIntent = opts?.pieceVectors ?? false;
         this.lancedbPath = path.join(basePath, '.lore', 'lancedb');
         fs.mkdirSync(this.lancedbPath, { recursive: true });
         // Default to the local Xenova provider when none is injected.
@@ -172,6 +179,10 @@ export class VerbatimStore implements VectorProvider {
         // factory; existing direct constructions (CLI scripts, tests
         // built before 6a) keep working unchanged.
         this.embeddingProvider = embeddingProvider ?? new LocalEmbeddingProvider();
+        // D7 (3.23) — reuses the same provider instance as the canonical
+        // store (never a second LocalEmbeddingProvider) so piece vectors
+        // and canonical vectors are always embedded by the same model.
+        this.pieceIndex = new LancePieceIndex(basePath, this.lancedbPath, this.embeddingProvider);
         this.verbatimSchema = buildVerbatimSchema(this.embeddingProvider.dimension);
         // SP-22: bumped to 500 — 200 could churn with moderately varied filters.
         // Key normalisation (sortedCacheKey) prevents unique-per-call proliferation
@@ -422,6 +433,15 @@ export class VerbatimStore implements VectorProvider {
             applyFingerprintOnOpen(this.basePath, this.table != null, this.embeddingProvider, this.strictFingerprintCheck);
             this.initialized = true;
 
+            // D7 (3.23) — open/validate the derived piece index. Best-effort:
+            // failures here must not block the canonical store from opening.
+            try {
+                const canonicalEmpty = !this.table || (await this.table.countRows()) === 0;
+                await this.pieceIndex.initialize({ intentOn: this.pieceVectorsIntent, canonicalIsEmpty: canonicalEmpty });
+            } catch (err) {
+                log.warn(`[VerbatimStore] piece index initialize failed (continuing without piece search): ${(err as Error).message}`);
+            }
+
             // CRASH-SAFE INDEX HEAL (2026-07-01). A build marker that survived
             // into this open means the last index build did not finish — the
             // on-disk index is suspect and reading it could hard-crash the
@@ -589,7 +609,13 @@ export class VerbatimStore implements VectorProvider {
      * wired in mcp/server.ts. NOT a hot-path API — bulk loads only.
      */
     async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
-        assertWritableRole(this.role, 'bulkAddPrebuiltRows'); return this.writeGate.run(() => verbatimBatch.bulkAddPrebuiltRows(this.batchCtx, rows));
+        assertWritableRole(this.role, 'bulkAddPrebuiltRows');
+        await this.writeGate.run(() => verbatimBatch.bulkAddPrebuiltRows(this.batchCtx, rows));
+        // D7 (3.23) — best-effort piece maintenance; bulk-loaded rows carry
+        // no redaction step upstream (Sprint Z2 skip-embed contract), so
+        // pieces are built from the row fields exactly as supplied.
+        await this.pieceIndex.upsertForRows(rows as unknown as PieceSourceRow[])
+            .catch((err: Error) => log.warn(`[VerbatimStore] piece upsert failed for bulkAddPrebuiltRows (non-fatal): ${err.message}`));
     }
 
     /**
@@ -607,7 +633,10 @@ export class VerbatimStore implements VectorProvider {
      * large batch does not build an unbounded predicate / payload.
      */
     async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
-        assertWritableRole(this.role, 'bulkUpsertPrebuiltRows'); return this.writeGate.run(() => verbatimBatch.bulkUpsertPrebuiltRows(this.batchCtx, rows));
+        assertWritableRole(this.role, 'bulkUpsertPrebuiltRows');
+        await this.writeGate.run(() => verbatimBatch.bulkUpsertPrebuiltRows(this.batchCtx, rows));
+        await this.pieceIndex.upsertForRows(rows as unknown as PieceSourceRow[])
+            .catch((err: Error) => log.warn(`[VerbatimStore] piece upsert failed for bulkUpsertPrebuiltRows (non-fatal): ${err.message}`));
     }
 
     async ensureVectorIndex(opts: { minRows?: number } = {}): Promise<boolean> {
@@ -1000,6 +1029,15 @@ export class VerbatimStore implements VectorProvider {
             }
             // Invalidate search cache so the next recall sees this write.
             this.bumpSearchEpoch();
+            // D7 (3.23) — best-effort piece maintenance. `row.text` is
+            // already the redacted text (line ~917 mutates doc.text in
+            // place before `row` is built); `#rev...` ids are filtered out
+            // internally by upsertForRows, so history snapshots are never
+            // pieced.
+            await this.pieceIndex.upsertForRows([{
+                id: row.id, label: row.label, text: row.text, type: row.type,
+                project: row.project, ecosystem: row.ecosystem, security_scopes: row.security_scopes,
+            }]).catch((err: Error) => log.warn(`[VerbatimStore] piece upsert failed for ${row.id} (non-fatal): ${err.message}`));
         } catch (error: any) {
             throw new VerbatimStoreError('store', error.message);
         } finally { this.writeGate.exit(); }
@@ -1240,6 +1278,16 @@ export class VerbatimStore implements VectorProvider {
         // Idempotent and gated the same way as ensureVectorIndex — safe to
         // call unconditionally after every bulk write.
         await this.ensureFtsIndex();
+
+        // D7 (3.23) — best-effort piece maintenance for the whole batch.
+        // `rows[].text`/`.label` are already redacted/final (built above at
+        // Phase 3); `#rev...` ids are filtered out internally by
+        // upsertForRows, so history snapshots created in this batch's
+        // preflight are never pieced.
+        await this.pieceIndex.upsertForRows(rows.map((r) => ({
+            id: r.id, label: r.label, text: r.text, type: r.type,
+            project: r.project, ecosystem: r.ecosystem, security_scopes: r.security_scopes,
+        }))).catch((err: Error) => log.warn(`[VerbatimStore] piece upsert failed for storeBatch (non-fatal): ${err.message}`));
         } finally { this.writeGate.exit(); }
     }
 
@@ -1521,6 +1569,7 @@ export class VerbatimStore implements VectorProvider {
             if (!this.initialized || !this.table) return;
             await this.table.delete(`id = '${id.replace(/'/g, "''")}'`);
             this.bumpSearchEpoch();
+            await this.pieceIndex.deleteForIds([id]).catch((err: Error) => log.warn(`[VerbatimStore] piece delete failed for ${id} (non-fatal): ${err.message}`));
         } catch (error) {
             throw new VerbatimStoreError('physicalDelete', (error as Error).message);
         } finally { this.writeGate.exit(); }
@@ -1558,6 +1607,7 @@ export class VerbatimStore implements VectorProvider {
                 processed += chunk.length;
             }
             this.bumpSearchEpoch();
+            await this.pieceIndex.deleteForIds(ids).catch((err: Error) => log.warn(`[VerbatimStore] piece delete failed for physicalDeleteMany (non-fatal): ${err.message}`));
             return processed;
         } catch (error) {
             throw new VerbatimStoreError('physicalDeleteMany', (error as Error).message);
@@ -1696,6 +1746,9 @@ export class VerbatimStore implements VectorProvider {
                 }]);
             // Tombstone is a logical delete from search results — invalidate.
             this.bumpSearchEpoch();
+            // D7 (3.23) — tombstoned content is excluded from search/bm25Search,
+            // so its pieces must also drop out of piece search.
+            await this.pieceIndex.deleteForIds([id]).catch((err: Error) => log.warn(`[VerbatimStore] piece delete failed for tombstone ${id} (non-fatal): ${err.message}`));
         } catch (error) {
             // 1.M10 (2026-08-17 audit) — was a bare `catch {}`: every failure
             // (LanceDB IO, embed provider down) was swallowed while callers
@@ -1965,6 +2018,70 @@ export class VerbatimStore implements VectorProvider {
         } finally { this.writeGate.exit(); }
     }
 
+    /**
+     * D7b — piece-level vector search delegator, the retrieval-routing seam
+     * D7a left as a stub. Accepts either a raw query string (embedded once
+     * here, same as the canonical `search()` path's single `embedQuery`
+     * call — see design 2.5's "the query is embedded once per search
+     * call") or an already-embedded vector, mirroring the `string |
+     * number[]` convention `SqlitePieceIndex.searchPieces` already
+     * established (D7a) and matching T1's direct store-level calls, which
+     * pass a pre-embedded vector (`test/d7-piece-index-unit.ts` Section C).
+     * Production retrieval routing (`pieceAwareSearch`) always passes the
+     * raw string; a pre-embedded vector is accepted so this store-level API
+     * has the same shape on both engines and so tests can probe it without
+     * a live embedding provider on the query path. Delegates the resolved
+     * vector, filter and actor-scope resolution down to `LancePieceIndex`.
+     * `filter` follows the same `VerbatimQueryFilter` shape / D2-E2
+     * allowlist as `search`/`searchByVector`. `actorScopes` is resolved
+     * here (falling back to the bound actor) rather than inside
+     * `LancePieceIndex`, mirroring where `_runVectorSearchUncached`
+     * resolves it for the canonical table. `gate` gets the same minimal
+     * abort check the rest of this class's lightweight (non-cachedRead)
+     * paths use — piece search is deliberately NOT wired into the full
+     * cachedRead/writeGate/searchGate admission machinery; that is a
+     * disproportionate change for this slice.
+     */
+    async searchPieces(
+        query: string | number[],
+        topK: number,
+        filter?: VerbatimQueryFilter,
+        actorScopes?: ReadonlyArray<string>,
+        gate?: VerbatimGateOptions,
+    ): Promise<PieceSearchHit[]> {
+        if (gate?.signal?.aborted) throw toGateAbortError(gate.signal);
+        const vector = typeof query === 'string' ? await this.embeddingProvider.embedQuery(query) : query;
+        return this.pieceIndex.searchPieces(vector, topK, filter, actorScopes ?? getCurrentActorScopes());
+    }
+
+    /** D7 (3.23) — observability/ops hook mirroring LancePieceIndex.status(). */
+    pieceIndexStatus(): PieceIndexStatus {
+        return this.pieceIndex.status();
+    }
+
+    /** D7c — exposes this store's own piece-index instance for the migration
+     *  CLI (pieceIndexBuild.ts) only; every other caller goes through
+     *  searchPieces()/pieceIndexStatus() instead. */
+    pieceIndexForMigration(): LancePieceIndex {
+        return this.pieceIndex;
+    }
+
+    /**
+     * D7b — this store's own resolved piece-vectors intent (design 2.5 step
+     * 3: retrieval routing needs "intent on" as a signal distinct from
+     * "index currently open/valid" — a sidecar can be open+valid from a
+     * prior run even after intent is later turned off, per the intent/index
+     * separation design 2.3 establishes, so `pieceIndexStatus().valid` alone
+     * is not sufficient to decide whether retrieval may query pieces).
+     * Reflects the value resolved once at construction (`opts.pieceVectors`),
+     * not a live re-read of workspace config — the running store's own
+     * decision is authoritative for what IT does, not whatever config might
+     * say now.
+     */
+    pieceVectorsIntentOn(): boolean {
+        return this.pieceVectorsIntent;
+    }
+
     /** Releases the LanceDB natives (LORE_VERBATIM_NATIVE_CLOSE kill switch, default
      *  on); idempotent PER OPEN (initialize() resets the guard on reconnect). Order:
      *  drain in-flight table/db touches → close read pool → closeVerbatimNatives.
@@ -1980,6 +2097,7 @@ export class VerbatimStore implements VectorProvider {
             if (nativeClose && drained) await closeVerbatimNatives({ table: this.table, db: this.db }, this.lancedbPath);
             this.db = null; this.table = null; this.searchCache.clear();
             this.hashCache = new BoundedVectorCache(10_000); this.nativesClosed = true;
+            await this.pieceIndex.close();
         } catch (error: any) {
             throw new VerbatimStoreError('close', error.message);
         }

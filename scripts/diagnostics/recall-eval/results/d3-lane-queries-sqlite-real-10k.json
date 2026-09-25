@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-23T19:57:23.893Z",
+  "generatedAt": "2026-09-25T01:41:28.510Z",
   "config": {
     "engine": "sqlite",
     "graphEngine": "sqlite",
@@ -12,8 +12,11 @@
     "wideMax": 50,
     "abstain": false,
     "relevanceFloor": null,
+    "termCoverage": false,
+    "termCoverageMin": null,
     "gibberishFile": "gibberish.json",
     "distractorsFile": null,
+    "questionsFiles": "questions.json",
     "withQueries": true,
     "candidateFloor": "50",
     "lexicalBase": null,
@@ -21,7 +24,7 @@
     "absentIdentifiersFile": "identifiers-absent.json"
   },
   "fixture": {
-    "dataDir": "<local>/logs-e3/cache/sqlite/fixture-f4b536ccd6b5d820",
+    "dataDir": "<local>/d3diag/cache/fixture-f4b536ccd6b5d820",
     "reused": true,
     "counts": {
       "knowledge": 80,
@@ -30,24 +33,25 @@
       "edges": 36,
       "edgesWritten": 36
     },
-    "buildMs": 1
+    "buildMs": 2
   },
   "timings": {
-    "fixtureMs": 1,
-    "evalMs": 7936,
-    "totalMs": 8881,
-    "meanRecallMs": 23.611797973214312
+    "fixtureMs": 2,
+    "evalMs": 8605,
+    "totalMs": 9716,
+    "meanRecallMs": 25.599008925595278
   },
   "latency": {
     "n": 336,
-    "p50": 21.488083999999617,
-    "p90": 50.90595800000028,
-    "p95": 55.009917000000314,
-    "p99": 63.176542000000154
+    "p50": 23.00158400000055,
+    "p90": 52.346750000000156,
+    "p95": 58.094208999999864,
+    "p99": 70.34362499999997
   },
   "perQuestion": [
     {
       "id": "q-fx-decision-lease-ttl",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-lease-ttl"
       ],
@@ -71,7 +75,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -93,7 +99,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -132,6 +140,7 @@
     },
     {
       "id": "q-fx-decision-dlq-retention",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-dlq-retention"
       ],
@@ -155,7 +164,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -177,7 +188,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -216,6 +229,7 @@
     },
     {
       "id": "q-fx-decision-tenant-router-hash",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-tenant-router-hash"
       ],
@@ -239,7 +253,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -261,7 +277,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -300,6 +318,7 @@
     },
     {
       "id": "q-fx-decision-config-loader-format",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-config-loader-format"
       ],
@@ -323,7 +342,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -345,7 +366,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -384,6 +407,7 @@
     },
     {
       "id": "q-fx-convention-retry-jitter",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-retry-jitter"
       ],
@@ -407,7 +431,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -429,7 +455,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -468,6 +496,7 @@
     },
     {
       "id": "q-fx-convention-metrics-naming",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-metrics-naming"
       ],
@@ -491,7 +520,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -513,7 +544,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -552,6 +585,7 @@
     },
     {
       "id": "q-fx-convention-webhook-signing",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-webhook-signing"
       ],
@@ -575,7 +609,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -597,7 +633,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -636,6 +674,7 @@
     },
     {
       "id": "q-fx-architecture-checkpoint-store",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-checkpoint-store"
       ],
@@ -659,7 +698,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -681,7 +722,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -720,6 +763,7 @@
     },
     {
       "id": "q-fx-architecture-connector-bus",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-connector-bus"
       ],
@@ -743,7 +787,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -765,7 +811,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -804,6 +852,7 @@
     },
     {
       "id": "q-fx-architecture-scheduler-tiers",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-scheduler-tiers"
       ],
@@ -827,7 +876,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -849,7 +900,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -888,6 +941,7 @@
     },
     {
       "id": "q-fx-architecture-rate-limiter-token-bucket",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-rate-limiter-token-bucket"
       ],
@@ -911,7 +965,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -933,7 +989,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -972,6 +1030,7 @@
     },
     {
       "id": "q-fx-bug-checkpoint-torn-write",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-checkpoint-torn-write"
       ],
@@ -995,7 +1054,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1017,7 +1078,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1056,6 +1119,7 @@
     },
     {
       "id": "q-fx-bug-lease-double-execution",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-lease-double-execution"
       ],
@@ -1079,7 +1143,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1101,7 +1167,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1140,6 +1208,7 @@
     },
     {
       "id": "q-fx-bug-rate-limiter-thundering-herd",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-rate-limiter-thundering-herd"
       ],
@@ -1163,7 +1232,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1185,7 +1256,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1224,6 +1297,7 @@
     },
     {
       "id": "q-fx-bug-config-loader-hot-reload-leak",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-config-loader-hot-reload-leak"
       ],
@@ -1247,7 +1321,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1269,7 +1345,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1308,6 +1386,7 @@
     },
     {
       "id": "q-fx-convention-idempotency-key",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-idempotency-key"
       ],
@@ -1331,7 +1410,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1353,7 +1434,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1392,6 +1475,7 @@
     },
     {
       "id": "q-fx-decision-webhook-relay-language",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-webhook-relay-language"
       ],
@@ -1415,7 +1499,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1437,7 +1523,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1476,6 +1564,7 @@
     },
     {
       "id": "q-fx-architecture-metrics-exporter-batching",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-metrics-exporter-batching"
       ],
@@ -1499,7 +1588,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1521,7 +1612,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1560,6 +1653,7 @@
     },
     {
       "id": "q-fx-bug-tenant-router-hot-shard",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-tenant-router-hot-shard"
       ],
@@ -1583,7 +1677,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1605,7 +1701,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": null,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1644,6 +1742,7 @@
     },
     {
       "id": "q-fx-convention-schema-migration-additive",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-schema-migration-additive"
       ],
@@ -1667,7 +1766,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": 2.88,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1689,7 +1790,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": 2.57,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1728,6 +1831,7 @@
     },
     {
       "id": "q-fx-architecture-worker-pool-autoscale",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-worker-pool-autoscale"
       ],
@@ -1751,7 +1855,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": 2.32,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1773,7 +1879,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": 4.85,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1812,6 +1920,7 @@
     },
     {
       "id": "q-fx-bug-dlq-purge-race",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-dlq-purge-race"
       ],
@@ -1835,7 +1944,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": 4.8,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1857,7 +1968,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": 4.73,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1896,6 +2009,7 @@
     },
     {
       "id": "q-fx-decision-observability-vendor",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-observability-vendor"
       ],
@@ -1919,7 +2033,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": 4.57,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1941,7 +2057,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": 4.31,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -1980,6 +2098,7 @@
     },
     {
       "id": "q-fx-convention-postmortem-blameless",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-postmortem-blameless"
       ],
@@ -2003,7 +2122,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": 2.57,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -2025,7 +2146,9 @@
         "confidence": 1,
         "abstained": false,
         "topRelevance": 3.48,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -2067,12 +2190,26 @@
     {
       "id": "g-0",
       "query": "marmalade tapestry bassoon",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-decision-config-loader-format",
+        "fx-filler-bug_pattern-035",
+        "fx-code-007908",
+        "fx-code-007604",
+        "fx-code-008772",
+        "fx-code-007481",
+        "fx-code-003892",
+        "fx-code-001764",
+        "fx-code-009207"
+      ],
       "hitCount": 10,
       "topScore": 0.778,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.52,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2081,12 +2218,26 @@
     {
       "id": "g-1",
       "query": "chowder sphinx",
+      "ids": [
+        "fx-note-0150",
+        "fx-note-0299",
+        "fx-code-005113",
+        "fx-code-002873",
+        "fx-code-008777",
+        "fx-code-001257",
+        "fx-code-008921",
+        "fx-code-004249",
+        "fx-code-007337",
+        "fx-code-007961"
+      ],
       "hitCount": 10,
       "topScore": 0.807,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.67,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2095,12 +2246,26 @@
     {
       "id": "g-2",
       "query": "pulsar tuba cyclops flannel",
+      "ids": [
+        "fx-note-0150",
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-note-0299",
+        "fx-note-0262",
+        "fx-note-0180",
+        "fx-note-0278",
+        "fx-note-0290",
+        "fx-bug-checkpoint-torn-write",
+        "fx-filler-convention-041",
+        "fx-note-0217"
+      ],
       "hitCount": 10,
       "topScore": 0.785,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.21,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2109,12 +2274,26 @@
     {
       "id": "g-3",
       "query": "basalt comet damask",
+      "ids": [
+        "fx-decision-config-loader-format",
+        "fx-code-002244",
+        "fx-code-003316",
+        "fx-code-008196",
+        "fx-code-001655",
+        "fx-code-003396",
+        "fx-code-001431",
+        "fx-code-001444",
+        "fx-code-008500",
+        "fx-code-009156"
+      ],
       "hitCount": 10,
       "topScore": 0.777,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.56,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2123,12 +2302,26 @@
     {
       "id": "g-4",
       "query": "chimera gingham",
+      "ids": [
+        "fx-code-008786",
+        "fx-code-005234",
+        "fx-code-003458",
+        "fx-code-003076",
+        "fx-code-004925",
+        "fx-code-003346",
+        "fx-code-006740",
+        "fx-code-008868",
+        "fx-code-004099",
+        "fx-code-004939"
+      ],
       "hitCount": 10,
       "topScore": 0.781,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.39,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2137,12 +2330,26 @@
     {
       "id": "g-5",
       "query": "harmonica biscotti comet obsidian",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-006045",
+        "fx-code-002845",
+        "fx-code-006957",
+        "fx-code-004381",
+        "fx-code-009501",
+        "fx-code-009709",
+        "fx-code-007229",
+        "fx-code-008525",
+        "fx-code-004541"
+      ],
       "hitCount": 10,
       "topScore": 0.782,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.34,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2151,12 +2358,26 @@
     {
       "id": "g-6",
       "query": "falafel trombone chimera",
+      "ids": [
+        "fx-decision-config-loader-format",
+        "fx-filler-architecture-030",
+        "fx-bug-checkpoint-torn-write",
+        "fx-convention-schema-migration-additive",
+        "fx-code-000759",
+        "fx-code-009927",
+        "fx-code-007543",
+        "fx-code-007607",
+        "fx-code-007895",
+        "fx-code-007052"
+      ],
       "hitCount": 10,
       "topScore": 0.783,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.33,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2165,12 +2386,26 @@
     {
       "id": "g-7",
       "query": "feldspar kraken",
+      "ids": [
+        "fx-code-004051",
+        "fx-code-007490",
+        "fx-code-002931",
+        "fx-code-005761",
+        "fx-code-007523",
+        "fx-code-007166",
+        "fx-code-005313",
+        "fx-code-007585",
+        "fx-code-001764",
+        "fx-code-009249"
+      ],
       "hitCount": 10,
       "topScore": 0.761,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -1.22,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2179,12 +2414,26 @@
     {
       "id": "g-8",
       "query": "orbit cyclops tuba tapestry",
+      "ids": [
+        "fx-note-0293",
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-005013",
+        "fx-code-009845",
+        "fx-code-004021",
+        "fx-code-005909",
+        "fx-code-003125",
+        "fx-code-004869",
+        "fx-code-004789",
+        "fx-code-005396"
+      ],
       "hitCount": 10,
       "topScore": 0.787,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.14,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2193,12 +2442,26 @@
     {
       "id": "g-9",
       "query": "asteroid croissant taffeta",
+      "ids": [
+        "fx-code-004907",
+        "fx-code-007178",
+        "fx-code-006218",
+        "fx-code-009307",
+        "fx-code-004698",
+        "fx-code-006906",
+        "fx-code-002971",
+        "fx-code-009883",
+        "fx-code-004938",
+        "fx-code-009339"
+      ],
       "hitCount": 10,
       "topScore": 0.785,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.21,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2207,12 +2470,26 @@
     {
       "id": "g-10",
       "query": "bassoon kraken",
+      "ids": [
+        "fx-filler-convention-029",
+        "fx-note-0064",
+        "fx-code-003924",
+        "fx-code-008340",
+        "fx-code-006564",
+        "fx-code-001700",
+        "fx-code-009412",
+        "fx-code-007604",
+        "fx-code-001972",
+        "fx-code-006708"
+      ],
       "hitCount": 10,
       "topScore": 0.773,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.73,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2221,12 +2498,26 @@
     {
       "id": "g-11",
       "query": "centaur granite quasar souffle",
+      "ids": [
+        "fx-code-006755",
+        "fx-code-009459",
+        "fx-code-006915",
+        "fx-code-003747",
+        "fx-code-005155",
+        "fx-code-008299",
+        "fx-code-004579",
+        "fx-code-009747",
+        "fx-code-001541",
+        "fx-code-006906"
+      ],
       "hitCount": 10,
       "topScore": 0.799,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.34,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2235,12 +2526,26 @@
     {
       "id": "g-12",
       "query": "comet pegasus ukulele",
+      "ids": [
+        "fx-note-0016",
+        "fx-code-001764",
+        "fx-code-007166",
+        "fx-code-009790",
+        "fx-code-009765",
+        "fx-code-005685",
+        "fx-code-006087",
+        "fx-code-003892",
+        "fx-code-007762",
+        "fx-code-003559"
+      ],
       "hitCount": 10,
       "topScore": 0.783,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.3,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2249,12 +2554,26 @@
     {
       "id": "g-13",
       "query": "strudel organza",
+      "ids": [
+        "fx-code-001872",
+        "fx-code-004780",
+        "fx-code-002668",
+        "fx-code-008176",
+        "fx-code-008028",
+        "fx-code-000172",
+        "fx-code-003996",
+        "fx-code-007760",
+        "fx-code-006620",
+        "fx-code-002396"
+      ],
       "hitCount": 10,
       "topScore": 0.797,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.26,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2263,12 +2582,26 @@
     {
       "id": "g-14",
       "query": "schist flannel chiffon centaur",
+      "ids": [
+        "fx-note-0150",
+        "fx-filler-convention-041",
+        "fx-note-0244",
+        "fx-bug-checkpoint-torn-write",
+        "fx-note-0274",
+        "fx-code-005699",
+        "fx-code-009539",
+        "fx-code-003939",
+        "fx-code-008115",
+        "fx-code-002163"
+      ],
       "hitCount": 10,
       "topScore": 0.788,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.11,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2277,12 +2610,26 @@
     {
       "id": "g-15",
       "query": "biscotti schist ukulele",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-006611",
+        "fx-code-005939",
+        "fx-code-007299",
+        "fx-code-009043",
+        "fx-code-009475",
+        "fx-code-004451",
+        "fx-code-004771",
+        "fx-code-001651",
+        "fx-code-008499"
+      ],
       "hitCount": 10,
       "topScore": 0.799,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.37,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2291,12 +2638,26 @@
     {
       "id": "g-16",
       "query": "minotaur kazoo",
+      "ids": [
+        "fx-note-0163",
+        "fx-note-0203",
+        "fx-note-0158",
+        "fx-note-0040",
+        "fx-note-0284",
+        "fx-note-0161",
+        "fx-decision-observability-vendor",
+        "fx-note-0092",
+        "fx-note-0191",
+        "fx-note-0175"
+      ],
       "hitCount": 10,
       "topScore": 0.787,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.16,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2305,12 +2666,26 @@
     {
       "id": "g-17",
       "query": "chimera quasar souffle meteor",
+      "ids": [
+        "fx-code-006218",
+        "fx-code-006906",
+        "fx-code-004698",
+        "fx-code-007178",
+        "fx-code-004938",
+        "fx-code-000458",
+        "fx-code-000842",
+        "fx-code-005418",
+        "fx-code-000218",
+        "fx-code-005178"
+      ],
       "hitCount": 10,
       "topScore": 0.806,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.63,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2319,12 +2694,26 @@
     {
       "id": "g-18",
       "query": "comet paisley organza",
+      "ids": [
+        "fx-code-006352",
+        "fx-code-005392",
+        "fx-code-006992",
+        "fx-code-009840",
+        "fx-code-003680",
+        "fx-code-003216",
+        "fx-code-008972",
+        "fx-code-007328",
+        "fx-code-007756",
+        "fx-code-001312"
+      ],
       "hitCount": 10,
       "topScore": 0.784,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.28,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2333,12 +2722,26 @@
     {
       "id": "g-19",
       "query": "marble bassoon",
+      "ids": [
+        "fx-decision-config-loader-format",
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-filler-convention-029",
+        "fx-filler-bug_pattern-019",
+        "fx-note-0024",
+        "fx-convention-retry-jitter",
+        "fx-filler-decision-036",
+        "fx-filler-bug_pattern-035",
+        "fx-filler-architecture-030",
+        "fx-filler-bug_pattern-007"
+      ],
       "hitCount": 10,
       "topScore": 0.768,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.92,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2347,12 +2750,26 @@
     {
       "id": "g-20",
       "query": "gazpacho sphinx griffin clarinet",
+      "ids": [
+        "fx-note-0150",
+        "fx-convention-webhook-signing",
+        "fx-note-0299",
+        "fx-note-0203",
+        "fx-note-0293",
+        "fx-code-000889",
+        "fx-code-003081",
+        "fx-code-002575",
+        "fx-code-007750",
+        "fx-code-004521"
+      ],
       "hitCount": 10,
       "topScore": 0.787,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.12,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2361,12 +2778,26 @@
     {
       "id": "g-21",
       "query": "marble comet minotaur",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-009594",
+        "fx-code-006098",
+        "fx-code-003274",
+        "fx-code-001370",
+        "fx-code-005185",
+        "fx-code-006778",
+        "fx-code-008170",
+        "fx-code-009050",
+        "fx-code-006330"
+      ],
       "hitCount": 10,
       "topScore": 0.786,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.18,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2375,12 +2806,26 @@
     {
       "id": "g-22",
       "query": "velvet bassoon",
+      "ids": [
+        "fx-code-003508",
+        "fx-code-007508",
+        "fx-code-000964",
+        "fx-code-005940",
+        "fx-code-006884",
+        "fx-code-003156",
+        "fx-code-006820",
+        "fx-code-003940",
+        "fx-code-008580",
+        "fx-code-007444"
+      ],
       "hitCount": 10,
       "topScore": 0.79,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.03,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2389,12 +2834,26 @@
     {
       "id": "g-23",
       "query": "velvet pumice quartz marble",
+      "ids": [
+        "fx-code-005623",
+        "fx-code-005047",
+        "fx-code-006119",
+        "fx-code-004711",
+        "fx-code-003879",
+        "fx-code-003655",
+        "fx-code-005863",
+        "fx-code-008455",
+        "fx-code-002903",
+        "fx-code-005879"
+      ],
       "hitCount": 10,
       "topScore": 0.802,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.47,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2403,12 +2862,26 @@
     {
       "id": "g-24",
       "query": "limestone kazoo centaur",
+      "ids": [
+        "fx-decision-observability-vendor",
+        "fx-hub-system-overview",
+        "fx-decision-lease-ttl",
+        "fx-convention-retry-jitter",
+        "fx-note-0147",
+        "fx-note-0119",
+        "fx-note-0092",
+        "fx-dup-cli-auth-token-scope-a",
+        "fx-architecture-scheduler-tiers",
+        "fx-filler-bug_pattern-015"
+      ],
       "hitCount": 10,
       "topScore": 0.802,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.48,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2417,12 +2890,26 @@
     {
       "id": "g-25",
       "query": "meteor xylophone",
+      "ids": [
+        "fx-note-0210",
+        "fx-convention-metrics-naming",
+        "fx-note-0111",
+        "fx-decision-observability-vendor",
+        "fx-note-0230",
+        "fx-note-0145",
+        "fx-note-0192",
+        "fx-note-0127",
+        "fx-note-0146",
+        "fx-note-0143"
+      ],
       "hitCount": 10,
       "topScore": 0.79,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.15,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2431,12 +2918,26 @@
     {
       "id": "g-26",
       "query": "dumpling damask cashmere velvet",
+      "ids": [
+        "fx-bug-dlq-purge-race",
+        "fx-bug-checkpoint-torn-write",
+        "fx-note-0124",
+        "fx-note-0163",
+        "fx-note-0058",
+        "fx-note-0030",
+        "fx-code-003655",
+        "fx-code-005623",
+        "fx-code-006275",
+        "fx-code-007783"
+      ],
       "hitCount": 10,
       "topScore": 0.79,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.02,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2445,12 +2946,26 @@
     {
       "id": "g-27",
       "query": "orbit meringue gorgon",
+      "ids": [
+        "fx-decision-observability-vendor",
+        "fx-convention-webhook-signing",
+        "fx-code-009618",
+        "fx-code-003570",
+        "fx-code-009922",
+        "fx-code-008194",
+        "fx-code-005202",
+        "fx-code-008066",
+        "fx-code-006434",
+        "fx-code-007666"
+      ],
       "hitCount": 10,
       "topScore": 0.785,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.22,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2459,12 +2974,26 @@
     {
       "id": "g-28",
       "query": "xylophone chiffon",
+      "ids": [
+        "fx-note-0124",
+        "fx-note-0293",
+        "fx-note-0244",
+        "fx-note-0150",
+        "fx-note-0180",
+        "fx-note-0016",
+        "fx-note-0072",
+        "fx-note-0160",
+        "fx-note-0136",
+        "fx-note-0023"
+      ],
       "hitCount": 10,
       "topScore": 0.783,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.33,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2473,12 +3002,26 @@
     {
       "id": "g-29",
       "query": "accordion galaxy eclipse strudel",
+      "ids": [
+        "fx-code-002352",
+        "fx-code-006592",
+        "fx-code-007728",
+        "fx-code-001872",
+        "fx-code-001200",
+        "fx-code-000458",
+        "fx-code-004780",
+        "fx-code-008028",
+        "fx-code-002668",
+        "fx-code-007389"
+      ],
       "hitCount": 10,
       "topScore": 0.778,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.52,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2487,12 +3030,26 @@
     {
       "id": "g-30",
       "query": "souffle brocade taffeta",
+      "ids": [
+        "fx-note-0180",
+        "fx-note-0150",
+        "fx-note-0122",
+        "fx-code-008071",
+        "fx-code-002711",
+        "fx-code-006519",
+        "fx-code-001623",
+        "fx-code-007159",
+        "fx-code-000781",
+        "fx-code-008951"
+      ],
       "hitCount": 10,
       "topScore": 0.786,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.17,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2501,12 +3058,26 @@
     {
       "id": "g-31",
       "query": "souffle phoenix",
+      "ids": [
+        "fx-note-0150",
+        "fx-note-0299",
+        "fx-note-0180",
+        "fx-note-0210",
+        "fx-code-004087",
+        "fx-code-007287",
+        "fx-code-009127",
+        "fx-code-001911",
+        "fx-code-009431",
+        "fx-code-008253"
+      ],
       "hitCount": 10,
       "topScore": 0.792,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.06,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2515,12 +3086,26 @@
     {
       "id": "g-32",
       "query": "meteor harmonica hydra cyclops",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-004250",
+        "fx-code-006250",
+        "fx-code-006042",
+        "fx-code-008746",
+        "fx-code-007482",
+        "fx-code-009018",
+        "fx-code-002330",
+        "fx-code-007690",
+        "fx-code-005210"
+      ],
       "hitCount": 10,
       "topScore": 0.814,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.98,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2529,12 +3114,26 @@
     {
       "id": "g-33",
       "query": "nebula orbit gingham",
+      "ids": [
+        "fx-decision-webhook-relay-language",
+        "fx-decision-observability-vendor",
+        "fx-convention-webhook-signing",
+        "fx-code-007588",
+        "fx-code-005300",
+        "fx-code-006388",
+        "fx-code-001370",
+        "fx-code-000842",
+        "fx-code-009530",
+        "fx-code-006906"
+      ],
       "hitCount": 10,
       "topScore": 0.771,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.81,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2543,12 +3142,26 @@
     {
       "id": "g-34",
       "query": "gorgon phoenix",
+      "ids": [
+        "fx-code-008878",
+        "fx-code-004974",
+        "fx-code-008910",
+        "fx-code-006894",
+        "fx-code-002494",
+        "fx-code-005230",
+        "fx-code-006974",
+        "fx-code-007406",
+        "fx-code-006862",
+        "fx-code-009486"
+      ],
       "hitCount": 10,
       "topScore": 0.767,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.98,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2557,12 +3170,26 @@
     {
       "id": "g-35",
       "query": "mandolin risotto croissant feldspar",
+      "ids": [
+        "fx-code-005234",
+        "fx-code-002290",
+        "fx-code-005906",
+        "fx-code-006114",
+        "fx-code-000066",
+        "fx-code-002210",
+        "fx-code-007794",
+        "fx-code-000706",
+        "fx-code-001810",
+        "fx-code-000786"
+      ],
       "hitCount": 10,
       "topScore": 0.779,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.48,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2571,12 +3198,26 @@
     {
       "id": "g-36",
       "query": "strudel clarinet kraken",
+      "ids": [
+        "fx-code-004447",
+        "fx-code-000173",
+        "fx-code-000551",
+        "fx-code-004415",
+        "fx-code-000413",
+        "fx-code-007079",
+        "fx-code-000711",
+        "fx-code-002111",
+        "fx-code-007780",
+        "fx-code-005965"
+      ],
       "hitCount": 10,
       "topScore": 0.778,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.5,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2585,12 +3226,26 @@
     {
       "id": "g-37",
       "query": "obsidian tapestry",
+      "ids": [
+        "fx-filler-bug_pattern-035",
+        "fx-filler-architecture-038",
+        "fx-code-001949",
+        "fx-code-008477",
+        "fx-code-003213",
+        "fx-code-000877",
+        "fx-code-003453",
+        "fx-code-008909",
+        "fx-code-006301",
+        "fx-code-001069"
+      ],
       "hitCount": 10,
       "topScore": 0.797,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.26,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2599,12 +3254,26 @@
     {
       "id": "g-38",
       "query": "feldspar kraken clarinet mandolin",
+      "ids": [
+        "fx-note-0170",
+        "fx-note-0173",
+        "fx-note-0147",
+        "fx-note-0158",
+        "fx-note-0016",
+        "fx-note-0247",
+        "fx-note-0092",
+        "fx-note-0064",
+        "fx-note-0160",
+        "fx-note-0233"
+      ],
       "hitCount": 10,
       "topScore": 0.758,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -1.1,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2613,12 +3282,26 @@
     {
       "id": "g-39",
       "query": "gazpacho falafel trombone",
+      "ids": [
+        "fx-note-0087",
+        "fx-bug-tenant-router-hot-shard",
+        "fx-note-0119",
+        "fx-decision-config-loader-format",
+        "fx-note-0150",
+        "fx-note-0293",
+        "fx-note-0240",
+        "fx-note-0128",
+        "fx-note-0070",
+        "fx-note-0053"
+      ],
       "hitCount": 10,
       "topScore": 0.781,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.38,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2627,12 +3310,26 @@
     {
       "id": "g-40",
       "query": "accordion harmonica",
+      "ids": [
+        "fx-convention-webhook-signing",
+        "fx-code-001665",
+        "fx-code-005761",
+        "fx-code-005345",
+        "fx-code-009233",
+        "fx-code-007585",
+        "fx-code-005313",
+        "fx-code-001562",
+        "fx-code-009889",
+        "fx-code-003953"
+      ],
       "hitCount": 10,
       "topScore": 0.772,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.76,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2641,12 +3338,26 @@
     {
       "id": "g-41",
       "query": "pegasus basalt pumice chowder",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-note-0256",
+        "fx-code-009252",
+        "fx-code-009396",
+        "fx-code-009236",
+        "fx-code-008695",
+        "fx-code-003828",
+        "fx-code-008832",
+        "fx-code-007044",
+        "fx-code-008151"
+      ],
       "hitCount": 10,
       "topScore": 0.797,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.25,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2655,12 +3366,26 @@
     {
       "id": "g-42",
       "query": "eclipse hydra harmonica",
+      "ids": [
+        "fx-code-000747",
+        "fx-code-009576",
+        "fx-code-001864",
+        "fx-code-003988",
+        "fx-code-009764",
+        "fx-code-006280",
+        "fx-code-001736",
+        "fx-code-009840",
+        "fx-code-009780",
+        "fx-code-003680"
+      ],
       "hitCount": 10,
       "topScore": 0.812,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.9,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2669,12 +3394,26 @@
     {
       "id": "g-43",
       "query": "dumpling paisley",
+      "ids": [
+        "fx-convention-idempotency-key",
+        "fx-bug-lease-double-execution",
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-note-0203",
+        "fx-bug-tenant-router-hot-shard",
+        "fx-code-000761",
+        "fx-code-002071",
+        "fx-code-003577",
+        "fx-code-001913",
+        "fx-code-000815"
+      ],
       "hitCount": 10,
       "topScore": 0.787,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.14,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2683,12 +3422,26 @@
     {
       "id": "g-44",
       "query": "sandstone taffeta brocade taffeta",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-note-0058",
+        "fx-code-004555",
+        "fx-code-009083",
+        "fx-code-001915",
+        "fx-code-008971",
+        "fx-code-009547",
+        "fx-code-009371",
+        "fx-code-008923",
+        "fx-code-009931"
+      ],
       "hitCount": 10,
       "topScore": 0.801,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.41,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2697,12 +3450,26 @@
     {
       "id": "g-45",
       "query": "granite quartz kazoo",
+      "ids": [
+        "fx-code-008503",
+        "fx-code-003095",
+        "fx-code-007143",
+        "fx-code-001191",
+        "fx-code-007799",
+        "fx-code-008071",
+        "fx-code-006519",
+        "fx-code-001639",
+        "fx-code-008951",
+        "fx-code-002711"
+      ],
       "hitCount": 10,
       "topScore": 0.8,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.38,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2711,12 +3478,26 @@
     {
       "id": "g-46",
       "query": "phoenix paisley",
+      "ids": [
+        "fx-code-006294",
+        "fx-code-003857",
+        "fx-code-001377",
+        "fx-code-001270",
+        "fx-code-004321",
+        "fx-code-006449",
+        "fx-code-000086",
+        "fx-code-004065",
+        "fx-code-004335",
+        "fx-code-003265"
+      ],
       "hitCount": 10,
       "topScore": 0.789,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.06,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2725,12 +3506,26 @@
     {
       "id": "g-47",
       "query": "brocade nebula obsidian eclipse",
+      "ids": [
+        "fx-note-0180",
+        "fx-note-0004",
+        "fx-note-0082",
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-note-0023",
+        "fx-filler-decision-016",
+        "fx-note-0072",
+        "fx-note-0040",
+        "fx-note-0249",
+        "fx-note-0047"
+      ],
       "hitCount": 10,
       "topScore": 0.785,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.21,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2739,12 +3534,26 @@
     {
       "id": "g-48",
       "query": "basalt cashmere damask",
+      "ids": [
+        "fx-decision-config-loader-format",
+        "fx-architecture-scheduler-tiers",
+        "fx-code-008675",
+        "fx-code-001347",
+        "fx-code-005203",
+        "fx-code-007123",
+        "fx-code-007474",
+        "fx-code-006547",
+        "fx-code-005170",
+        "fx-code-007522"
+      ],
       "hitCount": 10,
       "topScore": 0.779,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.48,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2753,12 +3562,26 @@
     {
       "id": "g-49",
       "query": "limestone clarinet",
+      "ids": [
+        "fx-dup-cli-auth-token-scope-a",
+        "fx-filler-architecture-026",
+        "fx-filler-convention-037",
+        "fx-hub-system-overview",
+        "fx-note-0147",
+        "fx-filler-decision-020",
+        "fx-filler-architecture-002",
+        "fx-decision-lease-ttl",
+        "fx-hub-glossary",
+        "fx-decision-observability-vendor"
+      ],
       "hitCount": 10,
       "topScore": 0.808,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.71,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2767,12 +3590,26 @@
     {
       "id": "g-50",
       "query": "risotto centaur kazoo brocade",
+      "ids": [
+        "fx-convention-retry-jitter",
+        "fx-architecture-scheduler-tiers",
+        "fx-code-002290",
+        "fx-code-005906",
+        "fx-code-003954",
+        "fx-code-003570",
+        "fx-code-005219",
+        "fx-code-002210",
+        "fx-code-000595",
+        "fx-code-001042"
+      ],
       "hitCount": 10,
       "topScore": 0.777,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.55,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2781,12 +3618,26 @@
     {
       "id": "g-51",
       "query": "meteor pulsar hydra",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-note-0127",
+        "fx-code-008746",
+        "fx-code-008202",
+        "fx-code-005178",
+        "fx-code-002330",
+        "fx-code-006250",
+        "fx-code-006042",
+        "fx-code-003770",
+        "fx-code-004250"
+      ],
       "hitCount": 10,
       "topScore": 0.807,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.7,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2795,12 +3646,26 @@
     {
       "id": "g-52",
       "query": "gingham chimera",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-004939",
+        "fx-code-008299",
+        "fx-code-004099",
+        "fx-code-005234",
+        "fx-code-008539",
+        "fx-code-004925",
+        "fx-code-008786",
+        "fx-code-005976",
+        "fx-code-005989"
+      ],
       "hitCount": 10,
       "topScore": 0.779,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.48,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2809,12 +3674,26 @@
     {
       "id": "g-53",
       "query": "cashmere sandstone pulsar sandstone",
+      "ids": [
+        "fx-note-0290",
+        "fx-architecture-scheduler-tiers",
+        "fx-note-0191",
+        "fx-filler-convention-009",
+        "fx-note-0092",
+        "fx-decision-lease-ttl",
+        "fx-note-0104",
+        "fx-filler-bug_pattern-003",
+        "fx-code-007984",
+        "fx-code-007872"
+      ],
       "hitCount": 10,
       "topScore": 0.799,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.35,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2823,12 +3702,26 @@
     {
       "id": "g-54",
       "query": "pumice griffin sphinx",
+      "ids": [
+        "fx-code-005833",
+        "fx-code-001961",
+        "fx-code-005017",
+        "fx-code-005161",
+        "fx-code-004329",
+        "fx-code-005241",
+        "fx-code-000777",
+        "fx-code-009497",
+        "fx-code-000529",
+        "fx-code-003105"
+      ],
       "hitCount": 10,
       "topScore": 0.806,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.65,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2837,12 +3730,26 @@
     {
       "id": "g-55",
       "query": "asteroid griffin",
+      "ids": [
+        "fx-code-007706",
+        "fx-code-007572",
+        "fx-code-007460",
+        "fx-code-006650",
+        "fx-code-004676",
+        "fx-code-005280",
+        "fx-code-001572",
+        "fx-code-003860",
+        "fx-code-004260",
+        "fx-code-008612"
+      ],
       "hitCount": 10,
       "topScore": 0.773,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.71,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2851,12 +3758,26 @@
     {
       "id": "g-56",
       "query": "quasar organza paisley minotaur",
+      "ids": [
+        "fx-note-0203",
+        "fx-architecture-scheduler-tiers",
+        "fx-bug-tenant-router-hot-shard",
+        "fx-note-0278",
+        "fx-code-001639",
+        "fx-code-007143",
+        "fx-code-008503",
+        "fx-code-001191",
+        "fx-code-002839",
+        "fx-code-003095"
+      ],
       "hitCount": 10,
       "topScore": 0.793,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0.11,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2865,12 +3786,26 @@
     {
       "id": "g-57",
       "query": "falafel marmalade chiffon",
+      "ids": [
+        "fx-decision-config-loader-format",
+        "fx-note-0124",
+        "fx-note-0088",
+        "fx-note-0016",
+        "fx-note-0147",
+        "fx-note-0293",
+        "fx-note-0203",
+        "fx-note-0087",
+        "fx-filler-decision-028",
+        "fx-note-0150"
+      ],
       "hitCount": 10,
       "topScore": 0.774,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -0.67,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2879,12 +3814,26 @@
     {
       "id": "g-58",
       "query": "mandolin griffin",
+      "ids": [
+        "fx-convention-webhook-signing",
+        "fx-decision-config-loader-format",
+        "fx-code-004465",
+        "fx-code-007441",
+        "fx-code-004993",
+        "fx-code-004962",
+        "fx-code-000762",
+        "fx-code-004498",
+        "fx-code-003746",
+        "fx-code-000929"
+      ],
       "hitCount": 10,
       "topScore": 0.762,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": -1.16,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2893,12 +3842,26 @@
     {
       "id": "g-59",
       "query": "tuba eclipse chowder nebula",
+      "ids": [
+        "fx-note-0259",
+        "fx-note-0269",
+        "fx-note-0140",
+        "fx-note-0032",
+        "fx-note-0168",
+        "fx-note-0238",
+        "fx-note-0290",
+        "fx-note-0106",
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-note-0203"
+      ],
       "hitCount": 10,
       "topScore": 0.79,
       "confidence": 0.7,
       "abstained": false,
       "topRelevance": 0,
       "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null,
       "withQueries": {
         "hitCount": 10,
         "abstained": false
@@ -2955,7 +3918,9 @@
         "topScore": 0.825,
         "abstained": false,
         "topRelevance": 1.41,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-02",
@@ -2983,7 +3948,9 @@
         "topScore": 0.818,
         "abstained": false,
         "topRelevance": 1.13,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-03",
@@ -3011,7 +3978,9 @@
         "topScore": 0.822,
         "abstained": false,
         "topRelevance": 1.3,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-04",
@@ -3039,7 +4008,9 @@
         "topScore": 0.82,
         "abstained": false,
         "topRelevance": 1.21,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-05",
@@ -3067,7 +4038,9 @@
         "topScore": 0.832,
         "abstained": false,
         "topRelevance": 1.73,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-06",
@@ -3095,7 +4068,9 @@
         "topScore": 0.824,
         "abstained": false,
         "topRelevance": 1.39,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-07",
@@ -3123,7 +4098,9 @@
         "topScore": 0.827,
         "abstained": false,
         "topRelevance": 1.52,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-08",
@@ -3151,7 +4128,9 @@
         "topScore": 0.833,
         "abstained": false,
         "topRelevance": 1.77,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-09",
@@ -3179,7 +4158,9 @@
         "topScore": 0.823,
         "abstained": false,
         "topRelevance": 1.32,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-10",
@@ -3207,7 +4188,9 @@
         "topScore": 0.83,
         "abstained": false,
         "topRelevance": 1.61,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-11",
@@ -3235,7 +4218,9 @@
         "topScore": 0.824,
         "abstained": false,
         "topRelevance": 1.38,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-12",
@@ -3263,7 +4248,9 @@
         "topScore": 0.822,
         "abstained": false,
         "topRelevance": 1.32,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-13",
@@ -3291,7 +4278,9 @@
         "topScore": 0.936,
         "abstained": false,
         "topRelevance": 5.99,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-14",
@@ -3319,7 +4308,9 @@
         "topScore": 0.919,
         "abstained": false,
         "topRelevance": 5.3,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-15",
@@ -3347,7 +4338,9 @@
         "topScore": 0.949,
         "abstained": false,
         "topRelevance": 6.53,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-16",
@@ -3375,7 +4368,9 @@
         "topScore": 0.934,
         "abstained": false,
         "topRelevance": 5.91,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-17",
@@ -3403,7 +4398,9 @@
         "topScore": 0.934,
         "abstained": false,
         "topRelevance": 5.93,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-18",
@@ -3431,7 +4428,9 @@
         "topScore": 0.928,
         "abstained": false,
         "topRelevance": 5.69,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-19",
@@ -3459,7 +4458,9 @@
         "topScore": 0.923,
         "abstained": false,
         "topRelevance": 5.48,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       {
         "id": "id-20",
@@ -3487,7 +4488,9 @@
         "topScore": 0.938,
         "abstained": false,
         "topRelevance": 6.07,
-        "overridden": null
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       }
     ]
   },
@@ -3495,110 +4498,278 @@
     {
       "id": "ida-01",
       "query": "fixture symbol #999999",
+      "ids": [
+        "fx-code-005060",
+        "fx-code-009409",
+        "fx-code-009121",
+        "fx-code-000936",
+        "fx-code-006100",
+        "fx-code-004999",
+        "fx-code-009720",
+        "fx-code-006049",
+        "fx-code-008305",
+        "fx-code-009767"
+      ],
       "hitCount": 10,
       "topScore": 0.822,
       "abstained": false,
       "topRelevance": 1.32,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-02",
       "query": "fixture symbol #10000",
+      "ids": [
+        "fx-code-004065",
+        "fx-code-006100",
+        "fx-code-009908",
+        "fx-code-001377",
+        "fx-code-008500",
+        "fx-code-009409",
+        "fx-code-004321",
+        "fx-code-005028",
+        "fx-code-001828",
+        "fx-code-001841"
+      ],
       "hitCount": 10,
       "topScore": 0.823,
       "abstained": false,
       "topRelevance": 1.33,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-03",
       "query": "fixture symbol #123456",
+      "ids": [
+        "fx-code-006455",
+        "fx-code-004535",
+        "fx-code-001543",
+        "fx-code-001409",
+        "fx-code-004999",
+        "fx-code-006049",
+        "fx-code-006913",
+        "fx-code-004555",
+        "fx-code-004545",
+        "fx-code-003639"
+      ],
       "hitCount": 10,
       "topScore": 0.826,
       "abstained": false,
       "topRelevance": 1.48,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-04",
       "query": "fixture symbol #48213",
+      "ids": [
+        "fx-code-008500",
+        "fx-code-004150",
+        "fx-code-004916",
+        "fx-code-009244",
+        "fx-code-001444",
+        "fx-code-004613",
+        "fx-code-008932",
+        "fx-code-004300",
+        "fx-code-009409",
+        "fx-code-008156"
+      ],
       "hitCount": 10,
       "topScore": 0.828,
       "abstained": false,
       "topRelevance": 1.54,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-05",
       "query": "fx-code-999999",
+      "ids": [
+        "fx-code-009160",
+        "fx-code-009784",
+        "fx-code-009704",
+        "fx-code-009736",
+        "fx-code-009960",
+        "fx-code-004936",
+        "fx-code-009320",
+        "fx-code-009576",
+        "fx-code-004008",
+        "fx-code-007432"
+      ],
       "hitCount": 10,
       "topScore": 0.843,
       "abstained": false,
       "topRelevance": 2.19,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-06",
       "query": "compactGrimoire",
+      "ids": [
+        "fx-code-007544",
+        "fx-code-006466",
+        "fx-code-009081",
+        "fx-code-009547",
+        "fx-code-006379",
+        "fx-code-008299",
+        "fx-code-004937",
+        "fx-code-008539",
+        "fx-code-002873",
+        "fx-code-005113"
+      ],
       "hitCount": 10,
       "topScore": 0.828,
       "abstained": false,
       "topRelevance": 1.54,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-07",
       "query": "src/billing/chargeInvoice.ts",
+      "ids": [
+        "fx-code-005512",
+        "fx-code-005950",
+        "fx-code-008632",
+        "fx-code-008728",
+        "fx-code-002216",
+        "fx-code-000600",
+        "fx-code-002088",
+        "fx-code-003576",
+        "fx-code-007960",
+        "fx-code-002040"
+      ],
       "hitCount": 10,
       "topScore": 0.872,
       "abstained": false,
       "topRelevance": 3.37,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-08",
       "query": "transmuteWidget.ts checkpoint-store",
+      "ids": [
+        "fx-code-008483",
+        "fx-code-005155",
+        "fx-code-009507",
+        "fx-code-002563",
+        "fx-code-006035",
+        "fx-code-002963",
+        "fx-code-003747",
+        "fx-code-005267",
+        "fx-code-008547",
+        "fx-code-000291"
+      ],
       "hitCount": 10,
       "topScore": 0.88,
       "abstained": false,
       "topRelevance": 3.7,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-09",
       "query": "ERR_LEASE_EXPIRED",
+      "ids": [
+        "fx-code-008390",
+        "fx-code-008134",
+        "fx-code-006742",
+        "fx-code-008758",
+        "fx-code-006826",
+        "fx-code-004566",
+        "fx-code-007878",
+        "fx-code-004762",
+        "fx-code-008554",
+        "fx-code-004838"
+      ],
       "hitCount": 10,
       "topScore": 0.867,
       "abstained": false,
       "topRelevance": 3.17,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-10",
       "query": "ctx.quantum_router.teleport",
+      "ids": [
+        "fx-code-001669",
+        "fx-code-001573",
+        "fx-code-001205",
+        "fx-code-007221",
+        "fx-code-005797",
+        "fx-code-002085",
+        "fx-code-009941",
+        "fx-code-007861",
+        "fx-code-001541",
+        "fx-code-005413"
+      ],
       "hitCount": 10,
       "topScore": 0.88,
       "abstained": false,
       "topRelevance": 3.67,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-11",
       "query": "src/lease-manager/frobnicateShard.ts",
+      "ids": [
+        "fx-code-006450",
+        "fx-code-005170",
+        "fx-code-000946",
+        "fx-code-009026",
+        "fx-code-007490",
+        "fx-code-007474",
+        "fx-code-009842",
+        "fx-code-004898",
+        "fx-code-007330",
+        "fx-code-003522"
+      ],
       "hitCount": 10,
       "topScore": 0.89,
       "abstained": false,
       "topRelevance": 4.11,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "ida-12",
       "query": "where is harmonizeVortex defined?",
+      "ids": [
+        "fx-hub-glossary",
+        "fx-dup-retry-budget-cap-a",
+        "fx-architecture-rate-limiter-token-bucket",
+        "fx-convention-retry-jitter",
+        "fx-architecture-checkpoint-store",
+        "fx-dup-batch-size-tuning-a",
+        "fx-dup-audit-log-immutability-a",
+        "fx-dup-worker-pool-min-size-b",
+        "fx-hub-system-overview",
+        "fx-filler-architecture-010"
+      ],
       "hitCount": 10,
       "topScore": null,
       "abstained": false,
       "topRelevance": 1.58,
-      "overridden": null
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     }
   ],
   "aggregate": {

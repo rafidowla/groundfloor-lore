@@ -25,6 +25,7 @@ import type { VerbatimStoreApi } from './verbatimStoreApi.js';
 import type { VerbatimStoreRole } from './verbatimStoreRole.js';
 import type { EmbeddingProvider } from '../providers/types.js';
 import { resolveVectorEngineForPath, type VectorEngineKind } from './vectorEngineSelector.js';
+import { resolveHostPieceVectorsDefault, resolvePieceVectorsIntent } from './pieces/pieceSettings.js';
 
 export interface OpenWorkspaceVerbatimOpts {
     /** Workspace name, when the caller already resolved one. */
@@ -37,6 +38,10 @@ export interface OpenWorkspaceVerbatimOpts {
      *  COMMITS, so the caller can swap a cached reference. Never called for
      *  a 'lance'-engine workspace (nothing to promote). */
     onLancePromoted?: (info: { newLanceDbPath: string }) => void | Promise<void>;
+    /** D7 (3.23) — host-level `createLore({pieceVectors})` default, resolved
+     *  against LORE_RECALL_PIECE_VECTORS and then the workspace's own
+     *  explicit override (which always wins) via pieceSettings.ts. */
+    pieceVectors?: boolean;
 }
 
 /** Which vector engine backs `basePath` — exposed for callers (CLI status/
@@ -61,10 +66,20 @@ export function openWorkspaceVerbatim(
 ): VerbatimStoreApi {
     const { engine, workspace } = resolveVectorEngineForPath(basePath, opts);
     const workspaceId = opts.workspaceId ?? workspace ?? undefined;
+    // D7 (3.23) — resolve the final per-workspace piece-vectors intent here,
+    // the single funnel both engine constructors are opened through, so
+    // every caller (createLore, CLI, tests) gets the same precedence
+    // (workspace explicit > createLore option > env > off) without each
+    // one duplicating pieceSettings.ts's resolution logic.
+    const hostPieceVectorsDefault = resolveHostPieceVectorsDefault(opts.pieceVectors);
+    const pieceVectorsIntent = workspaceId
+        ? resolvePieceVectorsIntent(workspaceId, opts.home, hostPieceVectorsDefault)
+        : hostPieceVectorsDefault === true;
     if (engine === 'sqlite') {
         return new SqliteVerbatimStore(basePath, embeddingProvider, {
             role: opts.role,
             strictFingerprintCheck: opts.strictFingerprintCheck,
+            pieceVectors: pieceVectorsIntent,
             ...(workspaceId ? { workspaceName: workspaceId } : {}),
             ...(opts.home ? { home: opts.home } : {}),
             ...(opts.onLancePromoted ? { onLancePromoted: opts.onLancePromoted } : {}),
@@ -73,5 +88,6 @@ export function openWorkspaceVerbatim(
     return new VerbatimStore(basePath, embeddingProvider, {
         role: opts.role,
         strictFingerprintCheck: opts.strictFingerprintCheck,
+        pieceVectors: pieceVectorsIntent,
     });
 }

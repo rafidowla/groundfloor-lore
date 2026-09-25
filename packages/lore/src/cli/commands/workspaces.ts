@@ -34,6 +34,12 @@ import {
     type WorkspaceVocabMode,
     type WorkspaceVocabOnMismatch,
 } from '../../config/workspaces.js';
+import {
+    getWorkspaceRecallRerank,
+    setWorkspaceRecallRerank,
+    RERANK_K_MIN,
+    RERANK_K_MAX,
+} from '../../recall/rerankConfig.js';
 
 function usage(): string {
     return [
@@ -44,6 +50,13 @@ function usage(): string {
         '  active                                       Print the active workspace name.',
         '  switch <name> [--quiet]                      Set the active workspace.',
         '  show <name> [--json]                         Print full record for one workspace.',
+        '  set-rerank <name> <on|off|default>',
+        '              [--model <id>] [--k <n>] [--margin <n>]',
+        '                                               Set / clear the per-workspace local-rerank policy.',
+        '                                               on/off set recallRerank.enabled; default clears the',
+        `                                               whole policy (back to env/default precedence). --k`,
+        `                                               must be ${RERANK_K_MIN}-${RERANK_K_MAX}.`,
+        '  get-rerank <name> [--json]                   Print the resolved rerank policy.',
         '  set-vocab-policy <name> --mode <allowlist|denylist|open>',
         '                   [--types <csv>]',
         '                   [--on-mismatch <reject|hitl|warn>]',
@@ -120,6 +133,76 @@ export async function workspacesCommand(args: string[]): Promise<void> {
             console.log(`createdAt:  ${entry.createdAt}`);
             console.log(`active:     ${entry.name === file.active}`);
             if (entry.retention) console.log(`retention:  ${JSON.stringify(entry.retention)}`);
+        }
+        return;
+    }
+
+    if (sub === 'set-rerank') {
+        // Positional args are `<name> <state>`, in that order.
+        const positionals = rest.filter((a) => !a.startsWith('--'));
+        const name = positionals[0];
+        const state = positionals[1];
+        if (!name || !state) {
+            console.error('set-rerank: missing workspace name or state.');
+            console.error('Usage: lore workspaces set-rerank <name> <on|off|default> [--model <id>] [--k <n>] [--margin <n>]');
+            process.exit(1);
+        }
+        if (state !== 'on' && state !== 'off' && state !== 'default') {
+            console.error('set-rerank: state must be on|off|default.');
+            process.exit(1);
+        }
+
+        if (state === 'default') {
+            setWorkspaceRecallRerank(name, null);
+            console.log(`Cleared recallRerank policy on "${name}" (back to env/default precedence).`);
+            return;
+        }
+
+        const modelFlag = readFlag(rest, '--model');
+        const kRaw = readFlag(rest, '--k');
+        const marginRaw = readFlag(rest, '--margin');
+        let k: number | undefined;
+        if (kRaw !== undefined) {
+            k = Number(kRaw);
+            if (!Number.isFinite(k) || k < RERANK_K_MIN || k > RERANK_K_MAX) {
+                console.error(`set-rerank: --k must be a number between ${RERANK_K_MIN} and ${RERANK_K_MAX}.`);
+                process.exit(1);
+            }
+        }
+        let margin: number | undefined;
+        if (marginRaw !== undefined) {
+            margin = Number(marginRaw);
+            if (!Number.isFinite(margin)) {
+                console.error('set-rerank: --margin must be a finite number.');
+                process.exit(1);
+            }
+        }
+
+        const next = setWorkspaceRecallRerank(name, {
+            enabled: state === 'on',
+            ...(modelFlag ? { model: modelFlag } : {}),
+            ...(k !== undefined ? { k } : {}),
+            ...(margin !== undefined ? { margin } : {}),
+        });
+        console.log(`Updated recallRerank on "${name}": ${JSON.stringify(next)}`);
+        return;
+    }
+
+    if (sub === 'get-rerank') {
+        const name = rest.find((a) => !a.startsWith('--'));
+        if (!name) {
+            console.error('get-rerank: missing workspace name.');
+            process.exit(1);
+        }
+        const policy = getWorkspaceRecallRerank(name);
+        if (json) {
+            console.log(JSON.stringify(policy, null, 2));
+        } else {
+            console.log(`workspace:  ${name}`);
+            console.log(`enabled:    ${policy.enabled}`);
+            if (policy.model !== undefined) console.log(`model:      ${policy.model}`);
+            if (policy.k !== undefined) console.log(`k:          ${policy.k}`);
+            if (policy.margin !== undefined) console.log(`margin:     ${policy.margin}`);
         }
         return;
     }

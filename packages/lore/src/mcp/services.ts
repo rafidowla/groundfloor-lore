@@ -25,6 +25,7 @@ import { hasCapability } from '../engines/connectorCapabilities.js';
 import { DataplaneGraph } from '../engines/dataplaneGraph.js';
 import { createLoreDataplaneSdk } from '../engines/dataplaneSdkCompat.js';
 import { openWorkspaceVerbatim, resolveVerbatimEngineForPath } from '../engines/openWorkspaceVerbatim.js';
+import { resolveHostPieceVectorsDefault, resolvePieceVectorsIntent } from '../engines/pieces/pieceSettings.js';
 import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js'; import type { VerbatimStoreRole } from '../engines/verbatimStoreRole.js';
 import { log } from '../logger.js';
 import type { PendingAutolinkTracker } from '../engines/pendingAutolink.js';
@@ -215,6 +216,11 @@ export interface CreateVectorStoreOpts {
     workspaceId?: string;
     /** Same contract as CreateGraphOpts.home. */
     home?: string;
+    /** D7 (3.23) — host-level `createLore({pieceVectors})` default; resolved
+     *  against the workspace's own explicit override inside
+     *  openWorkspaceVerbatim(). Cloud branch (DataplaneVectorStore) is out
+     *  of scope for this slice and ignores it. */
+    pieceVectors?: boolean;
 }
 
 /**
@@ -258,13 +264,24 @@ export async function createVectorStore(opts: CreateVectorStoreOpts): Promise<Lo
     // resolveSearchWorkerIsolation's own doc comment (the worker exists to
     // fence LanceDB native crashes; there are none here).
     if (resolveSearchWorkerIsolation(opts.graphBasePath, opts.searchWorkerPolicy, vectorEngine)) {
-        return new VerbatimSearchWorkerProxy(opts.graphBasePath, opts.embedOverrides, opts.embeddingProvider, opts.injectedEmbeddingProvider ?? false);
+        // D7c — resolve piece-vectors intent the SAME way openWorkspaceVerbatim
+        // does (host default, then the workspace's own explicit override) and
+        // hand it to the proxy so it can (a) answer pieceVectorsIntentOn()
+        // correctly itself and (b) tell the child to open with pieces enabled
+        // — see WORKER_ENV.PIECE_VECTORS's doc for why this is resolved ONCE
+        // here rather than re-derived inside the child.
+        const hostPieceVectorsDefault = resolveHostPieceVectorsDefault(opts.pieceVectors);
+        const pieceVectorsIntent = opts.workspaceId
+            ? resolvePieceVectorsIntent(opts.workspaceId, opts.home, hostPieceVectorsDefault)
+            : hostPieceVectorsDefault === true;
+        return new VerbatimSearchWorkerProxy(opts.graphBasePath, opts.embedOverrides, opts.embeddingProvider, opts.injectedEmbeddingProvider ?? false, pieceVectorsIntent);
     }
     return openWorkspaceVerbatim(opts.graphBasePath, opts.embeddingProvider, {
         workspaceId: opts.workspaceId,
         home: opts.home,
         role: opts.vectorStoreRole,
         strictFingerprintCheck: opts.injectedEmbeddingProvider ?? false,
+        pieceVectors: opts.pieceVectors,
         // The boot store has no cached-reference of its own to swap on a
         // background promotion commit — see openWorkspaceVerbatim.ts's
         // header and this file's `createVectorStore` doc comment. The

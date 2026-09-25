@@ -17,6 +17,8 @@ import type { LoreNode } from '../providers/types.js';
 import type { RetrieveOutcome } from './retrieve.js';
 import { buildLanguageHint } from '../mcp/tools/search/helpers.js';
 import { buildRelevanceMeta, type RelevanceMetaFields } from './abstention.js';
+import type { PieceVectorsMeta } from './pieceSeedSearch.js';
+import { toSnakeRerankMeta, type SnakeRerankMeta } from './rerankStage.js';
 
 /* ─── RecallResult shape (canonical; embedded lore.recall returns it) ─── */
 
@@ -33,6 +35,9 @@ export interface RecallHit {
      *  Additive only — absent for keyword/traversal-only matches. */
     similarity?: number;
     relevance?: number;
+    /** D8b: this hit's cross-encoder re-rank score. Absent unless `rerank`
+     *  was enabled for this call AND the stage actually applied. */
+    rerank_score?: number;
 }
 
 /** D4 fix (fix/d4-traversal-separate-field): a graph-traversal neighbour of a
@@ -65,6 +70,8 @@ export interface RecallNode {
     /** D1: see RecallHit.similarity/relevance — same semantics. */
     similarity?: number;
     relevance?: number;
+    /** D8b: see RecallHit.rerank_score — same semantics. */
+    rerank_score?: number;
 }
 
 export interface RecallMeta extends RelevanceMetaFields {
@@ -102,6 +109,14 @@ export interface RecallMeta extends RelevanceMetaFields {
      *  (NullEmbeddingProvider / LORE_EMBEDDING_PROVIDER=none) — the read
      *  degraded to the keyword/BM25/graph path instead of throwing. */
     vector_leg_skipped?: boolean;
+    /** D7b — piece-level vector routing status for this call. Present only
+     *  when piece-vectors intent is on for the seed store consulted (absent
+     *  entirely, not `{status:'off'}`, when intent is off — keeps default
+     *  output byte-identical to pre-D7b). See pieceSeedSearch.ts. */
+    piece_vectors?: PieceVectorsMeta;
+    /** D8b: present only when `rerank` was enabled for this call (per-call >
+     *  workspace > env). Absent leaves default output byte-identical. */
+    rerank?: SnakeRerankMeta;
 }
 // D1 (calibrated relevance + abstention): the top_similarity/top_relevance/
 // floor/below_floor/abstained/calibration fields above come from
@@ -236,9 +251,14 @@ export interface RecallCandidate {
     score: number;
     matchedBy: string[];
     updatedAt: string;
+    /** D8b: see RecallHit.rerank_score — same semantics. */
+    rerank_score?: number;
 }
 
 export function buildCompactCandidates(outcome: RetrieveOutcome): RecallCandidate[] {
+    // outcome.results is already in reranked order when rerank applied
+    // (retrieve.ts reorders internally before returning) — no reordering
+    // logic needed here, only surfacing the already-present score.
     return outcome.results.map((r) => {
         const n = r.node as LoreNode;
         return {
@@ -248,6 +268,7 @@ export function buildCompactCandidates(outcome: RetrieveOutcome): RecallCandidat
             score: r.score,
             matchedBy: r.matchedBy,
             updatedAt: n.updatedAt,
+            ...(r.rerankScore !== undefined ? { rerank_score: r.rerankScore } : {}),
         };
     });
 }
@@ -330,7 +351,12 @@ export async function buildRecallResult(
             ...(outcome.meta.possibleStarvation ? { possible_starvation: true } : {}),
             ...(outcome.meta.bm25Ranked === false ? { bm25_ranked: false } : {}),
             ...(outcome.meta.vectorLegSkipped ? { vector_leg_skipped: true } : {}),
+            ...(outcome.meta.pieceVectors ? { piece_vectors: outcome.meta.pieceVectors } : {}),
             ...buildRelevanceMeta(outcome.meta),
+            // D8b — absent unless rerank actually ran for this call (the
+            // stage still reports a fail-open `too_few_results` meta when
+            // outcome.results was too small, same as a genuine empty recall).
+            ...(outcome.meta.rerank ? { rerank: toSnakeRerankMeta(outcome.meta.rerank) } : {}),
         };
         // An empty result keeps the REQUESTED response shape — a full-mode
         // caller gets the full-mode shape with an empty knowledge array, not
@@ -353,7 +379,12 @@ export async function buildRecallResult(
         };
     }
 
-    const recalled = outcome.results.map((r) => ({ node: r.node, source: mapSource(r.source), similarity: r.similarity, relevance: r.relevance }));
+    // outcome.results is already in reranked order when rerank applied
+    // (retrieve.ts reorders internally before returning `results`) — no
+    // reordering logic needed here, only carrying the already-present score
+    // through so full-mode `knowledge` / summary `hits` (and auto_full,
+    // which slices `trimmed` below) can surface it.
+    const recalled = outcome.results.map((r) => ({ node: r.node, source: mapSource(r.source), similarity: r.similarity, relevance: r.relevance, rerankScore: r.rerankScore }));
     const related: RecallRelated[] = outcome.related.map((r) => {
         const n = r.node as LoreNode;
         return { id: n.id, type: n.type, label: n.label, project: n.project, snippet: snippetOf(n.content), via: r.via, relation: r.relation, depth: r.depth };
@@ -395,7 +426,7 @@ export async function buildRecallResult(
             // `related` is retrieve()'s own separate array, this is a direct
             // count of it, not arithmetic over `knowledge`.
             connectedMatches: related.length,
-            knowledge: recalled.map(({ node, source, similarity, relevance }) => {
+            knowledge: recalled.map(({ node, source, similarity, relevance, rerankScore }) => {
                 const n = node as LoreNode & { language?: string | null; stale?: boolean };
                 return {
                     id: n.id, type: n.type, label: n.label, content: n.content, tags: n.tags,
@@ -403,6 +434,7 @@ export async function buildRecallResult(
                     ...(n.stale ? { stale_warning: true } : {}),
                     ...(similarity !== undefined && similarity !== null ? { similarity } : {}),
                     ...(relevance !== undefined && relevance !== null ? { relevance } : {}),
+                    ...(rerankScore !== undefined ? { rerank_score: rerankScore } : {}), // D8b
                 };
             }),
             ...(related.length > 0 ? { related } : {}),
@@ -418,8 +450,10 @@ export async function buildRecallResult(
                 ...(outcome.meta.possibleStarvation ? { possible_starvation: true } : {}),
             ...(outcome.meta.bm25Ranked === false ? { bm25_ranked: false } : {}),
             ...(outcome.meta.vectorLegSkipped ? { vector_leg_skipped: true } : {}),
+            ...(outcome.meta.pieceVectors ? { piece_vectors: outcome.meta.pieceVectors } : {}),
                 ...tokenMeta,
                 ...buildRelevanceMeta(outcome.meta),
+                ...(outcome.meta.rerank ? { rerank: toSnakeRerankMeta(outcome.meta.rerank) } : {}), // D8b
             },
         };
     }
@@ -447,7 +481,7 @@ export async function buildRecallResult(
     return {
         topic, mode: 'summary', searchMode, scope: { workspace: workspaceScope, ecosystem: ecosystemScope }, queryId,
         crossProject, totalRecalled: recalled.length, shown: trimmed.length, projectsSeen: [...projectsSeen],
-        hits: trimmed.map(({ node, source, similarity, relevance }) => {
+        hits: trimmed.map(({ node, source, similarity, relevance, rerankScore }) => {
             const n = node as LoreNode & { stale?: boolean };
             return {
                 id: n.id, type: n.type, label: n.label, project: n.project, tags: n.tags,
@@ -455,6 +489,7 @@ export async function buildRecallResult(
                 ...(n.stale ? { stale_warning: true } : {}),
                 ...(similarity !== undefined && similarity !== null ? { similarity } : {}),
                 ...(relevance !== undefined && relevance !== null ? { relevance } : {}),
+                ...(rerankScore !== undefined ? { rerank_score: rerankScore } : {}), // D8b
             };
         }),
         ...(related.length > 0 ? { related } : {}),
@@ -471,8 +506,10 @@ export async function buildRecallResult(
             ...(outcome.meta.possibleStarvation ? { possible_starvation: true } : {}),
             ...(outcome.meta.bm25Ranked === false ? { bm25_ranked: false } : {}),
             ...(outcome.meta.vectorLegSkipped ? { vector_leg_skipped: true } : {}),
+            ...(outcome.meta.pieceVectors ? { piece_vectors: outcome.meta.pieceVectors } : {}),
             ...tokenMeta,
             ...buildRelevanceMeta(outcome.meta),
+            ...(outcome.meta.rerank ? { rerank: toSnakeRerankMeta(outcome.meta.rerank) } : {}), // D8b
         },
     };
 }

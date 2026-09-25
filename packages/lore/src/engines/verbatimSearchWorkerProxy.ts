@@ -233,11 +233,19 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         parentEmbedder?: EmbeddingProvider,
         /** Forwarded to the child as WORKER_ENV.STRICT_FINGERPRINT (see verbatimFingerprintGate.ts). */
         private readonly forwardStrictFingerprint = false,
+        /** D7c — the caller's already-resolved piece-vectors intent (see
+         *  WORKER_ENV.PIECE_VECTORS doc). Threaded into `super()` below so
+         *  this instance's OWN `pieceVectorsIntentOn()` (a plain field read,
+         *  inherited unchanged — no IPC involved) answers correctly without
+         *  needing the child at all; separately forwarded to the child via
+         *  spawn() so `searchPieces`/`pieceIndexStatus` calls (which DO need
+         *  the child's real LancePieceIndex) open with pieces enabled too. */
+        private readonly pieceVectors = false,
     ) {
         // Base ctor only sets up paths + a (never-initialized) default provider
         // for schema sizing; it does NOT open LanceDB. We never call
         // super.initialize(), so no native handle is ever created in-process.
-        super(basePath);
+        super(basePath, undefined, { pieceVectors });
         this.workerBasePath = basePath;
         this.embedOverridesJson = embedOverrides ? JSON.stringify(embedOverrides) : undefined;
         this.parentEmbedder = parentEmbedder;
@@ -399,6 +407,7 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
             if (this.parentEmbedder.dtype) env[WORKER_ENV.EMBED_DTYPE] = this.parentEmbedder.dtype;
         }
         if (this.forwardStrictFingerprint) env[WORKER_ENV.STRICT_FINGERPRINT] = '1';
+        if (this.pieceVectors) env[WORKER_ENV.PIECE_VECTORS] = '1';
 
         // execArgv defaults to the parent's, so a tsx-loaded parent runs the
         // worker under tsx too (native ABI match); a compiled parent runs .js.

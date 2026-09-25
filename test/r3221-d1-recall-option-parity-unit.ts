@@ -89,7 +89,7 @@ async function runInProcessCapture(): Promise<Set<string>> {
             queryLanguage: 'en', filePaths: [], max: 5, queries: ['q'],
             entities: ['e'], topics: ['t'], project: 'p',
             abstain: false, relevanceFloor: 2, abstainTermCoverage: false,
-            candidateFloor: 0, lexicalBase: 'rrf',
+            candidateFloor: 0, lexicalBase: 'rrf', rerank: true,
         }).catch(() => {});
         return await capture;
     } finally {
@@ -139,7 +139,7 @@ async function runMcpToolCapture(): Promise<Set<string>> {
         tags: ['t'], queries: ['q'], entities: ['e'], topics: ['t'], project: 'p',
         types: ['note'], workspace: 'default', ecosystem: '*', max_tokens: 1000,
         include_archived: false, search_mode: 'keyword', compact: false,
-        abstain: false, relevance_floor: 2,
+        abstain: false, relevance_floor: 2, rerank: true,
     }).catch(() => {});
     return await capture;
 }

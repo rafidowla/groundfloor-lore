@@ -48,6 +48,8 @@ import type { EmbeddingProvider } from '../providers/types.js';
 import { VerbatimStore } from './verbatimStore.js';
 import type * as verbatimHistory from './verbatimHistory.js';
 import { reconnectGraph, type ReconnectableGraph } from './reconnect.js';
+import { log } from '../logger.js';
+import { buildPieceIndex, type PieceBuildableStore } from './pieces/pieceIndexBuild.js';
 import {
     checkCompatibility,
     readFingerprintOrLegacy,
@@ -239,6 +241,29 @@ export async function migrateEmbeddingModel(
     //    table; LoreEdge prune is unrelated to the embedding swap and
     //    would make the operator wait for an unrelated cleanup.
     const verbatim = new VerbatimStore(basePath, targetProvider);
+
+    // 1b. D7c (3.23) — a re-embed swaps the CANONICAL table into the new
+    //     model's vector space; any existing piece-level index/sidecar was
+    //     built against the OLD model. LancePieceIndex.initialize() already
+    //     refuses to OPEN a fingerprint-mismatched sidecar for querying (so
+    //     this is not a query-correctness gap), but leaving the stale table
+    //     + sidecar on disk is still real waste, and a real trap for the
+    //     next `lore migrate piece-vectors` run: it would refuse with
+    //     "mismatched piece index" (this slice's own pieceIndexBuild.ts
+    //     refusal logic) and demand --force/--drop from an operator who has
+    //     no way to know THIS migration is what caused the mismatch.
+    //     Reuses buildPieceIndex's own `{drop:true}` path (table + sidecar
+    //     removal — see pieceIndexBuild.ts) rather than hand-rolling the
+    //     same drop logic a second time here. Best-effort: a failure here
+    //     must not abort the embedding-model migration itself, the same
+    //     posture step 0's preservedRows read and step 2b's restore loop
+    //     already take toward their own non-critical side effects.
+    try {
+        await buildPieceIndex(basePath, verbatim as unknown as PieceBuildableStore, targetProvider, { drop: true });
+    } catch (err) {
+        log.warn(`[migrateEmbeddingModel] piece-index drop failed (continuing — the embedding-model migration itself is unaffected): ${(err as Error).message}`);
+    }
+
     const result = await reconnectGraph(graph, verbatim, {
         dryRun: false,
         force: true,

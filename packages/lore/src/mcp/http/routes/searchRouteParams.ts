@@ -127,3 +127,33 @@ export function parseAbstainParam(params: URLSearchParams): boolean | undefined 
     if (raw === 'false') return false;
     return undefined;
 }
+
+/**
+ * D8b/D8d — `?rerank=1|0`. Absent must be `undefined` (inherit workspace/
+ * host/env precedence in `rerankConfig.ts`'s `resolveRerankConfig`), not
+ * `false` — same "silently disables the operator's default" trap
+ * `parseAbstainParam` documents above. REST's primary, documented
+ * convention is `1|0` (design DESIGN-3.23.md §3.2), matching every other
+ * boolean-ish REST query param this file's `1|0` siblings use.
+ *
+ * N16 (3.23 final review): also accepts `true`/`false`, case-insensitively,
+ * as a secondary alias — `parseAbstainParam` right above already
+ * establishes `true|false` as a query-param convention in this same file,
+ * and an operator hand-typing a curl command reasonably tries either
+ * spelling. `1`/`0` remain the primary, documented values; `true`/`false`
+ * is accepted so it fails open into the right answer rather than silently
+ * falling through to `undefined` (still inheriting the operator's default,
+ * not a false-negative "off" — but a spelling that LOOKS like a rerank
+ * opinion should behave like one).
+ */
+export function parseRerankParam(params: URLSearchParams): boolean | undefined {
+    const raw = params.get('rerank');
+    if (raw === '1') return true;
+    if (raw === '0') return false;
+    if (raw !== null) {
+        const lower = raw.toLowerCase();
+        if (lower === 'true') return true;
+        if (lower === 'false') return false;
+    }
+    return undefined;
+}

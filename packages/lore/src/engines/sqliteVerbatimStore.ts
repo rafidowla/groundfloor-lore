@@ -38,8 +38,10 @@ import { assertWritableRole } from './verbatimStoreRole.js';
 import { applyFingerprintOnOpen, stampFingerprint } from './verbatimFingerprintGate.js';
 import { applyActorScopeFilter } from '../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../security/actorContext.js';
+import { redactSecrets } from '../security/secretScan.js';
 import { buildSqlFilterEntries } from './verbatimHistory.js';
 import { ReadCache, cacheKey } from './cache.js';
+import { SqlitePieceIndex, type PieceSourceRow, type PieceSearchHit, type PieceIndexStatus } from './pieces/sqlitePieceIndex.js';
 
 import { openSqliteVerbatimDb, type SqliteVecLoadResult } from './sqliteVerbatimSchema.js';
 import { BruteForceVectorCache, nativeVectorSearch, decodeVector, encodeVector } from './sqliteVerbatimVector.js';
@@ -58,6 +60,12 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     private readonly strictFingerprintCheck: boolean;
     private vecStatus: SqliteVecLoadResult = { loaded: false };
     private readonly vectorCache = new BruteForceVectorCache();
+    /** D7 (3.23) — derived piece-level vector index (pieces/sqlitePieceIndex.ts).
+     *  Nullable: it can only be constructed once `this.db` exists, i.e.
+     *  inside initialize(); only ever populated when `pieceVectorsIntent`
+     *  is on AND its sidecar is valid. */
+    private pieceIndex: SqlitePieceIndex | null = null;
+    private readonly pieceVectorsIntent: boolean;
 
     /**
      * Opus review follow-up (3.21 step 2): a short-TTL cache + single-flight
@@ -113,6 +121,11 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
              *  (e.g. the boot store) that have nowhere to swap a live
              *  reference to. */
             onLancePromoted?: (info: { newLanceDbPath: string }) => void | Promise<void>;
+            /** D7 (3.23) — whether piece-level vectors are on for this store.
+             *  Already-resolved (host default + workspace override applied
+             *  upstream, see openWorkspaceVerbatim.ts); this class only
+             *  consumes the final boolean. */
+            pieceVectors?: boolean;
         },
     ) {
         this.basePath = basePath;
@@ -122,6 +135,7 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         this.workspaceName = opts?.workspaceName;
         this.home = opts?.home;
         this.onLancePromoted = opts?.onLancePromoted;
+        this.pieceVectorsIntent = opts?.pieceVectors ?? false;
         const rawMax = process.env.LORE_SEARCH_CACHE_MAX_ENTRIES;
         const maxEntries = (rawMax && rawMax.trim() !== '' && Number.isFinite(Number(rawMax)) && Number(rawMax) > 0)
             ? Number(rawMax)
@@ -188,6 +202,15 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         }
         this.initialized = true;
         this.closed = false;
+
+        // D7 (3.23) — open/validate the derived piece index. Best-effort:
+        // failures here must not block the canonical store from opening.
+        try {
+            this.pieceIndex = new SqlitePieceIndex(this.basePath, this.db, this.embeddingProvider);
+            await this.pieceIndex.initialize({ intentOn: this.pieceVectorsIntent, canonicalIsEmpty: this.rowCountEstimate === 0 });
+        } catch (err) {
+            log.warn(`[SqliteVerbatimStore] piece index initialize failed (continuing without piece search): ${(err as Error).message}`);
+        }
     }
 
     /** 3.21 step 2 part 2 — after every committed write, bump the cheap
@@ -230,6 +253,16 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         if (!this.initialized) return;
         await sqliteWrite.store(this.writeDeps(), doc);
         this.checkPromotion(1);
+        // D7 (3.23) — best-effort piece maintenance. sqliteVerbatimWrite.ts
+        // redacts doc.text into a LOCAL variable only (never writes it back
+        // onto `doc`), unlike the Lance engine's store() which mutates
+        // doc.text in place — so pieces must be built from an independently
+        // redacted copy here, never the raw doc.text, to avoid embedding
+        // un-redacted (potentially secret-containing) text.
+        await this.pieceIndex?.upsertForRows([{
+            id: doc.id, label: doc.metadata?.label, text: redactSecrets(doc.text), type: doc.metadata?.type,
+            project: doc.metadata?.project, ecosystem: doc.metadata?.ecosystem, security_scopes: doc.metadata?.security_scopes,
+        }]).catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece upsert failed for ${doc.id} (non-fatal): ${err.message}`));
     }
 
     async storeBatch(docs: VerbatimDocument[]): Promise<void> {
@@ -237,6 +270,11 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         if (!this.initialized || docs.length === 0) return;
         await sqliteWrite.storeBatch(this.writeDeps(), docs);
         this.checkPromotion(docs.length);
+        // D7 (3.23) — same independent-redaction rationale as store() above.
+        await this.pieceIndex?.upsertForRows(docs.map((doc) => ({
+            id: doc.id, label: doc.metadata?.label, text: redactSecrets(doc.text), type: doc.metadata?.type,
+            project: doc.metadata?.project, ecosystem: doc.metadata?.ecosystem, security_scopes: doc.metadata?.security_scopes,
+        }))).catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece upsert failed for storeBatch (non-fatal): ${err.message}`));
     }
 
     async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
@@ -244,6 +282,11 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         if (!this.initialized) return;
         sqliteWrite.bulkAddPrebuiltRows(this.writeDeps(), rows);
         this.checkPromotion(rows.length);
+        // D7 (3.23) — bulk-loaded rows carry no redaction step upstream
+        // (matches sqliteVerbatimWrite.ts's bulkAddPrebuiltRows, which does
+        // not redact), so pieces are built from the row fields as supplied.
+        await this.pieceIndex?.upsertForRows(rows as unknown as PieceSourceRow[])
+            .catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece upsert failed for bulkAddPrebuiltRows (non-fatal): ${err.message}`));
     }
 
     async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
@@ -251,6 +294,8 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         if (!this.initialized) return;
         sqliteWrite.bulkUpsertPrebuiltRows(this.writeDeps(), rows);
         this.checkPromotion(rows.length);
+        await this.pieceIndex?.upsertForRows(rows as unknown as PieceSourceRow[])
+            .catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece upsert failed for bulkUpsertPrebuiltRows (non-fatal): ${err.message}`));
     }
 
     async delete(id: string): Promise<void> {
@@ -261,18 +306,24 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         assertWritableRole(this.role, 'physicalDelete');
         if (!this.initialized) return;
         sqliteWrite.physicalDelete(this.writeDeps(), id);
+        await this.pieceIndex?.deleteForIds([id]).catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece delete failed for ${id} (non-fatal): ${err.message}`));
     }
 
     async physicalDeleteMany(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'physicalDeleteMany');
         if (!this.initialized) return 0;
-        return sqliteWrite.physicalDeleteMany(this.writeDeps(), ids);
+        const processed = sqliteWrite.physicalDeleteMany(this.writeDeps(), ids);
+        await this.pieceIndex?.deleteForIds(ids).catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece delete failed for physicalDeleteMany (non-fatal): ${err.message}`));
+        return processed;
     }
 
     async tombstone(id: string, reason: string): Promise<void> {
         assertWritableRole(this.role, 'tombstone');
         if (!this.initialized) return;
         await sqliteWrite.tombstone(this.writeDeps(), id, reason);
+        // D7 (3.23) — tombstoned content is excluded from search/bm25Search,
+        // so its pieces must also drop out of piece search.
+        await this.pieceIndex?.deleteForIds([id]).catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece delete failed for tombstone ${id} (non-fatal): ${err.message}`));
     }
 
     // ---- vector search -----------------------------------------------------
@@ -502,6 +553,56 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         }
     }
 
+    /**
+     * D7b — piece-level vector search delegator, mirroring
+     * VerbatimStore.searchPieces's signature so retrieval routing can treat
+     * both engines uniformly. `SqlitePieceIndex.searchPieces` already
+     * accepts `string | number[]` and embeds internally only when given a
+     * string (same as this class's own `search()` → `_searchUncached`), so
+     * this delegator passes `query` straight through rather than resolving
+     * it here — a raw string embeds once inside `SqlitePieceIndex`, and a
+     * pre-embedded vector (as T1's direct store-level calls pass, see
+     * `test/d7-piece-index-unit.ts` Section C) passes through untouched,
+     * matching the `string | number[]` convention `VerbatimStore.
+     * searchPieces` mirrors on the Lance side. `filter` is converted
+     * through the same `buildSqlFilterEntries` → `RowFilter` shape
+     * `searchByVector` already uses, so a piece query honors the identical
+     * D2/E2 allowlist. No `gate` parameter: this engine has no cancellation
+     * wiring on any read path today (`search`/`searchByVector` take none
+     * either), so none is added here either — accepting one that no other
+     * method on this class honors would be a false promise, not parity.
+     */
+    async searchPieces(
+        query: string | number[],
+        topK: number,
+        filter?: VerbatimQueryFilter,
+        actorScopes?: ReadonlyArray<string>,
+    ): Promise<PieceSearchHit[]> {
+        if (!this.pieceIndex) return [];
+        const filterEntries = buildSqlFilterEntries(filter as Record<string, unknown> | undefined);
+        const rowFilter = filterEntries.map((e) => [e.column, e.rowValue] as const);
+        return this.pieceIndex.searchPieces(query, topK, rowFilter, actorScopes ?? getCurrentActorScopes());
+    }
+
+    /** D7 (3.23) — observability/ops hook mirroring SqlitePieceIndex.status(). */
+    pieceIndexStatus(): PieceIndexStatus {
+        return this.pieceIndex?.status() ?? { open: false, valid: false, reason: 'not initialized' };
+    }
+
+    /** D7c — exposes this store's own piece-index instance for the migration
+     *  CLI (pieceIndexBuild.ts) only; every other caller goes through
+     *  searchPieces()/pieceIndexStatus() instead. */
+    pieceIndexForMigration(): SqlitePieceIndex | null {
+        return this.pieceIndex;
+    }
+
+    /** D7b — mirrors VerbatimStore.pieceVectorsIntentOn(); see its docblock
+     *  for why retrieval routing needs intent as a signal distinct from
+     *  index open/valid. */
+    pieceVectorsIntentOn(): boolean {
+        return this.pieceVectorsIntent;
+    }
+
     // ---- observability / lifecycle -----------------------------------------
 
     readPoolStats(): { size: number; available: number; waitingCount: number } | null {
@@ -537,6 +638,7 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         this.closed = true;
         this.initialized = false;
         try {
+            await this.pieceIndex?.close();
             this.db?.close();
         } catch (err) {
             throw new Error(`[SqliteVerbatimStore:close] ${(err as Error).message}`);

@@ -54,6 +54,13 @@ import {
     unionBm25Envelopes,
     type VerbatimSeedHit,
 } from './ecosystemSeedUnion.js';
+import {
+    pieceAwareSearch,
+    resolvePieceRouting,
+    pieceCalibrationIdentityFor,
+    type PieceSearchStats,
+    type PieceVectorsMeta,
+} from './pieceSeedSearch.js';
 
 /** Minimal view of a verbatim (vector) store the seed step needs. Both
  *  `LoreStorageClient` (boot-bound, via a thin adapter below) and a
@@ -69,6 +76,19 @@ export interface VerbatimSeedStore {
      *  (new embedder / re-embed / a second Lore instance in the same process
      *  using the same workspace name) never reuses another store's null fit. */
     readonly calibrationIdentity?: object;
+    /** D7b — `_meta.pieceVectors` value for this resolved seed store.
+     *  Present whenever the underlying store's piece-vectors intent is on
+     *  (even when not currently 'active' — see resolvePieceRouting),
+     *  `undefined` when intent is off so retrieve.ts omits the key entirely
+     *  and default (opt-out) responses stay byte-identical (design 2.5). */
+    readonly pieceStatus?: PieceVectorsMeta;
+    /** D7b — filled by side effect during `search()` ONLY when `pieceStatus`
+     *  is `'active'` (piece search actually ran). retrieve.ts reads this
+     *  AFTER awaiting `search()` to fill in `piecesFetched`/`nodesGrouped` on
+     *  `_meta.pieceVectors`. Overwritten on each `search()` call within a
+     *  single resolveSeedStore-produced store — "last call wins" (see
+     *  pieceSeedSearch.ts's PieceSearchStats docblock). */
+    readonly pieceStats?: PieceSearchStats;
 }
 
 /** The subset of RetrieveContext this decision needs. Structural — kept
@@ -197,11 +217,41 @@ export async function resolveSeedStore(
         // exactly this workspace's LanceDB. Adapt it to the seed-store shape.
         // (Unchanged pre-P2 path.)
         const sc = ctx.store.storageClient;
+        // D7b (design 2.5 step 2-3) — the RAW verbatim handle (not the
+        // storageClient wrapper) is what exposes searchPieces/
+        // pieceIndexStatus/pieceVectorsIntentOn, so routing is decided
+        // against it, not `sc`. `rawVerbatim` is a real `LoreStorageClient`
+        // method, but this branch's `sc` is typed only as `StorageBundle`'s
+        // `storageClient`, and several existing tests construct a minimal
+        // structural `storageClient` fixture (verbatimCount/verbatimSearch/
+        // verbatimBm25Search only, e.g. r3221-d1-recall-option-parity-unit.ts)
+        // that never implements it — feature-detect the same way
+        // resolvePieceRouting itself feature-detects `rawStore`, rather than
+        // assuming every storageClient exposes the escape hatch.
+        const rawStore = typeof sc.rawVerbatim === 'function' ? sc.rawVerbatim() : undefined;
+        const routing = resolvePieceRouting(rawStore);
+        const pieceStats: PieceSearchStats = { piecesFetched: 0, nodesGrouped: 0 };
+        const pooledRun = (q: string) => (lim: number, f: SeedFilter) => sc.verbatimSearch(q, lim, f, undefined, undefined, gate);
+        const pieceRun = (q: string) => (lim: number, f: SeedFilter) =>
+            pieceAwareSearch(routing.capable!, q, lim, f as Record<string, unknown> | undefined, undefined, gate, pieceStats);
+        const runFor = routing.active ? pieceRun : pooledRun;
         return {
-            calibrationIdentity: sc,
+            // D1 — a distinct identity when piece mode is active so the
+            // calibration cache re-fits instead of reusing a pooled-vector-
+            // era null distribution (design 2.5). Keyed off `routing.capable`
+            // (guaranteed non-null exactly when `routing.active` is true —
+            // see resolvePieceRouting) rather than `rawStore` directly, since
+            // `rawStore` itself is `object | undefined` now that it degrades
+            // gracefully for a storageClient without a `rawVerbatim` escape
+            // hatch.
+            calibrationIdentity: routing.active ? pieceCalibrationIdentityFor(routing.capable!) : sc,
             count: () => sc.verbatimCount(),
-            search: (q, n) => vectorSeeds((lim, f) => sc.verbatimSearch(q, lim, f, undefined, undefined, gate), n),
+            search: (q, n) => vectorSeeds(runFor(q), n),
+            // bm25Search/count stay canonical — piece vectors only affect the
+            // semantic leg (design 2.5 step 4).
             bm25Search: (q, n) => bm25Seeds((lim, f) => sc.verbatimBm25Search(q, lim, f, undefined, gate), n),
+            pieceStatus: routing.meta,
+            pieceStats: routing.active ? pieceStats : undefined,
         };
     }
     // NON-active workspace. The boot storageClient only knows the ACTIVE
@@ -213,11 +263,22 @@ export async function resolveSeedStore(
     if (!ctx.workspaceVerbatimResolver) return null;
     try {
         const store = await ctx.workspaceVerbatimResolver.getOrOpen(workspace);
+        // D7b — same routing decision as the boot branch above, against the
+        // resolved per-workspace store itself (it IS the raw store here,
+        // there is no separate wrapper to unwrap).
+        const routing = resolvePieceRouting(store);
+        const pieceStats: PieceSearchStats = { piecesFetched: 0, nodesGrouped: 0 };
+        const pooledRun = (q: string) => (lim: number, f: SeedFilter) => store.search(q, lim, f, undefined, undefined, gate);
+        const pieceRun = (q: string) => (lim: number, f: SeedFilter) =>
+            pieceAwareSearch(routing.capable!, q, lim, f as Record<string, unknown> | undefined, undefined, gate, pieceStats);
+        const runFor = routing.active ? pieceRun : pooledRun;
         return {
-            calibrationIdentity: store,
+            calibrationIdentity: routing.active ? pieceCalibrationIdentityFor(store) : store,
             count: () => store.count(),
-            search: (q, n) => vectorSeeds((lim, f) => store.search(q, lim, f, undefined, undefined, gate), n),
+            search: (q, n) => vectorSeeds(runFor(q), n),
             bm25Search: (q, n) => bm25Seeds((lim, f) => store.bm25Search(q, lim, f, undefined, gate), n),
+            pieceStatus: routing.meta,
+            pieceStats: routing.active ? pieceStats : undefined,
         };
     } catch {
         // Never-embedded workspace, missing/corrupt LanceDB, or a chokepoint

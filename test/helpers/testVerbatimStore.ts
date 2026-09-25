@@ -185,7 +185,13 @@ export function testVectorEngine(): TestVectorEngine {
 export function makeVerbatimStore(
     basePath: string,
     embeddingProvider?: EmbeddingProvider,
-    opts?: { role?: VerbatimStoreRole; strictFingerprintCheck?: boolean },
+    // `pieceVectors` added per the 3.23 final review (test:arch's
+    // test-test-types.mjs was failing with TS2559 at every d7-piece-*
+    // call site that passed `{ pieceVectors: true }` — both engine
+    // constructors already accept it, this helper's opts type just never
+    // declared it) so callers no longer need an `as` cast to smuggle it
+    // through.
+    opts?: { role?: VerbatimStoreRole; strictFingerprintCheck?: boolean; pieceVectors?: boolean },
 ): VerbatimStoreApi {
     return testVectorEngine() === 'sqlite'
         ? new SqliteVerbatimStore(basePath, embeddingProvider, opts)

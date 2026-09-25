@@ -146,10 +146,21 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_RECALL_STAGE_TIMING',                 // WP5 — debug JSON stage timings on retrieve (default off)
     'LORE_RECALL_RECENCY_HALF_LIFE_DAYS',       // recall recency decay half-life
     'LORE_RECALL_ABSTAIN',                      // D1 — default for retrieve()'s `abstain` (0/1; default off)
+    'LORE_RECALL_RERANK',                       // D8 — default for retrieve()'s `rerank` (0/1; default ON since D8d)
+    'LORE_RECALL_RERANK_MODEL',                 // D8 — cross-encoder model id (default Xenova/ms-marco-MiniLM-L-6-v2)
+    'LORE_RECALL_RERANK_K',                     // D8 — candidates reranked (default 10, clamp 2-20)
+    'LORE_RECALL_RERANK_MARGIN',                // D8 — margin gate for replacing rank #1 (default 1.0)
+    'LORE_RECALL_RERANK_TIMEOUT_MS',            // D8 — stage timeout before failing open (default 3000)
+    'LORE_RECALL_RERANK_IDLE_UNLOAD_MS',        // D8 — idle-unload for the cached tokenizer/model (default 300000; <=0 falls back to default)
+    'LORE_RECALL_RERANK_DTYPE',                 // D8 — ONNX dtype override (default q8)
+    'LORE_RECALL_RERANK_MAX_CONCURRENT',        // D8d F2 — process-wide concurrent rerank score runs (default 2, min 1)
+    'LORE_RECALL_RERANK_MAX_CACHED_MODELS',     // D8d — resident model+dtype sessions, LRU (default 3, min 1)
     'LORE_RECALL_RELEVANCE_FLOOR',              // D1 — default z-score abstention floor (default 2.0)
     'LORE_RECALL_ABSTAIN_TERM_COVERAGE',        // D1 — opt-in key-term-coverage abstention signal (0/1; default off)
     'LORE_RECALL_TERM_COVERAGE_MIN',            // D1 — term-coverage threshold (default 0.1)
     'LORE_RECALL_CANDIDATE_FLOOR',               // D3 — candidate-generation window floor (0 = legacy)
+    'LORE_RECALL_PIECE_VECTORS',                 // D7 (3.23) — host default for piece-level vectors (0/1; default off)
+    'LORE_RECALL_PIECE_FANOUT',                  // D7b (3.23) — piece over-fetch fanout multiplier (int, default 8, clamp 2-32)
     'LORE_RECALL_LEXICAL_BASE',                  // D3 — lexical-only seed base-score mode (anchored|rrf)
     'LORE_LOAD_MAX_CONCURRENT_PER_WORKSPACE',   // bulk-load concurrency cap
     'LORE_LOAD_TEMP_RETENTION_HOURS_COMPLETE',  // bulk-load temp retention (success)
@@ -222,6 +233,7 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_WORKER_EMBED_DIM',                     // search-worker internal: parent provider vector dimension for the child's stub
     'LORE_WORKER_EMBED_MODEL',                   // search-worker internal: parent provider model identity for the child's stub
     'LORE_WORKER_EMBED_DTYPE',                   // search-worker internal: parent embedder's dtype, so the child's stub fingerprints identically (verbatimFingerprintGate.ts)
+    'LORE_WORKER_PIECE_VECTORS',                 // search-worker internal: '1' when the parent resolved piece-vectors intent on (D7c) — child must not re-resolve it
     'LORE_WORKER_STRICT_FINGERPRINT',            // search-worker internal: '1' when the parent opened this workspace with strict fingerprint checking (host-injected provider) — child refuses a mismatch instead of warning
     'LORE_IS_SEARCH_WORKER',                     // search-worker internal: marks a process as a Lore search worker (prevents recursive forking)
     'LORE_SEARCH_WEIGHT_TAGS',                   // search: ranking weight for tags match (default 1)

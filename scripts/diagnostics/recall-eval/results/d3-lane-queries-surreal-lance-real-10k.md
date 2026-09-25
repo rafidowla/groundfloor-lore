@@ -1,9 +1,9 @@
 # recall-eval baseline — surreal-lance / real / 10000 code rows
 
-Generated: 2026-09-23T19:57:53.317Z
+Generated: 2026-09-25T01:43:06.046Z
 Config: candidateFloor=50 lexicalBase=(default)
-Fixture: <local>/logs-e3/cache/sl/fixture-2e77a69126caddfe (reused=true), counts: {"knowledge":80,"notes":300,"code":10000,"edges":36,"edgesWritten":36}
-Timings: fixture 1ms, eval 27116ms, total 29203ms
+Fixture: <local>/d3diag/cache/fixture-2e77a69126caddfe (reused=true), counts: {"knowledge":80,"notes":300,"code":10000,"edges":36,"edgesWritten":36}
+Timings: fixture 1ms, eval 29895ms, total 32076ms
 
 ## Baseline numbers
 
@@ -24,7 +24,7 @@ Timings: fixture 1ms, eval 27116ms, total 29203ms
 | prefix stability BOTH phrasings | 100.0% |
 | mean pairwise Jaccard of top-10 (unrelated questions) | 0.023 |
 | gibberish zero-hit rate | 0.0% |
-| recall() latency p50 / p90 / p95 / p99 (n=336) | 98.3ms / 130.5ms / 222.3ms / 246.5ms |
+| recall() latency p50 / p90 / p95 / p99 (n=336) | 107.6ms / 145.5ms / 242.4ms / 269.1ms |
 | pooled hit@3 (terse+chatty, n=48) | 100.0% (48/48) |
 
 ## D1 — calibration / abstention (abstain=off, gibberish file=gibberish.json)
@@ -39,7 +39,7 @@ Timings: fixture 1ms, eval 27116ms, total 29203ms
 | null_median (mean across questions) | 0.790 |
 | null_scale (mean across questions) | 0.024 |
 | calibration build cost | fixture 1ms (includes 128-probe fit; single-flight cached across the run) |
-| mean recall() latency | 80.7ms |
+| mean recall() latency | 89.0ms |
 
 | identifiers present (n=20) rank1 / hit@3 / found@10 | 100.0% / 100.0% / 100.0% |
 | identifiers present abstained % / rescued | 0.0% / 0 |

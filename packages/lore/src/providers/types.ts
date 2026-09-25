@@ -577,6 +577,17 @@ export interface EmbeddingProvider {
      * Xenova where pipeline accepts arrays natively.
      */
     embedDocumentBatch?(texts: string[]): Promise<number[][]>;
+    /**
+     * D7 (3.23, piece-level vectors) — split `text` into overlapping
+     * windows of ~`windowTokens` tokens with `overlapTokens` overlap, using
+     * this provider's own tokenizer for an exact count. Optional: callers
+     * (`engines/pieces/pieceLayout.ts`) must fall back to a fixed-width
+     * character window (480/120) when this is absent OR when it rejects
+     * (no usable tokenizer on this provider). Must NEVER prepend the
+     * asymmetric `query: `/`passage: ` prefix — that is applied exactly
+     * once, later, by `embedDocument`/`embedDocumentBatch`.
+     */
+    splitIntoWindows?(text: string, windowTokens: number, overlapTokens: number): Promise<string[]>;
 }
 
 /**

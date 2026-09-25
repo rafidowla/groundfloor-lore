@@ -18,6 +18,8 @@ import type { StorageBundle } from '../mcp/services.js';
 import type { Bm25Envelope } from '../engines/verbatimBm25Result.js';
 import type { CalibrationStatus } from './calibration.js';
 import type { LexicalBaseMode } from './candidateWindow.js';
+import type { PieceVectorsMeta } from './pieceSeedSearch.js';
+import type { RerankMeta } from './rerankStage.js';
 
 /* ─── Unified contract (D4) ────────────────────────────────────── */
 
@@ -65,6 +67,14 @@ export interface RetrievalResult {
      * (insufficient_rows / degenerate / unavailable / not_applicable).
      */
     relevance?: number | null;
+    /**
+     * D8 — cross-encoder logit from the optional local re-rank stage
+     * (rerankStage.ts). Present only on hits the stage actually scored
+     * (the reranked top K of a call that had rerank enabled). Not
+     * comparable across queries or across models. Never used in place of
+     * `score`/`similarity` — those stay pre-rerank (see `RerankMeta`).
+     */
+    rerankScore?: number;
 }
 
 /**
@@ -195,6 +205,17 @@ export interface RetrieveOptions {
      * when candidateFloor > 0.
      */
     lexicalBase?: LexicalBaseMode;
+    /**
+     * D8d — per-call override for the optional local cross-encoder re-rank
+     * stage (default ON). `undefined` = no per-call opinion (falls through
+     * to workspace/host/env/default precedence — see rerankConfig.ts).
+     * `false` always wins (immediate off, byte-identical to pre-D8). `true`
+     * wins over env/default but NOT over a workspace-level off, which is
+     * authoritative and overrides it (that is the one case where
+     * `_meta.rerank = {applied:false, reason:'workspace_disabled'}` is
+     * surfaced).
+     */
+    rerank?: boolean;
 }
 
 /**
@@ -239,6 +260,11 @@ export interface RetrieveCalibrationMeta {
 }
 
 export interface RetrieveMeta extends RetrieveCalibrationMeta {
+    /** D7b — piece-level vector routing status for this call. Present only
+     *  when piece-vectors intent is on for the seed store consulted (absent
+     *  entirely, not `{status:'off'}`, when intent is off — keeps default
+     *  output byte-identical to pre-D7b). See pieceSeedSearch.ts. */
+    pieceVectors?: PieceVectorsMeta;
     /** Top semantic similarity score (0..1) when the vector index was consulted. */
     topScore: number | null;
     /** 1 = keyword only; 2 = vector index also consulted. */
@@ -309,6 +335,8 @@ export interface RetrieveMeta extends RetrieveCalibrationMeta {
      * beyond the single requested limit).
      */
     prefixStableUpTo: number;
+    /** D8 — present only when rerank was enabled for this call. */
+    rerank?: RerankMeta;
 }
 
 export interface RetrieveOutcome {

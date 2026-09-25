@@ -2,10 +2,11 @@
  * buildFixture.mjs — builds (or reuses a cached) synthetic Lore workspace
  * for the recall-eval harness.
  *
- * Fixture identity is (engine pair, code-row count, embedder mode). A build
- * is cached under a scratch directory keyed by those three so repeat runs
- * with the same shape are fast. Never copies any real workspace — every
- * fixture is generated fresh from lib/corpus.mjs into a fresh data dir.
+ * Fixture identity is (engine pair, code-row count, embedder mode,
+ * piece-vectors on/off — D7c, 3.23). A build is cached under a scratch
+ * directory keyed by those four so repeat runs with the same shape are
+ * fast. Never copies any real workspace — every fixture is generated fresh
+ * from lib/corpus.mjs into a fresh data dir.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -18,8 +19,16 @@ import { checkLocalEmbedderCached } from './embedCacheCheck.mjs';
 
 const CORPUS_VERSION = 'v1'; // bump if anchors.mjs/corpus.mjs content changes shape
 
-export function fixtureCacheKey({ graphEngine, vectorEngine, codeRowCount, embedder }) {
-    const raw = `${FIXTURE_SEED}|${CORPUS_VERSION}|${graphEngine}|${vectorEngine}|${codeRowCount}|${embedder}`;
+export function fixtureCacheKey({ graphEngine, vectorEngine, codeRowCount, embedder, pieceVectors = false }) {
+    // D7c (3.23) — pieceVectors is a fixture-shape input, not just a query-time
+    // toggle: when it's on, every bulkIngest() below runs against a store whose
+    // pieceVectorsIntent is true, so each row's piece rows (title + windows) are
+    // built incrementally as part of the write path (verbatimStore.ts's store()/
+    // bulk paths call pieceIndex.upsertForRows()) -- an "off" fixture has no piece
+    // table/sidecar at all. Folding it into the cache key means `--piece-vectors
+    // on` a `--piece-vectors off` run for the same (engine, rows, embedder) never
+    // silently reuse each other's build (see DESIGN-3.23.md §7.1).
+    const raw = `${FIXTURE_SEED}|${CORPUS_VERSION}|${graphEngine}|${vectorEngine}|${codeRowCount}|${embedder}|pv${pieceVectors ? 1 : 0}`;
     return crypto.createHash('sha256').update(raw).digest('hex').slice(0, 16);
 }
 
@@ -45,6 +54,7 @@ export async function ensureFixture(opts) {
         vectorEngine = 'sqlite',
         codeRowCount = 10000,
         embedder = 'real', // 'real' | 'fake'
+        pieceVectors = false, // D7c — see fixtureCacheKey's doc
         cacheRoot,
         force = false,
         log = () => {},
@@ -61,14 +71,14 @@ export async function ensureFixture(opts) {
     }
 
     const root = cacheRoot ?? scratchRoot();
-    const key = fixtureCacheKey({ graphEngine, vectorEngine, codeRowCount, embedder });
+    const key = fixtureCacheKey({ graphEngine, vectorEngine, codeRowCount, embedder, pieceVectors });
     const dataDir = path.join(root, `fixture-${key}`);
     const markerPath = path.join(dataDir, '.fixture-complete.json');
 
     if (!force && fs.existsSync(markerPath)) {
         const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'));
         log(`[fixture] reusing cached build at ${dataDir} (built ${marker.builtAt})`);
-        return { dataDir, reused: true, counts: marker.counts, graphEngine, vectorEngine, embedder, codeRowCount };
+        return { dataDir, reused: true, counts: marker.counts, graphEngine, vectorEngine, embedder, codeRowCount, pieceVectors };
     }
 
     fs.rmSync(dataDir, { recursive: true, force: true });
@@ -84,6 +94,15 @@ export async function ensureFixture(opts) {
         const { createLore } = await import('../../../../packages/lore/src/index.js');
         const createOpts = { deploymentMode: 'embedded', dataDir, ownsProcess: false };
         if (embedder === 'fake') createOpts.embeddingProvider = new FakeEmbeddingProvider();
+        // D7c — this dataDir is never workspace-registered (raw path, no name),
+        // so openWorkspaceVerbatim's funnel takes the `hostDefault === true`
+        // branch straight off this option (resolveHostPieceVectorsDefault(
+        // createOpts.pieceVectors) with no per-workspace override to consult).
+        // Every bulkIngest() call below then runs against a store whose
+        // pieceVectorsIntent is already true, so piece rows are built
+        // incrementally on the write path -- no separate migration step needed
+        // for a fresh fixture build.
+        if (pieceVectors) createOpts.pieceVectors = true;
         const lore = await createLore(createOpts);
 
         const corpus = buildCorpus({ codeRowCount });
@@ -133,12 +152,12 @@ export async function ensureFixture(opts) {
         fs.writeFileSync(markerPath, JSON.stringify({
             builtAt: new Date().toISOString(),
             durationMs: Date.now() - t0,
-            graphEngine, vectorEngine, embedder, codeRowCount,
+            graphEngine, vectorEngine, embedder, codeRowCount, pieceVectors,
             counts,
         }, null, 2));
         log(`[fixture] build complete in ${Date.now() - t0}ms — ${JSON.stringify(counts)}`);
 
-        return { dataDir, reused: false, counts, graphEngine, vectorEngine, embedder, codeRowCount, durationMs: Date.now() - t0 };
+        return { dataDir, reused: false, counts, graphEngine, vectorEngine, embedder, codeRowCount, pieceVectors, durationMs: Date.now() - t0 };
     } finally {
         if (prevGraphEnv === undefined) delete process.env.LORE_DEFAULT_GRAPH_ENGINE; else process.env.LORE_DEFAULT_GRAPH_ENGINE = prevGraphEnv;
         if (prevVectorEnv === undefined) delete process.env.LORE_DEFAULT_VECTOR_ENGINE; else process.env.LORE_DEFAULT_VECTOR_ENGINE = prevVectorEnv;

@@ -647,6 +647,58 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
         return chunks;
     }
 
+    /**
+     * D7 (3.23, piece-level vectors, design 2.4) — split `text` into
+     * overlapping windows of ~`windowTokens` tokens with `overlapTokens`
+     * overlap, using this provider's own tokenizer for an exact count.
+     * Generalises {@link splitTextIntoChunks} above (same tokenizer +
+     * decode calls), parameterized instead of the hardcoded
+     * EMBED_CHUNK_TOKENS/EMBED_CHUNK_OVERLAP document-chunking constants.
+     *
+     * Unlike `splitTextIntoChunks`, this method has NO char-window
+     * fallback — it throws when the loaded pipeline exposes no usable
+     * tokenizer. The caller (`engines/pieces/pieceLayout.ts`) is
+     * responsible for catching that and applying its own fixed 480/120
+     * char-window fallback (design 2.4); duplicating that fallback here
+     * would let two different call sites silently disagree on it.
+     *
+     * Never prepends the asymmetric `query: `/`passage: ` prefix — this
+     * only splits text; the prefix is applied exactly once, later, by
+     * `embedDocument`/`embedDocumentBatch` when the caller embeds the
+     * returned windows.
+     */
+    async splitIntoWindows(text: string, windowTokens: number, overlapTokens: number): Promise<string[]> {
+        // Cheap pre-check: worst case is 1 token/byte (see embedDocument's
+        // identical comment), so a byte length under the window size means
+        // the token count is too — no need to touch the tokenizer.
+        if (Buffer.byteLength(text, 'utf8') <= windowTokens) return [text];
+        const { embedder, release } = await acquirePipeline(this.modelId, this.device, this.dtype);
+        try {
+            const tokenizer = embedder?.tokenizer;
+            if (!tokenizer) {
+                throw new Error('LocalEmbeddingProvider.splitIntoWindows: no usable tokenizer on this pipeline');
+            }
+            const encoded = await tokenizer(text, { add_special_tokens: false });
+            const rawIds = encoded?.input_ids?.data;
+            if (!rawIds || typeof rawIds.length !== 'number') {
+                throw new Error('LocalEmbeddingProvider.splitIntoWindows: tokenizer returned no usable token ids');
+            }
+            if (rawIds.length <= windowTokens) return [text];
+            const ids = Array.from(rawIds, (x) => Number(x));
+            const windows: string[] = [];
+            const stride = Math.max(1, windowTokens - overlapTokens);
+            for (let start = 0; start < ids.length; start += stride) {
+                const window = ids.slice(start, start + windowTokens);
+                const windowText: string = await tokenizer.decode(window, { skip_special_tokens: true });
+                if (windowText && windowText.trim().length > 0) windows.push(windowText);
+                if (start + windowTokens >= ids.length) break;
+            }
+            return windows.length > 0 ? windows : [text];
+        } finally {
+            release();
+        }
+    }
+
     /** Inner batched forward pass: tokenize + mean-pool + L2-normalize,
      *  bounding each ONNX call so a multi-MB document (thousands of
      *  chunks) can't OOM the host. */

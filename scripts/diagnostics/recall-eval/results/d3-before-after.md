@@ -168,6 +168,39 @@ Surreal/lance legacy identifiers measured 85/90/95 this round (round 2 recorded 
 noted for that engine). Per-query identifier ranks were identical on both engines. Verdict: with the lane,
 floor 50 passes the gating rule on both engines. The default is still `0`; see the design doc §4.
 
+## Round 5 (2026-09-25) — negatives re-baseline after the 3.22.1 window fix
+
+The negatives "lexical-only" check asks whether the hybrid top-1 appears in a
+`searchMode:'semantic'` reference window of `--wide-max` (50). Through 3.22.0,
+`recall()` silently re-capped every result list at `SUMMARY_MAX_HITS=10`
+(fixed in 3.22.1, PR #142), so that reference window was really 10 wide and
+some semantically-supported top-1s were miscounted as lexical-only. This is a
+measurement correction, not a ranking change.
+
+Re-ran `d3-legacy-*`, `d3-lane-*` and `d3-lane-queries-*` on both engines at
+main `cda8d614` (3.22.3), same cached 10k fixtures (`reused=true`), same flags
+as round 4. Every ranked metric (hit@1/hit@3/MRR, prefix stability, top-3
+agreement, identifiers rank1/hit@3/found@10/MRR, top_score quantiles) is
+unchanged; only the legacy negatives counts and wall-clock latencies moved.
+The two `d3-legacy-*` reports also pick up the D1 and identifiers sections the
+harness has emitted since round 2.
+
+| negatives, top-1 lexical-only (top-3 slots) | round 4 | **round 5** |
+|---|---|---|
+| sqlite legacy — offtopic | 9/20 (24/60) | **7/20 (20/60)** |
+| sqlite legacy — unanswerable | 4/12 (14/36) | **4/12 (13/36)** |
+| surreal/lance legacy — offtopic | 11/20 (28/60) | **9/20 (24/60)** |
+| surreal/lance legacy — unanswerable | 6/12 (16/36)¹ | 6/12 (16/36) |
+| sqlite f50 + lane | 0+0 | 0+0 (unchanged) |
+| surreal/lance f50 + lane | 1+2 | 1+2 (unchanged) |
+
+¹ Round 4's summary table printed `11+7` for surreal/lance legacy; the
+committed report file it came from reads 11 + 6.
+
+Verdict unchanged: floor 50 + lane still strictly improves negatives over
+legacy on both engines; the legacy gap is smaller than previously reported
+(sqlite 11 → 0 lexical-only top-1s, not 13 → 0).
+
 ## Round 1 historical numbers (superseded — kept for the record)
 
 Round 1 measured `legacy` / `floor-only` / `lexical-only` (floor=0,

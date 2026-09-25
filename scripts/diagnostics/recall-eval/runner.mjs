@@ -47,6 +47,11 @@
  * D1 (calibrated relevance + abstention) additions:
  * --abstain on|off                  (default off; passed as lore.recall()'s `abstain` option)
  * --relevance-floor N               (default unset -> retrieve()'s own default, 2.0)
+ *
+ * D8 (optional local cross-encoder re-rank) addition:
+ * --rerank on|off                   (default unset -> no per-call opinion, falls through to workspace/
+ *                                     env/off precedence like every other production recall surface;
+ *                                     passed straight through as lore.recall()'s `rerank` option)
  * --gibberish-file PATH             (default gibberish.json; pass gibberish-heldout.json for the held-out set)
  * --questions-file A[,B...]        (default questions.json; comma-separated list of {id,terse,chatty,expectedIds}
  *                                     files, all run as real questions -- e.g. questions.json,questions-heldout.json.
@@ -72,6 +77,15 @@
  * --absent-identifiers-file PATH    (optional; {id,query} identifier-shaped rows naming something NOT
  *                                     stored, e.g. identifiers-absent.json (absent at --code-rows <= 10000)
  *                                     -- reported like distractors, no pass bar; the rescue must not fire)
+ *
+ * D7 (piece-level vectors, 3.23) addition:
+ * --piece-vectors on|off             (default off; passed to ensureFixture() as a FIXTURE-SHAPE input --
+ *                                     see buildFixture.mjs's fixtureCacheKey doc -- and to createLore() as
+ *                                     the `pieceVectors` option, so this run's recall()/retrieve() calls
+ *                                     see the fixture's piece index. `on` never silently reuses an `off`
+ *                                     fixture build (or vice versa): they hash to different cache dirs.
+ *                                     Per DESIGN-3.23.md §7.1, pass --force if you want a guaranteed
+ *                                     rebuild regardless of cache state.)
  */
 import { spawnSync, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -110,6 +124,17 @@ const OUT = argOf('--out', null);
 const ABSTAIN = argOf('--abstain', 'off') === 'on';
 const RELEVANCE_FLOOR_RAW = argOf('--relevance-floor', undefined);
 const RELEVANCE_FLOOR = RELEVANCE_FLOOR_RAW === undefined ? undefined : Number.parseFloat(RELEVANCE_FLOOR_RAW);
+// D8b — --rerank on|off maps straight to the per-call lore.recall({rerank})
+// option (same on/off vocabulary --abstain already uses above). Omitted
+// (the default) means "no per-call opinion" — opts.rerank is left unset
+// entirely below so the call falls through to workspace/env/off precedence,
+// exactly like every other production recall surface.
+const RERANK_RAW = argOf('--rerank', undefined);
+if (RERANK_RAW !== undefined && RERANK_RAW !== 'on' && RERANK_RAW !== 'off') {
+    console.error(`[runner] --rerank must be "on" or "off" (got "${RERANK_RAW}")`);
+    process.exit(1);
+}
+const RERANK = RERANK_RAW === undefined ? undefined : RERANK_RAW === 'on';
 const GIBBERISH_FILE = argOf('--gibberish-file', 'gibberish.json');
 const DISTRACTORS_FILE = argOf('--distractors-file', null);
 const QUESTIONS_FILES = argOf('--questions-file', 'questions.json');
@@ -124,6 +149,7 @@ const SKIP_NEGATIVES = hasFlag('--skip-negatives');
 const IDENTIFIERS_PATH = argOf('--identifiers-file', argOf('--identifiers', path.join(path.dirname(SELF), 'identifiers.json')));
 const SKIP_IDENTIFIERS = hasFlag('--skip-identifiers');
 const ABSENT_IDENTIFIERS_FILE = argOf('--absent-identifiers-file', null);
+const PIECE_VECTORS = argOf('--piece-vectors', 'off') === 'on'; // D7c — fixture-shape input, see buildFixture.mjs
 
 const [graphEngine, vectorEngine] = ENGINE === 'surreal-lance' ? ['surreal', 'lance'] : ['sqlite', 'sqlite'];
 
@@ -159,6 +185,7 @@ async function main() {
     const t0 = Date.now();
     const fixture = await ensureFixture({
         graphEngine, vectorEngine, codeRowCount: CODE_ROWS, embedder: EMBEDDER,
+        pieceVectors: PIECE_VECTORS,
         cacheRoot: CACHE_ROOT, force: FORCE, log,
     });
     const fixtureMs = Date.now() - t0;
@@ -167,6 +194,11 @@ async function main() {
 
     const { createLore } = await import(path.join(REPO_ROOT, 'packages', 'lore', 'src', 'index.js'));
     const evalOpts = { deploymentMode: 'embedded', dataDir: fixture.dataDir, ownsProcess: false };
+    // D7c — must match what the fixture was BUILT with (fixture.pieceVectors),
+    // not necessarily the raw PIECE_VECTORS flag: a cache hit from a run that
+    // didn't pass --piece-vectors would otherwise open a piece-off fixture
+    // with pieceVectors:true and see an empty/invalid index at query time.
+    if (fixture.pieceVectors) evalOpts.pieceVectors = true;
     if (EMBEDDER === 'fake') {
         const { FakeEmbeddingProvider } = await import(path.join(HERE, 'lib', 'fakeEmbeddingProvider.mjs'));
         evalOpts.embeddingProvider = new FakeEmbeddingProvider();
@@ -266,8 +298,8 @@ async function main() {
     const report = {
         generatedAt: new Date().toISOString(),
         config: {
-            engine: ENGINE, graphEngine, vectorEngine, embedder: EMBEDDER, codeRows: CODE_ROWS, depth: DEPTH,
-            searchMode: SEARCH_MODE, max: MAX, wideMax: WIDE_MAX, abstain: ABSTAIN, relevanceFloor: RELEVANCE_FLOOR ?? null, termCoverage: TERM_COVERAGE, termCoverageMin: process.env.LORE_RECALL_TERM_COVERAGE_MIN ?? null,
+            engine: ENGINE, graphEngine, vectorEngine, embedder: EMBEDDER, codeRows: CODE_ROWS, depth: DEPTH, pieceVectors: PIECE_VECTORS,
+            searchMode: SEARCH_MODE, max: MAX, wideMax: WIDE_MAX, abstain: ABSTAIN, relevanceFloor: RELEVANCE_FLOOR ?? null, rerank: RERANK ?? null, termCoverage: TERM_COVERAGE, termCoverageMin: process.env.LORE_RECALL_TERM_COVERAGE_MIN ?? null,
             gibberishFile: path.basename(gibberishPath), distractorsFile: DISTRACTORS_FILE ?? null, questionsFiles: QUESTIONS_FILES,
             withQueries: WITH_QUERIES,
             candidateFloor: process.env.LORE_RECALL_CANDIDATE_FLOOR ?? null,
@@ -301,6 +333,7 @@ async function recallOne(lore, topic, max, queries, searchModeOverride) {
         abstain: ABSTAIN,
     };
     if (RELEVANCE_FLOOR !== undefined) opts.relevanceFloor = RELEVANCE_FLOOR;
+    if (RERANK !== undefined) opts.rerank = RERANK;
     if (TERM_COVERAGE) opts.abstainTermCoverage = true;
     if (queries && queries.length > 0) opts.queries = queries;
     const t = performance.now();

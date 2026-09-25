@@ -2,9 +2,17 @@ import fs from 'fs';
 import path from 'path';
 import { loreHome } from '../../config/loreHome.js';
 import { ConfigManager } from '../../config/configManager.js';
+import { DEFAULT_RERANK_MODEL } from '../../recall/rerankConfig.js';
+import { fetchRerankCommand } from './modelsFetch.js';
+import { loadWorkspacesIfPresent } from '../../config/workspaces.js';
+import { validateRerankModelId } from '../../providers/rerankModelId.js';
 
 export async function modelsCommand(args: string[]): Promise<void> {
     const sub = args[0];
+    if (sub === 'fetch-rerank') {
+        await fetchRerankCommand(args.slice(1));
+        return;
+    }
     if (sub !== 'prune') {
         console.error('usage: lore models prune [--apply] [--keep <pattern>]...');
         console.error('       Removes cached ONNX model weights that are not the currently active');
@@ -12,6 +20,11 @@ export async function modelsCommand(args: string[]): Promise<void> {
         console.error('');
         console.error('       --keep <pattern>  Pin additional models to preserve. Can be repeated.');
         console.error('                         Example: --keep "Xenova/*" --keep "onnx-community/Llama*"');
+        console.error('');
+        console.error('usage: lore models fetch-rerank [--model <id>] [--dtype fp32|fp16|q8|q4]');
+        console.error('       Downloads the local cross-encoder re-rank model (D8, Lore 3.23). The');
+        console.error('       ONLY code path allowed to download a model — see --help on the');
+        console.error('       subcommand itself for details.');
         process.exit(1);
     }
 
@@ -36,10 +49,44 @@ export async function modelsCommand(args: string[]): Promise<void> {
         /* use fallback */
     }
 
+    // D8b: keep the configured rerank model too, so `prune` never deletes
+    // what `lore models fetch-rerank` just downloaded. There is no
+    // workspace argument here (prune is a global, LORE_HOME-scoped
+    // operation, matching how `activeModel` above only reflects the
+    // embedded-LLM config, not any single workspace's override) — this
+    // reads the same env override / default `resolveRerankConfig()` would
+    // fall back to absent a per-workspace policy.
+    const configuredRerankModel = process.env['LORE_RECALL_RERANK_MODEL'] ?? DEFAULT_RERANK_MODEL;
+
+    // F8: also keep every PER-WORKSPACE rerank model override — the
+    // original set above only ever covered the global env/default one, so
+    // `prune` could delete a model a workspace's `set-rerank --model` was
+    // actively depending on, the moment it differed from the global
+    // default. Only validated ids are unioned in (`validateRerankModelId`)
+    // — a corrupt/garbage `recallRerank.model` on disk must not become an
+    // always-kept glob-like string; it simply loses keep protection for
+    // that entry (unrelated to whether it can still be pruned, which is
+    // never destructive of anything except cached model weights).
+    const workspaceRerankModels = new Set<string>();
+    try {
+        const file = loadWorkspacesIfPresent(basePath);
+        if (file) {
+            for (const ws of file.workspaces) {
+                const m = ws.recallRerank?.model;
+                if (m && validateRerankModelId(m)) workspaceRerankModels.add(m);
+            }
+        }
+    } catch {
+        /* best-effort — an unreadable control file just means no extra
+           per-workspace keeps; prune still runs on the global set. */
+    }
+
     const alwaysKeep = new Set([
         activeModel,
         'Xenova/all-MiniLM-L6-v2',
         'onnx-community/gemma-3-1b-it-ONNX',
+        configuredRerankModel,
+        ...workspaceRerankModels,
     ]);
 
     const modelsRoot = path.join(basePath, 'models');

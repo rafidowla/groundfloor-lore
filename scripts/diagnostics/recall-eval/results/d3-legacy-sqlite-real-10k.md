@@ -1,9 +1,9 @@
 # recall-eval baseline — sqlite / real / 10000 code rows
 
-Generated: 2026-09-23T13:12:58.904Z
+Generated: 2026-09-25T01:41:10.370Z
 Config: candidateFloor=0 lexicalBase=rrf
 Fixture: <local>/d3diag/cache/fixture-f4b536ccd6b5d820 (reused=true), counts: {"knowledge":80,"notes":300,"code":10000,"edges":36,"edgesWritten":36}
-Timings: fixture 2ms, eval 5448ms, total 6462ms
+Timings: fixture 3ms, eval 8403ms, total 10452ms
 
 ## Baseline numbers
 
@@ -24,7 +24,27 @@ Timings: fixture 2ms, eval 5448ms, total 6462ms
 | prefix stability BOTH phrasings | 16.7% |
 | mean pairwise Jaccard of top-10 (unrelated questions) | 0.021 |
 | gibberish zero-hit rate | 0.0% |
-| recall() latency p50 / p90 / p95 / p99 (n=220) | 23.5ms / 29.8ms / 30.8ms / 34.4ms |
+| recall() latency p50 / p90 / p95 / p99 (n=240) | 24.7ms / 57.9ms / 62.4ms / 82.6ms |
+| pooled hit@3 (terse+chatty, n=48) | 100.0% (48/48) |
+
+## D1 — calibration / abstention (abstain=off, gibberish file=gibberish.json)
+
+| metric | value |
+|---|---|
+| real questions abstained (of 48 terse+chatty phrasings) | 0 |
+| exact-identifier rescue overrides (across all sets) | 0 |
+| gibberish abstained % | 0.0% |
+| gibberish zero-hit % | 0.0% |
+| calibration status(es) seen | pending, ok |
+| null_median (mean across questions) | 0.790 |
+| null_scale (mean across questions) | 0.024 |
+| calibration build cost | fixture 3ms (includes 128-probe fit; single-flight cached across the run) |
+| mean recall() latency | 35.0ms |
+
+| identifiers present (n=20) rank1 / hit@3 / found@10 | 85.0% / 90.0% / 95.0% |
+| identifiers present abstained % / rescued | 0.0% / 0 |
+
+
 
 ## Real vs. gibberish top_score quantiles
 
@@ -33,9 +53,20 @@ Timings: fixture 2ms, eval 5448ms, total 6462ms
 | real (n=24) | 0.845 | 0.853 | 0.869 | 0.888 | 0.905 | 0.916 | 0.919 |
 | gibberish (n=60) | 0.761 | 0.772 | 0.779 | 0.786 | 0.797 | 0.806 | 0.814 |
 
+
 ## Negatives (D3 §5.3)
 
 | set | n | topScore null | top-1 lexical-only | top-3 lexical-only slots |
 |---|---|---|---|---|
-| offtopic | 20 | 5 | 9 | 24/60 |
-| unanswerable | 12 | 5 | 4 | 14/36 |
+| offtopic | 20 | 5 | 7 | 20/60 |
+| unanswerable | 12 | 5 | 4 | 13/36 |
+
+## Identifiers / rare-term (review round 2 item 1)
+
+| metric | value |
+|---|---|
+| n | 20 |
+| rank1 | 85.0% |
+| hit@3 | 90.0% |
+| found@10 | 95.0% |
+| MRR | 0.875 |

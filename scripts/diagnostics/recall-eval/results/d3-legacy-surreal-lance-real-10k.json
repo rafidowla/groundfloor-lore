@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-09-23T13:13:48.911Z",
+  "generatedAt": "2026-09-25T01:42:06.360Z",
   "config": {
     "engine": "surreal-lance",
     "graphEngine": "surreal",
@@ -10,8 +10,18 @@
     "searchMode": "hybrid",
     "max": 10,
     "wideMax": 50,
+    "abstain": false,
+    "relevanceFloor": null,
+    "termCoverage": false,
+    "termCoverageMin": null,
+    "gibberishFile": "gibberish.json",
+    "distractorsFile": null,
+    "questionsFiles": "questions.json",
+    "withQueries": false,
     "candidateFloor": "0",
-    "lexicalBase": "rrf"
+    "lexicalBase": "rrf",
+    "identifiersFile": "identifiers.json",
+    "absentIdentifiersFile": null
   },
   "fixture": {
     "dataDir": "<local>/d3diag/cache/fixture-2e77a69126caddfe",
@@ -27,19 +37,21 @@
   },
   "timings": {
     "fixtureMs": 6,
-    "evalMs": 23900,
-    "totalMs": 25775
+    "evalMs": 28333,
+    "totalMs": 30404,
+    "meanRecallMs": 118.04032358749997
   },
   "latency": {
-    "n": 220,
-    "p50": 94.93666699999994,
-    "p90": 114.04075000000012,
-    "p95": 116.10758299999907,
-    "p99": 123.46187499999905
+    "n": 240,
+    "p50": 102.6125839999986,
+    "p90": 121.84754199999952,
+    "p95": 129.83891700000095,
+    "p99": 152.09366600000067
   },
   "perQuestion": [
     {
       "id": "q-fx-decision-lease-ttl",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-lease-ttl"
       ],
@@ -60,7 +72,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.869,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": null,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -79,7 +96,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.89,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.11,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": false,
@@ -87,10 +109,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "pending",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": null,
+        "null_scale": null,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-decision-dlq-retention",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-dlq-retention"
       ],
@@ -111,7 +143,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.919,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.31,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -130,7 +167,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.922,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.42,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -138,10 +180,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-decision-tenant-router-hash",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-tenant-router-hash"
       ],
@@ -162,7 +214,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.88,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.69,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -181,7 +238,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.89,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.1,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": false,
       "prefixStableTerse": false,
@@ -189,10 +251,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 1,
-      "top3SetEqual": true
+      "top3SetEqual": true,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-decision-config-loader-format",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-config-loader-format"
       ],
@@ -213,7 +285,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.916,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.18,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -232,7 +309,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.849,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.41,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": false,
@@ -240,10 +322,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 1,
-      "top3SetEqual": true
+      "top3SetEqual": true,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-convention-retry-jitter",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-retry-jitter"
       ],
@@ -264,7 +356,12 @@
         "hit1": false,
         "hit3": true,
         "topScore": 0.845,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.25,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -283,7 +380,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.89,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.09,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -291,10 +393,20 @@
       "anchorBothTop3": true,
       "top1Equal": false,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-convention-metrics-naming",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-metrics-naming"
       ],
@@ -315,7 +427,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.884,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.87,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -334,7 +451,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.864,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.04,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": false,
@@ -342,10 +464,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-convention-webhook-signing",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-webhook-signing"
       ],
@@ -366,7 +498,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.888,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.02,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -385,7 +522,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.893,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.21,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": false,
       "prefixStableTerse": true,
@@ -393,10 +535,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-architecture-checkpoint-store",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-checkpoint-store"
       ],
@@ -417,7 +569,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.919,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.29,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -436,7 +593,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.868,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.21,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": false,
       "prefixStableTerse": true,
@@ -444,10 +606,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-architecture-connector-bus",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-connector-bus"
       ],
@@ -468,7 +640,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.892,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.21,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -487,7 +664,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.884,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.85,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": false,
@@ -495,10 +677,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-architecture-scheduler-tiers",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-scheduler-tiers"
       ],
@@ -519,7 +711,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.905,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.73,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -538,7 +735,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.904,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.69,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -546,10 +748,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-architecture-rate-limiter-token-bucket",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-rate-limiter-token-bucket"
       ],
@@ -570,7 +782,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.869,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.23,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -589,7 +806,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.919,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.29,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": false,
       "prefixStableTerse": false,
@@ -597,10 +819,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-bug-checkpoint-torn-write",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-checkpoint-torn-write"
       ],
@@ -621,7 +853,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.878,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.61,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -640,7 +877,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.895,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.31,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": false,
       "prefixStableTerse": false,
@@ -648,10 +890,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-bug-lease-double-execution",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-lease-double-execution"
       ],
@@ -672,7 +924,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.886,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.94,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -691,7 +948,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.872,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.34,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": false,
@@ -699,10 +961,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-bug-rate-limiter-thundering-herd",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-rate-limiter-thundering-herd"
       ],
@@ -723,7 +995,12 @@
         "hit1": false,
         "hit3": true,
         "topScore": 0.855,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.65,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -742,7 +1019,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.876,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.53,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": true,
@@ -750,10 +1032,20 @@
       "anchorBothTop3": true,
       "top1Equal": false,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-bug-config-loader-hot-reload-leak",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-config-loader-hot-reload-leak"
       ],
@@ -774,7 +1066,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.903,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.65,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -793,7 +1090,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.917,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.2,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": false,
@@ -801,10 +1103,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-convention-idempotency-key",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-idempotency-key"
       ],
@@ -825,7 +1137,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.897,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.4,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -844,7 +1161,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.921,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.39,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": false,
       "prefixStableTerse": true,
@@ -852,10 +1174,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-decision-webhook-relay-language",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-webhook-relay-language"
       ],
@@ -876,7 +1208,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.9,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.51,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -895,7 +1232,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.913,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.04,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": false,
       "prefixStableTerse": true,
@@ -903,10 +1245,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-architecture-metrics-exporter-batching",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-metrics-exporter-batching"
       ],
@@ -927,7 +1279,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.914,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 5.1,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -946,7 +1303,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.9,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.5,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": false,
       "prefixStableTerse": false,
@@ -954,10 +1316,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-bug-tenant-router-hot-shard",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-tenant-router-hot-shard"
       ],
@@ -978,7 +1350,12 @@
         "hit1": false,
         "hit3": true,
         "topScore": 0.882,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.78,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -997,7 +1374,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.89,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.1,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": false,
@@ -1005,10 +1387,20 @@
       "anchorBothTop3": true,
       "top1Equal": false,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-convention-schema-migration-additive",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-schema-migration-additive"
       ],
@@ -1029,7 +1421,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.86,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.88,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1048,7 +1445,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.853,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.57,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": false,
       "prefixStableTerse": false,
@@ -1056,10 +1458,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-architecture-worker-pool-autoscale",
+      "source": "questions.json",
       "expectedIds": [
         "fx-architecture-worker-pool-autoscale"
       ],
@@ -1080,7 +1492,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.847,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.32,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1099,7 +1516,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.908,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.85,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": false,
@@ -1107,10 +1529,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-bug-dlq-purge-race",
+      "source": "questions.json",
       "expectedIds": [
         "fx-bug-dlq-purge-race"
       ],
@@ -1131,7 +1563,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.907,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.8,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1150,7 +1587,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.905,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.73,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": false,
       "prefixStableTerse": false,
@@ -1158,10 +1600,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.2,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-decision-observability-vendor",
+      "source": "questions.json",
       "expectedIds": [
         "fx-decision-observability-vendor"
       ],
@@ -1182,7 +1634,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.901,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.57,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1201,7 +1658,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.895,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 4.31,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": false,
@@ -1209,10 +1671,20 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     },
     {
       "id": "q-fx-convention-postmortem-blameless",
+      "source": "questions.json",
       "expectedIds": [
         "fx-convention-postmortem-blameless"
       ],
@@ -1233,7 +1705,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.853,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 2.57,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "terse": {
         "ids": [
@@ -1252,7 +1729,12 @@
         "hit1": true,
         "hit3": true,
         "topScore": 0.875,
-        "confidence": 1
+        "confidence": 1,
+        "abstained": false,
+        "topRelevance": 3.48,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
       },
       "prefixStableChatty": true,
       "prefixStableTerse": false,
@@ -1260,437 +1742,1467 @@
       "anchorBothTop3": true,
       "top1Equal": true,
       "top3AgreementFrac": 0.5,
-      "top3SetEqual": false
+      "top3SetEqual": false,
+      "calibration": {
+        "status": "ok",
+        "version": "v1",
+        "probes": 128,
+        "rows": 10380,
+        "null_median": 0.7904561758041382,
+        "null_scale": 0.024248798239045535,
+        "scope": "default"
+      }
     }
   ],
   "gibberish": [
     {
       "id": "g-0",
       "query": "marmalade tapestry bassoon",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-007908",
+        "fx-code-007604",
+        "fx-code-008772",
+        "fx-code-007481",
+        "fx-code-003892",
+        "fx-code-001764",
+        "fx-code-009207",
+        "fx-code-000996",
+        "fx-code-003641"
+      ],
       "hitCount": 10,
       "topScore": 0.778,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.52,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-1",
       "query": "chowder sphinx",
+      "ids": [
+        "fx-note-0150",
+        "fx-code-005113",
+        "fx-code-002873",
+        "fx-code-008777",
+        "fx-code-001257",
+        "fx-code-008921",
+        "fx-code-004249",
+        "fx-code-007337",
+        "fx-code-007961",
+        "fx-code-005145"
+      ],
       "hitCount": 10,
       "topScore": 0.807,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.67,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-2",
       "query": "pulsar tuba cyclops flannel",
+      "ids": [
+        "fx-note-0150",
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-note-0299",
+        "fx-note-0262",
+        "fx-note-0180",
+        "fx-note-0278",
+        "fx-note-0290",
+        "fx-bug-checkpoint-torn-write",
+        "fx-filler-convention-041",
+        "fx-code-007697"
+      ],
       "hitCount": 10,
       "topScore": 0.785,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.21,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-3",
       "query": "basalt comet damask",
+      "ids": [
+        "fx-decision-config-loader-format",
+        "fx-code-002244",
+        "fx-code-003316",
+        "fx-code-008196",
+        "fx-code-001655",
+        "fx-code-003396",
+        "fx-code-001431",
+        "fx-code-001444",
+        "fx-code-008500",
+        "fx-code-009156"
+      ],
       "hitCount": 10,
       "topScore": 0.777,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.56,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-4",
       "query": "chimera gingham",
+      "ids": [
+        "fx-code-008786",
+        "fx-code-005234",
+        "fx-code-003458",
+        "fx-code-003076",
+        "fx-code-004925",
+        "fx-code-003346",
+        "fx-code-006740",
+        "fx-code-008868",
+        "fx-code-004099",
+        "fx-code-004939"
+      ],
       "hitCount": 10,
       "topScore": 0.781,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.39,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-5",
       "query": "harmonica biscotti comet obsidian",
+      "ids": [
+        "fx-code-006045",
+        "fx-code-002845",
+        "fx-code-006957",
+        "fx-code-004381",
+        "fx-code-009501",
+        "fx-code-009709",
+        "fx-code-007229",
+        "fx-code-008525",
+        "fx-code-004541",
+        "fx-code-009549"
+      ],
       "hitCount": 10,
       "topScore": 0.782,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.34,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-6",
       "query": "falafel trombone chimera",
+      "ids": [
+        "fx-decision-config-loader-format",
+        "fx-filler-architecture-030",
+        "fx-code-000759",
+        "fx-code-009927",
+        "fx-code-007543",
+        "fx-code-007607",
+        "fx-code-007895",
+        "fx-code-007052",
+        "fx-code-005797",
+        "fx-code-007367"
+      ],
       "hitCount": 10,
       "topScore": 0.783,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.33,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-7",
       "query": "feldspar kraken",
+      "ids": [
+        "fx-code-004051",
+        "fx-code-007490",
+        "fx-code-002931",
+        "fx-code-005761",
+        "fx-code-007523",
+        "fx-code-007166",
+        "fx-code-005313",
+        "fx-code-007585",
+        "fx-code-001764",
+        "fx-code-009249"
+      ],
       "hitCount": 10,
       "topScore": 0.761,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -1.22,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-8",
       "query": "orbit cyclops tuba tapestry",
+      "ids": [
+        "fx-code-005013",
+        "fx-code-009845",
+        "fx-code-004021",
+        "fx-code-005909",
+        "fx-code-003125",
+        "fx-code-004869",
+        "fx-code-004789",
+        "fx-code-005396",
+        "fx-code-008819",
+        "fx-code-004163"
+      ],
       "hitCount": 10,
       "topScore": 0.787,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.14,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-9",
       "query": "asteroid croissant taffeta",
+      "ids": [
+        "fx-code-004907",
+        "fx-code-007178",
+        "fx-code-006218",
+        "fx-code-009307",
+        "fx-code-004698",
+        "fx-code-006906",
+        "fx-code-002971",
+        "fx-code-009883",
+        "fx-code-004938",
+        "fx-code-009339"
+      ],
       "hitCount": 10,
       "topScore": 0.785,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.21,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-10",
       "query": "bassoon kraken",
+      "ids": [
+        "fx-filler-convention-029",
+        "fx-code-003924",
+        "fx-code-008340",
+        "fx-code-006564",
+        "fx-code-001700",
+        "fx-code-009412",
+        "fx-code-007604",
+        "fx-code-001972",
+        "fx-code-006708",
+        "fx-code-008436"
+      ],
       "hitCount": 10,
       "topScore": 0.773,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.73,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-11",
       "query": "centaur granite quasar souffle",
+      "ids": [
+        "fx-code-006755",
+        "fx-code-009459",
+        "fx-code-006915",
+        "fx-code-003747",
+        "fx-code-005155",
+        "fx-code-008299",
+        "fx-code-004579",
+        "fx-code-009747",
+        "fx-code-001541",
+        "fx-code-006906"
+      ],
       "hitCount": 10,
       "topScore": 0.799,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.34,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-12",
       "query": "comet pegasus ukulele",
+      "ids": [
+        "fx-code-001764",
+        "fx-code-007166",
+        "fx-code-009790",
+        "fx-code-009765",
+        "fx-code-005685",
+        "fx-code-006087",
+        "fx-code-003892",
+        "fx-code-007762",
+        "fx-code-003559",
+        "fx-code-005255"
+      ],
       "hitCount": 10,
       "topScore": 0.783,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.3,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-13",
       "query": "strudel organza",
+      "ids": [
+        "fx-code-001872",
+        "fx-code-004780",
+        "fx-code-002668",
+        "fx-code-008176",
+        "fx-code-008028",
+        "fx-code-000172",
+        "fx-code-003996",
+        "fx-code-007760",
+        "fx-code-006620",
+        "fx-code-002396"
+      ],
       "hitCount": 10,
       "topScore": 0.797,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.26,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-14",
       "query": "schist flannel chiffon centaur",
+      "ids": [
+        "fx-note-0150",
+        "fx-filler-convention-041",
+        "fx-code-005699",
+        "fx-code-009539",
+        "fx-code-003939",
+        "fx-code-008115",
+        "fx-code-002163",
+        "fx-code-009795",
+        "fx-code-009968",
+        "fx-code-005187"
+      ],
       "hitCount": 10,
       "topScore": 0.788,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.11,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-15",
       "query": "biscotti schist ukulele",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-006611",
+        "fx-code-005939",
+        "fx-code-007299",
+        "fx-code-009043",
+        "fx-code-009475",
+        "fx-code-004451",
+        "fx-code-004771",
+        "fx-code-001651",
+        "fx-code-008499"
+      ],
       "hitCount": 10,
       "topScore": 0.799,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.37,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-16",
       "query": "minotaur kazoo",
+      "ids": [
+        "fx-note-0163",
+        "fx-note-0203",
+        "fx-note-0158",
+        "fx-note-0040",
+        "fx-note-0284",
+        "fx-note-0161",
+        "fx-decision-observability-vendor",
+        "fx-code-001669",
+        "fx-code-009941",
+        "fx-code-002085"
+      ],
       "hitCount": 10,
       "topScore": 0.787,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.16,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-17",
       "query": "chimera quasar souffle meteor",
+      "ids": [
+        "fx-code-006218",
+        "fx-code-006906",
+        "fx-code-004698",
+        "fx-code-007178",
+        "fx-code-004938",
+        "fx-code-000458",
+        "fx-code-000842",
+        "fx-code-005418",
+        "fx-code-000218",
+        "fx-code-005178"
+      ],
       "hitCount": 10,
       "topScore": 0.806,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.63,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-18",
       "query": "comet paisley organza",
+      "ids": [
+        "fx-code-006352",
+        "fx-code-005392",
+        "fx-code-006992",
+        "fx-code-009840",
+        "fx-code-003680",
+        "fx-code-003216",
+        "fx-code-008972",
+        "fx-code-007328",
+        "fx-code-007756",
+        "fx-code-001312"
+      ],
       "hitCount": 10,
       "topScore": 0.784,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.28,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-19",
       "query": "marble bassoon",
+      "ids": [
+        "fx-decision-config-loader-format",
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-filler-convention-029",
+        "fx-filler-bug_pattern-019",
+        "fx-code-002244",
+        "fx-code-003316",
+        "fx-code-003332",
+        "fx-code-006065",
+        "fx-code-006033",
+        "fx-code-008196"
+      ],
       "hitCount": 10,
       "topScore": 0.768,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.92,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-20",
       "query": "gazpacho sphinx griffin clarinet",
+      "ids": [
+        "fx-note-0150",
+        "fx-convention-webhook-signing",
+        "fx-code-000889",
+        "fx-code-003081",
+        "fx-code-002575",
+        "fx-code-007750",
+        "fx-code-004521",
+        "fx-code-001785",
+        "fx-code-006633",
+        "fx-code-000937"
+      ],
       "hitCount": 10,
       "topScore": 0.787,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.12,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-21",
       "query": "marble comet minotaur",
+      "ids": [
+        "fx-code-009594",
+        "fx-code-006098",
+        "fx-code-003274",
+        "fx-code-001370",
+        "fx-code-005185",
+        "fx-code-006778",
+        "fx-code-008170",
+        "fx-code-009050",
+        "fx-code-006330",
+        "fx-code-009281"
+      ],
       "hitCount": 10,
       "topScore": 0.786,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.18,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-22",
       "query": "velvet bassoon",
+      "ids": [
+        "fx-code-003508",
+        "fx-code-007508",
+        "fx-code-000964",
+        "fx-code-005940",
+        "fx-code-006884",
+        "fx-code-003156",
+        "fx-code-006820",
+        "fx-code-003940",
+        "fx-code-008580",
+        "fx-code-007444"
+      ],
       "hitCount": 10,
       "topScore": 0.79,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.03,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-23",
       "query": "velvet pumice quartz marble",
+      "ids": [
+        "fx-code-005623",
+        "fx-code-005047",
+        "fx-code-006119",
+        "fx-code-004711",
+        "fx-code-003879",
+        "fx-code-003655",
+        "fx-code-005863",
+        "fx-code-008455",
+        "fx-code-002903",
+        "fx-code-005879"
+      ],
       "hitCount": 10,
       "topScore": 0.802,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.47,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-24",
       "query": "limestone kazoo centaur",
+      "ids": [
+        "fx-decision-observability-vendor",
+        "fx-hub-system-overview",
+        "fx-decision-lease-ttl",
+        "fx-convention-retry-jitter",
+        "fx-note-0147",
+        "fx-note-0119",
+        "fx-note-0092",
+        "fx-dup-cli-auth-token-scope-a",
+        "fx-architecture-scheduler-tiers",
+        "fx-filler-bug_pattern-015"
+      ],
       "hitCount": 10,
       "topScore": 0.802,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.48,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-25",
       "query": "meteor xylophone",
+      "ids": [
+        "fx-note-0210",
+        "fx-convention-metrics-naming",
+        "fx-note-0111",
+        "fx-decision-observability-vendor",
+        "fx-note-0230",
+        "fx-note-0145",
+        "fx-code-001034",
+        "fx-code-007258",
+        "fx-code-006410",
+        "fx-code-001658"
+      ],
       "hitCount": 10,
       "topScore": 0.794,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.15,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-26",
       "query": "dumpling damask cashmere velvet",
+      "ids": [
+        "fx-code-003655",
+        "fx-code-005623",
+        "fx-code-006275",
+        "fx-code-007783",
+        "fx-code-003879",
+        "fx-code-005047",
+        "fx-code-007111",
+        "fx-code-005863",
+        "fx-code-004711",
+        "fx-code-004867"
+      ],
       "hitCount": 10,
       "topScore": 0.79,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.02,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-27",
       "query": "orbit meringue gorgon",
+      "ids": [
+        "fx-decision-observability-vendor",
+        "fx-code-009618",
+        "fx-code-003570",
+        "fx-code-009922",
+        "fx-code-008194",
+        "fx-code-005202",
+        "fx-code-008066",
+        "fx-code-006434",
+        "fx-code-007666",
+        "fx-code-007850"
+      ],
       "hitCount": 10,
       "topScore": 0.785,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.22,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-28",
       "query": "xylophone chiffon",
+      "ids": [
+        "fx-note-0124",
+        "fx-note-0293",
+        "fx-note-0244",
+        "fx-note-0150",
+        "fx-note-0180",
+        "fx-note-0016",
+        "fx-note-0072",
+        "fx-code-009145",
+        "fx-code-009860",
+        "fx-code-004073"
+      ],
       "hitCount": 10,
       "topScore": 0.783,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.33,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-29",
       "query": "accordion galaxy eclipse strudel",
+      "ids": [
+        "fx-code-002352",
+        "fx-code-006592",
+        "fx-code-007728",
+        "fx-code-001872",
+        "fx-code-001200",
+        "fx-code-000458",
+        "fx-code-004780",
+        "fx-code-008028",
+        "fx-code-002668",
+        "fx-code-007389"
+      ],
       "hitCount": 10,
       "topScore": 0.778,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.52,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-30",
       "query": "souffle brocade taffeta",
+      "ids": [
+        "fx-note-0180",
+        "fx-note-0150",
+        "fx-code-008071",
+        "fx-code-002711",
+        "fx-code-006519",
+        "fx-code-001623",
+        "fx-code-007159",
+        "fx-code-000781",
+        "fx-code-008951",
+        "fx-code-008141"
+      ],
       "hitCount": 10,
       "topScore": 0.786,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.17,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-31",
       "query": "souffle phoenix",
+      "ids": [
+        "fx-note-0150",
+        "fx-note-0299",
+        "fx-code-004087",
+        "fx-code-007287",
+        "fx-code-009127",
+        "fx-code-001911",
+        "fx-code-009431",
+        "fx-code-008253",
+        "fx-code-009213",
+        "fx-code-005591"
+      ],
       "hitCount": 10,
       "topScore": 0.792,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.06,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-32",
       "query": "meteor harmonica hydra cyclops",
+      "ids": [
+        "fx-code-004250",
+        "fx-code-006250",
+        "fx-code-006042",
+        "fx-code-008746",
+        "fx-code-007482",
+        "fx-code-009018",
+        "fx-code-002330",
+        "fx-code-007690",
+        "fx-code-005210",
+        "fx-code-009738"
+      ],
       "hitCount": 10,
       "topScore": 0.814,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.98,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-33",
       "query": "nebula orbit gingham",
+      "ids": [
+        "fx-decision-webhook-relay-language",
+        "fx-code-007588",
+        "fx-code-005300",
+        "fx-code-006388",
+        "fx-code-001370",
+        "fx-code-000842",
+        "fx-code-009530",
+        "fx-code-006906",
+        "fx-code-000746",
+        "fx-code-007380"
+      ],
       "hitCount": 10,
       "topScore": 0.771,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.81,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-34",
       "query": "gorgon phoenix",
+      "ids": [
+        "fx-code-008878",
+        "fx-code-004974",
+        "fx-code-008910",
+        "fx-code-006894",
+        "fx-code-002494",
+        "fx-code-005230",
+        "fx-code-006974",
+        "fx-code-007406",
+        "fx-code-006862",
+        "fx-code-009486"
+      ],
       "hitCount": 10,
       "topScore": 0.767,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.98,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-35",
       "query": "mandolin risotto croissant feldspar",
+      "ids": [
+        "fx-code-005234",
+        "fx-code-002290",
+        "fx-code-005906",
+        "fx-code-006114",
+        "fx-code-000066",
+        "fx-code-002210",
+        "fx-code-007794",
+        "fx-code-000706",
+        "fx-code-001810",
+        "fx-code-000786"
+      ],
       "hitCount": 10,
       "topScore": 0.779,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.48,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-36",
       "query": "strudel clarinet kraken",
+      "ids": [
+        "fx-code-004447",
+        "fx-code-000173",
+        "fx-code-000551",
+        "fx-code-004415",
+        "fx-code-000413",
+        "fx-code-007079",
+        "fx-code-000711",
+        "fx-code-002111",
+        "fx-code-007780",
+        "fx-code-005965"
+      ],
       "hitCount": 10,
       "topScore": 0.778,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.5,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-37",
       "query": "obsidian tapestry",
+      "ids": [
+        "fx-code-001949",
+        "fx-code-008477",
+        "fx-code-003213",
+        "fx-code-000877",
+        "fx-code-003453",
+        "fx-code-008909",
+        "fx-code-006301",
+        "fx-code-001069",
+        "fx-code-001549",
+        "fx-code-003485"
+      ],
       "hitCount": 10,
       "topScore": 0.797,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.26,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-38",
       "query": "feldspar kraken clarinet mandolin",
+      "ids": [
+        "fx-note-0170",
+        "fx-note-0173",
+        "fx-note-0147",
+        "fx-note-0158",
+        "fx-note-0016",
+        "fx-code-005313",
+        "fx-code-007490",
+        "fx-code-007585",
+        "fx-code-005761",
+        "fx-code-009249"
+      ],
       "hitCount": 10,
       "topScore": 0.764,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -1.1,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-39",
       "query": "gazpacho falafel trombone",
+      "ids": [
+        "fx-note-0087",
+        "fx-bug-tenant-router-hot-shard",
+        "fx-note-0119",
+        "fx-code-003756",
+        "fx-code-008268",
+        "fx-code-004700",
+        "fx-code-003660",
+        "fx-code-003420",
+        "fx-code-008743",
+        "fx-code-008844"
+      ],
       "hitCount": 10,
       "topScore": 0.781,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.38,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-40",
       "query": "accordion harmonica",
+      "ids": [
+        "fx-convention-webhook-signing",
+        "fx-code-001665",
+        "fx-code-005761",
+        "fx-code-005345",
+        "fx-code-009233",
+        "fx-code-007585",
+        "fx-code-005313",
+        "fx-code-001562",
+        "fx-code-009889",
+        "fx-code-003953"
+      ],
       "hitCount": 10,
       "topScore": 0.772,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.76,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-41",
       "query": "pegasus basalt pumice chowder",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-009252",
+        "fx-code-009396",
+        "fx-code-009236",
+        "fx-code-008695",
+        "fx-code-003828",
+        "fx-code-008832",
+        "fx-code-007044",
+        "fx-code-008151",
+        "fx-code-007824"
+      ],
       "hitCount": 10,
       "topScore": 0.797,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.25,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-42",
       "query": "eclipse hydra harmonica",
+      "ids": [
+        "fx-code-000747",
+        "fx-code-009576",
+        "fx-code-001864",
+        "fx-code-003988",
+        "fx-code-009764",
+        "fx-code-006280",
+        "fx-code-001736",
+        "fx-code-009840",
+        "fx-code-009780",
+        "fx-code-003680"
+      ],
       "hitCount": 10,
       "topScore": 0.812,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.9,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-43",
       "query": "dumpling paisley",
+      "ids": [
+        "fx-convention-idempotency-key",
+        "fx-bug-lease-double-execution",
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-000761",
+        "fx-code-002071",
+        "fx-code-003577",
+        "fx-code-001913",
+        "fx-code-000815",
+        "fx-code-004335",
+        "fx-code-007641"
+      ],
       "hitCount": 10,
       "topScore": 0.787,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.14,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-44",
       "query": "sandstone taffeta brocade taffeta",
+      "ids": [
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-code-004555",
+        "fx-code-009083",
+        "fx-code-001915",
+        "fx-code-008971",
+        "fx-code-009547",
+        "fx-code-009371",
+        "fx-code-008923",
+        "fx-code-009931",
+        "fx-code-003067"
+      ],
       "hitCount": 10,
       "topScore": 0.801,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.41,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-45",
       "query": "granite quartz kazoo",
+      "ids": [
+        "fx-code-008503",
+        "fx-code-003095",
+        "fx-code-007143",
+        "fx-code-001191",
+        "fx-code-007799",
+        "fx-code-008071",
+        "fx-code-006519",
+        "fx-code-001639",
+        "fx-code-008951",
+        "fx-code-002711"
+      ],
       "hitCount": 10,
       "topScore": 0.8,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.38,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-46",
       "query": "phoenix paisley",
+      "ids": [
+        "fx-code-006294",
+        "fx-code-003857",
+        "fx-code-001377",
+        "fx-code-001270",
+        "fx-code-004321",
+        "fx-code-006449",
+        "fx-code-000086",
+        "fx-code-004065",
+        "fx-code-004335",
+        "fx-code-003265"
+      ],
       "hitCount": 10,
       "topScore": 0.789,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.06,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-47",
       "query": "brocade nebula obsidian eclipse",
+      "ids": [
+        "fx-note-0180",
+        "fx-note-0004",
+        "fx-note-0082",
+        "fx-bug-rate-limiter-thundering-herd",
+        "fx-note-0023",
+        "fx-code-003165",
+        "fx-code-000525",
+        "fx-code-004221",
+        "fx-code-000829",
+        "fx-code-009021"
+      ],
       "hitCount": 10,
       "topScore": 0.785,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.21,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-48",
       "query": "basalt cashmere damask",
+      "ids": [
+        "fx-code-008675",
+        "fx-code-001347",
+        "fx-code-005203",
+        "fx-code-007123",
+        "fx-code-007474",
+        "fx-code-006547",
+        "fx-code-005170",
+        "fx-code-007522",
+        "fx-code-002211",
+        "fx-code-006450"
+      ],
       "hitCount": 10,
       "topScore": 0.779,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.48,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-49",
       "query": "limestone clarinet",
+      "ids": [
+        "fx-dup-cli-auth-token-scope-a",
+        "fx-filler-architecture-026",
+        "fx-filler-convention-037",
+        "fx-hub-system-overview",
+        "fx-note-0147",
+        "fx-filler-decision-020",
+        "fx-filler-architecture-002",
+        "fx-decision-lease-ttl",
+        "fx-hub-glossary",
+        "fx-decision-observability-vendor"
+      ],
       "hitCount": 10,
       "topScore": 0.808,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.71,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-50",
       "query": "risotto centaur kazoo brocade",
+      "ids": [
+        "fx-convention-retry-jitter",
+        "fx-code-002290",
+        "fx-code-005906",
+        "fx-code-003954",
+        "fx-code-003570",
+        "fx-code-005219",
+        "fx-code-002210",
+        "fx-code-000595",
+        "fx-code-001042",
+        "fx-code-000066"
+      ],
       "hitCount": 10,
       "topScore": 0.777,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.55,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-51",
       "query": "meteor pulsar hydra",
+      "ids": [
+        "fx-code-008746",
+        "fx-code-008202",
+        "fx-code-005178",
+        "fx-code-002330",
+        "fx-code-006250",
+        "fx-code-006042",
+        "fx-code-003770",
+        "fx-code-004250",
+        "fx-code-003914",
+        "fx-code-009018"
+      ],
       "hitCount": 10,
       "topScore": 0.807,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.7,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-52",
       "query": "gingham chimera",
+      "ids": [
+        "fx-code-004939",
+        "fx-code-008299",
+        "fx-code-004099",
+        "fx-code-005234",
+        "fx-code-008539",
+        "fx-code-004925",
+        "fx-code-008786",
+        "fx-code-005976",
+        "fx-code-005989",
+        "fx-code-007700"
+      ],
       "hitCount": 10,
       "topScore": 0.779,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.48,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-53",
       "query": "cashmere sandstone pulsar sandstone",
+      "ids": [
+        "fx-note-0290",
+        "fx-architecture-scheduler-tiers",
+        "fx-note-0191",
+        "fx-filler-convention-009",
+        "fx-code-007984",
+        "fx-code-007872",
+        "fx-code-009392",
+        "fx-code-001664",
+        "fx-code-001008",
+        "fx-code-009123"
+      ],
       "hitCount": 10,
       "topScore": 0.799,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.35,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-54",
       "query": "pumice griffin sphinx",
+      "ids": [
+        "fx-code-005833",
+        "fx-code-001961",
+        "fx-code-005017",
+        "fx-code-005161",
+        "fx-code-004329",
+        "fx-code-005241",
+        "fx-code-000777",
+        "fx-code-009497",
+        "fx-code-000529",
+        "fx-code-003105"
+      ],
       "hitCount": 10,
       "topScore": 0.806,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.65,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-55",
       "query": "asteroid griffin",
+      "ids": [
+        "fx-code-007706",
+        "fx-code-007572",
+        "fx-code-007460",
+        "fx-code-006650",
+        "fx-code-004676",
+        "fx-code-005280",
+        "fx-code-001572",
+        "fx-code-003860",
+        "fx-code-004260",
+        "fx-code-008612"
+      ],
       "hitCount": 10,
       "topScore": 0.773,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.71,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-56",
       "query": "quasar organza paisley minotaur",
+      "ids": [
+        "fx-note-0203",
+        "fx-architecture-scheduler-tiers",
+        "fx-code-001639",
+        "fx-code-007143",
+        "fx-code-008503",
+        "fx-code-001191",
+        "fx-code-002839",
+        "fx-code-003095",
+        "fx-code-007799",
+        "fx-code-000183"
+      ],
       "hitCount": 10,
       "topScore": 0.793,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0.11,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-57",
       "query": "falafel marmalade chiffon",
+      "ids": [
+        "fx-decision-config-loader-format",
+        "fx-note-0124",
+        "fx-note-0088",
+        "fx-note-0016",
+        "fx-note-0147",
+        "fx-note-0293",
+        "fx-code-001747",
+        "fx-code-007827",
+        "fx-code-009971",
+        "fx-code-009465"
+      ],
       "hitCount": 10,
       "topScore": 0.774,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -0.67,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-58",
       "query": "mandolin griffin",
+      "ids": [
+        "fx-code-004465",
+        "fx-code-007441",
+        "fx-code-004993",
+        "fx-code-004962",
+        "fx-code-000762",
+        "fx-code-004498",
+        "fx-code-003746",
+        "fx-code-000929",
+        "fx-code-006674",
+        "fx-code-004466"
+      ],
       "hitCount": 10,
       "topScore": 0.762,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": -1.16,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     },
     {
       "id": "g-59",
       "query": "tuba eclipse chowder nebula",
+      "ids": [
+        "fx-note-0259",
+        "fx-note-0269",
+        "fx-note-0140",
+        "fx-note-0032",
+        "fx-note-0168",
+        "fx-code-007904",
+        "fx-code-009111",
+        "fx-code-006695",
+        "fx-code-002880",
+        "fx-code-006592"
+      ],
       "hitCount": 10,
       "topScore": 0.79,
-      "confidence": 0.7
+      "confidence": 0.7,
+      "abstained": false,
+      "topRelevance": 0,
+      "overridden": null,
+      "abstainReason": null,
+      "termCoverage": null
     }
   ],
+  "distractors": null,
   "negatives": {
     "offtopic": {
       "n": 20,
       "topScoreNullCount": 3,
-      "top1LexicalOnlyCount": 11,
-      "top3LexicalOnlySlots": 28,
+      "top1LexicalOnlyCount": 9,
+      "top3LexicalOnlySlots": 24,
       "top3LexicalOnlySlotsOf": 60
     },
     "unanswerable": {
@@ -1701,6 +3213,616 @@
       "top3LexicalOnlySlotsOf": 36
     }
   },
+  "identifiers": {
+    "n": 20,
+    "rank1": 0.85,
+    "hit3": 0.9,
+    "found10": 0.95,
+    "mrr": 0.875,
+    "perQuery": [
+      {
+        "id": "id-01",
+        "query": "fixture symbol #3",
+        "expectedIds": [
+          "fx-code-000003"
+        ],
+        "ids": [
+          "fx-note-0003",
+          "fx-dup-worker-pool-min-size-b",
+          "fx-dup-worker-pool-min-size-a",
+          "fx-convention-postmortem-blameless",
+          "fx-code-009999",
+          "fx-code-000003",
+          "fx-code-002608",
+          "fx-code-002621",
+          "fx-code-002637",
+          "fx-code-002509"
+        ],
+        "rank": 6,
+        "rank1": false,
+        "hit3": false,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.41,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-02",
+        "query": "fixture symbol #99",
+        "expectedIds": [
+          "fx-code-000099"
+        ],
+        "ids": [
+          "fx-note-0099",
+          "fx-code-009999",
+          "fx-code-000099",
+          "fx-code-005632",
+          "fx-code-005584",
+          "fx-code-005695",
+          "fx-code-005600",
+          "fx-code-005661",
+          "fx-code-005631",
+          "fx-code-005616"
+        ],
+        "rank": 3,
+        "rank1": false,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.13,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-03",
+        "query": "fixture symbol #1234",
+        "expectedIds": [
+          "fx-code-001234"
+        ],
+        "ids": [
+          "fx-code-001234",
+          "fx-code-003696",
+          "fx-code-003647",
+          "fx-code-003615",
+          "fx-code-003568",
+          "fx-code-003549",
+          "fx-code-003663",
+          "fx-code-003645",
+          "fx-code-003632",
+          "fx-code-003613"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.3,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-04",
+        "query": "fixture symbol #2500",
+        "expectedIds": [
+          "fx-code-002500"
+        ],
+        "ids": [
+          "fx-code-005525",
+          "fx-code-005217",
+          "fx-code-006100",
+          "fx-code-001749",
+          "fx-code-007045",
+          "fx-code-005669",
+          "fx-code-002741",
+          "fx-code-005061",
+          "fx-code-002549",
+          "fx-code-002629"
+        ],
+        "rank": null,
+        "rank1": false,
+        "hit3": false,
+        "found10": false,
+        "hitCount": 10,
+        "topScore": 0.82,
+        "abstained": false,
+        "topRelevance": 1.21,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-05",
+        "query": "fixture symbol #3333",
+        "expectedIds": [
+          "fx-code-003333"
+        ],
+        "ids": [
+          "fx-code-003333",
+          "fx-code-007696",
+          "fx-code-007695",
+          "fx-code-007647",
+          "fx-code-007615",
+          "fx-code-007568",
+          "fx-code-007693",
+          "fx-code-007663",
+          "fx-code-007645",
+          "fx-code-007632"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.73,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-06",
+        "query": "fixture symbol #4444",
+        "expectedIds": [
+          "fx-code-004444"
+        ],
+        "ids": [
+          "fx-code-004444",
+          "fx-code-002704",
+          "fx-code-002703",
+          "fx-code-002623",
+          "fx-code-002589",
+          "fx-code-002559",
+          "fx-code-002701",
+          "fx-code-002656",
+          "fx-code-002621",
+          "fx-code-002605"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.39,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-07",
+        "query": "fixture symbol #5555",
+        "expectedIds": [
+          "fx-code-005555"
+        ],
+        "ids": [
+          "fx-code-005555",
+          "fx-code-001696",
+          "fx-code-001695",
+          "fx-code-001647",
+          "fx-code-001615",
+          "fx-code-005525",
+          "fx-code-000535",
+          "fx-code-004551",
+          "fx-code-005217",
+          "fx-code-005544"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.827,
+        "abstained": false,
+        "topRelevance": 1.52,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-08",
+        "query": "fixture symbol #6666",
+        "expectedIds": [
+          "fx-code-006666"
+        ],
+        "ids": [
+          "fx-code-006666",
+          "fx-code-001696",
+          "fx-code-001695",
+          "fx-code-001647",
+          "fx-code-001615",
+          "fx-code-001568",
+          "fx-code-001693",
+          "fx-code-001663",
+          "fx-code-001645",
+          "fx-code-001632"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.77,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-09",
+        "query": "fixture symbol #7777",
+        "expectedIds": [
+          "fx-code-007777"
+        ],
+        "ids": [
+          "fx-code-007777",
+          "fx-code-000704",
+          "fx-code-000703",
+          "fx-code-000623",
+          "fx-code-000589",
+          "fx-code-000559",
+          "fx-code-000701",
+          "fx-code-000656",
+          "fx-code-000621",
+          "fx-code-000605"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.32,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-10",
+        "query": "fixture symbol #8888",
+        "expectedIds": [
+          "fx-code-008888"
+        ],
+        "ids": [
+          "fx-code-008888",
+          "fx-code-007200",
+          "fx-code-007199",
+          "fx-code-007135",
+          "fx-code-007103",
+          "fx-code-007072",
+          "fx-code-007197",
+          "fx-code-007165",
+          "fx-code-007133",
+          "fx-code-007117"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.61,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-11",
+        "query": "fixture symbol #9750",
+        "expectedIds": [
+          "fx-code-009750"
+        ],
+        "ids": [
+          "fx-code-009750",
+          "fx-code-005200",
+          "fx-code-005199",
+          "fx-code-005135",
+          "fx-code-005103",
+          "fx-code-005072",
+          "fx-code-005197",
+          "fx-code-005165",
+          "fx-code-005133",
+          "fx-code-005117"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.38,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-12",
+        "query": "fixture symbol #9999",
+        "expectedIds": [
+          "fx-code-009999"
+        ],
+        "ids": [
+          "fx-code-009999",
+          "fx-code-005200",
+          "fx-code-005135",
+          "fx-code-005103",
+          "fx-code-005072",
+          "fx-code-005053",
+          "fx-code-005165",
+          "fx-code-005133",
+          "fx-code-005117",
+          "fx-code-005005"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": null,
+        "abstained": false,
+        "topRelevance": 1.32,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-13",
+        "query": "rebalanceLedger.ts checkpoint-store",
+        "expectedIds": [
+          "fx-code-000179"
+        ],
+        "ids": [
+          "fx-code-000179",
+          "fx-code-002643",
+          "fx-code-003139",
+          "fx-code-009939",
+          "fx-code-001107",
+          "fx-code-009491",
+          "fx-code-009763",
+          "fx-code-007443",
+          "fx-code-009155",
+          "fx-code-005475"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.936,
+        "abstained": false,
+        "topRelevance": 5.99,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-14",
+        "query": "src/job-table/throttleLedger.ts",
+        "expectedIds": [
+          "fx-code-000956"
+        ],
+        "ids": [
+          "fx-code-000956",
+          "fx-code-009361",
+          "fx-code-002561",
+          "fx-code-000241",
+          "fx-code-001041",
+          "fx-code-003073",
+          "fx-code-001345",
+          "fx-code-005212",
+          "fx-code-003500",
+          "fx-code-009774"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.919,
+        "abstained": false,
+        "topRelevance": 5.3,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-15",
+        "query": "validateCursor.ts checkpoint-store",
+        "expectedIds": [
+          "fx-code-001939"
+        ],
+        "ids": [
+          "fx-code-001939",
+          "fx-code-006566",
+          "fx-code-005318",
+          "fx-code-009014",
+          "fx-code-002250",
+          "fx-code-004314",
+          "fx-code-009002",
+          "fx-code-009830",
+          "fx-code-000484",
+          "fx-code-003302"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.949,
+        "abstained": false,
+        "topRelevance": 6.53,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-16",
+        "query": "src/audit-log/renewCursor.ts",
+        "expectedIds": [
+          "fx-code-003118"
+        ],
+        "ids": [
+          "fx-code-003118",
+          "fx-code-009566",
+          "fx-code-007774",
+          "fx-code-006734",
+          "fx-code-005822",
+          "fx-code-007374",
+          "fx-code-000206",
+          "fx-code-005114",
+          "fx-code-004554",
+          "fx-code-003054"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.934,
+        "abstained": false,
+        "topRelevance": 5.91,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-17",
+        "query": "dispatchBatch.ts tenant-router",
+        "expectedIds": [
+          "fx-code-004549"
+        ],
+        "ids": [
+          "fx-code-004549",
+          "fx-code-004485",
+          "fx-code-002453",
+          "fx-code-002677",
+          "fx-code-002933",
+          "fx-code-006133",
+          "fx-code-000037",
+          "fx-code-005701",
+          "fx-code-002053",
+          "fx-code-003093"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.934,
+        "abstained": false,
+        "topRelevance": 5.93,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-18",
+        "query": "src/lease-manager/reconcileOffset.ts",
+        "expectedIds": [
+          "fx-code-005938"
+        ],
+        "ids": [
+          "fx-code-005938",
+          "fx-code-005426",
+          "fx-code-003314",
+          "fx-code-002450",
+          "fx-code-000450",
+          "fx-code-006802",
+          "fx-code-007826",
+          "fx-code-001970",
+          "fx-code-008082",
+          "fx-code-003026"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.928,
+        "abstained": false,
+        "topRelevance": 5.69,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-19",
+        "query": "reconcileShard.ts lease-manager",
+        "expectedIds": [
+          "fx-code-007490"
+        ],
+        "ids": [
+          "fx-code-007490",
+          "fx-code-000210",
+          "fx-code-009698",
+          "fx-code-005826",
+          "fx-code-003058",
+          "fx-code-006514",
+          "fx-code-006706",
+          "fx-code-006034",
+          "fx-code-005378",
+          "fx-code-007074"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.923,
+        "abstained": false,
+        "topRelevance": 5.48,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      },
+      {
+        "id": "id-20",
+        "query": "src/job-table/renewToken.ts",
+        "expectedIds": [
+          "fx-code-008988"
+        ],
+        "ids": [
+          "fx-code-008988",
+          "fx-code-003564",
+          "fx-code-005516",
+          "fx-code-009180",
+          "fx-code-008700",
+          "fx-code-009772",
+          "fx-code-004748",
+          "fx-code-002524",
+          "fx-code-008124",
+          "fx-code-003308"
+        ],
+        "rank": 1,
+        "rank1": true,
+        "hit3": true,
+        "found10": true,
+        "hitCount": 10,
+        "topScore": 0.938,
+        "abstained": false,
+        "topRelevance": 6.07,
+        "overridden": null,
+        "abstainReason": null,
+        "termCoverage": null
+      }
+    ]
+  },
+  "absentIdentifiers": null,
   "aggregate": {
     "n_questions": 24,
     "n_gibberish": 60,
@@ -1710,6 +3832,9 @@
     "hit1Terse": 1,
     "hit3Terse": 1,
     "mrrTerse": 1,
+    "pooledHit3": 1,
+    "pooledHit3Count": 48,
+    "pooledHit3N": 48,
     "prefixStableChattyPct": 0.5833333333333334,
     "prefixStableTersePct": 0.3333333333333333,
     "prefixStableBothPct": 0.16666666666666666,
@@ -1719,6 +3844,10 @@
     "top3SetEqualPct": 0.08333333333333333,
     "meanPairwiseJaccard": 0.01969217834408303,
     "zeroHitGibberishPct": 0,
+    "abstainedGibberishPct": 0,
+    "realAbstainedCount": 0,
+    "realAbstainedN": 48,
+    "rescueOverrideCount": 0,
     "topScoreQuantiles": {
       "real": {
         "0": 0.845,
@@ -1738,6 +3867,25 @@
         "0.75": 0.797,
         "0.9": 0.806
       }
-    }
+    },
+    "calibration": {
+      "statuses": [
+        "pending",
+        "ok"
+      ],
+      "nullMedianMean": 0.7904561758041382,
+      "nullScaleMean": 0.024248798239045532
+    },
+    "distractors": null,
+    "identifiers": {
+      "n": 20,
+      "rank1": 0.85,
+      "hit3": 0.9,
+      "found10": 0.95,
+      "abstainedPct": 0,
+      "overriddenCount": 0
+    },
+    "absentIdentifiers": null,
+    "withQueries": null
   }
 }

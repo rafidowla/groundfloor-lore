@@ -38,6 +38,7 @@ import { VerbatimStore } from '../engines/verbatimStore.js';
 import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import { VerbatimSearchWorkerProxy, resolveSearchWorkerIsolation, type SearchWorkerPolicy } from '../engines/verbatimSearchWorkerProxy.js';
 import { openWorkspaceVerbatim, resolveVerbatimEngineForPath } from '../engines/openWorkspaceVerbatim.js';
+import { resolveHostPieceVectorsDefault, resolvePieceVectorsIntent } from '../engines/pieces/pieceSettings.js';
 import type { VerbatimStoreRole } from '../engines/verbatimStoreRole.js';
 import type { EmbeddingProvider } from '../providers/types.js';
 import { assertWorkspaceOpenAllowed } from '../security/routeWorkspaceBinding.js';
@@ -137,6 +138,13 @@ export class WorkspaceVerbatimResolver {
      *  (and the search-worker proxy) as strictFingerprintCheck. See
      *  verbatimFingerprintGate.ts for the design decision. */
     private readonly strictFingerprintCheck?: boolean;
+    /** D7 (3.23) — host-level `createLore({pieceVectors})` default for every
+     *  store this resolver opens; threaded into openWorkspaceVerbatim's own
+     *  workspace-override resolution in getOrOpen(), and re-resolved
+     *  directly (via pieceSettings.ts) in swapToLance() since that path
+     *  constructs a VerbatimStore without going through
+     *  openWorkspaceVerbatim(). */
+    private readonly pieceVectors?: boolean;
 
     constructor(
         private readonly embeddingProvider?: EmbeddingProvider,
@@ -163,12 +171,15 @@ export class WorkspaceVerbatimResolver {
              *  (and the search-worker proxy) as strictFingerprintCheck. See
              *  verbatimFingerprintGate.ts for the design decision. */
             strictFingerprintCheck?: boolean;
+            /** D7 (3.23) — host-level `createLore({pieceVectors})` default. */
+            pieceVectors?: boolean;
         } = {},
     ) {
         this.now = opts.now ?? Date.now;
         this.home = opts.home ?? loreHome();
         this.vectorStoreRole = opts.vectorStoreRole;
         this.strictFingerprintCheck = opts.strictFingerprintCheck;
+        this.pieceVectors = opts.pieceVectors;
         if (opts.autoEvict) this.startEvictionSweep();
     }
 
@@ -260,13 +271,24 @@ export class WorkspaceVerbatimResolver {
             // `vectorEngine` is threaded through too — a 'sqlite' workspace
             // never spawns a search worker regardless of policy/env.
             const useWorker = resolveSearchWorkerIsolation(resolvedPath, this.searchWorkerIsolation ?? false, vectorEngine);
+            // D7c — same host-default + per-workspace-override resolution the
+            // non-worker branch below gets for free from openWorkspaceVerbatim;
+            // the worker branch constructs its own store, so it must resolve
+            // intent itself before handing it to the proxy (see
+            // WORKER_ENV.PIECE_VECTORS's doc for why this happens ONCE here,
+            // in the parent, rather than re-derived inside the child).
+            const hostPieceVectorsDefault = resolveHostPieceVectorsDefault(this.pieceVectors);
+            const pieceVectorsIntent = resolvePieceVectorsIntent(workspace, this.home, hostPieceVectorsDefault);
             const store = useWorker
-                ? new VerbatimSearchWorkerProxy(resolvedPath, this.embedOverrides, this.embeddingProvider, this.strictFingerprintCheck ?? false) as unknown as VerbatimStoreApi
+                ? new VerbatimSearchWorkerProxy(resolvedPath, this.embedOverrides, this.embeddingProvider, this.strictFingerprintCheck ?? false, pieceVectorsIntent) as unknown as VerbatimStoreApi
                 : openWorkspaceVerbatim(resolvedPath, this.embeddingProvider, {
                     workspaceId: workspace,
                     home: this.home,
                     role,
                     strictFingerprintCheck: this.strictFingerprintCheck ?? false,
+                    // D7 (3.23) — openWorkspaceVerbatim resolves this host
+                    // default against the workspace's own explicit override.
+                    pieceVectors: this.pieceVectors,
                     // The live swap on a committed background promotion —
                     // see swapToLance() below.
                     onLancePromoted: () => this.swapToLance(workspace),
@@ -323,7 +345,12 @@ export class WorkspaceVerbatimResolver {
         const entry = this.byPath.get(resolvedPath);
         if (!entry) return;
         const role = typeof this.vectorStoreRole === 'function' ? this.vectorStoreRole(resolvedPath) : this.vectorStoreRole;
-        const fresh = new VerbatimStore(resolvedPath, this.embeddingProvider, { role, strictFingerprintCheck: this.strictFingerprintCheck ?? false });
+        // D7 (3.23) — this construction bypasses openWorkspaceVerbatim(), so
+        // the workspace-override resolution it normally does has to be
+        // repeated here directly via pieceSettings.ts, same precedence.
+        const hostPieceVectorsDefault = resolveHostPieceVectorsDefault(this.pieceVectors);
+        const pieceVectorsIntent = resolvePieceVectorsIntent(workspace, this.home, hostPieceVectorsDefault);
+        const fresh = new VerbatimStore(resolvedPath, this.embeddingProvider, { role, strictFingerprintCheck: this.strictFingerprintCheck ?? false, pieceVectors: pieceVectorsIntent });
         try {
             await fresh.initialize();
         } catch (err) {

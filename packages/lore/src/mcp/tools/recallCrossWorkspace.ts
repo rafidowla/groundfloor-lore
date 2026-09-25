@@ -28,6 +28,7 @@ import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import type { VerbatimStoreApi } from '../../engines/verbatimStoreApi.js';
 import type { DataplaneVectorStore } from '../../engines/dataplaneVectorStore.js';
 import type { ISessionCache } from '../../engines/sessionCache.js';
+import { pieceAwareSearch, resolvePieceRouting, type PieceVectorsMeta } from '../../recall/pieceSeedSearch.js';
 import { listWorkspaceNames } from '../../config/workspaces.js';
 import { curatedTypesFromSchema, rankScore } from '../../recall/ranking.js';
 import { DEFAULT_SCHEMA_V2 } from '../../schemas/types.js';
@@ -40,6 +41,8 @@ import { applyActorScopeFilter } from '../../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../../security/actorContext.js';
 import type { LoreGraphHandle } from '../../storage/loreStorageClient.js';
 import { resolveLiveNodes } from '../../recall/supersessionRecall.js';
+import { applyRerankStageIfEnabled, toSnakeRerankMeta, type RerankMeta } from '../../recall/rerankStage.js';
+import type { RetrievalResult } from '../../recall/retrieveTypes.js';
 
 /**
  * D2-recall-1/2 — Row-level security_scopes enforcement for the cross-workspace
@@ -123,6 +126,18 @@ export interface CrossWorkspaceRecallArgs {
     workspaceVerbatimResolver?: {
         getOrOpen(ws: string): Promise<LoreVerbatim>;
     };
+    /**
+     * D8d — rescore the top hits with a local cross-encoder for tighter
+     * ordering. Default ON. Applied ONCE to the merged, filtered candidate
+     * list (after the tags/types filters, before the token-budget cap) —
+     * never inside the per-workspace fan-out. There is no single workspace
+     * to resolve a workspace-level policy against here (workspace passed as
+     * `undefined` to `resolveRerankConfig`), so the workspace-off
+     * authoritative tier never applies at this call site; precedence
+     * collapses to per-call false (off) > per-call true > host/env >
+     * default on.
+     */
+    rerank?: boolean;
 }
 
 function estimateTokens(node: LoreNode): number {
@@ -135,6 +150,7 @@ export async function runCrossWorkspaceRecall(
     const {
         topic, includeSuperseded, includeArchived, tags, types, registry, verbatimStore,
         sessionCache, responseMode, maxTokens, allowedWorkspaces, workspaceVerbatimResolver,
+        rerank,
     } = args;
     const ecosystemScope = args.ecosystem ?? '*';
     const SUMMARY_MAX_HITS = 10;
@@ -175,6 +191,13 @@ export async function runCrossWorkspaceRecall(
     const perWorkspaceSeeding = !!workspaceVerbatimResolver;
     let seeds: Array<{ id: string; score: number }> = [];
     let verbatimCount = 0;
+    // D7b — `_meta.piece_vectors` for the cross-workspace response (design
+    // 2.5's status enum, surfaced the same way retrieve.ts/recallPreset.ts
+    // do for single-workspace recall). Legacy mode has one shared boot-store
+    // routing decision; per-workspace mode aggregates below (an 'active' from
+    // any fanned-out workspace wins, since that's the workspace that actually
+    // served the query for the row(s) that matched).
+    let pieceVectorsMeta: PieceVectorsMeta | undefined;
     if (!perWorkspaceSeeding) {
         try {
             verbatimCount = await verbatimStore.count();
@@ -187,7 +210,18 @@ export async function runCrossWorkspaceRecall(
                 // of relying solely on the post-merge filter below, which can
                 // only narrow a fixed-size window that may already be
                 // crowded out by off-type rows.
-                const sem = await verbatimStore.search(topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined);
+                //
+                // D7b — piece-vector routing (design 2.5): only when intent is
+                // on AND this store's piece index is 'active' for THIS store;
+                // resolvePieceRouting/pieceAwareSearch mirror the single-
+                // workspace resolveSeedStore() path exactly, structurally
+                // feature-detected (verbatimStore is a LoreVerbatim union
+                // member, not necessarily piece-capable).
+                const pieceRouting = resolvePieceRouting(verbatimStore);
+                pieceVectorsMeta = pieceRouting.meta;
+                const sem = pieceRouting.active
+                    ? await pieceAwareSearch(pieceRouting.capable!, topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined)
+                    : await verbatimStore.search(topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined);
                 seeds = sem.map((r) => ({
                     id: r.id.startsWith('lore:') ? r.id.slice(5) : r.id,
                     score: r.score ?? 0,
@@ -213,7 +247,7 @@ export async function runCrossWorkspaceRecall(
     // own store has content + a readable semantic result.
     let anySemanticConsulted = false;
 
-    interface Candidate { node: LoreNode; workspace: string; score: number; source: string }
+    interface Candidate { node: LoreNode; workspace: string; score: number; source: string; rerankScore?: number }
     const byId = new Map<string, Candidate>();
     const projectsSeen: string[] = [];
 
@@ -226,7 +260,7 @@ export async function runCrossWorkspaceRecall(
     const perWs = await mapWithConcurrency(
         candidateWorkspaces,
         resolveRecallFanoutConcurrency(),
-        async (ws): Promise<{ ws: string; seedNodes: Map<string, LoreNode>; wsSeeds: Array<{ id: string; score: number }>; kwHits: LoreNode[]; scanCapHit: boolean; liveId: Map<string, string> } | null> => {
+        async (ws): Promise<{ ws: string; seedNodes: Map<string, LoreNode>; wsSeeds: Array<{ id: string; score: number }>; kwHits: LoreNode[]; scanCapHit: boolean; liveId: Map<string, string>; pieceMeta: PieceVectorsMeta | undefined } | null> => {
             let wsGraph: LoreGraph;
             try {
                 wsGraph = await registry.getGraphHandle(ws);
@@ -238,6 +272,7 @@ export async function runCrossWorkspaceRecall(
             // workspace's LanceDB surfaces semantically here. A never-embedded /
             // corrupt store degrades to keyword for this workspace (catch → []).
             let wsSeeds: Array<{ id: string; score: number }> = [];
+            let wsPieceMeta: PieceVectorsMeta | undefined;
             if (perWorkspaceSeeding) {
                 try {
                     const store = await workspaceVerbatimResolver!.getOrOpen(ws);
@@ -245,7 +280,16 @@ export async function runCrossWorkspaceRecall(
                         // fix/3.22.1-recall-parity review fix (2) — same
                         // pushdown as the legacy boot-store seed above, per
                         // workspace.
-                        const sem = await store.search(topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined);
+                        //
+                        // D7b — same piece-vector routing as the legacy
+                        // boot-store seed above, evaluated per workspace (this
+                        // workspace's own store may have intent/status this
+                        // one differs from another workspace's).
+                        const wsPieceRouting = resolvePieceRouting(store);
+                        wsPieceMeta = wsPieceRouting.meta;
+                        const sem = wsPieceRouting.active
+                            ? await pieceAwareSearch(wsPieceRouting.capable!, topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined)
+                            : await store.search(topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined);
                         wsSeeds = sem.map((r) => ({
                             id: r.id.startsWith('lore:') ? r.id.slice(5) : r.id,
                             score: r.score ?? 0,
@@ -316,7 +360,7 @@ export async function runCrossWorkspaceRecall(
                 ]);
             const filteredSeedNodes = new Map(resolvedSeedNodes.map((n) => [n.id, n] as const));
             const filteredKwHits = resolvedKwHits;
-            return { ws, seedNodes: filteredSeedNodes, wsSeeds, kwHits: filteredKwHits, scanCapHit: kwSignals.scanCapHit, liveId };
+            return { ws, seedNodes: filteredSeedNodes, wsSeeds, kwHits: filteredKwHits, scanCapHit: kwSignals.scanCapHit, liveId, pieceMeta: wsPieceMeta };
         },
     );
 
@@ -328,6 +372,15 @@ export async function runCrossWorkspaceRecall(
         const { ws, seedNodes, kwHits } = entry;
         if (entry.scanCapHit) anyScanCapHit = true;
         projectsSeen.push(ws);
+        // D7b — an 'active' status from any fanned-out workspace wins (that
+        // workspace's piece index genuinely served this query); otherwise
+        // keep the first non-undefined status seen (intent-on-but-not-yet-
+        // active is still worth surfacing so a caller can see why).
+        if (perWorkspaceSeeding && entry.pieceMeta) {
+            if (!pieceVectorsMeta || pieceVectorsMeta.status !== 'active') {
+                pieceVectorsMeta = entry.pieceMeta;
+            }
+        }
         // P2: in per-workspace mode the semantic seeds are THIS workspace's own
         // seed pass; in legacy mode they are the shared boot-store seeds.
         const wsSeeds = perWorkspaceSeeding ? entry.wsSeeds : seeds;
@@ -402,6 +455,42 @@ export async function runCrossWorkspaceRecall(
         merged = merged.filter((c) => typeSet.has(c.node.type));
     }
 
+    // D8b — optional rerank stage, applied ONCE here to the merged, filtered
+    // list (after sort/tags/types, before the token-budget cap below) — the
+    // per-workspace fan-out above never reranks its own individual results.
+    // `workspace: undefined` — no single workspace exists at this level, so
+    // the workspace-off authoritative tier never applies here;
+    // resolveRerankConfig's precedence collapses to per-call false (off) >
+    // per-call true > host/env > default on.
+    let rerankMeta: RerankMeta | undefined;
+    if (merged.length > 0) {
+        const rerankInput: RetrievalResult[] = merged.map((c) => ({
+            node: c.node,
+            score: c.fs,
+            matchedBy: c.source === 'semantic' ? ['semantic'] : ['keyword'],
+            depth: 0,
+            source: 'seed',
+        }));
+        const { results: rerankedResults, rerankMeta: meta } = await applyRerankStageIfEnabled(rerankInput, topic, rerank, undefined);
+        rerankMeta = meta;
+        if (meta?.applied) {
+            const byNodeId = new Map(merged.map((c) => [c.node.id, c] as const));
+            const reordered: typeof merged = [];
+            for (const r of rerankedResults) {
+                const c = byNodeId.get(r.node.id);
+                if (c) reordered.push({ ...c, rerankScore: r.rerankScore });
+            }
+            // Fail-safe: only adopt the reordered list if every candidate was
+            // found (should always hold — the stage never drops candidates,
+            // only reorders/scores them). Any mismatch leaves `merged`
+            // exactly as it was pre-rerank rather than risking a partial or
+            // corrupted order.
+            if (reordered.length === merged.length) {
+                merged = reordered;
+            }
+        }
+    }
+
     // Feature 3 — token-budget truncation.
     const totalMatched = merged.length;
     let truncated = false;
@@ -442,12 +531,15 @@ export async function runCrossWorkspaceRecall(
             vector_index_consulted: semanticConsulted, // P14 freshness signal
             ...(anyScanCapHit ? { scan_cap_hit: true } : {}),
             ...tokenMeta,
+            ...(pieceVectorsMeta ? { piece_vectors: pieceVectorsMeta } : {}),
             // D1: cross-workspace aggregation merges scores via Math.max across
             // workspaces (a D3-scoped scale-mixing issue, not touched here) and
             // has no single workspace to calibrate against, so it reports
             // "not applicable" rather than a calibrated relevance/abstention
             // verdict. Never abstains.
             ...notApplicableRelevanceMeta('cross_workspace'),
+            // D8b — absent unless rerank actually ran for this call.
+            ...(rerankMeta ? { rerank: toSnakeRerankMeta(rerankMeta) } : {}),
         };
         return {
             content: [{
@@ -476,6 +568,7 @@ export async function runCrossWorkspaceRecall(
                             : null,
                         source: c.source,
                         ...(c.node.stale ? { stale_warning: true } : {}),
+                        ...(c.rerankScore !== undefined ? { rerank_score: c.rerankScore } : {}),
                     })),
                     tip: 'Cross-workspace recall (workspace:"*") merges hits from every entry in workspaces.json. Same id across workspaces is deduped by highest score; the `workspace` field on each hit identifies the physical source.',
                     _meta: meta,
@@ -498,6 +591,9 @@ export async function runCrossWorkspaceRecall(
                 projectsSeen,
                 ...(anyScanCapHit ? { scan_cap_hit: true } : {}),
                 ...tokenMeta,
+                // D8b — absent unless rerank actually ran for this call (full
+                // mode had no `_meta` object at all before this).
+                ...(rerankMeta ? { _meta: { rerank: toSnakeRerankMeta(rerankMeta) } } : {}),
                 knowledge: merged.map((c) => ({
                     id: c.node.id,
                     type: c.node.type,
@@ -509,6 +605,7 @@ export async function runCrossWorkspaceRecall(
                     source: c.source,
                     language: c.node.language ?? null,
                     ...(c.node.stale ? { stale_warning: true } : {}),
+                    ...(c.rerankScore !== undefined ? { rerank_score: c.rerankScore } : {}),
                 })),
             }, null, 2),
         }],

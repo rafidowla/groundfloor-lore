@@ -36,6 +36,7 @@ import {
 import { ensureChangesLogTable, dropChangesLogTable } from './sqliteVerbatimSchema.js';
 import { streamStage, copyTail } from './verbatimPromotionStage.js';
 import { verifyPromotion, type VerifyResult } from './verbatimPromotionVerify.js';
+import { readPieceSidecar } from './pieces/pieceLayout.js';
 
 const DEFAULT_PROMOTE_ROWS = 250_000;
 
@@ -175,6 +176,17 @@ export async function promoteWorkspace(basePath: string, dim: number, opts: Prom
         try {
             const sourceCount = (db.prepare(`SELECT count(*) as c FROM verbatim`).get() as { c: number }).c;
 
+            // D7c (3.23) — capture piece-index state BEFORE any renames
+            // happen. The piece sidecar (piece_layout.json) lives inside
+            // `.lore/lancedb/` right alongside embedding_model.json
+            // (embeddingFingerprint.ts) — the SAME directory
+            // finishCommitRenames' step 1 moves aside as "stale" once this
+            // promotion commits. Reading it now, while it is still in
+            // place, is the only chance to know whether pieces were
+            // built+complete pre-promotion; reading it after commit would
+            // see the new (empty) lancedb dir and always report "absent".
+            const pieceSidecarBefore = opts.dryRun ? null : readPieceSidecar(resolved);
+
             if (opts.dryRun) {
                 return {
                     committed: false, dryRun: true,
@@ -243,6 +255,38 @@ export async function promoteWorkspace(basePath: string, dim: number, opts: Prom
                 db.close(); // release the handle before renaming verbatim.sqlite out from under it
                 finishCommitRenames(resolved, { state: 'committed', startedAt, sourceRows: sourceCount, highWaterRowid, committedAt });
                 clearPromotionState(resolved);
+
+                // D7c (3.23), revised per final review (B2): promotion used
+                // to rebuild the piece index inline here, re-embedding every
+                // node's pieces with the DEFAULT embedder before returning.
+                // That widened the promotion lost-write window from minutes
+                // to hours (SqliteVerbatimStore keeps serving reads/writes
+                // against the just-renamed-away backup file for the whole
+                // rebuild, with no promotion-state write gate of its own),
+                // and used createEmbeddingProvider()'s default args rather
+                // than the workspace's own/host-injected provider, so a
+                // rebuilt sidecar could come out fingerprint-mismatched
+                // (immediately `stale`) on a host with a non-default
+                // embedder. The old sidecar (and, on the Lance engine, the
+                // old piece table) were already swept into the
+                // `.stale-<ts>` aside directory by finishCommitRenames step
+                // 1 above, so the freshly-promoted Lance store simply has no
+                // piece index at all — `pieceIndexStatus` reports
+                // `not_built` and `pieceAwareSearch` falls back to the
+                // canonical vector leg until an operator explicitly rebuilds
+                // it. This keeps the promotion's own commit point exactly
+                // where it always was (finishCommitRenames, above) with
+                // nothing awaited afterward.
+                if (pieceSidecarBefore?.complete) {
+                    // Deliberately no quote marks around not_built / the CLI
+                    // command name below — logger.ts's redactError() hashes
+                    // ANY quoted substring as a possible node-id (S9), which
+                    // would turn this operator-facing hint into unreadable
+                    // id# tags. The workspace path itself still gets scrubbed
+                    // by the same function (it is a /private|/Users|... path),
+                    // consistent with every other log line in this module.
+                    log.warn(`[verbatimPromotion] ${resolved} promoted from SQLite to Lance with a complete piece index in place — the piece index was NOT carried over (pieceIndexStatus is now not_built; recall falls back to canonical vectors until it is rebuilt). Run lore migrate piece-vectors on this workspace to rebuild it.`);
+                }
 
                 return {
                     committed: true, dryRun: false, verify, rowsStaged, tailRowsApplied,
