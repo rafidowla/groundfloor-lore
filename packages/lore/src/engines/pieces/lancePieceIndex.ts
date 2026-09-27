@@ -19,34 +19,35 @@ import * as lancedb from '@lancedb/lancedb';
 import { Schema, Field, FixedSizeList, Float32, Int32, Bool, List, Utf8 } from 'apache-arrow';
 
 import type { EmbeddingProvider } from '../../providers/types.js';
-import { assertSafeLanceId, isRevisionHistoryId, buildLanceFilterConditions } from '../verbatimHistory.js';
+import {
+    assertSafeLanceId, buildLanceFilterConditions, HISTORY_ID_LIKE_PATTERN,
+} from '../verbatimHistory.js';
 import { VERBATIM_CHUNK_SIZE } from '../verbatimBatch.js';
 import { log } from '../../logger.js';
 import { applyActorScopeFilter } from '../../security/scopeFilter.js';
 import {
-    buildPieces, stripLeadingLabel, isPieceSidecarValid, readPieceSidecar,
-    writePieceSidecar, freshPieceSidecar,
+    buildPieceRecords, isPieceSidecarValid, readPieceSidecar,
+    writePieceSidecar, freshPieceSidecar, markPieceSidecarIncomplete,
+    type PieceSourceRow, type BuiltPieceRecord,
 } from './pieceLayout.js';
+import { PendingPieceQueue, type PendingPieceRow } from './pendingPieceQueue.js';
+
+export type { PieceSourceRow } from './pieceLayout.js';
 
 const PIECE_TABLE_NAME = 'lore_verbatim_pieces';
-
-export interface PieceSourceRow {
-    /** Owning node id — canonical `lore_verbatim.id`. */
-    id: string;
-    label?: string;
-    /** Full canonical row text (buildVerbatimText's [label, content,
-     *  tags] join) — this class strips the label prefix itself via
-     *  stripLeadingLabel before windowing. */
-    text: string;
-    type?: string;
-    project?: string;
-    ecosystem?: string;
-    security_scopes?: string[];
-}
 
 export interface PieceSearchHit {
     nodeId: string;
     score: number;
+}
+
+/** One node's prebuilt pieces, shipped from the search-worker parent back to
+ *  the child (3.24.1). `seq` is the PendingPieceQueue sequence the parent
+ *  took the row under. */
+export interface PrebuiltPieceBatchEntry {
+    id: string;
+    seq: number;
+    records: BuiltPieceRecord[];
 }
 
 export interface PieceIndexStatus {
@@ -76,12 +77,19 @@ export class LancePieceIndex {
     private valid = false;
     private invalidReason: string | undefined;
     private warnedStaleOnce = false;
+    /** 3.24.1 — set only in the search-worker child under parent-embeds
+     *  (its provider is a stub): write hooks enqueue here instead of
+     *  building, and the parent builds + ships pieces back. */
+    private readonly deferred: PendingPieceQueue | null;
 
     constructor(
         private readonly basePath: string,
         private readonly lancedbPath: string,
         private readonly embeddingProvider: EmbeddingProvider,
-    ) {}
+        opts?: { deferBuild?: boolean },
+    ) {
+        this.deferred = opts?.deferBuild ? new PendingPieceQueue() : null;
+    }
 
     get isOpen(): boolean {
         return this.valid && this.table !== null;
@@ -134,15 +142,6 @@ export class LancePieceIndex {
         this.invalidReason = undefined;
     }
 
-    private async embedPieceTexts(texts: string[]): Promise<number[][]> {
-        if (typeof this.embeddingProvider.embedDocumentBatch === 'function') {
-            return this.embeddingProvider.embedDocumentBatch(texts);
-        }
-        const out: number[][] = [];
-        for (const t of texts) out.push(await this.embeddingProvider.embedDocument(t));
-        return out;
-    }
-
     /**
      * Rebuild every piece for each row in `rows` (full replace, not merge
      * — the piece count for a node changes between writes as its body
@@ -152,43 +151,123 @@ export class LancePieceIndex {
      * history-row exclusions elsewhere. No-op when the index isn't open
      * (stale/absent sidecar): pieces are only maintained alongside a
      * valid index, never partially, never against a stale one.
+     *
+     * 3.24.1 — never throws from a store write hook: a failure marks the
+     * index incomplete (see markIncomplete) so it reports `not_built`
+     * instead of quietly serving with holes. `throwOnError` is for the
+     * migration CLI only, which owns the sidecar lifecycle itself and
+     * must abort rather than write `complete:true` over a failed batch.
+     * In deferred (worker-child) mode the rows are queued for the parent
+     * instead of built here.
      */
-    async upsertForRows(rows: PieceSourceRow[]): Promise<void> {
+    async upsertForRows(rows: PieceSourceRow[], opts?: { throwOnError?: boolean }): Promise<void> {
         if (!this.valid) return;
-        const liveIds = rows.map((r) => r.id).filter((id) => !isRevisionHistoryId(id));
-        if (liveIds.length === 0) return;
-        const toWrite: Record<string, unknown>[] = [];
-        for (const row of rows) {
-            if (isRevisionHistoryId(row.id)) continue;
-            const body = stripLeadingLabel(row.text, row.label);
-            const { pieces } = await buildPieces(this.embeddingProvider, row.label, body);
-            if (pieces.length === 0) continue;
-            const vectors = await this.embedPieceTexts(pieces.map((p) => p.text));
-            for (let i = 0; i < pieces.length; i++) {
-                toWrite.push({
-                    id: `${row.id}#p${pieces[i].pieceIndex}`,
-                    nodeId: row.id,
-                    pieceIndex: pieces[i].pieceIndex,
-                    isTitle: pieces[i].isTitle,
-                    text: pieces[i].text,
-                    vector: vectors[i],
-                    type: row.type ?? null,
-                    project: row.project ?? null,
-                    ecosystem: row.ecosystem ?? null,
-                    security_scopes: row.security_scopes ?? [],
-                });
-            }
+        if (this.deferred && !opts?.throwOnError) {
+            this.deferred.enqueue(rows);
+            return;
         }
+        try {
+            const { liveIds, records } = await buildPieceRecords(this.embeddingProvider, rows);
+            await this.writeRecords(liveIds, records);
+        } catch (err) {
+            if (opts?.throwOnError) throw err;
+            this.markIncomplete(`piece upsert failed for ${rows.length} row(s): ${(err as Error).message}`);
+        }
+    }
+
+    private async writeRecords(liveIds: string[], records: BuiltPieceRecord[]): Promise<void> {
+        if (liveIds.length === 0) return;
         if (!this.table) return; // valid but no table would be an internal contradiction; guard defensively
-        await this.deleteForIds(liveIds);
-        if (toWrite.length > 0) await this.table.add(toWrite);
+        await this.deleteRows(liveIds);
+        if (records.length > 0) await this.table.add(records as unknown as Record<string, unknown>[]);
+    }
+
+    /** 3.24.1 (worker child) — hand up to `limit` queued rows to the parent
+     *  to build. Empty when not in deferred mode or nothing is queued. */
+    takePending(limit: number): PendingPieceRow[] {
+        if (!this.deferred || !this.valid) return [];
+        return this.deferred.take(limit);
+    }
+
+    /** 3.24.1 (worker child) — persist pieces the parent built. An entry is
+     *  written only if its `seq` is still the latest write for that node
+     *  (see PendingPieceQueue); stale entries are dropped. Returns how many
+     *  nodes were written. */
+    async upsertPrebuilt(batch: PrebuiltPieceBatchEntry[]): Promise<number> {
+        if (!this.valid || !this.deferred) return 0;
+        const accepted = batch.filter((e) => this.deferred!.accept(e.id, e.seq));
+        if (accepted.length === 0) return 0;
+        try {
+            await this.writeRecords(accepted.map((e) => e.id), accepted.flatMap((e) => e.records));
+        } catch (err) {
+            this.markIncomplete(`prebuilt piece upsert failed for ${accepted.length} row(s): ${(err as Error).message}`);
+            return 0;
+        }
+        return accepted.length;
+    }
+
+    /**
+     * 3.24.1 — a piece write failed, so the index no longer covers every
+     * canonical row. Stop serving it (no partial use), persist
+     * `complete:false` so every later open reports `not_built` too, and
+     * `log.error` once per valid→incomplete transition (not once per row).
+     * Recovery is `lore migrate piece-vectors` with the host stopped.
+     */
+    markIncomplete(detail: string): void {
+        const wasValid = this.valid;
+        this.valid = false;
+        this.invalidReason = 'incomplete build';
+        this.deferred?.clear();
+        try {
+            markPieceSidecarIncomplete(this.basePath, this.embeddingProvider);
+        } catch (err) {
+            log.warn(`[LancePieceIndex] could not persist the incomplete marker: ${(err as Error).message}`);
+        }
+        if (wasValid) {
+            log.error(`[LancePieceIndex] piece index marked incomplete — piece search is off until it is rebuilt (stop the host, run \`lore migrate piece-vectors\`, restart): ${detail}`);
+        }
+    }
+
+    /**
+     * 3.24.1 — open-time coverage check for indexes damaged before the
+     * incomplete marker existed (3.24.0 under the search worker left the
+     * table empty behind a valid, complete sidecar). Count-only, no scan of
+     * vectors: every pieced node has exactly one `pieceIndex = 0` row, so
+     * that count is the number of covered nodes. Only when it falls short
+     * of the canonical table's total row count is the (filtered) live-row
+     * count taken — history snapshots, tombstones and empty rows are never
+     * pieced. Fewer covered nodes than live rows → markIncomplete.
+     */
+    async verifyCoverage(canonical: lancedb.Table | null): Promise<void> {
+        if (!this.valid || !this.table || !canonical) return;
+        const covered = await this.table.countRows('pieceIndex = 0');
+        const total = await canonical.countRows();
+        if (covered >= total) return;
+        const live = await canonical.countRows(
+            `id NOT LIKE '${HISTORY_ID_LIKE_PATTERN}' AND text NOT LIKE '[TOMBSTONED%' AND text != ''`,
+        );
+        if (covered < live) {
+            this.markIncomplete(`piece index covers ${covered} of ${live} live node(s)`);
+        }
     }
 
     /** Deletes every piece belonging to each id in `ids` (a node's full
      *  piece set, by `nodeId`, not a single piece row). No-op when the
-     *  index isn't open. */
+     *  index isn't open. 3.24.1 — never throws: a failed delete leaves
+     *  pieces for a node that is gone or changed, so it marks the index
+     *  incomplete like a failed upsert. */
     async deleteForIds(ids: string[]): Promise<void> {
+        this.deferred?.forget(ids);
         if (!this.valid || !this.table || ids.length === 0) return;
+        try {
+            await this.deleteRows(ids);
+        } catch (err) {
+            this.markIncomplete(`piece delete failed for ${ids.length} id(s): ${(err as Error).message}`);
+        }
+    }
+
+    private async deleteRows(ids: string[]): Promise<void> {
+        if (!this.table) return;
         ids.forEach((id) => assertSafeLanceId(id, 'LancePieceIndex.deleteForIds'));
         for (let i = 0; i < ids.length; i += VERBATIM_CHUNK_SIZE) {
             const chunk = ids.slice(i, i + VERBATIM_CHUNK_SIZE);

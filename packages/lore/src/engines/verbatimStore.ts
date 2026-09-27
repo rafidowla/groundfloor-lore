@@ -42,7 +42,8 @@ import type { FtsReconcileCtx } from './verbatimFtsReconcile.js';
 import { makeBm25Envelope } from './verbatimBm25Result.js';
 import type { VerbatimFtsRow, Bm25Envelope } from './verbatimBm25Result.js';
 import { assertWritableRole, shouldOpenWriteTable, shouldBuildReadPool, canSearchWithoutTable, shouldLogWriteRoleFallback, WRITE_ROLE_FALLBACK_LOG_MESSAGE, countHandles, type VerbatimStoreRole } from './verbatimStoreRole.js';
-import { LancePieceIndex, type PieceSourceRow, type PieceSearchHit, type PieceIndexStatus } from './pieces/lancePieceIndex.js';
+import { LancePieceIndex, type PieceSourceRow, type PieceSearchHit, type PieceIndexStatus, type PrebuiltPieceBatchEntry } from './pieces/lancePieceIndex.js';
+import type { PendingPieceRow } from './pieces/pendingPieceQueue.js';
 export type { VerbatimDocument, VerbatimSearchResult };
 
 /** Optional per-call cancellation/deadline for search/searchByVector/
@@ -169,7 +170,7 @@ export class VerbatimStore implements VectorProvider {
      *  LORE_TEST_WORKER_HOOKS=1. See checkGateAborted. */
     private readonly testCounters: Record<string, number> | null =
         process.env.LORE_TEST_WORKER_HOOKS === '1' ? Object.create(null) : null;
-    constructor(basePath: string, embeddingProvider?: EmbeddingProvider, opts?: { role?: VerbatimStoreRole; strictFingerprintCheck?: boolean; pieceVectors?: boolean }) {
+    constructor(basePath: string, embeddingProvider?: EmbeddingProvider, opts?: { role?: VerbatimStoreRole; strictFingerprintCheck?: boolean; pieceVectors?: boolean; deferPieceBuild?: boolean }) {
         this.basePath = basePath; this.role = opts?.role ?? 'both'; this.strictFingerprintCheck = opts?.strictFingerprintCheck ?? false;
         this.pieceVectorsIntent = opts?.pieceVectors ?? false;
         this.lancedbPath = path.join(basePath, '.lore', 'lancedb');
@@ -182,7 +183,11 @@ export class VerbatimStore implements VectorProvider {
         // D7 (3.23) — reuses the same provider instance as the canonical
         // store (never a second LocalEmbeddingProvider) so piece vectors
         // and canonical vectors are always embedded by the same model.
-        this.pieceIndex = new LancePieceIndex(basePath, this.lancedbPath, this.embeddingProvider);
+        // 3.24.1 — `deferPieceBuild` is set only by the search-worker child in
+        // parent-embeds mode, whose provider is a stub that cannot window or
+        // embed: pieces are queued there and built by the parent instead
+        // (see verbatimSearchWorkerProxy.ts's drainPieces).
+        this.pieceIndex = new LancePieceIndex(basePath, this.lancedbPath, this.embeddingProvider, { deferBuild: opts?.deferPieceBuild ?? false });
         this.verbatimSchema = buildVerbatimSchema(this.embeddingProvider.dimension);
         // SP-22: bumped to 500 — 200 could churn with moderately varied filters.
         // Key normalisation (sortedCacheKey) prevents unique-per-call proliferation
@@ -438,6 +443,10 @@ export class VerbatimStore implements VectorProvider {
             try {
                 const canonicalEmpty = !this.table || (await this.table.countRows()) === 0;
                 await this.pieceIndex.initialize({ intentOn: this.pieceVectorsIntent, canonicalIsEmpty: canonicalEmpty });
+                // 3.24.1 — catch an index left empty/partial behind a valid
+                // sidecar (3.24.0 under the search worker), so it reports
+                // not_built instead of active. Count-only.
+                await this.pieceIndex.verifyCoverage(this.table);
             } catch (err) {
                 log.warn(`[VerbatimStore] piece index initialize failed (continuing without piece search): ${(err as Error).message}`);
             }
@@ -614,8 +623,7 @@ export class VerbatimStore implements VectorProvider {
         // D7 (3.23) — best-effort piece maintenance; bulk-loaded rows carry
         // no redaction step upstream (Sprint Z2 skip-embed contract), so
         // pieces are built from the row fields exactly as supplied.
-        await this.pieceIndex.upsertForRows(rows as unknown as PieceSourceRow[])
-            .catch((err: Error) => log.warn(`[VerbatimStore] piece upsert failed for bulkAddPrebuiltRows (non-fatal): ${err.message}`));
+        await this.pieceIndex.upsertForRows(rows as unknown as PieceSourceRow[]);
     }
 
     /**
@@ -635,8 +643,7 @@ export class VerbatimStore implements VectorProvider {
     async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
         assertWritableRole(this.role, 'bulkUpsertPrebuiltRows');
         await this.writeGate.run(() => verbatimBatch.bulkUpsertPrebuiltRows(this.batchCtx, rows));
-        await this.pieceIndex.upsertForRows(rows as unknown as PieceSourceRow[])
-            .catch((err: Error) => log.warn(`[VerbatimStore] piece upsert failed for bulkUpsertPrebuiltRows (non-fatal): ${err.message}`));
+        await this.pieceIndex.upsertForRows(rows as unknown as PieceSourceRow[]);
     }
 
     async ensureVectorIndex(opts: { minRows?: number } = {}): Promise<boolean> {
@@ -1037,7 +1044,7 @@ export class VerbatimStore implements VectorProvider {
             await this.pieceIndex.upsertForRows([{
                 id: row.id, label: row.label, text: row.text, type: row.type,
                 project: row.project, ecosystem: row.ecosystem, security_scopes: row.security_scopes,
-            }]).catch((err: Error) => log.warn(`[VerbatimStore] piece upsert failed for ${row.id} (non-fatal): ${err.message}`));
+            }]);
         } catch (error: any) {
             throw new VerbatimStoreError('store', error.message);
         } finally { this.writeGate.exit(); }
@@ -1287,7 +1294,7 @@ export class VerbatimStore implements VectorProvider {
         await this.pieceIndex.upsertForRows(rows.map((r) => ({
             id: r.id, label: r.label, text: r.text, type: r.type,
             project: r.project, ecosystem: r.ecosystem, security_scopes: r.security_scopes,
-        }))).catch((err: Error) => log.warn(`[VerbatimStore] piece upsert failed for storeBatch (non-fatal): ${err.message}`));
+        })));
         } finally { this.writeGate.exit(); }
     }
 
@@ -1569,7 +1576,7 @@ export class VerbatimStore implements VectorProvider {
             if (!this.initialized || !this.table) return;
             await this.table.delete(`id = '${id.replace(/'/g, "''")}'`);
             this.bumpSearchEpoch();
-            await this.pieceIndex.deleteForIds([id]).catch((err: Error) => log.warn(`[VerbatimStore] piece delete failed for ${id} (non-fatal): ${err.message}`));
+            await this.pieceIndex.deleteForIds([id]);
         } catch (error) {
             throw new VerbatimStoreError('physicalDelete', (error as Error).message);
         } finally { this.writeGate.exit(); }
@@ -1607,7 +1614,7 @@ export class VerbatimStore implements VectorProvider {
                 processed += chunk.length;
             }
             this.bumpSearchEpoch();
-            await this.pieceIndex.deleteForIds(ids).catch((err: Error) => log.warn(`[VerbatimStore] piece delete failed for physicalDeleteMany (non-fatal): ${err.message}`));
+            await this.pieceIndex.deleteForIds(ids);
             return processed;
         } catch (error) {
             throw new VerbatimStoreError('physicalDeleteMany', (error as Error).message);
@@ -1748,7 +1755,7 @@ export class VerbatimStore implements VectorProvider {
             this.bumpSearchEpoch();
             // D7 (3.23) — tombstoned content is excluded from search/bm25Search,
             // so its pieces must also drop out of piece search.
-            await this.pieceIndex.deleteForIds([id]).catch((err: Error) => log.warn(`[VerbatimStore] piece delete failed for tombstone ${id} (non-fatal): ${err.message}`));
+            await this.pieceIndex.deleteForIds([id]);
         } catch (error) {
             // 1.M10 (2026-08-17 audit) — was a bare `catch {}`: every failure
             // (LanceDB IO, embed provider down) was swallowed while callers
@@ -2052,6 +2059,25 @@ export class VerbatimStore implements VectorProvider {
         if (gate?.signal?.aborted) throw toGateAbortError(gate.signal);
         const vector = typeof query === 'string' ? await this.embeddingProvider.embedQuery(query) : query;
         return this.pieceIndex.searchPieces(vector, topK, filter, actorScopes ?? getCurrentActorScopes());
+    }
+
+    /** 3.24.1 (search-worker child, parent-embeds) — rows this store wrote
+     *  whose pieces the parent must build; see PendingPieceQueue. */
+    takePendingPieceRows(limit: number = 64): PendingPieceRow[] {
+        return this.pieceIndex.takePending(limit);
+    }
+
+    /** 3.24.1 (search-worker child, parent-embeds) — persist pieces the
+     *  parent built for rows handed out by takePendingPieceRows. */
+    async upsertPrebuiltPieces(batch: PrebuiltPieceBatchEntry[]): Promise<number> {
+        assertWritableRole(this.role, 'upsertPrebuiltPieces');
+        return this.pieceIndex.upsertPrebuilt(batch);
+    }
+
+    /** 3.24.1 (search-worker child, parent-embeds) — the parent could not
+     *  build pieces it took; mark the index incomplete (not_built). */
+    reportPieceBuildFailure(detail: string): void {
+        this.pieceIndex.markIncomplete(detail);
     }
 
     /** D7 (3.23) — observability/ops hook mirroring LancePieceIndex.status(). */

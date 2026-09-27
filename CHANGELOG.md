@@ -4,6 +4,49 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.24.1] — 2026-09-27
+
+Upgrading from 3.24.0: read [`docs/MIGRATION-3.24.md`](docs/MIGRATION-3.24.md) §0. Hosts that
+run the search worker (`LORE_SEARCH_WORKER=1` or a `searchWorkerPolicy`) with
+piece vectors on need 3.24.1; if they ingested under 3.24.0, stop the host, run
+`lore migrate piece-vectors` once, then restart.
+
+### Fixed
+- **D7 piece vectors never built under the search worker in parent-embeds
+  mode** (since 3.23). The child's stub provider threw on every piece embed;
+  each failure was a per-row `WARN`, writes returned ok, and the piece table
+  stayed empty. The child now queues the rows it actually wrote
+  (`PendingPieceQueue`; a skip-identical re-store queues nothing) and the
+  parent drains them after each write call, builds the pieces with its real
+  provider through the same `buildPieceRecords` helper the in-process path
+  uses, and ships them back (`upsertPrebuiltPieces`, sequence-guarded against
+  a newer write or delete of the same node). Piece-search rankings and scores
+  are identical worker-on vs in-process; an unchanged re-store embeds only its
+  canonical text.
+- **`_meta.piece_vectors` could never be `active` under the search worker.**
+  `pieceStatusOf` read the proxy's forwarded (Promise-returning)
+  `pieceIndexStatus()` synchronously and reported `stale` / `unknown`.
+  `pieceStatusOf` and `resolvePieceRouting` are now async.
+- **String `searchPieces()` queries threw under parent-embeds** (the child's
+  stub `embedQuery`); the proxy now embeds the query in the parent.
+- **Piece-build and piece-delete failures are loud** (Lance and SQLite). The
+  first failure marks the index incomplete (sidecar `complete: false`),
+  `_meta.piece_vectors` reports `not_built` / `incomplete build`, and one
+  `log.error` names the fix (`lore migrate piece-vectors`). Seed search falls
+  back to canonical vectors until the index is rebuilt. `lore migrate
+  piece-vectors` still fails hard on any error.
+- **Open-time coverage check (Lance).** A piece table that covers fewer live
+  nodes than the canonical table behind a valid sidecar — what 3.24.0 left on
+  worker hosts — is marked incomplete at open, so it reports `not_built` and
+  `lore migrate piece-vectors` rebuilds it instead of answering `noop` /
+  "already built".
+- **Search-worker crash between a write and its piece drain is not silent.**
+  The proxy counts writes whose queued rows are not yet drained; if the child
+  exits with any outstanding, the respawn marks the index incomplete (one
+  `log.error`, `not_built`) instead of losing those rows quietly. Queue
+  sequence numbers are seeded from the clock so they stay monotonic across
+  child restarts.
+
 ## [3.24.0] — 2026-09-26
 
 Upgrading from 3.23.x: read [`docs/MIGRATION-3.24.md`](docs/MIGRATION-3.24.md) — re-rank goes back

@@ -262,7 +262,7 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         await this.pieceIndex?.upsertForRows([{
             id: doc.id, label: doc.metadata?.label, text: redactSecrets(doc.text), type: doc.metadata?.type,
             project: doc.metadata?.project, ecosystem: doc.metadata?.ecosystem, security_scopes: doc.metadata?.security_scopes,
-        }]).catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece upsert failed for ${doc.id} (non-fatal): ${err.message}`));
+        }]);
     }
 
     async storeBatch(docs: VerbatimDocument[]): Promise<void> {
@@ -274,7 +274,7 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         await this.pieceIndex?.upsertForRows(docs.map((doc) => ({
             id: doc.id, label: doc.metadata?.label, text: redactSecrets(doc.text), type: doc.metadata?.type,
             project: doc.metadata?.project, ecosystem: doc.metadata?.ecosystem, security_scopes: doc.metadata?.security_scopes,
-        }))).catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece upsert failed for storeBatch (non-fatal): ${err.message}`));
+        })));
     }
 
     async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
@@ -285,8 +285,7 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         // D7 (3.23) — bulk-loaded rows carry no redaction step upstream
         // (matches sqliteVerbatimWrite.ts's bulkAddPrebuiltRows, which does
         // not redact), so pieces are built from the row fields as supplied.
-        await this.pieceIndex?.upsertForRows(rows as unknown as PieceSourceRow[])
-            .catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece upsert failed for bulkAddPrebuiltRows (non-fatal): ${err.message}`));
+        await this.pieceIndex?.upsertForRows(rows as unknown as PieceSourceRow[]);
     }
 
     async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
@@ -294,8 +293,7 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         if (!this.initialized) return;
         sqliteWrite.bulkUpsertPrebuiltRows(this.writeDeps(), rows);
         this.checkPromotion(rows.length);
-        await this.pieceIndex?.upsertForRows(rows as unknown as PieceSourceRow[])
-            .catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece upsert failed for bulkUpsertPrebuiltRows (non-fatal): ${err.message}`));
+        await this.pieceIndex?.upsertForRows(rows as unknown as PieceSourceRow[]);
     }
 
     async delete(id: string): Promise<void> {
@@ -306,14 +304,14 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         assertWritableRole(this.role, 'physicalDelete');
         if (!this.initialized) return;
         sqliteWrite.physicalDelete(this.writeDeps(), id);
-        await this.pieceIndex?.deleteForIds([id]).catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece delete failed for ${id} (non-fatal): ${err.message}`));
+        await this.pieceIndex?.deleteForIds([id]);
     }
 
     async physicalDeleteMany(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'physicalDeleteMany');
         if (!this.initialized) return 0;
         const processed = sqliteWrite.physicalDeleteMany(this.writeDeps(), ids);
-        await this.pieceIndex?.deleteForIds(ids).catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece delete failed for physicalDeleteMany (non-fatal): ${err.message}`));
+        await this.pieceIndex?.deleteForIds(ids);
         return processed;
     }
 
@@ -323,7 +321,7 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         await sqliteWrite.tombstone(this.writeDeps(), id, reason);
         // D7 (3.23) — tombstoned content is excluded from search/bm25Search,
         // so its pieces must also drop out of piece search.
-        await this.pieceIndex?.deleteForIds([id]).catch((err: Error) => log.warn(`[SqliteVerbatimStore] piece delete failed for tombstone ${id} (non-fatal): ${err.message}`));
+        await this.pieceIndex?.deleteForIds([id]);
     }
 
     // ---- vector search -----------------------------------------------------

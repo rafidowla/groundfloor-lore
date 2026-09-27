@@ -49,7 +49,7 @@ export interface PieceIndexLike {
     upsertForRows(rows: Array<{
         id: string; label?: string; text: string; type?: string;
         project?: string; ecosystem?: string; security_scopes?: string[];
-    }>): Promise<void>;
+    }>, opts?: { throwOnError?: boolean }): Promise<void>;
     drop(): Promise<void>;
     /** (Re)create the table fresh+empty and mark the index valid, without
      *  touching the sidecar — see LancePieceIndex.createEmptyForRebuild()'s
@@ -232,7 +232,10 @@ export async function buildPieceIndex(
             // enforcement is unaffected either way.
             security_scopes: [] as string[],
         }));
-        await idx.upsertForRows(batch);
+        // 3.24.1 — write hooks now swallow piece failures (marking the
+        // index incomplete); the rebuild must instead abort loudly, before
+        // it could stamp `complete:true` over a batch that never landed.
+        await idx.upsertForRows(batch, { throwOnError: true });
         nodesRebuilt += batch.length;
     }
 

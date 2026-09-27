@@ -1,4 +1,4 @@
-# Migrating to Lore 3.24.0
+# Migrating to Lore 3.24.x
 
 For embedded hosts (Atlas, MIRA, PM Helper, nirman-tapestry) upgrading from
 3.23.x. Covers the 3.24 "shared local model server" work: re-rank going back
@@ -6,6 +6,46 @@ to opt-in (Part B), the shared embedding cache (Part A), and the shared
 model server process (Part C). See also:
 [`CHANGELOG.md`](../CHANGELOG.md) 3.24.0 entry and
 [`docs/CONFIGURATION.md`](CONFIGURATION.md) — `LORE_RECALL_RERANK*` section.
+
+## 0. 3.24.1 — piece vectors under the search worker
+
+**Who is affected:** hosts that run the search worker
+(`LORE_SEARCH_WORKER=1`, or a `createLore({ searchWorkerPolicy })` that
+returns true) **and** inject their own `embeddingProvider` **and** have piece
+vectors on (`createLore({ pieceVectors: true })`, `LORE_RECALL_PIECE_VECTORS`,
+or a workspace override). Hosts without the worker, or without piece vectors,
+are unaffected — upgrade as usual.
+
+**What was wrong in 3.23 / 3.24.0:** under the worker, the piece index was
+never written. Every write logged a `piece upsert failed … NOT REACHABLE:
+parent embeds` warning and returned ok; `_meta.piece_vectors` reported
+`{ status: 'stale', reason: 'unknown' }`; recall silently used canonical
+vectors only. `lore migrate piece-vectors` answered `noop` / "already built"
+because the sidecar still said the build was complete.
+
+**What to do:**
+
+1. Upgrade worker hosts to **3.24.1**. On 3.24.0 the worker cannot build
+   pieces at all.
+2. If the host ingested anything under 3.23 / 3.24.0 with the worker and
+   piece vectors on, run this once:
+   1. Stop the host.
+   2. Run `lore migrate piece-vectors` with the host's `LORE_HOME` and
+      embedding settings. It should report `Action: built`.
+   3. Restart the host.
+3. Check `_meta.piece_vectors` on a recall: it should read
+   `{ status: 'active', layout: 'pieces-v1' }`.
+
+If you skip step 2, 3.24.1 detects the short index when it opens the store,
+logs one `ERROR` naming the fix, and reports `not_built` / `incomplete build`.
+Recall keeps working on canonical vectors in the meantime.
+
+**New in 3.24.1 for every host with piece vectors on:** a piece build or
+delete that fails (for example, an embedding endpoint error) now marks the
+index incomplete instead of logging a warning and carrying on. You get one
+`ERROR`, `_meta.piece_vectors` reports `not_built`, and piece search stays off
+until `lore migrate piece-vectors` is run. It does not recover by itself
+while the host is running.
 
 ## 1. Re-rank is now opt-in (reverts the 3.23 default)
 

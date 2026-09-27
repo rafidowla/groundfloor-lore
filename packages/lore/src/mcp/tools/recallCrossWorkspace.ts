@@ -223,7 +223,7 @@ export async function runCrossWorkspaceRecall(
                 // workspace resolveSeedStore() path exactly, structurally
                 // feature-detected (verbatimStore is a LoreVerbatim union
                 // member, not necessarily piece-capable).
-                const pieceRouting = resolvePieceRouting(verbatimStore);
+                const pieceRouting = await resolvePieceRouting(verbatimStore);
                 pieceVectorsMeta = pieceRouting.meta;
                 const sem = pieceRouting.active
                     ? await pieceAwareSearch(pieceRouting.capable!, topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined)
@@ -291,7 +291,7 @@ export async function runCrossWorkspaceRecall(
                         // boot-store seed above, evaluated per workspace (this
                         // workspace's own store may have intent/status this
                         // one differs from another workspace's).
-                        const wsPieceRouting = resolvePieceRouting(store);
+                        const wsPieceRouting = await resolvePieceRouting(store);
                         wsPieceMeta = wsPieceRouting.meta;
                         const sem = wsPieceRouting.active
                             ? await pieceAwareSearch(wsPieceRouting.capable!, topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined)

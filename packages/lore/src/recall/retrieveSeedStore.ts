@@ -229,7 +229,7 @@ export async function resolveSeedStore(
         // resolvePieceRouting itself feature-detects `rawStore`, rather than
         // assuming every storageClient exposes the escape hatch.
         const rawStore = typeof sc.rawVerbatim === 'function' ? sc.rawVerbatim() : undefined;
-        const routing = resolvePieceRouting(rawStore);
+        const routing = await resolvePieceRouting(rawStore);
         const pieceStats: PieceSearchStats = { piecesFetched: 0, nodesGrouped: 0 };
         const pooledRun = (q: string) => (lim: number, f: SeedFilter) => sc.verbatimSearch(q, lim, f, undefined, undefined, gate);
         const pieceRun = (q: string) => (lim: number, f: SeedFilter) =>
@@ -266,7 +266,7 @@ export async function resolveSeedStore(
         // D7b — same routing decision as the boot branch above, against the
         // resolved per-workspace store itself (it IS the raw store here,
         // there is no separate wrapper to unwrap).
-        const routing = resolvePieceRouting(store);
+        const routing = await resolvePieceRouting(store);
         const pieceStats: PieceSearchStats = { piecesFetched: 0, nodesGrouped: 0 };
         const pooledRun = (q: string) => (lim: number, f: SeedFilter) => store.search(q, lim, f, undefined, undefined, gate);
         const pieceRun = (q: string) => (lim: number, f: SeedFilter) =>

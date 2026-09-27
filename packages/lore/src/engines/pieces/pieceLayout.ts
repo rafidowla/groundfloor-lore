@@ -23,6 +23,7 @@ import * as path from 'path';
 import type { EmbeddingProvider } from '../../providers/types.js';
 import { embeddingProviderFingerprint } from '../../providers/localEmbeddingProvider.js';
 import { getFingerprintPath } from '../embeddingFingerprint.js';
+import { isRevisionHistoryId } from '../verbatimHistory.js';
 
 export const PIECE_LAYOUT_V1 = {
     layout: 'pieces-v1' as const,
@@ -142,6 +143,87 @@ export async function buildPieces(
     return { pieces, tokenizer };
 }
 
+/** One canonical row to piece — the shape every engine's piece hooks
+ *  hand in (VerbatimStore / SqliteVerbatimStore write paths, the
+ *  migration CLI, and the search-worker parent build). */
+export interface PieceSourceRow {
+    /** Owning node id — canonical `lore_verbatim.id`. */
+    id: string;
+    label?: string;
+    /** Full canonical row text (buildVerbatimText's [label, content,
+     *  tags] join) — the label prefix is stripped via stripLeadingLabel
+     *  before windowing. */
+    text: string;
+    type?: string;
+    project?: string;
+    ecosystem?: string;
+    security_scopes?: string[];
+}
+
+/** A fully built piece row — windowed text plus its vector — ready for an
+ *  engine to persist. Engine-neutral: Lance writes it as-is, SQLite encodes
+ *  the vector/scopes itself. */
+export interface BuiltPieceRecord {
+    id: string; // `${nodeId}#p${pieceIndex}`
+    nodeId: string;
+    pieceIndex: number;
+    isTitle: boolean;
+    text: string;
+    vector: number[];
+    type: string | null;
+    project: string | null;
+    ecosystem: string | null;
+    security_scopes: string[];
+}
+
+async function embedPieceTexts(provider: EmbeddingProvider, texts: string[]): Promise<number[][]> {
+    if (typeof provider.embedDocumentBatch === 'function') return provider.embedDocumentBatch(texts);
+    const out: number[][] = [];
+    for (const t of texts) out.push(await provider.embedDocument(t));
+    return out;
+}
+
+/**
+ * Window + embed every piece for `rows` with `provider`. The ONE build path
+ * for piece rows: the in-process engines call it with their own provider,
+ * and under the search worker (3.24.1) the PARENT calls it with its real
+ * embedder and ships the result to the child, whose stub provider can
+ * neither window nor embed — so worker-on and worker-off produce identical
+ * pieces by construction. `#rev...` history ids are skipped; `liveIds` is
+ * every non-history id in `rows` (including ones that produced no pieces),
+ * i.e. the full set whose existing pieces the caller must replace.
+ */
+export async function buildPieceRecords(
+    provider: EmbeddingProvider,
+    rows: PieceSourceRow[],
+): Promise<{ liveIds: string[]; records: BuiltPieceRecord[] }> {
+    const liveIds: string[] = [];
+    const records: BuiltPieceRecord[] = [];
+    for (const row of rows) {
+        if (isRevisionHistoryId(row.id)) continue;
+        liveIds.push(row.id);
+        const body = stripLeadingLabel(row.text, row.label);
+        const { pieces } = await buildPieces(provider, row.label, body);
+        if (pieces.length === 0) continue;
+        const vectors = await embedPieceTexts(provider, pieces.map((p) => p.text));
+        for (let i = 0; i < pieces.length; i++) {
+            records.push({
+                id: `${row.id}#p${pieces[i].pieceIndex}`,
+                nodeId: row.id,
+                pieceIndex: pieces[i].pieceIndex,
+                isTitle: pieces[i].isTitle,
+                text: pieces[i].text,
+                vector: vectors[i]!,
+                type: row.type ?? null,
+                project: row.project ?? null,
+                ecosystem: row.ecosystem ?? null,
+                security_scopes: row.security_scopes ?? [],
+            });
+        }
+    }
+    return { liveIds, records };
+}
+
 // ---- sidecar -----------------------------------------------------------
 
 export interface PieceSidecar {
@@ -233,4 +315,17 @@ export function freshPieceSidecar(provider: Pick<EmbeddingProvider, 'modelId' | 
         embedding: embeddingProviderFingerprint(provider),
         complete: true,
     };
+}
+
+/**
+ * 3.24.1 — persist "this index is no longer complete" after a piece write
+ * failed. Keeps every other sidecar field (or starts from a fresh one when
+ * none/corrupt), so the index reads back as `not_built` ('incomplete
+ * build') on every later open until `lore migrate piece-vectors` rebuilds
+ * it — the failure survives a restart instead of living only in memory.
+ */
+export function markPieceSidecarIncomplete(basePath: string, provider: Pick<EmbeddingProvider, 'modelId' | 'dtype'>): void {
+    let current: PieceSidecar | null = null;
+    try { current = readPieceSidecar(basePath); } catch { current = null; }
+    writePieceSidecar(basePath, { ...(current ?? freshPieceSidecar(provider, 'model')), complete: false });
 }

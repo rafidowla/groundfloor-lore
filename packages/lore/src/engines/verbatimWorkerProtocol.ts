@@ -72,6 +72,11 @@ export const FORWARDED_METHODS = [
     // D7c — piece-level vector search surface (see header).
     'searchPieces',
     'pieceIndexStatus',
+    // 3.24.1 — parent-built pieces under parent-embeds (the child's stub
+    // provider cannot window/embed; see pendingPieceQueue.ts).
+    'takePendingPieceRows',
+    'upsertPrebuiltPieces',
+    'reportPieceBuildFailure',
 ] as const;
 
 export type ForwardedMethod = (typeof FORWARDED_METHODS)[number];

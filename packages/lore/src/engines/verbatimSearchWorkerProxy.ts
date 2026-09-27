@@ -35,6 +35,9 @@ import { isTestProcess, resolveLoreHome } from '../config/loreHome.js';
 import { log } from '../logger.js';
 import { redactSecrets } from '../security/secretScan.js';
 import { VerbatimStore } from './verbatimStore.js';
+import { buildPieceRecords } from './pieces/pieceLayout.js';
+import type { PrebuiltPieceBatchEntry, PieceSearchHit } from './pieces/lancePieceIndex.js';
+import type { PendingPieceRow } from './pieces/pendingPieceQueue.js';
 import { EmbeddingFingerprintMismatchError, type FingerprintMismatchKind } from './verbatimFingerprintGate.js';
 import {
     forwardableMethods,
@@ -151,6 +154,9 @@ interface Pending {
     method: string;
 }
 
+/** 3.24.1 — rows per takePendingPieceRows round trip in drainPieces. */
+const PIECE_DRAIN_BATCH = 64;
+
 /** Methods with a gate-shaped slot in their VerbatimStore signature. Used to
  *  pull the caller's own `{signal, deadline}` back out of the (already-
  *  positioned) args array so `call()` can (a) reject its own pending promise
@@ -249,6 +255,13 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
     /** Set when the child refused to open on a strict fingerprint mismatch —
      *  deterministic, so the proxy stops respawning and fails every call fast. */
     private fatalInitError: Error | null = null;
+    /** 3.24.1 — serializes parent-side piece builds (see drainPieces). */
+    private pieceDrain: Promise<void> = Promise.resolve();
+    /** 3.24.1 — write calls whose queued piece rows no drain has finished yet. */
+    private pieceWritesUndrained = 0;
+    /** 3.24.1 — the child exited while piece rows may still have been queued
+     *  in it; reported (index → not_built) by the next drain. */
+    private pieceQueueLost = false;
     constructor(
         basePath: string,
         embedOverrides?: Record<string, unknown>,
@@ -286,6 +299,9 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         for (const method of forwardableMethods()) {
             if (method === 'initialize' || method === 'close') continue;
             if (method === 'search' || method === 'store' || method === 'storeBatch') continue;
+            // 3.24.1 — overridden below: the bulk writes drain parent-built
+            // pieces afterwards, and searchPieces embeds a string query here.
+            if (method === 'bulkAddPrebuiltRows' || method === 'bulkUpsertPrebuiltRows' || method === 'searchPieces') continue;
             (this as unknown as Record<string, unknown>)[method] =
                 (...args: unknown[]): Promise<unknown> => this.call(method, args, extractGateOpts(method, args));
         }
@@ -329,7 +345,7 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
             return this.call('store', [row]) as Promise<void>;
         }
         const [prepared] = await this.embedLocally([row]);
-        return this.call('store', [prepared]) as Promise<void>;
+        await this.withPieceDrain(() => this.call('store', [prepared]));
     }
 
     /**
@@ -359,7 +375,110 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         if (!this.parentEmbedder) {
             return this.call('storeBatch', [rows]) as Promise<void>;
         }
-        return this.call('storeBatch', [await this.embedLocally(rows)]) as Promise<void>;
+        const prepared = await this.embedLocally(rows);
+        await this.withPieceDrain(() => this.call('storeBatch', [prepared]));
+    }
+
+    override async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
+        await this.withPieceDrain(() => this.call('bulkAddPrebuiltRows', [rows]));
+    }
+
+    override async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
+        await this.withPieceDrain(() => this.call('bulkUpsertPrebuiltRows', [rows]));
+    }
+
+    /**
+     * 3.24.1 — with a parentEmbedder, a string query is embedded HERE and the
+     * vector forwarded: the child's stub provider throws on embedQuery. A
+     * vector query (the normal recall path) forwards unchanged.
+     */
+    override async searchPieces(
+        query: string | number[],
+        topK: number,
+        filter?: Parameters<VerbatimStore['searchPieces']>[2],
+        actorScopes?: ReadonlyArray<string>,
+        gate?: Parameters<VerbatimStore['searchPieces']>[4],
+    ): Promise<PieceSearchHit[]> {
+        const args: unknown[] = [query, topK, filter, actorScopes, gate];
+        const gateOpts = extractGateOpts('searchPieces', args);
+        if (this.parentEmbedder && typeof query === 'string') {
+            if (gate?.signal?.aborted) throw gate.signal.reason ?? new Error('aborted');
+            args[0] = await this.parentEmbedder.embedQuery(query);
+        }
+        return this.call('searchPieces', args, gateOpts) as Promise<PieceSearchHit[]>;
+    }
+
+    /**
+     * 3.24.1 — build piece vectors in the PARENT for rows the child wrote.
+     *
+     * Under parent-embeds the child's provider is a stub that can neither
+     * window nor embed, so the child queues the rows it actually wrote
+     * (a skip-identical re-store queues nothing — no piece embeds for
+     * unchanged content) and this drains them: take → buildPieceRecords with
+     * the real embedder (the same helper the in-process engines use, so
+     * pieces are identical worker-on or off) → upsertPrebuiltPieces.
+     *
+     * Serialized on one promise chain and awaited by every write, so a write
+     * returns with its pieces in place, as in-process. Never throws: a build
+     * failure is reported to the child, which marks the index incomplete
+     * (not_built + one log.error) rather than serving with holes.
+     */
+    private async withPieceDrain(write: () => Promise<unknown>): Promise<void> {
+        if (!this.parentEmbedder || !this.pieceVectors) {
+            await write();
+            return;
+        }
+        this.pieceWritesUndrained++;
+        try {
+            await write();
+        } finally {
+            await this.drainPieces();
+        }
+    }
+
+    private drainPieces(): Promise<void> {
+        if (!this.parentEmbedder || !this.pieceVectors) return Promise.resolve();
+        const next = this.pieceDrain.then(() => this.drainPiecesOnce());
+        this.pieceDrain = next.catch(() => {});
+        return this.pieceDrain;
+    }
+
+    private async drainPiecesOnce(): Promise<void> {
+        const embedder = this.parentEmbedder!;
+        const owed = this.pieceWritesUndrained;
+        try {
+            if (this.pieceQueueLost) {
+                await this.call('reportPieceBuildFailure', [
+                    'search worker exited before its queued piece rows were built',
+                ]);
+                this.pieceQueueLost = false;
+            }
+            for (;;) {
+                const taken = await this.call('takePendingPieceRows', [PIECE_DRAIN_BATCH]) as PendingPieceRow[];
+                if (!Array.isArray(taken) || taken.length === 0) {
+                    this.pieceWritesUndrained -= owed;
+                    return;
+                }
+                const batch: PrebuiltPieceBatchEntry[] = [];
+                try {
+                    for (const entry of taken) {
+                        const { records } = await buildPieceRecords(embedder, [entry.row]);
+                        batch.push({ id: entry.row.id, seq: entry.seq, records });
+                    }
+                } catch (err) {
+                    await this.call('reportPieceBuildFailure', [
+                        `parent piece build failed for ${taken.length} row(s): ${redactSecrets((err as Error)?.message ?? String(err))}`,
+                    ]);
+                    return;
+                }
+                await this.call('upsertPrebuiltPieces', [batch]);
+            }
+        } catch (err) {
+            // IPC-level failure (child crashed/restarting). Anything still
+            // queued died with the child: onExit set pieceQueueLost, and the
+            // drain it schedules after the respawn reports it (not_built).
+            log.warn(`[search-worker] piece drain failed: ${redactSecrets((err as Error)?.message ?? String(err))}`);
+        }
     }
 
     /**
@@ -502,6 +621,9 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         for (const w of waiters) w.reject(crashErr);
         for (const [, p] of this.pending) { clearTimeout(p.timer); p.reject(crashErr); }
         this.pending.clear();
+        // 3.24.1 — piece rows queued in the dead child (a write returned, or
+        // was in flight, and its drain never finished) are gone.
+        if (this.pieceWritesUndrained > 0) this.pieceQueueLost = true;
 
         if (this.closed || this.fatalInitError) return; // expected shutdown / deterministic refusal — don't respawn
 
@@ -516,7 +638,9 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         }
         // Respawn eagerly so the next call finds a ready worker. The new worker
         // re-runs initialize() → crash-safe index self-heal.
-        void this.ensureChild().catch((err) => {
+        void this.ensureChild().then(() => {
+            if (this.pieceQueueLost) void this.drainPieces();
+        }).catch((err) => {
             log.error(`[VerbatimSearchWorkerProxy] restart failed: ${(err as Error).message}`);
         });
     }

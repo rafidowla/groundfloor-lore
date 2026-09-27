@@ -32,22 +32,14 @@ import type { Database as DatabaseType } from 'better-sqlite3';
 import type { EmbeddingProvider } from '../../providers/types.js';
 import { log } from '../../logger.js';
 import { encodeVector, decodeVector, type RowFilter } from '../sqliteVerbatimVector.js';
-import { isRevisionHistoryId } from '../verbatimHistory.js';
 import { VERBATIM_CHUNK_SIZE } from '../verbatimBatch.js';
 import {
-    buildPieces, stripLeadingLabel, isPieceSidecarValid, readPieceSidecar,
-    writePieceSidecar, freshPieceSidecar,
+    buildPieceRecords, isPieceSidecarValid, readPieceSidecar, writePieceSidecar,
+    freshPieceSidecar, markPieceSidecarIncomplete, type PieceSourceRow,
 } from './pieceLayout.js';
 
-export interface PieceSourceRow {
-    id: string;
-    label?: string;
-    text: string;
-    type?: string;
-    project?: string;
-    ecosystem?: string;
-    security_scopes?: string[];
-}
+export type { PieceSourceRow } from './pieceLayout.js';
+
 
 export interface PieceSearchHit {
     nodeId: string;
@@ -185,60 +177,55 @@ export class SqlitePieceIndex {
         this.invalidReason = undefined;
     }
 
-    private async embedPieceTexts(texts: string[]): Promise<number[][]> {
-        if (typeof this.embeddingProvider.embedDocumentBatch === 'function') {
-            return this.embeddingProvider.embedDocumentBatch(texts);
-        }
-        const out: number[][] = [];
-        for (const t of texts) out.push(await this.embeddingProvider.embedDocument(t));
-        return out;
-    }
-
     /** Full replace per node (delete-then-insert), same rationale as the
      *  Lance engine: piece count changes between writes as a node's body
      *  grows/shrinks, so a stale piece from a previous version must not
      *  survive a mergeInsert-style partial update. `#rev...` ids are
-     *  skipped. No-op when the index isn't open. */
-    async upsertForRows(rows: PieceSourceRow[]): Promise<void> {
+     *  skipped. No-op when the index isn't open. 3.24.1 — same failure
+     *  contract as LancePieceIndex.upsertForRows: never throws from a write
+     *  hook (marks the index incomplete instead); `throwOnError` is for
+     *  the migration CLI only. */
+    async upsertForRows(rows: PieceSourceRow[], opts?: { throwOnError?: boolean }): Promise<void> {
         if (!this.valid) return;
-        const liveIds = rows.map((r) => r.id).filter((id) => !isRevisionHistoryId(id));
-        if (liveIds.length === 0) return;
-        const toWrite: Array<{
-            id: string; nodeId: string; pieceIndex: number; isTitle: number; text: string;
-            vector: Buffer; type: string | null; project: string | null; ecosystem: string | null;
-            security_scopes: string | null;
-        }> = [];
-        for (const row of rows) {
-            if (isRevisionHistoryId(row.id)) continue;
-            const body = stripLeadingLabel(row.text, row.label);
-            const { pieces } = await buildPieces(this.embeddingProvider, row.label, body);
-            if (pieces.length === 0) continue;
-            const vectors = await this.embedPieceTexts(pieces.map((p) => p.text));
-            for (let i = 0; i < pieces.length; i++) {
-                toWrite.push({
-                    id: `${row.id}#p${pieces[i].pieceIndex}`,
-                    nodeId: row.id,
-                    pieceIndex: pieces[i].pieceIndex,
-                    isTitle: pieces[i].isTitle ? 1 : 0,
-                    text: pieces[i].text,
-                    vector: encodeVector(vectors[i]!),
-                    type: row.type ?? null,
-                    project: row.project ?? null,
-                    ecosystem: row.ecosystem ?? null,
-                    security_scopes: row.security_scopes ? JSON.stringify(row.security_scopes) : null,
-                });
-            }
+        try {
+            const { liveIds, records } = await buildPieceRecords(this.embeddingProvider, rows);
+            if (liveIds.length === 0) return;
+            const toWrite = records.map((r) => ({
+                ...r,
+                isTitle: r.isTitle ? 1 : 0,
+                vector: encodeVector(r.vector),
+                security_scopes: JSON.stringify(r.security_scopes),
+            }));
+            const insert = this.db.prepare(
+                `INSERT INTO verbatim_pieces (id, nodeId, pieceIndex, isTitle, text, vector, type, project, ecosystem, security_scopes)
+                 VALUES (@id, @nodeId, @pieceIndex, @isTitle, @text, @vector, @type, @project, @ecosystem, @security_scopes)`,
+            );
+            const replace = this.db.transaction((ids: string[], batch: typeof toWrite) => {
+                this.deleteForIdsSync(ids);
+                for (const row of batch) insert.run(row);
+            });
+            replace(liveIds, toWrite);
+        } catch (err) {
+            if (opts?.throwOnError) throw err;
+            this.markIncomplete(`piece upsert failed for ${rows.length} row(s): ${(err as Error).message}`);
         }
-        this.deleteForIdsSync(liveIds);
-        if (toWrite.length === 0) return;
-        const insert = this.db.prepare(
-            `INSERT INTO verbatim_pieces (id, nodeId, pieceIndex, isTitle, text, vector, type, project, ecosystem, security_scopes)
-             VALUES (@id, @nodeId, @pieceIndex, @isTitle, @text, @vector, @type, @project, @ecosystem, @security_scopes)`,
-        );
-        const insertMany = this.db.transaction((batch: typeof toWrite) => {
-            for (const row of batch) insert.run(row);
-        });
-        insertMany(toWrite);
+    }
+
+    /** 3.24.1 — mirrors LancePieceIndex.markIncomplete: stop serving, persist
+     *  `complete:false` (not_built on every later open), one log.error per
+     *  valid→incomplete transition. */
+    markIncomplete(detail: string): void {
+        const wasValid = this.valid;
+        this.valid = false;
+        this.invalidReason = 'incomplete build';
+        try {
+            markPieceSidecarIncomplete(this.basePath, this.embeddingProvider);
+        } catch (err) {
+            log.warn(`[SqlitePieceIndex] could not persist the incomplete marker: ${(err as Error).message}`);
+        }
+        if (wasValid) {
+            log.error(`[SqlitePieceIndex] piece index marked incomplete — piece search is off until it is rebuilt (stop the host, run \`lore migrate piece-vectors\`, restart): ${detail}`);
+        }
     }
 
     private deleteForIdsSync(ids: string[]): void {
@@ -256,7 +243,11 @@ export class SqlitePieceIndex {
      *  index isn't open. */
     async deleteForIds(ids: string[]): Promise<void> {
         if (!this.valid || ids.length === 0) return;
-        this.deleteForIdsSync(ids);
+        try {
+            this.deleteForIdsSync(ids);
+        } catch (err) {
+            this.markIncomplete(`piece delete failed for ${ids.length} id(s): ${(err as Error).message}`);
+        }
     }
 
     /** Out-of-scope retrieval routing will call this with a resolved query

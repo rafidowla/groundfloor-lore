@@ -32,7 +32,9 @@ export interface PieceSearchCapableStore {
         actorScopes?: ReadonlyArray<string>,
         gate?: { signal?: AbortSignal },
     ): Promise<PieceSearchRow[]>;
-    pieceIndexStatus(): { open: boolean; valid: boolean; reason?: string };
+    /** Sync on the in-process engines; a Promise through the search-worker
+     *  proxy (forwarded over IPC). Always awaited — see pieceStatusOf. */
+    pieceIndexStatus(): { open: boolean; valid: boolean; reason?: string } | Promise<{ open: boolean; valid: boolean; reason?: string }>;
 }
 
 /** Structural — matches ecosystemSeedUnion.ts's `VerbatimSeedHit` exactly
@@ -172,15 +174,18 @@ const NOT_BUILT_REASONS = new Set(['no sidecar', 'incomplete build']);
  *   exists but disagrees with the live layout/embedding fingerprint, or the
  *   table itself went missing out from under a valid sidecar).
  */
-export function pieceStatusOf(
+export async function pieceStatusOf(
     store: PieceSearchCapableStore | null | undefined,
     intentOn: boolean,
-): PieceVectorsMeta {
+): Promise<PieceVectorsMeta> {
     if (!intentOn) return { status: 'off' };
     if (!store || typeof store.searchPieces !== 'function' || typeof store.pieceIndexStatus !== 'function') {
         return { status: 'unsupported' };
     }
-    const raw = store.pieceIndexStatus();
+    // 3.24.1 — awaited: under LORE_SEARCH_WORKER=1 the proxy forwards this
+    // over IPC and returns a Promise. Read synchronously, `raw.open` was
+    // undefined and piece routing could never be active under the worker.
+    const raw = await store.pieceIndexStatus();
     if (raw.open && raw.valid) return { status: 'active', layout: 'pieces-v1' };
     const reason = raw.reason ?? 'unknown';
     return { status: NOT_BUILT_REASONS.has(reason) ? 'not_built' : 'stale', reason };
@@ -212,7 +217,7 @@ export interface PieceRoutingDecision {
  * same way the rest of this codebase narrows a `LoreGraph`/`LoreVerbatim`
  * union without naming a concrete class.
  */
-export function resolvePieceRouting(raw: unknown): PieceRoutingDecision {
+export async function resolvePieceRouting(raw: unknown): Promise<PieceRoutingDecision> {
     const candidate = raw as
         | (Partial<PieceSearchCapableStore> & { pieceVectorsIntentOn?: () => boolean })
         | null
@@ -222,7 +227,7 @@ export function resolvePieceRouting(raw: unknown): PieceRoutingDecision {
         : null;
     const intentOn = !!candidate && typeof candidate.pieceVectorsIntentOn === 'function' && candidate.pieceVectorsIntentOn();
     if (!intentOn) return { active: false, capable: null, meta: undefined };
-    const meta = pieceStatusOf(capableRaw, true);
+    const meta = await pieceStatusOf(capableRaw, true);
     const active = meta.status === 'active';
     return { active, capable: active ? capableRaw : null, meta };
 }

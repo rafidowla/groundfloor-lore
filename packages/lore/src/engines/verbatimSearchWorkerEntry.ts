@@ -176,6 +176,12 @@ async function main(): Promise<void> {
         store = new VerbatimStore(basePath, embeddingProvider, {
             strictFingerprintCheck: process.env[WORKER_ENV.STRICT_FINGERPRINT] === '1',
             pieceVectors: process.env[WORKER_ENV.PIECE_VECTORS] === '1',
+            // 3.24.1 — the stub provider above can neither window nor embed,
+            // so under parent-embeds this store queues piece rows and the
+            // parent builds them (verbatimSearchWorkerProxy.ts drainPieces).
+            // Pre-3.24.1 the store built pieces on the stub: every piece
+            // upsert threw NOT REACHABLE and was swallowed per row.
+            deferPieceBuild: process.env[WORKER_ENV.PARENT_EMBEDS] === '1',
         });
         await store.initialize(); // opens LanceDB + runs the crash-safe self-heal
     } catch (err) {
