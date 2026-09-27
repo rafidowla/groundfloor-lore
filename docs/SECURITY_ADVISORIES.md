@@ -900,6 +900,12 @@ gets the most scrutiny below.
 2. Bump `optionalDependencies.sharp` to `^0.35.3` and test the HEIC
    ingestion path.
 
+**Update 2026-09-26 (3.24.0):** `@huggingface/transformers` ^4.3.0 pulls
+`onnxruntime-node` 1.30.0, which depends on `adm-zip` ^0.6.0 (0.6.1
+installed) — the adm-zip / onnxruntime-node row and its transformers rollup
+are **RESOLVED**. `npm audit` (prod and full) reports 0 vulnerabilities on
+the 3.24.0 lockfile.
+
 ---
 
 ## Enterprise Honesty Posture — TW-6c (2026-06-15)

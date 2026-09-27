@@ -301,6 +301,7 @@ async function dispatchAfterGates(
         dataplane: deps.dataplane,
         graphRegistry: deps.graphRegistry,
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // P2 — non-active recall seeds its own verbatim store.
+        rerankBackend: deps.rerankBackend, // 3.24 Part B
     })) return;
 
     // Sprint Z1 — POST /api/load streaming upload + GET /api/load/jobs/<id>

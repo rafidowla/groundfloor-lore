@@ -68,6 +68,29 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_POOL_ACQUIRE_TIMEOUT_MS',             // Max ms a queued acquire may wait before 503 — default 30000; concurrency
     'LORE_EMBEDDER_CHAR_LIMIT',                 // Override the char cap on text sent to OpenAI-compat embed API; correctness (avoids server-side errors on long inputs)
 
+    // 3.24 D9 shared model server (modelServer/config.ts) — every var here
+    // is read by the model-server process itself; scrubbing one silently
+    // reverts an operator override to the compiled-in default with no
+    // feedback, same failure shape as the rc3 perf vars above.
+    'LORE_MODEL_SERVER_IDLE_EXIT_MS',                // Idle-exit window with no connected clients/in-flight work, ms; default 60000, 0 disables — modelServer/server.ts
+    'LORE_MODEL_SERVER_BOOTSTRAP_TIMEOUT_MS',   // Exit if no client ever connects within this many ms of listen, 0 disables; default 30000 — modelServer/server.ts
+    'LORE_MODEL_SERVER_MAX_CLIENTS',            // Max simultaneous client connections before new ones are refused; default 64 — modelServer/server.ts
+    'LORE_MODEL_SERVER_TEXT_CHAR_LIMIT',        // Per-text char cap enforced on embed/rerank request payloads before dispatch; default 200000 — modelServer/connection.ts
+    'LORE_MODEL_SERVER_LOG_MAX_BYTES',          // Rotation size threshold for model-server.log; default 10000000 — modelServer/log.ts
+    'LORE_MODEL_SERVER_LOG_MAX_FILES',          // Number of rotated model-server.log.N backups kept; default 3 — modelServer/log.ts
+    'LORE_MODEL_SERVER_QUEUE_MAX_PER_CLIENT',   // Per-client embed queue depth cap before returning `busy`; default 256 — modelServer/queue.ts
+    'LORE_MODEL_SERVER_RERANK_MAX_CONCURRENT',  // Concurrent rerank score runs in the shared server; default LORE_RECALL_RERANK_MAX_CONCURRENT if set, else 4 — modelServer/config.ts
+
+    // 3.24 C2a shared model server CLIENT (modelServer/applicability.ts) —
+    // same rationale as the server vars above: scrubbing one silently
+    // reverts to the compiled-in default with no feedback.
+    'LORE_MODEL_SERVER',                        // '0' opts this process out of the shared client entirely (in-process fallback); '1' forces it on even in a test process — modelServer/applicability.ts
+    'LORE_MODEL_SERVER_READY_MS',               // ms budget for one spawn-or-connect attempt; default 10000 — modelServer/applicability.ts
+    'LORE_MODEL_SERVER_RESTARTS',               // Max spawn/reconnect attempts before falling back; default 3 — modelServer/applicability.ts
+    'LORE_MODEL_SERVER_RESTART_BUDGET_MS',      // Total elapsed-time budget across restart attempts before falling back; default 10000 — modelServer/applicability.ts
+    'LORE_MODEL_SERVER_PROBE_MS',               // Interval between recovery probes while in fallback mode; default 60000 — modelServer/applicability.ts
+    'LORE_MODEL_SERVER_CALL_MS',                // Per-embed-call deadline against a live connection; default 120000 — modelServer/applicability.ts
+
     // rc3 security var — shared-secret token for the MCP socket. If
     // scrubbed, mcp/server.ts's getSharedSecret callback returns
     // undefined and the auth check short-circuits to "no token
@@ -235,6 +258,7 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_WORKER_EMBED_DTYPE',                   // search-worker internal: parent embedder's dtype, so the child's stub fingerprints identically (verbatimFingerprintGate.ts)
     'LORE_WORKER_PIECE_VECTORS',                 // search-worker internal: '1' when the parent resolved piece-vectors intent on (D7c) — child must not re-resolve it
     'LORE_WORKER_STRICT_FINGERPRINT',            // search-worker internal: '1' when the parent opened this workspace with strict fingerprint checking (host-injected provider) — child refuses a mismatch instead of warning
+    'LORE_WORKER_MODEL_SERVER',                  // search-worker internal: '0' when the parent host opted out of the shared model server (CreateLoreOptions.modelServer===false) — child's own attachModelServer call must respect the same opt-out
     'LORE_IS_SEARCH_WORKER',                     // search-worker internal: marks a process as a Lore search worker (prevents recursive forking)
     'LORE_SEARCH_WEIGHT_TAGS',                   // search: ranking weight for tags match (default 1)
     'LORE_TEST_WORKER_HOOKS',                    // test-only: '1' exposes __testHold/__testCounters/checkGateDeadline on the search worker (verbatimStore.ts, verbatimWorkerProtocol.ts), never set in production

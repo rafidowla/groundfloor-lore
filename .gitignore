@@ -66,3 +66,4 @@ node_modules
 
 # Local `npm pack` output — never commit release tarballs.
 *.tgz
+.dist-spawn-check-*/

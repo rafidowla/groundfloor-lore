@@ -154,7 +154,7 @@ export class ProviderBatchedEmbedder implements BatchedEmbedder {
         this.provider = provider;
         this.dimension = provider.dimension;
         this.modelId = provider.modelId;
-        this.cap = opts.maxBatchSize ?? inferMaxBatchSize(provider);
+        this.cap = opts.maxBatchSize ?? provider.maxBatchSize ?? LOCAL_XENOVA_MAX_BATCH;
     }
 
     maxBatchSize(): number {
@@ -202,24 +202,6 @@ export class ProviderBatchedEmbedder implements BatchedEmbedder {
         }
         return out;
     }
-}
-
-/**
- * Infer the per-provider default cap from the provider's class name.
- * The provider interface intentionally doesn't expose "what kind of
- * provider am I" — kept narrow. We sniff by constructor name so this
- * stays a small, in-package decision; if an external client uses a custom
- * provider that wants a different cap, it can pass `opts.maxBatchSize`
- * explicitly.
- */
-function inferMaxBatchSize(provider: EmbeddingProvider): number {
-    const name = provider.constructor?.name ?? '';
-    if (name === 'OpenAICompatEmbeddingProvider') return OPENAI_COMPAT_MAX_BATCH;
-    if (name === 'LocalEmbeddingProvider') return LOCAL_XENOVA_MAX_BATCH;
-    // Unknown provider — be conservative. Matches the local cap so
-    // memory pressure stays bounded for the common case (a custom
-    // local provider that wraps a different in-process model).
-    return LOCAL_XENOVA_MAX_BATCH;
 }
 
 /**

@@ -7,16 +7,23 @@
  * `providers/localRerankProvider.ts`'s `rerankModelCached`. Pins:
  *
  *   - When the cross-encoder model is NOT already cached on disk (the
- *     common case for a fresh install/CI box), rerank (default ON as of
- *     D8d) must fail open with `reason:'model_absent'` WITHOUT ever
- *     calling `fetch` — `rerankModelCached()` is a pure filesystem check
- *     that runs BEFORE `@huggingface/transformers` is even imported (see
+ *     common case for a fresh install/CI box), an OPTED-IN rerank (per-call
+ *     `true` — see 3.24 Part B below) must fail open with
+ *     `reason:'model_absent'` WITHOUT ever calling `fetch` —
+ *     `rerankModelCached()` is a pure filesystem check that runs BEFORE
+ *     `@huggingface/transformers` is even imported (see
  *     localRerankProvider.ts's header comment), so there is no network
  *     path to stub around; stubbing `globalThis.fetch` to throw and
  *     counting 0 calls is the proof that no download was attempted.
+ *   - 3.24 Part B (2026-09-25) flipped the no-opinion default to OFF
+ *     (was ON under D8d): a call with no per-call/workspace/env/host
+ *     opinion is now byte-identical to pre-D8 output — same array
+ *     reference, no `rerankMeta` at all. The "model absent -> fail open"
+ *     path above is now exercised via an explicit per-call `true` opt-in
+ *     instead of the no-opinion default.
  *   - D8d: explicit OFF (per-query `false`) must still be byte-identical —
- *     same array reference, no `rerankMeta` at all — since default-on only
- *     changes the NO-OPINION case, not an explicit opt-out.
+ *     same array reference, no `rerankMeta` at all — this was already true
+ *     before 3.24 and is unchanged by it.
  *   - `@huggingface/transformers`'s global `env.cacheDir` /
  *     `env.allowRemoteModels` / `env.localModelPath` are never mutated by
  *     this call — D8 passes `cache_dir`/`local_files_only` PER-CALL to
@@ -140,13 +147,26 @@ await test('too few results: skipped before even the model-cache check runs (few
     }
 });
 
-await test('D8d default-on (no per-call/workspace/env opinion): rerank is ATTEMPTED, model absent -> fail-open meta, zero fetch', async () => {
+await test('3.24 Part B: no per-call/workspace/env opinion -> default OFF, byte-identical output, zero fetch (was default-ON under D8d)', async () => {
     const stub = stubFetchThrows();
     try {
         const results = [result('a'), result('b')];
         const { results: out, rerankMeta } = await applyRerankStageIfEnabled(results, 'q', undefined, undefined);
-        assert.equal(stub.calls, 0, 'default-on with model absent must still never fetch');
-        assert.ok(rerankMeta, 'D8d: default ON means an opinion-less call now reports rerank meta');
+        assert.equal(stub.calls, 0, 'default-off must never fetch');
+        assert.equal(rerankMeta, undefined, '3.24: an opinion-less call now reports no rerank meta at all');
+        assert.equal(out, results, '3.24 default-off returns the exact same array reference');
+    } finally {
+        stub.restore();
+    }
+});
+
+await test('opted in (per-call true), model absent -> fail-open meta, zero fetch', async () => {
+    const stub = stubFetchThrows();
+    try {
+        const results = [result('a'), result('b')];
+        const { results: out, rerankMeta } = await applyRerankStageIfEnabled(results, 'q', true, undefined);
+        assert.equal(stub.calls, 0, 'opted-in with model absent must still never fetch');
+        assert.ok(rerankMeta, 'explicit per-call true must report rerank meta');
         assert.equal(rerankMeta!.applied, false);
         assert.equal(rerankMeta!.reason, 'model_absent');
         assert.deepEqual(out.map((r) => r.node.id), ['a', 'b'], 'fail-open keeps original order');

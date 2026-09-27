@@ -42,6 +42,7 @@ import { getCurrentActorScopes } from '../../security/actorContext.js';
 import type { LoreGraphHandle } from '../../storage/loreStorageClient.js';
 import { resolveLiveNodes } from '../../recall/supersessionRecall.js';
 import { applyRerankStageIfEnabled, toSnakeRerankMeta, type RerankMeta } from '../../recall/rerankStage.js';
+import type { RerankBackend } from '../../recall/rerankBackend.js';
 import type { RetrievalResult } from '../../recall/retrieveTypes.js';
 
 /**
@@ -128,16 +129,21 @@ export interface CrossWorkspaceRecallArgs {
     };
     /**
      * D8d — rescore the top hits with a local cross-encoder for tighter
-     * ordering. Default ON. Applied ONCE to the merged, filtered candidate
+     * ordering. Default OFF (3.24 Part B; opt in per-call, per-workspace,
+     * host default, or env). Applied ONCE to the merged, filtered candidate
      * list (after the tags/types filters, before the token-budget cap) —
      * never inside the per-workspace fan-out. There is no single workspace
      * to resolve a workspace-level policy against here (workspace passed as
      * `undefined` to `resolveRerankConfig`), so the workspace-off
      * authoritative tier never applies at this call site; precedence
      * collapses to per-call false (off) > per-call true > host/env >
-     * default on.
+     * default off.
      */
     rerank?: boolean;
+    /** 3.24 Part B — this Lore instance's `RerankBackend`, threaded through
+     *  to the single `applyRerankStageIfEnabled` call below. Omitted ⇒ that
+     *  call's own default (`localRerankBackend`). */
+    rerankBackend?: RerankBackend;
 }
 
 function estimateTokens(node: LoreNode): number {
@@ -150,7 +156,7 @@ export async function runCrossWorkspaceRecall(
     const {
         topic, includeSuperseded, includeArchived, tags, types, registry, verbatimStore,
         sessionCache, responseMode, maxTokens, allowedWorkspaces, workspaceVerbatimResolver,
-        rerank,
+        rerank, rerankBackend,
     } = args;
     const ecosystemScope = args.ecosystem ?? '*';
     const SUMMARY_MAX_HITS = 10;
@@ -471,7 +477,7 @@ export async function runCrossWorkspaceRecall(
             depth: 0,
             source: 'seed',
         }));
-        const { results: rerankedResults, rerankMeta: meta } = await applyRerankStageIfEnabled(rerankInput, topic, rerank, undefined);
+        const { results: rerankedResults, rerankMeta: meta } = await applyRerankStageIfEnabled(rerankInput, topic, rerank, undefined, rerankBackend);
         rerankMeta = meta;
         if (meta?.applied) {
             const byNodeId = new Map(merged.map((c) => [c.node.id, c] as const));

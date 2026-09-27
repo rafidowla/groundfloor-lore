@@ -33,6 +33,11 @@
  */
 
 import type { EmbeddingProvider } from './types.js';
+// 3.24 Part B — same constant embed/batchedEmbedder.ts used to infer for
+// this class by sniffing its constructor name. batchedEmbedder.ts's only
+// import of this file's sibling (providers/types.ts) is type-only (erased
+// at compile time), so this is not a providers<->embed runtime cycle.
+import { OPENAI_COMPAT_MAX_BATCH } from '../embed/batchedEmbedder.js';
 
 /** OpenAI-compatible /embeddings response body shape. */
 interface EmbeddingsResponse {
@@ -105,6 +110,9 @@ export class OpenAICompatEmbeddingProvider implements EmbeddingProvider {
     public readonly modelId: string;
     public readonly dimension: number;
     public readonly dtype?: string;
+    /** 3.24 Part B — advertised batch cap (embed/batchedEmbedder.ts reads
+     *  this instead of sniffing the class name). */
+    public readonly maxBatchSize: number = OPENAI_COMPAT_MAX_BATCH;
 
     private readonly endpoint: string;
     private readonly headers: Record<string, string>;

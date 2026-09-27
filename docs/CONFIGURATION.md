@@ -31,6 +31,8 @@ to at least one `process.env` read in `packages/lore/src/`.
    - [Ollama](#24-ollama)
    - [Batched embedding tuning](#25-batched-embedding-tuning)
    - [Local / in-process (ONNX)](#26-local--in-process-onnx)
+2a. [Shared Model Server](#2a-shared-model-server)
+2b. [Shared Model Server — Client](#2b-shared-model-server--client)
 3. [Sync / Dataplane](#3-sync--dataplane)
    - [Cloud Arcade (ArcadeDB multi-tenant)](#3a-cloud-arcade-arcadedb-multi-tenant)
 4. [Maintenance (`lore maintain`)](#4-maintenance-lore-maintain)
@@ -657,7 +659,8 @@ calls fast (so a genuinely broken workspace surfaces instead of crash-looping).
 `LORE_WORKER_BASE_PATH`, `LORE_WORKER_EMBED_OVERRIDES`,
 `LORE_WORKER_PARENT_EMBEDS`, `LORE_WORKER_EMBED_DIM`,
 `LORE_WORKER_EMBED_MODEL`, `LORE_WORKER_EMBED_DTYPE`,
-`LORE_WORKER_STRICT_FINGERPRINT`, `LORE_WORKER_PIECE_VECTORS`, and
+`LORE_WORKER_STRICT_FINGERPRINT`, `LORE_WORKER_PIECE_VECTORS`,
+`LORE_WORKER_MODEL_SERVER`, and
 `LORE_IS_SEARCH_WORKER` are **internal**
 — the parent sets them on the child when it forks a worker (workspace path,
 serialized embedding overrides, whether embedding stays in the parent, the
@@ -666,8 +669,11 @@ opened this workspace with strict fingerprint checking — see
 `verbatimFingerprintGate.ts` —, the workspace's already-resolved
 piece-vectors intent (D7c, 3.23 — so the child's own `VerbatimStore`
 construction doesn't have to re-resolve `LORE_RECALL_PIECE_VECTORS` /
-per-workspace overrides itself), and the recursion guard). Do not set them
-yourself.
+per-workspace overrides itself), whether the host opted out of the shared
+model server (D9, 3.24 — `CreateLoreOptions.modelServer === false` mirrored
+into the child so a worker without a `parentEmbedder` respects the same
+opt-out its host's own `attachModelServer` call gets), and the recursion
+guard). Do not set them yourself.
 
 Source: `src/engines/verbatimSearchWorkerProxy.ts`
 
@@ -728,7 +734,7 @@ Source: `src/providers/localEmbeddingProvider.ts`, `src/mcp/services.ts`
 | | |
 |---|---|
 | **Default** | `q8` |
-| **Values** | `q8` (8-bit quantized) \| `fp32` (full precision) |
+| **Values** | `fp32` \| `fp16` \| `q8` (8-bit quantized) \| `q4` |
 | **Surface** | daemon (ONNX runtime) |
 
 Quantization of the in-process ONNX embedding model. `q8` is the default —
@@ -736,9 +742,45 @@ Quantization of the in-process ONNX embedding model. `q8` is the default —
 a full-precision reference embedding is required (e.g. reproducing vectors
 generated elsewhere). Changing this against an existing workspace changes the
 produced vectors, so re-embed (`lore migrate embedding-model`) if you need the
-stored vectors to match.
+stored vectors to match. An unset or blank value silently defaults to `q8`;
+any other value that isn't one of the four above is invalid — it logs a
+warning naming the bad value and falls back to `q8` rather than being passed
+through to the ONNX runtime unchecked.
 
 Source: `src/providers/localEmbeddingProvider.ts`
+
+---
+
+**Shared model cache (D9, Lore 3.24).** The local embedding model resolves
+through the same shared, verified cache design as the re-rank model above
+(`<LORE_HOME>/models/`), via `providers/modelCache.ts`. On first use per
+`modelId`+`dtype`, resolution tries, in order: (1) an already-installed copy
+under the shared cache (a `.complete` marker present); (2) a legacy
+pre-3.24 `@huggingface/transformers` on-disk cache, if one exists, copied
+through a staging directory and verified before being trusted — no network;
+(3) a download into `.staging-<random>`, verified, then atomically renamed
+into place with `.complete` written last. Unlike re-rank, embedding is not
+optional, so a download-verify failure is a hard error (nothing is
+silently skipped) rather than a fail-open no-op. Concurrent callers for the
+same model+dtype (same process or different processes) share one download
+via an `O_EXCL` lock file (`.lock-<hash>`, stale after ~60s). The default
+model+dtype (`Xenova/multilingual-e5-small` @ `q8`) is additionally pinned
+to an exact upstream revision and sha256-verified file-by-file
+(`providers/embedManifest.ts`), identically to the re-rank model's pin +
+verify scheme; a non-default `--model`/`--dtype` has no manifest coverage.
+`lore models prune` always keeps whichever embedding model is currently
+configured (`LORE_LOCAL_EMBEDDING_MODEL` or the default), so a routine
+prune never deletes the model in active use.
+
+To warm the shared cache ahead of time (a convenience, not a prerequisite —
+`embedQuery`/`embedDocument` resolve and download on first use themselves):
+
+```
+lore models fetch-embedding [--model <id>] [--dtype fp32|fp16|q8|q4] [--revision <rev>]
+```
+
+Source: `src/providers/modelCache.ts`, `src/providers/embedManifest.ts`,
+`src/cli/commands/modelsFetchEmbedding.ts`
 
 ---
 
@@ -796,6 +838,284 @@ unloaded regardless of this setting. Call `releaseLocalEmbeddingPipeline()`
 for the idle window.
 
 Source: `src/providers/localEmbeddingProvider.ts`
+
+---
+
+## 2a. Shared Model Server
+
+D9 (3.24) — a single local process (`modelServer/`) that serves in-process
+ONNX embedding and rerank inference over a Unix domain socket to every Lore
+host on the machine, so N hosts sharing a machine share one warm pipeline
+instead of each loading its own. Hosts spawn-or-connect to this process
+(spawn/connect logic is a separate build slice); the vars below configure
+the server process itself. Socket, token and pidfile paths are keyed per
+`(LORE_HOME, protocol version, @huggingface/transformers version,
+onnxruntime-node version)` and are not independently configurable — see
+`src/modelServer/paths.ts`.
+
+#### `LORE_MODEL_SERVER_IDLE_EXIT_MS`
+
+| | |
+|---|---|
+| **Default** | `60000` (60s) |
+| **Surface** | model-server process |
+
+How long the server waits with no connected clients and nothing in flight
+before exiting cleanly. `0` disables idle-exit (the server runs until killed
+or sent a `shutdown` protocol message / SIGTERM). A client reconnecting
+later transparently spawns a fresh server.
+
+Source: `src/modelServer/config.ts`, `src/modelServer/server.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_BOOTSTRAP_TIMEOUT_MS`
+
+| | |
+|---|---|
+| **Default** | `30000` (30s) |
+| **Surface** | model-server process |
+
+If no client ever connects within this many ms of the server starting to
+listen, it exits cleanly rather than idling forever on a spawn that nobody
+followed up on. `0` disables this check.
+
+Source: `src/modelServer/config.ts`, `src/modelServer/server.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_MAX_CLIENTS`
+
+| | |
+|---|---|
+| **Default** | `64` |
+| **Surface** | model-server process |
+
+Maximum simultaneous client connections. A connection beyond this cap is
+refused (destroyed) immediately rather than queued.
+
+Source: `src/modelServer/config.ts`, `src/modelServer/server.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_TEXT_CHAR_LIMIT`
+
+| | |
+|---|---|
+| **Default** | `200000` |
+| **Surface** | model-server process |
+
+Per-text character cap enforced on `embed`/`rerank` request payloads before
+they're dispatched to a provider. A request exceeding this returns a
+`too_large` protocol error and the connection is kept open (only that one
+request is rejected).
+
+Source: `src/modelServer/config.ts`, `src/modelServer/connection.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_LOG_MAX_BYTES`
+
+| | |
+|---|---|
+| **Default** | `10000000` (10MB) |
+| **Surface** | model-server process |
+
+Size threshold that triggers rotation of `<LORE_HOME>/logs/model-server.log`.
+This log never contains query/passage/document text by construction (only
+ids, op names, counts, byte sizes and timings are logged) — see
+`src/modelServer/log.ts`'s header comment.
+
+Source: `src/modelServer/config.ts`, `src/modelServer/log.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_LOG_MAX_FILES`
+
+| | |
+|---|---|
+| **Default** | `3` |
+| **Surface** | model-server process |
+
+Number of rotated `model-server.log.N` backups kept before the oldest is
+dropped.
+
+Source: `src/modelServer/config.ts`, `src/modelServer/log.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_QUEUE_MAX_PER_CLIENT`
+
+| | |
+|---|---|
+| **Default** | `256` |
+| **Surface** | model-server process |
+
+Per-client cap on not-yet-dispatched `embed` requests in the round-robin
+queue (see `src/modelServer/queue.ts`). A client exceeding this gets a
+`busy` protocol error on its next `embed` call rather than an unbounded
+queue backlog. Does not apply to `rerank`, which is never queued — it fails
+fast with `busy` once the server's re-rank cap is reached
+(`LORE_MODEL_SERVER_RERANK_MAX_CONCURRENT` below).
+
+Source: `src/modelServer/config.ts`, `src/modelServer/connection.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_RERANK_MAX_CONCURRENT`
+
+| | |
+|---|---|
+| **Default** | `LORE_RECALL_RERANK_MAX_CONCURRENT` if set, else `4` |
+| **Surface** | model-server process |
+
+Concurrent re-rank score runs inside the shared model server. In-process,
+each host has its own `LORE_RECALL_RERANK_MAX_CONCURRENT` slots (default
+`2`); the server serves every local host from one pool, so it defaults
+higher. A request over the cap fails open immediately with
+`_meta.rerank.reason: 'busy'` (original order). Minimum `1`. Read when the
+server starts, from the environment of the host that spawned it.
+
+Source: `src/modelServer/config.ts`, `src/providers/localRerankProvider.ts`
+
+---
+
+#### CLI: `lore models server status` / `lore models server stop`
+
+```
+lore models server status [--json]
+lore models server stop
+```
+
+`status` connects to this `LORE_HOME`'s server socket and prints pid,
+socket path, protocol version, uptime, connected clients and queue depth;
+if no server is running it prints "not running" and exits `0` (not an
+error — the server is spawned on demand). `--json` prints the same fields
+as JSON instead of the human-readable form.
+
+`stop` sends a `shutdown` protocol message using the server's own auth
+token (same as any client) and waits for it to exit gracefully; it never
+signals the process by pid or pattern, and never `SIGKILL`s. If no server
+is running it exits `0` immediately. If the server doesn't shut down
+gracefully, it exits non-zero and reports why rather than forcing the
+process down.
+
+Source: `src/cli/commands/modelsServer.ts`
+
+---
+
+## 2b. Shared Model Server — Client
+
+D9 (3.24) slice C2a — the client side of §2a: how a Lore host decides
+whether to use the shared model server at all, and how it behaves while
+trying to reach one. Applicability (local mode only, Lore's own local
+embedding/rerank providers, device `cpu` only, off in a test process unless
+overridden — see `src/modelServer/applicability.ts`) is not itself
+env-configurable beyond the on/off switch below; everything else here tunes
+timing once the client has decided to try.
+
+One server per machine-level `LORE_HOME` (env, else `~/.groundfloor`) — the
+same root as the shared `models/` cache. `createLore({ dataDir })` does not
+change which server a host uses, so embedders with different `dataDir`s share
+one server.
+
+#### `LORE_MODEL_SERVER`
+
+| | |
+|---|---|
+| **Default** | unset (auto: on outside a test process, off inside one) |
+| **Surface** | any Lore host process |
+
+Overrides the shared-client on/off decision. `0` opts this process out
+entirely — it always uses its own in-process embedding/rerank providers,
+the same as `createLore({ modelServer: false })`. `1` forces the client on
+even inside a test process, where it is otherwise disabled by default so
+that ordinary test runs never spawn a background server. Ignored (no
+effect) when applicability is already false for another reason (non-local
+mode, a non-default provider, a non-`cpu` device).
+
+Source: `src/modelServer/applicability.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_READY_MS`
+
+| | |
+|---|---|
+| **Default** | `10000` (10s) |
+| **Surface** | any Lore host process |
+
+Total time budget for one spawn-or-connect attempt: probing for an
+already-listening server, and, if none is found, spawning one and polling
+until it accepts connections or this budget runs out.
+
+Source: `src/modelServer/applicability.ts`, `src/modelServer/clientConnection.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_RESTARTS`
+
+| | |
+|---|---|
+| **Default** | `3` |
+| **Surface** | any Lore host process |
+
+Maximum spawn/reconnect attempts within one connect cycle before the client
+gives up and transitions to fallback (in-process) mode. Paired with
+`LORE_MODEL_SERVER_RESTART_BUDGET_MS` below — whichever limit is hit first
+ends the attempt loop, since a fast-failing server could otherwise exhaust
+many attempts well under the time budget.
+
+Source: `src/modelServer/applicability.ts`, `src/modelServer/client.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_RESTART_BUDGET_MS`
+
+| | |
+|---|---|
+| **Default** | `10000` (10s) |
+| **Surface** | any Lore host process |
+
+Total elapsed time across all restart attempts in one connect cycle before
+the client gives up and transitions to fallback mode. See
+`LORE_MODEL_SERVER_RESTARTS` above.
+
+Source: `src/modelServer/applicability.ts`, `src/modelServer/client.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_PROBE_MS`
+
+| | |
+|---|---|
+| **Default** | `60000` (60s) |
+| **Surface** | any Lore host process |
+
+While in fallback mode (shared server unreachable), how often the client
+probes for a recovered server in the background. A successful probe clears
+fallback and logs a recovery warning; probing itself never blocks a caller
+— in-process providers keep serving requests the whole time.
+
+Source: `src/modelServer/applicability.ts`, `src/modelServer/client.ts`
+
+---
+
+#### `LORE_MODEL_SERVER_CALL_MS`
+
+| | |
+|---|---|
+| **Default** | `120000` (2min) |
+| **Surface** | any Lore host process |
+
+Per-call deadline applied to `embed` calls against a live shared-server
+connection. A call that exceeds this is treated as a liveness failure (the
+connection is torn down and a restart/fallback is triggered), not merely a
+slow response. Does not apply to `rerank`, which relies solely on its own
+caller-supplied timeout (`LORE_RECALL_RERANK_TIMEOUT_MS`, §8) so a slow
+rerank fails open without looking like a dead connection.
+
+Source: `src/modelServer/applicability.ts`, `src/modelServer/client.ts`
 
 ---
 
@@ -2286,23 +2606,25 @@ Source: `src/recall/pieceSeedSearch.ts`
 
 | | |
 |---|---|
-| **Default** | **ON** (D8d); model `Xenova/ms-marco-MiniLM-L-6-v2`; `k=10`; `margin=1.0` |
+| **Default** | **OFF** (3.24 Part B — was ON under D8d); model `Xenova/ms-marco-MiniLM-L-6-v2`; `k=10`; `margin=1.0` |
 | **Surface** | daemon + embedded (`recall` MCP tool, `GET /api/recall`, `lore.recall()`, cross-workspace recall) |
 
-D8 local cross-encoder re-rank, **on by default as of D8d**. With no
-opinion anywhere in the precedence chain, retrieve() now attempts a rerank
-on every call. If the model isn't cached yet (the common case until an
+D8 local cross-encoder re-rank, **opt-in as of 3.24 Part B**. With no
+opinion anywhere in the precedence chain, retrieve() output is byte-identical
+to pre-D8 output — no `_meta.rerank`, no `rerank_score`, original order,
+nothing added. Rerank only runs when something below explicitly turns it on.
+When it is turned on and the model isn't cached yet (the common case until an
 operator runs `lore models fetch-rerank`), this fails open exactly like any
 other rerank failure — original order, `_meta.rerank = {applied:false,
-reason:'model_absent', model}` — so a fresh install still behaves correctly,
-just without reordering, until the model is fetched.
+reason:'model_absent', model}`.
 
-**Off switches** (any one of these disables rerank for that scope):
-- Per query: `rerank:false` (MCP `rerank` param / `?rerank=0` — REST's
-  primary, documented form; `?rerank=false`, case-insensitive, is also
-  accepted as an alias — / `RecallOpts.rerank:false`).
-- Per workspace: `lore workspaces set-rerank <name> off`.
-- Process-wide: `LORE_RECALL_RERANK=0` (or `false`/`off`).
+**On switches** (any one of these opts a call into rerank):
+- Per query: `rerank:true` (MCP `rerank` param / `?rerank=1` — REST's
+  primary, documented form; `?rerank=true`, case-insensitive, is also
+  accepted as an alias — / `RecallOpts.rerank:true`).
+- Per workspace: `lore workspaces set-rerank <name> on`.
+- Per host: `createLore({ recallRerank: { enabled: true } })`.
+- Process-wide: `LORE_RECALL_RERANK=1` (or `true`/`on`).
 
 **Precedence (highest to lowest)**:
 1. Per-query `rerank:false` — always wins, unconditionally off.
@@ -2312,22 +2634,24 @@ just without reordering, until the model is fetched.
 3. Per-query `rerank:true` — on (unless #1/#2 above already decided it).
 4. Per-workspace `on` — on.
 5. Host default (`createLore({ recallRerank })` option) — whatever that
-   host configured.
+   host configured. This sits ABOVE the env var: a host that explicitly
+   sets a default wins even if `LORE_RECALL_RERANK` says otherwise.
 6. `LORE_RECALL_RERANK` env var — `1`/`true`/`on` or `0`/`false`/`off`.
-7. **Default: ON** (D8d). No opinion anywhere above means "attempt rerank."
+7. **Default: OFF** (3.24 Part B; was ON under D8d). No opinion anywhere
+   above means "do not attempt rerank" — output matches pre-D8 exactly.
 
 `model`/`k`/`margin`: per-workspace override (`--model`/`--k`/`--margin` on
 `set-rerank`) > matching env var > default. Cross-workspace recall
 (`workspace:'*'`) has no single workspace to consult, so its precedence
-collapses to per-call > host default > env > default-on. `k` is clamped to
+collapses to per-call > host default > env > default-off. `k` is clamped to
 `[2, 20]`.
 
-**Explicit-off is byte-identical to pre-D8 output.** Any of the three off
-switches above (`rerank:false`, workspace off, `LORE_RECALL_RERANK=0`)
-produces the exact same response shape as before rerank existed — no
-`_meta.rerank`, no `rerank_score`, original order, nothing added. Only the
-*default* (no opinion) path now differs from pre-D8d behavior, by attempting
-a rerank and reporting `_meta.rerank` either way (applied or fail-open).
+**Default (no opinion) is byte-identical to pre-D8 output.** With nothing
+set anywhere in the chain, the response shape is exactly what it was before
+rerank existed — no `_meta.rerank`, no `rerank_score`, original order,
+nothing added. Only an explicit opt-in (per-query, workspace, host default,
+or env) makes the response differ from pre-D8d behavior, by attempting a
+rerank and reporting `_meta.rerank` either way (applied or fail-open).
 
 When enabled, retrieve()'s top-K candidates are rescored by a local
 cross-encoder and reordered, protected by a margin gate: the incumbent #1
@@ -2346,7 +2670,7 @@ enum:
 
 | `reason` | Meaning |
 |---|---|
-| `model_absent` | Model not cached under `<LORE_HOME>/models/<modelId>/` (no `.complete` marker) — run `lore models fetch-rerank`. This is the expected reason on a fresh install now that default is ON. |
+| `model_absent` | Model not cached under `<LORE_HOME>/models/<modelId>/` (no `.complete` marker) — run `lore models fetch-rerank`. This is the expected reason when a call opts into rerank on a fresh install before the model is fetched. |
 | `workspace_disabled` | The workspace's `set-rerank` policy is `off` — authoritative, overrides even a per-query `rerank:true`. |
 | `invalid_model` | Configured model id fails the `"org/name"`-shape check (F3). |
 | `integrity_failed` | Cached files exist but don't match the pinned sha256 manifest (default model only, F4) — treated as compromised/corrupt, never trusted. |
@@ -2425,7 +2749,8 @@ model. Full methodology and variant matrix (build-time evidence, not
 shipped): `evidence/d8c/memory-matrix.md`.
 
 Source: `src/recall/rerankConfig.ts`, `src/recall/rerankStage.ts`,
-`src/providers/localRerankProvider.ts`, `src/cli/commands/modelsFetch.ts`
+`src/recall/rerankBackend.ts`, `src/providers/localRerankProvider.ts`,
+`src/cli/commands/modelsFetch.ts`
 
 ---
 
@@ -3394,7 +3719,7 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_RECALL_TERM_COVERAGE_MIN` | `0.1` | Recall |
 | `LORE_RECALL_PIECE_VECTORS` | unset (off) | Recall |
 | `LORE_RECALL_PIECE_FANOUT` | `8` | Recall |
-| `LORE_RECALL_RERANK` | ON | Recall |
+| `LORE_RECALL_RERANK` | OFF (3.24 Part B; was ON under D8d) | Recall |
 | `LORE_RECALL_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Recall |
 | `LORE_RECALL_RERANK_K` | `10` | Recall |
 | `LORE_RECALL_RERANK_MARGIN` | `1.0` | Recall |
@@ -3426,6 +3751,7 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_WORKER_EMBED_DTYPE` | _(internal)_ | Search |
 | `LORE_WORKER_STRICT_FINGERPRINT` | _(internal)_ | Search |
 | `LORE_WORKER_PIECE_VECTORS` | _(internal)_ | Search |
+| `LORE_WORKER_MODEL_SERVER` | _(internal)_ | Search |
 | `LORE_IS_SEARCH_WORKER` | _(internal)_ | Search |
 | `LORE_SEARCH_WEIGHT_TAGS` | `1` | Search |
 | `LORE_LANCE_ADD_COLUMN_SUPPORTED` | `true` | DB Internals |

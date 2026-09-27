@@ -145,7 +145,7 @@ declares both.
 
 ## Q7. Does transformers.js v4 forward `session_options` to onnxruntime-node?
 
-**Yes, in the version Lore ships (`@huggingface/transformers` 4.2.0).**
+**Yes, in the version Lore shipped at the time (`@huggingface/transformers` 4.2.0).** Lore 3.24.0 moves to 4.3.0; the line numbers below are for 4.2.0 and were not re-checked.
 
 - The path, in `dist/transformers.node.mjs`:
   1. `pipeline(task, model, { session_options })` passes it to `from_pretrained`.

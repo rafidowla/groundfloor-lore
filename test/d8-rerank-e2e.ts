@@ -132,14 +132,12 @@ async function main(): Promise<void> {
         }
 
         let baselineIds: string[] = [];
-        await test('step 1: baseline recall (rerank omitted) returns all 4 nodes; D8d default-on attempts rerank, fails open (model not cached), order unchanged', async () => {
+        await test('step 1: baseline recall (rerank omitted) returns all 4 nodes; 3.24 Part B default-off means no rerank attempted at all', async () => {
             const out = await recall({});
             baselineIds = out.hits.map((h: any) => h.id);
             assert.equal(baselineIds.length, 4, `expected all 4 nodes, got ${JSON.stringify(baselineIds)}`);
             assert.deepEqual([...baselineIds].sort(), [...NODE_IDS].sort());
-            assert.ok(out._meta.rerank, 'D8d default-on: opinion-less call now reports rerank meta');
-            assert.equal(out._meta.rerank.applied, false);
-            assert.equal(out._meta.rerank.reason, 'model_absent');
+            assert.equal(out._meta.rerank, undefined, '3.24: default-off means an opinion-less call reports no rerank meta at all (was ON under D8d)');
         });
 
         // The node at original rank 3 (index 2) and rank 1 (index 0) — taken
@@ -186,14 +184,14 @@ async function main(): Promise<void> {
             assert.equal(out._meta.rerank.applied, true);
             assert.equal(out._meta.rerank.gate_held, false);
         });
-        await test('step 4b: REST GET /api/recall, D8d default-on: an omitted ?rerank param still reorders (no opinion means ON now)', async () => {
+        await test('step 4b: REST GET /api/recall, 3.24 Part B default-off: an omitted ?rerank param does NOT reorder (was ON under D8d)', async () => {
             const out = await callRest('');
-            assert.equal(out.hits[0].id, origRank3Id, 'D8d: default-on means the cross-encoder scorer applies here too, even with no ?rerank param');
-            assert.equal(out._meta.rerank.applied, true);
+            assert.deepEqual(out.hits.map((h: any) => h.id), baselineIds, '3.24 default-off: an omitted ?rerank param must keep the real store\'s baseline order');
+            assert.equal(out._meta.rerank, undefined, '3.24 default-off: no meta at all when rerank is omitted');
         });
-        await test('step 4c: REST GET /api/recall?rerank=0 is the explicit off switch — keeps the real store\'s baseline order even with a scorer installed and default-on', async () => {
+        await test('step 4c: REST GET /api/recall?rerank=0 is the explicit off switch — keeps the real store\'s baseline order (redundant with 3.24 default, but must not regress)', async () => {
             const out = await callRest('&rerank=0');
-            assert.deepEqual(out.hits.map((h: any) => h.id), baselineIds, 'explicit rerank=0 must win over default-on');
+            assert.deepEqual(out.hits.map((h: any) => h.id), baselineIds, 'explicit rerank=0 must keep baseline order');
             assert.equal(out._meta.rerank, undefined, 'explicit off is byte-identical-off: no meta at all');
         });
 

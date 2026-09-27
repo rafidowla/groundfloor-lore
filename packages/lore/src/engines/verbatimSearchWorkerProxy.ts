@@ -31,6 +31,7 @@ import { fork, type ChildProcess } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import { isTestProcess, resolveLoreHome } from '../config/loreHome.js';
 import { log } from '../logger.js';
 import { redactSecrets } from '../security/secretScan.js';
 import { VerbatimStore } from './verbatimStore.js';
@@ -206,6 +207,27 @@ function toCallAbortError(signal: AbortSignal): Error {
     return err;
 }
 
+/**
+ * Env that makes the forked child resolve the same Lore home, and the same
+ * shared-model-server eligibility, as this (parent) process.
+ *
+ * `resolveLoreHome()` / `isTestProcess()` key on `process.argv[1]`, and the
+ * child's entry is `verbatimSearchWorkerEntry`, never a `test/` file. So a
+ * worker forked from a test process fell through to the real
+ * `~/.groundfloor` (model cache copy, `run/model-server-*`, `logs/`) and was
+ * eligible for the shared model server there, while its test parent was
+ * isolated in a temp home and ineligible. Pinning `LORE_HOME` to the
+ * parent's resolution is a no-op for production parents (both resolve the
+ * same default); `LORE_MODEL_SERVER=0` mirrors the test-process gate in
+ * `modelServer/applicability.ts`. Explicit caller settings always win.
+ */
+export function inheritedHomeEnv(parentEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const out: NodeJS.ProcessEnv = {};
+    if (!parentEnv['LORE_HOME']) out['LORE_HOME'] = resolveLoreHome();
+    if (isTestProcess() && parentEnv['LORE_MODEL_SERVER'] === undefined) out['LORE_MODEL_SERVER'] = '0';
+    return out;
+}
+
 export class VerbatimSearchWorkerProxy extends VerbatimStore {
     private child: ChildProcess | null = null;
     private ready = false;
@@ -241,6 +263,12 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
          *  spawn() so `searchPieces`/`pieceIndexStatus` calls (which DO need
          *  the child's real LancePieceIndex) open with pieces enabled too. */
         private readonly pieceVectors = false,
+        /** Forwarded to the child as WORKER_ENV.MODEL_SERVER='0' when `false`
+         *  — mirrors the host's own shared-model-server opt-out into the
+         *  no-parentEmbedder child branch (3.24 C3a gap fix). `undefined`
+         *  (default) forwards nothing, deferring to the child's own env/
+         *  eligibility check exactly as before this param existed. */
+        private readonly modelServer: boolean | undefined = undefined,
     ) {
         // Base ctor only sets up paths + a (never-initialized) default provider
         // for schema sizing; it does NOT open LanceDB. We never call
@@ -408,6 +436,8 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         }
         if (this.forwardStrictFingerprint) env[WORKER_ENV.STRICT_FINGERPRINT] = '1';
         if (this.pieceVectors) env[WORKER_ENV.PIECE_VECTORS] = '1';
+        if (this.modelServer === false) env[WORKER_ENV.MODEL_SERVER] = '0';
+        Object.assign(env, inheritedHomeEnv(process.env));
 
         // execArgv defaults to the parent's, so a tsx-loaded parent runs the
         // worker under tsx too (native ABI match); a compiled parent runs .js.

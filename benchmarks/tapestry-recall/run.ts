@@ -25,6 +25,10 @@
  *   C4 hybrid + questions[]/summary/entities/topics at WRITE time
  *   C5 hybrid + queries[] (3 rephrasings) alongside the question at READ time
  *   C6 hybrid + both
+ *   C7 C6 + rerank            (opt-in; needs --rerank-model-dir)
+ *   C8 C6 + piece vectors     (opt-in)
+ *   C9 C6 + both of the above (opt-in; needs --rerank-model-dir)
+ * A run with no --configs runs C1–C6 only (DEFAULT_CONFIG_IDS).
  *
  * For each config: a fresh temp embedded Lore instance, bulkIngest all 415
  * memories (embed sync), then for each of the 295 eval questions call
@@ -37,7 +41,14 @@
  * baseline for C1.
  *
  * Usage:
- *   npx tsx benchmarks/tapestry-recall/run.ts [--configs C1,C2,...] [--limit N] [--out path.json] [--engine surreal-lance|sqlite]
+ *   npx tsx benchmarks/tapestry-recall/run.ts [--configs C1,C2,...] [--limit N] [--out path.json] [--engine surreal-lance|sqlite] [--rerank-model-dir DIR]
+ *
+ * --rerank-model-dir points at a local copy of the default rerank model
+ * (`<cache>/Xenova/ms-marco-MiniLM-L-6-v2`, e.g. from `lore models
+ * fetch-rerank`); it is copied into each fresh bench home's `models/`.
+ * Required by C7/C9 — never fetched here, and never read from the real
+ * `~/.groundfloor`. Every rerank/piece config asserts the feature really
+ * engaged (`_meta.rerank` / `_meta.piece_vectors`) and fails loudly if not.
  *
  * --limit N restricts to the first N questions (smoke-testing only — never
  * use for the numbers that ship in RESULTS.md). --engine selects which
@@ -57,7 +68,7 @@ import { fileURLToPath } from 'node:url';
 import { createBenchLore, SURREAL_LANCE_PROFILE, SQLITE_ONLY_PROFILE, type EngineProfile } from './src/loreHarness.js';
 import { tokenize, jaccard } from './src/tokenize.js';
 import { runReferenceBm25 } from './src/referenceBm25.js';
-import { CONFIGS } from './src/types.js';
+import { CONFIGS, DEFAULT_CONFIG_IDS } from './src/types.js';
 import type { ConfigId, ConfigSpec, Memory, EvalQuestion, AliasEntry, RephrasingEntry } from './src/types.js';
 import type { BulkIngestNodeArgs } from '../../packages/lore/src/mcp/bulkIngest.js';
 import type { LoreInstance } from '../../packages/lore/src/index.js';
@@ -97,8 +108,10 @@ function parseArgs(argv: string[]) {
     if (engineArg !== undefined && engineArg !== 'surreal-lance' && engineArg !== 'sqlite') {
         throw new Error(`--engine must be 'surreal-lance' or 'sqlite', got ${JSON.stringify(engineArg)}`);
     }
+    const rerankModelDir = get('--rerank-model-dir');
     return {
-        configs: (configsArg ? configsArg.split(',') : CONFIGS.map((c) => c.id)) as ConfigId[],
+        rerankModelDir: rerankModelDir ? path.resolve(rerankModelDir) : undefined,
+        configs: (configsArg ? configsArg.split(',') : DEFAULT_CONFIG_IDS) as ConfigId[],
         questionLimit: limitArg ? Number(limitArg) : undefined,
         outFile: get('--out'),
         engineName: (engineArg ?? 'surreal-lance') as 'surreal-lance' | 'sqlite',
@@ -181,8 +194,13 @@ interface Hit {
     id: string;
 }
 
+interface RecallMetaSeen {
+    rerank?: { applied: boolean; gate_held: boolean; reason?: string };
+    piece_vectors?: { status: string; reason?: string };
+}
+
 interface RecallCaller {
-    call(topic: string, extraQueries: string[] | undefined): Promise<Hit[]>;
+    call(topic: string, extraQueries: string[] | undefined): Promise<{ hits: Hit[]; meta: RecallMetaSeen }>;
     teardown(): Promise<void>;
 }
 
@@ -195,7 +213,7 @@ interface RecallCaller {
  * — so C5/C6 no longer need the MCP-tool-in-process workaround this file
  * used to carry.
  */
-function makeDirectCaller(lore: LoreInstance, searchMode: ConfigSpec['searchMode']): RecallCaller {
+function makeDirectCaller(lore: LoreInstance, searchMode: ConfigSpec['searchMode'], rerank: boolean): RecallCaller {
     return {
         async call(topic, extraQueries) {
             const result = await lore.recall(topic, {
@@ -206,15 +224,48 @@ function makeDirectCaller(lore: LoreInstance, searchMode: ConfigSpec['searchMode
                 depth: 0,
                 mode: 'summary',
                 queries: extraQueries,
+                // Only set when the config asks — C1–C6 stay byte-identical.
+                ...(rerank ? { rerank: true } : {}),
             });
             if (result.mode !== 'summary') throw new Error('expected summary mode');
-            return result.hits.map((h) => ({ id: h.id }));
+            return { hits: result.hits.map((h) => ({ id: h.id })), meta: result._meta as RecallMetaSeen };
         },
         async teardown() {},
     };
 }
 
 /* ─── per-config run ────────────────────────────────────────────── */
+
+interface FeatureStats {
+    rerankApplied: number;
+    rerankGateHeld: number;
+    rerankReasons: Record<string, number>;
+    pieceStatus: Record<string, number>;
+}
+
+/** Rerank fail-open reasons that mean the feature never really ran — a
+ *  config reporting them would silently measure C6 under a C7/C9 label. */
+const FATAL_RERANK_REASONS = new Set(['model_absent', 'error', 'invalid_model', 'integrity_failed', 'workspace_disabled']);
+
+function recordFeatures(config: ConfigSpec, meta: RecallMetaSeen, stats: FeatureStats, qid: string): void {
+    if (config.rerank) {
+        const r = meta.rerank;
+        if (!r) throw new Error(`[${config.id}] rerank requested but _meta.rerank absent (qid=${qid})`);
+        if (r.reason && FATAL_RERANK_REASONS.has(r.reason)) {
+            throw new Error(`[${config.id}] rerank did not run: reason=${r.reason} (qid=${qid})`);
+        }
+        if (r.applied) stats.rerankApplied++;
+        if (r.gate_held) stats.rerankGateHeld++;
+        if (r.reason) stats.rerankReasons[r.reason] = (stats.rerankReasons[r.reason] ?? 0) + 1;
+    }
+    if (config.pieceVectors) {
+        const status = meta.piece_vectors?.status ?? 'absent';
+        if (status !== 'active') {
+            throw new Error(`[${config.id}] piece vectors not active: ${JSON.stringify(meta.piece_vectors)} (qid=${qid})`);
+        }
+        stats.pieceStatus[status] = (stats.pieceStatus[status] ?? 0) + 1;
+    }
+}
 
 interface QuestionOutcome {
     qid: string;
@@ -229,6 +280,10 @@ interface ConfigResult {
     searchMode: string;
     useQuestionsAtWrite: boolean;
     useQueriesAtRead: boolean;
+    rerank: boolean;
+    pieceVectors: boolean;
+    /** C7–C9 only: how often each feature actually engaged. */
+    featureStats?: FeatureStats;
     nQuestions: number;
     runtimeMs: number;
     overall: MetricsBlock;
@@ -268,12 +323,19 @@ async function runConfig(
     rephrasingsByQid: Map<string, RephrasingEntry>,
     leakage: LeakageInfo,
     engineProfile: EngineProfile,
+    rerankModelDir: string | undefined,
 ): Promise<ConfigResult> {
+    if (config.rerank && !rerankModelDir) {
+        throw new Error(`[${config.id}] needs --rerank-model-dir (a local <cache>/Xenova/ms-marco-MiniLM-L-6-v2 copy)`);
+    }
     const start = Date.now();
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), `lore-tapestry-bench-${config.id}-`));
     console.log(`[${config.id}] ${config.label} — dataDir=${tmpDir}`);
 
-    const { lore } = await createBenchLore(tmpDir, WORKSPACE, ECOSYSTEM, engineProfile);
+    const { lore } = await createBenchLore(tmpDir, WORKSPACE, ECOSYSTEM, engineProfile, {
+        pieceVectors: config.pieceVectors === true,
+        rerankModelDir: config.rerank ? rerankModelDir : undefined,
+    });
     try {
         const nodes = buildNodes(memories, aliasesById, config.useQuestionsAtWrite);
         const ingestResult = await lore.bulkIngest(nodes, { autolink: false, embed: 'sync' });
@@ -285,13 +347,15 @@ async function runConfig(
         }
         console.log(`[${config.id}] ingested ${ingestResult.succeeded}/${memories.length} memories`);
 
-        const caller: RecallCaller = makeDirectCaller(lore, config.searchMode);
+        const caller: RecallCaller = makeDirectCaller(lore, config.searchMode, config.rerank === true);
+        const stats: FeatureStats = { rerankApplied: 0, rerankGateHeld: 0, rerankReasons: {}, pieceStatus: {} };
 
         const outcomes: QuestionOutcome[] = [];
         try {
             for (const q of questions) {
                 const extraQueries = config.useQueriesAtRead ? rephrasingsByQid.get(q.qid)?.queries : undefined;
-                const hits = await caller.call(q.question, extraQueries);
+                const { hits, meta } = await caller.call(q.question, extraQueries);
+                recordFeatures(config, meta, stats, q.qid);
 
                 // Assert aliases never leak into results as their own ids —
                 // mapAliasHitsToParent (core/questionAliases.ts) should have
@@ -333,6 +397,9 @@ async function runConfig(
             searchMode: config.searchMode,
             useQuestionsAtWrite: config.useQuestionsAtWrite,
             useQueriesAtRead: config.useQueriesAtRead,
+            rerank: config.rerank === true,
+            pieceVectors: config.pieceVectors === true,
+            ...(config.rerank || config.pieceVectors ? { featureStats: stats } : {}),
             nQuestions: outcomes.length,
             runtimeMs: Date.now() - start,
             overall: computeMetrics(outcomes),
@@ -375,8 +442,9 @@ async function main() {
     const selected = CONFIGS.filter((c) => args.configs.includes(c.id));
     const results: ConfigResult[] = [];
     for (const config of selected) {
-        const r = await runConfig(config, memories, questions, aliasesById, rephrasingsByQid, leakage, engineProfile);
+        const r = await runConfig(config, memories, questions, aliasesById, rephrasingsByQid, leakage, engineProfile, args.rerankModelDir);
         results.push(r);
+        if (r.featureStats) console.log(`[${config.id}] features: ${JSON.stringify(r.featureStats)}`);
         console.log(`[${config.id}] done in ${(r.runtimeMs / 1000).toFixed(1)}s — top1=${r.overall.hitAt[1]!.toFixed(3)} top5=${r.overall.hitAt[5]!.toFixed(3)} top10=${r.overall.hitAt[10]!.toFixed(3)}`);
     }
 

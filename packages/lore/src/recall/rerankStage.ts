@@ -9,7 +9,8 @@
  *
  * `applyRerankStageIfEnabled` is the thin wiring layer `retrieve.ts` calls
  * on every query: it resolves config, decides whether rerank applies at
- * all, and supplies the real scorer (a `LocalRerankProvider`) — or the
+ * all, and supplies the real scorer — via the injected `RerankBackend`
+ * (`rerankBackend.ts`; `localRerankBackend` by default) — or the
  * test-injected one via `setRerankScorerForTest` — before delegating to
  * `applyRerankStage`.
  *
@@ -25,13 +26,13 @@
 import type { RetrievalResult } from './retrieveTypes.js';
 import { resolveRerankConfig, type RerankConfig } from './rerankConfig.js';
 import {
-    LocalRerankProvider,
     rerankModelCached,
     RerankBusyError,
     RerankIntegrityError,
     type RerankDtype,
 } from '../providers/localRerankProvider.js';
 import { loreHomePath } from '../config/loreHome.js';
+import { localRerankBackend, type RerankBackend } from './rerankBackend.js';
 
 /** A piece is `label + '\n' + body.slice(at, at+1000)`, at 0, 800, 1600, …
  *  (design §3.4 point 2). */
@@ -289,12 +290,22 @@ export function setRerankScorerForTest(fn: RerankScorer | null): void {
  *     a plain per-call filesystem stat, not memoized across calls, so a
  *     model that appears later (via `lore models fetch-rerank`) is picked
  *     up on the very next query with no cache to invalidate.
+ *
+ * `backend` (3.24 Part B): the `RerankBackend` this Lore instance was
+ * created with (`CreateLoreOptions.rerankBackend`), threaded down from
+ * `retrieve.ts`'s `RetrieveContext`. Defaults to `localRerankBackend` — the
+ * exact `LocalRerankProvider` construction this function used to do inline
+ * — for every existing caller and any host that hasn't opted into a
+ * different backend. Consulted only on the "real scorer" path below; the
+ * `testScorer` short-circuit and the `model_absent` cache check both run
+ * first, unaffected by which backend is selected.
  */
 export async function applyRerankStageIfEnabled(
     results: RetrievalResult[],
     query: string,
     perCallRerank: boolean | undefined,
     workspace: string | undefined,
+    backend: RerankBackend = localRerankBackend,
 ): Promise<{ results: RetrievalResult[]; rerankMeta?: RerankMeta }> {
     const cfg = resolveRerankConfig(perCallRerank, workspace);
     if (!cfg.enabled) {
@@ -321,8 +332,7 @@ export async function applyRerankStageIfEnabled(
         return { results, rerankMeta: failOpenMeta(cfg, 'model_absent', 0) };
     }
 
-    const provider = new LocalRerankProvider({ modelId: cfg.model, dtype: cfg.dtype, cacheDir });
-    const scorer: RerankScorer = (q, passages, signal) => provider.score(q, passages, signal);
+    const scorer = backend.scorer(cfg, cacheDir);
     const { results: newResults, meta } = await applyRerankStage(results, query, cfg, scorer);
     return { results: newResults, rerankMeta: meta };
 }

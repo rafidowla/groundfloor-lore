@@ -21,6 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createLore, type LoreInstance } from '../../../packages/lore/src/index.js';
+import { DEFAULT_RERANK_MODEL } from '../../../packages/lore/src/recall/rerankConfig.js';
 
 export interface BenchLoreHandle {
     lore: LoreInstance;
@@ -54,6 +55,17 @@ export const SURREAL_LANCE_PROFILE: EngineProfile = { graphEngine: 'surreal', ve
 /** What a brand-new local workspace gets by default since 3.21 (step 5a). */
 export const SQLITE_ONLY_PROFILE: EngineProfile = { graphEngine: 'sqlite', vectorEngine: 'sqlite' };
 
+/** Opt-in retrieval features for one bench instance (C7–C9). */
+export interface BenchFeatures {
+    /** Passed straight to `createLore({ pieceVectors })`. */
+    pieceVectors?: boolean;
+    /** Local dir holding the default rerank model's files; copied into
+     *  `<dataDir>/models/<DEFAULT_RERANK_MODEL>` (the cache rerankStage.ts
+     *  reads via LORE_HOME) and marked `.complete`. The source is never
+     *  modified; nothing is fetched. */
+    rerankModelDir?: string;
+}
+
 /** Creates a brand-new isolated embedded Lore instance under `dataDir`
  *  (caller-supplied, must be a fresh temp dir — never the repo, never a
  *  shared path). `engineProfile` defaults to the profile every existing
@@ -63,6 +75,7 @@ export async function createBenchLore(
     workspace: string,
     ecosystem: string,
     engineProfile: EngineProfile = SURREAL_LANCE_PROFILE,
+    features: BenchFeatures = {},
 ): Promise<BenchLoreHandle> {
     const absDataDir = path.resolve(dataDir);
     fs.mkdirSync(path.join(absDataDir, '.lore'), { recursive: true });
@@ -90,6 +103,17 @@ export async function createBenchLore(
     // log leakage otherwise).
     process.env['LORE_HOME'] = absDataDir;
 
-    const lore = await createLore({ deploymentMode: 'embedded', dataDir: absDataDir });
+    if (features.rerankModelDir) {
+        const dest = path.join(absDataDir, 'models', ...DEFAULT_RERANK_MODEL.split('/'));
+        fs.mkdirSync(dest, { recursive: true });
+        fs.cpSync(features.rerankModelDir, dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, '.complete'), '');
+    }
+
+    const lore = await createLore({
+        deploymentMode: 'embedded',
+        dataDir: absDataDir,
+        ...(features.pieceVectors ? { pieceVectors: true } : {}),
+    });
     return { lore, dataDir: absDataDir, workspace, ecosystem };
 }

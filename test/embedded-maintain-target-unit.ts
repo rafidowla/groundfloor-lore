@@ -79,7 +79,11 @@ async function main(): Promise<void> {
     const dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-d3-processhome-'));
     process.env['LORE_HOME'] = dirB;
     // Keep the version horizon short so a freshly written version is eligible.
-    const bEntriesBefore = fs.readdirSync(dirB).sort();
+    // `models/` is the machine-level model cache (D9 Part A, 3.24): it lives in
+    // LORE_HOME by design so every host shares one copy. Anything else
+    // appearing in B is instance data leaking out of A.
+    const bEntries = (): string[] => fs.readdirSync(dirB).filter((e) => e !== 'models').sort();
+    const bEntriesBefore = bEntries();
 
     const lore = await createLore({ deploymentMode: 'embedded', dataDir: dirA });
     try {
@@ -127,8 +131,8 @@ async function main(): Promise<void> {
             );
         });
 
-        await test('the process-wide home B is untouched (no workspaces.json created)', async () => {
-            const after = fs.readdirSync(dirB).sort();
+        await test('the process-wide home B is untouched apart from the shared model cache (no workspaces.json created)', async () => {
+            const after = bEntries();
             assert.deepEqual(after, bEntriesBefore,
                 `B must be untouched; before=${JSON.stringify(bEntriesBefore)} after=${JSON.stringify(after)}`);
         });
@@ -161,8 +165,8 @@ async function main(): Promise<void> {
             );
         });
 
-        await test('after apply, the process-wide home B is still untouched', async () => {
-            const after = fs.readdirSync(dirB).sort();
+        await test('after apply, the process-wide home B is still untouched apart from the shared model cache', async () => {
+            const after = bEntries();
             assert.deepEqual(after, bEntriesBefore,
                 `B must be untouched; before=${JSON.stringify(bEntriesBefore)} after=${JSON.stringify(after)}`);
         });

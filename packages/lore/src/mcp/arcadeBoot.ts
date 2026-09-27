@@ -521,6 +521,8 @@ export async function createArcadeInstance(input: {
         nodeUpsertBatch: () => Promise.reject(new Error('[arcadeBoot] nodeUpsertBatch unsupported in arcade mode')),
         awaitEmbeds: () => Promise.resolve(),
         recall: () => Promise.reject(new Error('[arcadeBoot] recall unsupported in arcade mode')),
+        // 3.24 Part C (C2a) — arcade mode has no local model server (cloud deploymentMode is ineligible anyway; see modelServer/applicability.ts).
+        modelStatus: () => ({ mode: 'in_process', since: 0 }),
         search: () => Promise.reject(new Error('[arcadeBoot] search unsupported in arcade mode')),
         dispose: async () => {
             try { limiter.stopSweeper(); } catch { /* ignore */ }

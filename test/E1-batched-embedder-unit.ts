@@ -72,12 +72,16 @@ class FakeLocalEmbeddingProvider implements EmbeddingProvider {
 
 /**
  * HTTP-style fake mirroring OpenAICompatEmbeddingProvider's shape.
- * Constructor name is what the BatchedEmbedder sniffs to set the
- * cloud-default cap (1000).
+ * 3.24 Part B: BatchedEmbedder no longer sniffs the constructor name —
+ * it reads the provider's own `maxBatchSize` property, so this fake must
+ * declare it explicitly (matching what the real
+ * OpenAICompatEmbeddingProvider now sets) to still get the cloud-default
+ * cap (1000).
  */
 class OpenAICompatEmbeddingProvider implements EmbeddingProvider {
     public readonly dimension = 1024;
     public readonly modelId = 'fake/bge-m3';
+    public readonly maxBatchSize = OPENAI_COMPAT_MAX_BATCH;
     async initialize(): Promise<void> { /* no-op */ }
     async embed(text: string): Promise<number[]> { return this.embedDocument(text); }
     async embedQuery(text: string): Promise<number[]> { return this.embedDocument(text); }
@@ -138,18 +142,33 @@ await it('embedBatch([]) returns []', async () => {
     assert.equal(provider.batchCalls, 0, 'empty input must not call the underlying provider');
 });
 
-await it('maxBatchSize() defaults to 256 for local-style provider', () => {
+await it('maxBatchSize() falls back to the conservative local default when the provider declares no maxBatchSize', () => {
     const provider = new FakeLocalEmbeddingProvider();
-    // FakeLocalEmbeddingProvider's constructor name is not "LocalEmbeddingProvider"
-    // — so we expect the conservative default (LOCAL_XENOVA_MAX_BATCH).
+    // 3.24 Part B: FakeLocalEmbeddingProvider declares no `maxBatchSize`
+    // property — BatchedEmbedder must fall back to LOCAL_XENOVA_MAX_BATCH
+    // rather than sniffing the constructor name.
     const embedder = batchedEmbedderFor(provider);
     assert.equal(embedder.maxBatchSize(), LOCAL_XENOVA_MAX_BATCH);
 });
 
-await it('maxBatchSize() defaults to 1000 for OpenAICompat provider', () => {
+await it('maxBatchSize() reads the provider-declared cap (1000 for OpenAICompat-shaped provider)', () => {
     const provider = new OpenAICompatEmbeddingProvider();
     const embedder = batchedEmbedderFor(provider);
     assert.equal(embedder.maxBatchSize(), OPENAI_COMPAT_MAX_BATCH);
+});
+
+await it('maxBatchSize() honors an arbitrary provider-declared cap (not one of the two known defaults)', () => {
+    class CustomCapProvider implements EmbeddingProvider {
+        public readonly dimension = 8;
+        public readonly modelId = 'fake/custom';
+        public readonly maxBatchSize = 42;
+        async initialize(): Promise<void> { /* no-op */ }
+        async embed(text: string): Promise<number[]> { return this.embedDocument(text); }
+        async embedQuery(text: string): Promise<number[]> { return this.embedDocument(text); }
+        async embedDocument(_text: string): Promise<number[]> { return new Array(this.dimension).fill(0.4); }
+    }
+    const embedder = batchedEmbedderFor(new CustomCapProvider());
+    assert.equal(embedder.maxBatchSize(), 42, 'a provider-declared cap must be honored even when it matches neither known default');
 });
 
 await it('opts.maxBatchSize override is honored (operator memory tuning)', async () => {

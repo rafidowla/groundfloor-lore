@@ -37,6 +37,7 @@ import { runCrossWorkspaceRecall } from '../../tools/recallCrossWorkspace.js';
 import { redactError } from '../../../security/logRedact.js';
 import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
+import type { RerankBackend } from '../../../recall/rerankBackend.js';
 
 /**
  * Read + JSON.parse, with the same error-swallowing semantics the old
@@ -81,6 +82,10 @@ export interface SearchDeps {
     workspaceVerbatimResolver?: {
         getOrOpen(ws: string): Promise<import('../../../engines/verbatimStoreApi.js').VerbatimStoreApi>;
     };
+    /** 3.24 Part B — this Lore instance's `RerankBackend`
+     *  (`CreateLoreOptions.rerankBackend`). Omitted ⇒ the default
+     *  (`localRerankBackend`), matching pre-3.24 behavior. */
+    rerankBackend?: RerankBackend;
 }
 
 export async function trySearchRoutes(
@@ -256,6 +261,7 @@ export async function trySearchRoutes(
                     sessionCache: deps.store.sessionCache, responseMode: 'summary',
                     allowedWorkspaces,
                     workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // P2 — each workspace seeds its own verbatim store.
+                    rerankBackend: deps.rerankBackend, // 3.24 Part B
                 });
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end((xw as { content: Array<{ text: string }> }).content[0]!.text);
@@ -269,7 +275,7 @@ export async function trySearchRoutes(
             // recall, so the three can no longer diverge.
             // P2: thread the per-workspace verbatim resolver so a non-active
             // workspace recall seeds semantic + BM25 against its OWN LanceDB.
-            const recallCtx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver };
+            const recallCtx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver, rerankBackend: deps.rerankBackend };
             let recallOutcome;
             try {
                 recallOutcome = await retrieve(recallCtx, topic, {
@@ -493,7 +499,7 @@ export async function trySearchRoutes(
                 res.end(JSON.stringify({ query, workspace, resultCount: legacy.length, vector_index_consulted: false, ...(legacySignals.scanCapHit ? { scan_cap_hit: true } : {}), ...(searchTags ? { tag_filter: searchTags } : {}), results: projectKeywordNodes(legacy), _meta: notApplicableRelevanceMeta('search:*') }));
                 return true;
             }
-            const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver };
+            const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver, rerankBackend: deps.rerankBackend };
             let outcome;
             try {
                 // `ecosystem` is REQUIRED, exactly as on GET /api/recall above.

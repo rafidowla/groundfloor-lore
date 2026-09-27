@@ -18,6 +18,8 @@
  */
 
 import { createEmbeddingProvider } from '../mcp/services.js';
+import { attachModelServer } from '../modelServer/applicability.js';
+import { resolveLoreHome } from '../config/loreHome.js';
 import { log } from '../logger.js';
 import { VerbatimStore } from './verbatimStore.js';
 import type { VerbatimStoreApi } from './verbatimStoreApi.js';
@@ -134,7 +136,34 @@ async function main(): Promise<void> {
             if (rawOverrides) {
                 try { overrides = JSON.parse(rawOverrides); } catch { overrides = undefined; }
             }
-            embeddingProvider = await createEmbeddingProvider(overrides as never);
+            const built = await createEmbeddingProvider(overrides as never);
+            // 3.24 Part C (C2a) — this child would otherwise load its own full
+            // ONNX model (the ~600MiB/workspace RSS cost the parent-embeds
+            // branch above exists to avoid). When the shared model server is
+            // eligible, swap in a SharedEmbeddingProvider instead so this fork
+            // benefits from the one shared inference process too, instead of
+            // every workspace's search worker loading a redundant local copy.
+            // `deploymentMode: 'local'` is safe unconditionally here — a search
+            // worker is only ever forked when the parent's own deploymentMode
+            // is local (see workspaceVerbatimResolver's cloud-mode gating in
+            // mcp/server.ts, which leaves it `undefined` — and therefore this
+            // proxy/worker pair unused — in cloud mode).
+            // Gap fix (3.24 C3a): mirror the host's own opt-out. Without this,
+            // a host that constructed `createLore({ modelServer: false })` and
+            // whose worker took the no-parentEmbedder branch (no parentEmbedder
+            // configured) would still have this child attach to the shared
+            // server on its own — the opt-out only reached the parent's own
+            // `attachModelServer` call, never this one. '0' means explicitly
+            // disabled; unset defers to env/eligibility exactly as before.
+            const workerModelServerOptOut = process.env[WORKER_ENV.MODEL_SERVER] === '0';
+            embeddingProvider = attachModelServer({
+                loreHome: resolveLoreHome(),
+                deploymentMode: 'local',
+                embeddingProvider: built,
+                injectedEmbeddingProvider: false,
+                modelServer: workerModelServerOptOut ? false : undefined,
+                log,
+            }).embeddingProvider;
         }
         // Strict fingerprint policy (host-injected provider in the parent) is
         // forwarded by the proxy, so the child refuses exactly as in-process would.

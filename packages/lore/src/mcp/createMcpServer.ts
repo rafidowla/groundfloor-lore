@@ -62,6 +62,7 @@ import type { AuxStore } from '../outbox/auxStore.js';
 import type { VersionStore } from '../outbox/versionStore.js';
 import type { OutboxStore } from '../outbox/types.js';
 import type { OutboxLagCache } from '../outbox/lagCache.js';
+import type { RerankBackend } from '../recall/rerankBackend.js';
 
 export interface CreateMcpServerDeps {
     /** Phase 2 unified storage handle. */
@@ -200,6 +201,11 @@ export interface CreateMcpServerDeps {
     versionStore?: VersionStore;
     /** D5 round 2 (#2) — host-level supersession-enforce default. */
     supersessionEnforceDefault?: boolean;
+    /** 3.24 Part B — this Lore instance's `RerankBackend`
+     *  (`CreateLoreOptions.rerankBackend`). Optional; omitted ⇒ every
+     *  search-tools call site falls back to `applyRerankStageIfEnabled`'s
+     *  own default (`localRerankBackend`), matching pre-3.24 behavior. */
+    rerankBackend?: RerankBackend;
 }
 
 export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
@@ -319,6 +325,7 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
         // stable across a session than a route table that changes shape).
         auxStore: deps.auxStore,
         versionStore: deps.versionStore,
+        rerankBackend: deps.rerankBackend, // 3.24 Part B
     });
 
     registerTraverseTool(mcpServer, { store: deps.store, graphRegistry: deps.graphRegistry, detectedScope: deps.detectedScope });

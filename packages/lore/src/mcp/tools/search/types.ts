@@ -9,6 +9,7 @@ import type { StorageBundle } from '../../services.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { AuxStore } from '../../../outbox/auxStore.js';
 import type { VersionStore } from '../../../outbox/versionStore.js';
+import type { RerankBackend } from '../../../recall/rerankBackend.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
 // classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
@@ -46,4 +47,8 @@ export interface SearchToolsDeps {
     /** 3.21 step 3(h) — optional; `recall_outcome` records a version entry
      *  when wired, matching `record_outcome`'s own posture. */
     versionStore?: VersionStore;
+    /** 3.24 Part B — this Lore instance's `RerankBackend`
+     *  (`CreateLoreOptions.rerankBackend`). Omitted ⇒ the default
+     *  (`localRerankBackend`), matching pre-3.24 behavior. */
+    rerankBackend?: RerankBackend;
 }

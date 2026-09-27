@@ -52,7 +52,7 @@ export function registerRecallTool(mcpServer: McpServer, deps: SearchToolsDeps):
             abstain: z.boolean().optional().describe('D1: when true, a topic whose calibrated relevance falls below `relevance_floor` returns zero results with `_meta.abstained: true` instead of low-relevance filler. Default false (off) — calibration/relevance `_meta` fields are always reported regardless of this flag. Ignored on the workspace="*" cross-workspace path.'),
             relevance_floor: z.number().optional().describe('D1: the z-score floor abstention gates on (default 2.0). Only meaningful when `abstain: true`.'),
             max: z.number().int().min(1).max(100).optional().describe('D2 (3.22.1): cap on the number of ranked hits returned (default 10, max 100). Raises the seed/retrieval limit AND the summary-mode display cap together — full, summary and compact modes all honour it. A value above 10 can push the response past the ~2KB summary budget; still governed by `max_tokens` if that is also set. Ignored on the workspace="*" cross-workspace path, which always returns its own fixed cap of 10 summary hits (full mode there is unbounded) regardless of `max`.'),
-            rerank: z.boolean().optional().describe('D8d: rescore the top hits with a local cross-encoder for tighter ordering. Default ON. Per-call false, or a workspace-level off (which is authoritative and wins even over a per-call true), turns it off with output byte-identical to pre-D8. Otherwise: per-call true > workspace on > host/env > default on. Fails open (order unchanged) if the model is not cached.'),
+            rerank: z.boolean().optional().describe('D8d: rescore the top hits with a local cross-encoder for tighter ordering. Default OFF (3.24 Part B). Per-call true, a workspace-level on, a host default, or LORE_RECALL_RERANK turns it on; a workspace-level off is authoritative and wins even over a per-call true. With nothing set, output is byte-identical to pre-D8. Fails open (order unchanged) if the model is not cached.'),
         },
         async ({ topic, depth, queryLanguage, filePaths, mode, crossProject, includeSuperseded, tags, queries, entities, topics, project, types, workspace, ecosystem, max_tokens, include_archived, search_mode, compact, abstain, relevance_floor, max, rerank }) => {
             try {
@@ -106,6 +106,7 @@ export function registerRecallTool(mcpServer: McpServer, deps: SearchToolsDeps):
                             sessionCache: deps.store.sessionCache, responseMode, queryLanguage, maxTokens: max_tokens,
                             allowedWorkspaces,
                             workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // P2 — each workspace seeds its own verbatim store.
+                            rerankBackend: deps.rerankBackend, // 3.24 Part B
                         });
                     }
                 }
@@ -113,7 +114,7 @@ export function registerRecallTool(mcpServer: McpServer, deps: SearchToolsDeps):
                 // Single-workspace — shared retrieve() core + buildRecallResult preset.
                 // P2: thread the per-workspace verbatim resolver so a non-active
                 // workspace recall runs semantic + BM25 against its OWN LanceDB.
-                const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver };
+                const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver, rerankBackend: deps.rerankBackend };
                 let outcome;
                 try {
                     outcome = await retrieve(ctx, topic, {

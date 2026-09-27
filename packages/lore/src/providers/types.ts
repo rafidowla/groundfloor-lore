@@ -534,6 +534,15 @@ export interface EmbeddingProvider {
      */
     readonly dtype?: string;
     /**
+     * 3.24 Part B — optional advertised cap on how many texts this
+     * provider's `embedDocumentBatch` can comfortably accept in one call.
+     * `embed/batchedEmbedder.ts` reads this (falling back to its own
+     * conservative default when omitted) instead of sniffing the
+     * provider's constructor name. A provider that doesn't set this is
+     * still fully usable — it just gets the generic fallback cap.
+     */
+    readonly maxBatchSize?: number;
+    /**
      * Lazy initialization hook. Idempotent; safe to call multiple times.
      * Vector stores call this from their own `initialize()`.
      */

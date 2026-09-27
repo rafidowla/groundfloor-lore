@@ -244,4 +244,10 @@ export const WORKER_ENV = {
      *  checking (host-injected provider): the child's own open then refuses a
      *  fingerprint mismatch instead of warning. */
     STRICT_FINGERPRINT: 'LORE_WORKER_STRICT_FINGERPRINT' as const,
+    /** Set to '0' when the host explicitly opted out of the shared model
+     *  server (`CreateLoreOptions.modelServer === false`) — mirrors that
+     *  decision into the child so its own (no-parentEmbedder) `attachModelServer`
+     *  call respects the same opt-out instead of re-deriving eligibility from
+     *  env alone (D9 §5.6 gap: the child previously never received this). */
+    MODEL_SERVER: 'LORE_WORKER_MODEL_SERVER' as const,
 } as const;

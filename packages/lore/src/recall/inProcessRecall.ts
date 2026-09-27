@@ -20,6 +20,7 @@ import { retrieve, type RetrieveContext } from './retrieve.js';
 import type { LexicalBaseMode } from './candidateWindow.js';
 import { buildRecallResult } from './recallPreset.js';
 import { runCrossWorkspaceRecall } from '../mcp/tools/recallCrossWorkspace.js';
+import type { RerankBackend } from './rerankBackend.js';
 
 // Re-export the canonical RecallResult shape (moved to recallPreset). Importers
 // (server.ts, index.ts) keep importing it from here.
@@ -149,11 +150,11 @@ export interface RecallOpts {
     candidateFloor?: number;
     lexicalBase?: LexicalBaseMode;
     /** D8d — rescore the top hits with a local cross-encoder for tighter
-     *  ordering. Mirrors the `recall` MCP tool's `rerank` param. Default ON.
-     *  Per-call `false`, or a workspace-level off (authoritative — wins even
-     *  over a per-call `true`), turns it off with output byte-identical to
-     *  pre-D8; otherwise per-call true > workspace on > host/env > default
-     *  on — see rerankConfig.ts for the full precedence table. Fails open
+     *  ordering. Mirrors the `recall` MCP tool's `rerank` param. Default OFF
+     *  (3.24 Part B). Per-call `true`, a workspace-level on, a host default,
+     *  or env turns it on; a workspace-level off is authoritative — wins even
+     *  over a per-call `true`. With nothing set, output is byte-identical to
+     *  pre-D8 — see rerankConfig.ts for the full precedence table. Fails open
      *  (order unchanged) if the model is not cached. Threaded into both the
      *  single-workspace and cross-workspace ("*") paths below. */
     rerank?: boolean;
@@ -182,6 +183,10 @@ export interface InProcessRecallDeps {
     workspaceVerbatimResolver?: {
         getOrOpen(ws: string): Promise<import('../engines/verbatimStoreApi.js').VerbatimStoreApi>;
     };
+    /** 3.24 Part B — this Lore instance's `RerankBackend`
+     *  (`CreateLoreOptions.rerankBackend`). Omitted ⇒ the default
+     *  (`localRerankBackend`), matching pre-3.24 behavior. */
+    rerankBackend?: RerankBackend;
 }
 
 /* ─── Implementation ───────────────────────────────────────────── */
@@ -256,6 +261,7 @@ async function inProcessRecallCore(
             sessionCache: deps.store.sessionCache,
             responseMode: mode, queryLanguage, maxTokens,
             workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // P2 — each workspace seeds its own verbatim store.
+            rerankBackend: deps.rerankBackend, // 3.24 Part B
         });
         return JSON.parse((mcpResult as { content: Array<{ text: string }> }).content[0]!.text) as RecallResult;
     }
@@ -263,7 +269,7 @@ async function inProcessRecallCore(
     // Single-workspace path — shared retrieve() core + buildRecallResult preset.
     // P2: thread the per-workspace verbatim resolver so a non-active workspace
     // recall seeds semantic + BM25 against its OWN verbatim store.
-    const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver };
+    const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver, rerankBackend: deps.rerankBackend };
     let outcome;
     try {
         outcome = await retrieve(ctx, topic, {

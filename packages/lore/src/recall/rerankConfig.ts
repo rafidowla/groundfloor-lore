@@ -2,11 +2,17 @@
  * rerankConfig.ts — D8 (Lore 3.23): config resolution for the optional
  * local cross-encoder re-rank stage. See DESIGN-3.23.md §3.2 for the base
  * precedence table and $SP/SECURITY-D8.md for the D8d default-flip owner
- * decisions this file now implements.
+ * decisions this file originally implemented, and
+ * docs/design/D9-shared-model-server.md §4 for the 3.24 Part B change below.
  *
- * D8d (2026-09-25) flips the feature to ON BY DEFAULT and adds a
- * `setHostRerankDefault()` tier (the `createLore({recallRerank})` option).
- * Full `enabled` precedence, highest to lowest:
+ * 3.24 Part B (2026-09-25, this file) flips tier 7 back to OFF BY DEFAULT,
+ * superseding D8d's 2026-09-25 default-ON flip the same day it shipped — D8d
+ * turned out to make a fresh `retrieve()` call differ from 3.22 output with
+ * zero opt-in from anyone, which is the behavior 3.24 corrects. Tiers 1-6 are
+ * unchanged, including `setHostRerankDefault()` (the `createLore({recallRerank})`
+ * option) at tier 5 — hosts that want re-rank now opt in via any of tiers
+ * 1-6; nothing at tier 5/6 changes shape, only what happens when none of
+ * them fire. Full `enabled` precedence, highest to lowest:
  *
  *   1. Per-query `rerank:false`                → OFF, no meta (byte-identical
  *                                                  to pre-D8 output).
@@ -21,7 +27,13 @@
  *   5. Host default (`setHostRerankDefault`,
  *      i.e. `createLore({recallRerank})`)       → whatever it says.
  *   6. Env `LORE_RECALL_RERANK`                 → whatever it says.
- *   7. Default                                  → ON.
+ *   7. Default                                  → OFF (3.24 Part B; was ON
+ *                                                  under D8d). With nothing
+ *                                                  set anywhere, `retrieve()`
+ *                                                  output is byte-identical
+ *                                                  to 3.22 again: no
+ *                                                  `_meta.rerank`, no
+ *                                                  `rerank_score`.
  *
  * This is checked in exactly that order below — critically, workspace-off
  * (tier 2) is evaluated BEFORE per-query-true (tier 3), which is what makes
@@ -235,7 +247,7 @@ export function resolveRerankConfig(
     } else if (envEnabled !== undefined) {
         enabled = envEnabled;
     } else {
-        enabled = true; // D8d: default ON.
+        enabled = false; // 3.24 Part B: default OFF (was `true` under D8d).
     }
 
     const model = workspacePolicy?.model

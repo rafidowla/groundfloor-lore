@@ -34,9 +34,9 @@ export interface EmbeddingBackendInfo {
     /** Package version, e.g., "1.24.3". Empty string if unknown. */
     version: string;
     /**
-     * Execution providers compiled into this build. On macOS with the
-     * current onnxruntime-node 1.24.3 this is just ['cpu']. CoreML EP
-     * arrives in a future onnxruntime-node release we'd need to pin.
+     * Execution providers compiled into this build, as reported by
+     * onnxruntime-node's `listSupportedBackends()` (on macOS with 1.30.0:
+     * cpu, webgpu, coreml).
      */
     providers: string[];
     /**

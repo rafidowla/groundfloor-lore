@@ -127,7 +127,7 @@ import { fileURLToPath } from 'node:url';
 import { createBenchmarkLore, WORKSPACE, engineProfileFor } from './loreClient.js';
 import { loadDataset, selectStratifiedSubset, ingestInstance } from './ingest.js';
 import { computeMetricsAtKs } from './retrievalMetrics.js';
-import { generateAnswer, AnswerModelUnavailableError } from './answerModel.js';
+import { generateAnswer, AnswerModelUnavailableError, buildPrompt } from './answerModel.js';
 import { judgeAnswer, JudgeUnavailableError } from './judge.js';
 import { judgeAnswerMajority } from './judgeMajority.js';
 import { printReport, type BenchmarkReport, type PerInstanceResult } from './report.js';
@@ -198,6 +198,10 @@ interface Args {
     /** Skip re-ingesting each instance; trust --data-dir already has it from
      *  a prior identical run. See this file's header comment. Default `false`. */
     skipIngest: boolean;
+    /** Write each instance's fully built answer prompt to this JSONL file and
+     *  skip the answer-writer + judge, so answering/grading can run out of
+     *  band (e.g. a model with no scriptable API key). Default: unset. */
+    promptsOut?: string;
 }
 
 function parseArgs(argv: string[]): Args {
@@ -249,6 +253,7 @@ function parseArgs(argv: string[]): Args {
     const decomposeMultiSession = decomposeMultiSessionRaw;
     const retrievalOnly = argv.includes('--retrieval-only');
     const skipIngest = argv.includes('--skip-ingest');
+    const promptsOut = get('--prompts-out', '') || undefined;
     const resultsFile = get(
         '--results-file',
         path.join(BENCH_ROOT, 'results', `subset-n${n}-${new Date().toISOString().replace(/[:.]/g, '-')}.json`),
@@ -256,7 +261,7 @@ function parseArgs(argv: string[]): Args {
     return {
         n, ks, dataset, dataDir, contextK, resultsFile, answerModel, think, majorityJudge, majorityVotes,
         questionIds, engine, structuredFacts, preferenceFacts, recencyTagging, decomposeMultiSession, retrievalOnly,
-        skipIngest,
+        skipIngest, promptsOut,
     };
 }
 
@@ -565,6 +570,20 @@ async function main(): Promise<void> {
             // one overwriting the other.
             const combinedStructuredFacts = [structuredFacts, preferenceFactsBlock].filter(Boolean).join('\n\n');
             const structuredFactsForPrompt = combinedStructuredFacts.length > 0 ? combinedStructuredFacts : undefined;
+
+            if (args.promptsOut) {
+                const contextNodes = knowledge.slice(0, args.contextK).map((k) => ({ content: k.content, label: k.label }));
+                fs.appendFileSync(args.promptsOut, JSON.stringify({
+                    questionId: instance.question_id,
+                    questionType: instance.question_type,
+                    isAbstention: result.isAbstention,
+                    question: instance.question,
+                    expectedAnswer: instance.answer,
+                    prompt: buildPrompt(instance.question, formatContext(contextNodes), instance.question_date, structuredFactsForPrompt),
+                }) + '\n');
+                perInstance.push(result);
+                continue;
+            }
 
             // Answering — best-effort; a missing key is expected right now
             // (see answerModel.ts header) and must be recorded, not hidden.

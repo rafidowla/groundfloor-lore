@@ -28,6 +28,7 @@ import type { ActorResolver } from './middleware.js';
 import type { RetentionSweepResult } from './routes/retention.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import type { WorkspaceVerbatimResolver } from '../../outbox/workspaceVerbatimResolver.js';
+import type { RerankBackend } from '../../recall/rerankBackend.js';
 import type { LoadJobsStore } from '../../storage/loadJobsStore.js';
 import type { WorkspaceConcurrencyManager } from '../../storage/loadJobsConcurrency.js';
 import type { StreamRegistry } from '../../streaming/streamRegistry.js';
@@ -156,6 +157,11 @@ export interface DispatcherDeps {
      *  per-workspace graph from graphRegistry). Undefined in cloud mode
      *  (server.ts builds it only when deploymentMode !== 'cloud'). */
     workspaceVerbatimResolver?: WorkspaceVerbatimResolver;
+
+    /** 3.24 Part B — this Lore instance's `RerankBackend`
+     *  (`CreateLoreOptions.rerankBackend`). Omitted ⇒ the default
+     *  (`localRerankBackend`), matching pre-3.24 behavior. */
+    rerankBackend?: RerankBackend;
 
     /** Sprint O1 — outbox aggregate-stats provider. /api/health calls
      *  this on every request to emit the `outbox` block (depth +

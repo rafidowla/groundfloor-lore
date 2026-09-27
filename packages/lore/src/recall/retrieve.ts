@@ -711,7 +711,7 @@ async function retrieveInner(
         related = related.filter((r) => passesEntitiesTopicsProject(r.node, entitiesFilter, topicsFilter, projectFilter));
     }
 
-    let rerankMeta; ({ results, rerankMeta } = await applyRerankStageIfEnabled(results, query, opts.rerank, workspace)); // D8: fail-open top-K re-rank (rerankStage.ts)
+    let rerankMeta; ({ results, rerankMeta } = await applyRerankStageIfEnabled(results, query, opts.rerank, workspace, ctx.rerankBackend)); // D8: fail-open top-K re-rank (rerankStage.ts); 3.24 Part B: per-instance backend (rerankBackend.ts)
     // D5: corrects pairs adjacent (before truncation). Injected, non-matching
     // corrects targets move to `related` (D4 contract: never ranked/counted).
     ({ results, related } = splitCorrectsInjections(await applyCorrectsAdjacency(results, graph, admitD5), related));

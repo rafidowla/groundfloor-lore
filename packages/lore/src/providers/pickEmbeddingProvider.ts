@@ -19,7 +19,7 @@
  *          (Metal-accelerated)
  *
  *   [Lore] Embedder: local Xenova multilingual-e5-small (384-dim)
- *          via onnxruntime-node 1.24.3 (CPU). For Metal/CUDA install
+ *          via onnxruntime-node (CPU). For Metal/CUDA install
  *          Ollama and `ollama pull nomic-embed-text`.
  *
  * License: original work for groundfloor-lore.

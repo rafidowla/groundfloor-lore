@@ -20,6 +20,7 @@ import type { CalibrationStatus } from './calibration.js';
 import type { LexicalBaseMode } from './candidateWindow.js';
 import type { PieceVectorsMeta } from './pieceSeedSearch.js';
 import type { RerankMeta } from './rerankStage.js';
+import type { RerankBackend } from './rerankBackend.js';
 
 /* ─── Unified contract (D4) ────────────────────────────────────── */
 
@@ -387,4 +388,13 @@ export interface RetrieveContext {
      * empty set to disable type bias (schema-agnostic caller).
      */
     curatedTypes?: ReadonlySet<string>;
+    /**
+     * 3.24 Part B — this Lore instance's `RerankBackend` (per-instance,
+     * threaded from `CreateLoreOptions.rerankBackend`). Omitted ⇒
+     * `applyRerankStageIfEnabled` falls back to its own default
+     * (`localRerankBackend`), matching pre-3.24 behavior — this field only
+     * matters for a host that opts into a non-default backend (e.g. a
+     * future `shared` model-server backend).
+     */
+    rerankBackend?: RerankBackend;
 }

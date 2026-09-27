@@ -221,6 +221,11 @@ export interface CreateVectorStoreOpts {
      *  openWorkspaceVerbatim(). Cloud branch (DataplaneVectorStore) is out
      *  of scope for this slice and ignores it. */
     pieceVectors?: boolean;
+    /** `CreateLoreOptions.modelServer` — threaded into the search-worker
+     *  proxy (3.24 C3a gap fix) so a forked worker without a parentEmbedder
+     *  respects the same shared-model-server opt-out the host's own
+     *  in-process `attachModelServer` call already gets. */
+    modelServer?: boolean;
 }
 
 /**
@@ -274,7 +279,7 @@ export async function createVectorStore(opts: CreateVectorStoreOpts): Promise<Lo
         const pieceVectorsIntent = opts.workspaceId
             ? resolvePieceVectorsIntent(opts.workspaceId, opts.home, hostPieceVectorsDefault)
             : hostPieceVectorsDefault === true;
-        return new VerbatimSearchWorkerProxy(opts.graphBasePath, opts.embedOverrides, opts.embeddingProvider, opts.injectedEmbeddingProvider ?? false, pieceVectorsIntent);
+        return new VerbatimSearchWorkerProxy(opts.graphBasePath, opts.embedOverrides, opts.embeddingProvider, opts.injectedEmbeddingProvider ?? false, pieceVectorsIntent, opts.modelServer);
     }
     return openWorkspaceVerbatim(opts.graphBasePath, opts.embeddingProvider, {
         workspaceId: opts.workspaceId,

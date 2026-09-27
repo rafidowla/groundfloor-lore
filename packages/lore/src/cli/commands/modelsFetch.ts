@@ -53,9 +53,17 @@ const VALID_DTYPES: readonly RerankDtype[] = ['fp32', 'fp16', 'q8', 'q4'];
  *  tag/sha, short enough to rule out abuse. */
 const VALID_REVISION_RE = /^[A-Za-z0-9._-]{1,64}$/;
 
+/** Exported so `cli/commands/modelsFetchEmbedding.ts` (D9, Lore 3.24) can
+ *  build an identical error message for its own `--revision` validation
+ *  without duplicating the pattern — see `validateRevision` below, which it
+ *  also reuses directly (the shape of a valid git revision has nothing
+ *  rerank-specific about it). */
+export const VALID_REVISION_SOURCE = VALID_REVISION_RE.source;
+
 /** Exported for direct unit testing (test/n13-modelsfetch-revision-unit.ts) —
  *  the CLI entry point itself calls `process.exit()` on a bad revision, which
- *  isn't something a unit test can assert against directly. */
+ *  isn't something a unit test can assert against directly. Also reused
+ *  as-is by `fetch-embedding` (see `VALID_REVISION_SOURCE` above). */
 export function validateRevision(revision: string): boolean {
     return VALID_REVISION_RE.test(revision) && !revision.includes('..');
 }

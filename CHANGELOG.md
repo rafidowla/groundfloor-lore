@@ -4,6 +4,116 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.24.0] — 2026-09-26
+
+Upgrading from 3.23.x: read [`docs/MIGRATION-3.24.md`](docs/MIGRATION-3.24.md) — re-rank goes back
+to opt-in, and local hosts now share one background model process by default. Design:
+[`docs/design/D9-shared-model-server.md`](docs/design/D9-shared-model-server.md).
+
+### Changed
+- **`@huggingface/transformers` ^4.1.0 → ^4.3.0** (resolves 4.3.0:
+  onnxruntime-node 1.24.3 → 1.30.0, tokenizers 0.1.3 → 0.2.0, adm-zip
+  0.5 → 0.6 — clears the adm-zip audit finding). Vectors are not
+  bit-identical to 4.2.0 (e5-small q8, 713 texts: min cosine 0.99902, mean
+  0.99960); dense-only tapestry retrieval top-5 unchanged (90.2%). The
+  embedding fingerprint is `modelId@dtype`, so existing stores are **not**
+  re-embedded and mix old and new vectors at that tolerance. The shared model
+  server key includes the transformers / onnxruntime versions, so 3.23 and
+  3.24 hosts on one machine run separate model processes.
+- **Re-rank is opt-in again (reverts the 3.23 default).** With no opinion
+  anywhere in the precedence chain, recall output is byte-identical to 3.22
+  (no `_meta.rerank`, original order). Opt in per host
+  (`createLore({ recallRerank: { enabled: true } })`), per workspace
+  (`lore workspaces set-rerank <name> on`), per call (`rerank: true`) or via
+  `LORE_RECALL_RERANK=1`. Precedence is otherwise unchanged. Re-rank scoring
+  now goes through a `RerankBackend` seam (`src/recall/rerankBackend.ts`).
+- **`EmbeddingProvider.maxBatchSize`** (optional) replaces class-name sniffing
+  in `batchedEmbedder.ts`; built-in providers declare their existing caps.
+
+### Fixed
+- **Long-document embedding was O(n²) in document length** (pre-existing):
+  20k chars ~4 s, 100k ~115 s, 150k didn't finish. The Unigram tokenizer
+  bundled in `@huggingface/transformers` 4.2.x rebuilt the remaining text
+  at every character, and the e5 pre-tokenizer makes a whole document one
+  pre-token. Fixed by the transformers 4.3.0 upgrade below (bundled
+  tokenizers 0.2.0 is linear); `embedDocument` on 100k chars 75 s → ~2 s
+  (`test/embed-chunking-linear-time-unit.ts`). Matters more under the shared
+  model server, since texts over `LORE_MODEL_SERVER_TEXT_CHAR_LIMIT` embed
+  in-process.
+
+### Added
+- **Shared, verified embedding cache (D9 Part A).** The local embedding model
+  always resolves into `<LORE_HOME>/models/<modelId>`, pinned and
+  integrity-checked like the re-rank model, under a cross-process lock with a
+  heartbeat. Models found only in the legacy `transformers` cache are cloned
+  copy-on-write, never re-downloaded or deleted. New `lore models
+  fetch-embedding`; `lore models prune` always keeps the configured model.
+- **Shared model server `lore-models` (D9 Part C) — on by default for local
+  CPU hosts.** One background process per machine-level `LORE_HOME` (plus
+  protocol / transformers / onnxruntime versions) serves embedding and
+  re-rank inference to every local host over a same-user unix socket
+  (`<LORE_HOME>/run/model-server-<key>/server.sock`, 0700 dir, 0600 token;
+  no TCP port). It holds no memories and exposes no recall/store/MCP surface.
+  Spawned on first use, exits by itself after `LORE_MODEL_SERVER_IDLE_EXIT_MS`
+  (default 60 s) idle; no launchd. Vectors and scores are identical to
+  in-process (same provider classes).
+  - **Off switch:** `createLore({ modelServer: false })` or
+    `LORE_MODEL_SERVER=0`. Not used for cloud, non-CPU devices, host-injected
+    or OpenAI-compatible providers, or test processes (unless
+    `LORE_MODEL_SERVER=1`).
+  - **Failure handling:** restart the shared server first (bounded by
+    `LORE_MODEL_SERVER_RESTARTS` / `_RESTART_BUDGET_MS`, with a crash-loop
+    guard), retry the call once, then fall back to in-process inference and
+    say so loudly — `log.error` per transition, `_meta.models` on recall
+    while degraded, `lore.modelStatus()`, and `createLore({ onModelStatus })`.
+    Recovers to shared automatically (`LORE_MODEL_SERVER_PROBE_MS`).
+    Oversize (`too_large`) and `busy` answers are served in-process for
+    parity rather than failing the call.
+  - **Single server per key:** a pid-bearing spawn lock that is never stolen
+    from a live pid, claimed by the server for its lifetime; a server only
+    ever removes files that name its own pid.
+  - **Hardening:** token handshake with a 5 s hello deadline, 64 KiB pre-auth
+    frame cap and pre-auth connection cap, per-client queue and text-size
+    limits (`LORE_MODEL_SERVER_TEXT_CHAR_LIMIT`, default 200000), malformed
+    frames answered with `bad_request`, allowlisted child environment (no
+    `NODE_OPTIONS` / `NODE_PATH`), run and socket dirs refused unless
+    owner-only and not symlinks, server always loads models from
+    `<LORE_HOME>/models` regardless of client input.
+  - **CLI:** `lore models server status [--json]` and `lore models server
+    stop` (graceful shutdown over the protocol; never signals by pattern).
+  - New env vars (all in `docs/CONFIGURATION.md` and `envScrub.ts`):
+    `LORE_MODEL_SERVER`, `_READY_MS`, `_RESTARTS`, `_RESTART_BUDGET_MS`,
+    `_PROBE_MS`, `_CALL_MS`, `_IDLE_EXIT_MS`, `_BOOTSTRAP_TIMEOUT_MS`,
+    `_MAX_CLIENTS`, `_TEXT_CHAR_LIMIT`, `_QUEUE_MAX_PER_CLIENT`,
+    `_RERANK_MAX_CONCURRENT` (default 4; one pool for all hosts), and the
+    `model-server.log` rotation knobs.
+
+### Tests
+- D9 §6 release gates: compiled-dist spawn under plain `node`, recall
+  parity shared vs in-process, kill mid-embed, no spawn while idle, env
+  allowlist, spawn race (single server), restart-first, fallback release,
+  too-large parity, busy retry, plus codec/lifecycle/concurrency/idle-exit
+  suites. Tests that need the real re-rank model install it into a temp
+  `LORE_HOME` (`test/helpers/rerank-model-fixture.ts`; set
+  `LORE_TEST_RERANK_MODEL_DIR` to copy a local copy instead of fetching).
+
+### Performance
+- `scripts/perf/d9-shared-models-bench.mjs` → [`docs/perf/D9-shared-models-RESULTS.md`](docs/perf/D9-shared-models-RESULTS.md)
+  (4 hosts, one `LORE_HOME`, 3 alternating runs per mode, Apple M5 Max):
+  total idle RSS **-49.5%** shared vs in-process (2011 vs 3979 MB); recall
+  p50/p90 within noise; first call ~equal (~2.8 s vs ~2.9 s — `createLore()`
+  drops to ~18 ms and model load moves to the first embed); re-rank
+  fail-open 0% in both modes with the server cap at 4 (2.5% at cap 2).
+
+### Security
+- **`hono` `^4.12.14` → `^4.13.9`** (lockfile 4.13.3 → 4.13.9; nothing else
+  moves). Clears GHSA-gqvv-2mrq-wpjv (`toSSG()` path escape — Lore doesn't
+  use SSG), GHSA-g6gw-c38x-mqfc (unbounded dot-notation nesting in
+  `parseBody()`) and GHSA-crvj-82cr-hjcx (query parsed past the URL
+  fragment), all moderate. `npm audit --omit=dev` now reports only the
+  tracked adm-zip exception (via `onnxruntime-node` →
+  `@huggingface/transformers`).
+
 ## [3.23.0] — 2026-09-25
 
 Upgrading from 3.22.x: read [`docs/MIGRATION-3.23.md`](docs/MIGRATION-3.23.md) — D8 re-rank is on by

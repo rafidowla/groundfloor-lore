@@ -4,13 +4,24 @@ import { loreHome } from '../../config/loreHome.js';
 import { ConfigManager } from '../../config/configManager.js';
 import { DEFAULT_RERANK_MODEL } from '../../recall/rerankConfig.js';
 import { fetchRerankCommand } from './modelsFetch.js';
+import { fetchEmbeddingCommand } from './modelsFetchEmbedding.js';
+import { modelsServerCommand } from './modelsServer.js';
 import { loadWorkspacesIfPresent } from '../../config/workspaces.js';
 import { validateRerankModelId } from '../../providers/rerankModelId.js';
+import { DEFAULT_LOCAL_MODEL_ID } from '../../providers/localEmbeddingProvider.js';
 
 export async function modelsCommand(args: string[]): Promise<void> {
     const sub = args[0];
     if (sub === 'fetch-rerank') {
         await fetchRerankCommand(args.slice(1));
+        return;
+    }
+    if (sub === 'fetch-embedding') {
+        await fetchEmbeddingCommand(args.slice(1));
+        return;
+    }
+    if (sub === 'server') {
+        await modelsServerCommand(args.slice(1));
         return;
     }
     if (sub !== 'prune') {
@@ -22,9 +33,21 @@ export async function modelsCommand(args: string[]): Promise<void> {
         console.error('                         Example: --keep "Xenova/*" --keep "onnx-community/Llama*"');
         console.error('');
         console.error('usage: lore models fetch-rerank [--model <id>] [--dtype fp32|fp16|q8|q4]');
-        console.error('       Downloads the local cross-encoder re-rank model (D8, Lore 3.23). The');
-        console.error('       ONLY code path allowed to download a model — see --help on the');
-        console.error('       subcommand itself for details.');
+        console.error('       Downloads the local cross-encoder re-rank model (D8, Lore 3.23).');
+        console.error('');
+        console.error('usage: lore models fetch-embedding [--model <id>] [--dtype fp32|fp16|q8|q4]');
+        console.error('       Downloads the local embedding model into the shared cache (D9, Lore');
+        console.error('       3.24) ahead of time — the same shared cache localEmbeddingProvider.ts');
+        console.error('       resolves into on first use, so a manual fetch is purely a warm-cache');
+        console.error('       convenience, not a prerequisite.');
+        console.error('');
+        console.error('       fetch-rerank / fetch-embedding are the ONLY code paths allowed to');
+        console.error('       download a model — see --help on either subcommand for details.');
+        console.error('');
+        console.error('usage: lore models server status [--json]');
+        console.error('       lore models server stop');
+        console.error('       Status/control for the shared local model server (D9, Lore 3.24).');
+        console.error('       See --help on either subcommand for details.');
         process.exit(1);
     }
 
@@ -58,6 +81,17 @@ export async function modelsCommand(args: string[]): Promise<void> {
     // fall back to absent a per-workspace policy.
     const configuredRerankModel = process.env['LORE_RECALL_RERANK_MODEL'] ?? DEFAULT_RERANK_MODEL;
 
+    // D9 Part A: same reasoning as configuredRerankModel above, for the
+    // embedding side — without this, `prune` would delete the CURRENT
+    // default embedding model (`Xenova/multilingual-e5-small`) the moment
+    // it wasn't also the `activeModel` (which only ever reflects the
+    // embedded-LLM config, not the embedding model). The stale hardcoded
+    // `'Xenova/all-MiniLM-L6-v2'` entry below is the OLD pre-flip default
+    // (see localEmbeddingProvider.ts's `MINILM_L6_V2_MODEL_ID` history) —
+    // left in place for operators who still use it explicitly, not a
+    // substitute for keeping today's configured/default model.
+    const configuredEmbedModel = process.env['LORE_LOCAL_EMBEDDING_MODEL'] ?? DEFAULT_LOCAL_MODEL_ID;
+
     // F8: also keep every PER-WORKSPACE rerank model override — the
     // original set above only ever covered the global env/default one, so
     // `prune` could delete a model a workspace's `set-rerank --model` was
@@ -86,6 +120,7 @@ export async function modelsCommand(args: string[]): Promise<void> {
         'Xenova/all-MiniLM-L6-v2',
         'onnx-community/gemma-3-1b-it-ONNX',
         configuredRerankModel,
+        configuredEmbedModel,
         ...workspaceRerankModels,
     ]);
 

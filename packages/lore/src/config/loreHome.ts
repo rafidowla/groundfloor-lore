@@ -37,7 +37,7 @@ import * as path from 'path';
  * and any caller can still force a specific home with `LORE_HOME` / `dataDir`,
  * both of which take precedence over this branch.
  */
-function isTestProcess(): boolean {
+export function isTestProcess(): boolean {
     const entry = process.argv[1];
     if (!entry) return false;
     const sep = path.sep;

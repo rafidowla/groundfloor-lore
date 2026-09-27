@@ -416,8 +416,13 @@ const RERANK_SESSION_OPTIONS = {
  *  or per-model, since the CPU cost is real and shared regardless of which
  *  model is scoring. Override via `LORE_RECALL_RERANK_MAX_CONCURRENT`,
  *  minimum 1. */
-const RERANK_MAX_CONCURRENT_SCORE_RUNS = Math.max(1, parseEnvInt('LORE_RECALL_RERANK_MAX_CONCURRENT', 2));
+let rerankMaxConcurrentScoreRuns = Math.max(1, parseEnvInt('LORE_RECALL_RERANK_MAX_CONCURRENT', 2));
 let rerankActiveScoreRuns = 0;
+
+/** Overrides the cap; only the shared model server calls this (modelServer/config.ts). */
+export function setRerankMaxConcurrentScoreRuns(max: number): void {
+    rerankMaxConcurrentScoreRuns = Math.max(1, Math.floor(max));
+}
 
 /** Thrown by `LocalRerankProvider.score()` when the process-wide concurrent
  *  score-run budget is already exhausted. `rerankStage.ts` catches this and
@@ -425,7 +430,7 @@ let rerankActiveScoreRuns = 0;
  *  surfaced as a thrown error to the caller. See $SP/SECURITY-D8.md F2. */
 export class RerankBusyError extends Error {
     constructor() {
-        super(`rerank: ${RERANK_MAX_CONCURRENT_SCORE_RUNS} concurrent score run(s) already in progress`);
+        super(`rerank: ${rerankMaxConcurrentScoreRuns} concurrent score run(s) already in progress`);
         this.name = 'RerankBusyError';
     }
 }
@@ -438,7 +443,7 @@ export class RerankBusyError extends Error {
  * `recall/rerankStage.ts`, which is the only intended caller.
  *
  * D8d (F2) hardening: `score()` now (a) fails fast with `RerankBusyError`
- * when `RERANK_MAX_CONCURRENT_SCORE_RUNS` process-wide runs are already in
+ * when `rerankMaxConcurrentScoreRuns` process-wide runs are already in
  * flight, rather than queueing unboundedly and letting concurrent
  * `rerank:true` callers pile up CPU work, and (b) accepts an optional
  * `AbortSignal` checked BETWEEN forward-pass batches — so a timeout raised
@@ -460,7 +465,7 @@ export class LocalRerankProvider {
 
     async score(query: string, passages: string[], signal?: AbortSignal): Promise<number[]> {
         if (passages.length === 0) return [];
-        if (rerankActiveScoreRuns >= RERANK_MAX_CONCURRENT_SCORE_RUNS) {
+        if (rerankActiveScoreRuns >= rerankMaxConcurrentScoreRuns) {
             throw new RerankBusyError();
         }
         rerankActiveScoreRuns++;

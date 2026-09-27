@@ -74,7 +74,7 @@ export function registerSearchTool(mcpServer: McpServer, deps: SearchToolsDeps):
                     // and warms the access/session caches internally.
                     // P2: thread the per-workspace verbatim resolver so a search
                     // against a non-active workspace uses its OWN verbatim store.
-                    const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver };
+                    const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver, rerankBackend: deps.rerankBackend };
                     let outcome;
                     try {
                         // `ecosystem` is REQUIRED here, not optional polish.

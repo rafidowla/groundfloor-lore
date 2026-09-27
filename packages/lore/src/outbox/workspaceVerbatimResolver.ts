@@ -145,6 +145,11 @@ export class WorkspaceVerbatimResolver {
      *  constructs a VerbatimStore without going through
      *  openWorkspaceVerbatim(). */
     private readonly pieceVectors?: boolean;
+    /** `CreateLoreOptions.modelServer` — `false` opts out of the shared
+     *  model server; threaded into the search-worker proxy (3.24 C3a gap
+     *  fix) so a forked worker without a parentEmbedder respects the same
+     *  opt-out the host's own in-process `attachModelServer` call gets. */
+    private readonly modelServer?: boolean;
 
     constructor(
         private readonly embeddingProvider?: EmbeddingProvider,
@@ -173,6 +178,8 @@ export class WorkspaceVerbatimResolver {
             strictFingerprintCheck?: boolean;
             /** D7 (3.23) — host-level `createLore({pieceVectors})` default. */
             pieceVectors?: boolean;
+            /** `CreateLoreOptions.modelServer` — see field doc above. */
+            modelServer?: boolean;
         } = {},
     ) {
         this.now = opts.now ?? Date.now;
@@ -180,6 +187,7 @@ export class WorkspaceVerbatimResolver {
         this.vectorStoreRole = opts.vectorStoreRole;
         this.strictFingerprintCheck = opts.strictFingerprintCheck;
         this.pieceVectors = opts.pieceVectors;
+        this.modelServer = opts.modelServer;
         if (opts.autoEvict) this.startEvictionSweep();
     }
 
@@ -280,7 +288,7 @@ export class WorkspaceVerbatimResolver {
             const hostPieceVectorsDefault = resolveHostPieceVectorsDefault(this.pieceVectors);
             const pieceVectorsIntent = resolvePieceVectorsIntent(workspace, this.home, hostPieceVectorsDefault);
             const store = useWorker
-                ? new VerbatimSearchWorkerProxy(resolvedPath, this.embedOverrides, this.embeddingProvider, this.strictFingerprintCheck ?? false, pieceVectorsIntent) as unknown as VerbatimStoreApi
+                ? new VerbatimSearchWorkerProxy(resolvedPath, this.embedOverrides, this.embeddingProvider, this.strictFingerprintCheck ?? false, pieceVectorsIntent, this.modelServer) as unknown as VerbatimStoreApi
                 : openWorkspaceVerbatim(resolvedPath, this.embeddingProvider, {
                     workspaceId: workspace,
                     home: this.home,

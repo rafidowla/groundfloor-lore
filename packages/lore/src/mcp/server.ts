@@ -120,6 +120,7 @@ import { buildShutdownDrain, collectSqliteStores } from './shutdownDrain.js';
 // shared with the MCP store_node tool + POST /api/node route.
 import { nodeUpsert as nodeServiceUpsert, resolveAutolinkHandles, type NodeWriteResult } from '../core/nodeService.js';
 import { resolveSupersessionContext, resolveHostSupersessionDefault } from '../core/supersessionPolicy.js'; import { setHostRerankDefault } from '../recall/rerankConfig.js';
+import { type RerankBackend } from '../recall/rerankBackend.js'; import type { PublicModelStatus } from '../modelServer/applicability.js'; import { attachHostModelServer } from '../modelServer/hostWiring.js'; // 3.24 C2a/SF12 — see hostWiring.ts.
 // 1.1 (2026-08-17 functional-correctness audit) — SurrealDB's optimistic
 // concurrency drops writes under overlapping-key contention; the retry
 // wrapper (previously wired ONLY into bulkIngest) now covers the embedded
@@ -186,7 +187,8 @@ export interface CreateLoreOptions extends EmbeddingInjectionOptions {
      * `resolveHostSupersessionDefault`, and CHANGELOG.md's "D5 round 3"
      * entry for the full precedence writeup.
      */
-    supersessionEnforce?: boolean; /** D8d — host default for rerank `enabled` (workspace/per-query win; see recall/rerankConfig.ts). */ recallRerank?: boolean;
+    // 3.24: recallRerank (D8d rerank-enabled default), rerankBackend (Part B, omitted ⇒ localRerankBackend, set once), modelServer (Part C — false/env LORE_MODEL_SERVER=0 opts out), onModelStatus (fires on shared/fallback/recovery transitions; exceptions caught+logged).
+    supersessionEnforce?: boolean; recallRerank?: boolean; rerankBackend?: RerankBackend; modelServer?: boolean; onModelStatus?: (status: PublicModelStatus) => void;
     /**
      * Local embedding provider overrides. Programmatic alternative to the
      * LORE_LOCAL_EMBEDDING_DEVICE / LORE_LOCAL_EMBEDDING_MODEL env vars.
@@ -334,7 +336,7 @@ export interface LoreInstance {
      */
     awaitEmbeds(): Promise<void>;
     /** P2/Atlas — in-process hybrid recall (semantic+BM25+traversal). Returns a typed JS object; no MCP transport. */
-    recall(topic: string, opts: RecallOpts): Promise<RecallResult>;
+    recall(topic: string, opts: RecallOpts): Promise<RecallResult>; modelStatus(): PublicModelStatus; // 3.24 C2a: 'in_process' when the shared model server is inapplicable/disabled; see modelServer/applicability.ts.
     /** P2/Atlas — vector+keyword node search. Thin wrapper over storageClient.search(); workspace/ecosystem default to '*'.
      *  `opts.signal` (fix/search-worker-call-cancellation, 3.20.2, req. 3) is
      *  light-touch: it rejects this outer promise on abort, but this path runs
@@ -442,7 +444,7 @@ interface DaemonWiring {
     fireBootHealthPing(): Promise<void>;
     getDataplaneState(): DataplaneState;
     runRetentionSweep(dryRun: boolean): ReturnType<typeof runRetentionSweepImpl>;
-    createMcpServer(): McpServer;
+    rerankBackend: RerankBackend; createMcpServer(): McpServer; // 3.24 Part B: plain field (not getter/setter like graphRegistry); known synchronously at createLore() entry, never reassigned.
 }
 
 /**
@@ -565,7 +567,8 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
 
     // Q2.2 slice 6a/6b/7 + injected provider — ONE EmbeddingProvider for every
     // store; precedence + strict-fingerprint rule in embeddingProviderSelection.ts.
-    const { embeddingProvider, injectedEmbeddingProvider } = await selectEmbeddingProvider(opts);
+    let { embeddingProvider, injectedEmbeddingProvider } = await selectEmbeddingProvider(opts); const hostModel = attachHostModelServer({
+        deploymentMode, embeddingProvider, injectedEmbeddingProvider, log, modelServer: opts.modelServer, onModelStatus: opts.onModelStatus, rerankBackendOverride: opts.rerankBackend, }); embeddingProvider = hostModel.embeddingProvider; // 3.24 C2a/SF12 — see hostWiring.ts.
     // v1.1 (deferred item #3 partial): probe + log the actual ONNX runtime
     // backend so operators see ground truth instead of the legacy
     // "Wasm CPU" misnomer. Surfaced on /health and /api/health.
@@ -580,15 +583,12 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
 
     // Q2.2 slice 3 — Mode-conditional vector-store factory (local: embedded LanceDB VerbatimStore; cloud: DataplaneVectorStore). Both implement VectorProvider.
     const verbatimStore: LoreVectorStore = await createVectorStore({
-        deploymentMode,
-        graphBasePath,
-        embeddingProvider,
-        embedOverrides: opts.embedding as Record<string, unknown> | undefined,
-        vectorStoreRole: typeof opts.vectorStoreRole === 'function' ? opts.vectorStoreRole(graphBasePath) : opts.vectorStoreRole, searchWorkerPolicy: opts.searchWorkerPolicy, injectedEmbeddingProvider, workspaceId: getActiveWorkspaceName(dataHome), home: dataHome, pieceVectors: opts.pieceVectors, // 3.21 step 2 part 2: resolves ITS OWN vectorEngine by name, same as createGraph() above.
+        deploymentMode, graphBasePath, embeddingProvider, injectedEmbeddingProvider, home: dataHome, pieceVectors: opts.pieceVectors, embedOverrides: opts.embedding as Record<string, unknown> | undefined, searchWorkerPolicy: opts.searchWorkerPolicy, vectorStoreRole: typeof opts.vectorStoreRole === 'function' ? opts.vectorStoreRole(graphBasePath) : opts.vectorStoreRole, workspaceId: getActiveWorkspaceName(dataHome),
+        modelServer: opts.modelServer, // 3.21 step 2 part 2: resolves ITS OWN vectorEngine by name, same as createGraph() above.
     });
 
     // SP-F3 — per-workspace verbatim resolver (local mode); autoEvict gated on OWNERSHIP (processOwnership.ts), not mode alone — a 'local'-mode caller that never claimed ownership must start no more recurring loops than 'embedded' does (tw2a-embedded-lifecycle-unit.ts (d)). vectorStoreRole threads the same per-path role resolution as the boot verbatimStore above. LORE-ASK-SEARCH-WORKER-POLICY: resolver ctor treats "no policy" as undecided, so this call site applies the env fallback, same as pre-policy. injectedEmbeddingProvider threads strictFingerprintCheck the same way as the boot verbatimStore.
-    const workspaceVerbatimResolver = deploymentMode === 'cloud' ? undefined : new WorkspaceVerbatimResolver(embeddingProvider, opts.searchWorkerPolicy ?? searchWorkerIsolationEnabled(), opts.embedding as Record<string, unknown> | undefined, { autoEvict: daemonTimersEnabled(opts.ownsProcess, effectiveMode), home: dataHome, vectorStoreRole: opts.vectorStoreRole, strictFingerprintCheck: injectedEmbeddingProvider, pieceVectors: opts.pieceVectors }); const workspaceQuotaStore = new InMemoryWorkspaceQuotaStore();
+    const workspaceVerbatimResolver = deploymentMode === 'cloud' ? undefined : new WorkspaceVerbatimResolver(embeddingProvider, opts.searchWorkerPolicy ?? searchWorkerIsolationEnabled(), opts.embedding as Record<string, unknown> | undefined, { autoEvict: daemonTimersEnabled(opts.ownsProcess, effectiveMode), home: dataHome, vectorStoreRole: opts.vectorStoreRole, strictFingerprintCheck: injectedEmbeddingProvider, pieceVectors: opts.pieceVectors, modelServer: opts.modelServer }); const workspaceQuotaStore = new InMemoryWorkspaceQuotaStore();
     // Finding 2 (post-review, 3.20.2, follow-up to e2abf06a) — a bare
     // `loadWorkspaces()` defaults to the process-wide `loreHome()`, not this
     // instance's own home. For an embedded host whose workspace (and its
@@ -659,7 +659,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     // D5 round 2 (#2): host-level default, precedence createLore() option >
     // LORE_SUPERSESSION_ENFORCE env > false. Threaded into every write path
     // below (embedded + MCP + REST) via DaemonWiring.supersessionEnforceDefault.
-    const hostSupersessionDefault = resolveHostSupersessionDefault(opts.supersessionEnforce); if (opts.recallRerank !== undefined) setHostRerankDefault(opts.recallRerank); // D8d; guarded (N11): the setter is process-global, so an unset option must not clear another host's default
+    const hostSupersessionDefault = resolveHostSupersessionDefault(opts.supersessionEnforce); if (opts.recallRerank !== undefined) setHostRerankDefault(opts.recallRerank); const rerankBackend: RerankBackend = hostModel.rerankBackend; // D8d/N11 — resolved once in hostWiring.ts.
 
     // D5 round 2 (HIGH #1): shared resolver for the embedded nodeUpsert/nodeUpsertBatch
     // call sites below, so each doesn't repeat the same param block. graphRegistry is
@@ -965,7 +965,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
             auxStore,
             versionStore,
             outboxStore: outboxWiring.store, outboxLagCache: outboxWiring.lagCache, quotaStore: workspaceQuotaStore, getWorkspaceEntryForQuota, // SP-F3 outbox rows + L-033 MCP store_node shared write quota.
-            supersessionEnforceDefault: hostSupersessionDefault, // D5 round 2 (#2) host switch.
+            supersessionEnforceDefault: hostSupersessionDefault, rerankBackend, // D5 round 2 (#2) host switch. 3.24 Part B.
         });
     }
 
@@ -1005,7 +1005,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
             try {
                 await ordered(reason);
             } finally {
-                try { disposeNativePoolSafetyNet(); } catch { /* non-fatal */ }
+                try { disposeNativePoolSafetyNet(); } catch { /* non-fatal */ } await hostModel.dispose(); // 3.24 Part C (C2a) — swallows internally, see hostWiring.ts.
             }
         };
     };
@@ -1029,7 +1029,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         deploymentMode,
         graphBasePath,
         loreDir,
-        supersessionEnforceDefault: hostSupersessionDefault,
+        supersessionEnforceDefault: hostSupersessionDefault, rerankBackend, // 3.24 Part B
         embeddingProvider,
         detectedScope,
         domainSchema,
@@ -1294,7 +1294,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                 await delayMs(25);
             }
         },
-        recall: (topic, opts) => inProcessRecall(topic, opts, { store, graphRegistry: graphRegistry ?? undefined, workspaceVerbatimResolver }),
+        recall: hostModel.wrapRecall((topic: string, opts: RecallOpts) => inProcessRecall(topic, opts, { store, graphRegistry: graphRegistry ?? undefined, workspaceVerbatimResolver, rerankBackend })), modelStatus: hostModel.modelStatus, // 3.24 B/C: wrapRecall adds _meta.models while degraded.
         // 1.2 (2026-08-17 audit) — `workspace` now actually ROUTES (via the
         // facade's per-workspace read routers) instead of silently landing
         // in the `project` positional of the boot graph. '*' keeps the
@@ -1683,7 +1683,7 @@ async function main(): Promise<LoreInstance | void> {
                 planOrchestrator: orchestrationWiring.planOrchestrator,
                 embedQueue,
                 graphRegistry, workspaceVerbatimResolver: d.workspaceVerbatimResolver, quotaStore: d.workspaceQuotaStore, getWorkspaceEntryForQuota: d.getWorkspaceEntryForQuota, // L-018 routing + L-033 REST shares the MCP write-quota store.
-                supersessionEnforceDefault: d.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+                supersessionEnforceDefault: d.supersessionEnforceDefault, rerankBackend: d.rerankBackend, // D5 round 2 (#2) host switch. 3.24 Part B.
                 coreNodeTypes: domainSchema.nodeTypes,
                 getOutboxStats: () => outboxWiring.store.aggregateStats!(), outboxStore: outboxWiring.store, outboxLagCache: outboxWiring.lagCache,
                 loadJobsStore, loadJobsRunner: loadJobsRunner ?? undefined,

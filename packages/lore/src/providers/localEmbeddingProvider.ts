@@ -39,8 +39,17 @@
 
 // @ts-ignore — Local workspace linking lacks full Node16 exports declaration
 import { pipeline } from '@huggingface/transformers';
+// 3.24 Part B — the same adaptive per-host cap embed/batchedEmbedder.ts
+// used to infer for this class by sniffing its constructor name. Reusing
+// the exported constant (rather than recomputing) keeps one source of
+// truth; batchedEmbedder.ts's only import of providers/types.ts is
+// type-only (erased at compile time), so this does not create a
+// providers<->embed runtime cycle.
+import { LOCAL_XENOVA_MAX_BATCH } from '../embed/batchedEmbedder.js';
 
 import type { EmbeddingProvider } from './types.js';
+import { loreHomePath } from '../config/loreHome.js';
+import { resolveEmbedModelDir } from './modelCache.js';
 
 /**
  * The default model used by the local provider when no override is
@@ -64,7 +73,28 @@ export const DEFAULT_LOCAL_MODEL_DIM = 384;
  * Override via `LocalEmbeddingProviderOptions.dtype` or
  * `LORE_LOCAL_EMBEDDING_DTYPE=fp32` env var when fp32 parity is required.
  */
-export const DEFAULT_LOCAL_MODEL_DTYPE = (process.env['LORE_LOCAL_EMBEDDING_DTYPE'] as ModelDtype | undefined) ?? 'q8';
+const VALID_LOCAL_MODEL_DTYPES: readonly ModelDtype[] = ['fp32', 'fp16', 'q8', 'q4'];
+
+/**
+ * Reads and validates `LORE_LOCAL_EMBEDDING_DTYPE`. An unset/blank value
+ * silently uses the `'q8'` default (expected, not an error); a SET but
+ * unrecognized value (typo, stale config from a future dtype) now logs a
+ * warning and falls back instead of passing through silently — the prior
+ * behavior let an invalid string reach `pipeline({ dtype })` unchecked,
+ * where transformers.js's own error (if any) would be far removed from
+ * the actual misconfiguration.
+ */
+function resolveDefaultLocalModelDtype(): ModelDtype {
+    const raw = process.env['LORE_LOCAL_EMBEDDING_DTYPE'];
+    if (!raw || raw.trim() === '') return 'q8';
+    if ((VALID_LOCAL_MODEL_DTYPES as readonly string[]).includes(raw)) return raw as ModelDtype;
+    console.warn(
+        `LORE_LOCAL_EMBEDDING_DTYPE="${raw}" is not one of ${VALID_LOCAL_MODEL_DTYPES.join(', ')} — falling back to the default "q8".`,
+    );
+    return 'q8';
+}
+
+export const DEFAULT_LOCAL_MODEL_DTYPE: ModelDtype = resolveDefaultLocalModelDtype();
 
 /**
  * Slice 7 alias retained for back-compat. Equal to
@@ -258,14 +288,35 @@ function getOrCreateEntry(modelId: string, device?: LoadDevice, dtype?: ModelDty
     if (existing) return existing;
     // pipeline() accepts `device` (ORT executionProviders) and `dtype`
     // (selects which ONNX file to load; 'q8' → model_quantized.onnx).
-    const opts: { device?: LoadDevice; dtype?: ModelDtype } = {};
-    if (device) opts.device = device;
-    if (dtype) opts.dtype = dtype;
-    const promise = pipeline('feature-extraction', modelId, opts).catch((err: unknown) => {
-        // Remove the rejected entry so a subsequent call can retry cleanly.
-        pipelineCache.delete(key);
-        return Promise.reject(err);
-    });
+    const effectiveDtype = dtype ?? DEFAULT_LOCAL_MODEL_DTYPE;
+    // D9 Part A: resolve through the shared model cache first (marker hit /
+    // legacy-cache copy / verified download — see providers/modelCache.ts)
+    // rather than letting pipeline() manage its own cache_dir. cache_dir is
+    // always passed explicitly, per-call — never the process-global
+    // `env.cacheDir` that providers/llmDispatch.ts mutates for its own,
+    // unrelated purpose.
+    const cacheDir = loreHomePath('models');
+    const promise = resolveEmbedModelDir(modelId, effectiveDtype, { cacheDir })
+        .then((modelDir) => {
+            const opts: { device?: LoadDevice; dtype?: ModelDtype; cache_dir: string; local_files_only: true } = {
+                cache_dir: cacheDir,
+                local_files_only: true,
+                dtype: effectiveDtype,
+            };
+            if (device) opts.device = device;
+            // Pass the resolved absolute directory, never the raw modelId —
+            // same defense-in-depth as providers/localRerankProvider.ts:
+            // `local_files_only` should already prevent a network call, but
+            // an absolute, realpath-verified directory closes a known
+            // upstream network-fallback edge case even if that flag were
+            // ever bypassed.
+            return pipeline('feature-extraction', modelDir, opts);
+        })
+        .catch((err: unknown) => {
+            // Remove the rejected entry so a subsequent call can retry cleanly.
+            pipelineCache.delete(key);
+            return Promise.reject(err);
+        });
     const entry: CachedPipelineEntry = { promise, lastUsedAt: Date.now(), inFlight: 0 };
     pipelineCache.set(key, entry);
     return entry;
@@ -490,6 +541,13 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
      * Fingerprint string: `provider.modelId + '@' + provider.dtype`.
      */
     public readonly dtype: ModelDtype;
+    /**
+     * 3.24 Part B — advertised batch cap (embed/batchedEmbedder.ts reads
+     * this instead of sniffing the class name). Same adaptive value
+     * `LOCAL_XENOVA_MAX_BATCH` already computed: ~8 texts/GB of host RAM,
+     * clamped to [8,256].
+     */
+    public readonly maxBatchSize: number = LOCAL_XENOVA_MAX_BATCH;
     /** Cached prefix mode so we don't re-run the regex on every embed. */
     private readonly asymmetric: boolean;
     /** Optional ORT execution-provider hint passed to pipeline(). */

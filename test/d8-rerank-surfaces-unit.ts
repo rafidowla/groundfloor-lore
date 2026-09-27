@@ -82,21 +82,29 @@ await (async () => {
     function clearEnv(): void { for (const k of ENV_KEYS) delete process.env[k]; }
 
     try {
-        await test('D8d: default ON with nothing set anywhere', async () => {
+        await test('3.24 Part B: default OFF with nothing set anywhere (was ON under D8d)', async () => {
             clearEnv();
             setWorkspaceRecallRerank(WS, null, HOME);
             const cfg = resolveRerankConfig(undefined, WS, HOME);
-            assert.equal(cfg.enabled, true);
-            assert.equal(cfg.model, DEFAULT_RERANK_MODEL);
+            assert.equal(cfg.enabled, false);
         });
 
-        await test('D8d: explicit env "off" overrides the new default-on (no workspace policy, no per-call opinion)', async () => {
+        await test('D8d: explicit env "off" is still a plain off (redundant with 3.24 default, but must not regress)', async () => {
             clearEnv();
             setWorkspaceRecallRerank(WS, null, HOME);
             process.env['LORE_RECALL_RERANK'] = 'off';
             const cfg = resolveRerankConfig(undefined, WS, HOME);
             assert.equal(cfg.enabled, false);
             assert.equal(cfg.disabledReason, undefined, 'env-off is not workspace_disabled — byte-identical-off path, no meta at all');
+        });
+
+        await test('D8d: explicit env "on" opts in (no workspace policy, no per-call opinion)', async () => {
+            clearEnv();
+            setWorkspaceRecallRerank(WS, null, HOME);
+            process.env['LORE_RECALL_RERANK'] = 'on';
+            const cfg = resolveRerankConfig(undefined, WS, HOME);
+            assert.equal(cfg.enabled, true, 'env on must opt in from the 3.24 default-off baseline');
+            assert.equal(cfg.model, DEFAULT_RERANK_MODEL);
         });
 
         await test('enabled: workspace policy overrides env in both directions (workspace off beats env on; workspace on beats env off)', async () => {
@@ -144,7 +152,7 @@ await (async () => {
             }
         });
 
-        await test('D8d: per-call false always wins, even over workspace-on / env-on / the new default-on', async () => {
+        await test('D8d: per-call false always wins, even over workspace-on / env-on', async () => {
             clearEnv();
             process.env['LORE_RECALL_RERANK'] = 'on';
             setWorkspaceRecallRerank(WS, { enabled: true }, HOME);
@@ -202,6 +210,50 @@ await (async () => {
             const cfg = resolveRerankConfig(undefined, undefined, HOME);
             assert.equal(cfg.enabled, true, 'with no workspace name, env must decide (workspace policy is unreachable)');
         });
+
+        // 3.24 Part B — host default (setHostRerankDefault, tier 5) as an
+        // opt-in path, and confirming every "off" tier still beats it.
+        const { setHostRerankDefault } = await import('../packages/lore/src/recall/rerankConfig.js');
+        try {
+            await test('3.24 Part B: host default (createLore({recallRerank:true})) opts in with nothing else set', async () => {
+                clearEnv();
+                setWorkspaceRecallRerank(WS, null, HOME);
+                setHostRerankDefault(true);
+                const cfg = resolveRerankConfig(undefined, WS, HOME);
+                assert.equal(cfg.enabled, true, 'host default true must opt in from the 3.24 default-off baseline');
+            });
+
+            await test('3.24 Part B: workspace-off is still authoritative over host default on', async () => {
+                setHostRerankDefault(true);
+                setWorkspaceRecallRerank(WS, { enabled: false }, HOME);
+                const cfg = resolveRerankConfig(undefined, WS, HOME);
+                assert.equal(cfg.enabled, false, 'workspace off must win even over host default on');
+            });
+
+            await test('3.24 Part B: per-call false still wins over host default on', async () => {
+                setHostRerankDefault(true);
+                setWorkspaceRecallRerank(WS, null, HOME);
+                const cfg = resolveRerankConfig(false, WS, HOME);
+                assert.equal(cfg.enabled, false, 'per-call false must win even over host default on');
+            });
+
+            await test('3.24 Part B: host default on still wins over env off (host sits above env in the chain; workspace has no opinion)', async () => {
+                setHostRerankDefault(true);
+                setWorkspaceRecallRerank(WS, null, HOME);
+                process.env['LORE_RECALL_RERANK'] = 'off';
+                const cfg = resolveRerankConfig(undefined, WS, HOME);
+                assert.equal(cfg.enabled, true, 'host default (tier 5) must win over env (tier 6) — env only decides when the host has no opinion');
+            });
+
+            await test('3.24 Part B: env on still opts in when host default is unset (workspace has no opinion)', async () => {
+                setWorkspaceRecallRerank(WS, null, HOME);
+                process.env['LORE_RECALL_RERANK'] = 'on';
+                const cfg = resolveRerankConfig(undefined, WS, HOME);
+                assert.equal(cfg.enabled, true, 'env on must still opt in when no host default and no workspace/per-call opinion exist');
+            });
+        } finally {
+            setHostRerankDefault(undefined); // guarded setter (N11) — clear this process-global back to "unset" so later tests/files aren't affected
+        }
     } finally {
         clearEnv();
         fs.rmSync(HOME, { recursive: true, force: true });
@@ -394,10 +446,17 @@ async function callMcpRecall(args: Record<string, unknown>): Promise<any> {
 await (async () => {
     console.log('\nC. MCP `recall` tool\n');
 
-    await test('D8d summary, rerank omitted: default-on attempts rerank; model not cached under this test LORE_HOME -> fail-open meta, baseline order n1,n2,n3', async () => {
+    await test('3.24 Part B summary, rerank omitted: default OFF, no rerank attempted at all, baseline order n1,n2,n3 (was default-on/fail-open under D8d)', async () => {
         const out = await callMcpRecall({ mode: 'summary' });
         assert.deepEqual(out.hits.map((h: any) => h.id), ['n1', 'n2', 'n3']);
-        assert.ok(out._meta.rerank, 'D8d default-on means an opinion-less call now reports rerank meta');
+        assert.equal(out._meta.rerank, undefined, '3.24: an opinion-less call reports no rerank meta at all');
+        assert.equal(out.hits[0].rerank_score, undefined);
+    });
+
+    await test('summary, rerank:true explicit, model not cached under this test LORE_HOME -> fail-open meta, baseline order n1,n2,n3', async () => {
+        const out = await callMcpRecall({ mode: 'summary', rerank: true });
+        assert.deepEqual(out.hits.map((h: any) => h.id), ['n1', 'n2', 'n3']);
+        assert.ok(out._meta.rerank, 'explicit opt-in must report rerank meta even when it fails open');
         assert.equal(out._meta.rerank.applied, false);
         assert.equal(out._meta.rerank.reason, 'model_absent');
         assert.equal(out.hits[0].rerank_score, undefined);
@@ -456,10 +515,16 @@ async function callRestRecall(qs: string): Promise<any> {
 await (async () => {
     console.log('\nD. REST GET /api/recall\n');
 
-    await test('D8d no ?rerank param: default-on attempts rerank; model not cached -> fail-open meta, baseline order', async () => {
+    await test('3.24 Part B no ?rerank param: default OFF, no rerank attempted at all, baseline order (was default-on/fail-open under D8d)', async () => {
         const out = await callRestRecall('');
         assert.deepEqual(out.hits.map((h: any) => h.id), ['n1', 'n2', 'n3']);
-        assert.ok(out._meta.rerank, 'D8d default-on means an opinion-less call now reports rerank meta');
+        assert.equal(out._meta.rerank, undefined, '3.24: an opinion-less call reports no rerank meta at all');
+    });
+
+    await test('?rerank=1 explicit, model not cached -> fail-open meta, baseline order', async () => {
+        const out = await callRestRecall('&rerank=1');
+        assert.deepEqual(out.hits.map((h: any) => h.id), ['n1', 'n2', 'n3']);
+        assert.ok(out._meta.rerank, 'explicit opt-in must report rerank meta even when it fails open');
         assert.equal(out._meta.rerank.applied, false);
         assert.equal(out._meta.rerank.reason, 'model_absent');
     });
@@ -499,11 +564,11 @@ await (async () => {
         assert.equal(out._meta.rerank, undefined);
     });
 
-    await test('N16: ?rerank=yes (not a recognized alias) falls through to undefined, same as an absent param', async () => {
+    await test('N16: ?rerank=yes (not a recognized alias) falls through to undefined, same as an absent param -> 3.24 default OFF, no meta', async () => {
         setRerankScorerForTest(reverseScorer);
         const out = await callRestRecall('&rerank=yes');
-        assert.ok(out._meta.rerank, 'D8d default-on: an unrecognized value must inherit the default opinion, not silently disable it');
-        assert.equal(out._meta.rerank.applied, true, 'default-on + a real scorer installed -> applied');
+        assert.deepEqual(out.hits.map((h: any) => h.id), ['n1', 'n2', 'n3'], 'an unrecognized value must inherit the default opinion (now off), not force it on');
+        assert.equal(out._meta.rerank, undefined, '3.24: falling through to the default (now off) reports no rerank meta, even with a scorer installed');
     });
 })();
 
@@ -529,13 +594,18 @@ await (async () => {
             const baseline = await lore.recall('zzyzxd8binproc', { workspace: 'default', mode: 'full', searchMode: 'keyword' }) as any;
             const baselineIds: string[] = baseline.knowledge.map((k: any) => k.id);
             assert.equal(baselineIds.length, 3, 'all 3 ingested nodes must match the shared keyword');
-            // D8d: default-on means an opinion-less call still ATTEMPTS
-            // rerank; this test's LORE_HOME never has the model cached, so
-            // it fails open with reason:'model_absent' rather than omitting
-            // meta entirely (that's the explicit-off contract, tested below).
-            assert.ok(baseline._meta.rerank, 'D8d default-on: opinion-less call now reports rerank meta');
-            assert.equal(baseline._meta.rerank.applied, false);
-            assert.equal(baseline._meta.rerank.reason, 'model_absent');
+            // 3.24 Part B: default OFF means an opinion-less call never
+            // attempts rerank at all -> no meta whatsoever (was D8d
+            // default-on fail-open with reason:'model_absent'; that
+            // explicit-opt-in fail-open path is covered separately below
+            // via rerank:true against this same uncached-model LORE_HOME).
+            assert.equal(baseline._meta.rerank, undefined, '3.24: an opinion-less call reports no rerank meta at all');
+
+            const optedIn = await lore.recall('zzyzxd8binproc', { workspace: 'default', mode: 'full', searchMode: 'keyword', rerank: true }) as any;
+            assert.deepEqual(optedIn.knowledge.map((k: any) => k.id), baselineIds, 'model absent -> fail-open keeps baseline order');
+            assert.ok(optedIn._meta.rerank, 'explicit opt-in must report rerank meta even when it fails open');
+            assert.equal(optedIn._meta.rerank.applied, false);
+            assert.equal(optedIn._meta.rerank.reason, 'model_absent');
 
             setRerankScorerForTest(reverseScorer);
             const reranked = await lore.recall('zzyzxd8binproc', { workspace: 'default', mode: 'full', searchMode: 'keyword', rerank: true }) as any;
@@ -626,7 +696,7 @@ await (async () => {
                 assert.equal(out._meta.rerank.applied, true);
             });
 
-            await test('D8d no per-call rerank: default-on applies on the cross-workspace path too (precedence collapses to per-call > env > default-on — no single workspace to resolve against)', async () => {
+            await test('3.24 Part B no per-call rerank, no env: default OFF applies on the cross-workspace path too (was default-ON under D8d — precedence collapses to per-call > env > default, no single workspace to resolve against)', async () => {
                 delete process.env['LORE_RECALL_RERANK'];
                 setRerankScorerForTest(reverseScorer);
                 const defaultRes = await runCrossWorkspaceRecall({
@@ -634,7 +704,15 @@ await (async () => {
                     sessionCache: { pushNode() { /* noop */ } } as any, responseMode: 'summary',
                 } as any);
                 const defaultOut = JSON.parse(defaultRes.content[0]!.text);
-                assert.equal(defaultOut._meta.rerank.applied, true, 'D8d: no per-call opinion, no env -> default ON applies on the cross-workspace path too');
+                assert.equal(defaultOut._meta.rerank, undefined, '3.24: no per-call opinion, no env -> default OFF, no meta at all, on the cross-workspace path too');
+
+                process.env['LORE_RECALL_RERANK'] = '1';
+                const onRes = await runCrossWorkspaceRecall({
+                    topic: 'q', depth: 0, includeSuperseded: false, registry: registry as any, verbatimStore: verbatimStore as any,
+                    sessionCache: { pushNode() { /* noop */ } } as any, responseMode: 'summary',
+                } as any);
+                const onOut = JSON.parse(onRes.content[0]!.text);
+                assert.equal(onOut._meta.rerank.applied, true, 'env "1" alone must still opt rerank in on the cross-workspace path from the 3.24 default-off baseline');
 
                 process.env['LORE_RECALL_RERANK'] = '0';
                 const offRes = await runCrossWorkspaceRecall({
