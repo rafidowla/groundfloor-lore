@@ -7,14 +7,21 @@ model server process (Part C). See also:
 [`CHANGELOG.md`](../CHANGELOG.md) 3.24.0 entry and
 [`docs/CONFIGURATION.md`](CONFIGURATION.md) — `LORE_RECALL_RERANK*` section.
 
-## 0. 3.24.1 — piece vectors under the search worker
+## 0. 3.24.1 / 3.24.2 — piece vectors under the search worker
 
-**Who is affected:** hosts that run the search worker
+**Who is affected:** any host that runs the search worker
 (`LORE_SEARCH_WORKER=1`, or a `createLore({ searchWorkerPolicy })` that
-returns true) **and** inject their own `embeddingProvider` **and** have piece
-vectors on (`createLore({ pieceVectors: true })`, `LORE_RECALL_PIECE_VECTORS`,
-or a workspace override). Hosts without the worker, or without piece vectors,
-are unaffected — upgrade as usual.
+returns true) **and** has piece vectors on (`createLore({ pieceVectors: true })`,
+`LORE_RECALL_PIECE_VECTORS`, or a workspace override) — **whichever embedding
+provider it uses**: an injected `createLore({ embeddingProvider })`, a remote
+`LORE_EMBEDDING_PROVIDER`, or the default local model. The worker always
+runs in parent-embeds mode (the host process embeds, the worker only
+searches/writes), so every worker host hit the same unreachable piece path.
+Hosts without the worker, or without piece vectors, are unaffected — upgrade
+as usual.
+
+> Earlier copies of this section (3.24.1) said only hosts that *inject* their
+> own `embeddingProvider` were affected. That was too narrow; see above.
 
 **What was wrong in 3.23 / 3.24.0:** under the worker, the piece index was
 never written. Every write logged a `piece upsert failed … NOT REACHABLE:
@@ -25,18 +32,30 @@ because the sidecar still said the build was complete.
 
 **What to do:**
 
-1. Upgrade worker hosts to **3.24.1**. On 3.24.0 the worker cannot build
+1. Upgrade worker hosts to **3.24.2** (3.24.1 has the same worker fix; 3.24.2
+   adds the data-root repair below). On 3.24.0 the worker cannot build
    pieces at all.
 2. If the host ingested anything under 3.23 / 3.24.0 with the worker and
-   piece vectors on, run this once:
-   1. Stop the host.
-   2. Run `lore migrate piece-vectors` with the host's `LORE_HOME` and
-      embedding settings. It should report `Action: built`.
+   piece vectors on, rebuild its piece index once, offline:
+   1. Stop the host (or `dispose()` its Lore instance).
+   2. Rebuild **the host's own data root** — the directory it passes as
+      `createLore({ dataDir })`, not necessarily `LORE_HOME`. Either:
+      - CLI, with the host's embedding settings in the environment:
+        `lore migrate piece-vectors --data-dir <dataDir>`
+      - or in-process, from the host (required if the host injects its own
+        provider — the CLI can only build one from env):
+        ```ts
+        import { rebuildPieceIndex } from '@groundfloor/lore';
+        const r = await rebuildPieceIndex({ dataDir, embeddingProvider });
+        // r.action === 'built' (or 'noop' when already current)
+        ```
+      Either should report `Action: built` / `action: 'built'`. A host with
+      several data roots (Atlas: one per workspace) runs it once per root.
    3. Restart the host.
 3. Check `_meta.piece_vectors` on a recall: it should read
    `{ status: 'active', layout: 'pieces-v1' }`.
 
-If you skip step 2, 3.24.1 detects the short index when it opens the store,
+If you skip step 2, 3.24.1+ detects the short index when it opens the store,
 logs one `ERROR` naming the fix, and reports `not_built` / `incomplete build`.
 Recall keeps working on canonical vectors in the meantime.
 
@@ -44,8 +63,26 @@ Recall keeps working on canonical vectors in the meantime.
 delete that fails (for example, an embedding endpoint error) now marks the
 index incomplete instead of logging a warning and carrying on. You get one
 `ERROR`, `_meta.piece_vectors` reports `not_built`, and piece search stays off
-until `lore migrate piece-vectors` is run. It does not recover by itself
+until the index is rebuilt (step 2 above). It does not recover by itself
 while the host is running.
+
+### `--data-dir` / `rebuildPieceIndex()` (3.24.2)
+
+- **Target resolution** mirrors `createLore({ dataDir })`: the data root's
+  own `workspaces.json`, active workspace's path. Without `--data-dir` the
+  command still targets `LORE_HOME` exactly as before.
+- **Must run offline.** On a Surreal-graph data root, a root held by a
+  running host is refused (`PieceIndexDataDirInUseError` from the API; the
+  CLI exits 1 and says to stop that host). The SQLite graph takes no
+  cross-process lock, so on a SQLite-graph root nothing can detect a live
+  host — stopping it first is on you.
+- A nonexistent `--data-dir` / `dataDir` is an error; nothing is created.
+- Options: `force`, `dryRun`, `drop` (same as the CLI flags);
+  `embeddingProvider` (inject — must be the model the store was built
+  with), or `embedding` (local-model overrides, as `createLore`).
+- **3.24.1 workaround:** for a host whose active workspace path *is* its data
+  root (Atlas's layout), `LORE_HOME=<dataDir> lore migrate piece-vectors`
+  already reaches it on 3.24.1.
 
 ## 1. Re-rank is now opt-in (reverts the 3.23 default)
 
@@ -247,7 +284,7 @@ adm-zip 0.6.1 (clears the 3.23 `npm audit` high). No action needed:
 
 ## 5. Checklist
 
-1. Bump the vendored tarball to `groundfloor-lore-3.24.0.tgz` (copy into
+1. Bump the vendored tarball to the latest 3.24.x (`groundfloor-lore-3.24.2.tgz`) (copy into
    `vendor/`, update the `@groundfloor/lore` line, `npm install`, commit).
 2. Keep the 3.23 host `overrides` (`sharp`, `uuid`) and Node `>=22.13 <23`.
 3. If your host relied on re-rank running without an explicit opt-in, add
@@ -257,3 +294,6 @@ adm-zip 0.6.1 (clears the 3.23 `npm audit` high). No action needed:
    3.23's default-on if the model wasn't fetched).
 5. Re-run your own recall eval with your chosen re-rank setting (on or off)
    to confirm nothing regressed.
+6. Worker + piece-vectors hosts: section 0 — rebuild each data root once
+   (`--data-dir` / `rebuildPieceIndex()`) and confirm `_meta.piece_vectors`
+   is `active`.

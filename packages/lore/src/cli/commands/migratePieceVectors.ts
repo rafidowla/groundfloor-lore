@@ -17,13 +17,33 @@
  * resolves for this workspace (Lance or SQLite) — this command, unlike
  * migrateEmbedding.ts's Lance-only `new VerbatimStore(...)`, must support
  * both, since `test/d7-piece-migration-unit.ts` runs it under both engines.
+ *
+ * `--data-dir <path>` (3.24.2): target an embedded host's own
+ * `createLore({ dataDir })` root instead of `loreHome()`. Without it the
+ * target is `loreHome()` verbatim, exactly as before. Path resolution and the
+ * build itself are shared with the exported `rebuildPieceIndex()` API
+ * (engines/pieces/rebuildPieceIndex.ts).
  */
 
-import path from 'path';
-import { loreHome } from '../../config/loreHome.js';
 import type { WorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
-import type { VerbatimStoreApi } from '../../engines/verbatimStoreApi.js';
-import type { PieceBuildableStore } from '../../engines/pieces/pieceIndexBuild.js';
+import type { PieceRebuildTarget } from '../../engines/pieces/rebuildPieceIndex.js';
+
+/** Value of `--data-dir <path>` / `--data-dir=<path>`; undefined when absent. */
+function parseDataDir(args: string[]): string | undefined {
+    for (let i = 0; i < args.length; i++) {
+        const a = args[i]!;
+        if (a.startsWith('--data-dir=')) return a.slice('--data-dir='.length);
+        if (a === '--data-dir') {
+            const v = args[i + 1];
+            if (v === undefined || v.startsWith('--')) {
+                console.error('--data-dir requires a path');
+                process.exit(1);
+            }
+            return v;
+        }
+    }
+    return undefined;
+}
 
 export async function migratePieceVectorsCommand(args: string[]): Promise<void> {
     const dryRun = args.includes('--dry-run');
@@ -35,20 +55,47 @@ export async function migratePieceVectorsCommand(args: string[]): Promise<void> 
         process.exit(1);
     }
 
-    const basePath = loreHome();
-    const loreDir = path.join(basePath, '.lore');
+    const dataDir = parseDataDir(args);
 
     const { openGraphForCli, CliDaemonLockError } = await import('./shared.js');
-    const { openWorkspaceVerbatim, resolveVerbatimEngineForPath } = await import('../../engines/openWorkspaceVerbatim.js');
+    const { resolveVerbatimEngineForPath } = await import('../../engines/openWorkspaceVerbatim.js');
     const { createEmbeddingProvider } = await import('../../mcp/services.js');
-    const { buildPieceIndex } = await import('../../engines/pieces/pieceIndexBuild.js');
+    const { resolvePieceRebuildTarget, rebuildPieceIndexAt, acquirePieceRebuildLock, PieceIndexDataDirInUseError } =
+        await import('../../engines/pieces/rebuildPieceIndex.js');
     const { getFingerprintPath } = await import('../../engines/embeddingFingerprint.js');
 
-    // Same daemon-lock preflight every other CLI migration uses — refuse
-    // fast with actionable recovery steps rather than racing the daemon's
-    // single-writer lock (see migrateEmbedding.ts for the identical block).
-    let graph: WorkspaceGraph;
+    let target: PieceRebuildTarget;
     try {
+        target = resolvePieceRebuildTarget(dataDir);
+    } catch (err) {
+        console.error((err as Error).message);
+        process.exit(1);
+    }
+    const basePath = target.basePath;
+
+    let graph: { close(): Promise<void> } | WorkspaceGraph;
+    if (dataDir !== undefined) {
+        // An embedded host's data root: no LORE_HOME daemon owns it, so the
+        // lock preflight is a short-budget direct open. If the host is still
+        // running, tell the operator to stop THAT host — the launchd recipe
+        // below would stop an unrelated daemon.
+        try {
+            graph = await acquirePieceRebuildLock(target);
+        } catch (err) {
+            console.error('');
+            console.error(`Could not open ${basePath}: ${(err as Error)?.message ?? ''}`);
+            if (err instanceof PieceIndexDataDirInUseError) {
+                console.error('');
+                console.error('Stop (or dispose the Lore instance of) the host that owns this data directory, then re-run:');
+                console.error('');
+                console.error(`  lore migrate piece-vectors --data-dir ${dataDir}`);
+            }
+            process.exit(1);
+        }
+    } else try {
+        // Same daemon-lock preflight every other CLI migration uses — refuse
+        // fast with actionable recovery steps rather than racing the daemon's
+        // single-writer lock (see migrateEmbedding.ts for the identical block).
         graph = await openGraphForCli(basePath);
     } catch (err) {
         const msg = err instanceof CliDaemonLockError
@@ -71,19 +118,11 @@ export async function migratePieceVectorsCommand(args: string[]): Promise<void> 
     }
 
     const provider = await createEmbeddingProvider();
-    const engine = resolveVerbatimEngineForPath(basePath, {}).engine;
-    const store: VerbatimStoreApi = openWorkspaceVerbatim(basePath, provider, {
-        // D7c — this CLI builds/maintains the index regardless of the
-        // workspace's current retrieval intent (design 2.8: migration is
-        // independent of intent, matching this module's own docblock).
-        // `pieceVectors: true` only affects the constructor's own
-        // `initialize({intentOn})` fast-path for a fresh/empty canonical
-        // store — buildPieceIndex below does the real work either way.
-        pieceVectors: true,
-    });
+    const engine = resolveVerbatimEngineForPath(basePath, { home: target.home }).engine;
 
     console.log('');
     console.log('Piece-vector migration');
+    if (dataDir !== undefined) console.log(`  Data dir: ${basePath}`);
     console.log(`  Engine:   ${engine === 'sqlite' ? 'SQLite' : 'LanceDB'}`);
     console.log(`  Provider: ${provider.constructor.name} (${provider.modelId})`);
     console.log(`  Mode:     ${drop ? 'DROP (remove index + sidecar, disable)' : dryRun ? 'DRY-RUN (count only, writes nothing)' : 'BUILD (idempotent — no-op if already current)'}`);
@@ -92,23 +131,11 @@ export async function migratePieceVectorsCommand(args: string[]): Promise<void> 
     console.log('');
 
     try {
-        await store.initialize();
-
-        // D7c — buildPieceIndex only needs exportRows() + the store's own
-        // piece-index instance (pieceIndexForMigration()); neither is part
-        // of VerbatimStoreApi's public contract (same "feature-detect, don't
-        // widen the shared interface for one caller" convention D7b's
-        // PieceSearchCapableStore already established in
-        // recall/pieceSeedSearch.ts) — both concrete engines implement it
-        // structurally, so this cast is safe for whichever engine
-        // openWorkspaceVerbatim resolved above.
-        const buildableStore = store as unknown as PieceBuildableStore;
-
-        const result = await buildPieceIndex(basePath, buildableStore, provider, {
-            dryRun,
-            force,
-            drop,
-        });
+        // rebuildPieceIndexAt opens whichever store openWorkspaceVerbatim
+        // resolves (Lance or SQLite) with pieceVectors: true — this CLI
+        // builds/maintains the index regardless of the workspace's current
+        // retrieval intent (design 2.8) — and runs buildPieceIndex on it.
+        const result = await rebuildPieceIndexAt(target, provider, { dryRun, force, drop });
 
         console.log('─── Result ──────────────────────────────────');
         console.log(`  Action:          ${result.action}`);
@@ -130,7 +157,6 @@ export async function migratePieceVectorsCommand(args: string[]): Promise<void> 
             console.log('Piece index built. Retrieval picks it up automatically once the workspace\'s piece-vectors intent is on.');
         }
     } finally {
-        await store.close();
         await graph.close();
     }
 }

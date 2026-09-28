@@ -755,6 +755,9 @@ All types below are importable from `'@groundfloor/lore'`:
 | `LoreDeploymentMode` | `type` | `'embedded' \| 'local' \| 'cloud'`. |
 | `NodeWriteResult` | `type` | Discriminated union returned by `nodeUpsert`. |
 | `LoreStorageClient` | `class` | Storage-client facade (cloud-swap point). |
+| `rebuildPieceIndex` | `function` | 3.24.2. Offline D7 piece-index rebuild for a host's `createLore({ dataDir })` root — the API behind `lore migrate piece-vectors --data-dir`. `({ dataDir?, embeddingProvider?, embedding?, force?, dryRun?, drop? })` → `{ action, nodesScanned, nodesRebuilt, piecesIndexed, reason?, basePath, engine, modelId }`. Dispose the host's instance first. See `docs/MIGRATION-3.24.md` §0. |
+| `PieceIndexDataDirInUseError` | `class` | Thrown by `rebuildPieceIndex` when a (Surreal-graph) data root is held by a running process. |
+| `RebuildPieceIndexOptions` / `RebuildPieceIndexResult` | `interface` | Options / result of `rebuildPieceIndex`. |
 
 ---
 

@@ -162,6 +162,17 @@ export type { EmbeddingProvider } from './providers/types.js';
 export { embeddingProviderFingerprint } from './providers/localEmbeddingProvider.js';
 export { EmbeddingFingerprintMismatchError, type FingerprintMismatchKind } from './engines/verbatimFingerprintGate.js';
 
+// 3.24.2: offline D7 piece-index rebuild for an embedded host's own
+// createLore({ dataDir }) root — the API behind `lore migrate piece-vectors
+// --data-dir`. Dispose the host's Lore instance first; a held data root
+// throws PieceIndexDataDirInUseError.
+export {
+    rebuildPieceIndex,
+    PieceIndexDataDirInUseError,
+    type RebuildPieceIndexOptions,
+    type RebuildPieceIndexResult,
+} from './engines/pieces/rebuildPieceIndex.js';
+
 // P3 (Atlas): Pin the local embedding model contract so cross-device sync
 // can validate dimensions before trusting vectors from another machine.
 // Import DEFAULT_LOCAL_MODEL_ID / DEFAULT_LOCAL_MODEL_DIM to assert the

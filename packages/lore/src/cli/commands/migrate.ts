@@ -49,10 +49,12 @@ export async function migrateCommand(args: string[]): Promise<void> {
         console.error('  workspace-to-workspace --from <a> --to <b> [filters] [--apply]');
         console.error('      Move filtered nodes (and optionally edges + vectors) from one');
         console.error('      workspace to another. Default --dry-run. See --help for flags.');
-        console.error('  piece-vectors [--dry-run] [--force] [--drop]');
+        console.error('  piece-vectors [--dry-run] [--force] [--drop] [--data-dir <path>]');
         console.error('      Build/rebuild the derived piece-level index (D7, 3.23). Bare');
         console.error('      invocation builds and is idempotent (no-op once current).');
         console.error('      --dry-run counts only; --force rebuilds; --drop removes + disables.');
+        console.error('      --data-dir <path> targets an embedded host\'s createLore({ dataDir })');
+        console.error('      root instead of LORE_HOME (3.24.2); stop that host first.');
         console.error('  list [--substrate <name>] [--workspace <name>] [--status <s>]');
         console.error('      Sprint H1: list online schema migrations tracked in migrations.sqlite.');
         console.error('  status <id>');

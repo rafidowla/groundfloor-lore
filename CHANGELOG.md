@@ -4,6 +4,38 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.24.2] — 2026-09-27
+
+Upgrading from 3.24.1: no action needed unless a host's piece index is marked
+incomplete — then rebuild **that host's own data root** with the new
+`--data-dir` flag or `rebuildPieceIndex()` (see
+[`docs/MIGRATION-3.24.md`](docs/MIGRATION-3.24.md) §0).
+
+### Added
+- **`lore migrate piece-vectors --data-dir <path>`** and an exported
+  **`rebuildPieceIndex({ dataDir, embeddingProvider?, force?, dryRun?, drop? })`**
+  (+ `PieceIndexDataDirInUseError`, `RebuildPieceIndexOptions`,
+  `RebuildPieceIndexResult`). Offline D7 piece-index rebuild for an embedded
+  host's `createLore({ dataDir })` root. Target resolution mirrors
+  `createLore` (`resolveLoreHome({ dataDir })`, then the root's active
+  workspace path); a Surreal-graph root held by a running process is refused;
+  a nonexistent path is an error and creates nothing. Shared core:
+  `engines/pieces/rebuildPieceIndex.ts`.
+
+### Fixed
+- **The 3.24.1 piece-index repair could not reach an embedded host's store.**
+  `lore migrate piece-vectors` only ever targeted `loreHome()`, so a host whose
+  data lives at its own `dataDir` (Atlas: one per workspace) rebuilt — or
+  no-op'd — `LORE_HOME` while its own index stayed incomplete, with piece
+  search off. Without the new flag the command's target is unchanged.
+
+### Docs
+- `MIGRATION-3.24.md` §0 "Who is affected" was too narrow: it limited the
+  3.24.1 worker fix to hosts that inject their own `embeddingProvider`. The
+  worker always runs parent-embeds, so every worker + piece-vectors host is
+  affected, whatever its provider. Rewritten, with the `--data-dir` / API
+  repair steps and the SQLite no-lock caveat.
+
 ## [3.24.1] — 2026-09-27
 
 Upgrading from 3.24.0: read [`docs/MIGRATION-3.24.md`](docs/MIGRATION-3.24.md) §0. Hosts that
