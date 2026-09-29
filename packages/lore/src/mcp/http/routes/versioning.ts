@@ -2,6 +2,7 @@
  * versioning.ts — HTTP mirrors for the versioning MCP tools (Feature 8).
  *
  *   GET  /api/nodes/:id/history            — version log for a single node
+ *   GET  /api/version-history/policy       — READ-ONLY effective history-retention policy
  *   GET  /api/workspaces/:name/diff        — workspace changes since a timestamp
  *   POST /api/changesets                   — open a new atomic changeset
  *   POST /api/changesets/:id/commit        — commit buffered writes
@@ -113,6 +114,22 @@ export async function tryVersioningRoutes(
             const versions = deps.versionStore.getVersions(nodeId, workspace, limit);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ node_id: nodeId, workspace, count: versions.length, versions }));
+        } catch (err) {
+            writeError(res, 500, 'internal_error', redactError(err));
+        }
+        return true;
+    }
+
+    /* ─── GET /api/version-history/policy (READ-ONLY, no setter) ── */
+    if (pathname === '/api/version-history/policy' && req.method === 'GET') {
+        const gate = await gateRoute(
+            { deploymentMode: deps.deploymentMode, dataplane: deps.dataplane },
+            { permission: 'read' },
+        );
+        if (!gate.allowed) { writePermissionDenied(res, gate); return true; }
+        try {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(deps.versionStore.getEffectiveHistoryPolicy()));
         } catch (err) {
             writeError(res, 500, 'internal_error', redactError(err));
         }

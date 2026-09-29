@@ -1542,26 +1542,52 @@ Source: `src/mcp/compactionScheduler.ts`
 ---
 
 Same shape, for `versions.sqlite` — one immutable row is recorded per node
-write, with no built-in ceiling. `pruneVersions()` existed since Feature 8
-(2026-05-26) but was never wired to anything, so a long-running local daemon's
-version history grew unbounded (found in the wild: 896MB against a healthy
-sibling's ~130MB for a comparable node count). These three variables control
-the background timer that periodically soft-compacts old rows, hard-deletes
-already-compacted rows (nothing reads one — every read path excludes
-`compacted=1`), then VACUUMs to actually reclaim the freed pages on disk.
+write. **Age-based deletion of this history is opt-in (owner decision
+2026-09-29). By default nothing is ever deleted by age: the daemon no longer
+prunes version history after 90 days.** These four variables control the
+daemon's background timer, which — only when pruning is enabled — periodically
+soft-compacts old rows, hard-deletes already-compacted rows (nothing reads
+one; every read path excludes `compacted=1`), then reclaims space online. For
+embedded `createLore()` hosts the same switch is the `versionHistory.pruning`
+option (see `docs/API_REFERENCE.md`); the effective policy is readable, never
+writable, through `lore.getVersionHistoryPolicy()`, the
+`get_version_history_policy` MCP tool and `GET /api/version-history/policy`.
+
+### `LORE_VERSION_PRUNE_ENABLED`
+
+| | |
+|---|---|
+| **Default** | off (version history is kept forever) |
+| **Values** | `1` / `true` to enable, `0` / `false` to force off |
+| **Surface** | daemon (scheduled version-prune timer) and the read-only policy surfaces |
+
+Explicitly enables age-based deletion of `node_versions` rows. When enabled
+without `LORE_VERSION_RETENTION_DAYS`, the retention window is **2557 days
+(7 years)**. `0` / `false` forces pruning off even if
+`LORE_VERSION_RETENTION_DAYS` is set. An embedded host's
+`versionHistory.pruning` option takes precedence over this variable. Not
+settable through MCP or REST.
+
+Source: `src/outbox/versionPruningPolicy.ts`
+
+---
 
 ### `LORE_VERSION_RETENTION_DAYS`
 
 | | |
 |---|---|
-| **Default** | `90` |
+| **Default** | unset (pruning disabled); 2557 (7 years) when pruning is enabled without this variable |
 | **Surface** | daemon (scheduled version-prune timer) |
 
-Rows older than this many days are pruned, except protected-node rows (any
-row whose state JSON contains `"status":"protected"`), which are retained
-regardless of age. Non-finite or non-positive values fall back to the default.
+Retention window in days. **Setting it to a positive number explicitly also
+enables pruning at that value** (backward compatibility for operators who
+already set it) and logs a one-time startup notice. Unset, non-finite or
+non-positive values do not enable pruning. Rows older than the window are
+pruned, except protected-node rows (any row whose state JSON contains
+`"status":"protected"`), which are retained regardless of age. Per-type
+overrides (`retentionDaysByType`) apply only when pruning is enabled.
 
-Source: `src/mcp/versionPruneScheduler.ts`
+Source: `src/outbox/versionPruningPolicy.ts`, `src/mcp/versionPruneScheduler.ts`
 
 ---
 
@@ -1570,7 +1596,7 @@ Source: `src/mcp/versionPruneScheduler.ts`
 | | |
 |---|---|
 | **Default** | `86400000` (24 hours) |
-| **Surface** | daemon (scheduled version-prune timer) |
+| **Surface** | daemon (scheduled version-prune timer; only scheduled when pruning is enabled) |
 
 Cadence in milliseconds between automatic version-prune passes. Non-finite or
 non-positive values fall back to the default.
@@ -1583,12 +1609,13 @@ Source: `src/mcp/versionPruneScheduler.ts`
 
 | | |
 |---|---|
-| **Default** | off (scheduled pruning enabled) |
+| **Default** | off |
 | **Values** | `1` to disable |
 | **Surface** | daemon (scheduled version-prune timer) |
 
-Opt-out of the scheduled version-prune timer entirely, for an operator who
-prunes on their own cadence. Only the exact string `1` disables it.
+Kill switch: even with pruning enabled, do not run the scheduled timer, for an
+operator who prunes on their own cadence. Only the exact string `1` disables
+it. Has no effect when pruning is disabled (nothing is scheduled anyway).
 
 Source: `src/mcp/versionPruneScheduler.ts`
 
@@ -3675,7 +3702,8 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_MAINTAIN_EPHEMERAL_EXPIRY` | `true` | Maintenance |
 | `LORE_COMPACT_INTERVAL_MS` | `86400000` (24 h) | Maintenance |
 | `LORE_COMPACT_SCHEDULE_DISABLED` | off | Maintenance |
-| `LORE_VERSION_RETENTION_DAYS` | `90` | Maintenance |
+| `LORE_VERSION_PRUNE_ENABLED` | off (history kept forever) | Maintenance |
+| `LORE_VERSION_RETENTION_DAYS` | unset (pruning off); explicit value enables pruning; 2557 (7 y) when enabled without it | Maintenance |
 | `LORE_VERSION_PRUNE_INTERVAL_MS` | `86400000` (24 h) | Maintenance |
 | `LORE_VERSION_PRUNE_SCHEDULE_DISABLED` | off | Maintenance |
 | `LORE_MCP_AUTH_TOKEN` | _(none)_ | Security |
@@ -3709,6 +3737,7 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_RECALL_CANDIDATE_FLOOR` | `0` (opt-in `50`) | Recall |
 | `LORE_RECALL_LEXICAL_BASE` | `rrf` (opt-in `anchored`) | Recall |
 | `LORE_SUPERSESSION_ENFORCE` | off | Write/Supersession |
+| `LORE_VERSION_SKIP_TYPES` | unset (no types skipped) | Write/Versioning |
 | `LORE_RECALL_STAGE_TIMING` | off | Recall |
 | `LORE_RECALL_RECENCY_HALF_LIFE_DAYS` | `30` | Recall |
 | `LORE_RECALL_FANOUT_WS_CAP` | `50` | Recall |

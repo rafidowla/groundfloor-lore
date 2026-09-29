@@ -30,6 +30,10 @@ import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { VersionStore } from '../packages/lore/src/outbox/versionStore.js';
 import { runVersionPruneSweep } from '../packages/lore/src/mcp/versionPruneScheduler.js';
+import { resolveEffectiveVersionHistoryPolicy } from '../packages/lore/src/outbox/versionPruningPolicy.js';
+
+/** Pruning is opt-in (owner decision 2026-09-29): every sweep test states its policy explicitly. */
+const POLICY_90 = resolveEffectiveVersionHistoryPolicy({ pruning: { enabled: true, retentionDays: 90 } }, {});
 
 let passed = 0;
 let failed = 0;
@@ -94,7 +98,7 @@ await test('T2: the real scheduler entry point actually prunes AND hard-deletes 
         });
 
         // THE REAL ENTRY POINT — same call the scheduler makes on its timer.
-        const result = await runVersionPruneSweep({ store, retentionDays: 90 });
+        const result = await runVersionPruneSweep({ store, policy: POLICY_90 });
 
         assert.equal(result.softCompacted, 50, 'the 50 old, unprotected rows were soft-compacted');
         assert.equal(result.hardDeleted, 50, 'and then hard-deleted in the same pass');
@@ -131,7 +135,7 @@ await test('T3: the file actually shrinks on disk — soft-delete alone would no
         const filePath = path.join(dir, 'versions.sqlite');
         const sizeBefore = fs.statSync(filePath).size;
 
-        await runVersionPruneSweep({ store, retentionDays: 90 });
+        await runVersionPruneSweep({ store, policy: POLICY_90 });
 
         const sizeAfter = fs.statSync(filePath).size;
         console.log(`      ${sizeBefore.toLocaleString()} bytes -> ${sizeAfter.toLocaleString()} bytes`);

@@ -173,6 +173,33 @@ export {
     type RebuildPieceIndexResult,
 } from './engines/pieces/rebuildPieceIndex.js';
 
+// Storage-growth fix 3/3 (Fix 5): offline, one-time reclaim of
+// versions.sqlite/outbox.sqlite for an embedded host's own
+// createLore({ dataDir }) root — the API behind `lore maintain storage
+// --data-dir`. Dispose the host's Lore instance first; a held data root
+// throws ReclaimDataDirInUseError, insufficient free disk for the VACUUM
+// step throws ReclaimInsufficientDiskSpaceError.
+export {
+    reclaimStorage,
+    ReclaimDataDirInUseError,
+    ReclaimInsufficientDiskSpaceError,
+    type ReclaimStorageOptions,
+    type ReclaimStorageResult,
+    type ReclaimFileReport,
+} from './outbox/reclaimStorage.js';
+
+// Version-history retention: age-based deletion is OPT-IN (owner decision
+// 2026-09-29). `lore.getVersionHistoryPolicy()` returns this shape,
+// read-only; DEFAULT_PRUNE_RETENTION_DAYS (7 years) applies only when
+// `createLore({ versionHistory: { pruning: { enabled: true } } })` (or the
+// daemon's LORE_VERSION_PRUNE_ENABLED=1) turns pruning on.
+export {
+    DEFAULT_PRUNE_RETENTION_DAYS,
+    type EffectiveVersionHistoryPolicy,
+    type VersionPolicySource,
+} from './outbox/versionPruningPolicy.js';
+export type { VersionHistoryPolicy, VersionPruningPolicy } from './outbox/versionPolicy.js';
+
 // P3 (Atlas): Pin the local embedding model contract so cross-device sync
 // can validate dimensions before trusting vectors from another machine.
 // Import DEFAULT_LOCAL_MODEL_ID / DEFAULT_LOCAL_MODEL_DIM to assert the

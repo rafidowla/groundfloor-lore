@@ -171,6 +171,7 @@ These are the tools available to AI agents over MCP. Categories below.
 | `check_anchors` | Validate anchor references within the graph. |
 | `maintain` | Config-driven capacity maintenance (compaction, version cleanup, retention, ephemeral expiry). |
 | `get_prune_status` | Status of the last prune run. |
+| `get_version_history_policy` | Read-only effective version-history retention policy: whether age-based deletion is enabled (default off, history kept forever), retention days (7 years when enabled), per-type overrides, skipTypes. |
 | `prune_nodes` | Archive or drop nodes matching a retention policy. |
 | `export_snapshot` | Export a workspace snapshot to a portable file. |
 | `redact_evidence` | Redact sensitive content from an evidence node. |

@@ -58,6 +58,8 @@ import {
 import type { LoreNode } from '../providers/types.js';
 import type { OutboxStore } from '../outbox/types.js';
 import type { VersionStore } from '../outbox/versionStore.js';
+import { shouldRecordVersion } from '../outbox/versionPolicy.js';
+import type { VersionHistoryPolicy } from '../outbox/versionPolicy.js';
 import type { WriteAheadLog } from '../engines/syncEngine.js';
 
 /* ─── Minimal substrate contracts (local | cloud) ──────────────────── */
@@ -198,6 +200,10 @@ export interface NodeUpsertHooks {
      *  the literal `'mcp'`; defaults to that when omitted so the version
      *  shape is unchanged. */
     versionPrincipal?: string;
+    /** Storage-growth fix 1/3 (R1/R2) — per-type history policy. Absent =
+     *  no type-level skip; the no-op check (see step 5) always applies
+     *  regardless of this being set. */
+    versionHistoryPolicy?: VersionHistoryPolicy;
     /** Local autolink handles (reconnect). Supplied only when the write is
      *  active-workspace local mode AND embedding is not skipped. */
     autolink?: AutolinkHandles;
@@ -715,7 +721,17 @@ export async function nodeUpsert(
     }
 
     // 5. Version record (non-fatal), when wired.
-    if (hooks.versionStore) {
+    //
+    // Storage-growth fix 1/3 (R1/R2, 2026-09-28) — gated by shouldRecordVersion:
+    // skip when the node's type is in `versionHistoryPolicy.skipTypes`, or when
+    // `previousState` is present and content is unchanged once volatile
+    // bookkeeping fields (createdAt/updatedAt/syncedAt/…) are ignored. A missing
+    // `previousState` ALWAYS records — never skip on missing data. See
+    // outbox/versionPolicy.ts for the full rationale.
+    if (hooks.versionStore && shouldRecordVersion(
+        typeof nodeData.type === 'string' ? nodeData.type : undefined,
+        hooks.previousState, node, hooks.versionHistoryPolicy,
+    )) {
         try {
             hooks.versionStore.recordVersion({
                 versionId: randomUUID(),

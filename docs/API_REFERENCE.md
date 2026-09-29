@@ -127,6 +127,7 @@ HITL exception queue.
 | Tool | Purpose |
 |---|---|
 | `node_history` | Version history for a node |
+| `get_version_history_policy` | Read-only effective version-history retention policy (`enabled`, `retentionDays`, `retentionDaysByType`, `skipTypes`, `source`, `skipTypesSource`). No setter. |
 | `diff_workspace` | Diff a workspace across two points |
 | `begin_changeset` | Open an atomic changeset (buffer writes) |
 | `commit_changeset` | Apply a buffered changeset atomically |
@@ -299,6 +300,7 @@ delete an X" without hunting through every family's own table below.
 | `GET /api/node/lineage` | Full superseded-by chain |
 | `GET /api/nodes/as-of` | Bi-temporal "as-of" query — nodes valid at a given instant |
 | `GET /api/nodes/:id/history` | Version history for a node |
+| `GET /api/version-history/policy` | Read-only effective version-history retention policy (`read` scope). No setter. |
 | `GET /api/nodes/:id/anchors` | Inspect a node's anchor references |
 | `POST /api/nodes/:id/outcomes` · `GET /api/nodes/:id/outcomes` | Record / read node outcomes |
 | `POST /api/recall/outcome` | Mirror of the route above, entered from a recall-adjacent surface (3.21 step 3(h); same mechanism, no new ranking math, no new vocabulary). Body: `{node_id, workspace, outcome, query_id?}` — `outcome` is `success`\|`failure`\|`partial`, identical meaning to `record_outcome`'s own field (outcome of ACTING on the memory, not relevance). 501 `not_configured` when outcome tracking isn't wired. |
@@ -554,8 +556,26 @@ const lore = await createLore({
 | `deploymentMode` | `'embedded' \| 'local' \| 'cloud'` | `LORE_DEPLOYMENT_MODE` env / config / `'local'` | Selects the substrate and transport mode. Use `'embedded'` for in-process library use. |
 | `dataDir` | `string` | `LORE_HOME` / `~/.groundfloor` | Per-instance Lore data root. Set to a unique path when running multiple instances in one process; they will be fully isolated on disk. |
 | `pieceVectors` | `boolean` | `LORE_RECALL_PIECE_VECTORS` env / off | D7 (3.23) host-level default for piece-level vector seed search (title row + overlapping token-window rows, beside the canonical per-node vector). A per-workspace override in `workspaces.json` always wins over this option. See `docs/CONFIGURATION.md`'s `LORE_RECALL_PIECE_VECTORS` for full precedence, and `lore migrate piece-vectors` (CLI) for backfilling an already-populated workspace — a fresh workspace opened with this `true` builds its piece index incrementally as nodes are written, no separate backfill needed. |
+| `versionHistory` | `{ skipTypes?: string[]; retentionDaysByType?: Record<string, number>; pruning?: { enabled: boolean; retentionDays?: number } }` | absent (every upsert with detectable content change is recorded; no type skipped; **version history is kept forever**) | Per-type `node_versions` history policy. **Age-based deletion of version history is opt-in (owner decision 2026-09-29).** Unless `pruning.enabled: true` is passed (or the daemon env `LORE_VERSION_PRUNE_ENABLED=1` / an explicit `LORE_VERSION_RETENTION_DAYS` is set), no `node_versions` row is ever deleted by age, for embedded hosts and the daemon alike. `pruning.retentionDays` is the retention window once enabled; default **2557 days (7 years)**. `skipTypes`: node types for which no version row is recorded going forward, regardless of content change. It is an opt-in for hosts that genuinely do not want history for a type; it is not a recommendation (Atlas keeps code history). Existing rows of a skipped type are deleted only when pruning is enabled or when an operator explicitly runs `lore maintain storage --skip-types`. `retentionDaysByType`: per-type retention window in days, overriding the retention window for that type; **applies only when pruning is enabled**, inert otherwise. Independent of all of this, every upsert skips recording a version row when the node's content is unchanged from its prior state (ignoring `createdAt`, `updatedAt`, `syncedAt`, `lastAccessedAt`, `last_retrieved_at`); the no-op skip is always on and cannot be disabled. The outbox prune of `replicated` rows is also always on. **Daemon/MCP mode** has no per-call options surface: `skipTypes` comes from the comma-separated `LORE_VERSION_SKIP_TYPES` env var (an explicit option wins); pruning comes from `LORE_VERSION_PRUNE_ENABLED` / `LORE_VERSION_RETENTION_DAYS` (see `docs/CONFIGURATION.md`). Read the effective, resolved policy with `lore.getVersionHistoryPolicy()`, the `get_version_history_policy` MCP tool, or `GET /api/version-history/policy`; all three are read-only and there is no setter. |
 
 ### `LoreInstance` members
+
+#### `lore.getVersionHistoryPolicy()` → `EffectiveVersionHistoryPolicy`
+
+Read-only. Returns a copy of the resolved version-history policy:
+
+```ts
+{
+  enabled: boolean;                 // false = history is never deleted by age (default)
+  retentionDays: number | null;     // null when disabled; 2557 (7 years) when enabled without an explicit value
+  retentionDaysByType: Record<string, number>; // inert unless enabled
+  skipTypes: string[];
+  source: 'default' | 'option' | 'env';         // where enabled/retentionDays came from
+  skipTypesSource: 'default' | 'option' | 'env';
+}
+```
+
+There is no setter: the policy is fixed at `createLore()` from the `versionHistory` option and env. Also exported: `DEFAULT_PRUNE_RETENTION_DAYS` (2557), `EffectiveVersionHistoryPolicy`, `VersionPolicySource`, `VersionHistoryPolicy`, `VersionPruningPolicy`.
 
 #### `lore.store` — `LoreStorageBundle`
 

@@ -116,9 +116,15 @@ function clonePolicy(policy: MaintainPolicy, enabledPatch: Partial<MaintainPolic
 }
 
 const HELP = `Usage: lore maintain [<workspace>] [options]
+       lore maintain storage [--data-dir <path>] [--dry-run] [--skip-types <csv>] [--json]
 
 Config-driven capacity maintenance. Refuses while the daemon is up; for
 online maintenance use the in-process MCP \`maintain\` tool.
+
+\`lore maintain storage\` is a separate, offline tool (storage-growth fix
+3/3): a one-time reclaim of versions.sqlite/outbox.sqlite via dedup +
+retention pruning + a full VACUUM. Run \`lore maintain storage --help\` for
+its own flags.
 
   --dry-run                            Report only — no writes.
   --all                                Run across every registered workspace.
@@ -135,6 +141,19 @@ online maintenance use the in-process MCP \`maintain\` tool.
   --force                              Bypass the daemon preflight (tests only).`;
 
 export async function maintainCommand(args: string[]): Promise<void> {
+    // Storage-growth fix 3/3 (Fix 5) — `lore maintain storage [--data-dir
+    // <path>] [--dry-run] [--skip-types a,b] [--json]`: the offline
+    // versions.sqlite/outbox.sqlite reclaim tool. Same sub-dispatch shape as
+    // `migrate.ts`'s `piece-vectors` target — inspected before any of this
+    // command's own flag parsing, since it is a wholly separate tool with
+    // its own preflight (reclaimStorage()'s own held-root probe), not a mode
+    // of the LanceDB/graph maintenance below.
+    if (args[0] === 'storage') {
+        const { maintainStorageCommand } = await import('./maintainStorage.js');
+        await maintainStorageCommand(args.slice(1));
+        return;
+    }
+
     if (args.includes('--help') || args.includes('-h')) {
         console.log(HELP);
         return;

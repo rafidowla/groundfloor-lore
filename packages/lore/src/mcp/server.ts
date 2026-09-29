@@ -82,10 +82,12 @@ import { createStorageClient } from './storageBundle.js';
 import { wireOrchestration } from '../schemas/orchestration/wiring.js';
 import { createActiveSessionTracker } from './activeSessions.js';
 import type { TokenSweeperHandle } from '../auth/tokens.js';
-import { wireDaemonTimers } from './daemonTimers.js';
+import { wireDaemonTimers } from './daemonTimers.js'; import { wireStorageGrowthSweeps } from './storageGrowthSweeps.js'; // storage-growth fix 2/3 (R3+R4)
 import { buildMergedEnums } from './mergedEnums.js';
 import { AuxStore } from '../outbox/auxStore.js';
 import { VersionStore } from '../outbox/versionStore.js';
+import { validateVersionHistoryPolicy, resolveVersionHistoryPolicy } from '../outbox/versionPolicy.js';
+import { resolveEffectiveVersionHistoryPolicy } from '../outbox/versionPruningPolicy.js';
 import { wireOutbox } from '../outbox/wiring.js';
 import { wireEmbedQueue } from '../embed/wiring.js';
 import { dispatchHttpRequest } from './http/dispatcher.js';
@@ -220,6 +222,26 @@ export interface CreateLoreOptions extends EmbeddingInjectionOptions {
     vectorStoreRole?: import('../engines/verbatimStoreRole.js').VerbatimStoreRole | ((basePath: string) => import('../engines/verbatimStoreRole.js').VerbatimStoreRole); // boot store + outbox resolver role; fn = resolved per basePath; omitted = today's default
     /** Decide per store whether to isolate search in a worker. Consulted before the LORE_SEARCH_WORKER env gate; omit for today's global behaviour. */ searchWorkerPolicy?: (basePath: string) => boolean;
     /** D7 (3.23) — host-level default for piece-level vectors; precedence per-workspace > this option > LORE_RECALL_PIECE_VECTORS env > off. See engines/pieces/pieceSettings.ts. */ pieceVectors?: boolean;
+    /**
+     * Version-history policy for this instance's `versions.sqlite`.
+     *
+     * DEFAULT: version history is kept FOREVER. Age-based deletion is opt-in
+     * (owner decision 2026-09-29) via `pruning`; when enabled the default
+     * retention is 7 years (2557 days). Env equivalents for daemon hosts:
+     * `LORE_VERSION_PRUNE_ENABLED`, `LORE_VERSION_RETENTION_DAYS`.
+     *
+     * - `pruning: { enabled, retentionDays? }`: the master switch.
+     * - `retentionDaysByType`: per-type override of the retention window;
+     *   ignored unless `pruning.enabled`.
+     * - `skipTypes`: node types for which no NEW version row is recorded
+     *   (documented opt-in, not a recommendation for any type). Rows that
+     *   already exist are deleted only when `pruning.enabled`.
+     *
+     * The no-op skip (identical content after ignoring volatile bookkeeping
+     * fields) always applies. Read the effective result, read-only, with
+     * `getVersionHistoryPolicy()`; see outbox/versionPolicy.ts.
+     */
+    versionHistory?: import('../outbox/versionPolicy.js').VersionHistoryPolicy;
 }
 
 /**
@@ -346,6 +368,8 @@ export interface LoreInstance {
     /** Ordered async graceful-shutdown drain; does NOT close any HTTP server or call process.exit (daemon owns those).
      *  TW-7b: closes the graph engine + LanceDB handles deterministically LAST, so an embedder awaiting dispose() exits NATURALLY without process.exit() (no native SIGSEGV; idempotent). See test/tw2a-embedded-lifecycle-unit.ts. */
     dispose(reason?: string): Promise<void>;
+    /** Effective version-history policy (read-only; no setter). See `versionHistory`. */
+    getVersionHistoryPolicy(): import('../outbox/versionPruningPolicy.js').EffectiveVersionHistoryPolicy;
     /**
      * cq-daemon-wiring-leaks-into-public-interface /
      * api-daemon-wiring-on-public-instance — the public embeddable surface
@@ -809,6 +833,19 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     } catch (vsErr) {
         log.warn(`[Lore MCP] VersionStore open failed (non-fatal — versioning tools unavailable): ${(vsErr as Error).message}`);
     }
+    // Storage-growth fix 2/3 (R2) — validate + carry the host's per-type
+    // history policy. `resolveVersionHistoryPolicy` layers in
+    // LORE_VERSION_SKIP_TYPES for daemon/MCP-mode operators who have no
+    // createLore() call site of their own (option > env > unset).
+    // Validated here (createLore()'s own call, not swallowed) so a
+    // malformed policy fails fast at boot rather than silently no-op'ing
+    // on the first upsert. Set on the store even when undefined (no-op) so
+    // `getHistoryPolicy()` always reflects the current host call.
+    const versionHistoryPolicy = resolveVersionHistoryPolicy(opts.versionHistory);
+    validateVersionHistoryPolicy(versionHistoryPolicy);
+    versionStore?.setHistoryPolicy(versionHistoryPolicy);
+    const effectiveVersionPolicy = resolveEffectiveVersionHistoryPolicy(opts.versionHistory);
+    versionStore?.setEffectiveHistoryPolicy(effectiveVersionPolicy);
 
     /**
      * S5 / W9 — rate limiter shared across all /api/* handlers.
@@ -919,8 +956,8 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         embedQueue,
         workspace: detectedScope.workspace,
         // RC-round4 — fan sweeps per-workspace (local). Lazy graphRegistry: assigned later in boot. See daemonTimers.
-        workspaceVerbatimResolver, auditLog, graphRegistry: { getGraphHandle: (ws: string, o?: { touch?: boolean }) => graphRegistry!.getGraphHandle(ws, o), tableStorageFor: (ws: string, o?: { touch?: boolean }) => graphRegistry!.tableStorageFor(ws, o) }, versionStore });
-
+        workspaceVerbatimResolver, auditLog, graphRegistry: { getGraphHandle: (ws: string, o?: { touch?: boolean }) => graphRegistry!.getGraphHandle(ws, o), tableStorageFor: (ws: string, o?: { touch?: boolean }) => graphRegistry!.tableStorageFor(ws, o) }, versionStore, versionPolicy: effectiveVersionPolicy });
+    const storageGrowthSweeps = wireStorageGrowthSweeps({ startsDaemonTimers, versionPruneSweeper, versionStore: versionStore ?? null, versionPolicy: effectiveVersionPolicy, outboxWiring }); // storage-growth 2/3 (R3+R4)
     /** C6b (Phase 4) — MCP client runtime (connects outward to external MCP servers). */
     const mcpClientRuntime = new McpClientRuntime();
 
@@ -984,7 +1021,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         embedQueue,
         consistencySweeper,
         compactionSweeper,
-        versionPruneSweeper,
+        ...storageGrowthSweeps,
         getLoadJobsRunner: () => loadJobsRunner,
         migrationWiring: migrationWiring ?? undefined,
         authTokenSweeper,
@@ -1179,6 +1216,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                     {
                         outboxStore: outboxWiring.store, embedQueue, verbatim: store.storageClient,
                         getWal: () => wal, versionStore, previousState, versionPrincipal: 'lib',
+                        versionHistoryPolicy,
                         autolink, supersessionPolicy, findSupersessionDuplicate,
                     },
                 ));
@@ -1221,6 +1259,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                         {
                             outboxStore: outboxWiring.store, embedQueue, verbatim: store.storageClient,
                             getWal: () => wal, versionStore, previousState, versionPrincipal: 'lib',
+                            versionHistoryPolicy,
                             autolink, supersessionPolicy, findSupersessionDuplicate,
                         },
                     ));
@@ -1324,6 +1363,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         // timer cleanup (retention/active-session/orchestration); local/cloud
         // library instances keep the plain ordered drain (daemon-owned).
         dispose: makeDispose(effectiveMode === 'embedded' ? buildEmbeddedDrain() : buildDrain()),
+        getVersionHistoryPolicy: () => ({ ...effectiveVersionPolicy }),
         _daemon: daemon,
     };
 }

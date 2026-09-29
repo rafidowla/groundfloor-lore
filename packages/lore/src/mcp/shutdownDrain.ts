@@ -67,6 +67,12 @@ export interface ShutdownDrainDeps {
      *  same reason as compactionSweeper — the drain awaits any in-flight
      *  VACUUM so process.exit can't cut it mid-run. */
     versionPruneSweeper?: { stop(): Promise<void> };
+    /** Storage-growth fix 2/3 (R4) — the deferred, one-shot outbox
+     *  prune-on-open pass (server.ts). Optional, same reason as
+     *  versionPruneSweeper — awaits any in-flight pass and cancels the
+     *  pending zero-delay timer if it hasn't fired yet, so process.exit
+     *  can never race a write against an already-closed outbox store. */
+    outboxOpenPruneSweep?: { stop(): Promise<void> };
     /** May be null until the load-jobs runner is wired (Sprint Z2). */
     getLoadJobsRunner: () => { stop(): Promise<void> } | null;
     /** May be undefined when migrations aren't wired. */
@@ -226,6 +232,18 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
         //    awaits the loop to finish its current tick, so rows
         //    mid-replication land instead of staying status='in_flight'.
         try { await deps.outboxReplicator.stop(); } catch (e) { logStepError('replicator.stop', e); }
+
+        // 4.5 Storage-growth fix 2/3 (R4) — cancel/await the deferred
+        //     outbox prune-on-open pass BEFORE anything below can close the
+        //     outbox store out from under it. Must run right after the
+        //     replicator itself stops (same store), not with versionPruneSweeper
+        //     at step 7.5 — that step is far later, after the embed queue and
+        //     consistency sweeper drains, which is too late for a fast
+        //     open-then-dispose() sequence (the common case for a short-lived
+        //     `createLore()` call in a test or a one-shot script).
+        if (deps.outboxOpenPruneSweep) {
+            try { await deps.outboxOpenPruneSweep.stop(); } catch (e) { logStepError('outboxOpenPruneSweep.stop', e); }
+        }
 
         // 5. Drain the embed queue. AWAIT drained() FIRST (queue still
         //    running so pending + in-flight + scheduled retries pump to

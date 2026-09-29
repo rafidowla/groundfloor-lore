@@ -18,6 +18,7 @@ import { startTokenSweeper, type TokenSweeperHandle } from '../auth/tokens.js';
 import { runConsistencySweep, scheduleConsistencySweep, type SweepResult } from '../diagnostics/sweeper.js';
 import { runCompactionSweep, scheduleCompactionSweep } from './compactionScheduler.js';
 import { runVersionPruneSweep, scheduleVersionPruneSweep, type PrunableVersionStore } from './versionPruneScheduler.js';
+import { resolveEffectiveVersionHistoryPolicy, type EffectiveVersionHistoryPolicy } from '../outbox/versionPruningPolicy.js';
 import { listWorkspaceNames } from '../config/workspaces.js';
 import { runRetentionSweep } from './services.js';
 import type { WorkspaceVerbatimResolver } from '../outbox/workspaceVerbatimResolver.js';
@@ -57,6 +58,10 @@ export interface DaemonTimersDeps {
      *  boot). Boot-scoped, NOT fanned out per workspace — see
      *  versionPruneScheduler.ts's header for why. */
     versionStore?: PrunableVersionStore;
+    /** Effective version-history policy. The version-prune timer is only
+     *  scheduled when `enabled` (opt-in; default keeps history forever).
+     *  Absent = resolved from env. */
+    versionPolicy?: EffectiveVersionHistoryPolicy;
 }
 
 export interface DaemonTimersHandles {
@@ -145,8 +150,12 @@ export function wireDaemonTimers(deps: DaemonTimersDeps): DaemonTimersHandles {
     // healthy sibling's ~130MB). Boot-scoped (not fanned out per workspace —
     // see versionPruneScheduler.ts). Same startsDaemonTimers gate as every
     // other sweeper here; never starts in embedded mode.
-    const versionPruneSweeper: { stop(): Promise<void> } = deps.startsDaemonTimers
-        ? scheduleVersionPruneSweep(() => runVersionPruneSweep({ store: deps.versionStore ?? null }))
+    // OPT-IN (owner decision 2026-09-29): no timer at all unless the operator
+    // enabled age-based pruning (LORE_VERSION_PRUNE_ENABLED=1 or an explicit
+    // LORE_VERSION_RETENTION_DAYS). Default keeps version history forever.
+    const versionPolicy = deps.versionPolicy ?? resolveEffectiveVersionHistoryPolicy();
+    const versionPruneSweeper: { stop(): Promise<void> } = deps.startsDaemonTimers && versionPolicy.enabled
+        ? scheduleVersionPruneSweep(() => runVersionPruneSweep({ store: deps.versionStore ?? null, policy: versionPolicy }))
         : { stop: async () => undefined };
 
     return { retentionScheduler, authTokenSweeper, consistencySweeper, compactionSweeper, versionPruneSweeper };

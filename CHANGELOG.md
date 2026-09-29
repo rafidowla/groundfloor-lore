@@ -4,6 +4,129 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.25.0] — 2026-09-28
+
+Storage-growth fix, all three sprints. Upgrading from 3.24.x: read
+[`docs/MIGRATION-3.25.md`](docs/MIGRATION-3.25.md) — every existing data root
+needs a one-time offline reclaim to actually shrink on disk; nothing shrinks
+automatically. No configuration is required: version history is kept in full
+by default. Background: on Atlas's live store, 14.3 GB across 75 workspace
+data roots was 50% `versions.sqlite` history and 27% `outbox.sqlite`, most of
+it no-op rows and already-replicated outbox rows.
+
+### Behaviour change
+- **The daemon no longer deletes version history after 90 days by default.**
+  Age-based deletion of `node_versions` rows is now **opt-in everywhere**
+  (owner decision 2026-09-29), for the daemon and for embedded
+  `createLore()` hosts alike. Until it is explicitly enabled, no version row
+  is ever deleted by age. Previously the daemon pruned at a 90-day default.
+  - Enable per host: `createLore({ versionHistory: { pruning: { enabled:
+    true, retentionDays? } } })`. Enable for the daemon:
+    `LORE_VERSION_PRUNE_ENABLED=1`. When enabled, the default retention is
+    **7 years (2557 days)**, not 90 days. `retentionDaysByType` applies only
+    when pruning is enabled.
+  - **Operators who relied on the old daemon default must opt in.** An
+    explicitly set `LORE_VERSION_RETENTION_DAYS=<n>` still enables pruning at
+    that value (logged once at startup); leaving it unset now means disabled.
+    `LORE_VERSION_PRUNE_SCHEDULE_DISABLED=1` remains a kill switch.
+  - Still on by default and unchanged: the no-op version skip and the outbox
+    prune of `replicated` rows (on open and in the replicator).
+  - The effective policy is visible read-only through
+    `lore.getVersionHistoryPolicy()`, the `get_version_history_policy` MCP
+    tool and `GET /api/version-history/policy`. There is no setter on any
+    surface; MCP agents cannot change it.
+  - `lore maintain storage`: age deletion now happens only with an explicit
+    `--prune-older-than <days>`, and type deletion only with an explicit
+    `--skip-types`. The default run is dedupe + outbox receipts + VACUUM.
+  - The MCP `maintain` tool's `versions_sqlite_retention_days` argument can
+    only lengthen the configured retention, and reports `skipped:
+    pruning_disabled` when pruning is off.
+
+### Added
+- **`versionHistory` host option** (`createLore({ versionHistory: {
+  skipTypes?, retentionDaysByType?, pruning? } })`, storage-growth 1/3).
+  `skipTypes` suppresses `node_versions` rows entirely for the listed node
+  types, regardless of content change; it is an opt-in for hosts that do not
+  want history for a type, not a recommendation (Atlas keeps code history).
+  `pruning: { enabled, retentionDays? }` opts in to age-based deletion (see
+  Behaviour change). `retentionDaysByType` sets a per-type retention window
+  and applies only when pruning is enabled. Daemon/MCP mode (no per-call
+  `createLore()` surface) reads `skipTypes` from the comma-separated
+  `LORE_VERSION_SKIP_TYPES` env var when no explicit option is passed; an
+  explicit option always wins.
+- **Every upsert now skips recording a `node_versions` row when the node's
+  content is unchanged** from its prior state (storage-growth 1/3),
+  ignoring volatile bookkeeping fields (`createdAt`, `updatedAt`,
+  `syncedAt`, `lastAccessedAt`, `last_retrieved_at`). Applies with or
+  without a `versionHistory` option and cannot be disabled. A missing
+  `previousState` always records, so a caller that cannot cheaply pre-read
+  a prior node loses nothing. Measured against two real historical
+  datasets: 77.7% of existing `node_versions` rows (groundfloor-atlas +
+  nirman-harness combined) would have been avoided by this fix alone.
+- **Embedded-host version-history pruning, opt-in** (storage-growth 2/3, R3):
+  `createLore()` hosts (Atlas, MIRA, PM Helper) previously never ran
+  version retention at all — only the daemon's own timer did.
+  `resolveVersionPruneSweeper()` schedules a recurring sweep against the
+  embedded host's own version store **only when `versionHistory.pruning` is
+  enabled** (inert otherwise), honoring `retentionDaysByType`,
+  keeping protected-node rows, and reclaiming space online via
+  `incrementalVacuum()` (bounded, non-blocking — a full offline `VACUUM`
+  stays a Sprint 3 tool). Pruning runs in bounded, yielding batches (default
+  3000 rows, `setImmediate` between batches) rather than one unbounded pass,
+  keeping event-loop stalls under ~150ms even against a 1.3 GB file with
+  300k+ rows; a new partial index (`idx_nv_pending` on
+  `node_versions(compacted) WHERE compacted = 0`) keeps batch cost flat as
+  the sweep progresses instead of rescanning from the start each time. On an
+  existing file that predates this index, opening it applies a one-time,
+  synchronous index build (~1s on an Atlas-sized file).
+- **Outbox prune-on-open** (storage-growth 2/3, R4): finished
+  (`status='replicated'`) outbox rows older than the retention threshold are
+  now pruned once a workspace opens, closing the gap where a workspace that
+  opened/wrote/closed without the replicator's own tick loop ever running
+  never got pruned between opens (the nirman-harness case: 144,617
+  never-pruned rows). Loops the same bounded, indexed delete until a call
+  returns fewer than the batch limit, then reclaims via
+  `incrementalVacuum()` once. Never touches `pending` or `dead` rows.
+  Deferred via a zero-delay, unref'd timer so it can never block
+  `createLore()`'s return or a host's first write; cancellable, and wired to
+  stop before the outbox store closes so a fast open-then-dispose() can't
+  race a write against an already-closed store.
+- **`lore maintain storage [--data-dir <path>] [--dry-run]
+  [--prune-older-than <days>] [--skip-types <csv>] [--json]`** and an exported
+  **`reclaimStorage({ dataDir?, dryRun?, pruneOlderThanDays?, skipTypes? })`** (storage-growth 3/3, Fix 5): the offline, one-time reclaim
+  tool that actually shrinks an existing `versions.sqlite`/`outbox.sqlite`
+  pair on disk. Per data root: (1) drops exact no-op `node_versions` rows,
+  (2) only with an explicit `--prune-older-than` / `--skip-types`, applies
+  that age or type deletion (a default run deletes no history by age), (3)
+  prunes `replicated` outbox rows past retention, (4) converts both files to
+  `auto_vacuum=INCREMENTAL` and runs a full `VACUUM` — the one step neither
+  Sprint 2 sweeper ever performs, since a full VACUUM blocks the event loop
+  by design and is offline-only.
+  - **`--dry-run`** runs the same mutating calls inside a transaction and
+    rolls back instead of committing, so the report reflects the real logic
+    rather than a separate estimation path. Not guaranteed byte-for-byte
+    identical on disk on a pre-3.25 file: opening it still applies the same
+    one-time schema upgrade (e.g. the `idx_nv_pending` index above) the
+    host's own next open would apply. Back up before a first dry run on a
+    legacy root if that matters.
+  - **Refuses a held data root**, including an idle one, not just one
+    mid-write: `checkNotHeld` probes each SQLite file with
+    `PRAGMA locking_mode=EXCLUSIVE` plus a forced read before
+    `BEGIN EXCLUSIVE`/`ROLLBACK` — an idle WAL-mode connection still holds a
+    claim on the file's wal-index shared memory for as long as it stays
+    open, which this probe collides with. Verified cross-process against a
+    real idle host on every layout: a bare `versions.sqlite`/`outbox.sqlite`
+    pair, a SurrealDB-backed graph, and a SQLite-engine graph alike. A
+    graph-backed root also takes `acquirePieceRebuildLock` as a second,
+    independent check. Stopping the host first remains the documented
+    procedure — this preflight is a safety net, not a substitute.
+  - **Refuses the VACUUM step without ~1.1x the file's size free on disk**
+    (`ReclaimInsufficientDiskSpaceError`), since Step 4 needs roughly a full
+    copy of the file as scratch space.
+  - **Measured on write-protected copies of real data:** see
+    [`docs/MIGRATION-3.25.md`](docs/MIGRATION-3.25.md) for the before/after
+    table.
+
 ## [3.24.2] — 2026-09-27
 
 Upgrading from 3.24.1: no action needed unless a host's piece index is marked

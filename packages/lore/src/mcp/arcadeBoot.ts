@@ -27,6 +27,7 @@
  * + per-request cell binding) is a following slice; here every data verb 501s.
  */
 
+import { resolveEffectiveVersionHistoryPolicy } from '../outbox/versionPruningPolicy.js';
 import { createServer, type IncomingMessage, type ServerResponse, type Server as HttpServer } from 'node:http';
 import { log } from '../logger.js';
 import { VERSION } from '../version.js';
@@ -520,6 +521,8 @@ export async function createArcadeInstance(input: {
         bulkIngest: () => Promise.reject(new Error('[arcadeBoot] bulkIngest unsupported in arcade mode')),
         nodeUpsertBatch: () => Promise.reject(new Error('[arcadeBoot] nodeUpsertBatch unsupported in arcade mode')),
         awaitEmbeds: () => Promise.resolve(),
+        // No local version store in arcade mode; report the (env-resolved) policy for API parity.
+        getVersionHistoryPolicy: () => resolveEffectiveVersionHistoryPolicy(),
         recall: () => Promise.reject(new Error('[arcadeBoot] recall unsupported in arcade mode')),
         // 3.24 Part C (C2a) — arcade mode has no local model server (cloud deploymentMode is ineligible anyway; see modelServer/applicability.ts).
         modelStatus: () => ({ mode: 'in_process', since: 0 }),

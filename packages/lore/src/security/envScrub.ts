@@ -166,6 +166,7 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_OUTBOX_BACKEND',                      // outbox storage backend selector
     'LORE_RECALL_RANKING',                      // recall ranking strategy
     'LORE_SUPERSESSION_ENFORCE',                // D5 — host default for write-time supersession enforcement (0/1; default off)
+    'LORE_VERSION_SKIP_TYPES',                  // storage-growth 1/3 — daemon/MCP-mode versionHistory.skipTypes (comma-separated node types; default unset)
     'LORE_RECALL_STAGE_TIMING',                 // WP5 — debug JSON stage timings on retrieve (default off)
     'LORE_RECALL_RECENCY_HALF_LIFE_DAYS',       // recall recency decay half-life
     'LORE_RECALL_ABSTAIN',                      // D1 — default for retrieve()'s `abstain` (0/1; default off)
@@ -318,7 +319,8 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_RETENTION_INTERVAL_MS',            // retention sweep: repeat interval ms (default 86400000, 24 h)
     'LORE_COMPACT_INTERVAL_MS',              // scheduled storage-compaction sweep interval ms (default 86400000, 24 h; local/daemon mode only)
     'LORE_COMPACT_SCHEDULE_DISABLED',        // opt-out: '1' disables the scheduled compaction timer (operator compacts externally)
-    'LORE_VERSION_RETENTION_DAYS',           // versions.sqlite prune: rows older than this are soft- then hard-deleted (default 90)
+    'LORE_VERSION_PRUNE_ENABLED',            // opt-in: '1' enables age-based versions.sqlite pruning at the 7-year default (default unset = keep history forever)
+    'LORE_VERSION_RETENTION_DAYS',           // versions.sqlite prune window in days; setting it explicitly also enables pruning at that value (back-compat)
     'LORE_VERSION_PRUNE_INTERVAL_MS',        // versions.sqlite prune sweep interval ms (default 86400000, 24 h; local/daemon mode only)
     'LORE_VERSION_PRUNE_SCHEDULE_DISABLED',  // opt-out: '1' disables the scheduled version-prune timer
 

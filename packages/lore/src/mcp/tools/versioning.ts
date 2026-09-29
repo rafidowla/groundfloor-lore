@@ -8,6 +8,7 @@
  *   commit_changeset   — apply all buffered writes atomically + record versions
  *   rollback_changeset — discard (open) or reverse (committed) a changeset
  *   export_snapshot    — serialize current workspace state as JSONL
+ *   get_version_history_policy — READ-ONLY effective history-retention policy
  *
  * Version records are written automatically by store_node, record_outcome,
  * prune_nodes, and restore_node when versionStore is wired into their deps.
@@ -113,6 +114,25 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 };
             } catch (error) {
                 return mcpToolError('node_history', error, log);
+            }
+        },
+    );
+
+    /* ─── get_version_history_policy (READ-ONLY, no setter) ─────── */
+    server.tool(
+        'get_version_history_policy',
+        'Return the effective version-history retention policy: whether age-based deletion is enabled (default off = history kept forever), retentionDays (null when off; 7 years when enabled by default), retentionDaysByType, skipTypes, and where each came from (default/option/env). Read-only: it is set only by host config.',
+        {},
+        async () => {
+            try {
+                return {
+                    content: [{
+                        type: 'text' as const,
+                        text: JSON.stringify(deps.versionStore.getEffectiveHistoryPolicy(), null, 2),
+                    }],
+                };
+            } catch (error) {
+                return mcpToolError('get_version_history_policy', error, log);
             }
         },
     );

@@ -155,7 +155,36 @@ async function testFinding2(): Promise<void> {
     }
     seedStore.close();
 
-    const lore = await createLore({ deploymentMode: 'embedded', dataDir: dirA });
+    // storage-growth fix 2/3 (R3): createLore() in embedded mode now kicks
+    // off its own version-prune sweep immediately (zero-delay, unref'd —
+    // see resolveVersionPruneSweeper's runImmediately:true in
+    // versionPruneScheduler.ts), when pruning is enabled. Left
+    // enabled, it races the awaits below and silently soft-compacts +
+    // hard-deletes the 12 seeded 200-day-old rows before this test's own
+    // explicit versions_sqlite_retention_days:1 calls ever run, so both
+    // land on an already-empty table (eligibleForCompact:0,
+    // alreadyCompacted:0) instead of exercising the explicit dry-run/apply
+    // path this test exists to check. Disable the background sweep for the
+    // life of this instance so seeding-then-probing stays deterministic;
+    // this doesn't touch the sweep itself, only opts this one short-lived
+    // test instance out of it, the same way an operator can via the env var.
+    const prevScheduleDisabled = process.env['LORE_VERSION_PRUNE_SCHEDULE_DISABLED'];
+    process.env['LORE_VERSION_PRUNE_SCHEDULE_DISABLED'] = '1';
+    let lore: Awaited<ReturnType<typeof createLore>>;
+    try {
+        // Pruning is opt-in (owner decision 2026-09-29): this test exercises
+        // the explicit maintain-tool prune path, so the host enables it
+        // (retention 1 day; `versions_sqlite_retention_days` can only
+        // lengthen, never shorten, the configured window).
+        lore = await createLore({
+            deploymentMode: 'embedded',
+            dataDir: dirA,
+            versionHistory: { pruning: { enabled: true, retentionDays: 1 } },
+        });
+    } finally {
+        if (prevScheduleDisabled === undefined) delete process.env['LORE_VERSION_PRUNE_SCHEDULE_DISABLED'];
+        else process.env['LORE_VERSION_PRUNE_SCHEDULE_DISABLED'] = prevScheduleDisabled;
+    }
     try {
         const mcpServer = lore.createMcpServer();
         const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

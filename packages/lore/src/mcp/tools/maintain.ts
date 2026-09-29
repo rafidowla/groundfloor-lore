@@ -146,7 +146,7 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
             disable: z.array(z.enum(['compaction', 'versionCleanup', 'nodeRetention', 'ephemeralExpiry', 'versionsSqlitePrune'])).optional()
                 .describe('Operations to skip this run.'),
             versions_sqlite_retention_days: z.number().int().optional()
-                .describe('versions.sqlite row-age threshold in days before soft-compact/hard-delete (default: LORE_VERSION_RETENTION_DAYS env, else 90). Independent of `retention_days` (cold-node retention) and `cleanup_versions_older_than` (LanceDB).'),
+                .describe('versions.sqlite pruning is OPT-IN: a no-op unless the host enabled it (LORE_VERSION_PRUNE_ENABLED / createLore versionHistory.pruning). When enabled this can only lengthen the configured window (default 7y). Independent of `retention_days` and `cleanup_versions_older_than`.'),
         },
         async (args) => {
             try {
@@ -326,12 +326,18 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
                 // report nothing when disabled at the engine-policy level.
                 let versionsSqlite: unknown;
                 if (deps.versionStore && !versionsSqlitePruneDisabled) {
-                    const retentionDays = args.versions_sqlite_retention_days;
-                    if (dryRun) {
-                        const preview = deps.versionStore.countPrunable(retentionDays ?? resolveRetentionDays());
+                    // OPT-IN (owner decision 2026-09-29): gated on the host's
+                    // effective policy, which an MCP caller can read but not
+                    // change. The arg may only LENGTHEN the configured window.
+                    const policy = deps.versionStore.getEffectiveHistoryPolicy();
+                    const retentionDays = resolveRetentionDays(policy, args.versions_sqlite_retention_days);
+                    if (retentionDays === null) {
+                        versionsSqlite = { dryRun, skipped: 'pruning_disabled', hint: 'Version history is kept forever unless the host enables pruning (LORE_VERSION_PRUNE_ENABLED=1 or createLore versionHistory.pruning).' };
+                    } else if (dryRun) {
+                        const preview = deps.versionStore.countPrunable(retentionDays);
                         versionsSqlite = { dryRun: true, ...preview };
                     } else {
-                        const result = await runVersionPruneSweep({ store: deps.versionStore, retentionDays });
+                        const result = await runVersionPruneSweep({ store: deps.versionStore, policy, retentionDays });
                         versionsSqlite = { dryRun: false, ...result };
                     }
                 }

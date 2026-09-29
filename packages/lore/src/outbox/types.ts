@@ -411,6 +411,16 @@ export interface OutboxStore {
         olderThanMs: number,
         opts?: { workspace?: string | null; limit?: number },
     ): Promise<number>;
+
+    /** Storage-growth fix 2/3 (R4) — online-safe disk reclaim after
+     *  `pruneReplicated()`, meant to run on a workspace's open path. Only
+     *  implementations backed by a file that supports incremental vacuum
+     *  need to provide this (the JSON-file backend has nothing to reclaim);
+     *  optional so callers must feature-detect with `?.()` rather than
+     *  assume every OutboxStore has it. See SqliteOutboxStore.incrementalVacuum
+     *  for the full contract (no-op unless the file is `auto_vacuum =
+     *  INCREMENTAL`; a full VACUUM is never run here — see Sprint 3). */
+    incrementalVacuum?(maxPages?: number): { ran: boolean; autoVacuumMode: number };
 }
 
 export interface OutboxWorkspaceStats {

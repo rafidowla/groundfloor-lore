@@ -47,6 +47,7 @@ import {
     DEFAULT_WORKSPACE_BACKFILL,
     type MigrationReport,
 } from './sqliteJsonMigration.js';
+import * as reclaimOps from './reclaimOps.js';
 
 // Re-exported so existing importers of MigrationReport from this module
 // keep working after the extraction.
@@ -141,7 +142,21 @@ export class SqliteOutboxStore implements IOutboxStore {
         fs.mkdirSync(loreDir, { recursive: true });
         this.dir = loreDir;
         this.dbPath = path.join(loreDir, SQLITE_FILE);
+        // Storage-growth fix 2/3 (R4) — checked BEFORE `new Database()`,
+        // which itself creates an empty file. `auto_vacuum` only takes
+        // effect on an empty database or right after a full VACUUM, so this
+        // only ever fires for a genuinely new outbox.sqlite; an existing
+        // file stays NONE until Sprint 3's offline conversion tool runs a
+        // one-time full VACUUM on it. See `incrementalVacuum()` below.
+        const isNewFile = !fs.existsSync(this.dbPath);
         this.db = new Database(this.dbPath);
+        // Must be set BEFORE `journal_mode = WAL` — empirically, switching to
+        // WAL first causes a subsequent `auto_vacuum = INCREMENTAL` to
+        // silently no-op (mode stays 0/NONE) even on a brand-new, schema-less
+        // file. Setting it first, then switching to WAL, persists correctly.
+        if (isNewFile) {
+            this.db.pragma('auto_vacuum = INCREMENTAL');
+        }
         this.db.pragma('journal_mode = WAL');
         this.db.pragma('synchronous = NORMAL');
         this.db.exec(SCHEMA_SQL);
@@ -167,6 +182,45 @@ export class SqliteOutboxStore implements IOutboxStore {
     /** Close the underlying SQLite handle. Idempotent. */
     close(): void {
         try { this.db.close(); } catch { /* ignore double-close */ }
+    }
+
+    // Storage-growth fix 2/3 (R4) — online-safe reclaim after pruneReplicated(). Same
+    // reasoning as VersionStore.incrementalVacuum: a full VACUUM blocks the process for
+    // seconds on a >1GB file and needs ~2x disk, so that's left to Sprint 3's offline
+    // tool. No-op (ran: false) unless the file is already auto_vacuum=INCREMENTAL.
+    // Uses PASSIVE checkpoint, not TRUNCATE, so it never blocks on another WAL reader.
+    incrementalVacuum(maxPages = 1000): { ran: boolean; autoVacuumMode: number } {
+        const mode = this.db.pragma('auto_vacuum', { simple: true }) as number;
+        if (mode !== 2 /* INCREMENTAL */) {
+            return { ran: false, autoVacuumMode: mode };
+        }
+        this.db.pragma(`incremental_vacuum(${maxPages})`);
+        this.db.pragma('wal_checkpoint(PASSIVE)');
+        return { ran: true, autoVacuumMode: mode };
+    }
+
+    // Reclaim-tool tx wrap around pruneReplicated(); see reclaimOps.ts (shared w/ VersionStore).
+    beginReclaimTx(): void {
+        reclaimOps.beginReclaimTx(this.db);
+    }
+
+    commitReclaimTx(): void {
+        reclaimOps.commitReclaimTx(this.db);
+    }
+
+    rollbackReclaimTx(): void {
+        reclaimOps.rollbackReclaimTx(this.db);
+    }
+
+    // Offline auto_vacuum=INCREMENTAL + VACUUM; see reclaimOps.ts. Call outside any tx.
+    convertToIncrementalVacuum(): { autoVacuumBefore: number; autoVacuumAfter: number } {
+        return reclaimOps.convertToIncrementalVacuumOp(this.db);
+    }
+
+    // Total row count, for the offline reclaim tool's dry-run estimate. Mirrors VersionStore.countAllVersions.
+    countAllEntries(): number {
+        const row = this.db.prepare(`SELECT COUNT(*) as n FROM outbox_entries`).get() as { n: number };
+        return row.n;
     }
 
     /** Per-workspace next sequenceId.
