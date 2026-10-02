@@ -29,6 +29,7 @@ import { resolveWorkspaceGraphEngine } from '../packages/lore/src/engines/graphE
 import { migrateGraphToSqlite, rollbackGraphMigration } from '../packages/lore/src/engines/migrateGraphToSqlite.js';
 import { restoreWorkspace } from '../packages/lore/src/engines/restore.js';
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
+import { SqliteGraph } from '../packages/lore/src/engines/sqliteGraph.js';
 import type { LoreEdge, LoreNode } from '../packages/lore/src/providers/types.js';
 
 let passed = 0;
@@ -257,6 +258,166 @@ await test('a crash BEFORE the flip (simulateCrashBeforeFlip) leaves the workspa
         assert.equal(stats.nodeCount, 7, 'no data loss on the surreal side');
     } finally {
         await reopened.close();
+    }
+});
+
+// ── 3.25.1: access times (lastAccessedAt / last_retrieved_at) survive importRaw ──
+// A recalled node carries both fields on the Surreal source. importRaw used to
+// omit them, so the SQLite copy held '' and the strict digest aborted the
+// migration. These tests stamp through the real `stampAccessTimes` path.
+
+const T_ACCESS = '2026-09-30T10:11:12.345Z';
+const T_RETRIEVE = '2026-09-30T10:11:13.456Z';
+
+async function seedAccessFixture(g: SurrealGraph): Promise<void> {
+    const ids = ['t1', 't2', 't3', 't4', 'u1', 'u2', 'u3'];
+    for (const id of ids) {
+        await g.upsertNode({ id, type: 'note', label: id, content: `body ${id}`, tags: ['acc'], project: '*', ecosystem: '*', metadata: '{}' } as never);
+    }
+    await g.addEdge({ sourceId: 't1', targetId: 'u1', relation: 'related_to' });
+    await g.addEdge({ sourceId: 't2', targetId: 't3', relation: 'cites', confidence: 'inferred', confidenceScore: 0.5 });
+    await g.addEdge({ sourceId: 'u2', targetId: 'u3', relation: 'related_to' });
+}
+
+await test('touched node (real stampAccessTimes): migration verifies and SQLite copy keeps both access times', async () => {
+    const home = freshHome();
+    loadWorkspaces(home);
+    const entry = createSurrealWorkspace('migrate-touched', home);
+    const g = new SurrealGraph(entry.path, { workspaceId: entry.name });
+    await g.initialize();
+    await seedAccessFixture(g);
+    const stamped = await g.stampAccessTimes([{ id: 't1', accessedAt: T_ACCESS, retrievedAt: T_RETRIEVE }]);
+    assert.equal(stamped, 1, 'source stamp applied');
+    const before = await g.getNode('t1');
+    assert.equal(before?.lastAccessedAt, T_ACCESS, 'source carries lastAccessedAt');
+    assert.equal(before?.last_retrieved_at, T_RETRIEVE, 'source carries last_retrieved_at');
+    await g.close();
+
+    const report = await migrateGraphToSqlite({ workspaceName: entry.name, home, backupOutDir: outDir() });
+    assert.ok(report.digestMatched, 'digest matched');
+
+    const dest = new SqliteGraph(entry.path, { workspaceId: entry.name, cacheDisabled: true });
+    await dest.initialize();
+    try {
+        const after = await dest.getNode('t1');
+        assert.equal(after?.lastAccessedAt, T_ACCESS);
+        assert.equal(after?.last_retrieved_at, T_RETRIEVE);
+    } finally {
+        await dest.close();
+    }
+});
+
+await test('browse-only stamp (lastAccessedAt without last_retrieved_at) round-trips too', async () => {
+    const home = freshHome();
+    loadWorkspaces(home);
+    const entry = createSurrealWorkspace('migrate-browse-only', home);
+    const g = new SurrealGraph(entry.path, { workspaceId: entry.name });
+    await g.initialize();
+    await seedAccessFixture(g);
+    await g.stampAccessTimes([{ id: 't1', accessedAt: T_ACCESS }]);
+    await g.close();
+
+    const report = await migrateGraphToSqlite({ workspaceName: entry.name, home, backupOutDir: outDir() });
+    assert.ok(report.digestMatched, 'digest matched');
+    const dest = new SqliteGraph(entry.path, { workspaceId: entry.name, cacheDisabled: true });
+    await dest.initialize();
+    try {
+        const n = await dest.getNode('t1');
+        assert.equal(n?.lastAccessedAt, T_ACCESS);
+        assert.ok(!n?.last_retrieved_at, 'last_retrieved_at stays empty/null');
+    } finally {
+        await dest.close();
+    }
+});
+
+await test('untouched node still matches (both access fields empty) — no regression', async () => {
+    const home = freshHome();
+    loadWorkspaces(home);
+    const entry = createSurrealWorkspace('migrate-untouched', home);
+    const g = new SurrealGraph(entry.path, { workspaceId: entry.name });
+    await g.initialize();
+    await seedAccessFixture(g);
+    const src = await g.getNode('u1');
+    await g.close();
+
+    const report = await migrateGraphToSqlite({ workspaceName: entry.name, home, backupOutDir: outDir() });
+    assert.ok(report.digestMatched, 'digest matched');
+    const dest = new SqliteGraph(entry.path, { workspaceId: entry.name, cacheDisabled: true });
+    await dest.initialize();
+    try {
+        const n = await dest.getNode('u1');
+        assert.equal(n?.lastAccessedAt ?? null, src?.lastAccessedAt ?? null);
+        assert.equal(n?.last_retrieved_at ?? null, src?.last_retrieved_at ?? null);
+        assert.ok(!n?.lastAccessedAt && !n?.last_retrieved_at, 'untouched node has no access times');
+    } finally {
+        await dest.close();
+    }
+});
+
+await test('mixed workspace (touched + untouched nodes + edges): verification passes, every node identical', async () => {
+    const home = freshHome();
+    loadWorkspaces(home);
+    const entry = createSurrealWorkspace('migrate-mixed', home);
+    const g = new SurrealGraph(entry.path, { workspaceId: entry.name });
+    await g.initialize();
+    await seedAccessFixture(g);
+    await g.stampAccessTimes([
+        { id: 't1', accessedAt: T_ACCESS, retrievedAt: T_RETRIEVE },
+        { id: 't2', accessedAt: '2026-09-29T01:02:03.000Z', retrievedAt: '2026-09-29T01:02:04.000Z' },
+        { id: 't3', accessedAt: '2026-09-28T05:06:07.000Z' },
+        { id: 't4', accessedAt: T_ACCESS, retrievedAt: T_RETRIEVE },
+    ]);
+    const { nodes, edges } = await readAllNodesAndEdges(g);
+    await g.close();
+
+    const report = await migrateGraphToSqlite({ workspaceName: entry.name, home, backupOutDir: outDir() });
+    assert.ok(report.digestMatched, 'digest matched');
+    assert.equal(report.nodeCount, nodes.length);
+    assert.equal(report.edgeCount, edges.length);
+
+    const dest = new SqliteGraph(entry.path, { workspaceId: entry.name, cacheDisabled: true });
+    await dest.initialize();
+    try {
+        const destNodes = await dest.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true });
+        const byId = new Map(destNodes.map((n) => [n.id, n]));
+        for (const s of nodes) {
+            const d = byId.get(s.id);
+            assert.ok(d, `node ${s.id} migrated`);
+            assert.equal(d.lastAccessedAt ?? null, s.lastAccessedAt ?? null, `${s.id} lastAccessedAt`);
+            assert.equal(d.last_retrieved_at ?? null, s.last_retrieved_at ?? null, `${s.id} last_retrieved_at`);
+        }
+    } finally {
+        await dest.close();
+    }
+});
+
+await test('direct importRaw round-trip: both access fields preserved; absent fields read back empty; re-import overwrites', async () => {
+    const home = freshHome();
+    loadWorkspaces(home);
+    const entry = createSurrealWorkspace('migrate-importraw-direct', home);
+    const dest = new SqliteGraph(entry.path, { workspaceId: entry.name, cacheDisabled: true });
+    await dest.initialize();
+    try {
+        const base = { type: 'note', label: 'x', content: 'c', tags: [], project: '*', ecosystem: '*', metadata: '{}', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-02T00:00:00.000Z', syncedAt: null };
+        await dest.importRaw([
+            { ...base, id: 'both', lastAccessedAt: T_ACCESS, last_retrieved_at: T_RETRIEVE },
+            { ...base, id: 'none' },
+        ] as never, []);
+        const both = await dest.getNode('both');
+        assert.equal(both?.lastAccessedAt, T_ACCESS);
+        assert.equal(both?.last_retrieved_at, T_RETRIEVE);
+        assert.equal(both?.createdAt, '2026-01-01T00:00:00.000Z');
+        assert.equal(both?.updatedAt, '2026-01-02T00:00:00.000Z');
+        const none = await dest.getNode('none');
+        assert.ok(!none?.lastAccessedAt && !none?.last_retrieved_at);
+
+        // ON CONFLICT path: re-importing with new values overwrites them.
+        await dest.importRaw([{ ...base, id: 'both', lastAccessedAt: '2026-10-01T00:00:00.000Z', last_retrieved_at: null }] as never, []);
+        const again = await dest.getNode('both');
+        assert.equal(again?.lastAccessedAt, '2026-10-01T00:00:00.000Z');
+        assert.ok(!again?.last_retrieved_at, 'null source value written as empty');
+    } finally {
+        await dest.close();
     }
 });
 

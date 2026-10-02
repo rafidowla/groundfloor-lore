@@ -78,8 +78,13 @@ export async function upsertNode(
 /**
  * importRaw — internal bulk loader for the (future) Surreal→SQLite
  * migration step: writes nodes/edges VERBATIM, preserving `createdAt` /
- * `updatedAt` exactly as given rather than stamping `now()`. NOT part of
- * `LoreGraphHandle` — no caller reaches this through the public interface.
+ * `updatedAt` exactly as given rather than stamping `now()`. Access times
+ * (`lastAccessedAt` / `last_retrieved_at`, normally written only by
+ * `stampAccessTimes`) are preserved too: a recalled source node carries them,
+ * and the migration's strict digest would otherwise disagree on every such
+ * node. Absent/null values are stored as '' (the column default) and read
+ * back as null. NOT part of `LoreGraphHandle` — no caller reaches this
+ * through the public interface.
  */
 export async function importRaw(
     db: SqliteDb,
@@ -87,11 +92,12 @@ export async function importRaw(
     edges: LoreEdge[],
 ): Promise<{ nodeCount: number; edgeCount: number }> {
     const insertNode = db.prepare(
-        `INSERT INTO nodes (id, ${NODE_WRITE_COLUMNS.join(', ')}, success_count, failure_count, partial_count, confirmation_score)
-         VALUES (@id, ${NODE_WRITE_COLUMNS.map((c) => `@${c}`).join(', ')}, @success_count, @failure_count, @partial_count, @confirmation_score)
+        `INSERT INTO nodes (id, ${NODE_WRITE_COLUMNS.join(', ')}, success_count, failure_count, partial_count, confirmation_score, lastAccessedAt, last_retrieved_at)
+         VALUES (@id, ${NODE_WRITE_COLUMNS.map((c) => `@${c}`).join(', ')}, @success_count, @failure_count, @partial_count, @confirmation_score, @lastAccessedAt, @last_retrieved_at)
          ON CONFLICT(id) DO UPDATE SET ${NODE_WRITE_COLUMNS.map((c) => `${c} = excluded.${c}`).join(', ')},
              success_count = excluded.success_count, failure_count = excluded.failure_count,
-             partial_count = excluded.partial_count, confirmation_score = excluded.confirmation_score`,
+             partial_count = excluded.partial_count, confirmation_score = excluded.confirmation_score,
+             lastAccessedAt = excluded.lastAccessedAt, last_retrieved_at = excluded.last_retrieved_at`,
     );
     const insertEdge = db.prepare(
         `INSERT INTO edges (source_id, target_id, relation, confidence, confidenceScore)
@@ -109,6 +115,8 @@ export async function importRaw(
                 failure_count: n.failure_count ?? 0,
                 partial_count: n.partial_count ?? 0,
                 confirmation_score: n.confirmation_score ?? 0,
+                lastAccessedAt: n.lastAccessedAt ?? '',
+                last_retrieved_at: n.last_retrieved_at ?? '',
             });
         }
         for (const e of es) {

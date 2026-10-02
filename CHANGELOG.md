@@ -4,6 +4,22 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.25.1] — 2026-10-01
+
+Patch on top of 3.25.0 (cut from the `v3.25.0` tag; it does not include the
+unreleased cloud-parity work on `main`). Upgrading from 3.25.0: no action
+needed. Hosts that aborted `lore migrate-graph --to sqlite` on 3.25.0 can
+simply re-run it.
+
+### Fixed
+- **`lore migrate-graph --to sqlite` no longer aborts on workspaces that have
+  been recalled from.** The SQLite bulk importer (`importRaw`) did not copy a
+  node's access times (`lastAccessedAt`, `last_retrieved_at`), so every node a
+  recall or browse had stamped came out different and the migration's strict
+  digest check stopped the run (Atlas `plane-so`: 409 of 43,989 nodes, those
+  two fields only). Both fields are now carried over verbatim; the digest
+  check stays strict. Nothing else changes for normal writes.
+
 ## [3.25.0] — 2026-09-28
 
 Storage-growth fix, all three sprints. Upgrading from 3.24.x: read
