@@ -30,6 +30,7 @@ import type { VersionStore } from '../../outbox/versionStore.js';
 import {
     resolveMaintainPolicy,
     runMaintenance,
+    failedOperations,
     LanceMaintainer,
     GraphNodeStore,
     WorkspaceRegistry,
@@ -342,7 +343,20 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
                     }
                 }
 
-                return { content: [{ type: 'text', text: JSON.stringify({ ok: true, dryRun, reports: [wsReport, storeReport], versionsSqlite }) }] };
+                // An ENABLED operation that recorded errors makes the whole
+                // call a failure (`ok: false`, `isError`), not a silent
+                // `ok: true`. Per-op `errors[]` in `reports` is unchanged.
+                const failed = failedOperations([wsReport, storeReport]);
+                const body = JSON.stringify({
+                    ok: failed.length === 0,
+                    dryRun,
+                    failedOperations: failed,
+                    reports: [wsReport, storeReport],
+                    versionsSqlite,
+                });
+                return failed.length > 0
+                    ? { content: [{ type: 'text', text: body }], isError: true }
+                    : { content: [{ type: 'text', text: body }] };
             } catch (err) {
                 return { content: [{ type: 'text', text: `maintain failed: ${redactError(err)}` }], isError: true };
             }

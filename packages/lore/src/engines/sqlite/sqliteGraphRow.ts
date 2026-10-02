@@ -66,6 +66,35 @@ export const SQLITE_OUTCOME_COUNTER_SEED = {
 const asBit = (v: boolean | undefined): number => (v ? 1 : 0);
 
 /**
+ * metadataToSqliteText — the ONE place a node's `metadata` value is turned
+ * into the TEXT the `metadata` column holds.
+ *
+ * `LoreNode.metadata` is typed `string`, but SCHEMALESS SurrealGraph stores
+ * whatever value it is handed, so a node's metadata can be an object, an
+ * array, a number or a boolean (this aborted `lore migrate-graph --to
+ * sqlite`). better-sqlite3 refuses to bind an object/array/boolean
+ * to a TEXT column, and silently coerces a bound number to REAL text
+ * ("5" -> "5.0"), so those nodes either aborted the migration or failed its
+ * strict digest.
+ *
+ *   - string          -> unchanged (the normal case; byte-identical).
+ *   - undefined/null  -> `undefined` (caller applies prior value / '{}', as
+ *                        `rowToLoreNode` does on the read side).
+ *   - anything else   -> `JSON.stringify(value)`. Faithful: `JSON.parse` of
+ *                        the stored text returns the original value.
+ *
+ * `migrateGraphToSqlite.digestOf` applies this same function to the SOURCE
+ * side before comparing, so an object on the Surreal side equals its JSON
+ * string on the SQLite side while every other field stays strictly compared.
+ */
+export function metadataToSqliteText(value: unknown): string | undefined {
+    if (value === undefined || value === null) return undefined;
+    if (typeof value === 'string') return value;
+    // JSON.stringify returns undefined for a function/symbol; treat as absent.
+    return JSON.stringify(value) as string | undefined;
+}
+
+/**
  * toNodeRow — a LoreNode write payload in stored form, field-for-field
  * identical to `surrealGraphWrites.toNodeDocument`. `existing` is the PRIOR
  * row (already parsed via `fromSqliteNodeRow`) on an update — every
@@ -114,7 +143,10 @@ export function toNodeRow(
         // constraint. Default it here, the same defensive pattern `content`
         // above already uses, and the same fallback `rowToLoreNode` already
         // assumes on read (`getValue('metadata') ?? '{}'`).
-        metadata: node.metadata ?? priorStr('metadata') ?? '{}',
+        // A non-string value (object/array/number/boolean — which schemaless
+        // SurrealGraph stores as-is) is serialised to JSON by
+        // `metadataToSqliteText`; reads always return a string.
+        metadata: metadataToSqliteText(node.metadata) ?? priorStr('metadata') ?? '{}',
         createdAt,
         updatedAt,
         syncedAt: '',

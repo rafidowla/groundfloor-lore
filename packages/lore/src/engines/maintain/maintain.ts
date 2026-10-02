@@ -42,6 +42,25 @@ export interface OpStatus {
     errors: string[];
 }
 
+/**
+ * failedOperations — the names of operations that were ENABLED and recorded at
+ * least one error, across one or more reports, de-duplicated in first-seen
+ * order. A disabled operation never counts (its `errors` is always empty
+ * anyway). This is what the MCP `maintain` tool and the CLI use to stop
+ * reporting `ok: true` for a run whose enabled step failed — before this, a
+ * retention step that threw on every node surfaced only inside
+ * `operations[].errors` while the top-level result still said `ok: true`.
+ */
+export function failedOperations(reports: readonly MaintainReport[]): MaintainOperation[] {
+    const failed: MaintainOperation[] = [];
+    for (const r of reports) {
+        for (const op of r.operations) {
+            if (op.enabled && op.errors.length > 0 && !failed.includes(op.operation)) failed.push(op.operation);
+        }
+    }
+    return failed;
+}
+
 export interface MaintainReport {
     dryRun: boolean;
     scopeLabel?: string;

@@ -171,13 +171,18 @@ export class RetentionSweeper {
             const cutoffMs = Date.now() - rule.ageThresholdDays * 24 * 60 * 60 * 1000;
             const cutoffIso = new Date(cutoffMs).toISOString();
 
-            // Only LoreNode has the legalHold column (core schema; present on
-            // the legacy engine's schema only, for now — SurrealDB has no column of that name yet, so
-            // `row['legalHold']` reads undefined there and never blocks a
-            // Surreal-backed sweep. That's a real cross-engine gap, but not
-            // a regression: this path was unreachable on Surreal before this
-            // commit too). Client-defined node tables may not carry it
-            // either. For now, scope the sweep to LoreNode only —
+            // Only LoreNode is swept. `legalHold` is NOT a persisted field on
+            // either local engine: `LoreNode` has no such property,
+            // `toNodeDocument` / `toNodeRow` never write it, and the SQLite
+            // `nodes` table has no such column. It is projected anyway so a
+            // hold set out-of-band (a hand-edited Surreal record, a future
+            // column) is honoured when present: Surreal returns the key
+            // absent and SQLite's `bulkListProjected` returns `null` for a
+            // column the table lacks, so `row['legalHold']` is falsy on both
+            // and never blocks the sweep. Until Lore can persist a hold, this
+            // is a no-op guard, not an enforced protection. Client-defined
+            // node tables may not carry it either. For now, scope the sweep to
+            // LoreNode only —
             // client-defined tables get their sweep when the client ships a
             // custom sweeper in Phase 7+.
             //

@@ -44,6 +44,7 @@ import { isDaemonServingHome, daemonRefuseMessage } from '../cli/commands/migrat
 import { backupWorkspace, type BackupResult } from './backup.js';
 import { SurrealGraph } from './surrealGraph.js';
 import { SqliteGraph } from './sqliteGraph.js';
+import { metadataToSqliteText } from './sqlite/sqliteGraphRow.js';
 import type { LoreEdge, LoreNode } from '../providers/types.js';
 
 export interface MigrateGraphToSqliteOptions {
@@ -115,8 +116,13 @@ function canonicalStringify(value: unknown): string {
     return JSON.stringify(sortKeys(value));
 }
 
+/** Exported so the digest's strictness can be unit-tested directly. Source node with `metadata` in the form SqliteGraph stores it (JSON text; absent -> '{}', as `rowToLoreNode` reads). */
+export function withSqliteMetadata(node: LoreNode): LoreNode {
+    return { ...node, metadata: metadataToSqliteText(node.metadata) ?? '{}' };
+}
+
 /** Canonical digest of every node + edge: sorted by a stable key, then key-order-normalized JSON. Timestamps are NOT normalized — importRaw preserves them exactly, so they must match byte-for-byte. */
-function digestOf(nodes: LoreNode[], edges: LoreEdge[]): string {
+export function digestOf(nodes: LoreNode[], edges: LoreEdge[]): string {
     const sortedNodes = [...nodes].sort((a, b) => a.id.localeCompare(b.id));
     const sortedEdges = [...edges].sort((a, b) =>
         `${a.sourceId}|${a.targetId}|${a.relation}`.localeCompare(`${b.sourceId}|${b.targetId}|${b.relation}`));
@@ -188,7 +194,11 @@ export async function migrateGraphToSqlite(opts: MigrateGraphToSqliteOptions): P
 
         const destNodes = await dest.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true });
         const destEdges = await readAllEdges(dest);
-        const sourceDigest = digestOf(nodes, edges);
+        // Schemaless Surreal can hold a non-string `metadata` (object, array,
+        // number, boolean); SqliteGraph stores it as JSON text. Normalise ONLY
+        // the source side's metadata through the SAME helper importRaw used,
+        // so the two agree — every other field is still compared byte-for-byte.
+        const sourceDigest = digestOf(nodes.map(withSqliteMetadata), edges);
         const destDigest = digestOf(destNodes, destEdges);
         const digestMatched = sourceDigest === destDigest;
         if (!digestMatched) {

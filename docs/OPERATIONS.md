@@ -341,6 +341,17 @@ cleanup, cold-node retention, and ephemeral-workspace expiry. The full knob tabl
 [root README, "Capacity maintenance" section](../README.md#capacity-maintenance-lore-maintain).
 This section summarizes the operational facts that matter when you run it.
 
+### Failures are not silent
+
+The MCP `maintain` result is `{ ok, dryRun, failedOperations, reports,
+versionsSqlite }`. If any **enabled** operation records errors, `ok` is
+`false`, `failedOperations` names the operation(s), and the tool result is
+marked `isError`. Per-operation `errors[]` inside each report are unchanged.
+A disabled operation never counts as failed. (Before 3.25.2 a failing step,
+for example node retention on a SQLite graph, was reported only inside
+`operations[].errors` with `ok: true`.) The `lore maintain` CLI prints a
+`FAILED:` line; its exit code is unchanged.
+
 ### Two ways to run it
 
 | Surface | When | Safety |

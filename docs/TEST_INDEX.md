@@ -93,12 +93,14 @@
 | `edge-bulk-graph-integration.ts` | localGraph |
 | `embedding-fingerprint-unit.ts` | embeddingFingerprint |
 | `freshness-unit.ts` | freshnessEngine, localSourceWatcher, localGraph |
+| `graph-metadata-shapes-unit.ts` | sqliteGraphRow, migrateGraphToSqlite, surrealGraph, sqliteGraph |
 | `lance-recall-concurrency-unit.ts` | verbatimStore |
 | `lance-table-pool-unit.ts` | lanceTablePool |
 | `lazy-handle-unit.ts` | lazyHandle |
 | `local-source-ingest-unit.ts` | bootSteps, freshnessEngine, localSourceWatcher, pathAllowlist, … |
 | `maintain-integration.ts` | adapters, maintain, policy |
 | `maintain-unit.ts` | policy, selection, maintain, ports |
+| `maintain-retention-engines-unit.ts` | adapters, maintain, retentionSweep, sqliteGraphAggregates, mcp maintain tool |
 | `memory-backbone-adversarial-unit.ts` | sweeper, contentHash, verbatimStore, consistency, … |
 | `memory-backbone-integration.ts` | verbatimStore, contentHash, sweeper, types, … |
 | `multi-master-sync-unit.ts` | multiMasterSync |

@@ -182,7 +182,33 @@ export async function bulkList(db: SqliteDb, q: BulkListQuery): Promise<BulkList
     }
 }
 
-/** bulkListProjected — keyset-paged node scan, requested columns only. Same contract as surrealGraphAggregates.bulkListProjected. */
+/**
+ * Per-handle cache of the `nodes` table's column names (`PRAGMA table_info`).
+ * The schema is fixed at open (DDL + idempotent upgrades run before any read),
+ * so one lookup per handle is enough.
+ */
+const NODE_COLUMNS = new WeakMap<SqliteDb, ReadonlySet<string>>();
+function nodeColumns(db: SqliteDb): ReadonlySet<string> {
+    let cols = NODE_COLUMNS.get(db);
+    if (!cols) {
+        const info = db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>;
+        cols = new Set(info.map((c) => c.name));
+        NODE_COLUMNS.set(db, cols);
+    }
+    return cols;
+}
+
+/**
+ * bulkListProjected — keyset-paged node scan, requested columns only. Same
+ * contract as surrealGraphAggregates.bulkListProjected, with one engine
+ * difference: Surreal is schemaless, so a requested field no node carries just
+ * comes back absent; SQLite has a fixed `nodes` schema, so a requested column
+ * that is not in the table (e.g. `legalHold`, which Lore never persists on
+ * either engine) is returned as `null` for every row instead of throwing
+ * "no such column". Callers treat null/absent identically (retentionSweep
+ * reads `legalHold` as a truthiness check). Identifiers are still validated
+ * with `assertIdent` before being interpolated.
+ */
 export async function bulkListProjected(
     db: SqliteDb,
     project: string,
@@ -201,8 +227,10 @@ export async function bulkListProjected(
     }
     const where = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
     try {
+        const have = nodeColumns(db);
+        const select = wanted.map((c) => (have.has(c) ? c : `NULL AS ${c}`)).join(', ');
         const rows = db.prepare(
-            `SELECT ${wanted.join(', ')} FROM nodes${where} ORDER BY updatedAt DESC, id ASC LIMIT ?`,
+            `SELECT ${select} FROM nodes${where} ORDER BY updatedAt DESC, id ASC LIMIT ?`,
         ).all(...params, limit + 1) as Array<Record<string, unknown>>;
         const normalized = rows.map((row) => (
             wanted.includes('tags') || wanted.includes('security_scopes') ? fromSqliteNodeRow(row) : row

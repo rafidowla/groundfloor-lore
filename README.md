@@ -283,6 +283,14 @@ It runs four independently-toggleable operations:
 and performs **zero** writes. A live run prints a before/after summary. Runs are
 idempotent — safe to wire into a nightly cron.
 
+**Result shape (MCP `maintain`).** The tool returns
+`{ ok, dryRun, failedOperations, reports, versionsSqlite }`. `ok` is `false`
+and `failedOperations` lists the operation names (`compaction`,
+`versionCleanup`, `nodeRetention`, `ephemeralExpiry`) whenever an **enabled**
+operation recorded errors, and the MCP result is flagged `isError`. A step you
+disabled never fails the run. Each report's per-operation `errors[]` is kept
+and says what went wrong; a `FAILED:` line appears in the CLI/text summary.
+
 ```bash
 # Preview the reclaimable disk on the active workspace:
 lore maintain --dry-run

@@ -4,6 +4,39 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.25.2] — 2026-10-02
+
+Patch on top of 3.25.1 (cut from the `v3.25.1` tag; it does not include the
+unreleased cloud-parity work on `main`). Upgrading from 3.25.1: no migration
+step and no schema change. One thing to check: a host that calls `maintain`
+and treats any returned result as success should now read `ok` (see
+"Behaviour change"). Hosts that aborted `lore migrate-graph --to sqlite` on
+object metadata can simply re-run it.
+
+### Fixed
+- **`lore migrate-graph --to sqlite` no longer aborts on nodes whose `metadata`
+  is an object.** The SQLite graph could not bind a non-string `metadata`
+  ("SQLite3 can only bind numbers, strings, bigints, buffers, and null"), which
+  broke `upsertNode`, bulk upsert and `importRaw`. Non-string metadata is now
+  serialised as JSON through one helper (`metadataToSqliteText`), and the
+  migration's source-side digest is normalised through the same helper. The
+  digest check stays strict (no `--force`); a genuinely different node still
+  fails it. Numeric metadata is now stored as `"5"` rather than `"5.0"`.
+- **Node retention now works on a SQLite graph.** `maintain` projects
+  `legalHold`, which the SQLite `nodes` table does not have, so the paged scan
+  threw, `inspected` stayed 0 and nothing was archived or deleted. SQLite
+  `bulkListProjected` now returns `null` for a requested column the table lacks
+  (as SurrealGraph returns it absent). `legalHold` cannot be persisted on either
+  engine through Lore's write paths, so it remains a guard for out-of-band holds.
+
+### Behaviour change
+- **`maintain` no longer reports `ok: true` when an enabled step failed.** The
+  MCP tool result is now `{ ok, dryRun, failedOperations, reports, ... }`;
+  `ok` is `false`, `failedOperations` lists the operations, and the result is
+  `isError` when an enabled operation recorded errors. Per-operation `errors[]`
+  are unchanged and the text summary gains a `FAILED:` line. Callers that
+  treated any returned result as success should check `ok`.
+
 ## [3.25.1] — 2026-10-01
 
 Patch on top of 3.25.0 (cut from the `v3.25.0` tag; it does not include the

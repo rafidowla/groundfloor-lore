@@ -6,7 +6,7 @@
  */
 
 import type { MaintainPolicy } from './policy.js';
-import type { MaintainReport } from './maintain.js';
+import { failedOperations, type MaintainReport } from './maintain.js';
 
 export function fmtBytes(n: number): string {
     if (n < 1024) return `${n}B`;
@@ -70,6 +70,11 @@ export function formatMaintainReport(report: MaintainReport, policy: MaintainPol
     }
 
     // Errors / op status
+    const failed = failedOperations([report]);
+    if (failed.length > 0) {
+        L.push('');
+        L.push(`FAILED: ${failed.join(', ')} — an enabled step reported errors; the work for that step was NOT completed.`);
+    }
     const errs = report.operations.flatMap((o) => o.errors.map((e) => `${o.operation}: ${e}`));
     if (errs.length > 0) {
         L.push('');
