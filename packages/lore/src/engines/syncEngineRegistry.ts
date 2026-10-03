@@ -171,9 +171,11 @@ export class SyncEngineRegistry {
             const engine = new SyncEngine(
                 graph,
                 perWsLoreDir,
-                this.deps.deploymentMode === 'cloud' ? null : this.deps.getAdapter(),
+                this.deps.deploymentMode === 'cloud' ? null : (this.deps.getAdapter()?.forWorkspace(workspace) ?? null),
                 verbatim,
                 this.deps.outboxStore,
+                null,
+                workspace, // pulled edges hold the per-edge lock (3.26.0)
             );
             // Never call startAutoSync on a lazily-opened engine — only the
             // boot engine auto-syncs (unchanged daemon behavior).

@@ -29,7 +29,7 @@ import { normaliseEcosystem } from '../core/bulkNodeScope.js';
 import { withNodeLock, withNodeLocks, withEdgeLock } from '../core/nodeWriteLock.js';
 import { FileOutboxStore } from './store.js';
 import { SqliteOutboxStore } from './sqliteStore.js';
-import type { OutboxStore as IOutboxStore } from './types.js';
+import type { OutboxEntry, OutboxStore as IOutboxStore } from './types.js';
 import {
     InMemoryOutboxHandlerRegistry,
     recoverOutbox,
@@ -47,7 +47,7 @@ export interface OutboxWiring {
      *  rollback). Both implement the same OutboxStore interface. */
     store: IOutboxStore;
     handlers: InMemoryOutboxHandlerRegistry;
-    runBootRecovery: () => Promise<void>;
+    runBootRecovery: (opts?: { onUnfinished?: (entries: readonly OutboxEntry[]) => void }) => Promise<void>;
     /** Sprint O1 — replicator service. Constructed in stopped state;
      *  the daemon calls `.start()` after boot recovery. Tests can use
      *  `.tickOnce()` for deterministic single-step exercise without
@@ -199,9 +199,11 @@ export function wireOutbox(input: {
         );
     });
 
-    async function runBootRecovery(): Promise<void> {
+    async function runBootRecovery(
+        opts?: { onUnfinished?: (entries: readonly OutboxEntry[]) => void },
+    ): Promise<void> {
         try {
-            const report = await recoverOutbox(store, handlers);
+            const report = await recoverOutbox(store, handlers, opts?.onUnfinished);
             if (report.discovered > 0) {
                 console.error(
                     `[outbox] boot recovery: ${report.completed}/${report.discovered} entries finished; ` +
@@ -215,6 +217,17 @@ export function wireOutbox(input: {
             console.error(`[outbox] boot recovery threw (non-fatal): ${(recErr as Error).message}`);
         }
     }
+
+    // 3.26.0 — the lookup the embedded replay guard uses to find the newest
+    // queued save of a node (OutboxStore.newestNodeUpsertAfter). Undefined
+    // when the row has no workspace/position or the store cannot answer.
+    type NewerSave = () => Promise<OutboxEntry | null>;
+    const newerSave = (nodeId: string, entry?: OutboxEntry): NewerSave | undefined => {
+        const ws = entry?.workspace;
+        const seq = entry?.sequenceId;
+        if (!ws || typeof seq !== 'number' || typeof store.newestNodeUpsertAfter !== 'function') return undefined;
+        return () => store.newestNodeUpsertAfter!(ws, nodeId, seq);
+    };
 
     // Sprint O1 — replicator substrates. O1 wires only the existing
     // sync.vector.mirror path (which the legacy handler also covers
@@ -244,10 +257,18 @@ export function wireOutbox(input: {
             // inside a lock (nodeWriteLock.ts rule 1). A legacy row with no
             // workspace keys on '' — those rows predate per-workspace routing
             // and go to the boot graph, so there is no better key available.
-            upsertNode: async (payload: Record<string, unknown>, workspace?: string) => {
+            //
+            // 3.26.0 — a graph that exposes `replayNodeUpsert` (the embedded
+            // guard, mcp/embeddedLifecycle.ts) gets the outbox row too, so it
+            // can tell crash recovery from a node the host deleted after
+            // saving it. Every other graph keeps the plain upsert.
+            upsertNode: async (payload: Record<string, unknown>, workspace?: string, entry?: OutboxEntry) => {
                 const g = await resolveGraph(workspace);
                 const id = String((payload as { id?: unknown }).id ?? '');
-                await withNodeLock(workspace ?? '', id, () => g.upsertNode(payload as unknown as LoreNode));
+                const replay = (g as { replayNodeUpsert?: (p: LoreNode, e?: OutboxEntry, n?: NewerSave) => Promise<unknown> }).replayNodeUpsert;
+                await withNodeLock(workspace ?? '', id, () => (typeof replay === 'function'
+                    ? replay(payload as unknown as LoreNode, entry, newerSave(id, entry))
+                    : g.upsertNode(payload as unknown as LoreNode)));
             },
             // Round-E X-edges — edges now DO take a lock: a per-triple one
             // (core/nodeWriteLock.ts `withEdgeLock`), keyed on
@@ -267,9 +288,10 @@ export function wireOutbox(input: {
                 const p = payload as unknown as LoreEdge;
                 await withEdgeLock(workspace ?? '', p.sourceId, p.targetId, p.relation, () => g.addEdge(p));
             },
-            deleteNode: async (id: string, workspace?: string) => {
+            deleteNode: async (id: string, workspace?: string, entry?: OutboxEntry) => {
                 const g = await resolveGraph(workspace);
-                await withNodeLock(workspace ?? '', id, () => g.deleteNode(id));
+                const replay = (g as { replayNodeDelete?: (id: string, e?: OutboxEntry, n?: NewerSave) => Promise<unknown> }).replayNodeDelete;
+                await withNodeLock(workspace ?? '', id, () => (typeof replay === 'function' ? replay(id, entry, newerSave(id, entry)) : g.deleteNode(id)));
             },
             // 2026-09-03 (X-markstale audit fix) — replay of a
             // `node.mark_stale` chunk row. Takes the SAME per-(workspace,id)

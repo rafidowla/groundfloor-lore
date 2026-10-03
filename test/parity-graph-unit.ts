@@ -55,6 +55,8 @@ import path from 'node:path';
 
 import { createTestGraphEngine, testGraphEngineName } from './helpers/testGraphEngine.js';
 import { DataplaneGraph } from '../packages/lore/src/engines/dataplaneGraph.js';
+import { registryAcceptingAny } from './helpers/workspace-registry.js';
+import { evalEngineFilter, parseEngineFilter } from './helpers/mock-dataplane.js';
 import type { LoreNode, LoreEdge } from '../packages/lore/src/providers/types.js';
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -76,7 +78,7 @@ import type { LoreNode, LoreEdge } from '../packages/lore/src/providers/types.js
 type Row = Record<string, unknown>;
 
 interface QueryOpts {
-    filter?: Record<string, unknown>;
+    filter?: unknown;
     sort?: Array<{ field: string; direction: 'asc' | 'desc' }>;
     limit?: number;
     offset?: number;
@@ -89,31 +91,11 @@ interface StoredEdge {
     relation: string;
 }
 
-function matchesFilter(rec: Row, filter: Record<string, unknown> | undefined): boolean {
-    if (!filter) return true;
-    for (const [key, value] of Object.entries(filter)) {
-        if (key === 'id_eq') {
-            if (rec['id'] !== value) return false;
-        } else if (key === 'source_id_eq') {
-            if (rec['source_id'] !== value) return false;
-        } else if (key === 'target_id_eq') {
-            if (rec['target_id'] !== value) return false;
-        } else if (key === 'relation_eq') {
-            if (rec['relation'] !== value) return false;
-        } else if (key === 'label_contains') {
-            if (!String(rec['label'] ?? '').toLowerCase().includes(String(value).toLowerCase())) return false;
-        } else if (key === 'content_contains') {
-            if (!String(rec['content'] ?? '').toLowerCase().includes(String(value).toLowerCase())) return false;
-        } else if (key === 'tags_contains') {
-            if (!String(rec['tags'] ?? '').toLowerCase().includes(String(value).toLowerCase())) return false;
-        } else if (key === 'updated_at_lt') {
-            if (!(String(rec['updated_at'] ?? '') < String(value))) return false;
-        } else {
-            // exact match on a top-level field (org_id, type, project, ecosystem…)
-            if (rec[key] !== value) return false;
-        }
-    }
-    return true;
+function matchesFilter(rec: Row, filter: unknown): boolean {
+    // Engine filter grammar (F1) — the shared evaluator from the faithful mock,
+    // so this fake can never accept the retired flat/suffix shape.
+    if (filter === undefined || filter === null) return true;
+    return evalEngineFilter(rec, parseEngineFilter(filter));
 }
 
 class StatefulSdkClient {
@@ -128,9 +110,9 @@ class StatefulSdkClient {
         return c;
     }
 
-    /** Test introspection — read a raw stored row (used for superseded-state assertions). */
+    /** Test introspection ONLY: look a row up by its LOGICAL id (`lore_id`). The client `get` below is primary-key-only, like the engine's GET. */
     rawGet(tenantId: string, collection: string, id: string): Row | null {
-        return this.coll(tenantId, collection).find((r) => r['id'] === id) ?? null;
+        return this.coll(tenantId, collection).find((r) => r['lore_id'] === id) ?? null;
     }
 
     async createCollection(_tenantId: string, _schema: unknown, _conn?: string): Promise<unknown> {
@@ -151,7 +133,7 @@ class StatefulSdkClient {
 
     async get<T = Row>(tenantId: string, collection: string, id: string, _conn?: string): Promise<T> {
         const rec = this.coll(tenantId, collection).find((r) => r['id'] === id);
-        if (!rec) throw new Error(`not found 404: ${collection}/${id}`);
+        if (!rec) throw Object.assign(new Error(`not found 404: ${collection}/${id}`), { statusCode: 404 }); // structured, as the SDK's GroundfloorError (review B #7: no message matching)
         return rec as unknown as T;
     }
 
@@ -245,7 +227,9 @@ class StatefulSdkClient {
             const edgeColl = options.edgeCollection ?? 'lore_edge';
             const nodeColl = collection;
             const maxDepth = options.maxDepth ?? 2;
-            const start = String(options.startId).replace(/^.*\//, '');
+            const startKey = String(options.startId).replace(/^.*\//, '');
+            // D2: the start ref carries the ROW KEY; edges reference LOGICAL ids.
+            const start = String(this.coll(tenantId, collection).find((r) => r['id'] === startKey)?.['lore_id'] ?? startKey);
             const edges: StoredEdge[] = this.coll(tenantId, edgeColl).map((e) => ({
                 fromBare: String(e['source_id'] ?? '').replace(/^.*\//, ''),
                 toBare: String(e['target_id'] ?? '').replace(/^.*\//, ''),
@@ -266,7 +250,7 @@ class StatefulSdkClient {
                         else if (e.toBare === cur) other = e.fromBare;
                         if (other === null || visited.has(other)) continue;
                         visited.add(other);
-                        const node = nodeRows.find((r) => r['id'] === other);
+                        const node = nodeRows.find((r) => r['lore_id'] === other);
                         if (node) { out.push({ ...node, relation: rel, _depth: depth }); next.push(other); }
                     }
                 }
@@ -410,7 +394,9 @@ async function main(): Promise<void> {
     const cloud = new DataplaneGraph({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         client: sdk as any,
-        tenantProvider: () => TENANT,
+        dataplaneWorkspaceId: TENANT,
+        workspaceRegistry: registryAcceptingAny(),
+        loreWorkspaceProvider: () => TENANT,
         orgId: ORG_ID,
     });
     await cloud.initialize();
@@ -523,14 +509,14 @@ async function main(): Promise<void> {
             const lNode = await local.getNode('kappa-label-older');
             assert.equal(lNode?.supersededBy, 'kappa-label-newer', 'local node now superseded');
 
-            // CONTRACT note: DataplaneGraph.recordToLoreNode does NOT map the
-            // superseded* fields (verified in dataplaneGraph.ts), so cloud
-            // getNode cannot surface supersededBy. The state IS written to the
-            // store (updateByQuery), so we assert the cloud superseded state on
-            // the raw stored row — the honest source of truth for the cloud side.
+            // Cloud parity B item 6: the cloud row stores snake_case columns (the old camelCase
+            // fields were never declared, so the engine lost them) and getNode now surfaces them.
             const cRow = sdk.rawGet(TENANT, 'lore_node', 'kappa-label-older');
-            assert.equal(cRow?.['supersededBy'], 'kappa-label-newer', 'cloud node superseded in store');
-            assert.equal(cRow?.['supersededReason'], 'parity test', 'cloud supersede reason persisted');
+            assert.equal(cRow?.['superseded_by'], 'kappa-label-newer', 'cloud node superseded in store');
+            assert.equal(cRow?.['superseded_reason'], 'parity test', 'cloud supersede reason persisted');
+            const cNode = await cloud.getNode('kappa-label-older');
+            assert.equal(cNode?.supersededBy, 'kappa-label-newer', 'cloud getNode surfaces supersededBy');
+            assert.equal(cNode?.supersededReason, 'parity test', 'cloud getNode surfaces supersededReason');
         });
 
         await check('supersedeNode(self): both refuse with reason "self", no state change', async () => {

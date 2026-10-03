@@ -502,7 +502,7 @@ export async function runHttpGates(
             }
             // TW-3a — CRITICAL multi-tenant isolation. The
             // `X-Lore-Workspace` header decides which customer's data
-            // partition DataplaneGraph.tenantProvider() reads/writes. It
+            // partition the Dataplane stores' loreWorkspaceProvider reads/writes. It
             // was previously trusted VERBATIM and never reconciled with
             // the authenticated principal, so any logged-in caller could
             // set the header to another tenant and breach it. Fail closed:
@@ -610,7 +610,7 @@ export function withPrincipalIfAny<T>(principal: Principal | null, fn: () => T):
  * L-032 — exact twin of withPrincipalIfAny for the cloud workspace context.
  * Binds the validated workspace id around the downstream await chain via the
  * callback-scoped runWithWorkspace (storage.run, which pops on completion) so
- * getCurrentWorkspaceId()/getCurrentTenantId() are populated for the whole
+ * getCurrentWorkspaceId() is populated for the whole
  * handler WITHOUT the cross-request leak risk of enterWith. No workspace
  * (local mode / header-exempt cloud paths) → no-op passthrough, preserving the
  * unbound getCurrentWorkspaceId()===null behavior.
@@ -630,7 +630,7 @@ export function runWithWorkspaceIfAny<T>(workspaceId: string | undefined, fn: ()
  * workspace and cannot reach foreign substrate.
  *
  * Cloud mode is a no-op passthrough (cloud keeps runWithWorkspaceIfAny +
- * DataplaneGraph.tenantProvider). No workspace (public local path, or a local
+ * the Dataplane stores' loreWorkspaceProvider). No workspace (public local path, or a local
  * path with no principal) → no slot, so slotless callers stay unconfined.
  */
 export function runWithRouteBindingSlotIfLocal<T>(

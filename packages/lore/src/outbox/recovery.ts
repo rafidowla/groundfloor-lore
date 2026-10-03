@@ -94,6 +94,10 @@ export interface RecoveryReport {
 export async function recoverOutbox(
     store: OutboxStore,
     registry: OutboxStepHandlerRegistry,
+    /** 3.26.0 — sees the unfinished rows exactly as this pass read them,
+     *  before any is dispatched. The embedded replay guard uses it to learn
+     *  which rows pre-date this boot (mcp/embeddedLifecycle.ts). */
+    onUnfinished?: (entries: readonly OutboxEntry[]) => void,
 ): Promise<RecoveryReport> {
     const report: RecoveryReport = {
         discovered: 0, completed: 0, stillUnfinished: [], stepFailures: [],
@@ -101,6 +105,7 @@ export async function recoverOutbox(
     };
     const unfinished = await store.listUnfinished();
     report.discovered = unfinished.length;
+    onUnfinished?.(unfinished);
 
     for (const entry of unfinished) {
         // SP-F2 (2026-06-10): zero outstanding steps means there is

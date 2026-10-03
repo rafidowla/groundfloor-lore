@@ -4,6 +4,367 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.26.0] — 2026-10-02
+
+Upgrade notes: [`docs/MIGRATION-3.26.md`](docs/MIGRATION-3.26.md).
+
+### Added
+- **`lore.nodeDelete({ id, workspace })` — the supported hard delete for an
+  in-process host** (asked for by Atlas 0.3.8). It runs the same sequence as the
+  MCP `delete_node` tool, now shared in `core/nodeDeleteService.ts`: `node.delete`
+  recorded in the outbox, graph node and its relationships removed, verbatim row
+  tombstoned, WAL entry appended, all under the node write lock, plus one
+  `lib:nodeDelete` audit row. Returns `{ deleted, verbatimWarning? }`;
+  `deleted: false` means the id did not exist. A save of the same id after the
+  delete is kept, and a save recorded before it is never replayed over it, even
+  one left unfinished by a crash. Not available in ArcadeDB mode. Hosts that
+  deleted through `storageClient.rawGraph().deleteNode()` should move to this
+  call.
+
+### Fixed
+- **Embedded mode: outbox replay no longer brings a deleted node back.**
+  `nodeUpsert` writes the graph inline and records a `node.upsert` outbox row.
+  The embedded replay guard (`embeddedGuardedGraph`) treated "row replayed, node
+  missing" as crash recovery and re-created the node, so a node the host deleted
+  with `rawGraph().deleteNode()` reappeared on the next replicator tick, on both
+  graph engines. The guard now decides in this order:
+  - a save recorded before a delete of the same node that this process applied
+    (`nodeDelete`, MCP `delete_node`) or replayed never re-creates the node,
+    whether or not its row pre-dates start-up;
+  - a node removed by the replay of a `node.delete` row is re-created by a save
+    recorded after that delete and before the removal (the save is the newer
+    write);
+  - otherwise a missing node is re-created only by a row that was already
+    unfinished when this process started (real crash recovery) or by a producer
+    that does not write the graph inline. A row recorded in the current process
+    had its graph write applied inline, so a missing node means it was deleted.
+
+  `nodeDelete` and MCP `delete_node` tell the guard their delete was applied
+  inline, so its row is not applied a second time. The guard's memory is per
+  process: one process replays a data directory's outbox. Not covered: a raw
+  `rawGraph().deleteNode()` of a node whose last save is still unfinished from
+  before start-up (after a crash, or right after start-up before the first
+  replay). That save is replayed as recovery and the node comes back. Use
+  `nodeDelete`, which records the delete.
+- **A failed update no longer deletes the node it was updating.** `nodeUpsert`
+  records the `node.upsert` outbox row, writes the graph, then records the
+  `verbatim.upsert` row. When the graph write or a later step failed,
+  `rollbackPartialWrite` deleted the graph node unconditionally, so a failed
+  UPDATE of an existing id destroyed the node and its relationships. The save
+  now reads the node under the node write lock before it writes, and the
+  rollback puts that state back. Only a node the failed write created is
+  deleted. `POST /api/nodes/bulk` has the same fix for its inline-embed items
+  and for a per-item graph failure (`mcp/http/routes/bulkWriteRollback.ts`).
+  Details:
+  - the restore writes the content fields and only the lifecycle fields the
+    failed write carried, so a change made meanwhile by a path that takes no
+    node lock (`supersedeNode`) is not undone. This covers the Dataplane
+    engine, which keeps the stored value for every omitted field;
+  - a node that was deleted while the write was in flight is not brought back;
+  - when the failed write's outbox row was already claimed by the replicator,
+    a compensating row is recorded: a `node.upsert` of the previous state when
+    the node is still there, a `node.delete` otherwise;
+  - **changed:** when the node cannot be read before the write, the save is
+    rejected with `nodeUpsert could not read the current state of <id> before
+    writing (...); nothing was written`, and no outbox row is recorded. The
+    bulk route fails that item with `could not read the node before writing`.
+    Before, an unreadable node was written with empty access scopes;
+  - a restored node keeps `createdAt` and its counters; `updatedAt` is the time
+    of the restore (both local engines also reset `syncedAt`, as they do on
+    any save). The restore runs
+    even when the failed write changed nothing: the local engines answer
+    `getNode` from a cache that only a successful write invalidates, so a read
+    cannot prove the node is untouched;
+  - every save now reads the node once before writing. Before, the read ran
+    only when the caller omitted `security_scopes`. In cloud mode it is a
+    network read;
+  - the restore, and the delete of a node the failed save created, retry a
+    transaction conflict (as the bulk route's do);
+  - a graph engine without `getNode` keeps the old behaviour.
+
+  Not covered: the bulk node delete route (`POST /api/nodes/bulk-delete`) is
+  unchanged. In daemon mode a failed payload whose row was already claimed is
+  replayed once before its compensating row; the final state is the restored
+  node.
+- **A failed item in `POST /api/edges/bulk` no longer deletes a relationship
+  that existed before the request.** The route recorded an `edge.upsert`
+  outbox row per item, wrote the graph, and on a failure compensated with an
+  `edge.delete` of the forward triple. For an edge that already existed, that
+  removed it; for a bidirectional item whose forward write landed and whose
+  reverse write failed, the forward edge stayed in the graph. The route now
+  reads each triple (both directions of a bidirectional item) under the
+  chunk's edge locks before it records the batch
+  (`mcp/http/routes/bulkEdgeRollback.ts`), and a failed item is undone per
+  direction: an edge that existed is written back with its previous
+  `confidence` and `confidenceScore`, an edge the item created is deleted, an
+  edge removed meanwhile is left alone. Details:
+  - when the item's outbox row was already claimed by the replicator, one
+    compensating row is recorded per direction: an `edge.upsert` of the
+    previous edge, or an `edge.delete` for an edge the item created. The
+    claimed row is replayed once before them; the final state is the earlier
+    edge. When a later item of the same chunk then succeeds on one of those
+    triples, its state is recorded again behind the compensation, so the
+    replay ends on the write the caller was told succeeded;
+  - **changed:** a triple that cannot be read before the write fails its item
+    with `could not read the edge before writing: ...; nothing was written`.
+    Nothing is written or queued for that item; the rest of the chunk goes on.
+    On SurrealDB an id the engine rejects now fails here, with this text,
+    instead of with the write's own error;
+  - the undo writes retry a transaction conflict;
+  - the SQLite, SurrealDB and Dataplane engines gain a keyed
+    `getEdge(sourceId, targetId, relation)`. SQLite reads by primary key,
+    SurrealDB reads the source node's outgoing edges, Dataplane does a GET by
+    row key (a filtered `limit: 1` query is not an identity lookup there). An
+    engine without it is read through `queryEdges`; an engine with neither
+    keeps the old delete;
+  - each bulk edge now costs one extra read (two when bidirectional). In cloud
+    mode they are network reads.
+- **A failed save or delete of one relationship is undone.** The
+  four single-edge doors (`POST /api/edge`, `DELETE /api/edge`, MCP
+  `store_edge`, MCP `delete_edge`) record their outbox row before the graph
+  write. When the write then failed, the row stayed (only `store_edge`
+  retracted it, and only for a missing endpoint, with a forward `edge.delete`
+  whatever the triple held before), so the replicator later applied an
+  operation whose caller had been told it failed: an edge appeared, or an edge
+  that was still there was removed. A bidirectional save that failed on the
+  reverse direction also left the forward edge in the graph. All four now go
+  through `mcp/edgeWriteRollback.ts`, with the contract of the bulk edge route
+  above:
+  - the edge is read under its edge lock before the row is recorded;
+  - a failed save is undone per direction (an edge that existed gets its
+    previous `confidence` and `confidenceScore` back, an edge the save created
+    is deleted). A failed delete writes back an edge that existed and is no
+    longer there as it was;
+  - the outbox row is removed while still pending. Already claimed by the
+    replicator: compensating rows are recorded that replay to the earlier
+    state (for a failed delete, an `edge.upsert` of the earlier edge; nothing
+    when the edge did not exist);
+  - the caller gets the original write error;
+  - **changed:** an edge that cannot be read beforehand is rejected with
+    `could not read the edge before writing: ...; nothing was written` or
+    `could not read the edge before deleting: ...; nothing was deleted`.
+    Nothing is written or queued;
+  - **changed:** `POST /api/edge` with a missing endpoint no longer leaves a
+    queued row that created the edge once the node appeared;
+  - each save now costs one extra read (two when bidirectional), each delete
+    one. In cloud mode they are network reads;
+  - **changed:** a failed pre-read is always a 500 on `POST /api/edge`, also
+    when the engine's message contains "not found" (it was mapped to 400);
+  - **changed:** a bidirectional save on a graph engine with no
+    `addBidirectionalEdge` is rejected with `this graph cannot write a
+    bidirectional edge; nothing was written` before anything is recorded;
+  - a graph engine with neither `getEdge` nor `queryEdges` keeps the old
+    behaviour;
+  - what can still be left behind, each logged: an undo that itself fails
+    (the graph keeps part of the failed write), a row that can be neither
+    removed nor compensated (replay applies it), and a failed delete whose row
+    was already claimed on an engine that cannot read edges (the delete
+    replays).
+- **A replayed `supersedes` edge stays one-way.** The three writers of that
+  edge (a save with `supersedes`, MCP `supersede_node`, `POST
+  /api/node/supersede`) queued an `edge.upsert` row with no `bidirectional`
+  flag. Replay treats a missing flag as true, so replaying the row also wrote
+  `old -[supersedes]-> new`. The rows now carry `bidirectional: false`. Rows
+  queued by an earlier version still replay both ways, and reverse edges
+  already written stay until the pair is un-superseded (next item).
+- **`POST /api/node/unsupersede` queues the removal of the `supersedes`
+  edge, in both directions.** It deleted the edge with no outbox row, so a
+  still-queued `edge.upsert` of the supersede, replayed afterwards, brought the
+  edge back. It now records an `edge.delete` first. It also deletes, and
+  queues the delete of, the reverse triple `old -[supersedes]-> new` that an
+  earlier replay wrote; the reverse stays only when the newer node is itself
+  superseded by the older one, or cannot be read. When a graph delete fails
+  the rows are kept and replay removes the edges (the unsupersede itself has
+  succeeded; `supersededBy` is authoritative).
+- **The `supersedes` edge writers take the edge lock.** The three writers
+  above and the unsupersede route wrote outside the per-triple lock the other
+  request-path edge writers hold, so the undo of a failed edge write could
+  remove an edge one of them wrote at the same moment.
+- **Three background edge writers take the edge lock.** Sync pull
+  (`SyncEngine.pullRemote`), reconnect's inferred edges (`reconnectGraph` and
+  `reconnectOneNode`: the save path's auto-link, `POST /api/reconnect`,
+  `POST /api/reconsume` and the boot-time background reconnect) and the
+  ArcadeDB replay lane's `addEdge` / `deleteEdge` now write each edge under
+  the same per-triple lock, so the undo of a failed edge call can no longer
+  remove an edge one of them wrote at the same moment. The ArcadeDB lane
+  locks on the app id, which is the name its request routes lock on. Still
+  outside the lock: the storage facade's `addEdge`, the `lore supersede` CLI
+  (its own process; it queues no row), CLI runs of `lore reconnect` and
+  `lore sync` (their own process), the admin import and migrate paths, the
+  bulk loader's edges, the schema relation operations, and reconnect's bulk
+  removal of old inferred edges (one engine statement, not a per-edge
+  write). An edge one of them writes between a failed call's
+  pre-read and its undo is removed by that undo.
+- **Outbox: a damaged payload no longer breaks the same-key lookup.** The
+  RA-6 supersession query read its key with a bare `json_extract(payload, …)`,
+  which raises on a payload that is not valid JSON, so one damaged row made
+  the lookup throw for its whole workspace. The key is now read through
+  `json_valid`; a damaged row matches no key.
+- **Embedded mode: replay after a delete ends on the newest save, not the
+  oldest.** When the replay of a `node.delete` row removed a node and two or
+  more saves of that id were queued behind it, the first save re-created the
+  node and the later ones were skipped because the node existed, so the node
+  kept the older content. New optional
+  `OutboxStore.newestNodeUpsertAfter(workspace, nodeId, sequenceId)` (SQLite and
+  file stores) returns the newest save still queued (`pending`, `failed` or
+  `replicating`) behind a row, and the replay guard writes that save instead.
+  Details:
+  - the SQLite store answers it from a new partial index,
+    `idx_outbox_node_upsert_id`, created when the store opens (an existing
+    outbox gets it on its first open under 3.26.0). No migration step. If the
+    index cannot be built the store still opens and the lookup scans;
+  - a stored row whose payload is not valid JSON indexes as NULL and never
+    matches the lookup. It does not fail the index build, and it does not make
+    the lookup throw for its workspace (a lookup that throws falls back to the
+    previous behaviour);
+  - if the newest save's payload fails to write, the row fails and is retried;
+    the older payload is never written in its place. A payload that can never
+    be written dead-letters both rows and the node stays absent, which
+    `lore doctor` reports; `lore outbox requeue-dead` re-drives them once the
+    cause is fixed;
+  - when a delete row that was not applied inline is replayed while the node
+    exists and a save from the running process is queued behind it, the delete
+    is skipped: the node already holds the newer save, and removing it would
+    also drop its relationships. If that delete never reached the graph, the
+    node keeps any field the newer save did not carry;
+  - a store without the method, or a row with no outbox position, keeps the
+    previous behaviour. The ArcadeDB lane is not affected: it replays every
+    row in order without the embedded guard, so the newest save lands last.
+- **The outbox replicator claims a row before replaying it, and runs one tick at
+  a time.** `replicateOne` dispatched every row of a `listPendingForWorkspace`
+  snapshot without re-checking its status, so two overlapping ticks (the
+  background loop and `awaitEmbeds()`, or two replayers on one outbox) replayed
+  the same row twice, and a row a rolled-back write had already retracted was
+  still replayed. New optional `OutboxStore.claimForReplication(id)` flips
+  `pending`/`failed` to `replicating` atomically; a row that cannot be claimed is
+  skipped. The SQLite store's claim also refuses a failed row whose retry time
+  has not come. Implemented by the SQLite and file stores and the ArcadeDB lane;
+  a store without it keeps the old behaviour. Applies to rows replayed one at a
+  time; the batched verbatim and embedding paths are unchanged.
+- **Cloud graph paging no longer skips entries saved in the same millisecond.**
+  `DataplaneGraph.bulkList` sorted by `(updated_at DESC, lore_id ASC)` but its
+  cursor was a bare `updated_at <`, so every row sharing the last row's timestamp
+  was dropped from the next page (a known Slice-1 limitation). The cursor is now
+  a keyset on the full sort key, pushed to the engine and re-checked client-side.
+  Affects every caller that pages the cloud graph: `POST /api/nodes/bulk-list`,
+  reconnect warm-up, backup export, the inspect and diagnostic listings. Local
+  engines already paged this way.
+- **A failed embedding-model warm-up no longer fails `open`.** On a cache miss the
+  local embedding provider falls through to a Hugging Face download, and a failed
+  download (seen as an `undici` `ETIMEDOUT` on an embedded open with a fresh
+  `LORE_HOME`) failed the whole store open. The three store open sites (LanceDB
+  verbatim store, SQLite verbatim store, Dataplane vector store) now log a warning
+  naming the model, dtype, cache directory and the fix, and retry the load on the
+  first embed. Embeds still fail, with `EmbedModelUnavailableError`
+  (`reason: 'download-failed' | 'offline'`), while the model is unavailable.
+- **Identical re-stores with `key: undefined` no longer write a history row.**
+  `isNoOpVersion` treated an explicitly-`undefined` field (e.g. `metadata: input.metadata`)
+  as a present key and compared it as a change. `undefined` is now handled exactly like
+  an omitted key, including for the fields a write layer clears on omission.
+
+### Behaviour change
+- **`lore maintain` exits with code 1 when an enabled step failed.** 3.25.2 made
+  the MCP tool answer `ok: false`; the CLI printed `FAILED:` but still exited 0.
+  The full report is printed first. With `--json`, stdout stays the plain reports
+  array and the `FAILED:` summary goes to stderr. A step switched off never fails
+  the run. Cron jobs and wrapper scripts that run `lore maintain` will now see a
+  failure they used to miss.
+- **`lore doctor --json`, `lore outbox requeue-dead` and `lore verbatim reap` exit
+  with code 1 on the failures they already reported.** These commands set
+  `process.exitCode = 1` and returned, and the CLI entry point then ended every
+  command with a hard-coded `process.exit(0)`, which overrides it. So
+  `doctor --json` with issues, `outbox requeue-dead` with no outbox (or a store
+  that cannot requeue) and `verbatim reap --apply` with failed tombstones printed
+  their error and exited 0. The entry point now exits with the code the command
+  set. Output is unchanged; only the exit code moves.
+- **Deleting a workspace fails when its deletion record cannot be written.** Every
+  workspace deletion is recorded in `<LORE_HOME>/workspace-deletions.jsonl` before
+  the registry entry is removed (the record is what later proves an id is safe to
+  purge). An unwritable `LORE_HOME` therefore refuses the deletion and the workspace
+  stays. Records are kept forever; back the file up with `workspaces.json`.
+- **Local-sync is registry-gated.** A local-mode host that sets `DATAPLANE_API_KEY`
+  now syncs only Lore workspaces present in its own `workspaces.json`. A workspace
+  not in the registry is refused with `cloud_scope_workspace_not_allowed`; before,
+  any pushed workspace name was accepted. Atlas, MIRA and PM Helper setups that set
+  the key must provision the workspace through Lore first. See `docs/CONFIGURATION.md`
+  (`DATAPLANE_API_KEY`).
+
+### Changed (cloud ids)
+- **Cloud data is keyed by a permanent workspace id, not the workspace name**
+  (cloud parity review C #6). Each `workspaces.json` entry gets an immutable `id`
+  (optional in the type; old files load unchanged). The `lore_workspace` column,
+  the `lw1_` row key, all scope filters, history/version rows and the sync adapter
+  use it. Rename keeps the data; delete + recreate under the same name gets a new
+  id; aliases resolve to their target's id; callers keep using names. Unknown name
+  or an entry without a usable id fails closed (`cloud_scope_workspace_not_allowed`).
+  Missing ids are backfilled only when a Dataplane-backed store is built (cloud or
+  local-sync), deterministically and atomically; local and embedded hosts never
+  rewrite `workspaces.json`. **No data migration** (nothing was deployed in cloud);
+  rows of a deleted workspace stay in Dataplane until an operator removes them with
+  `lore maintain cloud-purge` (see Added).
+- `scopedGetRow` treats the groundfloor-ts-sdk 3.x throw on an engine 200
+  `{success:false, ERR_NOT_FOUND}` (`engineCode`) as "no such row".
+- On an engine without `/v1/transaction`, the junk row the first-use attempt leaves
+  in a collection named `transaction` is deleted again (best effort).
+
+### Added
+- `lore maintain cloud-purge`: hard-deletes the Dataplane rows of a workspace that was
+  deleted from this instance. CLI only, cloud mode only, dry run by default
+  (`--list`, `--id`, `--apply`, `--unrecorded --confirm-org`, `--min-age` 7d default,
+  `--collection`, `--connection`, `--max-rows`, `--json`). Deletes only rows with the
+  per-row `lw1_` key proof under the org + workspace scope; refuses on a live or
+  unreadable registry, a missing or other-org deletion record, a young record or a
+  recent write; strict registry re-read before every delete pass; appends a purge
+  event to `workspace-deletions.jsonl`. Exit 0 done, 1 refused, 2 failure, 3 not
+  provably complete. See `docs/DATAPLANE_INTEGRATION.md` section 12.
+- **`LORE_MODELS_OFFLINE=1`** (or `true`): Lore never attempts an embedding-model
+  download; a cache miss fails fast with the fix in the message. Off by default.
+  Environment only, so it reaches the shared `lore-models` process. `lore models
+  fetch-embedding` still downloads with the switch on. See `docs/CONFIGURATION.md`.
+- Embedding-model download retry pause: after a failed download the next attempt
+  for that model waits 30 s (`EMBED_DOWNLOAD_RETRY_PAUSE_MS`). Calls inside the
+  pause get the same `EmbedModelUnavailableError` at once (`retryInMs` set) and
+  start no download. Per model, per process; a model that lands in the cache
+  meanwhile is used immediately.
+- `DATAPLANE_CONNECTION`: the one Dataplane connector every cloud call names
+  (graph, verbatim store, version store, history transactions, sync adapter).
+  Unset, Lore never sends `/v1/transaction` and logs `cloud_connection_unset` once
+  at boot. See `docs/CONFIGURATION.md`.
+- Cloud verbatim `physicalDelete` / `physicalDeleteMany` (canonical row only).
+
+### Changed (cloud mode)
+- Cloud verbatim `delete(id)` is a tombstone, as in the local store.
+- `getHistory` throws past its page budget instead of truncating; `getVersions`
+  pages newest-first; `write_count` is recounted so concurrent writers converge.
+- A failing verbatim batch stops at the first failure and names the ids not written.
+- Transaction success requires `committed: true`; a 0-match update inside a
+  transaction is compensated and written separately.
+
+### Fixed (outbox dead-letter watch)
+- Rows the RA-6 guard parks as `dead` with `superseded by newer same-key write (RA-6)`
+  no longer count as dead-letters in the watch. A later write of the same key replaced
+  them, so nothing is missing from the substrate, yet every start logged
+  `NOTE: N dead-lettered row(s) ... NOT on the substrate` and a runtime supersession
+  logged a false `DATA LOSS`. Works for rows already in existing outbox files (the
+  marker is the existing error text, shared as `SUPERSEDED_DEAD_ERROR`; no migration,
+  no new status). Genuine dead rows keep the existing wording. `aggregateStats()` and
+  per-workspace stats keep `dead` as the total and add `deadSuperseded`.
+  `requeue-dead` and `drain-failed` are unchanged; superseded rows are still not pruned.
+
+### Changed (release tooling)
+- `scripts/publish-public.sh --source <origin-branch>` mirrors a branch other than
+  `main` (a patch release cut from a tag while `main` carries unreleased work).
+  Unknown flags now exit 2; a missing origin branch fails with a clear message.
+
+### Tests
+- `version-prune-embedded-stall`: the measured pass is retried (up to 3 times, each
+  on a fresh store) before failing, because the wall-clock probe also counts time
+  the process spent descheduled on a busy machine. The 250 ms budget is unchanged.
+- `access-coldness-surreal`: temp-dir cleanup retries `ENOTEMPTY` (SurrealKV can
+  still be writing its manifest just after `close()`).
+- New `maintain-cli-exit-unit` (6 cases).
+- New `cli-entry-exit-code-unit` (4 cases, real CLI spawned on a throwaway home).
+
 ## [3.25.2] — 2026-10-02
 
 Patch on top of 3.25.1 (cut from the `v3.25.1` tag; it does not include the

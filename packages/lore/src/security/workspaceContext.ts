@@ -1,9 +1,9 @@
 /**
- * workspaceContext.ts — Per-request workspace/tenant routing for cloud mode (Q2.2).
+ * workspaceContext.ts — Per-request Lore-workspace routing for cloud mode (Q2.2).
  *
  * Problem: In cloud mode the daemon is a singleton serving many tenants.
  * Every authenticated /api/* request carries `X-Lore-Workspace: <id>`
- * (Q2.1 gate). Downstream code — DataplaneGraph.tenantProvider, lifecycle
+ * (Q2.1 gate). Downstream code — the Dataplane stores' loreWorkspaceProvider, lifecycle
  * hooks, audit logs — needs to know which workspace a given call is
  * operating in, without threading an argument through every signature.
  *
@@ -30,12 +30,6 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 export interface WorkspaceContext {
     /** The workspace / tenant id from X-Lore-Workspace. Never empty. */
     workspaceId: string;
-    /**
-     * Optional tenant id override. Usually equals workspaceId, but an
-     * operator may remap (e.g. dev-workspace-123 → tenant_dev_123).
-     * Reserved for slice 3; slice 2 treats workspaceId as tenantId 1:1.
-     */
-    tenantId?: string;
 }
 
 const storage = new AsyncLocalStorage<WorkspaceContext>();
@@ -59,8 +53,8 @@ export function runWithWorkspace<T>(ctx: WorkspaceContext, fn: () => T): T {
  * requests see their own values; it does NOT leak across requests.
  *
  * TW-3a SECURITY INVARIANT: in cloud mode the `workspaceId` passed here
- * is the value DataplaneGraph.tenantProvider() routes EVERY read/write
- * to — i.e. it selects the customer's data partition. Callers MUST NOT
+ * is the Lore workspace the Dataplane stores scope EVERY read/write
+ * to (their loreWorkspaceProvider) — i.e. it selects the customer's data partition. Callers MUST NOT
  * pass an `X-Lore-Workspace` header value verbatim. The header has to be
  * reconciled against the authenticated principal first (see
  * `resolveWorkspaceHeaderBinding` in `auth/principal.ts`, called from the
@@ -83,21 +77,10 @@ export function getCurrentWorkspaceId(): string | null {
 }
 
 /**
- * getCurrentTenantId — Read the tenant id to route Dataplane calls at.
- * Defaults to workspaceId when the context didn't override. Returns
- * null outside a bound scope.
- */
-export function getCurrentTenantId(): string | null {
-    const ctx = storage.getStore();
-    if (!ctx) return null;
-    return ctx.tenantId ?? ctx.workspaceId;
-}
-
-/**
  * requireCurrentWorkspaceId — Same as getCurrentWorkspaceId, but throws
  * if no workspace is bound. Use inside cloud-mode paths that would be
- * meaningless without a workspace (DataplaneGraph.tenantProvider calls
- * this — the HTTP 400 gate at the edge should make the throw unreachable
+ * meaningless without a workspace (the Dataplane stores' default
+ * loreWorkspaceProvider calls this — the HTTP 400 gate at the edge should make the throw unreachable
  * in practice, but we want a loud failure if the invariant breaks).
  */
 export function requireCurrentWorkspaceId(): string {
@@ -108,20 +91,6 @@ export function requireCurrentWorkspaceId(): string {
             'Cloud-mode code must be called from inside runWithWorkspace(). ' +
             'If you see this in a request handler, the AsyncLocalStorage wrap ' +
             'is missing around the request body.',
-        );
-    }
-    return id;
-}
-
-/**
- * requireCurrentTenantId — Same as requireCurrentWorkspaceId but returns
- * the effective tenant id (honoring a ctx.tenantId override if set).
- */
-export function requireCurrentTenantId(): string {
-    const id = getCurrentTenantId();
-    if (!id) {
-        throw new Error(
-            'workspaceContext: no tenant bound in the current async chain.',
         );
     }
     return id;

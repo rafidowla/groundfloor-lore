@@ -66,7 +66,7 @@ import { RetentionSweeper } from '../engines/retentionSweep.js';
 import { LocalFileSink } from '../engines/archive.js';
 import { buildDefaultConnectors } from '../engines/connectors/index.js';
 import { AuditLog } from '../security/audit.js'; import { wireAuditExporterOnBoot } from '../audit/wireExporter.js';
-import { logEmbeddedWrite } from './embeddedAudit.js';
+import { logEmbeddedWrite } from './embeddedAudit.js'; import { embeddedNodeDelete } from './embeddedNodeDelete.js';
 import { setCurrentUserProvider } from '../security/identity.js';
 import { ConsentManager } from '../security/consent.js';
 import { guardSyncDown } from '../security/syncDirectionGuard.js';
@@ -75,7 +75,7 @@ import { loreHome, resolveLoreHome } from '../config/loreHome.js';
 import { startHttpLifecycle, makeDispose } from './lifecycle.js';
 import { PoolExhaustedError, PoolAcquireTimeoutError } from '../engines/poolLimits.js';
 import { WorkspaceAccessDeniedError } from '../security/routeWorkspaceBinding.js';
-import { runEmbeddedInit, embeddedGuardedGraph, composeEmbeddedDrain, type GuardableGraph } from './embeddedLifecycle.js';
+import { runEmbeddedInit, embeddedGuardedGraph, composeEmbeddedDrain, createEmbeddedReplayScope, noteInlineAppliedDelete, type GuardableGraph, type EmbeddedReplayScope } from './embeddedLifecycle.js';
 import { createMcpServer as createMcpServerImpl } from './createMcpServer.js';
 import { createPhaseAServices } from './services.js';
 import { createStorageClient } from './storageBundle.js';
@@ -86,6 +86,8 @@ import { wireDaemonTimers } from './daemonTimers.js'; import { wireStorageGrowth
 import { buildMergedEnums } from './mergedEnums.js';
 import { AuxStore } from '../outbox/auxStore.js';
 import { VersionStore } from '../outbox/versionStore.js';
+import { openVersionStores } from './versionStoreWiring.js';
+import type { VersionStoreApi } from '../outbox/versionStoreApi.js';
 import { validateVersionHistoryPolicy, resolveVersionHistoryPolicy } from '../outbox/versionPolicy.js';
 import { resolveEffectiveVersionHistoryPolicy } from '../outbox/versionPruningPolicy.js';
 import { wireOutbox } from '../outbox/wiring.js';
@@ -306,6 +308,14 @@ export interface LoreInstance {
         force?: boolean;
     }): Promise<NodeWriteResult>;
     /**
+     * 3.26.0 — supported hard delete for an in-process host: the MCP
+     * `delete_node` sequence (outbox `node.delete`, graph node + relationships,
+     * verbatim tombstone, WAL) under the node write lock. Use this, not
+     * `storageClient.rawGraph().deleteNode()`: a raw delete is invisible to the
+     * outbox. `deleted: false` = no such node. No transport gates (as nodeUpsert).
+     */
+    nodeDelete(args: { id: string; workspace: string }): Promise<import('../core/nodeDeleteService.js').NodeDeleteOutcome>;
+    /**
      * Bulk-ingest N nodes optimised for structured import (repo indexing,
      * memory imports, migration tools). Fixes two trickle-ingest behaviours
      * that regress at bulk scale:
@@ -392,7 +402,7 @@ export interface LoreInstance {
  */
 export interface LoreInternalHandles {
     getGraphRegistry(): LocalGraphRegistry | undefined; getVerbatimResolver(): WorkspaceVerbatimResolver | undefined;
-    outboxWiring: ReturnType<typeof wireOutbox>;
+    outboxWiring: ReturnType<typeof wireOutbox>; replayScope?: EmbeddedReplayScope; // replayScope: absent in ArcadeDB mode
 }
 
 /**
@@ -423,7 +433,7 @@ interface DaemonWiring {
     configManager: ConfigManager;
     store: Awaited<ReturnType<typeof createStorageClient>>;
     embedQueue: ReturnType<typeof wireEmbedQueue>;
-    outboxWiring: ReturnType<typeof wireOutbox>;
+    outboxWiring: ReturnType<typeof wireOutbox>; replayScope: EmbeddedReplayScope;
     workspaceVerbatimResolver: WorkspaceVerbatimResolver | undefined; workspaceQuotaStore: import('../security/workspaceQuota.js').IWorkspaceQuotaStore; getWorkspaceEntryForQuota: (ws: string) => import('../config/workspaces.js').WorkspaceEntry | undefined; // L-033 shared write quota (REST + MCP).
     /** D5 round 2 (#2) — host-level supersession-enforce default, resolved once via `resolveHostSupersessionDefault`. */
     supersessionEnforceDefault: boolean | undefined;
@@ -458,7 +468,9 @@ interface DaemonWiring {
     orchestrationWiring: ReturnType<typeof wireOrchestration>;
     phaseAServices: ReturnType<typeof createPhaseAServices>;
     auxStore: AuxStore | undefined;
-    versionStore: VersionStore | undefined;
+    versionStore: VersionStoreApi | undefined;
+    /** sqlite-only handle (prune + close); undefined in cloud mode. */
+    localVersionStore: VersionStore | undefined;
     getGraphRegistry(): LocalGraphRegistry | undefined;
     setGraphRegistry(r: LocalGraphRegistry | undefined): void; getVerbatimResolver(): WorkspaceVerbatimResolver | undefined;
     /** Wave 4.3 — per-workspace SyncEngine registry. */
@@ -575,14 +587,14 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         setCurrentUserProvider(() => ({ id: osUser, displayName: osUser, roles: ['operator'] }));
     }
 
-    // Q2.2 — mode-conditional graph factory; full contract on `createGraph`.
-    // Local mode opens the engine the ACTIVE WORKSPACE DECLARES; cloud mode
-    // gets DataplaneGraph. `workspaceId` + `home` resolve that engine by NAME
-    // against THIS dataHome rather than path-matching the global LORE_HOME.
+    // Q2.2 — mode-conditional graph factory; full contract on `createGraph`. Local mode opens the engine the ACTIVE
+    // WORKSPACE DECLARES; cloud mode gets DataplaneGraph. `workspaceId` + `home` resolve that engine by NAME against
+    // THIS dataHome, not by path-matching the global LORE_HOME. The boot graph keeps this name (its edge-lock key).
+    const bootWorkspaceName = getActiveWorkspaceName(dataHome);
     let graph: LoreGraph = await createGraph({
         deploymentMode,
         graphBasePath,
-        workspaceId: getActiveWorkspaceName(dataHome),
+        workspaceId: bootWorkspaceName,
         home: dataHome,
         cacheTtlMs,
         cacheMaxSize,
@@ -707,7 +719,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
 
     // Module-level mutables (now factory locals). main() may replace adapter
     // (and rebuild syncEngine) if the OS keychain has a dataplane credential.
-    let adapter: TsSdkAdapter | null = resolveSyncAdapterFromEnv(deploymentMode);
+    let adapter: TsSdkAdapter | null = resolveSyncAdapterFromEnv(deploymentMode, dataHome);
 
     // Architecture gap #1 — durable outbox + recovery wiring (outbox/wiring.ts).
     const isLocal = deploymentMode !== 'cloud';
@@ -718,8 +730,10 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     // writes through so an already-applied node.upsert becomes a no-op (boot
     // recovery of genuinely-unapplied prior-run rows still applies). Daemon /
     // local / cloud are untouched — only effectiveMode==='embedded' wraps.
+    // 3.26.0 — replayScope: only rows that pre-date this boot re-create a missing node.
+    const replayScope = createEmbeddedReplayScope();
     const guardEmbeddedGraph = <T extends GuardableGraph>(g: T): T =>
-        effectiveMode === 'embedded' ? embeddedGuardedGraph(g) : g;
+        effectiveMode === 'embedded' ? embeddedGuardedGraph(g, replayScope) : g;
     // cq-server-wireoutbox-megaexpression — the local-mode outbox substrate
     // getters, broken out of the former 745-char single line into named local
     // closures so each getter (and its isLocal/registry/resolver guard) reads
@@ -772,7 +786,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     const loadTempFileSweeper = new TempFileSweeper({ store: loadJobsStore });
     // Sprint S — in-memory streaming-ingest registry.
     const streamRegistry = new StreamRegistry();
-    let syncEngine: SyncEngine = new SyncEngine(graph, loreDir, deploymentMode === 'cloud' ? null : adapter, verbatimStore, outboxWiring.store);
+    let syncEngine: SyncEngine = new SyncEngine(graph, loreDir, deploymentMode === 'cloud' ? null : (adapter?.forWorkspace(() => graphRegistry?.activeName() ?? detectedScope.workspace) ?? null), verbatimStore, outboxWiring.store, null, bootWorkspaceName);
     let wal = syncEngine.getWal();
 
     // S9 keychain preference. Thin closure injecting the factory-scope
@@ -781,10 +795,12 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         return maybeUpgradeAdapterFromKeychainImpl({
             deploymentMode,
             loreDir,
+            home: dataHome,
             getAdapter: () => adapter,
             getGraph: () => graph,
             verbatimStore,
-            setAdapter: (a) => { adapter = a; },
+            embeddingProvider,
+            setAdapter: (a) => { adapter = a; }, lockWorkspace: bootWorkspaceName, getSyncWorkspace: () => graphRegistry?.activeName() ?? detectedScope.workspace, // review A1 #1: boot engine syncs only the active workspace
             // Wave 4.3 — drop stale sibling engines (they hold the pre-upgrade
             // adapter by value); re-prime the boot entry with the new one.
             setSyncEngine: (s) => {
@@ -826,13 +842,8 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         log.warn(`[Lore MCP] AuxStore open failed (non-fatal — lifecycle/outcome/health tools unavailable): ${(auxOpenErr as Error).message}`);
     }
 
-    // Feature 8 — VersionStore opened once at daemon boot alongside AuxStore. CLOUD MUST-FIX: boot-bound = shared across workspaces; cloud multi-tenant needs a per-tenant store (see docs/CLOUD_GAP_AUDIT.md).
-    let versionStore: VersionStore | undefined;
-    try {
-        versionStore = VersionStore.open(loreDir);
-    } catch (vsErr) {
-        log.warn(`[Lore MCP] VersionStore open failed (non-fatal — versioning tools unavailable): ${(vsErr as Error).message}`);
-    }
+    // Feature 8 — version history: sqlite VersionStore (local) or the cloud graph's `lore_version` store (see versionStoreWiring.ts).
+    const { versionStore, localVersionStore } = openVersionStores(graph, loreDir, (m) => log.warn(m));
     // Storage-growth fix 2/3 (R2) — validate + carry the host's per-type
     // history policy. `resolveVersionHistoryPolicy` layers in
     // LORE_VERSION_SKIP_TYPES for daemon/MCP-mode operators who have no
@@ -956,8 +967,8 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         embedQueue,
         workspace: detectedScope.workspace,
         // RC-round4 — fan sweeps per-workspace (local). Lazy graphRegistry: assigned later in boot. See daemonTimers.
-        workspaceVerbatimResolver, auditLog, graphRegistry: { getGraphHandle: (ws: string, o?: { touch?: boolean }) => graphRegistry!.getGraphHandle(ws, o), tableStorageFor: (ws: string, o?: { touch?: boolean }) => graphRegistry!.tableStorageFor(ws, o) }, versionStore, versionPolicy: effectiveVersionPolicy });
-    const storageGrowthSweeps = wireStorageGrowthSweeps({ startsDaemonTimers, versionPruneSweeper, versionStore: versionStore ?? null, versionPolicy: effectiveVersionPolicy, outboxWiring }); // storage-growth 2/3 (R3+R4)
+        workspaceVerbatimResolver, auditLog, graphRegistry: { getGraphHandle: (ws: string, o?: { touch?: boolean }) => graphRegistry!.getGraphHandle(ws, o), tableStorageFor: (ws: string, o?: { touch?: boolean }) => graphRegistry!.tableStorageFor(ws, o) }, versionStore: localVersionStore, versionPolicy: effectiveVersionPolicy });
+    const storageGrowthSweeps = wireStorageGrowthSweeps({ startsDaemonTimers, versionPruneSweeper, versionStore: localVersionStore ?? null, versionPolicy: effectiveVersionPolicy, outboxWiring }); // storage-growth 2/3 (R3+R4)
     /** C6b (Phase 4) — MCP client runtime (connects outward to external MCP servers). */
     const mcpClientRuntime = new McpClientRuntime();
 
@@ -981,7 +992,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
             extractorRegistry,
             getSyncEngine: () => syncEngine,
             getSyncAdapter: () => adapter,
-            getWal: () => wal,
+            getWal: () => wal, noteInlineNodeDelete: (e, id) => noteInlineAppliedDelete(replayScope, e, id),
             detectedScope,
             loreDir,
             graphBasePath,
@@ -1027,7 +1038,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         authTokenSweeper,
         rateLimiter,
         graphRegistry, syncEngineRegistry, workspaceVerbatimResolver,
-        sqliteStores: collectSqliteStores({ outboxStore: outboxWiring.store, auxStore, versionStore, pendingOpsStore, tableStorage: store.tableStorage, loadJobsStore }),
+        sqliteStores: collectSqliteStores({ outboxStore: outboxWiring.store, auxStore, versionStore: localVersionStore, pendingOpsStore, tableStorage: store.tableStorage, loadJobsStore }),
         stopAllLocalWatchers,
     });
     // TW-2b — after the ordered drain completes, remove any process-global
@@ -1079,7 +1090,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         configManager,
         store,
         embedQueue,
-        outboxWiring,
+        outboxWiring, replayScope,
         workspaceVerbatimResolver, workspaceQuotaStore, getWorkspaceEntryForQuota,
         loadJobsStore,
         loadConcurrencyManager,
@@ -1107,7 +1118,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         orchestrationWiring,
         phaseAServices,
         auxStore,
-        versionStore,
+        versionStore, localVersionStore,
         getGraphRegistry: () => graphRegistry, getVerbatimResolver: () => workspaceVerbatimResolver,
         // 1.2 (2026-08-17 audit) — when the registry lands, also wire the
         // storage facade's per-workspace read routers so
@@ -1150,7 +1161,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
             workspaceVerbatimResolver,
             detectedWorkspace: detectedScope.workspace,
             dataHome,
-            outboxWiring,
+            outboxWiring, replayScope,
             setGraphRegistry: (r) => {
                 graphRegistry = r;
                 if (!r) return;
@@ -1229,6 +1240,13 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                 error !== undefined ? { ok: false, error } : { ok: true, value: value! },
             );
         },
+        nodeDelete: (args) => embeddedNodeDelete(args, {
+            auditLog, outboxStore: outboxWiring.store, getWal: () => wal, replayScope,
+            isActiveWorkspace: (ws) => ws === (graphRegistry?.activeName() ?? detectedScope.workspace),
+            resolveGraph: async (ws) => (graphRegistry ? graphRegistry.getGraphHandle(ws) : graph),
+            resolveVerbatim: async (ws) => (workspaceVerbatimResolver ? workspaceVerbatimResolver.getOrOpen(ws) : store.loreVerbatim),
+            verbatimDelete: (verbatimId) => store.storageClient.verbatimDelete(verbatimId),
+        }),
         async nodeUpsertBatch(nodes) {
             // 4.4 (2026-08-17) — bound the fan-out: an unchunked Promise.all
             // overflowed the previous graph engine's native connection-pool waiter queue (200/200) past ~200 nodes.
@@ -1326,9 +1344,9 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
             while (Date.now() < deadline) {
                 const pendingWs = await pendingLister();
                 if (pendingWs.length === 0) return;
-                // Safe alongside the running loop: dispatch is idempotent
-                // (verbatim mergeInsert / node upsert), and when the loop
-                // is NOT running (test mode) this is the only drain.
+                // Safe alongside the running loop: the replicator runs one
+                // tick at a time and claims each row before replay (3.26.0);
+                // when the loop is NOT running (test mode) this is the only drain.
                 await tick.call(outboxWiring.replicator);
                 await delayMs(25);
             }
@@ -1640,7 +1658,7 @@ async function main(): Promise<LoreInstance | void> {
         await runBackgroundReconnectIfFresh({
             loreDir, graph: localGraph, verbatim: verbatimStore,
             // Per-instance, seal-gated, abortable — see backgroundReconnect.ts.
-            tracker: d.store.sweepTracker,
+            tracker: d.store.sweepTracker, lockWorkspace: getActiveWorkspaceName(dataHome), // the name the boot graph is locked under, never '*'
         });
     }
 
@@ -1792,7 +1810,7 @@ async function main(): Promise<LoreInstance | void> {
                 authTokenSweeper,
                 rateLimiter,
                 graphRegistry, syncEngineRegistry, workspaceVerbatimResolver: d.workspaceVerbatimResolver,
-                sqliteStores: collectSqliteStores({ outboxStore: outboxWiring.store, auxStore: d.auxStore, versionStore: d.versionStore, pendingOpsStore: d.pendingOpsStore, tableStorage: d.store.tableStorage, loadJobsStore: d.loadJobsStore }),
+                sqliteStores: collectSqliteStores({ outboxStore: outboxWiring.store, auxStore: d.auxStore, versionStore: d.localVersionStore, pendingOpsStore: d.pendingOpsStore, tableStorage: d.store.tableStorage, loadJobsStore: d.loadJobsStore }),
                 stopAllLocalWatchers,
             })),
         });

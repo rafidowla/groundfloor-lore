@@ -33,7 +33,7 @@ import { isEmbeddingDisabled } from '../providers/nullEmbeddingProvider.js';
 import type { LoreGraph, LoreVectorStore } from './services.js';
 import type { LocalGraphRegistry } from '../engines/localGraphRegistry.js';
 import { WorkspaceNotFoundError } from '../engines/localGraphRegistry.js';
-import type { VersionStore } from '../outbox/versionStore.js';
+import type { VersionStoreApi } from '../outbox/versionStoreApi.js';
 import type { LoreStorageClient } from '../storage/loreStorageClient.js';
 import type { EmbedQueue } from '../embed/queue.js';
 import type { ReconnectableGraph } from '../engines/reconnect.js';
@@ -140,7 +140,7 @@ export interface BulkIngestDeps {
     loreVerbatim: LoreVectorStore;
     embeddingProvider: EmbeddingProvider;
     getWal: () => import('../engines/writeAheadLog.js').WriteAheadLog;
-    versionStore: VersionStore | undefined;
+    versionStore: VersionStoreApi | undefined;
     /**
      * R4 #4 — per-workspace verbatim (LanceDB) resolver. Step 3 below routes
      * each node's vector to ITS workspace's store via getOrOpen(node.workspace)

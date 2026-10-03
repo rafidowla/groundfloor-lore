@@ -64,6 +64,7 @@ export function cellOutboxStore(store: OutboxStore, cellKey: string): OutboxStor
   }
   // Forward the optional replicator/health surface when present.
   if (store.removeIfPending) wrapped.removeIfPending = (id) => store.removeIfPending!(id);
+  if (store.claimForReplication) wrapped.claimForReplication = (id) => store.claimForReplication!(id);
   if (store.listPendingForWorkspace)
     wrapped.listPendingForWorkspace = (ws, limit) => store.listPendingForWorkspace!(ws, limit);
   if (store.listWorkspacesWithPending)

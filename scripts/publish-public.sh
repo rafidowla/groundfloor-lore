@@ -6,7 +6,7 @@
 # process/agent/audit artifacts. Atlas memory (.atlas/) NEVER ships.
 #
 # How it works:
-#   1. snapshot origin/main into a scratch worktree
+#   1. snapshot the source branch (origin/main unless --source) into a scratch worktree
 #   2. rebase onto the public lineage (github/main) so pushes stay fast-forward
 #   3. strip the internal-file list below
 #   4. apply documented deletion-only rewrites to package.json and
@@ -21,15 +21,40 @@
 # ~/.groundfloor/hooks/pre-push stays in place for accidental pushes from the
 # working checkout — this script is the deliberate, self-asserting path.
 #
-# Usage: scripts/publish-public.sh [--dry-run]
+# Usage: scripts/publish-public.sh [--dry-run] [--source <origin-branch>]
+#
+#   --source <branch>  private origin branch to mirror (default: main). The
+#                      public destination is always github main. Use it for a
+#                      patch release cut from a tag while origin/main carries
+#                      unreleased work, e.g. --source release/3.25.1. The
+#                      public tree becomes exactly that branch (sanitized), so
+#                      never point it at a branch older than what is already
+#                      mirrored — check the --dry-run diffstat first.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 GITHUB_REMOTE="github"
-BRANCH="main"
+BRANCH="main"        # public destination branch
+SRC_BRANCH="main"    # private origin branch being mirrored
 DRY_RUN=0
-[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=1
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --source)
+      [ $# -ge 2 ] || { echo "ERROR: --source needs a branch name" >&2; exit 2; }
+      SRC_BRANCH="$2"; shift ;;
+    --source=*) SRC_BRANCH="${1#--source=}" ;;
+    *) echo "ERROR: unknown argument: $1" >&2
+       echo "Usage: scripts/publish-public.sh [--dry-run] [--source <origin-branch>]" >&2
+       exit 2 ;;
+  esac
+  shift
+done
+if [ -z "$SRC_BRANCH" ] || ! git check-ref-format --branch "$SRC_BRANCH" >/dev/null 2>&1; then
+  echo "ERROR: --source is not a valid branch name: '$SRC_BRANCH'" >&2
+  exit 2
+fi
 
 # ── Internal files that never ship to the public mirror ────────────────────
 # Invariant: this list contains ONLY docs/ops/agent artifacts — never code,
@@ -103,24 +128,27 @@ STRIP=(
 REWRITABLE=("package.json" ".test-type-baseline.json")
 
 cd "$ROOT"
-git fetch -q origin "$BRANCH"
+if ! git fetch -q origin "$SRC_BRANCH"; then
+  echo "ERROR: origin has no branch '$SRC_BRANCH' — nothing to publish" >&2
+  exit 1
+fi
 git fetch -q "$GITHUB_REMOTE" "$BRANCH" || true
 
 WORK="$(mktemp -d)"
 trap 'git worktree remove --force "$WORK" 2>/dev/null || rm -rf "$WORK"' EXIT
 
-# Snapshot the private main into a scratch worktree, then re-base onto the
+# Snapshot the private source branch into a scratch worktree, then re-base onto the
 # public lineage so the push is a fast-forward (no force ever needed). Work
 # on a detached HEAD: the local branch named "$BRANCH" is checked out in the
 # main worktree and can't be shared; HEAD:main pushes keep it fast-forward.
-git worktree add --detach -q "$WORK" "origin/$BRANCH"
+git worktree add --detach -q "$WORK" "origin/$SRC_BRANCH"
 git -C "$WORK" checkout -q "$GITHUB_REMOTE/$BRANCH" 2>/dev/null || true
 
 # Bring origin's full content into the index, then strip internal artifacts.
 # read-tree swaps the whole index (no worktree copy needed — only the index
 # determines the commit tree); --cached avoids touching disk, -f allows the
 # removal even though the index differs from HEAD (github/main lineage).
-git -C "$WORK" read-tree "origin/$BRANCH"
+git -C "$WORK" read-tree "origin/$SRC_BRANCH"
 git -C "$WORK" rm -rq -f --cached --ignore-unmatch "${STRIP[@]}"
 
 # ── Sanitizer: deletion-only rewrites of the rewritable files ──────────────
@@ -179,14 +207,14 @@ while read -r status path; do
     M)
       case "$path" in
         "package.json"|".test-type-baseline.json")
-          git -C "$WORK" diff -U0 --cached "origin/$BRANCH" -- "$path" | awk '
+          git -C "$WORK" diff -U0 --cached "origin/$SRC_BRANCH" -- "$path" | awk '
             /^\+/ && !/^\+\+\+/ && prev != "-" { print "unpaired insertion: " $0; bad = 1 }
             { prev = substr($0, 1, 1) }
             END { exit bad }
           ' && prev_ok=1 || prev_ok=0
           if [ "$prev_ok" != 1 ]; then
             echo "ERROR: $path sanitizer made a pure insertion (rewrites must be deletions/line replacements):" >&2
-            git -C "$WORK" diff -U0 --cached "origin/$BRANCH" -- "$path" | grep '^+[^+]' | head -10 >&2
+            git -C "$WORK" diff -U0 --cached "origin/$SRC_BRANCH" -- "$path" | grep '^+[^+]' | head -10 >&2
             exit 1
           fi
           ;;
@@ -197,12 +225,12 @@ while read -r status path; do
       esac
       ;;
     *)
-      echo "ERROR: publish tree adds $path vs origin/$BRANCH — unclassified file? Refusing." >&2
-      git -C "$WORK" diff --cached --name-status "origin/$BRANCH" | grep -v '^D' | head -20 >&2
+      echo "ERROR: publish tree adds $path vs origin/$SRC_BRANCH — unclassified file? Refusing." >&2
+      git -C "$WORK" diff --cached --name-status "origin/$SRC_BRANCH" | grep -v '^D' | head -20 >&2
       exit 1
       ;;
   esac
-done < <(git -C "$WORK" diff --cached --name-status "origin/$BRANCH")
+done < <(git -C "$WORK" diff --cached --name-status "origin/$SRC_BRANCH")
 # 3. No publisher-machine paths in the staged tree. Targets the running
 #    user's own home/username (plain and in Claude's mangled temp-dir form)
 #    and agent scratch dirs — NOT generic /Users/<x>, which redaction tests
@@ -219,18 +247,18 @@ fi
 
 # Nothing staged to ship (already in sync).
 if git -C "$WORK" diff --cached --quiet; then
-  echo "Publish: origin/$BRANCH already mirrored — nothing to do."
+  echo "Publish: origin/$SRC_BRANCH already mirrored — nothing to do."
   exit 0
 fi
 
-git -C "$WORK" commit -q -m "chore(publish): mirror origin/$BRANCH $(git rev-parse --short origin/$BRANCH) (sanitized)"
+git -C "$WORK" commit -q -m "chore(publish): mirror origin/$SRC_BRANCH $(git rev-parse --short origin/$SRC_BRANCH) (sanitized)"
 
 if [ "$DRY_RUN" = 1 ]; then
   echo "Dry run — would push to $GITHUB_REMOTE/$BRANCH:"
   git -C "$WORK" diff --stat "$GITHUB_REMOTE/$BRANCH" HEAD | tail -5
-  echo "(staged tree verified: origin/$BRANCH minus strip list, deletions-only rewrites)"
+  echo "(staged tree verified: origin/$SRC_BRANCH minus strip list, deletions-only rewrites)"
   exit 0
 fi
 
 git -C "$WORK" push -q "$GITHUB_REMOTE" "HEAD:$BRANCH"
-echo "Published $GITHUB_REMOTE/$BRANCH ← origin/$BRANCH ($(git rev-parse --short origin/$BRANCH))"
+echo "Published $GITHUB_REMOTE/$BRANCH ← origin/$SRC_BRANCH ($(git rev-parse --short origin/$SRC_BRANCH))"

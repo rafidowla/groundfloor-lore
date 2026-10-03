@@ -136,6 +136,8 @@ export async function maybeRunBackgroundReconnect(opts: {
      * callers that have no bundle keep working.
      */
     tracker?: PendingAutolinkTracker;
+    /** Workspace name for the per-edge lock; see `ReconnectOptions.lockWorkspace`. */
+    lockWorkspace?: string;
 }): Promise<void> {
     if (opts.disabled) {
         status = { state: 'skipped', cursorWasMissing: false, message: 'auto-trigger disabled' };
@@ -187,6 +189,7 @@ async function runReconnectInBackground(opts: {
     graph: ReconnectableGraph;
     verbatim: VerbatimStoreApi;
     shouldAbort?: () => boolean;
+    lockWorkspace?: string;
 }): Promise<void> {
     const startedIso = new Date().toISOString();
     status = { state: 'running', startedAt: startedIso, cursorWasMissing: true };
@@ -200,6 +203,7 @@ async function runReconnectInBackground(opts: {
             dryRun: false,    // first-install: actually populate edges
             force: false,
             ...(opts.shouldAbort ? { shouldAbort: opts.shouldAbort } : {}),
+            ...(opts.lockWorkspace ? { lockWorkspace: opts.lockWorkspace } : {}),
         });
 
         // An ABORTED sweep must NOT write the cursor. This file's cursor is

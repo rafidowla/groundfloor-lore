@@ -26,7 +26,8 @@ import { resolveTargetGraph } from './workspaceResolve.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import type { LoreDeploymentMode } from '../server.js';
 import { runVersionPruneSweep, resolveRetentionDays } from '../versionPruneScheduler.js';
-import type { VersionStore } from '../../outbox/versionStore.js';
+import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
+import { VersionStore } from '../../outbox/versionStore.js';
 import {
     resolveMaintainPolicy,
     runMaintenance,
@@ -89,7 +90,7 @@ export interface MaintainToolsDeps {
      * store per instance, not fanned out per requested workspace — see
      * versionPruneScheduler.ts's own "Scope" section).
      */
-    versionStore?: VersionStore;
+    versionStore?: VersionStoreApi;
 }
 
 /**
@@ -326,19 +327,23 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
                 // (report omits `versionsSqlite`) — matching how the other ops
                 // report nothing when disabled at the engine-policy level.
                 let versionsSqlite: unknown;
-                if (deps.versionStore && !versionsSqlitePruneDisabled) {
+                const localVersionStore = deps.versionStore instanceof VersionStore ? deps.versionStore : undefined;
+                if (deps.versionStore && !versionsSqlitePruneDisabled && !localVersionStore) {
+                    // Cloud version rows live in Dataplane's `lore_version`: pruning is a Dataplane retention concern.
+                    versionsSqlite = { dryRun, skipped: 'cloud_version_store', hint: 'Version history in cloud mode is retained by the Dataplane collection; Lore does not prune it.' };
+                } else if (localVersionStore && !versionsSqlitePruneDisabled) {
                     // OPT-IN (owner decision 2026-09-29): gated on the host's
                     // effective policy, which an MCP caller can read but not
                     // change. The arg may only LENGTHEN the configured window.
-                    const policy = deps.versionStore.getEffectiveHistoryPolicy();
+                    const policy = localVersionStore.getEffectiveHistoryPolicy();
                     const retentionDays = resolveRetentionDays(policy, args.versions_sqlite_retention_days);
                     if (retentionDays === null) {
                         versionsSqlite = { dryRun, skipped: 'pruning_disabled', hint: 'Version history is kept forever unless the host enables pruning (LORE_VERSION_PRUNE_ENABLED=1 or createLore versionHistory.pruning).' };
                     } else if (dryRun) {
-                        const preview = deps.versionStore.countPrunable(retentionDays);
+                        const preview = localVersionStore.countPrunable(retentionDays);
                         versionsSqlite = { dryRun: true, ...preview };
                     } else {
-                        const result = await runVersionPruneSweep({ store: deps.versionStore, policy, retentionDays });
+                        const result = await runVersionPruneSweep({ store: localVersionStore, policy, retentionDays });
                         versionsSqlite = { dryRun: false, ...result };
                     }
                 }

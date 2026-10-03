@@ -41,6 +41,7 @@ import { LoreStorageClient } from '../storage/loreStorageClient.js';
 import { WriteAheadLog, type WalOperation, type WalEntry } from './writeAheadLog.js';
 import { CURRENT_DATA_VERSION } from '../migration/coordinator.js';
 import { log } from '../logger.js';
+import { applyPulledEdge, pulledEdgeTimestamp, type PullEdgeLockWorkspace } from './syncPullEdge.js';
 
 // W5-MIGRATION-VERSION: re-export the single source-of-truth data-version
 // constant (owned by migration/coordinator.ts) so importers of the sync
@@ -424,6 +425,7 @@ export class SyncEngine {
         vectorStore: LoreVectorStore | null = null,
         outbox: import('../outbox/types.js').OutboxStore | null = null,
         storageClient: LoreStorageClient | null = null,
+        private readonly lockWorkspace: PullEdgeLockWorkspace = null, // per-edge lock for pulled edges (syncPullEdge.ts)
     ) {
         this.localGraph = localGraph;
         this.loreDir = loreDir;
@@ -894,9 +896,8 @@ export class SyncEngine {
                 // NW-7b (corr-pull-edges-silently-dropped): edge apply
                 // failures used to be swallowed with a bare `catch {}`,
                 // and the pull cursor still advanced past those edges.
-                // Now we route per-edge failures to the DLQ file and
-                // surface a count. (The cursor still advances — the
-                // edges are persisted in the DLQ, not lost.)
+                // Now per-edge failures go to the DLQ file and surface a count.
+                // (The cursor still advances; the edges are in the DLQ, not lost.)
                 for (const remoteEdge of remote.edges) {
                     // TW-4b (corr-pull-cursor-stall-edge-only-page): advance
                     // the page cursor from EDGE timestamps too, not nodes
@@ -907,13 +908,12 @@ export class SyncEngine {
                     // `LoreEdge` has no declared timestamp, but adapters may
                     // attach `updatedAt`/`createdAt`; read them defensively
                     // so an edge-bearing page can move the bookmark.
-                    const edgeTs = (remoteEdge as { updatedAt?: string; createdAt?: string }).updatedAt
-                        ?? (remoteEdge as { updatedAt?: string; createdAt?: string }).createdAt;
+                    const edgeTs = pulledEdgeTimestamp(remoteEdge);
                     if (edgeTs && edgeTs > maxUpdatedAtInPage) {
                         maxUpdatedAtInPage = edgeTs;
                     }
                     try {
-                        await this.localGraph.addEdge(remoteEdge);
+                        await applyPulledEdge(this.localGraph, this.lockWorkspace, remoteEdge);
                         edgesPulled++;
                     } catch (edgeErr) {
                         const msg = (edgeErr as Error).message;

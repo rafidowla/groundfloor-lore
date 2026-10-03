@@ -18,6 +18,7 @@ import { recordHotWrite, recordHotWriteBatch, retractHotWriteOrCompensate } from
 import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE, withEdgeLocks, type EdgeLockTriple } from '../../../core/nodeWriteLock.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import type { OutboxEntry } from '../../../outbox/types.js';
+import { readEdgePriors, markEdgeWritten, undoBulkEdgeWrite, retractBulkEdgeUpsert, reassertBulkEdgeUpsert } from './bulkEdgeRollback.js';
 import { resolveGraph, writeWorkspaceNotFound, ITEM_CAP, type BulkWriteDeps, type BulkResult, type EdgeInput } from './bulkWrite.js';
 
 export async function handleBulkEdges(
@@ -117,10 +118,17 @@ export async function handleBulkEdges(
             if (bidirectional) lockTriples.push({ sourceId: edge.targetId, targetId: edge.sourceId, relation: edge.relation });
         }
         await withEdgeLocks(lockWorkspace, lockTriples, async () => {
+            // 3.26.0 — read what each triple holds NOW, under the chunk's locks and
+            // before any outbox row is recorded: a failed item must put back an edge
+            // that existed, not delete it (bulkEdgeRollback.ts). A triple that cannot
+            // be read fails its own item, with nothing written for it.
+            const { chunk: live, priors } = await readEdgePriors(target, chunk, ({ idx }, error) => {
+                results[idx] = { ok: false, error };
+            });
             let chunkEntries: OutboxEntry[] | null = null;
-            if (deps.outboxStore && chunk.length > 0) {
+            if (deps.outboxStore && live.length > 0) {
                 try {
-                    chunkEntries = await recordHotWriteBatch(deps.outboxStore, chunk.map(({ edge, bidirectional }) => ({
+                    chunkEntries = await recordHotWriteBatch(deps.outboxStore, live.map(({ edge, bidirectional }) => ({
                         workspace: requestedWorkspace!,
                         operationKind: 'edge.upsert',
                         payload: { ...edge, bidirectional },
@@ -129,41 +137,56 @@ export async function handleBulkEdges(
                     })));
                 } catch (err) {
                     const msg = `outbox commit failed: ${(err as Error).message}`;
-                    for (const { idx } of chunk) results[idx] = { ok: false, error: msg };
+                    for (const { idx } of live) results[idx] = { ok: false, error: msg };
                     return;
                 }
             }
-            for (let k = 0; k < chunk.length; k++) {
-                const { idx, edge, bidirectional } = chunk[k]!;
+            // Triples of this chunk that got a compensating outbox row (a failed
+            // item whose own row was already claimed).
+            const compensated = new Set<string>();
+            for (let k = 0; k < live.length; k++) {
+                const { idx, edge, bidirectional } = live[k]!;
                 try {
                     // 1.1 — conflict retry, same wrapper as the node-bulk upsert path
                     // (the facade's upsertNode/addEdge wraps cover routes that route
                     // through it; this loop writes the raw handle directly).
                     if (bidirectional) await withTransactionConflictRetry(() => target.addBidirectionalEdge(edge));
                     else await withTransactionConflictRetry(() => target.addEdge(edge));
+                    markEdgeWritten(priors, edge, bidirectional);
                     results[idx] = { ok: true };
                     succeeded++;
+                    if (deps.outboxStore && compensated.size > 0) {
+                        // An earlier item of this chunk failed on one of these triples
+                        // and its compensation sorts after this item's row: record the
+                        // written state again so replay ends on it.
+                        try {
+                            await reassertBulkEdgeUpsert({ store: deps.outboxStore, workspace: requestedWorkspace!, edge, bidirectional, compensated });
+                        } catch (reassertErr) {
+                            console.error(`[Lore HTTP] bulk edges: could not re-record ${edge.sourceId}->${edge.targetId}:${edge.relation} behind an earlier compensation: ${redactError(reassertErr)} — replay may revert it`);
+                        }
+                    }
                 } catch (err) {
                     results[idx] = { ok: false, error: (err as Error).message };
+                    const triple = `${edge.sourceId}->${edge.targetId}:${edge.relation}`;
+                    // The write may have landed in part (the forward direction of a
+                    // bidirectional item, or a cloud edge row): put each direction back.
+                    try {
+                        await undoBulkEdgeWrite(target, edge, bidirectional, priors);
+                    } catch (undoErr) {
+                        console.error(`[Lore HTTP] bulk edges: could not restore the prior state of ${triple} after a failed write: ${redactError(undoErr)}`);
+                    }
                     // This chunk's edge.upsert outbox row for `edge` is already
                     // committed (above), but the substrate write just failed —
                     // retract it (mirroring bulkWrite.ts's node.upsert retraction)
                     // so a later replicator replay doesn't create the edge the
-                    // caller was told ok:false for.
-                    if (deps.outboxStore && chunkEntries) {
-                        const entry = chunkEntries[k];
-                        if (entry) {
-                            try {
-                                await retractHotWriteOrCompensate(deps.outboxStore, entry.id, {
-                                    workspace: requestedWorkspace!,
-                                    operationKind: 'edge.delete',
-                                    payload: { sourceId: edge.sourceId, targetId: edge.targetId, relation: edge.relation },
-                                    initiator: 'http:POST /api/edges/bulk',
-                                    operation: 'edge.delete',
-                                });
-                            } catch (retractErr) {
-                                console.error(`[Lore HTTP] bulk edges: edge.upsert outbox retraction failed for ${edge.sourceId}->${edge.targetId}:${edge.relation}: ${redactError(retractErr)} — replicator may create a ghost edge`);
-                            }
+                    // caller was told ok:false for. A row the replicator already
+                    // claimed is compensated by rows that end on the PRIOR state.
+                    const entry = deps.outboxStore && chunkEntries ? chunkEntries[k] : undefined;
+                    if (entry && deps.outboxStore) {
+                        try {
+                            for (const key of await retractBulkEdgeUpsert({ store: deps.outboxStore, entryId: entry.id, workspace: requestedWorkspace!, edge, bidirectional, priors })) compensated.add(key);
+                        } catch (retractErr) {
+                            console.error(`[Lore HTTP] bulk edges: edge.upsert outbox retraction failed for ${triple}: ${redactError(retractErr)} — replicator may create a ghost edge`);
                         }
                     }
                 }

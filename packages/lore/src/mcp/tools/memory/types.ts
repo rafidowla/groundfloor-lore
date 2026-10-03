@@ -6,14 +6,14 @@
  */
 
 import { z } from 'zod';
-import type { VersionStore } from '../../../outbox/versionStore.js';
+import type { VersionStoreApi } from '../../../outbox/versionStoreApi.js';
 import type { LocalGraphRegistry } from '../../../engines/localGraphRegistry.js';
 import type { ConfigManager } from '../../../config/configManager.js';
 import type { AuditLog } from '../../../security/audit.js';
 import type { WriteAheadLog } from '../../../engines/syncEngine.js';
 import type { StorageBundle } from '../../services.js';
 import type { PendingOpsStore } from '../../../security/pendingOps.js';
-import type { OutboxStore } from '../../../outbox/types.js';
+import type { OutboxEntry, OutboxStore } from '../../../outbox/types.js';
 import type { OutboxLagCache } from '../../../outbox/lagCache.js';
 
 export interface MemoryToolsDeps {
@@ -62,7 +62,7 @@ export interface MemoryToolsDeps {
      */
     coreNodeTypes: ReadonlyArray<string>;
     /** Feature 8 — version store. When wired, store_node records versions + honours changeset_id. */
-    versionStore?: VersionStore;
+    versionStore?: VersionStoreApi;
     /**
      * SP-F3 — outbox hot-lane store. When wired, store_node / store_edge /
      * delete_node record an outbox row (operationKind node.upsert /
@@ -75,6 +75,9 @@ export interface MemoryToolsDeps {
      * that don't wire an outbox keep the prior direct-write behavior.
      */
     outboxStore?: OutboxStore;
+    /** 3.26.0 — tells the embedded replay guard that `delete_node` applied a
+     *  `node.delete` row inline (mcp/embeddedLifecycle.ts). */
+    noteInlineNodeDelete?: (entry: OutboxEntry, nodeId: string) => void;
     /** SP-F3 — per-workspace lag cache for MCP-write backpressure (O4),
      *  mirroring REST `checkOutboxBackpressure`. Optional. */
     outboxLagCache?: OutboxLagCache;

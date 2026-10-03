@@ -55,6 +55,7 @@
  * edge op (or vice-versa) even if their key strings collide.
  */
 
+import { log } from '../logger.js';
 import type { OutboxEntry } from './types.js';
 
 /**
@@ -73,6 +74,22 @@ import type { OutboxEntry } from './types.js';
  *                  durably-applied op wins.
  */
 export type EntityFamily = 'node' | 'edge' | 'verbatim';
+
+/**
+ * The `lastError` the replicator stamps on a row it parks as `dead` because a
+ * newer same-key write already replicated (RA-6). It is the ONLY marker that
+ * distinguishes such a row from a genuinely failed dead-letter: no write is
+ * missing, a later write replaced it. Existing hosts' outbox files already hold
+ * rows with exactly this text, so readers match on it rather than on a new
+ * status. Every writer and reader goes through this constant; do not change the
+ * text, or rows already on disk stop being recognised.
+ */
+export const SUPERSEDED_DEAD_ERROR = 'superseded by newer same-key write (RA-6)';
+
+/** True when a dead row's `lastError` is the RA-6 supersession marker. */
+export function isSupersededDeadError(lastError: string | null | undefined): boolean {
+    return lastError === SUPERSEDED_DEAD_ERROR;
+}
 
 /**
  * Separator joining the edge identity triple into a single key. MUST equal
@@ -159,11 +176,15 @@ export function keyOfEntry(entry: OutboxEntry): { family: EntityFamily; key: str
  * compares equal to it.
  */
 export function supersessionFamilySql(family: EntityFamily): { kinds: string; keyExpr: string } {
+    // 3.26.0 — `json_extract` raises on a payload that is not valid JSON, so
+    // one damaged row made this lookup throw for its whole workspace. Guarded,
+    // such a row yields NULL and never equals the bound key.
+    const field = (path: string): string => `CASE WHEN json_valid(payload) THEN json_extract(payload, '${path}') END`;
     switch (family) {
         case 'node':
             return {
                 kinds: "('node.upsert', 'node.delete')",
-                keyExpr: "json_extract(payload, '$.id')",
+                keyExpr: field('$.id'),
             };
         case 'verbatim':
             // verbatim.upsert / verbatim.tombstone cross-supersede (2026-09-03),
@@ -171,17 +192,66 @@ export function supersessionFamilySql(family: EntityFamily): { kinds: string; ke
             // keeps it from matching a node row on a colliding key.
             return {
                 kinds: "('verbatim.upsert', 'verbatim.tombstone')",
-                keyExpr: "json_extract(payload, '$.id')",
+                keyExpr: field('$.id'),
             };
         case 'edge':
             // char(0) matches keyOfEntry's NUL join; it cannot appear in an
             // id/relation, so the composite is collision-free.
             return {
                 kinds: "('edge.upsert', 'edge.delete')",
-                keyExpr:
-                    "json_extract(payload, '$.sourceId') || char(0) || "
-                    + "json_extract(payload, '$.targetId') || char(0) || "
-                    + "json_extract(payload, '$.relation')",
+                keyExpr: `${field('$.sourceId')} || char(0) || ${field('$.targetId')} || char(0) || ${field('$.relation')}`,
             };
     }
+}
+
+/**
+ * The node id of a stored payload, or NULL when the payload is not valid JSON.
+ * `json_extract` raises on malformed JSON, which would fail both the index
+ * build and every lookup that reaches the row; one damaged record must not
+ * switch the newest-save lookup off for its workspace. The query and the index
+ * use this exact text: SQLite only serves a query from an expression index
+ * whose expression matches.
+ */
+const NODE_UPSERT_ID_EXPR = "CASE WHEN json_valid(payload) THEN json_extract(payload, '$.id') END";
+
+/** 3.26.0 — OutboxStore.newestNodeUpsertAfter for the SQLite store. Binds:
+ *  workspace, node id, sequenceId. Only rows still queued count: a
+ *  'replicated' row was already replayed, a 'dead' one never will be. A row
+ *  whose payload is not valid JSON never matches. */
+export const NEWEST_NODE_UPSERT_AFTER_SQL =
+    `SELECT * FROM outbox_entries WHERE workspace = ? AND ${NODE_UPSERT_ID_EXPR} = ?`
+    + " AND sequenceId > ? AND operationKind = 'node.upsert'"
+    + " AND status IN ('pending', 'failed', 'replicating') ORDER BY sequenceId DESC LIMIT 1";
+
+/** Index for {@link NEWEST_NODE_UPSERT_AFTER_SQL}: without it the lookup scans
+ *  the workspace's rows and parses each payload, once per replayed row. */
+export const NODE_UPSERT_ID_INDEX_SQL =
+    "CREATE INDEX IF NOT EXISTS idx_outbox_node_upsert_id ON outbox_entries"
+    + `(workspace, ${NODE_UPSERT_ID_EXPR}, sequenceId) WHERE operationKind = 'node.upsert'`;
+
+interface SqliteHandle {
+    exec(sql: string): unknown;
+    prepare(sql: string): { get(...params: unknown[]): unknown };
+}
+
+/**
+ * Create {@link NODE_UPSERT_ID_INDEX_SQL}. Called once when the store opens,
+ * as its own statement and not as part of the schema script: a build that
+ * fails (a busy or read-only database) must not fail the open. A malformed
+ * payload does not fail it: it indexes as NULL. Best-effort: without the index
+ * the lookup still answers, by scan. Resolves false when the build failed.
+ */
+export function ensureNodeUpsertIdIndex(db: Pick<SqliteHandle, 'exec'>): boolean {
+    try {
+        db.exec(NODE_UPSERT_ID_INDEX_SQL);
+        return true;
+    } catch (err) {
+        log.warn(`[outbox] could not create idx_outbox_node_upsert_id (${(err as Error).message}); newest-save lookups will scan`);
+        return false;
+    }
+}
+
+/** Run {@link NEWEST_NODE_UPSERT_AFTER_SQL}. */
+export function newestNodeUpsertRow(db: Pick<SqliteHandle, 'prepare'>, workspace: string, nodeId: string, sequenceId: number): unknown {
+    return db.prepare(NEWEST_NODE_UPSERT_AFTER_SQL).get(workspace, nodeId, sequenceId);
 }

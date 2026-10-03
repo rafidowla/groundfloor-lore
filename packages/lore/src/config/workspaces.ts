@@ -39,7 +39,9 @@
 
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'node:crypto';
 import { loreHome } from './loreHome.js';
+import { recordWorkspaceDeletion } from './deletedWorkspaces.js';
 
 /**
  * Per-workspace retention policy (2026-04-28). Soft-supersession is the
@@ -145,6 +147,8 @@ export interface WorkspaceSupersessionPolicy {
 
 export interface WorkspaceEntry {
     name: string;
+    /** PERMANENT id (UUID): set at creation, kept by renames, new on delete-then-recreate, shared by aliases. Cloud rows key on it, not the name (review C #6). Optional; backfilled by `config/workspaceIds.ts` only when a Dataplane store is built. */
+    id?: string;
     /** Human-readable display name. Defaults to name if not set. */
     label?: string;
     /** Sync mode: 'local-only' | 'local-sync' | 'cloud-only' */
@@ -347,6 +351,7 @@ export function loadWorkspaces(home: string = loreHome()): WorkspacesFile {
         workspaces: [
             {
                 name: 'default',
+                id: randomUUID(),
                 path: paths.home,
                 createdAt: new Date().toISOString(),
                 // 3.21 step 1d — ONLY for a genuinely FRESH home (no legacy
@@ -425,28 +430,19 @@ export function createWorkspace(
     fs.mkdirSync(loreDir, { recursive: true });
     const entry: WorkspaceEntry = {
         name,
+        id: randomUUID(),
         ...(opts?.label ? { label: opts.label } : {}),
         ...(opts?.mode ? { mode: opts.mode } : {}),
         ...(opts?.template ? { template: opts.template } : {}),
         path: workspacePath,
         createdAt: new Date().toISOString(),
-        // 3.21 step 1d — NEW local workspaces write this EXPLICITLY (never
-        // absent), so `graphEngineSelector.ts`'s absent-field default stays
-        // 'surreal' forever for every pre-3.21 workspace. `resolveNewWorkspaceGraphEngine`
-        // is not imported here on purpose: `engines/graphEngineSelector.ts`
-        // itself imports `loadWorkspaces` from THIS module, so importing
-        // back from it would be circular. The rule is one line — kept
-        // inline, with `graphEngineSelector.ts`'s
-        // `resolveNewWorkspaceGraphEngine` doc comment as the canonical
-        // explanation of the `LORE_DEFAULT_GRAPH_ENGINE` escape hatch.
+        // 3.21 step 1d — new local workspaces write graphEngine EXPLICITLY (never absent), so an
+        // absent field keeps meaning 'surreal' for pre-3.21 workspaces. Inline rather than imported
+        // from graphEngineSelector.ts (circular); see resolveNewWorkspaceGraphEngine for the
+        // LORE_DEFAULT_GRAPH_ENGINE escape hatch.
         graphEngine: process.env['LORE_DEFAULT_GRAPH_ENGINE'] === 'surreal' ? 'surreal' : 'sqlite',
-        // 3.21 step 2 part 2 — NEW local workspaces write this EXPLICITLY
-        // too (never absent), same reasoning as graphEngine above: an
-        // absent field must keep meaning 'lance' forever for every
-        // pre-3.21 workspace. `resolveNewWorkspaceVectorEngine` is the
-        // canonical explanation of the `LORE_DEFAULT_VECTOR_ENGINE` escape
-        // hatch; not imported here for the same circular-import reason
-        // graphEngine's inline duplicate exists.
+        // 3.21 step 2 part 2 — same rule for vectorEngine (absent = 'lance' for pre-3.21
+        // workspaces); see resolveNewWorkspaceVectorEngine for LORE_DEFAULT_VECTOR_ENGINE.
         vectorEngine: process.env['LORE_DEFAULT_VECTOR_ENGINE'] === 'lance' ? 'lance' : 'sqlite',
     };
     file.workspaces.push(entry);
@@ -489,8 +485,10 @@ export function registerWorkspaceAlias(
             `Workspace "${name}" already exists at ${existing.path}; refusing to re-point to ${aliasPath}`,
         );
     }
+    const sibling = file.workspaces.find((w) => w.path === aliasPath && typeof w.id === 'string' && w.id !== '');
     const entry: WorkspaceEntry = {
         name,
+        ...(sibling ? { id: sibling.id } : {}), // an alias addresses the SAME data, so it shares the target's permanent id
         ...(opts?.label ? { label: opts.label } : {}),
         path: aliasPath,
         createdAt: new Date().toISOString(),
@@ -570,8 +568,8 @@ export function setWorkspaceVectorEngine(
 }
 
 /**
- * deleteWorkspace — Remove a workspace from the registry. Does NOT touch
- * its on-disk data — user must rm -rf manually to irrevocably lose data.
+ * deleteWorkspace — Remove a workspace from the registry (id logged first, see
+ * deletedWorkspaces.ts). Does NOT touch its on-disk data — rm -rf manually.
  * Cannot delete the legacy/bootstrap workspace (the one anchored at
  * HOME_GROUNDFLOOR rather than under workspaces/) or the active one.
  */
@@ -583,7 +581,9 @@ export function deleteWorkspace(name: string, home: string = loreHome()): Worksp
         throw new Error('Cannot delete the legacy/bootstrap workspace (path is the Lore home)');
     }
     if (file.active === name) throw new Error('Cannot delete the active workspace');
-    file.workspaces = file.workspaces.filter((w) => w.name !== name);
+    const remaining = file.workspaces.filter((w) => w.name !== name);
+    recordWorkspaceDeletion(entry, remaining, home); // durable record first; throws before the registry changes
+    file.workspaces = remaining;
     writeControl(file, home);
     return file;
 }

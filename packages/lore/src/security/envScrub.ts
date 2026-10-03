@@ -121,6 +121,7 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_LOCAL_EMBEDDING_DTYPE',               // local ONNX model quantization (q8 default; fp32 for parity) — providers/localEmbeddingProvider.ts
     'LORE_LOCAL_EMBEDDING_MODEL',               // pre-existing path; allowlisted in case it isn't above
     'LORE_LOCAL_EMBEDDING_DIM',
+    'LORE_MODELS_OFFLINE',                      // opt-in: never download a model on a cache miss — providers/modelCache.ts
     // SP-14 — removed three LORE_ATLAS_* entries (LORE_ATLAS_SLIM_TOOLS,
     // LORE_ATLAS_REGISTER_ALL_TOOLS, LORE_ATLAS_REPO_ROOT). They named a
     // specific downstream client (Atlas) + the removed developer plugin's
@@ -287,7 +288,8 @@ const ALLOWED_VARS: readonly string[] = [
 
     // Dataplane — legacy env-sourced; keychain is the preferred path
     'DATAPLANE_URL', 'DATAPLANE_API_KEY',
-    'DATAPLANE_TENANT_ID', 'DATAPLANE_ORG_ID',
+    'DATAPLANE_TENANT_ID', 'DATAPLANE_WORKSPACE_ID', 'DATAPLANE_ORG_ID',
+    'DATAPLANE_CONNECTION',                      // connector named on every Dataplane call (review C #1); unset = engine per-route defaults
 
     // NW-7c — hc-* audit findings: previously hardcoded knobs now env-overridable.
     // Without these entries scrubEnv() silently deletes the operator's override

@@ -8,6 +8,7 @@
  *                                    health snapshot (FINDING 4, 2026-09-03)
  */
 
+import { getCloudHistoryHealth } from '../../../../engines/dataplaneTransaction.js';
 import type { ServerResponse } from 'node:http';
 import type { VerbatimStoreApi } from '../../../../engines/verbatimStoreApi.js';
 import { getBackgroundReconnectStatus } from '../../../../engines/backgroundReconnect.js';
@@ -484,6 +485,10 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
             // path list. Lets operators see effective limits +
             // env overrides without grepping source.
             rateLimit: deps.rateLimiter ? deps.rateLimiter.getConfigSnapshot() : null,
+            // Cloud parity C item 8 (R3): whether `/v1/transaction` was detected, how many history
+            // writes were atomic vs separate, and how many separate history writes FAILED (the change
+            // was kept). null in local mode.
+            cloudHistory: deps.deploymentMode === 'cloud' ? (getCloudHistoryHealth() ?? { transactions: 'unknown', atomicCommits: 0, separateWrites: 0, aliasFallbacks: 0, historyWriteFailures: 0 }) : null,
         }));
     } catch (err) {
         writeError(res, 500, 'internal_error', redactError(err), { status: 'degraded' });

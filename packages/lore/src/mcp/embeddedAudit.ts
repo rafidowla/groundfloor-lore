@@ -23,7 +23,7 @@ import { redactError } from '../security/logRedact.js';
 
 export interface EmbeddedAuditContext {
     auditLog: AuditLog;
-    toolName: 'lib:nodeUpsert' | 'lib:nodeUpsertBatch';
+    toolName: 'lib:nodeUpsert' | 'lib:nodeUpsertBatch' | 'lib:nodeDelete';
     workspace: string;
     nodeId: string;
     startedAt: number;

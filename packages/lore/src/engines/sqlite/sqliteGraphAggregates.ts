@@ -54,6 +54,29 @@ export async function queryEdges(db: SqliteDb, q: EdgeQuery): Promise<LoreEdge[]
     }
 }
 
+/**
+ * getEdge — the one edge with this exact (source, target, relation) triple, or
+ * null. A primary-key lookup; the write-failure rollback in the edge routes
+ * reads it once per written triple (queryEdges would filter the same way, but
+ * the Surreal twin of this read must not scan the table, so both engines
+ * expose the keyed form).
+ */
+export async function getEdge(db: SqliteDb, sourceId: string, targetId: string, relation: string): Promise<LoreEdge | null> {
+    try {
+        const row = db.prepare(
+            'SELECT confidence, confidenceScore FROM edges WHERE source_id = ? AND target_id = ? AND relation = ?',
+        ).get(sourceId, targetId, relation) as { confidence: string; confidenceScore: number } | undefined;
+        if (!row) return null;
+        return {
+            sourceId, targetId, relation,
+            confidence: (row.confidence as LoreEdge['confidence']) ?? 'extracted',
+            confidenceScore: typeof row.confidenceScore === 'number' ? row.confidenceScore : 1.0,
+        };
+    } catch (error) {
+        throw sqliteError('Failed to read edge', 'getEdge', error);
+    }
+}
+
 /** getStats — node count (summed from the type breakdown), edge count, per-type breakdown. Same three rules as surrealGraphAggregates.getStats. */
 export async function getStats(db: SqliteDb, projectFilter?: string): Promise<GraphStats> {
     try {

@@ -42,7 +42,7 @@ import { CAPPED_NODE_TEXT_FIELDS, MAX_NODE_FIELD_BYTES, SUPERSEDE_LIFECYCLE_FIEL
 import { log } from '../logger.js';
 import { recordHotWrite } from '../outbox/hotLane.js';
 import { withNodeLock } from './nodeWriteLock.js';
-import { applyVerbatimFanout, rollbackPartialWrite } from './nodeServiceVerbatim.js';
+import { applyVerbatimFanout, readPriorNode, rollbackPartialWrite } from './nodeServiceVerbatim.js';
 import { validateQuestionsMeta, mergeQuestionsMetaIntoMetadataJson } from './questionAliases.js';
 import {
     checkVocab,
@@ -57,7 +57,7 @@ import {
 } from './supersessionPolicy.js';
 import type { LoreNode } from '../providers/types.js';
 import type { OutboxStore } from '../outbox/types.js';
-import type { VersionStore } from '../outbox/versionStore.js';
+import { withVersionIntent, type VersionStoreApi } from '../outbox/versionStoreApi.js';
 import { shouldRecordVersion } from '../outbox/versionPolicy.js';
 import type { VersionHistoryPolicy } from '../outbox/versionPolicy.js';
 import type { WriteAheadLog } from '../engines/syncEngine.js';
@@ -193,7 +193,7 @@ export interface NodeUpsertHooks {
     getWal?: () => WriteAheadLog;
     /** Version store. When supplied, records a version (non-fatal). The
      *  caller pre-reads previous state and passes it as `previousState`. */
-    versionStore?: VersionStore;
+    versionStore?: VersionStoreApi;
     /** Previous node state captured by the caller for the version record. */
     previousState?: LoreNode | null;
     /** Principal string stamped on the version record. The MCP tool used
@@ -594,19 +594,6 @@ export async function nodeUpsert(
         }
     }
 
-    // 2.1/2.2 (2026-08-17) — the verbatim/vector mirror must carry the node's
-    // effective security_scopes, or row-level scope filtering fails open on the
-    // primary surfaces (store_node / POST /api/node never send scopes). Read the
-    // existing row's scopes once when the caller omitted them, so the verbatim
-    // metadata mirrors the graph row instead of defaulting to [].
-    if (nodeData['security_scopes'] === undefined && typeof targetGraph.getNode === 'function') {
-        try {
-            nodeData['security_scopes'] = (await targetGraph.getNode(id))?.security_scopes ?? [];
-        } catch {
-            nodeData['security_scopes'] = [];
-        }
-    }
-
     // 0d. D5 — write-time supersession-policy enforcement (opt-in) + round-4
     //     (#4) all-or-nothing `supersedes` id pre-check, regardless of enforcement.
     const supersessionVerdict = await runSupersessionValidation({
@@ -630,6 +617,15 @@ export async function nodeUpsert(
         //    verbatim failure left the node.upsert row pending; the replicator then
         //    re-applied it (dispatcher case 'node.upsert'), resurrecting a graph-
         //    only orphan — the exact partial state the rollback claims to prevent.
+        //    3.26.0 — first, the node as it is now, read under the lock: a
+        //    failed write puts it back (rollbackPartialWrite), and its
+        //    security_scopes are what the verbatim/vector mirror must carry
+        //    when the caller omitted them (2.1/2.2 — store_node / POST
+        //    /api/node never send scopes; defaulting to [] fails open).
+        const priorNode = await readPriorNode(targetGraph, id);
+        if (nodeData['security_scopes'] === undefined && priorNode !== undefined) {
+            nodeData['security_scopes'] = priorNode?.security_scopes ?? [];
+        }
         let nodeUpsertOutboxEntryId: string | null = null;
         if (hooks.outboxStore) {
             const nodeUpsertEntry = await recordHotWrite(hooks.outboxStore, {
@@ -651,13 +647,14 @@ export async function nodeUpsert(
         //    node anyway with NO verbatim row (permanently invisible to semantic
         //    recall). Route the failure through the SAME retraction mechanism
         //    the step-3 verbatim-failure path uses (rollbackPartialWrite), so
-        //    both failure paths behave identically: graph node deleted (no-op
-        //    cleanup of any partial row on a failed create) + outbox row
-        //    retracted (or a compensating node.delete recorded when the
-        //    replicator already claimed it, C-R2-03).
+        //    both failure paths behave identically: graph back to its
+        //    pre-write state (a node this write created is deleted, an
+        //    existing one restored) + outbox row retracted (or a compensating
+        //    row recorded when the replicator already claimed it, C-R2-03).
+        const versionIntent = { principal: hooks.versionPrincipal ?? 'mcp', policy: hooks.versionHistoryPolicy, recorded: [] as string[] };
         let node: LoreNode;
         try {
-            node = await targetGraph.upsertNode(nodeData);
+            node = await withVersionIntent(hooks.versionStore, versionIntent, () => targetGraph.upsertNode(nodeData)); // cloud: version in the same transaction (item 8)
         } catch (graphErr) {
             log.error(`${logPrefix} graph upsert failed for ${redactId(id)}: ${redactError(graphErr)} — retracting the node.upsert outbox row so the replicator cannot replay a write the caller was told failed`);
             await rollbackPartialWrite({
@@ -669,6 +666,8 @@ export async function nodeUpsert(
                 outboxStore: hooks.outboxStore,
                 nodeUpsertOutboxEntryId,
                 verbatimError: graphErr as Error,
+                priorNode,
+                written: nodeData,
             });
             throw graphErr;
         }
@@ -693,6 +692,8 @@ export async function nodeUpsert(
             hooks,
             nodeUpsertOutboxEntryId,
             questions: args.questions,
+            versionIds: versionIntent.recorded,
+            priorNode,
         });
         if (fanoutOutcome.error) {
             return { verbatimError: fanoutOutcome.error };
@@ -728,12 +729,9 @@ export async function nodeUpsert(
     // bookkeeping fields (createdAt/updatedAt/syncedAt/…) are ignored. A missing
     // `previousState` ALWAYS records — never skip on missing data. See
     // outbox/versionPolicy.ts for the full rationale.
-    if (hooks.versionStore && shouldRecordVersion(
-        typeof nodeData.type === 'string' ? nodeData.type : undefined,
-        hooks.previousState, node, hooks.versionHistoryPolicy,
-    )) {
+    if (hooks.versionStore && !hooks.versionStore.runWithVersionIntent && shouldRecordVersion(typeof nodeData.type === 'string' ? nodeData.type : undefined, hooks.previousState, node, hooks.versionHistoryPolicy)) {
         try {
-            hooks.versionStore.recordVersion({
+            await hooks.versionStore.recordVersion({
                 versionId: randomUUID(),
                 nodeId: id,
                 workspace,
@@ -807,6 +805,7 @@ export async function nodeUpsert(
                 // backwards, re-embedded nodes within ~1s). Only bulkIngest
                 // opts in via allowSkipEmbedStore. !skipEmbed: step 3 wrote it.
                 skipStore: skipEmbed ? !hooks.autolink.allowSkipEmbedStore : true,
+                lockWorkspace: workspace, // inferred edges hold the per-edge lock (3.26.0)
             }).catch((err) => log.error(`${logPrefix} ingest-hook reconnect failed for ${redactId(id)}: ${redactError(err)}`)));
         }
     }

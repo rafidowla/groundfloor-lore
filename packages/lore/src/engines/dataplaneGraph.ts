@@ -19,14 +19,17 @@
  *   and language breakdown returns an empty map. LocalGraph is unchanged —
  *   local mode keeps all its capabilities.
  *
- * Multi-tenancy:
- *   Lore server.ts is a singleton. Cloud requests carry `X-Lore-Workspace`
- *   (Q2.1 gate); the server wires that header into a request-local tenantId
- *   and exposes it to this adapter via `tenantProvider: () => string`. Every
- *   SDK call reads the current tenantId from the provider, so a single
- *   DataplaneGraph instance correctly serves many workspaces concurrently.
+ * Scope (cloud parity A1 — see dataplaneScopeFilter.ts):
+ *   The Dataplane workspace is fixed by the API credential (the engine ignores
+ *   X-Tenant-Id), so many Lore workspaces share it. Every op resolves a
+ *   `DataplaneScope` {orgId, loreWorkspace, dataplaneWorkspaceId} via
+ *   `resolveDataplaneScope` (fails closed when no Lore workspace is bound). Rows
+ *   carry `org_id` + `lore_workspace` + `lore_id`; the physical primary key `id`
+ *   is a hashed row key (D2) that never leaves this adapter — every read maps
+ *   `lore_id` back to `id`. Every filter goes through the scope builder (the
+ *   engine's tagged filter tree; there is no flat filter format).
  *
- *   For unit tests and static contexts, pass `tenantProvider: () => 'fixed'`.
+ *   For unit tests and static contexts, pass `loreWorkspaceProvider: () => 'fixed'`.
  *
  * Collections:
  *   - `lore_node` — base LoreNode documents (flat fields, no nested metadata)
@@ -37,14 +40,13 @@
  * Error Behavior: Bubbles SDK errors (GroundfloorError subclass) so callers
  *   can distinguish auth/network/server failures. `initialize()` tolerates
  *   "already exists" errors for idempotent schema push.
- * Idempotency: upsertNode uses updateByQuery+insert (same pattern as
- *   tsSdkAdapter.push). addEdge is NOT deduplicated in slice 1 — a repeat
- *   call creates a second edge. Callers that need dedup must check first.
+ * Idempotency: upsertNode/addEdge use a scoped updateByQuery → insert-on-0
+ *   (retrying the update once on a PK conflict). addEdge is idempotent per
+ *   (source, relation, target) inside a Lore workspace.
  */
 
 // `import type` avoids Node16 resolution issues with SDK's missing `"exports"`. Runtime calls use SdkClient below.
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
-import { tagsToArray, tagsToString } from './normalizeTags.js';
 import type {
     GraphProvider,
     LoreNode,
@@ -58,19 +60,47 @@ import type {
 import type { CollectionStorage } from './collectionStorage.js';
 import { detectLanguage } from './language.js';
 import { DataplaneCollectionStorage, type CollectionStorageSdkClient } from './dataplaneCollectionStorage.js';
+import { log } from '../logger.js';
+import { requireCurrentWorkspaceId } from '../security/workspaceContext.js';
+import {
+    buildDataplaneScopeFilter,
+    dataplaneRowKey,
+    engineAnd,
+    engineField,
+    resolveDataplaneScope,
+    SCOPE_COLUMNS,
+    SCOPE_KEY_INDEX,
+    type DataplaneScope,
+    type LoreWorkspaceRegistry,
+    type ScopeFilterInput,
+} from './dataplaneScopeFilter.js';
+import { keepInScope, normaliseVertexRecord, scopedGetRow, scopedUpsert, unscopeRow } from './dataplaneScopedIo.js';
+import { ensureCollection, GRAPH_COLLECTION_SCHEMAS } from './dataplaneGraphSchema.js';
+import { nodeRowFields, recordToLoreNode as rowToNode } from './dataplaneNodeShape.js';
+import { DataplaneVersionStore } from '../outbox/dataplaneVersionStore.js';
+import { assertEdgeEndpoints, edgeConfidenceFields, rowToLoreEdge } from './dataplaneEdgeShape.js';
+
+export { SCOPE_COLUMNS, SCOPE_KEY_INDEX };
 
 /**
- * Resolve the current tenant for a SDK call. Called once per operation so
- * server.ts can swap tenants via AsyncLocalStorage between requests without
- * DataplaneGraph caring.
+ * @deprecated Slice C removes tenant routing. Kept so older wiring compiles;
+ * when supplied (and `loreWorkspaceProvider` is not) it is treated as the
+ * Lore-workspace provider — it is NEVER a Dataplane tenant.
  */
 export type TenantProvider = () => string;
 
 export interface DataplaneGraphConfig {
     /** Pre-constructed SDK client. Lets tests inject a fake. */
     client: GroundfloorClient;
-    /** Dynamic per-request tenant id. */
-    tenantProvider: TenantProvider;
+    /**
+     * Groundfloor portal workspace = engine tenant. Fixed by the API credential;
+     * not sent for routing (the engine ignores X-Tenant-Id).
+     */
+    dataplaneWorkspaceId: string;
+    /** Lore workspace for the current call. Default: requireCurrentWorkspaceId (ALS; throws when unbound). */
+    loreWorkspaceProvider?: () => string;
+    /** @deprecated use loreWorkspaceProvider (see TenantProvider). */
+    tenantProvider?: TenantProvider;
     /** Organization id written on every record for ReBAC partitioning. */
     orgId: string;
     /**
@@ -80,14 +110,11 @@ export interface DataplaneGraphConfig {
      */
     connection?: string;
     /**
-     * F-S06 — Allowlist of tenant ids this graph may serve. When provided,
-     * a resolved tenant id NOT in this set is rejected (throws) before any
-     * SDK call — preventing a request from targeting an arbitrary tenant id
-     * that would otherwise be trusted and auto-provisioned. Omit ONLY for
-     * trusted single-tenant/test contexts where the tenantProvider is fixed
-     * and cannot be attacker-influenced.
+     * The Lore workspaces this instance serves (its own workspace registry), consulted on
+     * EVERY operation. REQUIRED: there is no wildcard and no default — a workspace that is
+     * not registered fails closed (`cloud_scope_workspace_not_allowed`).
      */
-    allowedTenants?: readonly string[];
+    workspaceRegistry: LoreWorkspaceRegistry;
 }
 
 import { NODE_COLLECTION, EDGE_COLLECTION } from './dataplaneCollections.js';
@@ -143,201 +170,123 @@ interface SdkClient {
 }
 
 export class DataplaneGraph implements GraphProvider {
-    private readonly client: SdkClient;
-    private readonly tenantProvider: TenantProvider;
+    private client: SdkClient;
+    private readonly loreWorkspaceProvider: () => string;
+    private readonly dataplaneWorkspaceId: string;
     private readonly orgId: string;
     private readonly connection?: string;
-    /** F-S06 — set of permitted tenant ids; null = no allowlist configured. */
-    private readonly allowedTenants: ReadonlySet<string> | null;
+    /** This instance's Lore-workspace registry, consulted on every op. */
+    private readonly workspaceRegistry: LoreWorkspaceRegistry;
     /**
-     * Per-tenant schema-push state. Collections are provisioned lazily
-     * on the first op for each tenant (boot time doesn't know which
-     * tenants will connect — the singleton serves many). Keys are
-     * tenant ids; value is the in-flight or settled promise so
-     * concurrent first-hits don't race on createCollection.
+     * Schema-push state. The Dataplane workspace is credential-fixed, so the
+     * collections are provisioned once per process (per Dataplane workspace),
+     * with in-flight dedup so concurrent first-hits don't race on createCollection.
      */
-    private readonly tenantInit = new Map<string, Promise<void>>();
+    private readonly initState = new Map<string, Promise<void>>();
     /**
      * Slice 5c — cached collection-storage adapter. See getGraphContext
-     * for rationale; the closure tenantProvider keeps it multi-tenant-safe.
+     * for rationale; the scope closure keeps it multi-workspace-safe.
      */
     private cachedCollectionStorage: DataplaneCollectionStorage | null = null;
+    /** Cloud version history (lore_version); shares this graph's client/scope so a credential rebuild is followed. */
+    readonly versions: DataplaneVersionStore;
 
     constructor(config: DataplaneGraphConfig) {
         this.client = config.client as unknown as SdkClient;
-        this.tenantProvider = config.tenantProvider;
+        this.dataplaneWorkspaceId = config.dataplaneWorkspaceId;
+        this.loreWorkspaceProvider = config.loreWorkspaceProvider ?? config.tenantProvider ?? requireCurrentWorkspaceId;
         this.orgId = config.orgId;
         this.connection = config.connection;
-        // F-S06 — freeze the allowlist into a Set for O(1) membership checks.
-        // Empty array is honored as "allow nothing" (fail closed); undefined
-        // means no allowlist configured (legacy/trusted-context behaviour).
-        this.allowedTenants = config.allowedTenants
-            ? new Set(config.allowedTenants)
-            : null;
+        this.versions = new DataplaneVersionStore({ client: () => this.client as never, scope: () => this.scope(), ensureInitialized: (s) => this.ensureInitialized(s), connection: this.connection });
+        if (!config.workspaceRegistry) throw new Error('DataplaneGraph requires a workspaceRegistry (no wildcard default)');
+        this.workspaceRegistry = config.workspaceRegistry;
+    }
+
+    /** Credential rebuild in place (see DataplaneVectorStore.adoptConnectionFrom): swap the client only. */
+    adoptConnectionFrom(other: DataplaneGraph): void {
+        this.client = other.client;
+        this.cachedCollectionStorage = null; // may hold the old client
     }
 
     /**
-     * initialize — Top-level no-op at boot.
-     *
-     * Schema push is per-tenant and lazy: the daemon is a singleton
-     * serving many workspaces, and at boot time no workspace is bound
-     * (no request yet). Each method that touches Dataplane calls
-     * `ensureTenantInitialized(tenantId)` which fires createCollection
-     * once per tenant, idempotently, with in-flight dedup so concurrent
-     * first-hits don't race.
+     * scope — resolve the per-call DataplaneScope. Runs on every operation so the
+     * registry and the ALS-bound Lore workspace are always current; throws
+     * DataplaneScopeError (fail closed) before any SDK call.
+     */
+    private scope(): DataplaneScope {
+        return resolveDataplaneScope({
+            orgId: this.orgId,
+            dataplaneWorkspaceId: this.dataplaneWorkspaceId,
+            workspaceRegistry: this.workspaceRegistry,
+            loreWorkspaceProvider: this.loreWorkspaceProvider,
+        });
+    }
+
+    /**
+     * initialize — Top-level no-op at boot. Schema push is lazy (first op) and
+     * once per Dataplane workspace.
      */
     async initialize(): Promise<void> {
-        // Intentionally empty. Per-tenant init fires inside the CRUD
-        // path (ensureTenantInitialized).
+        // Intentionally empty. Init fires inside the CRUD path (ensureInitialized).
     }
 
     /**
-     * ensureTenantInitialized — Idempotent schema push for one tenant.
-     *
-     * Called from every method that hits Dataplane. First call for a
-     * given tenant pushes lore_node + lore_edge collections; subsequent
-     * calls return the cached promise (no network hit). Collection
-     * "already exists" errors are swallowed — safe for re-boots against
-     * a tenant that was previously provisioned.
+     * ensureInitialized — Idempotent schema push. First call pushes lore_node +
+     * lore_edge; later calls return the cached promise. "already exists" errors
+     * are swallowed — safe for re-boots against a workspace provisioned earlier.
      */
-    private ensureTenantInitialized(tenantId: string): Promise<void> {
-        // F-S06 — choke point: validate the tenant against the allowlist before
-        // any schema push / auto-provision. Every Dataplane-touching method
-        // (and the topology/maintenance helper ctxs) routes through here, so an
-        // unknown tenant is rejected before a single SDK call regardless of how
-        // the caller obtained the id. Throwing synchronously here also rejects
-        // the helper paths that pass tenantProvider directly.
-        if (typeof tenantId !== 'string' || tenantId.length === 0) {
-            throw new Error('DataplaneGraph: empty tenant id — refusing operation (F-S06).');
+    private ensureInitialized(scope: DataplaneScope): Promise<void> {
+        const key = scope.dataplaneWorkspaceId;
+        if (typeof key !== 'string' || key.length === 0) {
+            throw new Error('DataplaneGraph: empty Dataplane workspace id — refusing operation.');
         }
-        if (this.allowedTenants && !this.allowedTenants.has(tenantId)) {
-            throw new Error(
-                `DataplaneGraph: tenant "${tenantId}" is not in the configured allowlist — ` +
-                `refusing to trust/auto-provision an unknown tenant (F-S06).`,
-            );
-        }
-        const existing = this.tenantInit.get(tenantId);
+        const existing = this.initState.get(key);
         if (existing) return existing;
-        const p = this.pushSchemaFor(tenantId).catch((err) => {
+        const p = this.pushSchemaFor(key).catch((err) => {
             // Drop the failed promise so the next call retries rather
             // than seeing a permanent failed state.
-            this.tenantInit.delete(tenantId);
+            this.initState.delete(key);
             throw err;
         });
-        this.tenantInit.set(tenantId, p);
+        this.initState.set(key, p);
         return p;
     }
 
-    private async pushSchemaFor(tenantId: string): Promise<void> {
-        await this.ensureCollection(tenantId, {
-            name: NODE_COLLECTION,
-            fields: [
-                { name: 'id', field_type: 'string', primary_key: true, required: true },
-                { name: 'type', field_type: 'string', required: true, indexed: true },
-                { name: 'label', field_type: 'string' },
-                { name: 'content', field_type: 'string' },
-                { name: 'tags', field_type: 'string' },
-                { name: 'project', field_type: 'string', indexed: true },
-                { name: 'ecosystem', field_type: 'string', indexed: true },
-                { name: 'org_id', field_type: 'string', indexed: true, required: true },
-                { name: 'created_at', field_type: 'string' },
-                { name: 'updated_at', field_type: 'string' },
-                { name: 'language', field_type: 'string' },
-                { name: 'security_scopes', field_type: 'string' }, // RA2-reaudit2 — node-level access scopes (was silently dropped in cloud)
-            ],
-        });
-        await this.ensureCollection(tenantId, {
-            name: EDGE_COLLECTION,
-            fields: [
-                { name: 'id', field_type: 'string', primary_key: true, required: true },
-                { name: 'source_id', field_type: 'string', required: true, indexed: true },
-                { name: 'target_id', field_type: 'string', required: true, indexed: true },
-                { name: 'relation', field_type: 'string', required: true },
-                { name: 'org_id', field_type: 'string', indexed: true, required: true },
-                { name: 'created_at', field_type: 'string' },
-            ],
-        });
-
-        // SP-14 — the per-tenant cloud-schema hook fan-out was
-        // removed (v3.11.0); the hook list was always empty (no setter
-        // caller in Core), so this was dead code.
-        // Core lore_node + lore_edge collections are still pushed above.
+    private async pushSchemaFor(dataplaneWorkspaceId: string): Promise<void> {
+        for (const schema of GRAPH_COLLECTION_SCHEMAS) {
+            // Create-or-reconcile: a fresh collection gets the full v2 schema; an older one only what it has (#4).
+            await ensureCollection(this.client, dataplaneWorkspaceId, schema, this.connection);
+        }
     }
 
-    private async ensureCollection(tenantId: string, schema: unknown): Promise<void> {
-        try {
-            await this.client.createCollection(tenantId, schema, this.connection);
-        } catch (err) {
-            const msg = (err as Error).message ?? String(err);
-            // Dataplane returns 409 / "already exists" / "duplicate". Accept
-            // any message shape that implies the collection is already there.
-            if (/already exists|duplicate|409/i.test(msg)) return;
-            throw err;
-        }
+    /** Scoped crud filter (org + Lore workspace + caller clauses) for a collection op. */
+    private crud(scope: DataplaneScope, input: ScopeFilterInput = {}) {
+        return buildDataplaneScopeFilter(scope, input, 'crud', 0);
     }
 
     async upsertNode(
         nodeData: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
     ): Promise<LoreNode> {
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
         const now = new Date().toISOString();
-        const existing = await this.tryGet(tenantId, nodeData.id);
+        const existing = await this.tryGet(scope, nodeData.id);
         const existingCreated = existing && typeof existing['created_at'] === 'string' ? (existing['created_at'] as string) : null;
         const createdAt: string = existingCreated ?? now;
-        const doc = {
-            id: nodeData.id,
-            type: nodeData.type,
-            label: nodeData.label,
-            content: nodeData.content ?? '',
-            // Cloud column is STRING (DEC-TAG-MATCH) — join the canonical
-            // string[] to the comma form the Dataplane schema stores.
-            tags: tagsToString(nodeData.tags),
-            project: nodeData.project ?? '*',
-            ecosystem: nodeData.ecosystem ?? '*',
-            org_id: this.orgId,
-            created_at: createdAt,
-            updated_at: now,
-            language: nodeData.language ?? null,
-            // RA2-reaudit2 — persist node-level access scopes (was dropped),
-            // serialized as JSON for lossless round-trip in the STRING column.
-            security_scopes: JSON.stringify(nodeData.security_scopes ?? []),
-        };
+        // Full node shape (D5): v1 + v2 snake_case columns; absent fields omitted, never null.
+        const doc = nodeRowFields(nodeData, createdAt, now, existing === null);
 
-        const res = await this.client.updateByQuery(
-            tenantId,
-            NODE_COLLECTION,
-            // RA2-reaudit2 — scope the update selector by org so a node id reused
-            // across orgs in one tenant can't be overwritten cross-org.
-            { id_eq: nodeData.id, org_id: this.orgId },
-            doc,
-            this.connection,
-        );
-        if ((res?.updated ?? 0) === 0) {
-            await this.client.insert(tenantId, NODE_COLLECTION, doc, this.connection);
-        }
-
-        return {
-            id: nodeData.id,
-            type: nodeData.type,
-            label: nodeData.label,
-            content: nodeData.content ?? '',
-            tags: tagsToArray(nodeData.tags),
-            project: nodeData.project ?? '*',
-            ecosystem: nodeData.ecosystem ?? '*',
-            metadata: nodeData.metadata ?? '{}',
-            createdAt,
-            updatedAt: now,
-            syncedAt: now,
-            security_scopes: nodeData.security_scopes,
-            language: nodeData.language ?? null,
-        };
+        // Scoped upsert (org + Lore workspace + lore_id; D2 row key). Under a version intent the node and its
+        // version row go in one transaction (outbox/dataplaneVersionStore.ts); otherwise a plain scoped upsert.
+        const node = this.recordToLoreNode({ ...existing, ...doc, lore_id: nodeData.id }); // the stored row after the write, as a read returns it
+        await this.versions.upsertNode({ scope, loreId: nodeData.id, doc, node, previous: existing ? this.recordToLoreNode(existing) : null, isNew: existing === null });
+        return node;
     }
 
     async getNode(id: string): Promise<LoreNode | null> {
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
-        const record = await this.tryGet(tenantId, id);
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
+        const record = await this.tryGet(scope, id);
         if (!record) return null;
         return this.recordToLoreNode(record);
     }
@@ -352,12 +301,12 @@ export class DataplaneGraph implements GraphProvider {
         const out = new Map<string, LoreNode>();
         const unique = Array.from(new Set(ids.filter((id) => typeof id === 'string' && id.length > 0)));
         if (unique.length === 0) return out;
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
         const CONCURRENCY = 16;
         for (let i = 0; i < unique.length; i += CONCURRENCY) {
             const slice = unique.slice(i, i + CONCURRENCY);
-            const recs = await Promise.all(slice.map((id) => this.tryGet(tenantId, id).catch(() => null)));
+            const recs = await Promise.all(slice.map((id) => this.tryGet(scope, id)));
             recs.forEach((rec) => {
                 if (rec) {
                     const node = this.recordToLoreNode(rec);
@@ -369,100 +318,60 @@ export class DataplaneGraph implements GraphProvider {
     }
 
     /**
-     * Robust single-record fetch — prefers `get`, falls back to filtered
-     * `query` when the connector doesn't expose a direct-id endpoint
-     * (some Dataplane connectors route id lookups through query).
+     * Single-record fetch by ROW KEY (scopedGetRow): GET + guardScope, null when absent or
+     * out of scope. A transient failure (5xx, network) is RE-THROWN — never read as "absent",
+     * or upsertNode would reset created_at / counters / status from defaults (review B #7).
+     * Returned rows are RAW (still carry the physical `id`); callers map via recordToLoreNode.
      */
-    private async tryGet(tenantId: string, id: string): Promise<Record<string, unknown> | null> {
-        try {
-            const rec = await this.client.get<Record<string, unknown>>(
-                tenantId,
-                NODE_COLLECTION,
-                id,
-                this.connection,
-            );
-            // Defense-in-depth org guard (parity with the org_id filter every
-            // list/search/query path already applies — search:506, listNodes:534,
-            // queryEdges:422, bulkList:570). The `get` SDK signature has no filter
-            // param, so the org check is enforced post-fetch. A single daemon
-            // serves exactly one org (this.orgId is the boot-fixed
-            // DATAPLANE_ORG_ID) and the engine enforces ReBAC server-side, so this
-            // is belt-and-suspenders, not the sole control — but it guarantees
-            // getNode can never surface a record stamped with a different org_id.
-            return this.guardOrg(rec) ?? null;
-        } catch (err) {
-            const msg = (err as Error).message ?? '';
-            // 404 / not found — interpret as null rather than re-throw.
-            if (/not found|404/i.test(msg)) return null;
-            // Some connectors don't expose /get — fall back to query. The
-            // fallback CAN take a filter, so apply org_id directly there.
-            try {
-                const res = await this.client.query<Record<string, unknown>>(
-                    tenantId,
-                    NODE_COLLECTION,
-                    { filter: { id_eq: id, org_id: this.orgId }, limit: 1 },
-                    this.connection,
-                );
-                return this.guardOrg(res.records?.[0]) ?? null;
-            } catch {
-                return null;
-            }
-        }
-    }
-
-    /**
-     * F-S06/S07 — Return the record only if its org_id EQUALS this graph's org.
-     * A record with a different org_id is treated as not-found; a record with a
-     * MISSING or empty org_id is ALSO treated as not-found (fail closed). Prior
-     * behaviour returned records lacking org_id to any caller — a cross-tenant
-     * read of un-stamped/legacy rows. Every write path here stamps org_id
-     * (required column), so a missing org_id is anomalous and must not surface.
-     * Defense-in-depth — see tryGet's note on why this is a secondary control.
-     */
-    private guardOrg(rec: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
-        if (!rec) return null;
-        const recOrg = rec['org_id'];
-        // F-S07: fail closed — a record must carry an org_id that matches ours.
-        if (typeof recOrg !== 'string' || recOrg.length === 0) return null;
-        if (recOrg !== this.orgId) return null;
-        return rec;
+    private async tryGet(scope: DataplaneScope, loreId: string): Promise<Record<string, unknown> | null> {
+        return scopedGetRow(this.client, scope, NODE_COLLECTION, loreId, this.connection);
     }
 
     async deleteNode(id: string): Promise<boolean> {
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
         const res = await this.client.deleteByQuery(
-            tenantId,
+            scope.dataplaneWorkspaceId,
             NODE_COLLECTION,
-            { id_eq: id, org_id: this.orgId }, // RA2-reaudit2 — org-scope the destructive delete (defense-in-depth, matches every other path)
+            this.crud(scope, { loreId: id }).server as object, // org + Lore workspace + lore_id scoped destructive delete
             this.connection,
         );
         return (res?.deleted ?? 0) > 0;
     }
 
     async addEdge(edge: LoreEdge): Promise<void> {
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
         const now = new Date().toISOString();
         const edgeId = `${edge.sourceId}__${edge.relation}__${edge.targetId}`;
+        // Both endpoints must exist in THIS Lore workspace (local edge_endpoint_missing parity).
+        // Identity lookups: GET by row key (a filtered limit-N query returns arbitrary rows on SQLite).
+        const present = new Set<string>();
+        for (const id of new Set([edge.sourceId, edge.targetId])) {
+            if (await this.tryGet(scope, id)) present.add(id);
+        }
+        assertEdgeEndpoints(edge, present);
         // Write to lore_edge collection for portability across connectors
-        // (non-graph connectors don't have graph.createEdge).
-        await this.client.insert(tenantId, EDGE_COLLECTION, {
-            id: edgeId,
+        // (non-graph connectors don't have graph.createEdge). Idempotent per
+        // (source, relation, target) inside the Lore workspace (row key from edgeId);
+        // a repeat refreshes confidence, like local ON CONFLICT DO UPDATE.
+        const outcome = await scopedUpsert(this.client, scope, EDGE_COLLECTION, edgeId, {
             source_id: edge.sourceId,
             target_id: edge.targetId,
             relation: edge.relation,
-            org_id: this.orgId,
             created_at: now,
+            ...edgeConfidenceFields(edge),
         }, this.connection);
+        if (outcome === 'updated') return; // graph edge already exists
         // Additionally create a graph edge for Arango-style connectors so
-        // `traverse` works. Non-graph connectors will throw 501; ignore.
+        // `traverse` works. Vertex refs are ROW KEYS (D2). Non-graph connectors
+        // will throw 501; ignore.
         try {
-            await this.client.graph.createEdge(tenantId, 'knowledge_graph', {
-                fromId: `${NODE_COLLECTION}/${edge.sourceId}`,
-                toId: `${NODE_COLLECTION}/${edge.targetId}`,
+            await this.client.graph.createEdge(scope.dataplaneWorkspaceId, 'knowledge_graph', {
+                fromId: `${NODE_COLLECTION}/${dataplaneRowKey(scope, edge.sourceId)}`,
+                toId: `${NODE_COLLECTION}/${dataplaneRowKey(scope, edge.targetId)}`,
                 edgeCollection: EDGE_COLLECTION,
-                properties: { relation: edge.relation, org_id: this.orgId },
+                properties: { relation: edge.relation, org_id: scope.orgId, lore_workspace: scope.loreWorkspace },
                 connection: this.connection,
             });
         } catch (err) {
@@ -484,32 +393,38 @@ export class DataplaneGraph implements GraphProvider {
     }
 
     /**
+     * getEdge — the one edge with this exact triple, or null. A GET by row key
+     * (the key `addEdge` writes): a filtered `limit: 1` query is not an identity
+     * lookup (see scopedGetRow), so an existing edge could read as absent.
+     */
+    async getEdge(sourceId: string, targetId: string, relation: string): Promise<LoreEdge | null> {
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
+        const row = await scopedGetRow(this.client, scope, EDGE_COLLECTION, `${sourceId}__${relation}__${targetId}`, this.connection);
+        return row ? rowToLoreEdge(row) : null;
+    }
+
+    /**
      * queryEdges — paginated edge query against lore_edge (cloud parity for
-     * GET /api/edges). lore_edge rows carry source_id/target_id/relation but
-     * NOT confidence (addEdge omits it), so results default to
-     * 'extracted' / 1.0 — the same default LocalGraph applies for a missing
-     * confidence column.
+     * GET /api/edges). Rows carry the stored confidence / confidence_score; rows
+     * written before those columns existed default to 'extracted' / 1.0 — the same
+     * default LocalGraph applies for a missing confidence column.
      */
     async queryEdges(q: EdgeQuery): Promise<LoreEdge[]> {
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
-        const filter: Record<string, unknown> = { org_id: this.orgId };
-        if (q.source) filter['source_id_eq'] = q.source;
-        if (q.target) filter['target_id_eq'] = q.target;
-        if (q.relation) filter['relation_eq'] = q.relation;
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
+        const extra: NonNullable<ScopeFilterInput['extra']>[number][] = [];
+        if (q.source) extra.push({ field: 'source_id', op: 'eq', value: q.source });
+        if (q.target) extra.push({ field: 'target_id', op: 'eq', value: q.target });
+        if (q.relation) extra.push({ field: 'relation', op: 'eq', value: q.relation });
+        const built = this.crud(scope, { extra });
         const res = await this.client.query<Record<string, unknown>>(
-            tenantId,
+            scope.dataplaneWorkspaceId,
             EDGE_COLLECTION,
-            { filter, limit: q.limit, offset: q.offset },
+            { filter: built.server, limit: q.limit, offset: q.offset },
             this.connection,
         );
-        return (res.records ?? []).map((r) => ({
-            sourceId: r['source_id'] as string,
-            targetId: r['target_id'] as string,
-            relation: r['relation'] as string,
-            confidence: 'extracted' as const,
-            confidenceScore: 1.0,
-        }));
+        return keepInScope(res.records ?? [], built.clientPredicate, 'queryEdges').map(rowToLoreEdge);
     }
 
     /**
@@ -520,12 +435,18 @@ export class DataplaneGraph implements GraphProvider {
      * cascade; the lore_edge row is authoritative (see addEdge).
      */
     async deleteEdge(sourceId: string, targetId: string, relation: string): Promise<number> {
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
         const res = await this.client.deleteByQuery(
-            tenantId,
+            scope.dataplaneWorkspaceId,
             EDGE_COLLECTION,
-            { source_id_eq: sourceId, target_id_eq: targetId, relation_eq: relation, org_id: this.orgId }, // RA2-reaudit2 — org-scope the delete
+            this.crud(scope, {
+                extra: [
+                    { field: 'source_id', op: 'eq', value: sourceId },
+                    { field: 'target_id', op: 'eq', value: targetId },
+                    { field: 'relation', op: 'eq', value: relation },
+                ],
+            }).server as object, // org + Lore workspace scoped delete
             this.connection,
         );
         return res?.deleted ?? 0;
@@ -547,14 +468,14 @@ export class DataplaneGraph implements GraphProvider {
      * present.
      */
     async traverse(nodeId: string, maxDepth = 2, relation?: string): Promise<TraversalResult[]> {
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
         try {
             const res = await this.client.graph.traverse<Record<string, unknown>>(
-                tenantId,
+                scope.dataplaneWorkspaceId,
                 NODE_COLLECTION,
                 {
-                    startId: nodeId,
+                    startId: dataplaneRowKey(scope, nodeId),
                     edgeCollection: EDGE_COLLECTION,
                     direction: 'both',
                     minDepth: 1,
@@ -562,7 +483,35 @@ export class DataplaneGraph implements GraphProvider {
                     connection: this.connection,
                 },
             );
-            let rows = res.records ?? [];
+            // The engine's traverse takes no filter (F6): scope is a client-side
+            // post-filter on every returned vertex (D3 traverse route). Row keys
+            // make cross-workspace edges unconstructible through this adapter, but a
+            // buggy/foreign writer could still plant one, so the guard is applied
+            // to every vertex AND paths through a rejected vertex are cut: the engine
+            // returns vertices without their path, so any vertex deeper than the
+            // shallowest rejected vertex may have been reached through it and is
+            // dropped too (fail closed; only ever triggers on anomalous data).
+            const scopePredicate = buildDataplaneScopeFilter(scope, {}, 'traverse', 0).clientPredicate;
+            const returned = (res.records ?? []).map((r) => normaliseVertexRecord(r, NODE_COLLECTION));
+            let cutDepth = Infinity;
+            for (const r of returned) {
+                if (!scopePredicate(r)) {
+                    const d = this.recordDepth(r);
+                    // depth-unknown (0) vertices cannot be ordered: treat as cutting everything deeper than 0
+                    cutDepth = Math.min(cutDepth, d > 0 ? d : 1);
+                }
+            }
+            let rows = keepInScope(returned, scopePredicate, 'traverse');
+            if (Number.isFinite(cutDepth)) {
+                const before = rows.length;
+                rows = rows.filter((r) => {
+                    const d = this.recordDepth(r);
+                    return d > 0 && d <= cutDepth;
+                });
+                if (rows.length < before) {
+                    log.error('[cloud-scope] dropped traverse vertices beyond an out-of-scope vertex', { cutDepth, dropped: before - rows.length });
+                }
+            }
             // Contract: when `relation` is supplied, only edges whose relation
             // exactly matches (case-sensitive) may surface. The SDK's traverse
             // has no relation predicate, so post-filter on the record's
@@ -647,15 +596,13 @@ export class DataplaneGraph implements GraphProvider {
         _excludeHidden?: boolean,
         signals?: { scanCapHit: boolean },
     ): Promise<LoreNode[]> {
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
 
-        // Scope filters are AND-applied server-side. org_id is ALWAYS present
-        // (ReBAC partition guard — never regress). project/ecosystem narrow
-        // the candidate set before we scan.
-        const filter: Record<string, unknown> = { org_id: this.orgId };
-        if (project) filter['project'] = project;
-        if (ecosystem) filter['ecosystem'] = ecosystem;
+        // Scope filters are AND-applied server-side. org_id + lore_workspace are
+        // ALWAYS present (never regress). project/ecosystem narrow the candidate
+        // set before we scan ('' / '*' add no clause).
+        const built = this.crud(scope, { project, ecosystem });
 
         // TW-4c (perf-search-no-order-by-scancap): sort by (updated_at desc, id
         // asc) BEFORE the cap so that beyond SEARCH_SCAN_CAP matches the cloud
@@ -663,16 +610,17 @@ export class DataplaneGraph implements GraphProvider {
         // keeps (rankSearchResults' tiebreak). Without it the SDK could hand a
         // DIFFERENT window to the identical ranker, breaking W5B order parity.
         const res = await this.client.query<Record<string, unknown>>(
-            tenantId,
+            scope.dataplaneWorkspaceId,
             NODE_COLLECTION,
             {
-                filter,
-                sort: [{ field: 'updated_at', direction: 'desc' }, { field: 'id', direction: 'asc' }],
+                filter: built.server,
+                // lore_id (not the hashed row key) is the logical tiebreak local uses.
+                sort: [{ field: 'updated_at', direction: 'desc' }, { field: 'lore_id', direction: 'asc' }],
                 limit: SEARCH_SCAN_CAP,
             },
             this.connection,
         );
-        const candidates = (res.records ?? []).map((r) => this.recordToLoreNode(r));
+        const candidates = keepInScope(res.records ?? [], built.clientPredicate, 'search').map((r) => this.recordToLoreNode(r));
         // P16 — same scan-cap-hit signal as LocalGraph so the incomplete-results
         // hint is cross-engine consistent: a full candidate window means matches
         // beyond SEARCH_SCAN_CAP were dropped before ranking.
@@ -693,24 +641,24 @@ export class DataplaneGraph implements GraphProvider {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         _opts?: { unbounded?: boolean },
     ): Promise<LoreNode[]> {
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
-        const filter: Record<string, unknown> = { org_id: this.orgId };
-        if (type) filter['type'] = type;
-        if (project) filter['project'] = project;
-        if (ecosystem) filter['ecosystem'] = ecosystem;
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
         // CONTRACT-DEVIATION: cloud does case-insensitive SUBSTRING; local
         // does case-insensitive EXACT membership (Pass 2). Both fold case.
         // See DECISIONS.md DEC-TAG-MATCH for the cloud Pass 2 follow-up.
-        if (tag) filter['tags_contains'] = tag.toLowerCase();
-
+        const built = this.crud(scope, {
+            type: type || undefined,
+            project,
+            ecosystem,
+            tags: tag ? [tag.toLowerCase()] : undefined,
+        });
         const res = await this.client.query<Record<string, unknown>>(
-            tenantId,
+            scope.dataplaneWorkspaceId,
             NODE_COLLECTION,
-            { filter, limit: 1000 },
+            { filter: built.server, limit: 1000 },
             this.connection,
         );
-        return (res.records ?? []).map((r) => this.recordToLoreNode(r));
+        return keepInScope(res.records ?? [], built.clientPredicate, 'listNodes').map((r) => this.recordToLoreNode(r));
     }
 
     /**
@@ -724,35 +672,58 @@ export class DataplaneGraph implements GraphProvider {
      *   - Multi-value type/tag filters apply only the FIRST value — the
      *     AND-only SDK filter can't express an OR-chain. Single type/tag
      *     (the common cold-warmup case) is exact.
-     *   - The cursor uses a strict `updated_at_lt`, so the rare case of
-     *     nodes sharing the EXACT cursor timestamp across a page boundary
-     *     can skip those rows. Knowledge writes stamp per-write ISO-ms
-     *     timestamps, so boundary collisions are vanishingly unlikely.
+     *
+     * The cursor is a keyset on the full sort key: a row is on a later page
+     * when `updated_at < cursor.updatedAt`, or `updated_at == cursor.updatedAt`
+     * and `lore_id > cursor.id`. A cursor on `updated_at` alone skipped every
+     * row that shared the boundary row's timestamp (two writes in the same
+     * millisecond are enough). The same test runs client-side, for a connector
+     * that does not push the filter down.
      */
     async bulkList(q: BulkListQuery): Promise<BulkListPage> {
-        const tenantId = this.tenantProvider();
-        await this.ensureTenantInitialized(tenantId);
-        const filter: Record<string, unknown> = { org_id: this.orgId };
-        if (q.project) filter['project'] = q.project;
-        if (q.ecosystem) filter['ecosystem'] = q.ecosystem;
-        if (q.types && q.types.length > 0) filter['type'] = q.types[0];
+        const scope = this.scope();
+        await this.ensureInitialized(scope);
         // CONTRACT-DEVIATION (substring vs exact) — see listNodes above.
-        if (q.tags && q.tags.length > 0) filter['tags_contains'] = q.tags[0]!.toLowerCase();
-        if (q.cursor) filter['updated_at_lt'] = q.cursor.updatedAt;
+        const built = this.crud(scope, {
+            project: q.project || undefined,
+            ecosystem: q.ecosystem || undefined,
+            type: q.types && q.types.length > 0 ? q.types[0] : undefined,
+            tags: q.tags && q.tags.length > 0 ? [q.tags[0]!.toLowerCase()] : undefined,
+        });
+        const cursor = q.cursor ?? null;
+        const filter = cursor && built.server
+            ? engineAnd([
+                built.server,
+                {
+                    or: [
+                        engineField('updated_at', 'lt', cursor.updatedAt),
+                        engineAnd([
+                            engineField('updated_at', 'eq', cursor.updatedAt),
+                            engineField('lore_id', 'gt', cursor.id),
+                        ]),
+                    ],
+                },
+            ])
+            : built.server;
+        const afterCursor = (r: Record<string, unknown>): boolean => {
+            if (!cursor) return true;
+            const at = String(r['updated_at'] ?? '');
+            return at < cursor.updatedAt || (at === cursor.updatedAt && String(r['lore_id'] ?? '') > cursor.id);
+        };
         const res = await this.client.query<Record<string, unknown>>(
-            tenantId,
+            scope.dataplaneWorkspaceId,
             NODE_COLLECTION,
             {
                 filter,
                 sort: [
                     { field: 'updated_at', direction: 'desc' },
-                    { field: 'id', direction: 'asc' },
+                    { field: 'lore_id', direction: 'asc' },
                 ],
                 limit: q.limit + 1,
             },
             this.connection,
         );
-        const records = res.records ?? [];
+        const records = keepInScope(res.records ?? [], built.clientPredicate, 'bulkList').filter(afterCursor);
         const hasMore = records.length > q.limit;
         const pageRecords = hasMore ? records.slice(0, q.limit) : records;
         const nodes = pageRecords.map((r) => this.recordToLoreNode(r) as unknown as Record<string, unknown>);
@@ -767,10 +738,9 @@ export class DataplaneGraph implements GraphProvider {
     private topologyCtx(): TopologyCtx {
         return {
             client: this.client,
-            tenantProvider: this.tenantProvider,
-            orgId: this.orgId,
+            scope: () => this.scope(),
             connection: this.connection,
-            ensureTenantInitialized: this.ensureTenantInitialized.bind(this),
+            ensureInitialized: this.ensureInitialized.bind(this),
         };
     }
 
@@ -852,19 +822,18 @@ export class DataplaneGraph implements GraphProvider {
         //
         // Slice 5c — single instance cached on the engine so collection
         // declarations (declareCollection) persist across every
-        // getGraphContext() call. The internal tenantProvider
-        // closure still resolves per-op via AsyncLocalStorage, so a
-        // single shared adapter is multi-tenant-safe.
+        // getGraphContext() call. The scope closure still resolves per-op
+        // via AsyncLocalStorage, so a single shared adapter is
+        // multi-workspace-safe.
         if (!this.cachedCollectionStorage) {
             this.cachedCollectionStorage = new DataplaneCollectionStorage({
                 client: this.client as unknown as CollectionStorageSdkClient,
-                tenantProvider: () => {
-                    const tenantId = this.tenantProvider();
-                    // Lazy schema push: same per-tenant init guard as the
-                    // core node/edge writes use. Collections were
-                    // pushed in slice 4's registerCloudSchema fan-out.
-                    void this.ensureTenantInitialized(tenantId);
-                    return tenantId;
+                scopeProvider: () => {
+                    const scope = this.scope();
+                    // Lazy schema push: same init guard as the core node/edge
+                    // writes use (fire-and-forget; failures retry next call).
+                    void this.ensureInitialized(scope).catch(() => undefined);
+                    return scope;
                 },
                 connection: this.connection,
             });
@@ -913,10 +882,9 @@ export class DataplaneGraph implements GraphProvider {
     private maintenanceCtx(): MaintenanceCtx {
         return {
             client: this.client,
-            tenantProvider: this.tenantProvider,
-            orgId: this.orgId,
+            scope: () => this.scope(),
             connection: this.connection,
-            ensureTenantInitialized: this.ensureTenantInitialized.bind(this),
+            ensureInitialized: this.ensureInitialized.bind(this),
             tryGet: this.tryGet.bind(this),
         };
     }
@@ -952,33 +920,7 @@ export class DataplaneGraph implements GraphProvider {
 
     /* ─── internals ───────────────────────────────────────────── */
 
-    private recordToLoreNode(rec: Record<string, unknown>): LoreNode {
-        return {
-            id: String(rec['id'] ?? ''),
-            type: String(rec['type'] ?? ''),
-            label: String(rec['label'] ?? ''),
-            content: String(rec['content'] ?? ''),
-            tags: tagsToArray(rec['tags']),
-            project: String(rec['project'] ?? '*'),
-            ecosystem: String(rec['ecosystem'] ?? '*'),
-            metadata: '{}',
-            createdAt: String(rec['created_at'] ?? ''),
-            updatedAt: String(rec['updated_at'] ?? ''),
-            syncedAt: String(rec['updated_at'] ?? ''),
-            language: (rec['language'] as string | null | undefined) ?? null,
-            // RA2-reaudit2 — read node-level access scopes back (was dropped).
-            security_scopes: parseSecurityScopes(rec['security_scopes']),
-        };
+    private recordToLoreNode(raw: Record<string, unknown>): LoreNode {
+        return rowToNode(raw);
     }
-}
-
-/** RA2-reaudit2 — deserialize the JSON-serialized security_scopes column;
- *  tolerates a legacy array, a JSON string, or empty → []. */
-function parseSecurityScopes(raw: unknown): string[] {
-    if (Array.isArray(raw)) return raw.filter((s): s is string => typeof s === 'string');
-    if (typeof raw === 'string' && raw.length > 0) {
-        try { const a = JSON.parse(raw); return Array.isArray(a) ? a.filter((s): s is string => typeof s === 'string') : []; }
-        catch { return []; }
-    }
-    return [];
 }

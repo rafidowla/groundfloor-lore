@@ -75,12 +75,13 @@ import type { BatchedEmbedder } from '../embed/batchedEmbedder.js';
  * falls back to the boot instances (prior behavior).
  */
 export interface DispatcherSubstrates {
-    /** Calls `localGraph.upsertNode(payload as LoreNode)` on the workspace's graph. */
-    upsertNode?: (payload: Record<string, unknown>, workspace?: string) => Promise<void>;
+    /** Calls `localGraph.upsertNode(payload as LoreNode)` on the workspace's graph.
+     *  3.26.0 — also receives the row being replayed (embedded replay guard). */
+    upsertNode?: (payload: Record<string, unknown>, workspace?: string, entry?: OutboxEntry) => Promise<void>;
     /** Calls `localGraph.addEdge(payload as LoreEdge)` on the workspace's graph. */
     addEdge?: (payload: Record<string, unknown>, workspace?: string) => Promise<void>;
-    /** Calls `localGraph.deleteNode(id)` on the workspace's graph. */
-    deleteNode?: (id: string, workspace?: string) => Promise<void>;
+    /** Calls `localGraph.deleteNode(id)` on the workspace's graph (3.26.0: + the row). */
+    deleteNode?: (id: string, workspace?: string, entry?: OutboxEntry) => Promise<void>;
     /** 2026-09-03 (X-markstale audit fix) — calls `graph.markStaleByIds(ids)`
      *  on the workspace's graph for the row's already-resolved id chunk
      *  (see outbox/types.ts `node.mark_stale`). */
@@ -281,7 +282,7 @@ export async function dispatch(
         case 'node.upsert': {
             if (!substrates.upsertNode) throw new UnwiredOperationKindError(kind);
             if (!payload['id']) throw new MissingPayloadError(kind, 'id');
-            await substrates.upsertNode(payload, ws);
+            await substrates.upsertNode(payload, ws, entry);
             return;
         }
         case 'edge.upsert': {
@@ -313,7 +314,7 @@ export async function dispatch(
             if (!substrates.deleteNode) throw new UnwiredOperationKindError(kind);
             const id = payload['id'];
             if (typeof id !== 'string') throw new MissingPayloadError(kind, 'id');
-            await substrates.deleteNode(id, ws);
+            await substrates.deleteNode(id, ws, entry);
             return;
         }
         case 'edge.delete': {

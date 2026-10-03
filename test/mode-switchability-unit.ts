@@ -36,6 +36,7 @@ import {
     CloudModeNotImplementedError,
 } from '../packages/lore/src/storage/loreStorageClient.js';
 import { DataplaneGraph } from '../packages/lore/src/engines/dataplaneGraph.js';
+import { registryAcceptingAny } from './helpers/workspace-registry.js';
 import { DataplaneVectorStore } from '../packages/lore/src/engines/dataplaneVectorStore.js';
 import { createLore } from '../packages/lore/src/index.js';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
@@ -127,12 +128,16 @@ function makeCloudFacade() {
     const sdk = makeFakeSdkClient();
     const graph = new DataplaneGraph({
         client: sdk as never,
-        tenantProvider: () => 'tenant-mode-guard',
+        dataplaneWorkspaceId: 'dp-ws',
+        workspaceRegistry: registryAcceptingAny(),
+        loreWorkspaceProvider: () => 'tenant-mode-guard',
         orgId: 'org-mode-guard',
     });
     const verbatim = new DataplaneVectorStore({
         client: sdk as never,
-        tenantProvider: () => 'tenant-mode-guard',
+        dataplaneWorkspaceId: 'dp-ws',
+        workspaceRegistry: registryAcceptingAny(),
+        loreWorkspaceProvider: () => 'tenant-mode-guard',
         orgId: 'org-mode-guard',
         embeddingProvider: stubEmbedder,
     });

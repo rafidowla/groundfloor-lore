@@ -518,6 +518,7 @@ export async function createArcadeInstance(input: {
         dataHome,
         createMcpServer: () => unsupported('createMcpServer'),
         nodeUpsert: () => Promise.reject(new Error('[arcadeBoot] nodeUpsert unsupported in arcade mode')),
+        nodeDelete: () => Promise.reject(new Error('[arcadeBoot] nodeDelete unsupported in arcade mode')),
         bulkIngest: () => Promise.reject(new Error('[arcadeBoot] bulkIngest unsupported in arcade mode')),
         nodeUpsertBatch: () => Promise.reject(new Error('[arcadeBoot] nodeUpsertBatch unsupported in arcade mode')),
         awaitEmbeds: () => Promise.resolve(),

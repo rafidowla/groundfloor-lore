@@ -9,12 +9,11 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from '../workspaceResolve.js';
 import { assertMcpScope } from '../mcpScope.js';
-import { recordHotWrite } from '../../../outbox/hotLane.js';
 import type { MemoryToolsDeps } from './types.js';
 import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
-import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import { withEdgeLock } from '../../../core/nodeWriteLock.js';
+import { deleteEdgeOrRestore, type SingleEdgeGraph } from '../../edgeWriteRollback.js';
 
 export function registerDeleteEdgeTool(mcpServer: McpServer, deps: MemoryToolsDeps): void {
     mcpServer.tool(
@@ -79,22 +78,15 @@ export function registerDeleteEdgeTool(mcpServer: McpServer, deps: MemoryToolsDe
                     // it the replicator replayed that pending upsert a few hundred
                     // ms later and silently RESURRECTED the edge this tool had
                     // just reported deleted.
-                    if (deps.outboxStore) {
-                        await recordHotWrite(deps.outboxStore, {
-                            workspace: resolved.resolvedWorkspace,
-                            operationKind: 'edge.delete',
-                            payload: { sourceId: source_id, targetId: target_id, relation },
-                            initiator: 'mcp:delete_edge',
-                            operation: 'edge.delete',
-                        });
-                    }
-                    // Capture the narrowed function bound to its receiver — a
-                    // bare `delGraph.deleteEdge` reference loses `this` when
-                    // invoked through the retry closure below (deleteEdge's own
-                    // implementation calls `this.initialize()`), throwing
-                    // "Cannot read properties of undefined" on every retry.
-                    const doDeleteEdge = delGraph.deleteEdge!.bind(delGraph);
-                    const removed = await withTransactionConflictRetry(() => doDeleteEdge(source_id, target_id, relation));
+                    //
+                    // 3.26.0 — a delete that fails is undone: the edge is
+                    // written back if it was removed and the row retracted, so
+                    // the replicator cannot remove later an edge this tool
+                    // reported as not deleted (mcp/edgeWriteRollback.ts).
+                    const removed = await deleteEdgeOrRestore({
+                        graph: delGraph as unknown as SingleEdgeGraph, store: deps.outboxStore, workspace: resolved.resolvedWorkspace,
+                        sourceId: source_id, targetId: target_id, relation, initiator: 'mcp:delete_edge',
+                    });
                     // Round-E X-edges finding (3) — no WAL op existed for an
                     // edge delete (only 'add_edge' did), so a sync push never
                     // learned a locally-deleted edge should be removed

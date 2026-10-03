@@ -30,6 +30,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { isSupersededDeadError } from './supersession.js';
 import type {
     OutboxAggregateStats,
     OutboxEntry,
@@ -268,6 +269,22 @@ export class FileOutboxStore implements IOutboxStore {
 
     // ---- Sprint O1 additions ----
 
+    /** 3.26.0 — atomic claim (see OutboxStore.claimForReplication). The
+     *  whole-file read-modify-write is the serialization point, as for
+     *  removeIfPending above. A legacy row with no status counts as pending. */
+    async claimForReplication(entryId: string): Promise<boolean> {
+        const map = this.readAll();
+        const entry = map[entryId];
+        if (!entry) return false;
+        const status = entry.status ?? 'pending';
+        if (status !== 'pending' && status !== 'failed') return false;
+        entry.status = 'replicating';
+        entry.updatedAt = new Date().toISOString();
+        delete entry.nextAttemptAt;
+        this.writeAll(map);
+        return true;
+    }
+
     async listPendingForWorkspace(workspace: string, limit: number): Promise<OutboxEntry[]> {
         const map = this.readAll();
         const rows = Object.values(map)
@@ -311,6 +328,20 @@ export class FileOutboxStore implements IOutboxStore {
         this.writeAll(map);
     }
 
+    /** 3.26.0 — see OutboxStore.newestNodeUpsertAfter (types.ts). */
+    async newestNodeUpsertAfter(workspace: string, nodeId: string, sequenceId: number): Promise<OutboxEntry | null> {
+        let best: OutboxEntry | null = null;
+        for (const e of Object.values(this.readAll())) {
+            if (e.operationKind !== 'node.upsert' || e.status === 'replicated' || e.status === 'dead') continue;
+            if ((e.workspace ?? DEFAULT_WORKSPACE_BACKFILL) !== workspace) continue;
+            if ((e.payload as { id?: unknown } | undefined)?.id !== nodeId) continue;
+            const seq = e.sequenceId;
+            if (typeof seq !== 'number' || seq <= sequenceId) continue;
+            if (best === null || seq > (best.sequenceId as number)) best = e;
+        }
+        return best;
+    }
+
     async readReplicationState(workspace: string): Promise<OutboxReplicationState> {
         const all = this.readReplStateMap();
         return all[workspace] ?? {
@@ -348,6 +379,7 @@ export class FileOutboxStore implements IOutboxStore {
             const s = stats[ws] ??= { depth: 0, lagSeconds: 0, dead: 0 };
             if (e.status === 'dead') {
                 s.dead += 1;
+                if (isSupersededDeadError(e.lastError)) s.deadSuperseded = (s.deadSuperseded ?? 0) + 1;
             } else if (e.status === 'pending' || e.status === 'replicating' || e.status === 'failed') {
                 s.depth += 1;
                 const created = Date.parse(e.createdAt);
@@ -362,12 +394,13 @@ export class FileOutboxStore implements IOutboxStore {
 
     async aggregateStats(): Promise<OutboxAggregateStats> {
         const perWorkspace = await this.statsByWorkspace();
-        let depth = 0, dead = 0, lagSeconds = 0;
+        let depth = 0, dead = 0, deadSuperseded = 0, lagSeconds = 0;
         for (const s of Object.values(perWorkspace)) {
             depth += s.depth;
             dead += s.dead;
+            deadSuperseded += s.deadSuperseded ?? 0;
             if (s.lagSeconds > lagSeconds) lagSeconds = s.lagSeconds;
         }
-        return { depth, dead, lagSeconds, perWorkspace };
+        return { depth, dead, deadSuperseded, lagSeconds, perWorkspace };
     }
 }

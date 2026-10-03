@@ -60,6 +60,14 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
     }
 }
 
+/** Remove a temp SurrealKV dir. `close()` resolves before surrealkv has finished
+ *  writing its manifest, so a plain recursive remove can race a late file and
+ *  fail with ENOTEMPTY (seen once in a full-chain run under load, 2026-10-02).
+ *  `maxRetries` makes Node retry ENOTEMPTY/EBUSY/EPERM with a growing delay. */
+function rmTmpDir(dir: string): void {
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 async function withGraph(fn: (g: SurrealGraph, dir: string) => Promise<void>): Promise<void> {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-access-coldness-'));
     const graph = new SurrealGraph(dir, { workspaceId: 'test-ws' });
@@ -68,7 +76,7 @@ async function withGraph(fn: (g: SurrealGraph, dir: string) => Promise<void>): P
         await fn(graph, dir);
     } finally {
         await graph.close().catch(() => undefined);
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmTmpDir(dir);
     }
 }
 
@@ -272,7 +280,7 @@ async function main(): Promise<void> {
         } finally {
             await graph.close().catch(() => undefined);
             await locker?.close().catch(() => undefined);
-            fs.rmSync(dir, { recursive: true, force: true });
+            rmTmpDir(dir);
             if (prevTimeoutMs === undefined) delete process.env['LORE_SURREAL_OPEN_TIMEOUT_MS'];
             else process.env['LORE_SURREAL_OPEN_TIMEOUT_MS'] = prevTimeoutMs;
             if (prevBudgetMs === undefined) delete process.env['LORE_SURREAL_OPEN_BUDGET_MS'];

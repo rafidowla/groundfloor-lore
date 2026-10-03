@@ -19,7 +19,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { StorageBundle } from '../../services.js';
 import type { AuxStore } from '../../../outbox/auxStore.js';
-import type { VersionStore } from '../../../outbox/versionStore.js';
+import type { VersionStoreApi } from '../../../outbox/versionStoreApi.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../../engines/localGraphRegistry.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
@@ -37,7 +37,7 @@ type LoreGraph = LoreGraphHandle;
 export interface RecallOutcomeRouteDeps {
     store: StorageBundle;
     auxStore?: AuxStore;
-    versionStore?: VersionStore;
+    versionStore?: VersionStoreApi;
     deploymentMode: 'local' | 'cloud';
     dataplane: GroundfloorClient | null;
     graphRegistry?: LocalGraphRegistry;

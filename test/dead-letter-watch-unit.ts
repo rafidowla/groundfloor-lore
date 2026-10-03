@@ -136,5 +136,55 @@ test('DeadLetterWatch carries state across calls and emits through the given log
     assert.match(seen[0], /DATA LOSS: 4 write\(s\)/);
 });
 
+// ── Section E: RA-6 superseded rows are not data loss ───────────────────────
+
+test('E: a startup backlog of only superseded rows logs nothing', () => {
+    const seen: string[] = [];
+    new DeadLetterWatch().observe(63, (m) => seen.push(m), 63);
+    assert.deepEqual(seen, []);
+});
+
+test('E: a mixed startup backlog reports only the genuine rows', () => {
+    const seen: string[] = [];
+    new DeadLetterWatch().observe(65, (m) => seen.push(m), 63);
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /NOTE: 2 dead-lettered row\(s\) already in the outbox at startup/);
+});
+
+test('E: ticks that add only superseded rows raise no DATA LOSS and no escalation', () => {
+    const seen: string[] = [];
+    const watch = new DeadLetterWatch();
+    let total = 0;
+    watch.observe(total, (m) => seen.push(m), 0);
+    for (let i = 0; i < DEAD_LETTER_ESCALATE_TICKS + 2; i++) {
+        total += 5;
+        watch.observe(total, (m) => seen.push(m), total);   // every dead row superseded
+    }
+    assert.deepEqual(seen, []);
+});
+
+test('E: a genuine loss alongside superseded rows is reported with the genuine count only', () => {
+    const seen: string[] = [];
+    const watch = new DeadLetterWatch();
+    watch.observe(10, (m) => seen.push(m), 10);
+    watch.observe(14, (m) => seen.push(m), 12);               // +4 dead, 2 of them superseded
+    assert.equal(seen.length, 1);
+    assert.match(seen[0], /DATA LOSS: 2 write\(s\).*\(2 dead-lettered in total\)/);
+});
+
+test('E: omitting the superseded argument behaves exactly as before', () => {
+    const seen: string[] = [];
+    const watch = new DeadLetterWatch();
+    watch.observe(0, (m) => seen.push(m));
+    watch.observe(3, (m) => seen.push(m));
+    assert.match(seen[0], /DATA LOSS: 3 write\(s\)/);
+});
+
+test('E: a superseded count larger than the total never produces a negative count', () => {
+    const seen: string[] = [];
+    new DeadLetterWatch().observe(2, (m) => seen.push(m), 5);
+    assert.deepEqual(seen, []);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed > 0 ? 1 : 0);

@@ -509,6 +509,9 @@ export class SurrealGraph implements LoreGraphHandle {
         return count;
     }
 
+    /** getEdge — one edge by its exact triple, or null (3.26.0; the edge-write rollback reads it). */
+    async getEdge(s: string, t: string, r: string): Promise<LoreEdge | null> { await this.initialize(); return aggregates.getEdge(this.query, s, t, r); }
+
     /** queryEdges — paginated edge query (GET /api/edges contract). */
     async queryEdges(q: EdgeQuery): Promise<LoreEdge[]> {
         await this.initialize();

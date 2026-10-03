@@ -32,13 +32,12 @@ import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { OutboxStore } from '../../../outbox/types.js';
-import { recordHotWrite } from '../../../outbox/hotLane.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { LoreEdge } from '../../../providers/types.js';
 import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
-import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import type { AuditLog } from '../../../security/audit.js';
 import { withEdgeLocks, withEdgeLock, type EdgeLockTriple } from '../../../core/nodeWriteLock.js';
+import { writeEdgeOrRestore, deleteEdgeOrRestore } from '../../edgeWriteRollback.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
 // classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
@@ -253,23 +252,16 @@ export async function tryEdgesRoutes(
                 ? [{ sourceId: parsed.sourceId, targetId: parsed.targetId, relation: parsed.relation },
                     { sourceId: parsed.targetId, targetId: parsed.sourceId, relation: parsed.relation }]
                 : [{ sourceId: parsed.sourceId, targetId: parsed.targetId, relation: parsed.relation }];
-            await withEdgeLocks(effectivePostWorkspace, lockTriples, async () => {
-                // O2: outbox-first — record edge.upsert before substrate.
-                if (deps.outboxStore) {
-                    await recordHotWrite(deps.outboxStore, {
-                        workspace: effectivePostWorkspace,
-                        operationKind: 'edge.upsert',
-                        payload: { ...edge, bidirectional },
-                        initiator: 'http:POST /api/edge',
-                        operation: 'edge.upsert',
-                    });
-                }
-                if (bidirectional) {
-                    await withTransactionConflictRetry(() => edgeGraph.addBidirectionalEdge(edge));
-                } else {
-                    await withTransactionConflictRetry(() => edgeGraph.addEdge(edge));
-                }
-            });
+            //
+            // 3.26.0 — O2 outbox-first (edge.upsert before the substrate),
+            // and a write that fails is undone: the graph is put back as it
+            // was and the outbox row retracted, so the replicator cannot
+            // apply later an edge this call reported as failed
+            // (mcp/edgeWriteRollback.ts).
+            await withEdgeLocks(effectivePostWorkspace, lockTriples, () => writeEdgeOrRestore({
+                graph: edgeGraph, store: deps.outboxStore, workspace: effectivePostWorkspace,
+                edge, bidirectional, initiator: 'http:POST /api/edge',
+            }));
             writeJson(res, 200, {
                 ok: true,
                 edge: { ...edge, bidirectional },
@@ -288,7 +280,10 @@ export async function tryEdgesRoutes(
             // 400 (caller asked for an edge against a node that doesn't
             // exist) rather than 500 (which implies a server fault).
             const msg = (err as Error).message;
-            const status = /Failed to add edge|not found/i.test(msg) ? 400 : 500;
+            // A failed pre-read (mcp/edgeWriteRollback.ts) is a server fault
+            // even when the engine's text says "not found".
+            const preReadFailed = msg.startsWith('could not read the edge before');
+            const status = !preReadFailed && /Failed to add edge|not found/i.test(msg) ? 400 : 500;
             console.error(`[Lore HTTP] POST /api/edge failed: ${redactError(err)}`);
             // F-COL5: 400 is an author-controlled validation message
             // (missing node) — keep it raw. 500 echoes raw engine text,
@@ -360,21 +355,17 @@ export async function tryEdgesRoutes(
             // `withEdgeLock`). Unlocked, a concurrent write for this triple
             // could land its outbox row and graph write between this call's
             // own outbox record and its graph delete.
-            const deleted = await withEdgeLock(effectiveDeleteWorkspace, sourceId, targetId, relation, async () => {
-                // O2: outbox-first — record edge.delete before substrate.
-                if (deps.outboxStore) {
-                    await recordHotWrite(deps.outboxStore, {
-                        workspace: effectiveDeleteWorkspace,
-                        operationKind: 'edge.delete',
-                        payload: { sourceId, targetId, relation },
-                        initiator: 'http:DELETE /api/edge',
-                        operation: 'edge.delete',
-                    });
-                }
-                // deleteEdge is declared on LoreGraphHandle — every graph
-                // substrate implements it directly, no capability probe needed.
-                return withTransactionConflictRetry(() => edgeGraph.deleteEdge(sourceId, targetId, relation));
-            });
+            //
+            // 3.26.0 — O2 outbox-first (edge.delete before the substrate),
+            // and a delete that fails is undone: the edge is written back if
+            // it was removed and the outbox row retracted, so the replicator
+            // cannot remove later an edge this call reported as not deleted
+            // (mcp/edgeWriteRollback.ts). deleteEdge is declared on
+            // LoreGraphHandle — no capability probe needed.
+            const deleted = await withEdgeLock(effectiveDeleteWorkspace, sourceId, targetId, relation, () => deleteEdgeOrRestore({
+                graph: edgeGraph, store: deps.outboxStore, workspace: effectiveDeleteWorkspace,
+                sourceId, targetId, relation, initiator: 'http:DELETE /api/edge',
+            }));
             if (deleted === 0) {
                 writeError(res, 404, 'edge_not_found', `edge not found: ${sourceId} -${relation}-> ${targetId}`, {
                     sourceId, targetId, relation,

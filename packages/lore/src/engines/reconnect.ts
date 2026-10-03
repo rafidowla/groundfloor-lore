@@ -21,6 +21,7 @@ import type { VerbatimStoreApi } from './verbatimStoreApi.js';
 import type { DataplaneVectorStore } from './dataplaneVectorStore.js';
 import { buildVerbatimText } from './verbatimSchema.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
+import { withEdgeLock } from '../core/nodeWriteLock.js';
 /**
  * Phase 3 — was `LocalGraph | DataplaneGraph`. Reconnect only ever calls
  * listNodes / bulkList / addEdge / pruneInferredLoreEdges, all of which are on
@@ -93,6 +94,27 @@ export interface ReconnectOptions {
      * a closing substrate is worse than one that reports it stopped.
      */
     shouldAbort?: () => boolean;
+    /**
+     * 3.26.0: the workspace name the request-path edge writers lock on. When
+     * set, every inferred edge is written under that triple's edge lock
+     * (core/nodeWriteLock.ts), so it cannot land between a failed edge call's
+     * pre-read and its undo (mcp/edgeWriteRollback.ts). In-daemon callers pass
+     * it; a CLI run (own process, nothing to contend with) leaves it unset and
+     * writes unlocked. The bulk prune (`pruneInferredLoreEdges`) is one engine
+     * statement over every inferred edge and is NOT under a per-edge lock.
+     */
+    lockWorkspace?: string;
+}
+
+/** Write one inferred edge, under the triple's edge lock when a lock workspace
+ *  is known. The lock is a leaf lock: nothing but the graph write runs in it. */
+function addInferredEdge(
+    graph: LoreGraph,
+    lockWorkspace: string | undefined,
+    edge: Parameters<LoreGraph['addEdge']>[0],
+): Promise<unknown> {
+    if (!lockWorkspace) return graph.addEdge(edge);
+    return withEdgeLock(lockWorkspace, edge.sourceId, edge.targetId, edge.relation, () => graph.addEdge(edge));
 }
 
 export interface ReconnectProposal {
@@ -607,7 +629,7 @@ export async function reconnectGraph(
                 // C1 — reconnect edges are semantic inferences, not user
                 // assertions. Tag confidence='inferred' with the cosine
                 // similarity as the numeric score.
-                await graph.addEdge({
+                await addInferredEdge(graph, opts.lockWorkspace, {
                     sourceId: strip(edge.from < edge.to ? edge.from : edge.to),
                     targetId: strip(edge.from < edge.to ? edge.to : edge.from),
                     relation,
@@ -657,7 +679,11 @@ export async function reconnectOneNode(
     graph: LoreGraph,
     verbatim: LoreVectorStore,
     node: Pick<LoreNode, 'id' | 'label' | 'content' | 'tags' | 'type' | 'project' | 'ecosystem'>,
-    opts: { k?: number; minSim?: number; skipStore?: boolean } = {},
+    opts: {
+        k?: number; minSim?: number; skipStore?: boolean;
+        /** See `ReconnectOptions.lockWorkspace`. */
+        lockWorkspace?: string;
+    } = {},
 ): Promise<{ added: number; confidences: number[] }> {
     const k = opts.k ?? 5;
     const minSim = opts.minSim ?? 0.65;
@@ -715,7 +741,7 @@ export async function reconnectOneNode(
             try {
                 // C1 — per-node reconnect is also inferred. Score is the
                 // cosine similarity for this candidate pair.
-                await graph.addEdge({
+                await addInferredEdge(graph, opts.lockWorkspace, {
                     sourceId: lo,
                     targetId: hi,
                     relation,

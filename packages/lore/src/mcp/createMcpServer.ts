@@ -59,8 +59,8 @@ import { registerVersioningTools } from './tools/versioning.js';
 import { registerMaintainTools } from './tools/maintain.js';
 import type { PhaseAServices, StorageBundle } from './services.js';
 import type { AuxStore } from '../outbox/auxStore.js';
-import type { VersionStore } from '../outbox/versionStore.js';
-import type { OutboxStore } from '../outbox/types.js';
+import type { VersionStoreApi } from '../outbox/versionStoreApi.js';
+import type { OutboxEntry, OutboxStore } from '../outbox/types.js';
 import type { OutboxLagCache } from '../outbox/lagCache.js';
 import type { RerankBackend } from '../recall/rerankBackend.js';
 
@@ -76,6 +76,8 @@ export interface CreateMcpServerDeps {
     getSyncEngine: () => SyncEngine;
     getSyncAdapter: () => TsSdkAdapter | null;
     getWal: () => WriteAheadLog;
+    /** 3.26.0 — embedded replay guard hook for the `delete_node` tool. */
+    noteInlineNodeDelete?: (entry: OutboxEntry, nodeId: string) => void;
 
     /** Boot-time scope/mode/dirs. */
     detectedScope: { workspace: string; ecosystem: string };
@@ -198,7 +200,7 @@ export interface CreateMcpServerDeps {
      * commit_changeset / rollback_changeset / export_snapshot tools
      * are registered, and write tools auto-record version entries.
      */
-    versionStore?: VersionStore;
+    versionStore?: VersionStoreApi;
     /** D5 round 2 (#2) — host-level supersession-enforce default. */
     supersessionEnforceDefault?: boolean;
     /** 3.24 Part B — this Lore instance's `RerankBackend`
@@ -336,6 +338,7 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
         auditLog: deps.auditLog,
         detectedScope: deps.detectedScope,
         getWal: deps.getWal,
+        noteInlineNodeDelete: deps.noteInlineNodeDelete,
         domain: deps.domain,
         edgeRelations: deps.edgeRelations,
         nodeTypesEnum: deps.nodeTypesEnum,

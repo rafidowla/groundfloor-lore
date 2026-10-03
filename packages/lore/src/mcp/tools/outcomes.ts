@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { StorageBundle } from '../services.js';
 import type { AuxStore } from '../../outbox/auxStore.js';
-import type { VersionStore } from '../../outbox/versionStore.js';
+import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import { assertMcpScope } from './mcpScope.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
@@ -29,7 +29,7 @@ export interface OutcomeDeps {
     store: StorageBundle;
     auxStore: AuxStore;
     /** Feature 8: optional version store. When wired, record_outcome writes create version records. */
-    versionStore?: VersionStore;
+    versionStore?: VersionStoreApi;
     /**
      * Local-mode multi-workspace registry. When wired, record_outcome's graph
      * counter denormalization resolves the requested workspace's graph instead
@@ -125,7 +125,7 @@ export function registerOutcomeTools(server: McpServer, deps: OutcomeDeps): void
                 // Feature 8: record version (non-fatal).
                 if (deps.versionStore) {
                     try {
-                        deps.versionStore.recordVersion({
+                        await deps.versionStore.recordVersion({
                             versionId: randomUUID(), nodeId: node_id, workspace,
                             timestamp: new Date().toISOString(), principal: 'mcp',
                             operation: 'outcome',

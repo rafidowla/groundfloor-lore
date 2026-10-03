@@ -269,6 +269,9 @@ export interface BackgroundReconnectDeps {
      *  first-install sweep is per-instance, seal-gated and cooperatively
      *  abortable — see engines/backgroundReconnect.ts. */
     tracker?: import('../engines/pendingAutolink.js').PendingAutolinkTracker;
+    /** The boot workspace's name, for the per-edge lock on the edges the
+     *  sweep writes (engines/reconnect.ts `lockWorkspace`). */
+    lockWorkspace?: string;
 }
 
 /**
@@ -286,6 +289,7 @@ export async function runBackgroundReconnectIfFresh(deps: BackgroundReconnectDep
             graph: deps.graph,
             verbatim: deps.verbatim,
             ...(deps.tracker ? { tracker: deps.tracker } : {}),
+            ...(deps.lockWorkspace ? { lockWorkspace: deps.lockWorkspace } : {}),
         });
     } catch (bgErr) {
         log.error(`[Lore MCP] background-reconnect schedule failed (non-fatal): ${(bgErr as Error).message}`);

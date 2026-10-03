@@ -150,7 +150,7 @@ export async function dispatchHttpRequest(
     // Wave 4.1 — in local mode also install the route-binding slot
     // { target: workspaceId, lane: 'workspace' } so every workspace-addressed
     // substrate open is confined to the validated target unless a route widens
-    // it. Cloud mode is untouched (keeps runWithWorkspaceIfAny + tenantProvider);
+    // it. Cloud mode is untouched (keeps runWithWorkspaceIfAny + loreWorkspaceProvider);
     // the slot installer is a no-op for cloud / when workspaceId is undefined.
     return withPrincipalIfAny(principal, () =>
         withActorIfAny(actor, () =>

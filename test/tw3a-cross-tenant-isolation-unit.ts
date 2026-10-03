@@ -7,7 +7,7 @@
  * THE VULN (base = swarm/integration-3): in cloud mode the
  * `X-Lore-Workspace` request header sets the active tenant/workspace for
  * the request (middleware.ts bindWorkspaceToRequest → workspaceContext →
- * DataplaneGraph.tenantProvider), but it was trusted VERBATIM and NEVER
+ * the Dataplane stores' loreWorkspaceProvider), but it was trusted VERBATIM and NEVER
  * reconciled with the authenticated principal. An authenticated caller
  * scoped to workspace A could send `X-Lore-Workspace: B` and the daemon
  * would bind tenant B — reading/writing another customer's data. The

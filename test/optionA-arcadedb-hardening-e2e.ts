@@ -271,7 +271,7 @@ async function testFacadeRoundTrip(): Promise<void> {
     metadata: { type: 'note', label: 'bm doc', project: 'lore', ecosystem: 'backend' },
   });
   const fbm = await facade.verbatimBm25Search('lexical keyword arcade', 5, { project: 'lore' });
-  check('FACADE', 'facade.verbatimBm25Search routes to arcade bm25 (non-zero, no CloudModeNotImplementedError)', fbm.some((r) => r.id === `fbm-${RUN_TAG}`), JSON.stringify(fbm.map((r) => r.id)));
+  check('FACADE', 'facade.verbatimBm25Search routes to arcade bm25 (non-zero, no CloudModeNotImplementedError)', fbm.hits.some((r) => r.id === `fbm-${RUN_TAG}`), JSON.stringify(fbm.hits.map((r) => r.id)));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -482,7 +482,7 @@ async function testNewProviderMethods(): Promise<void> {
 
   // bm25Search — client-ranked lexical over the verbatim store.
   const bm = await vector.bm25Search('isolation walls', 5, { project: 'provtest' });
-  check('PROVIDER', 'bm25Search finds the seeded verbatim doc (client-ranked lexical, non-zero)', bm.some((r) => r.id === docId), JSON.stringify(bm.map((r) => r.id)));
+  check('PROVIDER', 'bm25Search finds the seeded verbatim doc (client-ranked lexical, non-zero)', bm.hits.some((r) => r.id === docId), JSON.stringify(bm.hits.map((r) => r.id)));
 }
 
 // ═══════════════════════════════════════════════════════════════════════

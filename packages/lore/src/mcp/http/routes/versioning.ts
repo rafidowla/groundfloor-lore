@@ -14,7 +14,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { StorageBundle } from '../../services.js';
-import type { VersionStore } from '../../../outbox/versionStore.js';
+import type { VersionStoreApi } from '../../../outbox/versionStoreApi.js';
 import type { LocalGraphRegistry } from '../../../engines/localGraphRegistry.js';
 import type { LoreNode } from '../../../providers/types.js';
 import { gateRoute } from '../../../security/routeGate.js';
@@ -37,7 +37,7 @@ import type { WriteAheadLog } from '../../../engines/syncEngine.js';
 import { applyChangesetUpsert, applyChangesetDelete, type ChangesetWriteDeps } from '../../changesetWrite.js';
 
 export interface VersioningRouteDeps {
-    versionStore: VersionStore;
+    versionStore: VersionStoreApi;
     store: StorageBundle;
     graphRegistry?: LocalGraphRegistry;
     deploymentMode: 'local' | 'cloud';
@@ -111,7 +111,7 @@ export async function tryVersioningRoutes(
                 workspace = target;
             }
             const limit = Math.min(200, Math.max(1, parseInt(params.get('limit') ?? '50', 10) || 50));
-            const versions = deps.versionStore.getVersions(nodeId, workspace, limit);
+            const versions = await deps.versionStore.getVersions(nodeId, workspace, limit);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ node_id: nodeId, workspace, count: versions.length, versions }));
         } catch (err) {
@@ -154,7 +154,7 @@ export async function tryVersioningRoutes(
                 writeError(res, 400, 'invalid_request', '`since` query param is required (ISO 8601 timestamp)');
                 return true;
             }
-            const all = deps.versionStore.getDiff(workspace, since);
+            const all = await deps.versionStore.getDiff(workspace, since);
             const trimmed = all.slice(0, limit);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ workspace, since, total: all.length, returned: trimmed.length, changes: trimmed }));
@@ -202,7 +202,7 @@ export async function tryVersioningRoutes(
             // create (and then commit) a changeset in workspace B.
             const target = bindRouteTarget(res, { requested: parsed.workspace, intent: 'write' });
             if (target === null) return true;
-            const changesetId = deps.versionStore.createChangeset(parsed.workspace);
+            const changesetId = await deps.versionStore.createChangeset(parsed.workspace);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ changeset_id: changesetId, workspace: parsed.workspace, status: 'open' }));
         } catch (err) {
@@ -234,7 +234,7 @@ export async function tryVersioningRoutes(
             bindRouteTarget(res, { intent: 'write' }) === null) return true;
         try {
             const changesetId = commitMatch[1];
-            const cs = deps.versionStore.getChangeset(changesetId);
+            const cs = await deps.versionStore.getChangeset(changesetId);
             if (!cs) {
                 writeError(res, 404, 'changeset_not_found', `changeset not found: ${changesetId}`, { changeset_id: changesetId });
                 return true;
@@ -249,7 +249,7 @@ export async function tryVersioningRoutes(
                 return true;
             }
 
-            const writes = deps.versionStore.getChangesetWrites(changesetId);
+            const writes = await deps.versionStore.getChangesetWrites(changesetId);
             let applied = 0;
             let failed = 0;
             const errors: string[] = [];
@@ -281,7 +281,7 @@ export async function tryVersioningRoutes(
                             changesetWriteDeps(deps, cs.workspace, 'http:POST /api/changesets/:id/commit'),
                             graph, p.workspace, p.nodeData,
                         );
-                        deps.versionStore.recordVersion({
+                        await deps.versionStore.recordVersion({
                             versionId: randomUUID(), nodeId, workspace: p.workspace,
                             timestamp: new Date().toISOString(), principal: 'changeset',
                             operation: 'upsert',
@@ -299,7 +299,7 @@ export async function tryVersioningRoutes(
                             graph, p.workspace, p.node_id,
                             'node deleted via changeset commit',
                         );
-                        deps.versionStore.recordVersion({
+                        await deps.versionStore.recordVersion({
                             versionId: randomUUID(), nodeId: p.node_id, workspace: p.workspace,
                             timestamp: new Date().toISOString(), principal: 'changeset',
                             operation: 'delete',
@@ -315,7 +315,7 @@ export async function tryVersioningRoutes(
                 }
             }
 
-            deps.versionStore.updateChangeset(changesetId, 'committed');
+            await deps.versionStore.updateChangeset(changesetId, 'committed');
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ changeset_id: changesetId, status: 'committed', applied, failed, errors }));
         } catch (err) {
@@ -343,7 +343,7 @@ export async function tryVersioningRoutes(
             bindRouteTarget(res, { intent: 'write' }) === null) return true;
         try {
             const changesetId = rollbackMatch[1];
-            const cs = deps.versionStore.getChangeset(changesetId);
+            const cs = await deps.versionStore.getChangeset(changesetId);
             if (!cs) {
                 writeError(res, 404, 'changeset_not_found', `changeset not found: ${changesetId}`, { changeset_id: changesetId });
                 return true;
@@ -359,14 +359,14 @@ export async function tryVersioningRoutes(
                 return true;
             }
             if (cs.status === 'open') {
-                deps.versionStore.updateChangeset(changesetId, 'rolled_back');
+                await deps.versionStore.updateChangeset(changesetId, 'rolled_back');
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ changeset_id: changesetId, status: 'rolled_back', reversed: 0, note: 'open changeset discarded before any writes' }));
                 return true;
             }
 
             // committed — reverse each versioned write (newest-first)
-            const versions = deps.versionStore.getVersionsByChangeset(changesetId);
+            const versions = await deps.versionStore.getVersionsByChangeset(changesetId);
             let reversed = 0;
             let failed = 0;
             const errors: string[] = [];
@@ -408,7 +408,7 @@ export async function tryVersioningRoutes(
                 }
             }
 
-            deps.versionStore.updateChangeset(changesetId, 'rolled_back');
+            await deps.versionStore.updateChangeset(changesetId, 'rolled_back');
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ changeset_id: changesetId, status: 'rolled_back', reversed, failed, errors }));
         } catch (err) {

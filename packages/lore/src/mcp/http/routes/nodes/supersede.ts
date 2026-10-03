@@ -14,6 +14,7 @@ import { writePermissionDenied } from '../../../../security/rebacGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, extractWorkspace, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { WorkspaceNotFoundError } from '../../../../engines/localGraphRegistry.js';
 import { recordHotWrite } from '../../../../outbox/hotLane.js';
+import { withEdgeLock, withEdgeLocks, type EdgeLockTriple } from '../../../../core/nodeWriteLock.js';
 import { tombstoneQuestionAliases } from '../../../../core/nodeServiceVerbatim.js';
 import { log } from '../../../../logger.js';
 import type { LoreGraph, NodesDeps } from './types.js';
@@ -112,16 +113,20 @@ export async function handleSupersede(req: IncomingMessage, res: ServerResponse,
                 confidenceScore: 1.0,
             };
             try {
-                if (deps.outboxStore) {
-                    await recordHotWrite(deps.outboxStore, {
-                        workspace: supersedeWs,
-                        operationKind: 'edge.upsert',
-                        payload: supersedeEdge,
-                        initiator: 'http:POST /api/node/supersede',
-                        operation: 'edge.upsert',
-                    });
-                }
-                await targetGraph.addEdge(supersedeEdge);
+                // 3.26.0 — under the triple's edge lock, like the other
+                // request-path edge writers (see applyWriteTimeSupersedes).
+                await withEdgeLock(supersedeWs, parsed.newId, parsed.oldId, 'supersedes', async () => {
+                    if (deps.outboxStore) {
+                        await recordHotWrite(deps.outboxStore, {
+                            workspace: supersedeWs,
+                            operationKind: 'edge.upsert',
+                            payload: { ...supersedeEdge, bidirectional: false }, // one-way on replay
+                            initiator: 'http:POST /api/node/supersede',
+                            operation: 'edge.upsert',
+                        });
+                    }
+                    await targetGraph.addEdge(supersedeEdge);
+                });
             } catch (edgeErr) {
                 log.warn(`[Lore] POST /api/node/supersede: supersedes edge ${parsed.newId}->${parsed.oldId} failed (non-fatal; supersededAt is authoritative): ${redactError(edgeErr)}`);
             }
@@ -211,7 +216,46 @@ export async function handleUnsupersede(req: IncomingMessage, res: ServerRespons
         const ok = await targetGraph.unsupersedeNode(parsed.id);
         if (ok && priorSupersededBy) {
             try {
-                await targetGraph.deleteEdge(priorSupersededBy, parsed.id, 'supersedes');
+                // 3.26.0 — under the triple's edge lock, and outbox-first like
+                // every other edge delete: without an `edge.delete` row, a
+                // still-queued `edge.upsert` of the supersede replayed after
+                // this delete and brought the edge back. The unsupersede has
+                // already succeeded here, so a delete that fails KEEPS its
+                // row (replay removes the edge), as a failed supersede edge
+                // write keeps its `edge.upsert`.
+                //
+                // The reverse triple goes too. Before 3.26.0 a replayed
+                // supersede row wrote the edge in BOTH directions, and a row
+                // queued by an older Lore still does; removing the forward
+                // edge alone left the pair "unsuperseded" with a backwards
+                // `supersedes` edge. It stays only when it is a real
+                // supersession of its own (the newer node is itself
+                // superseded by this one), or when that cannot be read.
+                const unsupersededId = parsed.id;
+                const triples: EdgeLockTriple[] = [{ sourceId: priorSupersededBy, targetId: unsupersededId, relation: 'supersedes' }];
+                let reverseIsStale = unsupersededId !== priorSupersededBy;
+                if (reverseIsStale) {
+                    try {
+                        reverseIsStale = (await targetGraph.getNode(priorSupersededBy))?.supersededBy !== unsupersededId;
+                    } catch {
+                        reverseIsStale = false;
+                    }
+                }
+                if (reverseIsStale) triples.push({ sourceId: unsupersededId, targetId: priorSupersededBy, relation: 'supersedes' });
+                await withEdgeLocks(unsupersedeWs, triples, async () => {
+                    if (deps.outboxStore) {
+                        for (const payload of triples) {
+                            await recordHotWrite(deps.outboxStore, {
+                                workspace: unsupersedeWs,
+                                operationKind: 'edge.delete',
+                                payload: { ...payload },
+                                initiator: 'http:POST /api/node/unsupersede',
+                                operation: 'edge.delete',
+                            });
+                        }
+                    }
+                    for (const t of triples) await targetGraph.deleteEdge(t.sourceId, t.targetId, t.relation);
+                });
             } catch (edgeErr) {
                 log.warn(`[Lore] POST /api/node/unsupersede: supersedes edge ${priorSupersededBy}->${parsed.id} removal failed (non-fatal; supersededBy is authoritative): ${redactError(edgeErr)}`);
             }

@@ -6,12 +6,10 @@
 
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { redactId, redactError } from '../../../security/logRedact.js';
+import { redactError } from '../../../security/logRedact.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from '../workspaceResolve.js';
 import { assertMcpScope } from '../mcpScope.js';
-import { recordHotWrite } from '../../../outbox/hotLane.js';
-import { withNodeLock } from '../../../core/nodeWriteLock.js';
-import { tombstoneQuestionAliases } from '../../../core/nodeServiceVerbatim.js';
+import { deleteNodeEverywhere } from '../../../core/nodeDeleteService.js';
 import type { MemoryToolsDeps } from './types.js';
 import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
@@ -61,114 +59,28 @@ export function registerDeleteNodeTool(mcpServer: McpServer, deps: MemoryToolsDe
                 }
                 const delGraph = resolvedDel.graph;
                 __auditCtx.workspace = resolvedDel.resolvedWorkspace;
-                // The whole outbox → graph → verbatim sequence runs under the
-                // SHARED per-(workspace,id) write lock `nodeUpsert` holds
-                // (core/nodeWriteLock.ts). Unlocked, a concurrent store_node /
-                // POST /api/node for the same id interleaved with these three
-                // steps and left the graph holding the node while the verbatim
-                // mirror held this tombstone (or the reverse), both callers
-                // told ok — and the outbox carrying node.upsert AFTER
-                // node.delete, so replay contradicted execution. Nothing inside
-                // this callback may re-enter the lock: every call below is a
-                // RAW substrate primitive (see nodeWriteLock.ts rule 1).
-                const outcome = await withNodeLock(
-                    resolvedDel.resolvedWorkspace,
+                // The whole outbox → graph → verbatim → WAL sequence runs under
+                // the SHARED per-(workspace,id) write lock `nodeUpsert` holds;
+                // it lives in core/nodeDeleteService.ts (3.26.0), shared with
+                // the embedded `LoreInstance.nodeDelete()`.
+                const outcome = await deleteNodeEverywhere({
                     id,
-                    async (): Promise<{ deleted: boolean; verbatimWarning?: string }> => {
-                        // SP-F3 — outbox-first hot write, mirroring REST nodes-delete.ts.
-                        // Record node.delete BEFORE the substrate delete so the MCP
-                        // surface gets the same durability + crash-recovery-replay +
-                        // per-workspace replication as REST DELETE /api/node. Only when
-                        // an outbox is wired; otherwise keep prior direct-delete.
-                        if (deps.outboxStore) {
-                            await recordHotWrite(deps.outboxStore, {
-                                workspace: resolvedDel.resolvedWorkspace,
-                                operationKind: 'node.delete',
-                                payload: { id },
-                                initiator: 'mcp:delete_node',
-                                operation: 'node.delete',
-                            });
-                        }
-                        const deleted = await delGraph.deleteNode(id);
-                        // F2a (Phase 7a): also drop the LanceDB vector. reconnect
-                        // stores LoreNode verbatim records under the 'lore:'
-                        // prefix (see reconnect.ts PREFIX_LORE) — the pre-fix
-                        // version of this tool passed the raw id, which silently
-                        // missed every single vector. That's the root of the
-                        // orphan-embedding bug noted in commit 5849140.
-                        if (!deleted) return { deleted };
-                        // Verbatim is append-only memory: tombstone (kept +
-                        // marked superseded) rather than erase, so prior
-                        // content stays recallable for history / audit /
-                        // undo. Cloud-mode (DataplaneVectorStore) doesn't
-                        // support tombstone yet — fall back to legacy delete.
-                        // L-056 — resolve the RESOLVED workspace's verbatim store
-                        // so the tombstone lands in the same workspace as the graph
-                        // delete above (the resolver is what bulk-store/verbatim.ts
-                        // use). Without this the tombstone hit the boot store,
-                        // splitting the delete across two workspaces. Fall back to
-                        // the boot singleton when no resolver (cloud / test fixtures).
-                        const targetVerbatim = deps.workspaceVerbatimResolver
-                            ? await deps.workspaceVerbatimResolver.getOrOpen(resolvedDel.resolvedWorkspace)
-                            : deps.store.loreVerbatim;
-                        const store = targetVerbatim as unknown as { tombstone?: (id: string, reason: string) => Promise<void> };
-                        // 1.M10 (2026-08-17 audit) — tombstone() now THROWS on
-                        // real failure (was a bare catch swallow), so await it
-                        // here and surface a verbatim_warning in the response
-                        // instead of fire-and-forget success.
-                        let verbatimWarning: string | undefined;
-                        try {
-                            const reason = 'graph node deleted via MCP delete_node';
-                            if (typeof store.tombstone === 'function') {
-                                await store.tombstone(`lore:${id}`, reason);
-                            } else {
-                                await deps.store.storageClient.verbatimDelete(`lore:${id}`);
-                            }
-                            // QA A2 finding 2 (2026-09-03) — record a
-                            // verbatim.tombstone outbox row AFTER the node.delete
-                            // row above, so a stale pending `verbatim.upsert` from
-                            // an earlier store_node on this id can't later replay
-                            // and resurrect the content this call just tombstoned
-                            // (outbox/types.ts). Non-fatal: the synchronous
-                            // tombstone above already ran.
-                            if (deps.outboxStore) {
-                                await recordHotWrite(deps.outboxStore, {
-                                    workspace: resolvedDel.resolvedWorkspace,
-                                    operationKind: 'verbatim.tombstone',
-                                    payload: { id: `lore:${id}`, reason },
-                                    initiator: 'mcp:delete_node',
-                                    operation: 'verbatim.tombstone',
-                                });
-                                // 3.21 step 3(e) — tombstone this node's question
-                                // aliases too (best-effort; see
-                                // nodeServiceVerbatim.ts's tombstoneQuestionAliases).
-                                await tombstoneQuestionAliases({
-                                    id, workspace: resolvedDel.resolvedWorkspace,
-                                    initiator: 'mcp:delete_node', logPrefix: '[Lore MCP]',
-                                    outboxStore: deps.outboxStore,
-                                });
-                            }
-                        } catch (tombErr) {
-                            verbatimWarning = `verbatim tombstone failed: ${redactError(tombErr)}`;
-                            console.error(`[Lore MCP] Verbatim tombstone failed for ${redactId(id)}: ${redactError(tombErr)}`);
-                        }
-                        // ITEM X-walnode (2026-09-03) — store_node / store_edge
-                        // both append to the sync WAL (core/nodeService.ts,
-                        // storeEdge.ts) but delete_node never did, so a
-                        // hard-deleted node had no `delete_node` WAL entry for
-                        // the sync engine to push. When WAL push is wired
-                        // (walPushBridge.ts is dormant today), the delete would
-                        // never propagate and the node would resurrect on the
-                        // remote's next full sync. Mirror the upsert append's
-                        // exact gating (active-workspace only, P1.C scope) and
-                        // stay inside the same lock the delete + tombstone ran
-                        // under.
-                        if (resolvedDel.isActive) {
-                            deps.getWal().append('delete_node', { id, workspace: resolvedDel.resolvedWorkspace });
-                        }
-                        return { deleted, verbatimWarning };
-                    },
-                );
+                    workspace: resolvedDel.resolvedWorkspace,
+                    isActive: resolvedDel.isActive,
+                    graph: delGraph,
+                    outboxStore: deps.outboxStore,
+                    // L-056 — the RESOLVED workspace's verbatim store; the boot
+                    // singleton when no resolver (cloud / test fixtures).
+                    resolveVerbatim: async () => (deps.workspaceVerbatimResolver
+                        ? deps.workspaceVerbatimResolver.getOrOpen(resolvedDel.resolvedWorkspace)
+                        : deps.store.loreVerbatim),
+                    verbatimDelete: (verbatimId) => deps.store.storageClient.verbatimDelete(verbatimId),
+                    getWal: deps.getWal,
+                    initiator: 'mcp:delete_node',
+                    reason: 'graph node deleted via MCP delete_node',
+                    logPrefix: '[Lore MCP]',
+                    onInlineDeleteApplied: (entry) => deps.noteInlineNodeDelete?.(entry, id),
+                });
                 const { deleted, verbatimWarning } = outcome;
                 if (deleted) {
                     return {

@@ -12,6 +12,8 @@
 
 import { NODE_COLLECTION, EDGE_COLLECTION } from './dataplaneCollections.js';
 import { log } from '../logger.js';
+import { buildDataplaneScopeFilter, type DataplaneScope, type ScopeFilterInput } from './dataplaneScopeFilter.js';
+import { keepInScope } from './dataplaneScopedIo.js';
 
 /** Structural subset of the SDK client these maintenance ops touch. */
 interface MaintenanceClient {
@@ -23,28 +25,34 @@ interface MaintenanceClient {
 /** State threaded from DataplaneGraph for the maintenance operations. */
 export interface MaintenanceCtx {
     client: MaintenanceClient;
-    tenantProvider: () => string;
-    orgId: string;
+    /** Resolve the per-call scope (org + Lore workspace); throws DataplaneScopeError, fail closed. */
+    scope: () => DataplaneScope;
     connection?: string;
-    ensureTenantInitialized: (tenantId: string) => Promise<void>;
-    tryGet: (tenantId: string, id: string) => Promise<Record<string, unknown> | null>;
+    ensureInitialized: (scope: DataplaneScope) => Promise<void>;
+    tryGet: (scope: DataplaneScope, id: string) => Promise<Record<string, unknown> | null>;
+}
+
+/** Scoped crud filter (org + Lore workspace + caller clauses). */
+function scoped(scope: DataplaneScope, input: ScopeFilterInput = {}) {
+    return buildDataplaneScopeFilter(scope, input, 'crud', 0);
 }
 
 /** Mark `oldId` superseded by `newId`. Idempotent; validates both exist. */
 export async function supersedeNode(ctx: MaintenanceCtx, oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }> {
     if (oldId === newId) return { ok: false, reason: 'self' };
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
-    const oldNode = await ctx.tryGet(tenantId, oldId);
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
+    const tenantId = scope.dataplaneWorkspaceId;
+    const oldNode = await ctx.tryGet(scope, oldId);
     if (!oldNode) return { ok: false, reason: 'old-not-found' };
-    const newNode = await ctx.tryGet(tenantId, newId);
+    const newNode = await ctx.tryGet(scope, newId);
     if (!newNode) return { ok: false, reason: 'new-not-found' };
     const ts = new Date().toISOString();
     await ctx.client.updateByQuery(
         tenantId,
         NODE_COLLECTION,
-        { id_eq: oldId, org_id: ctx.orgId },
-        { supersededBy: newId, supersededAt: ts, supersededReason: reason ?? '' },
+        scoped(scope, { loreId: oldId }).server as object,
+        { superseded_by: newId, superseded_at: ts, superseded_reason: reason ?? '' },
         ctx.connection,
     );
     return { ok: true };
@@ -52,15 +60,16 @@ export async function supersedeNode(ctx: MaintenanceCtx, oldId: string, newId: s
 
 /** Reverse a prior supersession. */
 export async function unsupersedeNode(ctx: MaintenanceCtx, id: string): Promise<boolean> {
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
-    const exists = await ctx.tryGet(tenantId, id);
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
+    const tenantId = scope.dataplaneWorkspaceId;
+    const exists = await ctx.tryGet(scope, id);
     if (!exists) return false;
     const res = await ctx.client.updateByQuery(
         tenantId,
         NODE_COLLECTION,
-        { id_eq: id, org_id: ctx.orgId },
-        { supersededBy: '', supersededAt: '', supersededReason: '' },
+        scoped(scope, { loreId: id }).server as object,
+        { superseded_by: '', superseded_at: '', superseded_reason: '' },
         ctx.connection,
     );
     return (res?.updated ?? 0) > 0;
@@ -78,19 +87,21 @@ export async function unsupersedeNode(ctx: MaintenanceCtx, id: string): Promise<
 export async function findNodeIdsByTags(ctx: MaintenanceCtx, tags: string[]): Promise<string[]> {
     const lower = tags.map((t) => t.toLowerCase().trim()).filter(Boolean);
     if (lower.length === 0) return [];
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
+    const tenantId = scope.dataplaneWorkspaceId;
 
     const ids = new Set<string>();
     for (const tag of lower) {
+        const built = scoped(scope, { tags: [tag] });
         const res = await ctx.client.query<Record<string, unknown>>(
             tenantId,
             NODE_COLLECTION,
-            { filter: { org_id: ctx.orgId, tags_contains: tag }, limit: 1000 },
+            { filter: built.server, limit: 1000 },
             ctx.connection,
         );
-        for (const rec of res.records ?? []) {
-            const id = String(rec['id'] ?? '');
+        for (const rec of keepInScope(res.records ?? [], built.clientPredicate, 'findNodeIdsByTags')) {
+            const id = String(rec['lore_id'] ?? '');
             if (id) ids.add(id);
         }
     }
@@ -109,15 +120,16 @@ export async function findNodeIdsByTags(ctx: MaintenanceCtx, tags: string[]): Pr
 export async function markStaleByIds(ctx: MaintenanceCtx, ids: string[]): Promise<number> {
     const unique = Array.from(new Set(ids.filter((id) => typeof id === 'string' && id.length > 0)));
     if (unique.length === 0) return 0;
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
+    const tenantId = scope.dataplaneWorkspaceId;
 
     let marked = 0;
     for (const id of unique) {
         const res = await ctx.client.updateByQuery(
             tenantId,
             NODE_COLLECTION,
-            { id_eq: id, org_id: ctx.orgId },
+            scoped(scope, { loreId: id }).server as object,
             { stale: true },
             ctx.connection,
         );
@@ -146,20 +158,22 @@ export async function markStaleByTags(ctx: MaintenanceCtx, tags: string[]): Prom
  * deleteByQuery per id. Non-fatal on error (prune never blocks the daemon).
  */
 export async function pruneEphemeralNodes(ctx: MaintenanceCtx, defaultTtlMs: number = 3_600_000): Promise<number> {
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
+    const tenantId = scope.dataplaneWorkspaceId;
 
     try {
+        const built = scoped(scope, { extra: [{ field: 'ephemeral', op: 'eq', value: true }] });
         const res = await ctx.client.query<Record<string, unknown>>(
             tenantId,
             NODE_COLLECTION,
-            { filter: { org_id: ctx.orgId, ephemeral: true }, limit: 1000 },
+            { filter: built.server, limit: 1000 },
             ctx.connection,
         );
         const now = Date.now();
         const expired: string[] = [];
-        for (const rec of res.records ?? []) {
-            const id = String(rec['id'] ?? '');
+        for (const rec of keepInScope(res.records ?? [], built.clientPredicate, 'pruneEphemeralNodes')) {
+            const id = String(rec['lore_id'] ?? '');
             const createdAt = String(rec['created_at'] ?? '');
             const ttlRaw = rec['ttl_ms'];
             const ttl = typeof ttlRaw === 'number' && ttlRaw > 0 ? ttlRaw : defaultTtlMs;
@@ -174,7 +188,7 @@ export async function pruneEphemeralNodes(ctx: MaintenanceCtx, defaultTtlMs: num
             const r = await ctx.client.deleteByQuery(
                 tenantId,
                 NODE_COLLECTION,
-                { id_eq: id, org_id: ctx.orgId },
+                scoped(scope, { loreId: id }).server as object,
                 ctx.connection,
             );
             if ((r?.deleted ?? 0) > 0) deleted++;
@@ -192,17 +206,20 @@ export async function pruneEphemeralNodes(ctx: MaintenanceCtx, defaultTtlMs: num
  * deleteByQuery per id.
  */
 export async function pruneInferredLoreEdges(ctx: MaintenanceCtx, relationPrefix: string): Promise<number> {
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
+    const tenantId = scope.dataplaneWorkspaceId;
+    // Server-side starts_with narrows the scan; the exact prefix is re-checked below.
+    const built = scoped(scope, { extra: [{ field: 'relation', op: 'starts_with', value: relationPrefix }] });
     const res = await ctx.client.query<Record<string, unknown>>(
         tenantId,
         EDGE_COLLECTION,
-        { filter: { org_id: ctx.orgId }, limit: 10_000 },
+        { filter: built.server, limit: 10_000 },
         ctx.connection,
     );
     const matching: string[] = [];
-    for (const rec of res.records ?? []) {
-        const id = String(rec['id'] ?? '');
+    for (const rec of keepInScope(res.records ?? [], built.clientPredicate, 'pruneInferredLoreEdges')) {
+        const id = String(rec['lore_id'] ?? '');
         const relation = String(rec['relation'] ?? '');
         if (id && relation.startsWith(relationPrefix)) matching.push(id);
     }
@@ -211,7 +228,7 @@ export async function pruneInferredLoreEdges(ctx: MaintenanceCtx, relationPrefix
         const r = await ctx.client.deleteByQuery(
             tenantId,
             EDGE_COLLECTION,
-            { id_eq: id, org_id: ctx.orgId },
+            scoped(scope, { loreId: id }).server as object,
             ctx.connection,
         );
         if ((r?.deleted ?? 0) > 0) deleted++;

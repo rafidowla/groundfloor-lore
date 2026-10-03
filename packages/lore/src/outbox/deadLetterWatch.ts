@@ -100,9 +100,19 @@ export function observeDeadLetters(
  */
 export class DeadLetterWatch {
     private state = newDeadLetterWatchState();
-    /** Fold in the current total and emit whatever the policy decided. */
-    observe(dead: number, log: (message: string) => void): void {
-        const result = observeDeadLetters(this.state, dead);
+    /**
+     * Fold in the current total and emit whatever the policy decided.
+     *
+     * `superseded` is the part of `dead` parked by the RA-6 guard
+     * (`SUPERSEDED_DEAD_ERROR`): a newer same-key write replaced those rows, so
+     * nothing is missing from the substrate. They are subtracted here — the
+     * startup NOTE, the per-tick DATA LOSS delta and the "still climbing"
+     * escalation all see only genuinely discarded writes. Marking a row
+     * superseded raises `dead` by one, so without this every supersession would
+     * read as fresh data loss on the next tick.
+     */
+    observe(dead: number, log: (message: string) => void, superseded = 0): void {
+        const result = observeDeadLetters(this.state, Math.max(0, dead - superseded));
         this.state = result.state;
         for (const line of result.lines) log(line);
     }

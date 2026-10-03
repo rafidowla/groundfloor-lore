@@ -35,14 +35,119 @@
 import { buildVerbatimText } from '../engines/verbatimSchema.js';
 import { tagsToArray, tagsToString } from '../engines/normalizeTags.js';
 import { computeContentHash } from '../engines/contentHash.js';
+import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
 import { redactId, redactError } from '../security/logRedact.js';
 import { log } from '../logger.js';
 import { recordHotWrite } from '../outbox/hotLane.js';
 import type { LoreNode } from '../providers/types.js';
 import type { OutboxStore } from '../outbox/types.js';
+import type { VersionStoreApi } from '../outbox/versionStoreApi.js';
 import type { NodeUpsertHooks, NodeWriteGraph, VerbatimWriter } from './nodeService.js';
 import { aliasRowId, MAX_QUESTIONS } from './questionAliases.js';
 
+/**
+ * What the graph held for a node id BEFORE this write, read under the node
+ * lock (3.26.0). `LoreNode` — the node existed, a failed write must put it
+ * back. `null` — it did not exist, a failed write removes what it created.
+ * `undefined` — the graph has no `getNode` (minimal test fakes): unknown shape,
+ * the pre-3.26 behaviour (delete) applies.
+ */
+export type PriorNode = LoreNode | null | undefined;
+
+/**
+ * Read {@link PriorNode} for `id`. Call it INSIDE the node lock: a read taken
+ * before the lock could miss a concurrent same-id write, and restoring that
+ * stale copy would undo it. A read that THROWS rejects the save before anything
+ * is written: without the prior state a failed write could not be undone, and
+ * the stored `security_scopes` could not be carried onto the new write.
+ */
+export async function readPriorNode(targetGraph: NodeWriteGraph, id: string): Promise<PriorNode> {
+    if (typeof targetGraph.getNode !== 'function') return undefined;
+    try {
+        return await targetGraph.getNode(id);
+    } catch (readErr) {
+        throw new Error(
+            `nodeUpsert could not read the current state of ${redactId(id)} before writing (${redactError(readErr)}); nothing was written`,
+            { cause: readErr },
+        );
+    }
+}
+
+/** Value that clears each keep-if-omitted field when the prior node had it unset. */
+const RESTORE_DEFAULTS: Readonly<Record<string, unknown>> = {
+    security_scopes: [], language: '', ephemeral: false, ttl_ms: 0, stale: false,
+    status: 'active', classification: 'tactical', classification_expires_at: '',
+    anchor_stale: false, anchor_stale_since: '', anchors: '', evidence: '',
+    validFrom: '', validUntil: '', supersededBy: '', supersededAt: '', supersededReason: '',
+    success_count: 0, failure_count: 0, partial_count: 0, confirmation_score: 0,
+};
+
+/**
+ * The write payload that puts `prior` back after the failed write `written`.
+ *
+ * The content fields (type/label/content/tags/project/ecosystem/metadata) are
+ * always passed: the local engines overwrite them on every upsert. Every other
+ * field is keep-if-omitted on all engines (`toNodeRow` / `toNodeDocument` /
+ * `nodeRowFields`), and a read returns "unset" as null/undefined, so each one
+ * the failed write CARRIED is passed explicitly, with its clearing default when
+ * the prior node had none. A field the failed write did not carry is left out:
+ * the write cannot have changed it, and naming it would overwrite a change made
+ * meanwhile by a path that does not take the node lock (`supersedeNode`).
+ * Without `written`, every such field is passed.
+ *
+ * `createdAt` is preserved by the engine for an existing row; `updatedAt` is
+ * re-stamped (the restore is a real write).
+ */
+export function restorePayload(prior: LoreNode, written?: Record<string, unknown>): Record<string, unknown> {
+    const p = prior as unknown as Record<string, unknown>;
+    const out: Record<string, unknown> = {
+        id: prior.id, type: prior.type, label: prior.label, content: prior.content ?? '',
+        tags: prior.tags ?? [], project: prior.project, ecosystem: prior.ecosystem, metadata: prior.metadata ?? '{}',
+    };
+    for (const key of Object.keys(RESTORE_DEFAULTS)) {
+        if (written && (written[key] === undefined || written[key] === null)) continue;
+        out[key] = p[key] ?? RESTORE_DEFAULTS[key];
+    }
+    return out;
+}
+
+/**
+ * Undo the graph half of a failed write: restore an existing node, delete one
+ * this write created. Resolves true when the node is present afterwards.
+ * Throws when the state could not be put back.
+ *
+ * The restore is unconditional for a node that is still there. Comparing a
+ * fresh read with `prior` to skip it is not safe: the local engines answer
+ * `getNode` from a cache that only a SUCCESSFUL write invalidates, so after a
+ * write that threw part-way the read still shows the old node.
+ *
+ * Both writes retry a transaction conflict, as the bulk route's undo does
+ * (`bulkWriteRollback.ts`): a restore that fails while the outbox row is
+ * still pending leaves nothing queued to repair the node.
+ */
+async function undoGraphWrite(targetGraph: NodeWriteGraph, id: string, prior: PriorNode, written?: Record<string, unknown>): Promise<boolean> {
+    if (prior === null || prior === undefined) {
+        await withTransactionConflictRetry(() => targetGraph.deleteNode(id));
+        return false;
+    }
+    // Gone since the pre-write read: a delete that takes no node lock (host
+    // raw delete, boot prune) removed it. Do not bring it back.
+    if (await targetGraph.getNode!(id) === null) return false;
+    await withTransactionConflictRetry(() => targetGraph.upsertNode(restorePayload(prior, written)));
+    return true;
+}
+
+/**
+ * TW-4a rollback of a failed node write.
+ *
+ * 3.26.0 — a failed UPDATE no longer deletes the node. `priorNode` is what the
+ * graph held before the write ({@link PriorNode}): an existing node is put
+ * back as it was, and only a node this write created is removed. The outbox
+ * side follows: when the failed `node.upsert` row was already claimed by the
+ * replicator, the compensating row is a `node.upsert` of the previous state
+ * for an update (so a replay ends on the restored node) and a `node.delete`
+ * only for a create.
+ */
 export async function rollbackPartialWrite(input: {
     id: string;
     workspace: string;
@@ -52,15 +157,34 @@ export async function rollbackPartialWrite(input: {
     outboxStore?: OutboxStore;
     nodeUpsertOutboxEntryId: string | null;
     verbatimError: Error;
+    /** The node as it was before this write; see {@link PriorNode}. */
+    priorNode?: PriorNode;
+    /** The payload of the failed write; limits the restore to what it carried ({@link restorePayload}). */
+    written?: Record<string, unknown>;
+    /** Cloud: the version rows the graph write recorded atomically with the node; removed with it (review C #2). */
+    versionStore?: Pick<VersionStoreApi, 'discardVersions'>;
+    versionIds?: readonly string[];
 }): Promise<void> {
-    const { id, workspace, initiator, logPrefix, targetGraph, outboxStore, nodeUpsertOutboxEntryId, verbatimError } = input;
+    const { id, workspace, initiator, logPrefix, targetGraph, outboxStore, nodeUpsertOutboxEntryId, verbatimError, priorNode, written, versionStore, versionIds } = input;
     let rollbackError: Error | null = null;
+    const existedBefore = typeof priorNode === 'object' && priorNode !== null;
+    // Whether the node is on the graph once the undo ran; the compensating row follows it.
+    let nodeKept = existedBefore;
+
+    if (versionStore?.discardVersions && versionIds && versionIds.length > 0) {
+        try {
+            await versionStore.discardVersions([...versionIds]);
+        } catch (discardErr) {
+            rollbackError = discardErr as Error;
+            log.error(`${logPrefix} version rollback (discardVersions) failed for ${redactId(id)}: ${redactError(discardErr)} — a rollback/restore could resurrect the rolled-back state`);
+        }
+    }
 
     try {
-        await targetGraph.deleteNode(id);
+        nodeKept = await undoGraphWrite(targetGraph, id, priorNode, written);
     } catch (rollbackErr) {
         rollbackError = rollbackErr as Error;
-        log.error(`${logPrefix} graph rollback (deleteNode) failed for ${redactId(id)}: ${redactError(rollbackErr)}`);
+        log.error(`${logPrefix} graph rollback (${existedBefore ? 'restore previous node' : 'deleteNode'}) failed for ${redactId(id)}: ${redactError(rollbackErr)}`);
     }
 
     if (outboxStore && nodeUpsertOutboxEntryId) {
@@ -68,21 +192,17 @@ export async function rollbackPartialWrite(input: {
             if (outboxStore.removeIfPending) {
                 const removed = await outboxStore.removeIfPending(nodeUpsertOutboxEntryId);
                 if (!removed) {
-                    await recordHotWrite(outboxStore, {
-                        workspace,
-                        operationKind: 'node.delete',
-                        payload: { id },
-                        initiator,
-                        operation: 'graph.delete',
-                    });
-                    log.warn(`${logPrefix} node.upsert row for ${redactId(id)} was already claimed by the replicator; recorded a compensating node.delete to undo the resurrected orphan (C-R2-03)`);
+                    await recordHotWrite(outboxStore, nodeKept
+                        ? { workspace, operationKind: 'node.upsert', payload: restorePayload(priorNode as LoreNode, written), initiator, operation: 'graph.upsert' }
+                        : { workspace, operationKind: 'node.delete', payload: { id }, initiator, operation: 'graph.delete' });
+                    log.warn(`${logPrefix} node.upsert row for ${redactId(id)} was already claimed by the replicator; recorded a compensating ${nodeKept ? 'node.upsert of the previous state' : 'node.delete'} so its replay ends on the rolled-back state (C-R2-03)`);
                 }
             } else {
                 await outboxStore.remove(nodeUpsertOutboxEntryId);
             }
         } catch (retractErr) {
             rollbackError = rollbackError ?? (retractErr as Error);
-            log.error(`${logPrefix} node.upsert outbox retraction failed for ${redactId(id)}: ${redactError(retractErr)} — replicator may resurrect a graph-only orphan`);
+            log.error(`${logPrefix} node.upsert outbox retraction failed for ${redactId(id)}: ${redactError(retractErr)} — replicator may replay a write the caller was told failed`);
         }
     }
 
@@ -250,14 +370,18 @@ export async function applyVerbatimFanout(input: {
     node: LoreNode;
     nodeData: Record<string, unknown>;
     targetGraph: NodeWriteGraph;
-    hooks: Pick<NodeUpsertHooks, 'outboxStore' | 'embedQueue' | 'verbatim' | 'inlineVerbatim'>;
+    hooks: Pick<NodeUpsertHooks, 'outboxStore' | 'embedQueue' | 'verbatim' | 'inlineVerbatim' | 'versionStore'>;
     nodeUpsertOutboxEntryId: string | null;
+    /** Version ids the graph write recorded (cloud); see rollbackPartialWrite. */
+    versionIds?: readonly string[];
+    /** The node before this write (3.26.0); see {@link PriorNode}. */
+    priorNode?: PriorNode;
     /** 3.21 step 3(e) — optional question phrasings. See questionAliases.ts. */
     questions?: string[];
 }): Promise<VerbatimFanoutOutcome> {
     const {
         skipEmbed, asyncEmbed, id, workspace, initiator, logPrefix,
-        node, nodeData, targetGraph, hooks, nodeUpsertOutboxEntryId, questions,
+        node, nodeData, targetGraph, hooks, nodeUpsertOutboxEntryId, questions, versionIds, priorNode,
     } = input;
 
     const label = String(nodeData.label ?? '');
@@ -266,7 +390,8 @@ export async function applyVerbatimFanout(input: {
     const tagsStr = tagsToString(tagsArr);
     const rollback = (verbatimError: Error) => rollbackPartialWrite({
         id, workspace, initiator, logPrefix, targetGraph,
-        outboxStore: hooks.outboxStore, nodeUpsertOutboxEntryId, verbatimError,
+        outboxStore: hooks.outboxStore, nodeUpsertOutboxEntryId, verbatimError, priorNode, written: nodeData,
+        ...(hooks.versionStore ? { versionStore: hooks.versionStore } : {}), ...(versionIds ? { versionIds } : {}),
     });
 
     if (skipEmbed) return { error: null, embedPending: false };

@@ -51,7 +51,8 @@ import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 // edge.upsert, node.delete, verbatim.upsert) are idempotent — the replicator
 // replays no-ops. Marker tokens `withOutbox` + `outboxBatch` satisfy the O-D2
 // gate-test regex without renaming the helper.
-import { recordHotWriteBatch, retractHotWriteOrCompensate } from '../../../outbox/hotLane.js';
+import { recordHotWriteBatch } from '../../../outbox/hotLane.js';
+import { readInlinePriors, retractBulkNodeUpsert, undoBulkGraphWrite } from './bulkWriteRollback.js';
 import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE } from '../../../core/nodeWriteLock.js';
 import { flushBulkQueuedEmbeds, buildVerbatimSpec, type VerbatimSpec } from './bulkEmbedFlush.js';
 import { validateQuestionsMeta, mergeQuestionsMetaIntoMetadataJson } from '../../../core/questionAliases.js';
@@ -70,7 +71,6 @@ import type { OutboxEntry, OutboxStore } from '../../../outbox/types.js';
 import type { WorkspaceVerbatimResolver } from '../../../outbox/workspaceVerbatimResolver.js';
 import type { VerbatimStoreApi } from '../../../engines/verbatimStoreApi.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
-import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 
 // Widened when the local graph engine changed: naming CONCRETE classes excluded SurrealGraph.
 type LoreGraph = LoreGraphHandle;
@@ -534,8 +534,10 @@ async function handleBulkNodes(
         // the locks cannot be taken a node at a time without giving up the
         // chunk — `withNodeLocks` holds all of a chunk's ids, acquired in
         // sorted order (deadlock-free; see nodeWriteLock.ts rule 3).
-        for (const chunk of chunkForLocking(validSpecs, BULK_LOCK_CHUNK_SIZE)) {
-            await withNodeLocks(lockWorkspace, chunk.map(({ raw }) => raw.id as string), async () => {
+        for (const lockedChunk of chunkForLocking(validSpecs, BULK_LOCK_CHUNK_SIZE)) {
+            await withNodeLocks(lockWorkspace, lockedChunk.map(({ raw }) => raw.id as string), async () => {
+                // 3.26.0 — the nodes as they are now, so a failed inline seed restores an existing node (bulkWriteRollback.ts).
+                const { chunk, priors } = await readInlinePriors(batchGraph, lockedChunk, (s, error) => { results[s.idx] = { ok: false, id: s.raw.id as string, error }; });
                 let chunkEntries: OutboxEntry[] | null = null;
                 if (deps.outboxStore && chunk.length > 0) {
                     try {
@@ -572,13 +574,7 @@ async function handleBulkNodes(
                             const entry = chunkEntries[k];
                             if (entry) {
                                 try {
-                                    await retractHotWriteOrCompensate(deps.outboxStore, entry.id, {
-                                        workspace: requestedWorkspace!,
-                                        operationKind: 'node.delete',
-                                        payload: { id: raw.id as string },
-                                        initiator: 'http:POST /api/nodes/bulk',
-                                        operation: 'graph.delete',
-                                    });
+                                    await retractBulkNodeUpsert({ store: deps.outboxStore, entryId: entry.id, workspace: requestedWorkspace!, graph: batchGraph, id: raw.id as string, written: raw as Record<string, unknown> });
                                 } catch (retractErr) {
                                     console.error(`[Lore HTTP] bulk upsert: node.upsert outbox retraction failed for ${raw.id as string}: ${redactError(retractErr)} — replicator may create a ghost node`);
                                 }
@@ -647,8 +643,9 @@ async function handleBulkNodes(
                         // `.catch(console.error)`). A swallowed verbatim failure left the
                         // graph node committed + the caller told ok:true = a durable
                         // graph-only orphan. On failure now: report the item ok:false and
-                        // roll back its graph node. (The default 'queued' path is outbox-
-                        // tracked and unaffected.)
+                        // roll back its graph write — 3.26.0: an existing node is put back
+                        // as it was, only a node this item created is deleted. (The default
+                        // 'queued' path is outbox-tracked and unaffected.)
                         try {
                             // Metadata via the shared builder — this branch used to
                             // hardcode `project:'*', ecosystem:'*'` inline. See
@@ -669,8 +666,8 @@ async function handleBulkNodes(
                         } catch (err) {
                             results[idx] = { ok: false, id: raw.id as string, error: `verbatim seed failed: ${redactError(err)}` };
                             succeeded--;
-                            try { await withTransactionConflictRetry(() => targetGraph.deleteNode(raw.id as string)); }
-                            catch (delErr) { console.error(`[Lore HTTP] bulk inline rollback deleteNode failed for ${raw.id as string}: ${redactError(delErr)}`); }
+                            try { await undoBulkGraphWrite(batchGraph, raw.id as string, priors.get(raw.id as string), raw as Record<string, unknown>); }
+                            catch (delErr) { console.error(`[Lore HTTP] bulk inline rollback failed for ${raw.id as string}: ${redactError(delErr)}`); }
                             // QA E5-A2 (2026-09-03) — this id's node.upsert outbox row was
                             // committed above (recordHotWriteBatch) and `br.ok` was true, so
                             // the `!br.ok` branch's retraction above never runs for it. The
@@ -685,13 +682,7 @@ async function handleBulkNodes(
                                 const entry = chunkEntries[k];
                                 if (entry) {
                                     try {
-                                        await retractHotWriteOrCompensate(deps.outboxStore, entry.id, {
-                                            workspace: requestedWorkspace!,
-                                            operationKind: 'node.delete',
-                                            payload: { id: raw.id as string },
-                                            initiator: 'http:POST /api/nodes/bulk',
-                                            operation: 'graph.delete',
-                                        });
+                                        await retractBulkNodeUpsert({ store: deps.outboxStore, entryId: entry.id, workspace: requestedWorkspace!, graph: batchGraph, id: raw.id as string, written: raw as Record<string, unknown> });
                                     } catch (retractErr) {
                                         console.error(`[Lore HTTP] bulk inline verbatim rollback: node.upsert outbox retraction failed for ${raw.id as string}: ${redactError(retractErr)} — replicator may create a ghost node`);
                                     }
@@ -808,13 +799,7 @@ async function handleBulkNodes(
                         const entry = chunkEntries[k];
                         if (entry) {
                             try {
-                                await retractHotWriteOrCompensate(deps.outboxStore, entry.id, {
-                                    workspace: requestedWorkspace!,
-                                    operationKind: 'node.delete',
-                                    payload: { id: raw.id as string },
-                                    initiator: 'http:POST /api/nodes/bulk',
-                                    operation: 'graph.delete',
-                                });
+                                await retractBulkNodeUpsert({ store: deps.outboxStore, entryId: entry.id, workspace: requestedWorkspace!, graph: targetGraph, id: raw.id as string, written: raw as Record<string, unknown> });
                             } catch (retractErr) {
                                 console.error(`[Lore HTTP] bulk upsert (ARCADE): node.upsert outbox retraction failed for ${raw.id as string}: ${redactError(retractErr)} — replicator may create a ghost node`);
                             }
@@ -869,6 +854,10 @@ async function upsertOne(
     try {
         // Route through the LoreStorageClient facade (cloud-swap point) rather
         // than calling loreGraph.upsertNode() directly. SP-20 / D-019.
+        // 3.26.0 — read first, so a failed inline seed restores an existing node; a failed read fails the item before it writes.
+        // A graph without getNode keeps the pre-3.26 undo (delete).
+        const readGraph = storageClient.rawGraph();
+        const prior = embedMode === 'inline' && typeof readGraph.getNode === 'function' ? await readGraph.getNode(raw.id) : undefined;
         const node = await storageClient.upsertNode(raw as never);
         // Sprint E2 — only legacy 'inline' invokes the synchronous per-item
         // verbatim store. 'queued' rolls up into ONE embed.batch row by the
@@ -906,9 +895,8 @@ async function upsertOne(
                     }),
                 });
             } catch (err) {
-                const rid = raw.id;
-                try { await withTransactionConflictRetry(() => storageClient.rawGraph().deleteNode(rid)); }
-                catch (delErr) { console.error(`[Lore HTTP] upsertOne inline rollback deleteNode failed for ${raw.id as string}: ${redactError(delErr)}`); }
+                try { await undoBulkGraphWrite(storageClient.rawGraph(), raw.id, prior, raw as Record<string, unknown>); }
+                catch (delErr) { console.error(`[Lore HTTP] upsertOne inline rollback failed for ${raw.id as string}: ${redactError(delErr)}`); }
                 return { ok: false, id: raw.id, error: `verbatim seed failed: ${redactError(err)}` };
             }
         }

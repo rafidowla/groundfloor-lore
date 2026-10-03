@@ -56,6 +56,8 @@ process.env.LORE_SEARCH_SCAN_CAP = String(SCAN_CAP);
 const { SurrealGraph } = await import('../packages/lore/src/engines/surrealGraph.js');
 const { DataplaneGraph } = await import('../packages/lore/src/engines/dataplaneGraph.js');
 const { SEARCH_SCAN_CAP } = await import('../packages/lore/src/engines/searchRanking.js');
+import { evalEngineFilter, parseEngineFilter } from './helpers/mock-dataplane.js';
+import { registryAcceptingAny } from './helpers/workspace-registry.js';
 import type { LoreNode } from '../packages/lore/src/providers/types.js';
 
 // Sanity: the override took effect (proves the dedupe + env-overridable const).
@@ -74,21 +76,17 @@ assert.equal(SEARCH_SCAN_CAP, SCAN_CAP, 'LORE_SEARCH_SCAN_CAP override must appl
 
 type Row = Record<string, unknown>;
 interface QueryOpts {
-    filter?: Record<string, unknown>;
+    filter?: unknown;
     sort?: Array<{ field: string; direction: 'asc' | 'desc' }>;
     limit?: number;
     offset?: number;
 }
 
-function matchesFilter(rec: Row, filter: Record<string, unknown> | undefined): boolean {
-    if (!filter) return true;
-    for (const [key, value] of Object.entries(filter)) {
-        if (key === 'id_eq') { if (rec['id'] !== value) return false; }
-        else if (key === 'tags_contains') {
-            if (!String(rec['tags'] ?? '').toLowerCase().includes(String(value).toLowerCase())) return false;
-        } else if (rec[key] !== value) return false;
-    }
-    return true;
+function matchesFilter(rec: Row, filter: unknown): boolean {
+    // Engine filter grammar (F1) — the shared evaluator from the faithful mock,
+    // so this fake can never accept the retired flat/suffix shape.
+    if (filter === undefined || filter === null) return true;
+    return evalEngineFilter(rec, parseEngineFilter(filter));
 }
 
 class StatefulSdkClient {
@@ -100,8 +98,9 @@ class StatefulSdkClient {
         if (!c) { c = []; t.set(collection, c); }
         return c;
     }
+    /** Test introspection ONLY: look a row up by its LOGICAL id (`lore_id`). The client `get` below is primary-key-only, like the engine's GET. */
     rawGet(tenantId: string, collection: string, id: string): Row | null {
-        return this.coll(tenantId, collection).find((r) => r['id'] === id) ?? null;
+        return this.coll(tenantId, collection).find((r) => r['lore_id'] === id) ?? null;
     }
     async createCollection(): Promise<unknown> { return {}; }
     async insert<T = Row>(tenantId: string, collection: string, record: T): Promise<T> {
@@ -113,7 +112,7 @@ class StatefulSdkClient {
     }
     async get<T = Row>(tenantId: string, collection: string, id: string): Promise<T> {
         const rec = this.coll(tenantId, collection).find((r) => r['id'] === id);
-        if (!rec) throw new Error(`not found 404: ${collection}/${id}`);
+        if (!rec) throw Object.assign(new Error(`not found 404: ${collection}/${id}`), { statusCode: 404 }); // structured, as the SDK's GroundfloorError (review B #7: no message matching)
         return rec as unknown as T;
     }
     async query<T = Row>(
@@ -280,7 +279,9 @@ async function main(): Promise<void> {
     const cloud = new DataplaneGraph({
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         client: sdk as any,
-        tenantProvider: () => TENANT,
+        dataplaneWorkspaceId: TENANT,
+        workspaceRegistry: registryAcceptingAny(),
+        loreWorkspaceProvider: () => TENANT,
         orgId: ORG_ID,
     });
     await cloud.initialize();

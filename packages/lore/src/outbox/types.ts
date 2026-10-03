@@ -310,6 +310,25 @@ export interface OutboxStore {
      *  (e.g. record a node.delete) rather than rely on an in-place rollback.
      *  Optional on the interface so legacy stores degrade to remove(). */
     removeIfPending?(entryId: string): Promise<boolean>;
+    /** 3.26.0 — atomic claim, `pending`/`failed` → `replicating`. Returns
+     *  false when the row is not claimable: another replayer already holds
+     *  it, it was already applied, it was retracted (`removeIfPending`)
+     *  between the tick's snapshot and this call, or (stores with a retry
+     *  back-off) its retry time has not come yet. The replicator must not
+     *  dispatch a row it failed to claim. Optional so legacy stores degrade
+     *  to the unconditional `markEntryStatus(id, 'replicating')`. */
+    claimForReplication?(entryId: string): Promise<boolean>;
+
+    /** 3.26.0 — the NEWEST `node.upsert` row of node `nodeId` in `workspace`
+     *  recorded after outbox position `sequenceId` and still queued (not
+     *  'replicated': already replayed; not 'dead': never will be), or null.
+     *
+     *  The embedded replay guard (mcp/embeddedLifecycle.ts) asks this before
+     *  it re-creates a missing node, so the node comes back with the newest
+     *  queued save instead of the content of whichever row replayed first.
+     *  Optional: a store without it keeps the pre-3.26 behaviour (the
+     *  replayed row's own payload is written). */
+    newestNodeUpsertAfter?(workspace: string, nodeId: string, sequenceId: number): Promise<OutboxEntry | null>;
     /** Walk every entry that is not yet completed. Used by boot-time
      *  recovery. Returns entries in insertion order. */
     listUnfinished(): Promise<OutboxEntry[]>;
@@ -428,13 +447,20 @@ export interface OutboxWorkspaceStats {
     depth: number;
     /** Seconds since the oldest pending entry's createdAt. 0 if depth=0. */
     lagSeconds: number;
-    /** Count of entries that exceeded retry budget and need attention. */
+    /** Count of ALL entries with status 'dead' — failed-for-good and superseded alike. */
     dead: number;
+    /** Subset of `dead` parked by the RA-6 supersession guard (`lastError` ===
+     *  SUPERSEDED_DEAD_ERROR): a newer same-key write replaced them, so nothing
+     *  is missing from the substrate. `dead - deadSuperseded` is the genuine
+     *  dead-letter count. Optional so other store implementations stay valid. */
+    deadSuperseded?: number;
 }
 
 export interface OutboxAggregateStats {
     depth: number;
     lagSeconds: number;
     dead: number;
+    /** Subset of `dead` that is RA-6-superseded (see OutboxWorkspaceStats). */
+    deadSuperseded?: number;
     perWorkspace: Record<string, OutboxWorkspaceStats>;
 }

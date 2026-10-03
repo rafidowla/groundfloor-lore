@@ -86,6 +86,38 @@ export async function queryEdges(query: SurrealQuery, q: EdgeQuery): Promise<Lor
 }
 
 /**
+ * getEdge — the one edge with this exact (source, target, relation) triple, or
+ * null. Reads the SOURCE's outgoing adjacency (O(out-degree)), the same bounded
+ * form `addEdge` uses: `queryEdges` filtered on in/out/relation scans the whole
+ * edge table (measured ~30 ms per call at 20k edges), which would make a bulk
+ * edge load quadratic.
+ */
+export async function getEdge(query: SurrealQuery, sourceId: string, targetId: string, relation: string): Promise<LoreEdge | null> {
+    try {
+        const rows = await query(
+            `SELECT ->${EDGE_TABLE}.{ other: out, relation: relation, confidence: confidence, confidenceScore: confidenceScore } AS edges FROM $source`,
+            { source: toNodeRid(sourceId, 'getEdge') },
+        );
+        for (const row of rows) {
+            const list = row['edges'];
+            if (!Array.isArray(list)) continue;
+            for (const entry of list) {
+                const e = entry as { other?: unknown; relation?: unknown; confidence?: unknown; confidenceScore?: unknown };
+                if (e.other == null || e.relation !== relation || ridToId(e.other) !== targetId) continue;
+                return {
+                    sourceId, targetId, relation,
+                    confidence: (e.confidence as LoreEdge['confidence']) ?? 'extracted',
+                    confidenceScore: typeof e.confidenceScore === 'number' ? e.confidenceScore : 1.0,
+                };
+            }
+        }
+        return null;
+    } catch (error) {
+        throw surrealError('Failed to read edge', 'getEdge', error);
+    }
+}
+
+/**
  * getStats — node count, edge count, and the per-type breakdown.
  *
  * Three behaviours are pinned to `graphStats.computeGraphStats` because the

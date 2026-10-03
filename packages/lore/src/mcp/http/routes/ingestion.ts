@@ -282,7 +282,7 @@ export async function tryIngestionRoutes(
                 const sweepStartedAt = new Date().toISOString();
                 const started = deps.store.sweepTracker.runTracked(() => reconnectGraph(
                     reconnectGraphTarget, reconnectVerbatimTarget,
-                    { k, minSim: threshold, dryRun: !apply, force, since, shouldAbort: () => deps.store.sweepTracker.isSealed() },
+                    { k, minSim: threshold, dryRun: !apply, force, since, shouldAbort: () => deps.store.sweepTracker.isSealed(), lockWorkspace: reconnectWs },
                 ));
                 if (!started) return { denied: false, result: null };
                 const r = await started;
@@ -455,7 +455,7 @@ export async function tryIngestionRoutes(
             // finish inside any drain deadline without `shouldAbort`.
             const startedReconsume = deps.store.sweepTracker.runTracked(() => reconnectGraph(
                 reconsumeGraphTarget, reconsumeVerbatimTarget,
-                { k, minSim: threshold, dryRun: false, pruneInferred: true, force, shouldAbort: () => deps.store.sweepTracker.isSealed() },
+                { k, minSim: threshold, dryRun: false, pruneInferred: true, force, shouldAbort: () => deps.store.sweepTracker.isSealed(), lockWorkspace: reconsumeWs },
             ));
             if (!startedReconsume) {
                 deps.auditLog.log({

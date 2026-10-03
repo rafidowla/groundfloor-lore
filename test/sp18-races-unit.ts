@@ -18,6 +18,7 @@
  * simulated in-process; the mechanism assertion guards the fix from regressing).
  */
 
+import { evalEngineFilter, parseEngineFilter } from './helpers/mock-dataplane.js';
 import { strict as assert } from 'node:assert';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -26,6 +27,7 @@ import { fileURLToPath } from 'node:url';
 
 import { SqliteOutboxStore } from '../packages/lore/src/outbox/sqliteStore.js';
 import { TsSdkAdapter } from '../packages/lore/src/engines/tsSdkAdapter.js';
+import { testRegistry } from './helpers/workspace-registry.js';
 import type { OutboxEntry } from '../packages/lore/src/outbox/types.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -88,15 +90,18 @@ test('markStep: body wraps the read-modify-write in a transaction (mechanism)', 
 /** Fake GroundfloorClient that records inserts and reflects updateByQuery
  *  against what's already inserted (so the check-then-act sees the real state). */
 function makeFakeClient() {
+    const rows: Array<Record<string, unknown>> = [];
     const inserted = new Map<string, number>(); // id → count
     return {
         inserted,
         insertCalls: 0,
-        async updateByQuery(_coll: string, q: { id_eq: string }, _doc: unknown) {
-            return { updated: inserted.has(q.id_eq) ? 1 : 0 };
+        // The engine filter grammar (F1) — evaluated with the shared mock evaluator.
+        async updateByQuery(_coll: string, q: object, _doc: unknown) {
+            return { updated: rows.filter((r) => evalEngineFilter(r, parseEngineFilter(q))).length };
         },
         async insert(_coll: string, doc: Record<string, unknown>) {
-            const id = String(doc['id']);
+            const id = String(doc['lore_id'] ?? doc['id']); // logical id (review A1 #1: the physical id is now a row key)
+            rows.push({ ...doc });
             inserted.set(id, (inserted.get(id) ?? 0) + 1);
             (this as { insertCalls: number }).insertCalls++;
         },
@@ -104,7 +109,7 @@ function makeFakeClient() {
 }
 
 test('push: 5 concurrent pushes for the same fresh id insert exactly once (no TOCTOU dup)', async () => {
-    const adapter = new TsSdkAdapter({ baseUrl: 'x', apiKey: 'x', tenantId: 't', orgId: 'o' });
+    const adapter = new TsSdkAdapter({ baseUrl: 'x', apiKey: 'x', tenantId: 't', orgId: 'o', workspaceRegistry: testRegistry('ws'), loreWorkspace: 'ws' });
     const fake = makeFakeClient();
     // Inject the fake client + mark connected (both private — test seam).
     (adapter as unknown as { client: unknown; connected: boolean }).client = fake;

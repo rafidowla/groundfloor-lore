@@ -24,7 +24,7 @@ import { randomUUID } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { StorageBundle } from '../services.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
-import type { VersionStore } from '../../outbox/versionStore.js';
+import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
 import type { LoreNode } from '../../providers/types.js';
 import { requireWorkspaceGraph } from '../../engines/requireWorkspaceGraph.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
@@ -41,7 +41,7 @@ import type { WriteAheadLog } from '../../engines/syncEngine.js';
 import { applyChangesetUpsert, applyChangesetDelete, type ChangesetWriteDeps } from '../changesetWrite.js';
 
 export interface VersioningDeps {
-    versionStore: VersionStore;
+    versionStore: VersionStoreApi;
     store: StorageBundle;
     graphRegistry?: LocalGraphRegistry;
     detectedScope: { workspace: string; ecosystem: string };
@@ -105,7 +105,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 // SP-01 — enforce bound-principal workspace scope (read).
                 const scopeDenied = assertMcpScope(workspace, 'read');
                 if (scopeDenied) return scopeDenied;
-                const versions = deps.versionStore.getVersions(node_id, workspace, limit);
+                const versions = await deps.versionStore.getVersions(node_id, workspace, limit);
                 return {
                     content: [{
                         type: 'text' as const,
@@ -151,7 +151,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 // SP-01 — enforce bound-principal workspace scope (read).
                 const scopeDenied = assertMcpScope(workspace, 'read');
                 if (scopeDenied) return scopeDenied;
-                const all = deps.versionStore.getDiff(workspace, since);
+                const all = await deps.versionStore.getDiff(workspace, since);
                 const trimmed = all.slice(0, limit);
                 return {
                     content: [{
@@ -186,7 +186,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 // another workspace, so it can never commit one either.
                 const scopeDenied = assertMcpScope(workspace, 'write');
                 if (scopeDenied) return scopeDenied;
-                const changesetId = deps.versionStore.createChangeset(workspace);
+                const changesetId = await deps.versionStore.createChangeset(workspace);
                 return {
                     content: [{
                         type: 'text' as const,
@@ -208,7 +208,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
         },
         async ({ changeset_id }) => {
             try {
-                const cs = deps.versionStore.getChangeset(changeset_id);
+                const cs = await deps.versionStore.getChangeset(changeset_id);
                 if (!cs) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'changeset_not_found', changeset_id }, null, 2) }], isError: true };
                 }
@@ -224,7 +224,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 const scopeDenied = assertMcpScope(cs.workspace, 'write');
                 if (scopeDenied) return scopeDenied;
 
-                const writes = deps.versionStore.getChangesetWrites(changeset_id);
+                const writes = await deps.versionStore.getChangesetWrites(changeset_id);
 
                 // L-033 (R-005) — enforce the per-workspace write quota BEFORE
                 // applying any write. The store_node buffer branch returns
@@ -310,7 +310,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                             ad.nodes += 1;
                             ad.bytes += quotaBytesOf(p.nodeData);
                             appliedDelta.set(p.workspace, ad);
-                            deps.versionStore.recordVersion({
+                            await deps.versionStore.recordVersion({
                                 versionId: randomUUID(),
                                 nodeId,
                                 workspace: p.workspace,
@@ -343,7 +343,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                                 graph, p.workspace, p.node_id,
                                 'node deleted via commit_changeset',
                             );
-                            deps.versionStore.recordVersion({
+                            await deps.versionStore.recordVersion({
                                 versionId: randomUUID(),
                                 nodeId: p.node_id,
                                 workspace: p.workspace,
@@ -369,7 +369,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                     for (const [ws, delta] of appliedDelta) deps.quotaStore.increment(ws, delta);
                 }
 
-                deps.versionStore.updateChangeset(changeset_id, 'committed');
+                await deps.versionStore.updateChangeset(changeset_id, 'committed');
                 return {
                     content: [{
                         type: 'text' as const,
@@ -391,7 +391,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
         },
         async ({ changeset_id }) => {
             try {
-                const cs = deps.versionStore.getChangeset(changeset_id);
+                const cs = await deps.versionStore.getChangeset(changeset_id);
                 if (!cs) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'changeset_not_found', changeset_id }, null, 2) }], isError: true };
                 }
@@ -407,14 +407,14 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
 
                 if (cs.status === 'open') {
                     // No graph writes have been applied — discard buffered ops.
-                    deps.versionStore.updateChangeset(changeset_id, 'rolled_back');
+                    await deps.versionStore.updateChangeset(changeset_id, 'rolled_back');
                     return {
                         content: [{ type: 'text' as const, text: JSON.stringify({ changeset_id, status: 'rolled_back', reversed: 0, note: 'open changeset discarded before any writes' }, null, 2) }],
                     };
                 }
 
                 // status === 'committed' — reverse each versioned write (newest-first).
-                const versions = deps.versionStore.getVersionsByChangeset(changeset_id);
+                const versions = await deps.versionStore.getVersionsByChangeset(changeset_id);
                 let reversed = 0;
                 let failed = 0;
                 const errors: string[] = [];
@@ -451,7 +451,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                     }
                 }
 
-                deps.versionStore.updateChangeset(changeset_id, 'rolled_back');
+                await deps.versionStore.updateChangeset(changeset_id, 'rolled_back');
                 return {
                     content: [{
                         type: 'text' as const,

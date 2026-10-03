@@ -289,7 +289,8 @@ and `failedOperations` lists the operation names (`compaction`,
 `versionCleanup`, `nodeRetention`, `ephemeralExpiry`) whenever an **enabled**
 operation recorded errors, and the MCP result is flagged `isError`. A step you
 disabled never fails the run. Each report's per-operation `errors[]` is kept
-and says what went wrong; a `FAILED:` line appears in the CLI/text summary.
+and says what went wrong; a `FAILED:` line appears in the CLI/text summary,
+and the `lore maintain` CLI exits with code 1 (3.26.0).
 
 ```bash
 # Preview the reclaimable disk on the active workspace:

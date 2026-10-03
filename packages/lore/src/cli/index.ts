@@ -237,8 +237,12 @@ async function main(): Promise<void> {
     // 2026-08-21, but the CLI now loads other native addons (@surrealdb/node,
     // better-sqlite3, @lancedb/lancedb) and this exit guarantees no lingering
     // native handle can hang the process after data is committed.
+    //
+    // The code is `process.exitCode` when a command set one: `doctor --json`,
+    // `outbox requeue-dead` and `verbatim` report a failure that way and then
+    // return, and a hard-coded 0 here turned every one of them into success.
     if (command !== 'serve') {
-        process.exit(0);
+        process.exit(typeof process.exitCode === 'number' ? process.exitCode : 0);
     }
 }
 

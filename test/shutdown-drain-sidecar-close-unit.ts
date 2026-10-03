@@ -192,6 +192,9 @@ await test('structural: every SQLite sidecar server.ts constructs is in BOTH col
     for (const m of src.matchAll(/\b(\w*Store)\s*=\s*(?:new\s+\w+Store\(|\w+Store\.open\(|create\w*Store\()/g)) {
         if (!KNOWN_NON_SQLITE_STORES.has(m[1]!)) constructedStores.add(m[1]!);
     }
+    // `const { versionStore, localVersionStore } = openVersionStores(...)` (mcp/versionStoreWiring.ts): the cloud
+    // graph owns its own version store (no handle), the local sqlite one is `localVersionStore` and must be closed.
+    if (/=\s*openVersionStores\(/.test(src)) constructedStores.add('localVersionStore');
     assert.ok(constructedStores.size >= 4, `sanity: expected several *Store constructions in server.ts, found ${constructedStores.size}`);
     assert.ok(constructedStores.has('loadJobsStore'), 'sanity: the scan itself must find loadJobsStore’s construction');
 

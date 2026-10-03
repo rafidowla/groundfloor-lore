@@ -20,7 +20,7 @@ import { randomUUID } from 'node:crypto';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { StorageBundle } from '../services.js';
 import type { AuxStore } from '../../outbox/auxStore.js';
-import type { VersionStore } from '../../outbox/versionStore.js';
+import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
 import { loadWorkspaces } from '../../config/workspaces.js';
 import { assertMcpScope } from './mcpScope.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
@@ -37,7 +37,7 @@ export interface LifecycleDeps {
     store: StorageBundle;
     auxStore: AuxStore;
     /** Feature 8: optional version store. When wired, prune/restore writes create version records. */
-    versionStore?: VersionStore;
+    versionStore?: VersionStoreApi;
     /**
      * Phase 6 P1 — multi-workspace registry. When wired (local mode), prune/restore
      * route their graph reads/writes to the REQUESTED workspace's store via
@@ -342,7 +342,7 @@ export function registerLifecycleTools(server: McpServer, deps: LifecycleDeps): 
                         // Feature 8: record version (non-fatal).
                         if (deps.versionStore) {
                             try {
-                                deps.versionStore.recordVersion({
+                                await deps.versionStore.recordVersion({
                                     versionId: randomUUID(), nodeId: applied.node.id, workspace,
                                     timestamp: new Date().toISOString(), principal: 'mcp',
                                     operation: applied.kind === 'hard_delete' ? 'delete' : 'archive',
@@ -446,7 +446,7 @@ export function registerLifecycleTools(server: McpServer, deps: LifecycleDeps): 
                 // Feature 8: record version (non-fatal).
                 if (deps.versionStore) {
                     try {
-                        deps.versionStore.recordVersion({
+                        await deps.versionStore.recordVersion({
                             versionId: randomUUID(), nodeId: id, workspace,
                             timestamp: new Date().toISOString(), principal: 'mcp',
                             operation: 'restore',

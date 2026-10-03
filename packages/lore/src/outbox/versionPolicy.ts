@@ -252,6 +252,12 @@ export function isNoOpVersion(
     const b: Record<string, unknown> = {};
     for (const key of Object.keys(newObj)) {
         if (ignoreFields.includes(key)) continue;
+        // `key: undefined` is "omitted", not a value: the write layers read
+        // `node.field` / `node.field ?? prior`, which cannot tell the two apart,
+        // and `JSON.stringify` drops it from the persisted new_state. Treating
+        // it as present made `metadata: input.metadata` (undefined) defeat the
+        // no-op check. Omitted keys fall to the FIELDS_CLEARED_ON_OMISSION loop.
+        if (newObj[key] === undefined) continue;
         a[key] = prevObj[key];
         b[key] = newObj[key];
     }
@@ -264,7 +270,7 @@ export function isNoOpVersion(
     // record rather than silently skip.
     for (const field of FIELDS_CLEARED_ON_OMISSION) {
         if (ignoreFields.includes(field)) continue;
-        if (field in newObj) continue; // already compared above
+        if (newObj[field] !== undefined) continue; // already compared above (undefined == omitted)
         if (!isFieldOmissionEmpty(field, prevObj[field])) return false;
     }
     return JSON.stringify(canonicalize(a)) === JSON.stringify(canonicalize(b));

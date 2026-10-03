@@ -49,7 +49,7 @@ import { LOCAL_XENOVA_MAX_BATCH } from '../embed/batchedEmbedder.js';
 
 import type { EmbeddingProvider } from './types.js';
 import { loreHomePath } from '../config/loreHome.js';
-import { resolveEmbedModelDir } from './modelCache.js';
+import { resolveEmbedModelDir, type ResolveEmbedModelDirOptions } from './modelCache.js';
 
 /**
  * The default model used by the local provider when no override is
@@ -278,6 +278,9 @@ function cacheKeyFor(modelId: string, device?: LoadDevice, dtype?: ModelDtype): 
     return `${modelId}:${device ?? 'cpu'}:${dtype ?? 'default'}`;
 }
 
+/** Test-only seams: stub the model downloader / pipeline loader so unit tests never touch the network or load ONNX. */
+export const _loadSeamsForTests: { downloadModel?: ResolveEmbedModelDirOptions['downloadModel']; pipeline?: (task: string, dir: string, opts: object) => Promise<unknown> } = {};
+
 /** Get the cache entry for (modelId, device, dtype), creating and kicking
  *  off the pipeline() load if it doesn't exist yet. Does NOT bump
  *  `inFlight` — callers that will actually use the resolved pipeline must
@@ -286,17 +289,12 @@ function getOrCreateEntry(modelId: string, device?: LoadDevice, dtype?: ModelDty
     const key = cacheKeyFor(modelId, device, dtype);
     const existing = pipelineCache.get(key);
     if (existing) return existing;
-    // pipeline() accepts `device` (ORT executionProviders) and `dtype`
-    // (selects which ONNX file to load; 'q8' → model_quantized.onnx).
-    const effectiveDtype = dtype ?? DEFAULT_LOCAL_MODEL_DTYPE;
     // D9 Part A: resolve through the shared model cache first (marker hit /
-    // legacy-cache copy / verified download — see providers/modelCache.ts)
-    // rather than letting pipeline() manage its own cache_dir. cache_dir is
-    // always passed explicitly, per-call — never the process-global
-    // `env.cacheDir` that providers/llmDispatch.ts mutates for its own,
-    // unrelated purpose.
+    // legacy copy / verified download — providers/modelCache.ts), with
+    // cache_dir passed per call, never the process-global `env.cacheDir`.
+    const effectiveDtype = dtype ?? DEFAULT_LOCAL_MODEL_DTYPE;
     const cacheDir = loreHomePath('models');
-    const promise = resolveEmbedModelDir(modelId, effectiveDtype, { cacheDir })
+    const promise = resolveEmbedModelDir(modelId, effectiveDtype, { cacheDir, downloadModel: _loadSeamsForTests.downloadModel })
         .then((modelDir) => {
             const opts: { device?: LoadDevice; dtype?: ModelDtype; cache_dir: string; local_files_only: true } = {
                 cache_dir: cacheDir,
@@ -310,7 +308,7 @@ function getOrCreateEntry(modelId: string, device?: LoadDevice, dtype?: ModelDty
             // an absolute, realpath-verified directory closes a known
             // upstream network-fallback edge case even if that flag were
             // ever bypassed.
-            return pipeline('feature-extraction', modelDir, opts);
+            return (_loadSeamsForTests.pipeline ?? pipeline)('feature-extraction', modelDir, opts);
         })
         .catch((err: unknown) => {
             // Remove the rejected entry so a subsequent call can retry cleanly.

@@ -779,8 +779,53 @@ To warm the shared cache ahead of time (a convenience, not a prerequisite —
 lore models fetch-embedding [--model <id>] [--dtype fp32|fp16|q8|q4] [--revision <rev>]
 ```
 
+**The cache follows `LORE_HOME`, not `dataDir`.** The model cache is always
+`<LORE_HOME>/models/`, even when an embedded host passes a per-instance
+`createLore({ dataDir })`. Pre-fetch with the same `LORE_HOME` the host runs
+under, or the host will not see the files.
+
+**A failed warm-up does not fail open.** Opening a store (LanceDB, SQLite
+verbatim store, Dataplane adapter) primes the embedding model, but a failure
+there (for example a one-off `ETIMEDOUT` reaching Hugging Face) is logged as a
+single warning and the store still opens. Open needs only the provider's static
+model id, dimension and dtype, never a loaded model. The model load is retried
+by the next call that needs an embedding; if it fails again that call throws an
+`EmbedModelUnavailableError` naming the model id, dtype, cache directory, the
+missing file (or the download failure cause) and the fix
+(`lore models fetch-embedding`). After a failed download no new download is
+attempted for 30 s (`EMBED_DOWNLOAD_RETRY_PAUSE_MS`): calls inside the pause get
+the same error at once, with `retryInMs` set, instead of each paying a connect
+timeout. The pause is per model and per process; a model that lands in the cache
+meanwhile is used immediately. `preloadLocalModel()` is an explicit
+warm-up request and still throws. The re-rank model never downloads at runtime
+and is not loaded at open, so it is unaffected.
+
+**Never download (opt-in).** Set `LORE_MODELS_OFFLINE=1` (or `true`) to make a
+cache miss fail immediately, with no network attempt, instead of downloading.
+A marker hit and a local legacy-cache copy still work. `lore models
+fetch-embedding` still downloads when the switch is on (it is the explicit
+fetch command) and prints a note saying so. The switch is read from the
+environment per call and is passed through to the shared model server.
+
 Source: `src/providers/modelCache.ts`, `src/providers/embedManifest.ts`,
 `src/cli/commands/modelsFetchEmbedding.ts`
+
+---
+
+#### `LORE_MODELS_OFFLINE`
+
+| | |
+|---|---|
+| **Default** | _(unset — off)_ |
+| **Surface** | daemon, embedded host |
+
+Set to `1` or `true` to forbid implicit model downloads: a cache miss on the
+embedding model fails immediately with an error naming the model id, dtype,
+cache directory and missing file, and the fix (`lore models fetch-embedding`).
+Off by default. Unlike a failed warm-up, this is deterministic, so a store still
+opens and the error surfaces on the first embed.
+
+Source: `src/providers/modelCache.ts`
 
 ---
 
@@ -1176,7 +1221,73 @@ system keychain (account `dataplane`); `DATAPLANE_API_KEY` is the backward-
 compatible fallback, useful in CI. Also accepted in local mode for opportunistic
 local-sync.
 
+**Local-sync is registry-gated.** The sync adapter built from this key only
+pushes and pulls Lore workspaces that exist in the host's own workspace registry
+(`workspaces.json` under its Lore home). A workspace that is not in that registry
+is refused with `cloud_scope_workspace_not_allowed` instead of being synced. Hosts
+that set `DATAPLANE_API_KEY` in local mode (Atlas, MIRA, PM Helper) must create
+the workspace through Lore's own workspace provisioning before it can sync; earlier
+versions pushed any workspace name without this check.
+
+**Cloud rows are keyed by a permanent workspace id.** Each registry entry carries
+an immutable `id` (UUID); synced rows use it, not the workspace name. Renaming a
+workspace keeps its rows; deleting and recreating one under the same name starts
+empty (new id); aliases share their target's id. When a Dataplane-backed store is
+built (cloud mode or this local-sync mode), entries written before the field
+existed get an id added to `workspaces.json` once (atomic, only the `id` field
+changes, path fields untouched). Hosts that never use a Dataplane key are never
+rewritten. There is no data migration; rows of a deleted workspace are left in
+Dataplane.
+
 Source: `src/mcp/services.ts`, `src/mcp/server.ts`
+
+---
+
+### `DATAPLANE_WORKSPACE_ID`
+
+| | |
+|---|---|
+| **Default** | _(falls back to `DATAPLANE_TENANT_ID`, then `groundfloor_lore`)_ |
+| **Surface** | daemon (cloud mode) |
+
+The Dataplane workspace Lore's storage is provisioned in (preferred name;
+`DATAPLANE_TENANT_ID` is the legacy alias). The workspace is fixed by the API
+credential: the engine ignores any client-supplied tenant header. Lore workspaces
+(the application's tenants) are separated inside it by the `lore_workspace` column,
+and `DATAPLANE_ORG_ID` is the Lore instance.
+
+Source: `src/mcp/cloudBootConfig.ts`
+
+---
+
+### `DATAPLANE_CONNECTION`
+
+| | |
+|---|---|
+| **Default** | _(unset)_ |
+| **Surface** | daemon (cloud mode; also the local-sync adapter) |
+
+The one Dataplane connector (database) every Lore call names: graph, verbatim
+store, version store, history transactions and the sync adapter all send it.
+Set it to the connector that holds the Lore collections (for example
+`postgresql`).
+
+Why it matters: when a call names no connector the engine chooses one **per
+route** (sqlite for CRUD, query, bulk and vector; postgresql for keyword search
+and `/v1/transaction`; surrealdb for graph traverse), unless the engine's own
+`DEFAULT_CONNECTOR` overrides all of them. One logical store can then be split
+across databases, so keyword search or a history transaction runs against a
+database that does not hold the data.
+
+When unset Lore keeps working but is conservative: it never sends
+`/v1/transaction` (change and history rows are written separately, failures
+counted in `/health`), and it logs `cloud_connection_unset` once at boot.
+Keyword search and traverse still follow the engine's per-route defaults, so
+set this (or the engine's `DEFAULT_CONNECTOR`) in any real cloud deployment. A
+connector that cannot run transactions (sqlite) answers 501 on the first
+history write and is then treated the same way as unset.
+
+Source: `src/mcp/cloudBootConfig.ts`, `src/mcp/cloudStores.ts`
 
 ---
 
@@ -3675,10 +3786,13 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_LOCAL_EMBEDDING_DIM` | `384` | Embedding |
 | `LORE_LOCAL_EMBEDDING_DTYPE` | `q8` | Embedding |
 | `LORE_LOCAL_EMBEDDING_DEVICE` | `cpu` | Embedding |
+| `LORE_MODELS_OFFLINE` | _(off)_ | Embedding |
 | `LORE_CLOUD_URL` | _(none)_ | Sync |
 | `LORE_CLOUD_AUTH_TOKEN` | _(none)_ | Sync |
 | `DATAPLANE_URL` | `http://localhost:8080` | Sync/Dataplane |
 | `DATAPLANE_API_KEY` | _(none)_ | Sync/Dataplane |
+| `DATAPLANE_WORKSPACE_ID` | _(`DATAPLANE_TENANT_ID`, else `groundfloor_lore`)_ | Sync/Dataplane |
+| `DATAPLANE_CONNECTION` | _(none; engine per-route defaults)_ | Sync/Dataplane |
 | `DATAPLANE_TENANT_ID` | `groundfloor_lore` | Sync/Dataplane |
 | `DATAPLANE_ORG_ID` | _(required in cloud mode)_ | Sync/Dataplane |
 | `LORE_ARCADE_CA_FILE` | _(none)_ | Arcade (off by default) |

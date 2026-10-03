@@ -34,6 +34,7 @@ import {
     flattenRevisionDir,
     fmtBytes,
     listFilesWithSizes,
+    modelsOfflineFromEnv,
     rmQuiet,
     verifyAgainstManifest,
 } from '../../providers/modelCache.js';
@@ -105,6 +106,7 @@ export async function fetchEmbeddingCommand(args: string[]): Promise<void> {
 
     console.log('');
     console.log('Fetching local embedding model (online — local_files_only:false)');
+    if (modelsOfflineFromEnv()) console.log('  NOTE: LORE_MODELS_OFFLINE is set; it only blocks implicit downloads — this explicit fetch still downloads.');
     console.log(`  Model:     ${modelId}`);
     console.log(`  Dtype:     ${dtype}`);
     console.log(`  Revision:  ${revision ?? 'main (unpinned — pass --revision to pin)'}`);

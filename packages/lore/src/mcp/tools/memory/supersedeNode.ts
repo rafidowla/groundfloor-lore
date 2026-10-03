@@ -14,6 +14,7 @@ import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import { recordHotWrite } from '../../../outbox/hotLane.js';
+import { withEdgeLock } from '../../../core/nodeWriteLock.js';
 import { redactError } from '../../../security/logRedact.js';
 import { tombstoneQuestionAliases } from '../../../core/nodeServiceVerbatim.js';
 import { MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../../../engines/nodeFieldLimits.js';
@@ -103,16 +104,20 @@ export function registerSupersedeNodeTool(mcpServer: McpServer, deps: MemoryTool
                         confidenceScore: 1.0,
                     };
                     try {
-                        if (deps.outboxStore) {
-                            await recordHotWrite(deps.outboxStore, {
-                                workspace: _ws,
-                                operationKind: 'edge.upsert',
-                                payload: supersedeEdge,
-                                initiator: 'mcp:supersede_node',
-                                operation: 'edge.upsert',
-                            });
-                        }
-                        await withTransactionConflictRetry(() => targetGraph.addEdge(supersedeEdge));
+                        // 3.26.0 — under the triple's edge lock, like every
+                        // other edge writer (see applyWriteTimeSupersedes).
+                        await withEdgeLock(_ws, new_id, old_id, 'supersedes', async () => {
+                            if (deps.outboxStore) {
+                                await recordHotWrite(deps.outboxStore, {
+                                    workspace: _ws,
+                                    operationKind: 'edge.upsert',
+                                    payload: { ...supersedeEdge, bidirectional: false }, // one-way on replay
+                                    initiator: 'mcp:supersede_node',
+                                    operation: 'edge.upsert',
+                                });
+                            }
+                            await withTransactionConflictRetry(() => targetGraph.addEdge(supersedeEdge));
+                        });
                     } catch (edgeErr) {
                         log.warn(`[Lore] supersede_node: supersedes edge ${new_id}->${old_id} failed (non-fatal; supersededAt is authoritative): ${redactError(edgeErr)}`);
                     }

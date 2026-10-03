@@ -730,6 +730,45 @@ type NodeWriteResult =
 Note: transport-level gates (ReBAC, MCP scope, quota) are NOT applied to
 in-process `nodeUpsert` calls — the embedding host owns its own authorization.
 
+A save that fails partway is rolled back (3.26.0): an update puts the earlier
+node back (content, `createdAt`, counters and relationships as they were;
+`updatedAt` is the time of the restore), and only a node the failed save created
+is deleted. Before 3.26.0 the rollback deleted the node in both cases. Every
+save reads the node once before writing. If that read fails, the call rejects
+with `nodeUpsert could not read the current state of <id> before writing (...);
+nothing was written`, and it is safe to retry.
+
+#### `lore.nodeDelete(args)` → `Promise<NodeDeleteOutcome>` (3.26.0)
+
+In-process hard delete. Runs the same sequence as the MCP `delete_node` tool:
+`node.delete` recorded in the outbox, graph node and its relationships removed,
+verbatim row tombstoned, WAL entry appended, one `lib:nodeDelete` audit row.
+
+```ts
+const out = await lore.nodeDelete({ id: 'decision-001', workspace: 'default' });
+// { deleted: true }                    the node existed and is gone
+// { deleted: false }                   no node with that id
+// { deleted: true, verbatimWarning }   graph node gone, verbatim tombstone failed
+```
+
+- Throws on an empty `id` or `workspace`, and with `workspace_not_found` on a
+  workspace this instance does not know.
+- Version history rows of the node are kept (as with `delete_node`).
+- A `nodeUpsert` of the same id after the delete is kept. A save recorded before
+  the delete is never replayed over it, including one left unfinished by a crash.
+- If the graph delete itself throws, the call rejects. The delete is already
+  recorded in the outbox and is applied by a later replay; calling again is safe.
+- One process owns a data directory's outbox replay. Do not point a second
+  replaying process at the same directory.
+- Not available in ArcadeDB mode (the call rejects).
+- No transport-level gates apply, as with `nodeUpsert`.
+
+Use this instead of `lore.store.storageClient.rawGraph().deleteNode(id)`. A raw
+delete is invisible to the outbox: it leaves the node's verbatim row behind, and if
+the node's last save is still unfinished from before start-up (the process stopped
+before it was replayed, or the raw delete runs right after start-up before the
+first replay), that save is replayed as crash recovery and the node comes back.
+
 #### `lore.createMcpServer()` → `McpServer`
 
 Factory for a fresh, fully-configured MCP server. In embedded mode this gives
@@ -774,6 +813,7 @@ All types below are importable from `'@groundfloor/lore'`:
 | `CreateLoreOptions` | `interface` | Options for `createLore`. |
 | `LoreDeploymentMode` | `type` | `'embedded' \| 'local' \| 'cloud'`. |
 | `NodeWriteResult` | `type` | Discriminated union returned by `nodeUpsert`. |
+| `NodeDeleteOutcome` | `type` | `{ deleted: boolean; verbatimWarning?: string }`, returned by `nodeDelete`. |
 | `LoreStorageClient` | `class` | Storage-client facade (cloud-swap point). |
 | `rebuildPieceIndex` | `function` | 3.24.2. Offline D7 piece-index rebuild for a host's `createLore({ dataDir })` root — the API behind `lore migrate piece-vectors --data-dir`. `({ dataDir?, embeddingProvider?, embedding?, force?, dryRun?, drop? })` → `{ action, nodesScanned, nodesRebuilt, piecesIndexed, reason?, basePath, engine, modelId }`. Dispose the host's instance first. See `docs/MIGRATION-3.24.md` §0. |
 | `PieceIndexDataDirInUseError` | `class` | Thrown by `rebuildPieceIndex` when a (Surreal-graph) data root is held by a running process. |

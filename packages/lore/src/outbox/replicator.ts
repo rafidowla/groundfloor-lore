@@ -44,9 +44,10 @@
 import type { DispatcherSubstrates } from './dispatcher.js';
 import { dispatch, MissingPayloadError, UnwiredOperationKindError, verifyApplied } from './dispatcher.js';
 import { collectVerbatimUpsertRun, consolidateVerbatimRun } from './verbatimConsolidation.js';
-import { keyOfEntry, type EntityFamily } from './supersession.js';
+import { keyOfEntry, SUPERSEDED_DEAD_ERROR, type EntityFamily } from './supersession.js';
 import type { OutboxLagCache } from './lagCache.js';
 import type { OutboxEntry, OutboxStore } from './types.js';
+import { claimEntry, SerialGate } from './replicatorClaim.js';
 import { DeadLetterWatch } from './deadLetterWatch.js';
 import { interruptibleSleep, makeStopSignal, type StopSignal } from './interruptibleSleep.js';
 
@@ -233,6 +234,8 @@ export class OutboxReplicator {
     private loopPromise: Promise<void> | null = null;
     /** See outbox/interruptibleSleep.ts. Lets stop() wake an in-flight nap. */
     private stopSignal: StopSignal | null = null;
+    /** 3.26.0 — the loop and tickOnce() never run a tick concurrently. */
+    private readonly tickGate = new SerialGate();
     private readonly stats: ReplicatorStats = {
         replicated: 0, failures: 0, dead: 0, ticks: 0, lastTickMs: 0,
         selfHealed: 0, selfHealSweeps: 0, selfHealExamined: 0, pruned: 0,
@@ -285,7 +288,7 @@ export class OutboxReplicator {
      */
     async tickOnce(): Promise<number> {
         if (!this.requiredStoreMethods()) return 0;
-        const n = await this.runTick();
+        const n = await this.tickGate.run(() => this.runTick());
         await this.maybeSelfHeal();
         await this.maybePruneReplicated();
         await this.refreshLagCache();
@@ -456,7 +459,7 @@ export class OutboxReplicator {
         try {
             const stats = await fn.call(this.store);
             this.lagCache?.refresh(stats);
-            this.deadLetterWatch.observe(stats.dead, this.log);
+            this.deadLetterWatch.observe(stats.dead, this.log, stats.deadSuperseded);
         } catch (err) {
             this.log(`[outbox replicator] lag-cache refresh failed: ${(err as Error).message}`);
         }
@@ -478,7 +481,7 @@ export class OutboxReplicator {
             const started = Date.now();
             let processed = 0;
             try {
-                processed = await this.runTick();
+                processed = await this.tickGate.run(() => this.runTick());
             } catch (err) {
                 this.log(`[outbox replicator] tick error: ${(err as Error).message}`);
             }
@@ -722,12 +725,14 @@ export class OutboxReplicator {
         // replayed. Skip + mark 'dead' if a newer op on the same ENTITY (any
         // kind in the family) already 'replicated' (see isSupersededFailed).
         if (entry.status === 'failed' && await this.isSupersededFailed(entry)) {
-            await this.store.markEntryStatus!(entry.id, 'dead', { error: 'superseded by newer same-key write (RA-6)' });
+            await this.store.markEntryStatus!(entry.id, 'dead', { error: SUPERSEDED_DEAD_ERROR });
             this.stats.dead++;
             this.log(`[outbox replicator] entry ${entry.id} (${entry.operationKind}) skipped: superseded by newer same-key write`);
             return false;
         }
-        await this.store.markEntryStatus!(entry.id, 'replicating');
+        // 3.26.0 — claim before replay (see replicatorClaim.ts): a row held by
+        // another replayer, already applied, or retracted is not dispatched.
+        if (!(await claimEntry(this.store, entry.id))) return false;
         try {
             await dispatch(entry, this.substrates);
             await this.store.markEntryStatus!(entry.id, 'replicated');

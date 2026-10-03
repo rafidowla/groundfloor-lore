@@ -318,7 +318,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
 
                 // Feature 8: buffer into open changeset (validation already passed).
                 if (changeset_id && deps.versionStore) {
-                    const cs = deps.versionStore.getChangeset(changeset_id);
+                    const cs = await deps.versionStore.getChangeset(changeset_id);
                     if (!cs) {
                         return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'changeset_not_found', changeset_id }, null, 2) }], isError: true };
                     }
@@ -328,7 +328,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                     // SW-06 (B8): seq is allocated atomically inside the store
                     // (MAX(seq)+1 under one txn that also bumps write_count) — no
                     // longer derived from the racy cs.writeCount read above.
-                    const seq = deps.versionStore.addChangesetWrite(changeset_id, 'upsert_node', {
+                    const seq = await deps.versionStore.addChangesetWrite(changeset_id, 'upsert_node', {
                         workspace: scopedWorkspace,
                         nodeData: {
                             id, type, label, content: content ?? '', tags: tags ?? '',

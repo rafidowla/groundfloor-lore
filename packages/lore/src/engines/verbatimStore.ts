@@ -6,6 +6,7 @@ import * as path from 'path';
 
 import type { EmbeddingProvider, VectorProvider, VerbatimDocument, VerbatimSearchResult, VerbatimQueryFilter } from '../providers/types.js';
 import { LocalEmbeddingProvider } from '../providers/localEmbeddingProvider.js';
+import { warmEmbeddingProvider } from '../providers/embeddingWarmup.js';
 import { isEmbeddingDisabled } from '../providers/nullEmbeddingProvider.js';
 import { applyFingerprintOnOpen, stampFingerprint, EmbeddingFingerprintMismatchError } from './verbatimFingerprintGate.js';
 import { applyActorScopeFilter } from '../security/scopeFilter.js';
@@ -422,9 +423,8 @@ export class VerbatimStore implements VectorProvider {
     async initialize(): Promise<void> {
         try {
             if (this.initialized) return;
-            // Warm the embedder so the first store()/search() doesn't
-            // pay the model-load latency on the request path.
-            await this.embeddingProvider.initialize();
+            // Best-effort embedder warm-up (non-fatal; retried on first embed).
+            await warmEmbeddingProvider(this.embeddingProvider, '[VerbatimStore]');
             this.db = await lancedb.connect(this.lancedbPath); this.nativesClosed = false; // reconnect => close() runs again
             try {
                 this.table = shouldOpenWriteTable(this.role) ? await this.db.openTable('lore_verbatim') : null; // role:'read' skips this open

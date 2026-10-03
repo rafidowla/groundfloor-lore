@@ -21,9 +21,7 @@ import type { ISessionCache } from '../engines/sessionCache.js';
 import { openWorkspaceGraph } from '../engines/openWorkspaceGraph.js';
 import { requireWorkspaceGraph, isWorkspaceGraph } from '../engines/requireWorkspaceGraph.js';
 import { collectSupersededEligible } from '../engines/nodePager.js';
-import { hasCapability } from '../engines/connectorCapabilities.js';
 import { DataplaneGraph } from '../engines/dataplaneGraph.js';
-import { createLoreDataplaneSdk } from '../engines/dataplaneSdkCompat.js';
 import { openWorkspaceVerbatim, resolveVerbatimEngineForPath } from '../engines/openWorkspaceVerbatim.js';
 import { resolveHostPieceVectorsDefault, resolvePieceVectorsIntent } from '../engines/pieces/pieceSettings.js';
 import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js'; import type { VerbatimStoreRole } from '../engines/verbatimStoreRole.js';
@@ -35,7 +33,8 @@ import type { EmbeddingProvider } from '../providers/types.js';
 import { TsSdkAdapter } from '../engines/tsSdkAdapter.js';
 import type { TsSdkConfig } from '../engines/tsSdkAdapter.js';
 import { resolveSyncAdapter } from '../engines/syncAdapterRegistry.js';
-import { requireCurrentTenantId } from '../security/workspaceContext.js';
+import { buildCloudStores, type BuildCloudStoresOpts } from './cloudStores.js';
+import { createWorkspaceRegistry, requireDataplaneOrgId, resolveDataplaneConnection, resolveDataplaneWorkspaceId } from './cloudBootConfig.js';
 import type { AuditLog } from '../security/audit.js';
 import {
     getActiveWorkspaceName,
@@ -67,58 +66,9 @@ import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 export type LoreGraph = LoreGraphHandle;
 export type LoreVectorStore = VerbatimStoreApi | DataplaneVectorStore;
 
-/**
- * requireDataplaneOrgId — Cloud-mode tenant-isolation boot gate (D4/G14).
- *
- * In cloud/Dataplane mode the org id scopes every read and write. A
- * forgotten DATAPLANE_ORG_ID used to fall back to the literal 'default'
- * (six call sites), silently collapsing all tenants into one org — a
- * cross-tenant data-mixing risk that fails a multi-tenant security
- * review. There is no safe default in cloud mode, so refuse to build any
- * Dataplane-bound service without an explicit org id.
- *
- * Local mode never reaches this gate: it has no org and uses LocalGraph /
- * VerbatimStore, so its behaviour is unchanged.
- */
-export function requireDataplaneOrgId(): string {
-    const orgId = process.env['DATAPLANE_ORG_ID'];
-    if (!orgId) {
-        throw new Error(
-            '[Lore MCP] DATAPLANE_ORG_ID is required in cloud mode but is unset. ' +
-                'Refusing to start: a missing org id would silently collapse every ' +
-                "tenant into one 'default' org (cross-tenant data mixing). Set " +
-                'DATAPLANE_ORG_ID to the tenant org id, or run in local mode ' +
-                '(unset LORE_DEPLOYMENT_MODE / set it to "local").',
-        );
-    }
-    return orgId;
-}
-
-/**
- * loadGroundfloorClient — Lazy, cloud-only loader for the optional
- * groundfloor-ts-sdk dependency (TW-1b).
- *
- * The SDK is declared under package.json#optionalDependencies, so a
- * local/embedded consumer's `npm install` succeeds even when the SDK can't
- * be resolved. To keep the local path from ever touching the missing module,
- * the static import above is type-only (erased); the runtime class is pulled
- * in here via a dynamic import that ONLY executes inside the cloud branches.
- *
- * If the SDK isn't present (local install, optional dep skipped), surface a
- * clear, actionable error instead of a raw ERR_MODULE_NOT_FOUND.
- */
-export async function loadGroundfloorClient(): Promise<typeof import('groundfloor-ts-sdk').GroundfloorClient> {
-    try {
-        const m = await import('groundfloor-ts-sdk');
-        return m.GroundfloorClient;
-    } catch (err) {
-        throw new Error(
-            "[Lore MCP] cloud mode requires the optional dependency 'groundfloor-ts-sdk' — " +
-                "install it to use deploymentMode:'cloud'. " +
-                `(dynamic import failed: ${(err as Error).message})`,
-        );
-    }
-}
+// Cloud store construction + the boot gate live in cloudStores.ts (this file is at its line cap).
+export { loadGroundfloorClient } from './cloudStores.js';
+export { requireDataplaneOrgId } from './cloudBootConfig.js';
 
 export interface CreateGraphOpts {
     deploymentMode: 'local' | 'cloud';
@@ -170,16 +120,13 @@ export interface CreateGraphOpts {
  */
 export async function createGraph(opts: CreateGraphOpts): Promise<LoreGraph> {
     if (opts.deploymentMode === 'cloud') {
-        const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
-        const apiKey = process.env['DATAPLANE_API_KEY'] ?? '';
-        const orgId = requireDataplaneOrgId();
-        const GroundfloorClient = await loadGroundfloorClient();
-        const client = createLoreDataplaneSdk(GroundfloorClient, baseUrl, apiKey || 'pending-keychain');
-        return new DataplaneGraph({
-            client: client as never,
-            tenantProvider: () => requireCurrentTenantId(),
-            orgId,
+        // 'pending-keychain' is a placeholder that maybeUpgradeAdapterFromKeychain replaces (both stores).
+        const { graph } = await buildCloudStores({
+            baseUrl: process.env['DATAPLANE_URL'] ?? 'http://localhost:8080',
+            apiKey: process.env['DATAPLANE_API_KEY'] || 'pending-keychain',
+            ...(opts.home ? { home: opts.home } : {}),
         });
+        return graph;
     }
     // Construction only — `openWorkspaceGraph` deliberately does not
     // initialize, matching what `new LocalGraph(...)` did here before. Boot
@@ -238,24 +185,13 @@ export interface CreateVectorStoreOpts {
  */
 export async function createVectorStore(opts: CreateVectorStoreOpts): Promise<LoreVectorStore> {
     if (opts.deploymentMode === 'cloud') {
-        const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
-        const apiKey = process.env['DATAPLANE_API_KEY'] ?? '';
-        const orgId = requireDataplaneOrgId();
-        // Share the pattern with createGraph(): pending-keychain is a
-        // placeholder satisfied by the same maybeUpgradeAdapterFromKeychain
-        // rebuild when a keychain credential is present.
-        const GroundfloorClient = await loadGroundfloorClient();
-        const client = createLoreDataplaneSdk(GroundfloorClient, baseUrl, apiKey || 'pending-keychain');
-        return new DataplaneVectorStore({
-            client: client as never,
-            tenantProvider: () => requireCurrentTenantId(),
-            orgId,
+        const { vectorStore } = await buildCloudStores({
+            baseUrl: process.env['DATAPLANE_URL'] ?? 'http://localhost:8080',
+            apiKey: process.env['DATAPLANE_API_KEY'] || 'pending-keychain',
             embeddingProvider: opts.embeddingProvider,
-            // Bind a capability probe so bm25Search can skip the call
-            // when no connector ranks. Falls open on probe failure.
-            hasCapability: (capability: string) =>
-                hasCapability(baseUrl, apiKey || 'pending-keychain', capability),
+            ...(opts.home ? { home: opts.home } : {}),
         });
+        return vectorStore;
     }
     // 3.21 step 2 part 2 — which engine THIS workspace declares
     // (WorkspaceEntry.vectorEngine; absent = 'lance', unchanged behaviour).
@@ -308,12 +244,12 @@ export async function createVectorStore(opts: CreateVectorStoreOpts): Promise<Lo
  */
 export function resolveSyncAdapterFromEnv(
     deploymentMode: 'local' | 'cloud',
+    home?: string,
 ): TsSdkAdapter | null {
     const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
     const apiKey = process.env['DATAPLANE_API_KEY'];
-    const tenantId = process.env['DATAPLANE_TENANT_ID'] ?? 'groundfloor_lore';
-
     if (!apiKey) return null;
+    const tenantId = resolveDataplaneWorkspaceId();
 
     // Cloud mode requires an explicit org id (D4/G14 tenant isolation). Local
     // mode may carry a DATAPLANE_API_KEY for opportunistic ("local-sync") sync
@@ -340,13 +276,16 @@ export function resolveSyncAdapterFromEnv(
     // resolveSyncAdapterFromEnv runs at server.ts module scope; reading a fresh
     // env var here would require allow-listing it in envScrub (SP-17). Threading
     // a configurable name is a follow-up that owns that allowlist change.
-    const cfg: TsSdkConfig = { baseUrl, apiKey, tenantId, orgId };
+    const connection = resolveDataplaneConnection();
+    const cfg: TsSdkConfig = { baseUrl, apiKey, tenantId, orgId, workspaceRegistry: createWorkspaceRegistry(home), ...(connection ? { connection } : {}) };
     return resolveSyncAdapter('dataplane', cfg) as TsSdkAdapter;
 }
 
 export interface MaybeUpgradeAdapterDeps {
     deploymentMode: 'local' | 'cloud';
     loreDir: string;
+    /** Data home whose workspaces.json is this instance's Lore-workspace registry (default LORE_HOME). */
+    home?: string;
     /** Read fresh — adapter and graph are `let`-mutable in server.ts. */
     getAdapter: () => TsSdkAdapter | null;
     getGraph: () => LoreGraph;
@@ -354,9 +293,19 @@ export interface MaybeUpgradeAdapterDeps {
     verbatimStore: LoreVectorStore;
     /** Setters write back into server.ts module-scope `let` bindings. */
     setAdapter: (a: TsSdkAdapter) => void;
+    /** Review A1 #1 — Lore workspace the boot sync engine syncs (read per operation). */
+    getSyncWorkspace: () => string;
+    /** The name the boot graph (`getGraph()`) is registered and edge-locked
+     *  under. Fixed at boot: the graph does not follow a later active-workspace
+     *  change, so neither may its lock key. */
+    lockWorkspace: string;
     setSyncEngine: (s: import('../engines/syncEngine.js').SyncEngine) => void;
     setWal: (w: import('../engines/syncEngine.js').WriteAheadLog) => void;
     setGraph: (g: LoreGraph) => void;
+    /** Cloud only: embedder for the rebuilt vector store (`buildCloudStores`). */
+    embeddingProvider?: EmbeddingProvider;
+    /** Test seams (cloud only): keychain credential source and SDK factory. */
+    cloud?: Pick<BuildCloudStoresOpts, 'clientFactory'> & { getKeychainKey?: () => Promise<string | null> };
 }
 
 /**
@@ -377,12 +326,12 @@ export async function maybeUpgradeAdapterFromKeychain(
     const { getApiKey } = await import('../config/keychain.js');
     const { SyncEngine } = await import('../engines/syncEngine.js');
 
-    const keychainKey = await getApiKey('dataplane');
+    const keychainKey = await (deps.cloud?.getKeychainKey ?? (() => getApiKey('dataplane')))();
     if (!keychainKey) {
         return deps.getAdapter() ? 'env' : 'none';
     }
     const baseUrl = process.env['DATAPLANE_URL'] ?? 'http://localhost:8080';
-    const tenantId = process.env['DATAPLANE_TENANT_ID'] ?? 'groundfloor_lore';
+    const tenantId = resolveDataplaneWorkspaceId();
     // Cloud mode requires an explicit org id (D4/G14). Local mode keeps its
     // prior behaviour: it may carry a keychain dataplane key for opportunistic
     // sync but is never tenant-scoped, so it tolerates an absent org id.
@@ -390,7 +339,9 @@ export async function maybeUpgradeAdapterFromKeychain(
         deps.deploymentMode === 'cloud'
             ? requireDataplaneOrgId()
             : process.env['DATAPLANE_ORG_ID'] ?? 'default';
-    const newAdapter = new TsSdkAdapter({ baseUrl, apiKey: keychainKey, tenantId, orgId });
+    const workspaceRegistry = createWorkspaceRegistry(deps.home);
+    const connection = resolveDataplaneConnection();
+    const newAdapter = new TsSdkAdapter({ baseUrl, apiKey: keychainKey, tenantId, orgId, workspaceRegistry, ...(connection ? { connection } : {}) });
     deps.setAdapter(newAdapter);
     // Sprint 14 — SyncEngine accepts the LoreGraph union; the prior
     // `as LocalGraph` cast lied about cloud-mode runtime. Pass the
@@ -399,23 +350,28 @@ export async function maybeUpgradeAdapterFromKeychain(
     const newSync = new SyncEngine(
         deps.getGraph(),
         deps.loreDir,
-        deps.deploymentMode === 'cloud' ? null : newAdapter,
+        deps.deploymentMode === 'cloud' ? null : newAdapter.forWorkspace(deps.getSyncWorkspace),
         deps.verbatimStore,
+        null,
+        null,
+        deps.lockWorkspace, // pulled edges hold the per-edge lock (3.26.0)
     );
     deps.setSyncEngine(newSync);
     deps.setWal(newSync.getWal());
-    // Q2.2 — In cloud mode, keychain-sourced credential also upgrades
-    // the DataplaneGraph's client. Rebuild the graph binding so new
-    // requests use the real key instead of the 'pending-keychain' stub.
+    // Q2.2 — cloud mode: the keychain credential upgrades BOTH stores (graph + vector store,
+    // one buildCloudStores call) so neither keeps the 'pending-keychain' placeholder. The boot
+    // vector store / graph are captured by value across the daemon, so they adopt the new
+    // connection in place; the rebuilt graph is also handed to the server via setGraph.
     if (deps.deploymentMode === 'cloud') {
-        const GroundfloorClient = await loadGroundfloorClient();
-        const newClient = createLoreDataplaneSdk(GroundfloorClient, baseUrl, keychainKey);
-        const newGraph = new DataplaneGraph({
-            client: newClient as never,
-            tenantProvider: () => requireCurrentTenantId(),
-            orgId,
+        const { graph, vectorStore } = await buildCloudStores({
+            apiKey: keychainKey, baseUrl, orgId, dataplaneWorkspaceId: tenantId, workspaceRegistry,
+            ...(deps.embeddingProvider ? { embeddingProvider: deps.embeddingProvider } : {}),
+            ...(deps.cloud?.clientFactory ? { clientFactory: deps.cloud.clientFactory } : {}),
         });
-        deps.setGraph(newGraph);
+        if (deps.verbatimStore instanceof DataplaneVectorStore) deps.verbatimStore.adoptConnectionFrom(vectorStore);
+        const oldGraph = deps.getGraph();
+        if (oldGraph instanceof DataplaneGraph) oldGraph.adoptConnectionFrom(graph);
+        deps.setGraph(graph);
     }
     return 'keychain';
 }

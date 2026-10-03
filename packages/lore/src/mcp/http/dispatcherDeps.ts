@@ -38,7 +38,7 @@ import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { StorageBundle, PhaseAServices } from '../services.js';
 import type { PlanOrchestrator } from '../../schemas/orchestration/orchestrator.js';
 import type { AuxStore } from '../../outbox/auxStore.js';
-import type { VersionStore } from '../../outbox/versionStore.js';
+import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
 
 export interface DispatcherDeps {
     /** Boot-time. */
@@ -242,7 +242,7 @@ export interface DispatcherDeps {
 
     /** Feature 8 — VersionStore for versioning and changeset REST routes.
      *  Optional so cloud-mode boots without it still type. */
-    versionStore?: VersionStore;
+    versionStore?: VersionStoreApi;
 
     /** D5 round 2 (#2) — host-level supersession-enforce default, threaded
      *  to every route that resolves `resolveSupersessionContext`. */

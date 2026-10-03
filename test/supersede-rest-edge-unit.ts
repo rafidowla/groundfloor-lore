@@ -236,8 +236,10 @@ test('2: REST supersede records an outbox edge.upsert row (outbox-first)', async
     await handleSupersede(req as never, res as never, '/api/node/supersede', makeRestDeps() as never);
     assert.equal(res.statusCode, 200, `expected 200, got ${res.statusCode}: ${res.body}`);
 
-    const newEntries = outboxEntries.slice(before);
-    assert.equal(newEntries.length, 1, `expected exactly 1 outbox row, got ${newEntries.length}`);
+    // The same call also queues the superseded node's question-alias
+    // tombstones; only the edge row is under test here.
+    const newEntries = outboxEntries.slice(before).filter((e) => e.operationKind === 'edge.upsert');
+    assert.equal(newEntries.length, 1, `expected exactly 1 edge.upsert outbox row, got ${newEntries.length}`);
     const row = newEntries[0]!;
     assert.equal(row.operationKind, 'edge.upsert');
     assert.equal(row.workspace, WS);
@@ -246,6 +248,8 @@ test('2: REST supersede records an outbox edge.upsert row (outbox-first)', async
         { sourceId: row.payload?.['sourceId'], targetId: row.payload?.['targetId'], relation: row.payload?.['relation'] },
         { sourceId: 'ob-new', targetId: 'ob-old', relation: 'supersedes' },
     );
+    // 3.26.0 — one-way: replay treats a missing flag as true and wrote the reverse edge too.
+    assert.equal(row.payload?.['bidirectional'], false);
 
     const edges = await supersedesEdges('ob-new');
     assert.equal(edges.length, 1, 'edge must also exist in the graph after the outbox row');

@@ -68,7 +68,7 @@
 | `sw16-batch-hydration-unit.ts` | recallCrossWorkspace, localGraph |
 | `write-side-route-gate-unit.ts` | workspaces, retention, config, actorContext, … |
 
-### engines  (67 tests)
+### engines  (69 tests)
 
 | Test file | Primary modules under test |
 |---|---|
@@ -79,6 +79,9 @@
 | `bulk-write-content-hash-unit.ts` | bulkWrite, contentHash, verbatimStore, types |
 | `cache-per-kind-stats-unit.ts` | cache |
 | `cache-unit.ts` | cache |
+| `cloud-purge-adversarial-unit.ts` | dataplaneWorkspacePurgeApply, dataplaneWorkspacePurge, dataplaneScopeFilter |
+| `cloud-purge-cli-unit.ts` | maintainCloudPurge, deletedWorkspaces, dataplaneWorkspacePurgeApply |
+| `cloud-purge-unit.ts` | dataplaneWorkspacePurge, dataplaneScopeFilter, dataplaneScopedIo |
 | `collection-storage-unit.ts` | dataplaneCollectionStorage |
 | `connector-capabilities-unit.ts` | connectorCapabilities |
 | `connector-contract-unit.ts` | registry, types |
@@ -101,6 +104,8 @@
 | `maintain-integration.ts` | adapters, maintain, policy |
 | `maintain-unit.ts` | policy, selection, maintain, ports |
 | `maintain-retention-engines-unit.ts` | adapters, maintain, retentionSweep, sqliteGraphAggregates, mcp maintain tool |
+| `maintain-cli-exit-unit.ts` | cli maintain (exit code on a failed step) |
+| `cli-entry-exit-code-unit.ts` | cli index (a command's exit code survives the final exit) |
 | `memory-backbone-adversarial-unit.ts` | sweeper, contentHash, verbatimStore, consistency, … |
 | `memory-backbone-integration.ts` | verbatimStore, contentHash, sweeper, types, … |
 | `multi-master-sync-unit.ts` | multiMasterSync |
@@ -236,12 +241,13 @@
 | `sync-reconciler-unit.ts` | reconciler, cloudSyncClient |
 | `wal-push-bridge-unit.ts` | walPushBridge, syncEngine, cloudSyncClient |
 
-### providers  (5 tests)
+### providers  (6 tests)
 
 | Test file | Primary modules under test |
 |---|---|
 | `embedding-provider-unit.ts` | dataplaneVectorStore, localEmbeddingProvider, types |
 | `llm-capability-unit.ts` | llmDispatch |
+| `model-warmup-nonfatal-unit.ts` | modelCache, embeddingWarmup, localEmbeddingProvider, verbatimStore, sqliteVerbatimStore, dataplaneVectorStore |
 | `openai-compat-embedding-provider-unit.ts` | openAICompatEmbeddingProvider |
 | `unit-deferred.ts` | types, deferred |
 | `verbatim-search-cache-unit.ts` | verbatimStore, localEmbeddingProvider, types |
@@ -252,11 +258,12 @@
 |---|---|
 | `15-lorestorageclient-facade-unit.ts` | loreStorageClient |
 
-### config  (3 tests)
+### config  (4 tests)
 
 | Test file | Primary modules under test |
 |---|---|
 | `phase6-p1a-workspace-routing-unit.ts` | workspaces |
+| `workspace-deletion-record-unit.ts` | deletedWorkspaces, workspaces |
 | `workspace-registry-unit.ts` | workspaceRegistry |
 | `workspaces-json-atomic-write-unit.ts` | workspaces |
 

@@ -35,7 +35,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { AuxStore, OutcomeStatus } from '../outbox/auxStore.js';
-import type { VersionStore } from '../outbox/versionStore.js';
+import type { VersionStoreApi } from '../outbox/versionStoreApi.js';
 import type { LoreNode } from '../providers/types.js';
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
 
@@ -68,7 +68,7 @@ export interface RecallOutcomeGraph {
 export interface ApplyRecallOutcomeArgs {
     auxStore: AuxStore;
     graph: RecallOutcomeGraph;
-    versionStore?: VersionStore;
+    versionStore?: VersionStoreApi;
     nodeId: string;
     workspace: string;
     /** record_outcome's own vocabulary and meaning, exactly — the outcome
@@ -129,7 +129,7 @@ export async function applyRecallOutcome(args: ApplyRecallOutcomeArgs): Promise<
 
     if (versionStore) {
         try {
-            versionStore.recordVersion({
+            await versionStore.recordVersion({
                 versionId: randomUUID(), nodeId, workspace,
                 timestamp: new Date().toISOString(), principal,
                 operation: 'outcome',

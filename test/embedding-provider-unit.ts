@@ -21,6 +21,7 @@
 
 import assert from 'node:assert/strict';
 import { DataplaneVectorStore } from '../packages/lore/src/engines/dataplaneVectorStore.js';
+import { registryAcceptingAny } from './helpers/workspace-registry.js';
 import {
     LocalEmbeddingProvider,
     DEFAULT_LOCAL_MODEL_ID,
@@ -41,6 +42,10 @@ class FakeClient {
         createCollection: {},
         updateByQuery: { updated: 0 },
         insert: {},
+        // store() looks the row up first (skip-identical, cloud parity B item 3): no existing row.
+        query: { records: [] },
+        // The engine answers a GET-by-key miss with HTTP 200 + an ERR_NOT_FOUND envelope (review B #5/#6).
+        get: { success: false, data: null, error: { code: 'ERR_NOT_FOUND', message: 'not found' } },
     };
     private async dispatch(method: string, args: unknown[]): Promise<unknown> {
         this.calls.push({ method, args });
@@ -54,6 +59,8 @@ class FakeClient {
     updateByQuery = (...args: unknown[]) => this.dispatch('updateByQuery', args);
     deleteByQuery = (...args: unknown[]) => this.dispatch('deleteByQuery', args);
     count = (...args: unknown[]) => this.dispatch('count', args);
+    query = (...args: unknown[]) => this.dispatch('query', args);
+    get = (...args: unknown[]) => this.dispatch('get', args);
 }
 
 interface FakeProviderHandle {
@@ -110,7 +117,9 @@ const tests: Array<() => Promise<void>> = [
         const adapter = new DataplaneVectorStore({
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             client: client as any,
-            tenantProvider: () => 'tenant-1',
+            dataplaneWorkspaceId: 'dp-ws',
+            workspaceRegistry: registryAcceptingAny(),
+            loreWorkspaceProvider: () => 'tenant-1',
             orgId: 'org-1',
             embeddingProvider: provider,
         });
@@ -130,7 +139,9 @@ const tests: Array<() => Promise<void>> = [
         const adapter = new DataplaneVectorStore({
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             client: client as any,
-            tenantProvider: () => 'tenant-1',
+            dataplaneWorkspaceId: 'dp-ws',
+            workspaceRegistry: registryAcceptingAny(),
+            loreWorkspaceProvider: () => 'tenant-1',
             orgId: 'org-1',
             embeddingProvider: provider,
         });
@@ -154,7 +165,9 @@ const tests: Array<() => Promise<void>> = [
         const adapter = new DataplaneVectorStore({
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             client: client as any,
-            tenantProvider: () => 'tenant-1',
+            dataplaneWorkspaceId: 'dp-ws',
+            workspaceRegistry: registryAcceptingAny(),
+            loreWorkspaceProvider: () => 'tenant-1',
             orgId: 'org-1',
             embeddingProvider: provider,
         });

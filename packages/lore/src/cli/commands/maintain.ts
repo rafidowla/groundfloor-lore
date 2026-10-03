@@ -10,6 +10,11 @@
  *   --dry-run   report only — counts, reclaimable bytes, affected items.
  *   (default)   perform + print a summary.
  *
+ * Exit code:
+ *   0  every enabled step completed (or was skipped without error).
+ *   1  refused / bad policy, OR an enabled step recorded errors (3.26.0;
+ *      before that a failed step printed `FAILED:` and still exited 0).
+ *
  * Safety:
  *   Like `lore compact`, this refuses to run while the daemon is up,
  *   because opening a second graph handle (single-writer) risks
@@ -46,6 +51,7 @@ import { surrealDataPath } from '../../engines/surreal/surrealConnection.js';
 import {
     resolveMaintainPolicy,
     runMaintenance,
+    failedOperations,
     formatMaintainReport,
     parseDuration,
     parseList,
@@ -117,6 +123,7 @@ function clonePolicy(policy: MaintainPolicy, enabledPatch: Partial<MaintainPolic
 
 const HELP = `Usage: lore maintain [<workspace>] [options]
        lore maintain storage [--data-dir <path>] [--dry-run] [--skip-types <csv>] [--json]
+       lore maintain cloud-purge (--list | --id <workspace-id> [--apply]) [options]
 
 Config-driven capacity maintenance. Refuses while the daemon is up; for
 online maintenance use the in-process MCP \`maintain\` tool.
@@ -125,6 +132,10 @@ online maintenance use the in-process MCP \`maintain\` tool.
 3/3): a one-time reclaim of versions.sqlite/outbox.sqlite via dedup +
 retention pruning + a full VACUUM. Run \`lore maintain storage --help\` for
 its own flags.
+
+\`lore maintain cloud-purge\` (cloud mode only) deletes the Dataplane rows of a
+workspace deleted from this instance; dry run by default. Run
+\`lore maintain cloud-purge --help\` for its flags, refusals and exit codes.
 
   --dry-run                            Report only — no writes.
   --all                                Run across every registered workspace.
@@ -138,7 +149,10 @@ its own flags.
   --cold-signal retrieval|access|update  Recency clock for "cold" (default retrieval).
   --no-compaction --no-version-cleanup --no-node-retention --no-ephemeral
   --json                               Emit the raw report as JSON.
-  --force                              Bypass the daemon preflight (tests only).`;
+  --force                              Bypass the daemon preflight (tests only).
+
+Exit code: 0 on success; 1 when refused, or when an enabled step reported errors
+(the report is still printed, with a FAILED: line).`;
 
 export async function maintainCommand(args: string[]): Promise<void> {
     // Storage-growth fix 3/3 (Fix 5) — `lore maintain storage [--data-dir
@@ -151,6 +165,14 @@ export async function maintainCommand(args: string[]): Promise<void> {
     if (args[0] === 'storage') {
         const { maintainStorageCommand } = await import('./maintainStorage.js');
         await maintainStorageCommand(args.slice(1));
+        return;
+    }
+
+    // Cloud purge: deletes the Dataplane rows of a deleted workspace (dry run by default). Separate tool,
+    // own flags and refusals; touches no local store, so it needs no daemon preflight.
+    if (args[0] === 'cloud-purge') {
+        const { cloudPurgeCommand } = await import('./maintainCloudPurge.js');
+        await cloudPurgeCommand(args.slice(1));
         return;
     }
 
@@ -309,10 +331,20 @@ export async function maintainCommand(args: string[]): Promise<void> {
 
     if (asJson) {
         console.log(JSON.stringify(reports, null, 2));
-        return;
+    } else {
+        for (const r of reports) {
+            console.log('');
+            console.log(formatMaintainReport(r, policy));
+        }
     }
-    for (const r of reports) {
-        console.log('');
-        console.log(formatMaintainReport(r, policy));
+
+    // 3.26.0 — a run whose enabled step recorded errors exits non-zero, so a
+    // cron job or a wrapper script sees the failure the MCP tool already
+    // reports as `ok: false` (3.25.2). The reports are printed first, in full.
+    // `--json` keeps stdout a plain reports array; the summary goes to stderr.
+    const failed = failedOperations(reports);
+    if (failed.length > 0) {
+        if (asJson) console.error(`[maintain] FAILED: ${failed.join(', ')}`);
+        process.exit(1);
     }
 }

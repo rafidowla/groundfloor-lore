@@ -132,6 +132,8 @@ export {
 // Exported so embedding hosts can branch on result.ok without importing from
 // the internal core/nodeService.ts path.
 export type { NodeWriteResult } from './core/nodeService.js';
+// NodeDeleteOutcome — returned by LoreInstance.nodeDelete() (3.26.0).
+export type { NodeDeleteOutcome } from './core/nodeDeleteService.js';
 export type { BulkIngestOpts, BulkIngestResult, BulkIngestNodeArgs } from './mcp/bulkIngest.js';
 // Shape of CreateLoreOptions.searchWorkerPolicy (per-store search-worker isolation).
 export type { SearchWorkerPolicy } from './engines/verbatimSearchWorkerProxy.js';

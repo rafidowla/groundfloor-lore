@@ -594,6 +594,84 @@ test('N6d — omitted status (a field that genuinely falls back on both engines)
     assert.equal(versions.length, 1, 'a genuinely-falls-back field must not be flagged just because it is omitted');
 });
 
+/* ─── U: explicit `key: undefined` is treated exactly like an absent key ──
+   A caller that forwards optional args with a spread (`metadata: input.metadata`)
+   hands isNoOpVersion a newState whose key is PRESENT with value undefined.
+   `JSON.stringify` (recordVersion's persistence) drops such keys, so the stored
+   row looks identical to its predecessor while the live comparison saw a diff.
+   Both write layers read `node.field` / `node.field ?? prior`, which cannot
+   tell absent from undefined, so the policy must not either. */
+
+const EMPTY_PREV = {
+    id: 'u', type: 'note', label: 'l', content: 'c', tags: [], project: 'p',
+    ecosystem: '*', metadata: '{}', createdAt: 'A', updatedAt: 'A', syncedAt: 'A',
+};
+const EMPTY_NEW = { id: 'u', type: 'note', label: 'l', content: 'c', tags: [], project: 'p', ecosystem: '*', updatedAt: 'B' };
+
+test('U1 — metadata: undefined over an equal previous state is a no-op', () => {
+    assert.equal(isNoOpVersion(EMPTY_PREV, EMPTY_NEW), true, 'precondition: key-absent form is a no-op');
+    assert.equal(isNoOpVersion(EMPTY_PREV, { ...EMPTY_NEW, metadata: undefined }), true);
+});
+
+test('U2 — tags: undefined over previous tags [] is a no-op', () => {
+    assert.equal(isNoOpVersion(EMPTY_PREV, { ...EMPTY_NEW, tags: undefined }), true);
+});
+
+test('U3 — label: undefined over previous empty label is a no-op', () => {
+    const prev = { ...EMPTY_PREV, label: '' };
+    const next = { ...EMPTY_NEW, label: undefined };
+    assert.equal(isNoOpVersion(prev, next), true);
+});
+
+test('U4 — non-cleared field set to undefined (language) is excluded, not compared', () => {
+    const prev = { ...EMPTY_PREV, language: 'ts' };
+    assert.equal(isNoOpVersion(prev, { ...EMPTY_NEW, language: undefined }), true);
+    assert.equal(isNoOpVersion(prev, { ...EMPTY_NEW }), true, 'same as key-absent');
+});
+
+test('U5 — omission-clears: undefined behaves exactly like absent for every FIELDS_CLEARED_ON_OMISSION field', () => {
+    const nonEmpty: Record<string, unknown> = {
+        type: 'other', label: 'real', tags: ['x'], project: 'proj', ecosystem: 'eco', metadata: '{"k":1}',
+    };
+    for (const field of FIELDS_CLEARED_ON_OMISSION) {
+        const prev = { ...EMPTY_PREV, [field]: nonEmpty[field] };
+        const absent: Record<string, unknown> = { ...EMPTY_NEW };
+        delete absent[field];
+        const undef = { ...absent, [field]: undefined };
+        assert.equal(isNoOpVersion(prev, absent), false, `${field}: absent over non-empty must record`);
+        assert.equal(isNoOpVersion(prev, undef), false, `${field}: undefined over non-empty must record`);
+    }
+});
+
+test('U6 — null is not undefined: metadata: null / tags: null over equal empty state keeps its old (comparing) behaviour', () => {
+    // null stays a PRESENT key that is compared by value ('{}' !== null), so it
+    // is conservatively a change — unchanged by the undefined fix.
+    assert.equal(isNoOpVersion(EMPTY_PREV, { ...EMPTY_NEW, metadata: null }), false);
+    assert.equal(isNoOpVersion(EMPTY_PREV, { ...EMPTY_NEW, tags: null }), false);
+});
+
+test('U7 — a genuine change alongside an undefined key is still detected', () => {
+    assert.equal(isNoOpVersion(EMPTY_PREV, { ...EMPTY_NEW, metadata: undefined, content: 'changed' }), false);
+});
+
+test('U8 — nodeUpsert through the fake write path: second identical write with metadata: undefined records one row', async () => {
+    const { graph } = makeSurrealLikeFakeGraph();
+    const { store, versions } = makeFakeVersionStore();
+    const first = await nodeUpsert(
+        baseArgs('u8-node', graph, makeNodeData('u8-node')),
+        { versionStore: store as never, previousState: null },
+    );
+    const firstNode: LoreNode | null = first.ok === true ? first.node : null;
+    assert.ok(firstNode, 'first upsert must succeed');
+    // Real previousState arrives as a full row: metadata defaults to '{}'.
+    const prev = { ...firstNode!, metadata: '{}' } as LoreNode;
+    await nodeUpsert(
+        baseArgs('u8-node', graph, makeNodeData('u8-node', { metadata: undefined })),
+        { versionStore: store as never, previousState: prev },
+    );
+    assert.equal(versions.length, 1, 'identical re-store with metadata: undefined must not record');
+});
+
 /* ─── run ─────────────────────────────────────────────────────────────── */
 
 await Promise.all(pending);

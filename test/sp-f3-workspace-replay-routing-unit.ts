@@ -272,15 +272,16 @@ test('ISOLATION: resolver throw leaves row PENDING — does NOT misroute verbati
 
 test('MCP store_node / store_edge / delete_node call recordHotWrite', () => {
     const read = (rel: string) => fs.readFileSync(path.join(repoRoot, rel), 'utf-8');
-    // storeEdge + deleteNode still record the outbox hot-lane write directly.
-    for (const f of [
-        'packages/lore/src/mcp/tools/memory/storeEdge.ts',
-        'packages/lore/src/mcp/tools/memory/deleteNode.ts',
-    ]) {
-        const src = read(f);
-        assert.match(src, /recordHotWrite\(/, `${f} must call recordHotWrite`);
-        assert.match(src, /deps\.outboxStore/, `${f} must gate on deps.outboxStore`);
-    }
+    // 3.26.0 — store_edge's outbox hot-lane edge.upsert record moved into the
+    // shared mcp/edgeWriteRollback.ts (writeEdgeOrRestore), which records the
+    // row, writes the edge, and undoes both on failure. storeEdge.ts passes
+    // deps.outboxStore through; the helper records only when a store is wired.
+    const se = read('packages/lore/src/mcp/tools/memory/storeEdge.ts');
+    assert.match(se, /writeEdgeOrRestore\(/, 'storeEdge.ts must delegate to edgeWriteRollback.writeEdgeOrRestore');
+    assert.match(se, /store: deps\.outboxStore/, 'storeEdge.ts must pass deps.outboxStore to the helper');
+    const ewr = read('packages/lore/src/mcp/edgeWriteRollback.ts');
+    assert.match(ewr, /recordHotWrite\(/, 'edgeWriteRollback.ts must record the outbox hot-lane write');
+    assert.match(ewr, /operationKind: 'edge\.upsert'/);
     // W3-SERVICE-LAYER: store_node's guarded write — including the outbox
     // hot-lane node.upsert + verbatim.upsert records — moved into the shared
     // core/nodeService.ts (nodeUpsert), which storeNode.ts now delegates to (and
@@ -295,10 +296,16 @@ test('MCP store_node / store_edge / delete_node call recordHotWrite', () => {
     const verbatim = read('packages/lore/src/core/nodeServiceVerbatim.ts');
     assert.match(verbatim, /recordHotWrite\(/, 'nodeServiceVerbatim.ts must record verbatim.upsert');
     assert.match(verbatim, /operationKind: 'verbatim\.upsert'/);
-    const se = read('packages/lore/src/mcp/tools/memory/storeEdge.ts');
-    assert.match(se, /operationKind: 'edge\.upsert'/);
+    // 3.26.0 — delete_node's sequence (outbox node.delete first, then the graph
+    // delete and the verbatim tombstone) moved into the shared
+    // core/nodeDeleteService.ts, which deleteNode.ts delegates to (and so does
+    // the in-process lore.nodeDelete).
     const dn = read('packages/lore/src/mcp/tools/memory/deleteNode.ts');
-    assert.match(dn, /operationKind: 'node\.delete'/);
+    assert.match(dn, /deleteNodeEverywhere\(/, 'deleteNode.ts must delegate to nodeDeleteService.deleteNodeEverywhere');
+    assert.match(dn, /deps\.outboxStore/, 'deleteNode.ts must pass deps.outboxStore');
+    const dsvc = read('packages/lore/src/core/nodeDeleteService.ts');
+    assert.match(dsvc, /recordHotWrite\(/, 'nodeDeleteService.ts must record the outbox hot-lane write');
+    assert.match(dsvc, /operationKind: 'node\.delete'/);
 });
 
 test('MemoryToolsDeps + CreateMcpServerDeps expose outboxStore', () => {

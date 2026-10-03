@@ -40,6 +40,7 @@
  */
 
 import { recordHotWrite } from '../outbox/hotLane.js';
+import { withEdgeLock } from './nodeWriteLock.js';
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
 import { redactError } from '../security/logRedact.js';
 import { log } from '../logger.js';
@@ -289,16 +290,25 @@ export async function applyWriteTimeSupersedes(params: {
             confidenceScore: 1.0,
         };
         try {
-            if (outboxStore) {
-                await recordHotWrite(outboxStore, {
-                    workspace,
-                    operationKind: 'edge.upsert',
-                    payload: edge,
-                    initiator,
-                    operation: 'edge.upsert',
-                });
-            }
-            await withTransactionConflictRetry(() => targetGraph.addEdge(edge));
+            // 3.26.0 — outbox row + graph write under the triple's edge lock,
+            // like the request-path edge writers: an unlocked write here could land
+            // between another writer's pre-read and its undo, which would then
+            // remove this edge (mcp/edgeWriteRollback.ts). Edge locks are leaf
+            // locks, so taking one under the caller's node lock cannot cycle.
+            await withEdgeLock(workspace, newId, oldId, 'supersedes', async () => {
+                if (outboxStore) {
+                    await recordHotWrite(outboxStore, {
+                        workspace,
+                        operationKind: 'edge.upsert',
+                        // One-way: replay treats a missing flag as true and would
+                        // also write old -[supersedes]-> new.
+                        payload: { ...edge, bidirectional: false },
+                        initiator,
+                        operation: 'edge.upsert',
+                    });
+                }
+                await withTransactionConflictRetry(() => targetGraph.addEdge(edge));
+            });
         } catch (edgeErr) {
             log.warn(`${logPrefix} write-time supersedes: edge ${newId}->${oldId} failed (non-fatal; supersededBy is authoritative): ${redactError(edgeErr)}`);
         }

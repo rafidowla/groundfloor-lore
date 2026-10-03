@@ -13,6 +13,8 @@
 
 import type { GraphStats } from '../providers/types.js';
 import { NODE_COLLECTION, EDGE_COLLECTION } from './dataplaneCollections.js';
+import { buildDataplaneScopeFilter, type DataplaneScope } from './dataplaneScopeFilter.js';
+import { keepInScope, pageRepeats, unscopeRow } from './dataplaneScopedIo.js';
 
 /**
  * Cap on rows scanned for the client-side group-by overviews (1M-node guard).
@@ -42,16 +44,61 @@ interface TopologyClient {
 /** State threaded from DataplaneGraph for the topology reads. */
 export interface TopologyCtx {
     client: TopologyClient;
-    tenantProvider: () => string;
-    orgId: string;
+    /** Resolve the per-call scope (org + Lore workspace); throws DataplaneScopeError, fail closed. */
+    scope: () => DataplaneScope;
     connection?: string;
-    ensureTenantInitialized: (tenantId: string) => Promise<void>;
+    ensureInitialized: (scope: DataplaneScope) => Promise<void>;
+}
+
+/** Engine filter tree for "everything in this org + Lore workspace". */
+function scopeFilter(scope: DataplaneScope) {
+    return buildDataplaneScopeFilter(scope, {}, 'crud', 0);
+}
+
+/**
+ * Columns the client-side scope check needs on every scanned row (guardScope:
+ * org_id + lore_workspace + lore_id, and the row-key `id`). A `projection` that
+ * omitted them would make the check impossible, so every overview projects them
+ * alongside the one column it tallies.
+ */
+const SCOPE_PROJECTION = ['id', 'lore_id', 'lore_workspace', 'org_id'] as const;
+
+/**
+ * One page of the group-by scan. The engine's QueryRequest key is `projection`
+ * (there is no `fields`; an unknown key is silently ignored and the full row
+ * comes back). The server filter is an optimisation, NOT a guarantee — the
+ * engine's SQLite connector pushes down `id_eq` only — so every returned row is
+ * re-checked with the scope predicate. Paging decisions use the RAW page length
+ * (what the engine returned), tallying uses only the in-scope rows.
+ */
+async function scanPage(
+    ctx: TopologyCtx,
+    scope: DataplaneScope,
+    column: string,
+    limit: number,
+    offset: number,
+    what: string,
+): Promise<{ rows: Record<string, unknown>[]; rawCount: number; hasMore: boolean; head: unknown }> {
+    const built = scopeFilter(scope);
+    const res = await ctx.client.query<Record<string, unknown>>(
+        scope.dataplaneWorkspaceId,
+        NODE_COLLECTION,
+        { projection: [...SCOPE_PROJECTION, column], filter: built.server, limit, offset, connection: ctx.connection } as Record<string, unknown>,
+    );
+    const records = res?.records ?? [];
+    return {
+        head: records[0]?.['id'],
+        rows: keepInScope(records, built.clientPredicate, what),
+        rawCount: records.length,
+        hasMore: res?.has_more === true,
+    };
 }
 
 export async function getStats(ctx: TopologyCtx): Promise<GraphStats> {
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
-    const orgFilter = { org_id: ctx.orgId };
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
+    const tenantId = scope.dataplaneWorkspaceId;
+    const orgFilter = scopeFilter(scope).server as object;
     const [nodeCount, edgeCount] = await Promise.all([
         ctx.client.count(tenantId, NODE_COLLECTION, orgFilter, ctx.connection).catch(() => 0),
         ctx.client.count(tenantId, EDGE_COLLECTION, orgFilter, ctx.connection).catch(() => 0),
@@ -62,16 +109,21 @@ export async function getStats(ctx: TopologyCtx): Promise<GraphStats> {
 }
 
 export async function getTopology(ctx: TopologyCtx, limit = 100): Promise<{ nodes: unknown[]; edges: unknown[] }> {
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
-    const orgFilter = { org_id: ctx.orgId };
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
+    const tenantId = scope.dataplaneWorkspaceId;
+    const built = scopeFilter(scope);
+    const orgFilter = built.server as object;
     const [nodesRes, edgesRes] = await Promise.all([
         ctx.client.query<Record<string, unknown>>(tenantId, NODE_COLLECTION, { filter: orgFilter, limit }, ctx.connection).catch(() => ({ records: [] as Record<string, unknown>[] })),
         ctx.client.query<Record<string, unknown>>(tenantId, EDGE_COLLECTION, { filter: orgFilter, limit }, ctx.connection).catch(() => ({ records: [] as Record<string, unknown>[] })),
     ]);
     return {
-        nodes: (nodesRes.records ?? []).map((r) => ({ id: r['id'], type: r['type'], label: r['label'] })),
-        edges: (edgesRes.records ?? []).map((r) => ({ source: r['source_id'], target: r['target_id'], relation: r['relation'] })),
+        nodes: keepInScope(nodesRes.records ?? [], built.clientPredicate, 'getTopology.nodes')
+            .map((r) => unscopeRow(r))
+            .map((r) => ({ id: r['id'], type: r['type'], label: r['label'] })),
+        edges: keepInScope(edgesRes.records ?? [], built.clientPredicate, 'getTopology.edges')
+            .map((r) => ({ source: r['source_id'], target: r['target_id'], relation: r['relation'] })),
     };
 }
 
@@ -81,31 +133,30 @@ export async function getTopologyOverview(ctx: TopologyCtx): Promise<{
     totalNodes: number;
     truncated?: boolean;
 }> {
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
     const counts = new Map<string, number>();
     let total = 0;
     let truncated = false;
     const PAGE = 500;
     const scanCap = resolveTopologyScanCap();
+    let head: unknown;
     for (let offset = 0; offset < scanCap; offset += PAGE) {
         const limit = Math.min(PAGE, scanCap - offset);
-        const res = await ctx.client.query<Record<string, unknown>>(
-            tenantId,
-            NODE_COLLECTION,
-            { fields: ['project'], filter: { org_id: ctx.orgId }, limit, offset, connection: ctx.connection } as Record<string, unknown>,
-        );
-        const records = res?.records ?? [];
-        for (const r of records) {
+        const page = await scanPage(ctx, scope, 'project', limit, offset, 'getTopologyOverview');
+        // An ignored offset (SQLite) returns page 0 again: stop and flag, never re-count it.
+        if (offset === 0) head = page.head;
+        else if (pageRepeats(head, page.head)) { truncated = true; break; }
+        for (const r of page.rows) {
             const project = typeof r['project'] === 'string' && r['project'].length > 0
                 ? (r['project'] as string)
                 : '*';
             counts.set(project, (counts.get(project) ?? 0) + 1);
             total += 1;
         }
-        if (records.length < limit) break;       // last page
+        if (page.rawCount < limit) break;       // last page
         if (offset + PAGE >= scanCap) {
-            truncated = res.has_more === true || records.length === limit;
+            truncated = page.hasMore || page.rawCount === limit;
             break;
         }
     }
@@ -126,34 +177,33 @@ export async function getTopologyOverviewByType(ctx: TopologyCtx): Promise<{
     totalNodes: number;
     truncated?: boolean;
 }> {
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
     const counts = new Map<string, number>();
     let total = 0;
     let truncated = false;
     const PAGE = 500;
     const scanCap = resolveTopologyScanCap();
+    let head: unknown;
     for (let offset = 0; offset < scanCap; offset += PAGE) {
         const limit = Math.min(PAGE, scanCap - offset);
-        const res = await ctx.client.query<Record<string, unknown>>(
-            tenantId,
-            NODE_COLLECTION,
-            { fields: ['type'], filter: { org_id: ctx.orgId }, limit, offset, connection: ctx.connection } as Record<string, unknown>,
-        );
-        const records = res?.records ?? [];
-        for (const r of records) {
+        const page = await scanPage(ctx, scope, 'type', limit, offset, 'getTopologyOverviewByType');
+        // An ignored offset (SQLite) returns page 0 again: stop and flag, never re-count it.
+        if (offset === 0) head = page.head;
+        else if (pageRepeats(head, page.head)) { truncated = true; break; }
+        for (const r of page.rows) {
             const type = typeof r['type'] === 'string' && r['type'].length > 0
                 ? (r['type'] as string)
                 : 'unknown';
             counts.set(type, (counts.get(type) ?? 0) + 1);
             total += 1;
         }
-        if (records.length < limit) break;
+        if (page.rawCount < limit) break;
         if (offset + PAGE >= scanCap) {
             // perf-dataplane-topology-overview-silent-truncation: this method
             // used to hit the cap and return silently. Surface it like
             // getTopologyOverview does so callers can warn the user.
-            truncated = res.has_more === true || records.length === limit;
+            truncated = page.hasMore || page.rawCount === limit;
             break;
         }
     }
@@ -173,28 +223,27 @@ export async function getTopologyOverviewByType(ctx: TopologyCtx): Promise<{
 }
 
 export async function getLanguageBreakdown(ctx: TopologyCtx): Promise<Record<string, number>> {
-    const tenantId = ctx.tenantProvider();
-    await ctx.ensureTenantInitialized(tenantId);
+    const scope = ctx.scope();
+    await ctx.ensureInitialized(scope);
     const counts: Record<string, number> = {};
     let truncated = false;
     const PAGE = 500;
     const scanCap = resolveTopologyScanCap();
+    let head: unknown;
     for (let offset = 0; offset < scanCap; offset += PAGE) {
         const limit = Math.min(PAGE, scanCap - offset);
-        const res = await ctx.client.query<Record<string, unknown>>(
-            tenantId,
-            NODE_COLLECTION,
-            { fields: ['language'], filter: { org_id: ctx.orgId }, limit, offset, connection: ctx.connection } as Record<string, unknown>,
-        );
-        const records = res?.records ?? [];
-        for (const r of records) {
+        const page = await scanPage(ctx, scope, 'language', limit, offset, 'getLanguageBreakdown');
+        // An ignored offset (SQLite) returns page 0 again: stop and flag, never re-count it.
+        if (offset === 0) head = page.head;
+        else if (pageRepeats(head, page.head)) { truncated = true; break; }
+        for (const r of page.rows) {
             const raw = r['language'];
             const key = typeof raw === 'string' && raw.length > 0 ? raw : '_unknown';
             counts[key] = (counts[key] ?? 0) + 1;
         }
-        if (records.length < limit) break;
+        if (page.rawCount < limit) break;
         if (offset + PAGE >= scanCap) {
-            truncated = res.has_more === true || records.length === limit;
+            truncated = page.hasMore || page.rawCount === limit;
             break;
         }
     }

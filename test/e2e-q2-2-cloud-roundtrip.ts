@@ -12,7 +12,7 @@
  *     Stats for each tenant reflect only that tenant's nodes.
  *     Cross-tenant read of node-alpha as tenant-beta → 404.
  *     Verifies AsyncLocalStorage correctly propagates tenant through
- *     the HTTP handler into DataplaneGraph.tenantProvider().
+ *     the HTTP handler into the Dataplane stores' loreWorkspaceProvider.
  *
  *   Case B — upsert idempotency (slice 2 graph):
  *     Re-store "node-alpha" with updated label. Snapshot shows count
@@ -50,6 +50,9 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { startMockDataplane, type MockDataplane } from './helpers/mock-dataplane.js';
+
+/** The single Dataplane workspace fixed by the credential (the engine ignores X-Tenant-Id). */
+const DP_WS = 'q22-dataplane-ws';
 
 const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const SERVER_ENTRY = path.join(REPO_ROOT, 'packages/lore/src/mcp/server.ts');
@@ -127,7 +130,10 @@ async function main(): Promise<void> {
     console.log('Q2.2 slices 2+3 — cloud roundtrip (DataplaneGraph + DataplaneVectorStore, AsyncLocalStorage tenant routing)');
     console.log('='.repeat(72));
 
-    const mock: MockDataplane = await startMockDataplane();
+    const mock: MockDataplane = await startMockDataplane({ defaultWorkspace: DP_WS });
+    /** Rows of `collection` belonging to one LORE workspace (D1: a lore_workspace column in the ONE credential-fixed Dataplane workspace). */
+    const countFor = (loreWs: string, collection: string): number =>
+        mock.rows(DP_WS, collection).filter((r) => r['lore_workspace'] === loreWs).length;
     console.log(`  mock Dataplane at ${mock.url}`);
 
     let h: DaemonHandle | null = null;
@@ -187,14 +193,10 @@ async function main(): Promise<void> {
         const sBeta = await statsBeta.json() as { nodeCount?: number };
         assert.ok((sBeta.nodeCount ?? 0) >= 1, `beta expected >=1 node, got ${sBeta.nodeCount}`);
 
-        // Mock snapshot must show two tenants in the store.
-        const snap = mock.snapshot();
-        const alphaBucket = snap.tenants.find((t) => t.tenantId === 'tenant-alpha');
-        const betaBucket = snap.tenants.find((t) => t.tenantId === 'tenant-beta');
-        assert.ok(alphaBucket, 'mock must have tenant-alpha bucket');
-        assert.ok(betaBucket, 'mock must have tenant-beta bucket');
-        const alphaNodes = alphaBucket?.collections.find((c) => c.name === 'lore_node')?.count ?? 0;
-        const betaNodes = betaBucket?.collections.find((c) => c.name === 'lore_node')?.count ?? 0;
+        // The mock holds ONE Dataplane workspace; the Lore workspaces are rows tagged lore_workspace.
+        assert.equal(mock.snapshot().tenants.length, 1, 'exactly one Dataplane workspace (credential-fixed)');
+        const alphaNodes = countFor('tenant-alpha', 'lore_node');
+        const betaNodes = countFor('tenant-beta', 'lore_node');
         assert.equal(alphaNodes, 1, `tenant-alpha expected 1 node in mock, got ${alphaNodes}`);
         assert.equal(betaNodes, 1, `tenant-beta expected 1 node in mock, got ${betaNodes}`);
 
@@ -207,7 +209,7 @@ async function main(): Promise<void> {
             { headers: hdrBeta },
         );
         assert.equal(crossRead.status, 404, `cross-tenant read must 404 for tenant-beta; got ${crossRead.status}`);
-        console.log('  ok  two-tenant isolation: tenant buckets distinct, cross-tenant read denied');
+        console.log('  ok  two-workspace isolation: rows tagged per Lore workspace, cross-workspace read denied');
 
         // — Case B: upsert idempotency (graph) —
         console.log('— Case B: upsert idempotency (graph) —');
@@ -224,10 +226,7 @@ async function main(): Promise<void> {
             }),
         });
         assert.ok(rAlpha2.status === 200 || rAlpha2.status === 201, `tenant-alpha re-ingest failed: ${rAlpha2.status}`);
-        const snap2 = mock.snapshot();
-        const alphaNodes2 = snap2.tenants
-            .find((t) => t.tenantId === 'tenant-alpha')
-            ?.collections.find((c) => c.name === 'lore_node')?.count ?? 0;
+        const alphaNodes2 = countFor('tenant-alpha', 'lore_node');
         assert.equal(alphaNodes2, 1, `upsert should not duplicate; got ${alphaNodes2} nodes`);
         console.log('  ok  upsert idempotency: second store_node does not duplicate');
 
@@ -240,11 +239,8 @@ async function main(): Promise<void> {
         const vectorReady = await (async () => {
             const deadline = Date.now() + 120_000;
             while (Date.now() < deadline) {
-                const s = mock.snapshot();
-                const a = s.tenants.find((t) => t.tenantId === 'tenant-alpha')
-                    ?.collections.find((c) => c.name === 'lore_verbatim')?.count ?? 0;
-                const b = s.tenants.find((t) => t.tenantId === 'tenant-beta')
-                    ?.collections.find((c) => c.name === 'lore_verbatim')?.count ?? 0;
+                const a = countFor('tenant-alpha', 'lore_verbatim');
+                const b = countFor('tenant-beta', 'lore_verbatim');
                 if (a >= 1 && b >= 1) return true;
                 await new Promise((r) => setTimeout(r, 500));
             }
@@ -255,11 +251,8 @@ async function main(): Promise<void> {
             console.error('daemon log (tail):\n' + (h?.log.text.slice(-4000) ?? '(no log)'));
         }
         assert.ok(vectorReady, 'vector-store writes did not land within 120s');
-        const snap3 = mock.snapshot();
-        const alphaVerbatim = snap3.tenants.find((t) => t.tenantId === 'tenant-alpha')
-            ?.collections.find((c) => c.name === 'lore_verbatim')?.count ?? 0;
-        const betaVerbatim = snap3.tenants.find((t) => t.tenantId === 'tenant-beta')
-            ?.collections.find((c) => c.name === 'lore_verbatim')?.count ?? 0;
+        const alphaVerbatim = countFor('tenant-alpha', 'lore_verbatim');
+        const betaVerbatim = countFor('tenant-beta', 'lore_verbatim');
         assert.equal(alphaVerbatim, 1, `tenant-alpha expected 1 verbatim row, got ${alphaVerbatim}`);
         assert.equal(betaVerbatim, 1, `tenant-beta expected 1 verbatim row, got ${betaVerbatim}`);
 
@@ -284,9 +277,7 @@ async function main(): Promise<void> {
         // DataplaneVectorStore.store (updateByQuery → insert on 0).
         // Give the async write a moment to settle, then confirm no dup.
         await new Promise((r) => setTimeout(r, 500));
-        const snap4 = mock.snapshot();
-        const alphaVerbatim2 = snap4.tenants.find((t) => t.tenantId === 'tenant-alpha')
-            ?.collections.find((c) => c.name === 'lore_verbatim')?.count ?? 0;
+        const alphaVerbatim2 = countFor('tenant-alpha', 'lore_verbatim');
         assert.equal(alphaVerbatim2, 1, `vector upsert should not duplicate; got ${alphaVerbatim2} rows`);
         console.log('  ok  vector upsert idempotency: re-ingest does not duplicate verbatim rows');
 

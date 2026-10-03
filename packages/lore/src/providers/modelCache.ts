@@ -17,9 +17,9 @@
  *   3. Download — stage into `<cacheDir>/.staging-<rand>`, verify (default
  *      model only), install. This is the only step that touches the
  *      network, and only when neither 1 nor 2 already satisfied the call.
- *   4. Offline and nothing found — whatever the download step's own error
- *      was (today's error behavior; this module adds no new error
- *      wrapping here beyond staging cleanup).
+ *   4. Nothing found — `EmbedModelUnavailableError`: either the download
+ *      failed (cause included) or `LORE_MODELS_OFFLINE` is on and step 3 was
+ *      skipped entirely. Staging is cleaned up either way.
  *
  * Concurrency: an O_EXCL lock file (`<cacheDir>/.lock-<hash(modelId)>`)
  * serializes steps 2/3 across processes AND across concurrent in-process
@@ -72,6 +72,89 @@ export class EmbedIntegrityError extends Error {
         super(`embedding model "${modelId}": integrity check failed for "${relPath}" (sha256 mismatch against pinned manifest)`);
         this.name = 'EmbedIntegrityError';
     }
+}
+
+/** Opt-in "never download" switch (off by default). `LORE_MODELS_OFFLINE=1`
+ *  (or `true`) makes a cache miss fail immediately instead of reaching the
+ *  network. Read per call, like the other LORE_* knobs. */
+export function modelsOfflineFromEnv(): boolean {
+    const v = (process.env['LORE_MODELS_OFFLINE'] ?? '').trim().toLowerCase();
+    return v === '1' || v === 'true';
+}
+
+/** First thing a ready model dir lacks (marker, then each required file), or
+ *  'nothing' if `embedModelCached` would hit. Names only; never contents. */
+export function firstMissingEmbedFile(modelId: string, dtype: ModelDtype, dir: string): string {
+    const modelDir = resolveModelDirSafe(dir, modelId);
+    if (!modelDir) {
+        // resolveModelDirSafe needs the dir to exist; absent means never installed.
+        return fs.existsSync(path.join(dir, modelId)) ? 'model directory (unresolvable path)' : '.complete (model not installed)';
+    }
+    const required = ['.complete', ...EMBED_COMMON_FILES, `onnx/${EMBED_DTYPE_ONNX_FILE[dtype]}`];
+    for (const rel of required) {
+        try {
+            if (!fs.lstatSync(path.join(modelDir, rel)).isFile()) return rel;
+        } catch {
+            return rel;
+        }
+    }
+    return 'nothing';
+}
+
+/** Short, secret-free description of why a download failed: error code (own
+ *  or on the undici `cause`) plus a length-capped message. */
+function describeDownloadCause(err: unknown): string {
+    if (!(err instanceof Error)) return String(err).slice(0, 200);
+    const code = (err as { code?: unknown }).code ?? ((err as { cause?: { code?: unknown } }).cause?.code);
+    const msg = err.message.length > 200 ? `${err.message.slice(0, 200)}...` : err.message;
+    return typeof code === 'string' ? `${code}: ${msg}` : msg;
+}
+
+/** Thrown when the embedding model is not in the cache and cannot be had:
+ *  either offline mode is on (no download attempted) or the download failed.
+ *  Names the model id, dtype, cache dir, the missing file and the fix. */
+export class EmbedModelUnavailableError extends Error {
+    readonly reason: 'offline' | 'download-failed';
+    /** Set when this error replays a recent download failure during the
+     *  retry pause: ms until the next download attempt is allowed. */
+    readonly retryInMs?: number;
+    constructor(p: { modelId: string; dtype: ModelDtype; cacheDir: string; missing: string; reason: 'offline' | 'download-failed'; cause?: unknown; retryInMs?: number }) {
+        const where = `embedding model ${p.modelId} (dtype ${p.dtype}) is not in the model cache at ${p.cacheDir} (missing: ${p.missing})`;
+        const fix = `Fix: run "lore models fetch-embedding --model ${p.modelId} --dtype ${p.dtype}" with network access (the cache follows LORE_HOME).`;
+        const paused = p.retryInMs !== undefined
+            ? ` No new download is attempted for another ${Math.ceil(p.retryInMs / 1000)}s.`
+            : '';
+        super(p.reason === 'offline'
+            ? `${where}; offline mode is on (LORE_MODELS_OFFLINE) so no download was attempted. ${fix}`
+            : `${where} and the download failed: ${describeDownloadCause(p.cause)}.${paused} ${fix}`);
+        this.name = 'EmbedModelUnavailableError';
+        this.reason = p.reason;
+        if (p.retryInMs !== undefined) this.retryInMs = p.retryInMs;
+        if (p.cause !== undefined) this.cause = p.cause;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Download retry pause. After a failed download, further resolve calls for
+// the same model replay that failure for EMBED_DOWNLOAD_RETRY_PAUSE_MS
+// instead of starting another download: without it every embed on a host
+// with no route to the hub pays a full connect timeout. In-process state
+// only. A model that appears in the cache meanwhile (`lore models
+// fetch-embedding`, another process, the legacy cache) is picked up at once,
+// because those checks run before this one.
+// ---------------------------------------------------------------------------
+
+export const EMBED_DOWNLOAD_RETRY_PAUSE_MS = 30_000;
+
+const lastDownloadFailure = new Map<string, { at: number; cause: unknown }>();
+
+/** Test seams: `pauseMs` overrides the default pause, `now` the clock. */
+export const _embedDownloadRetryForTests: { pauseMs?: number; now?: () => number } = {};
+
+export function _resetEmbedDownloadRetryForTests(): void {
+    lastDownloadFailure.clear();
+    delete _embedDownloadRetryForTests.pauseMs;
+    delete _embedDownloadRetryForTests.now;
 }
 
 // ---------------------------------------------------------------------------
@@ -424,6 +507,12 @@ export interface ResolveEmbedModelDirOptions extends LockOptions {
     legacyCacheDir?: string;
     /** Override for tests — never let a unit test touch the network. */
     downloadModel?: (params: DownloadEmbedModelParams) => Promise<void>;
+    /** Never download: a cache miss throws `EmbedModelUnavailableError`
+     *  without touching the network. `undefined` follows `LORE_MODELS_OFFLINE`. */
+    offline?: boolean;
+    /** Pause after a failed download before the next attempt. `undefined`
+     *  uses `EMBED_DOWNLOAD_RETRY_PAUSE_MS`; `0` retries on every call. */
+    downloadRetryPauseMs?: number;
 }
 
 /** Winner-only resolution body: re-checks the marker (another process may
@@ -462,7 +551,23 @@ async function resolveEmbedModelDirLocked(
         }
     }
 
-    // Step 3 — download (the only network-touching step).
+    // Step 3 — download (the only network-touching step). Offline mode
+    // stops here, before any staging dir exists or the downloader is called.
+    if (opts.offline ?? modelsOfflineFromEnv()) {
+        throw new EmbedModelUnavailableError({ modelId, dtype, cacheDir, missing: firstMissingEmbedFile(modelId, dtype, cacheDir), reason: 'offline' });
+    }
+    // A download that failed moments ago is not re-run: replay its failure
+    // until the retry pause has elapsed.
+    const retryKey = `${cacheDir}\0${modelId}\0${dtype}`;
+    const now = (_embedDownloadRetryForTests.now ?? Date.now)();
+    const pauseMs = opts.downloadRetryPauseMs ?? _embedDownloadRetryForTests.pauseMs ?? EMBED_DOWNLOAD_RETRY_PAUSE_MS;
+    const prior = lastDownloadFailure.get(retryKey);
+    if (prior && now - prior.at < pauseMs) {
+        throw new EmbedModelUnavailableError({
+            modelId, dtype, cacheDir, missing: firstMissingEmbedFile(modelId, dtype, cacheDir),
+            reason: 'download-failed', cause: prior.cause, retryInMs: pauseMs - (now - prior.at),
+        });
+    }
     const stagingRoot = path.join(cacheDir, `.staging-${crypto.randomBytes(6).toString('hex')}`);
     fs.mkdirSync(stagingRoot, { recursive: true, mode: 0o700 });
     const revision = isDefault ? DEFAULT_EMBED_REVISION : undefined;
@@ -470,11 +575,13 @@ async function resolveEmbedModelDirLocked(
     try {
         await download({ modelId, dtype, stagingDir: stagingRoot, revision });
     } catch (err) {
-        // Step 4 — offline / nothing found: propagate today's error as-is,
-        // no new wrapping, staging cleaned up so nothing partial lingers.
+        // Step 4 — nothing found and the download failed: staging cleaned up
+        // so nothing partial lingers, error re-thrown naming the fix.
         rmQuiet(stagingRoot);
-        throw err;
+        lastDownloadFailure.set(retryKey, { at: (_embedDownloadRetryForTests.now ?? Date.now)(), cause: err });
+        throw new EmbedModelUnavailableError({ modelId, dtype, cacheDir, missing: firstMissingEmbedFile(modelId, dtype, cacheDir), reason: 'download-failed', cause: err });
     }
+    lastDownloadFailure.delete(retryKey);
     const stagedModelDir = path.join(stagingRoot, modelId);
     flattenRevisionDir(stagedModelDir, revision);
     if (manifest) {

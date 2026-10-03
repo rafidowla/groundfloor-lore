@@ -28,6 +28,7 @@ import type { Database as DatabaseType } from 'better-sqlite3';
 
 import { log } from '../logger.js';
 import { LocalEmbeddingProvider } from '../providers/localEmbeddingProvider.js';
+import { warmEmbeddingProvider } from '../providers/embeddingWarmup.js';
 import type { EmbeddingProvider, VerbatimDocument, VerbatimSearchResult, VectorProvider, VerbatimQueryFilter } from '../providers/types.js';
 import type { Bm25Envelope } from './verbatimBm25Result.js';
 import type { FtsTokenizerSettings } from './ftsTokenizerProfile.js';
@@ -180,7 +181,8 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     async initialize(): Promise<void> {
         if (this.initialized) return;
-        await this.embeddingProvider.initialize();
+        // Best-effort warm-up: a model-cache failure must not fail open; the first embed retries.
+        await warmEmbeddingProvider(this.embeddingProvider, '[SqliteVerbatimStore]');
         const { db, tableExisted, vec } = await openSqliteVerbatimDb(this.basePath);
         this.db = db;
         this.vecStatus = vec;

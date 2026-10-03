@@ -29,6 +29,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { tryDiagnosticRoutes } from '../packages/lore/src/mcp/http/routes/diagnostic.js';
 import { runWithPrincipal, type Principal } from '../packages/lore/src/auth/principal.js';
 import { RateLimiter } from '../packages/lore/src/security/rateLimit.js';
+import { transactionRunnerFor } from '../packages/lore/src/engines/dataplaneTransaction.js';
 import { isOperatorBearer } from '../packages/lore/src/mcp/arcadeBoot.js';
 
 let passed = 0, failed = 0;
@@ -75,7 +76,7 @@ function baseDeps(overrides: Record<string, unknown> = {}): Parameters<typeof tr
 // The exact key sets the two bodies must (not) carry — mirrors
 // handleHealthLite's literal shape vs handleHealth's full shape.
 const LITE_ONLY_KEYS = ['status', 'version', 'sessions', 'backgroundReconnect', 'embeddingBackend'];
-const FULL_ONLY_KEYS = ['loreHome', 'workspaces', 'workspace', 'rateLimit', 'outbox', 'deploymentMode', 'dataplane', 'telemetryOptOut', 'orphans', 'llmProvider', 'perWorkspaceOutbox'];
+const FULL_ONLY_KEYS = ['loreHome', 'workspaces', 'workspace', 'rateLimit', 'outbox', 'deploymentMode', 'dataplane', 'telemetryOptOut', 'orphans', 'llmProvider', 'perWorkspaceOutbox', 'cloudHistory'];
 
 await test('(a) ANONYMOUS GET /api/health returns exactly the lite body — no loreHome/workspaces/rateLimit/sessions-rich data', async () => {
     const res = fakeRes();
@@ -104,6 +105,21 @@ await test('(a) BEARER-AUTHENTICATED GET /api/health returns the FULL body — l
     const ws = body.workspaces as { perWorkspaceStats?: unknown };
     assert.ok(ws.perWorkspaceStats && typeof ws.perWorkspaceStats === 'object', 'expected workspaces.perWorkspaceStats');
     assert.ok(body.rateLimit !== null, 'expected a non-null rateLimit snapshot when a rateLimiter is wired');
+});
+
+await test('(a) cloud parity C item 8: the full body carries cloudHistory in cloud mode (null in local)', async () => {
+    const runner = transactionRunnerFor({});
+    assert.equal(await runner.tryCommit('t', [{ op: 'create', collection: 'c', fields: { a: 1 } }] as never, 'k'), 'unavailable');
+    runner.recordHistoryFailure('node:x', new Error('boom'));
+    const cloud = fakeRes();
+    await runWithPrincipal(AUTHED, () => tryDiagnosticRoutes(reqGet(), cloud, '/api/health', '/api/health', baseDeps({ deploymentMode: 'cloud' })));
+    const body = JSON.parse(cloud._body) as { cloudHistory: { transactions: string; historyWriteFailures: number; lastHistoryFailure?: { what: string } } | null };
+    assert.ok(body.cloudHistory, 'cloudHistory present in cloud mode');
+    assert.equal(body.cloudHistory!.transactions, 'absent');
+    assert.ok(body.cloudHistory!.historyWriteFailures >= 1);
+    const local = fakeRes();
+    await runWithPrincipal(AUTHED, () => tryDiagnosticRoutes(reqGet(), local, '/api/health', '/api/health', baseDeps()));
+    assert.equal((JSON.parse(local._body) as { cloudHistory: unknown }).cloudHistory, null);
 });
 
 await test('(a) GET /health (liveness) is ALWAYS the lite body regardless of auth — unaffected by this fix', async () => {

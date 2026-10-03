@@ -245,7 +245,7 @@ Diagnoses configuration, filesystem, and daemon connectivity:
 
 ```bash
 lore doctor          # human-readable
-lore doctor --json   # structured findings for scripting
+lore doctor --json   # structured findings for scripting; exits 1 when it reports issues (3.26.0+)
 ```
 
 `doctor` probes the running daemon's `/api/health` (port 3847 by default — set
@@ -350,7 +350,9 @@ marked `isError`. Per-operation `errors[]` inside each report are unchanged.
 A disabled operation never counts as failed. (Before 3.25.2 a failing step,
 for example node retention on a SQLite graph, was reported only inside
 `operations[].errors` with `ok: true`.) The `lore maintain` CLI prints a
-`FAILED:` line; its exit code is unchanged.
+`FAILED:` line and, from 3.26.0, exits with code 1 after printing the full
+report (in 3.25.2 it still exited 0). With `--json`, stdout stays the plain
+reports array and the `FAILED:` summary goes to stderr.
 
 ### Two ways to run it
 

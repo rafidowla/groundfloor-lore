@@ -88,6 +88,37 @@ async function main() {
         });
     }
 
+    /* ─── E4: explicit `metadata: undefined` is a no-op on re-store ──────── */
+    {
+        const dataDir = path.join(process.env.LORE_HOME!, 'e4');
+        const lore = await createLore({ deploymentMode: 'embedded', dataDir });
+
+        await test('E4 — identical re-store with metadata/tags: undefined → exactly 1 version row', async () => {
+            const base = { id: 'vno-e4-node', type: 'note', label: 'e4', content: 'same content, both writes' };
+            const r1 = await lore.nodeUpsert({ id: 'vno-e4-node', workspace: 'default', ecosystem: 'probe', nodeData: base });
+            assert.equal(r1.ok, true);
+            // A host that forwards optional args with a spread: the keys are
+            // present with value undefined (JSON.stringify later drops them).
+            const r2 = await lore.nodeUpsert({
+                id: 'vno-e4-node', workspace: 'default', ecosystem: 'probe',
+                nodeData: { ...base, metadata: undefined, tags: undefined },
+            });
+            assert.equal(r2.ok, true);
+
+            await lore.dispose();
+
+            const dataHome = resolveLoreHome({ dataDir });
+            const loreDir = path.join(resolveGraphPath(dataHome), '.lore');
+            const vs = VersionStore.open(loreDir);
+            try {
+                const versions = vs.getVersions('vno-e4-node', 'default', 50);
+                assert.equal(versions.length, 1, `expected exactly 1 version row, got ${versions.length}`);
+            } finally {
+                vs.close();
+            }
+        });
+    }
+
     /* ─── E2: skipTypes, via createLore({ versionHistory }) ──────────────── */
     {
         const dataDir = path.join(process.env.LORE_HOME!, 'e2');

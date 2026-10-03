@@ -38,6 +38,7 @@ import { ArcadeHttp } from './arcadeHttp.js';
 import { ArcadeGraphStore } from './arcadeGraphStore.js';
 import { ArcadeVectorStore } from './arcadeVectorStore.js';
 import { getTenantApp, readSecretAsync, ARCADE_BASE_URL } from './arcadeProvisioner.js';
+import { withEdgeLock } from '../../core/nodeWriteLock.js';
 import { parseArcadeCellKey } from './arcadeOutboxLane.js';
 
 interface CellAdapters {
@@ -134,14 +135,31 @@ export function wireArcadeReplicator(input: {
     return adapters;
   }
 
+  /** The workspace name the request-path edge writers lock on for this lane
+   *  key: the cell's appId. resolveCell has already rejected a key that does
+   *  not parse, so the fallback is unreachable in practice. */
+  function edgeLockWorkspace(workspaceKey?: string): string {
+    return parseArcadeCellKey(workspaceKey ?? '')?.appId ?? workspaceKey ?? '';
+  }
+
   const substrates: DispatcherSubstrates = {
     upsertNode: async (payload, workspace) => {
       const { graph } = await resolveCell(workspace);
       await graph.upsertNode(payload as unknown as LoreNode);
     },
+    // 3.26.0: both edge handlers hold the per-edge lock the request-path edge
+    // writers take (core/nodeWriteLock.ts), so a replayed write or delete
+    // cannot land between a failed call's pre-read and its undo
+    // (mcp/edgeWriteRollback.ts). The key is the cell's appId, the workspace
+    // name the delegated routes lock on (arcadeData.ts `cellWorkspace`), not
+    // the `arcade:<t>:<a>` lane key. Two tenants sharing an appId share lock
+    // keys: over-serialised, never under-locked. The lock is taken AFTER
+    // resolveCell so a cell lookup never runs under it (leaf lock).
     addEdge: async (payload, workspace) => {
       const { graph } = await resolveCell(workspace);
-      await graph.addEdge(payload as unknown as LoreEdge);
+      const edge = payload as unknown as LoreEdge;
+      await withEdgeLock(edgeLockWorkspace(workspace), edge.sourceId, edge.targetId, edge.relation,
+        () => graph.addEdge(edge));
     },
     deleteNode: async (id, workspace) => {
       const { graph } = await resolveCell(workspace);
@@ -149,16 +167,17 @@ export function wireArcadeReplicator(input: {
     },
     // 2026-09-03 (X-markstale audit fix) — arcade-lane replay of a
     // `node.mark_stale` chunk row (outbox/types.ts). Mirrors deleteNode
-    // above: no node-write-lock in this lane (arcade has no
-    // core/nodeWriteLock.ts equivalent wired here — same as every other
-    // handler in this file), resolve the cell, apply the substrate update.
+    // above: no node-write-lock in this lane (the NODE handlers here take
+    // none; the two edge handlers take the per-edge lock), resolve the cell,
+    // apply the substrate update.
     markStale: async (ids, workspace) => {
       const { graph } = await resolveCell(workspace);
       await graph.markStaleByIds(ids);
     },
     deleteEdge: async (payload, workspace) => {
       const { graph } = await resolveCell(workspace);
-      await graph.deleteEdge(payload.sourceId, payload.targetId, payload.relation);
+      await withEdgeLock(edgeLockWorkspace(workspace), payload.sourceId, payload.targetId, payload.relation,
+        () => graph.deleteEdge(payload.sourceId, payload.targetId, payload.relation));
     },
     upsertVerbatim: async (payload, workspace) => {
       const id = String(payload['id'] ?? '');

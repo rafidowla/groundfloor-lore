@@ -592,14 +592,17 @@ await test('R14b (ratchet): a non-SQL ecosystem equality pushdown must be an ALL
     // invariant the ratchet does not actually hold" shape this whole round is
     // about. Now a NEW backend adding the map form fails until it is either
     // widened or written down here.
-    const ALLOWED = new Set(['packages/lore/src/engines/dataplaneGraph.ts']);
+    // A1: the cloud pushdown moved from dataplaneGraph.ts's filter map into the
+    // engine-grammar scope builder (`engineField('ecosystem', 'eq', …)`); same
+    // documented exemption, new home.
+    const ALLOWED = new Set(['packages/lore/src/engines/dataplaneScopeFilter.ts']);
     const offenders: string[] = [];
     for (const f of SRC_FILES.filter((p) => rel(p).startsWith('packages/lore/src/engines/'))) {
         const src = readFileSync(f, 'utf8');
         for (const line of src.split('\n')) {
-            // `filter['ecosystem'] = X` / `filter.ecosystem = X` / `{ ecosystem: X }`
+            // `filter['ecosystem'] = X` / `filter.ecosystem = X` / `engineField('ecosystem', 'eq', X)`
             // inside something named like a filter/where/query bag.
-            if (!/(?:filter|where|query|criteria)\s*(?:\[\s*['"]ecosystem['"]\s*\]|\.ecosystem)\s*=[^=]/.test(line)) continue;
+            if (!/(?:(?:filter|where|query|criteria)\s*(?:\[\s*['"]ecosystem['"]\s*\]|\.ecosystem)\s*=[^=]|engineField\(\s*['"]ecosystem['"]\s*,\s*['"]eq['"])/.test(line)) continue;
             if (ALLOWED.has(rel(f))) continue;
             offenders.push(`${rel(f)}: ${line.trim().slice(0, 110)}`);
         }
@@ -611,7 +614,7 @@ await test('R14b (ratchet): a non-SQL ecosystem equality pushdown must be an ALL
     // a permanent excuse.
     for (const entry of ALLOWED) {
         const src = readFileSync(join(process.cwd(), entry), 'utf8');
-        assert.match(src, /(?:filter|where|query|criteria)\s*(?:\[\s*['"]ecosystem['"]\s*\]|\.ecosystem)\s*=[^=]/,
+        assert.match(src, /(?:(?:filter|where|query|criteria)\s*(?:\[\s*['"]ecosystem['"]\s*\]|\.ecosystem)\s*=[^=]|engineField\(\s*['"]ecosystem['"]\s*,\s*['"]eq['"])/,
             `${entry} is allowlisted but no longer carries a map-shaped ecosystem pushdown — drop the entry`);
     }
 });

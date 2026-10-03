@@ -330,6 +330,12 @@ export class SqliteGraph implements LoreGraphHandle {
         return count;
     }
 
+    /** getEdge — one edge by its exact triple, or null (3.26.0, bulk edge rollback). */
+    async getEdge(sourceId: string, targetId: string, relation: string): Promise<LoreEdge | null> {
+        await this.initialize();
+        return aggregates.getEdge(this.db(), sourceId, targetId, relation);
+    }
+
     async queryEdges(q: EdgeQuery): Promise<LoreEdge[]> {
         await this.initialize();
         return aggregates.queryEdges(this.db(), q);

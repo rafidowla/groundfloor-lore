@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { StorageBundle } from '../../services.js';
 import type { AuxStore } from '../../../outbox/auxStore.js';
-import type { VersionStore } from '../../../outbox/versionStore.js';
+import type { VersionStoreApi } from '../../../outbox/versionStoreApi.js';
 import { loadWorkspaces } from '../../../config/workspaces.js';
 // Widened when the local graph engine changed: naming the two CONCRETE
 // classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
@@ -37,7 +37,7 @@ import type { WriteAheadLog } from '../../../engines/syncEngine.js';
 export interface LifecycleRouteDeps {
     store: StorageBundle;
     auxStore: AuxStore;
-    versionStore?: VersionStore;
+    versionStore?: VersionStoreApi;
     deploymentMode: 'local' | 'cloud';
     dataplane: GroundfloorClient | null;
     /**
@@ -359,7 +359,7 @@ export async function tryLifecycleRoutes(
 
                     if (deps.versionStore) {
                         try {
-                            deps.versionStore.recordVersion({
+                            await deps.versionStore.recordVersion({
                                 versionId: randomUUID(), nodeId: applied.node.id, workspace,
                                 timestamp: new Date().toISOString(), principal: 'http',
                                 operation: applied.kind === 'hard_delete' ? 'delete' : 'archive',
@@ -492,7 +492,7 @@ export async function tryLifecycleRoutes(
 
             if (deps.versionStore) {
                 try {
-                    deps.versionStore.recordVersion({
+                    await deps.versionStore.recordVersion({
                         versionId: randomUUID(), nodeId, workspace,
                         timestamp: new Date().toISOString(), principal: 'http',
                         operation: 'restore',

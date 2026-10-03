@@ -41,7 +41,7 @@ import type {
     OutboxWorkspaceStats,
     StepStatus,
 } from './types.js';
-import { supersessionFamilySql, type EntityFamily } from './supersession.js';
+import { supersessionFamilySql, ensureNodeUpsertIdIndex, newestNodeUpsertRow, SUPERSEDED_DEAD_ERROR, type EntityFamily } from './supersession.js';
 import {
     migrateJsonOutbox,
     DEFAULT_WORKSPACE_BACKFILL,
@@ -154,12 +154,11 @@ export class SqliteOutboxStore implements IOutboxStore {
         // WAL first causes a subsequent `auto_vacuum = INCREMENTAL` to
         // silently no-op (mode stays 0/NONE) even on a brand-new, schema-less
         // file. Setting it first, then switching to WAL, persists correctly.
-        if (isNewFile) {
-            this.db.pragma('auto_vacuum = INCREMENTAL');
-        }
+        if (isNewFile) this.db.pragma('auto_vacuum = INCREMENTAL');
         this.db.pragma('journal_mode = WAL');
         this.db.pragma('synchronous = NORMAL');
         this.db.exec(SCHEMA_SQL);
+        ensureNodeUpsertIdIndex(this.db); // 3.26.0: own guarded statement, never fails the open
         // SP-21: add nextAttemptAt column to existing DBs that predate this migration.
         // ALTER TABLE ADD COLUMN is idempotent in SQLite (no-op if column exists)
         // but SQLite <3.37 does not support IF NOT EXISTS on ADD COLUMN, so we
@@ -421,6 +420,15 @@ export class SqliteOutboxStore implements IOutboxStore {
         return row === undefined;
     }
 
+    /** 3.26.0 — atomic claim (OutboxStore.claimForReplication): the conditional
+     *  UPDATE serializes against a second replayer and removeIfPending. */
+    async claimForReplication(entryId: string): Promise<boolean> {
+        return this.db.prepare(
+            `UPDATE outbox_entries SET status = 'replicating', updatedAt = ?, nextAttemptAt = NULL
+              WHERE id = ? AND status IN ('pending', 'failed') AND (nextAttemptAt IS NULL OR julianday(nextAttemptAt) <= julianday('now'))`,
+        ).run(new Date().toISOString(), entryId).changes > 0;
+    }
+
     /** Slice-4 — purge every row + the replication cursor for a workspace/lane
      *  key (arcade destroyApp right-to-be-forgotten). Deletes irrespective of
      *  status. Atomic (one transaction). Returns rows deleted. */
@@ -657,25 +665,25 @@ export class SqliteOutboxStore implements IOutboxStore {
         return info.changes;
     }
 
+    /** 3.26.0 — see OutboxStore.newestNodeUpsertAfter (types.ts). */
+    async newestNodeUpsertAfter(workspace: string, nodeId: string, sequenceId: number): Promise<OutboxEntry | null> {
+        const r = newestNodeUpsertRow(this.db, workspace, nodeId, sequenceId) as Row | undefined;
+        return r ? rowToEntry(r) : null;
+    }
+
     /**
      * F-S03/S04/S05 (RA-6 per-key watermark) + cross-kind generalization
      * (2026-07-05 durability fix) - has a NEWER row for the same ENTITY
-     * (same workspace + same entity identity, ANY operationKind WITHIN the
-     * same entity family) already reached 'replicated' past this row's
-     * sequenceId?
+     * (same workspace + entity identity, ANY operationKind WITHIN the same
+     * entity family) already reached 'replicated' past this row's sequenceId?
      *
      * The replicator calls this before replaying a `status='failed'` row.
-     * RA-6 originally scoped supersession to a SINGLE operationKind, which
-     * only caught upsert-supersedes-upsert and missed the reverse-op
-     * reorderings (a replicated node.delete must supersede a failed
-     * node.upsert on the same id, else the retry RESURRECTS a deleted node;
-     * and the three symmetric cases across node/edge). Supersession is
-     * scoped BY ENTITY FAMILY (a node op never supersedes an edge op even
-     * on a colliding key); the same-kind RA-6 behavior is a strict subset.
-     * `key` is the family's canonical identity, matched via
-     * supersessionFamilySql (keeps the SQL in lock-step with keyOfEntry). A
-     * row with no extractable key/family never reaches here - the caller
-     * falls through to the normal retry path. See outbox/supersession.ts.
+     * RA-6 originally scoped supersession to a SINGLE operationKind and so
+     * missed the reverse-op reorderings (a replicated node.delete must
+     * supersede a failed node.upsert on the same id, else the retry
+     * RESURRECTS a deleted node). Supersession is scoped BY ENTITY FAMILY;
+     * `key` is the family's canonical identity (supersessionFamilySql). A row
+     * with no extractable key/family never reaches here. See supersession.ts.
      */
     async hasNewerReplicatedForKey(
         workspace: string,
@@ -751,24 +759,27 @@ export class SqliteOutboxStore implements IOutboxStore {
             }
         }
         const deadRows = this.db.prepare(
-            `SELECT workspace, COUNT(*) AS dead FROM outbox_entries WHERE status = 'dead' GROUP BY workspace`,
-        ).all() as { workspace: string; dead: number }[];
+            `SELECT workspace, COUNT(*) AS dead, COALESCE(SUM(lastError = ?), 0) AS superseded
+               FROM outbox_entries WHERE status = 'dead' GROUP BY workspace`,
+        ).all(SUPERSEDED_DEAD_ERROR) as { workspace: string; dead: number; superseded: number }[];
         for (const r of deadRows) {
             const s = stats[r.workspace] ??= { depth: 0, lagSeconds: 0, dead: 0 };
             s.dead = r.dead;
+            s.deadSuperseded = r.superseded;
         }
         return stats;
     }
 
     async aggregateStats(): Promise<OutboxAggregateStats> {
         const perWorkspace = await this.statsByWorkspace();
-        let depth = 0, dead = 0, lagSeconds = 0;
+        let depth = 0, dead = 0, deadSuperseded = 0, lagSeconds = 0;
         for (const s of Object.values(perWorkspace)) {
             depth += s.depth;
             dead += s.dead;
+            deadSuperseded += s.deadSuperseded ?? 0;
             if (s.lagSeconds > lagSeconds) lagSeconds = s.lagSeconds;
         }
-        return { depth, dead, lagSeconds, perWorkspace };
+        return { depth, dead, deadSuperseded, lagSeconds, perWorkspace };
     }
 
     /** Idempotent migration from outbox.json + outbox-replication.json
