@@ -94,6 +94,16 @@ export interface VerbatimStoreApi extends VectorProvider {
     /** Bulk hard delete, chunked. Returns the number of ids processed. */
     physicalDeleteMany(ids: string[]): Promise<number>;
 
+    /** 3.27.0 — hard delete `ids` AND their `#rev<ts>` history rows
+     *  (nodeDelete({ purge:true })). Optional: stores without it are purged
+     *  through physicalDeleteMany (core/verbatimPurge.ts). */
+    purgeWithHistory?(ids: string[]): Promise<number>;
+
+    /** 3.27.0 — which of `ids` have a row (the batched form of `getById`'s
+     *  existence test; nodeDeleteMany's alias lookup). Optional: callers fall
+     *  back to per-id `getById`. */
+    getExistingIds?(ids: string[]): Promise<string[]>;
+
     /** Reclaim disk after bulk deletes. Lance-specific today (fragment
      *  merge + version prune); a SQLite engine may make this a cheap no-op
      *  (VACUUM is handled elsewhere) but must still implement the method. */

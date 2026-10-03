@@ -294,6 +294,19 @@ export class FileOutboxStore implements IOutboxStore {
         return rows.slice(0, Math.max(0, limit));
     }
 
+    /** 3.27.0 — see OutboxStore.queuedVerbatimUpsertIds. */
+    async queuedVerbatimUpsertIds(workspace: string, ids: string[]): Promise<string[]> {
+        const want = new Set(ids);
+        const out = new Set<string>();
+        for (const e of Object.values(this.readAll())) {
+            if (e.workspace !== workspace || e.operationKind !== 'verbatim.upsert') continue;
+            if (e.status !== 'pending' && e.status !== 'failed' && e.status !== 'replicating') continue;
+            const pid = (e.payload as Record<string, unknown> | undefined)?.['id'];
+            if (typeof pid === 'string' && want.has(pid)) out.add(pid);
+        }
+        return [...out];
+    }
+
     async listWorkspacesWithPending(): Promise<string[]> {
         const map = this.readAll();
         const set = new Set<string>();

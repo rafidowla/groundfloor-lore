@@ -96,6 +96,11 @@ export interface DispatcherSubstrates {
      *  stale `verbatim.upsert` from an earlier create can't outlive the
      *  delete and resurrect tombstoned content — see outbox/types.ts. */
     tombstoneVerbatim?: (id: string, reason: string, workspace?: string) => Promise<void>;
+    /** 3.27.0 — `verbatim.purge` (nodeDelete({ purge:true })): physically
+     *  delete every verbatim row in `ids` and their `#rev` history. No
+     *  embedding call. Optional; a substrate without it falls through to
+     *  UnwiredOperationKindError like the other kinds. */
+    purgeVerbatim?: (ids: string[], workspace?: string) => Promise<void>;
     /** SP-13 — batched verbatim upsert. The replicator consolidates a run
      *  of adjacent `verbatim.upsert` outbox rows into ONE
      *  `verbatim.upsert.batch` dispatch so the underlying
@@ -230,6 +235,16 @@ export class MissingPayloadError extends Error {
 /** Payload fields compared against the substrate node when present. */
 const NODE_CONTENT_WITNESS_FIELDS = ['type', 'label', 'content', 'project', 'ecosystem'] as const;
 
+/** 3.27.0 — the id set of a `verbatim.purge` payload: `ids` plus `id`, deduped. */
+function purgeIdsOf(payload: Record<string, unknown>): string[] {
+    const out = new Set<string>();
+    const raw = payload['ids'];
+    if (Array.isArray(raw)) for (const x of raw) if (typeof x === 'string' && x) out.add(x);
+    const id = payload['id'];
+    if (typeof id === 'string' && id) out.add(id);
+    return [...out];
+}
+
 /**
  * The contentHash a verbatim.upsert payload will persist —
  * `metadata.contentHash` wins (VerbatimStore.store's effectiveHash rule),
@@ -351,6 +366,14 @@ export async function dispatch(
             if (typeof id !== 'string' || !id) throw new MissingPayloadError(kind, 'id');
             const reason = typeof payload['reason'] === 'string' ? payload['reason'] : 'graph node deleted (outbox replay)';
             await substrates.tombstoneVerbatim(id, reason, ws);
+            return;
+        }
+        case 'verbatim.purge': {
+            // 3.27.0. Payload: { id: 'lore:<id>', ids: string[] } (outbox/types.ts).
+            if (!substrates.purgeVerbatim) throw new UnwiredOperationKindError(kind);
+            const ids = purgeIdsOf(payload);
+            if (ids.length === 0) throw new MissingPayloadError(kind, 'id|ids');
+            await substrates.purgeVerbatim(ids, ws);
             return;
         }
         case 'verbatim.upsert.batch': {
@@ -622,6 +645,16 @@ export async function verifyApplied(
                 if (!row) return { verified: true, reason: 'substrate-missing-verbatim' };
                 const tombstoned = typeof row.text === 'string' && row.text.startsWith('[TOMBSTONED');
                 return { verified: tombstoned, reason: tombstoned ? 'substrate-tombstoned' : 'substrate-still-live' };
+            }
+            case 'verbatim.purge': {
+                // 3.27.0 — verified iff EVERY id is absent from the substrate.
+                const ids = purgeIdsOf(payload);
+                if (ids.length === 0) return { verified: false, reason: 'missing-ids' };
+                if (!substrates.getVerbatim) return { verified: false, reason: 'content-witness-unwired' };
+                for (const pid of ids) {
+                    if (await substrates.getVerbatim(pid, ws)) return { verified: false, reason: 'substrate-still-has-verbatim' };
+                }
+                return { verified: true, reason: 'substrate-purged' };
             }
             case 'verbatim.upsert.batch': {
                 // SP-13 — self-heal a consolidated verbatim batch by probing

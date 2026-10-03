@@ -763,11 +763,60 @@ const out = await lore.nodeDelete({ id: 'decision-001', workspace: 'default' });
 - Not available in ArcadeDB mode (the call rejects).
 - No transport-level gates apply, as with `nodeUpsert`.
 
+**Purge (3.27.0).** `nodeDelete({ id, workspace, purge: true })` also erases the
+node's verbatim rows instead of tombstoning them: the canonical `lore:<id>` row,
+all of its `#rev<timestamp>` history rows, and its question-alias rows
+(`lore:<id>#q0..#q4`) with their history. Nothing is embedded, so the delete is
+cheap and leaves no `[TOMBSTONED` marker behind. It records one `verbatim.purge`
+outbox row (payload `{ id: 'lore:<id>', ids: [...] }`) so replay converges to
+"absent", and a stale queued `verbatim.upsert` for the node or an alias cannot
+bring the content back. The outcome carries `purged: true`. Stores that cannot
+purge history (the cloud/Dataplane store removes the exact ids only) leave their
+separate history rows; a store with no delete at all falls back to tombstones and
+reports a `verbatimWarning`. Version history in the graph is unaffected. Purge is
+embedded-only: MCP `delete_node` and REST `DELETE /api/node` still tombstone.
+
+In both modes, alias tombstones are recorded only for aliases that exist in the
+verbatim store or have a queued `verbatim.upsert` (3.27.0). A node without
+aliases records 2 outbox rows, not 7.
+
 Use this instead of `lore.store.storageClient.rawGraph().deleteNode(id)`. A raw
 delete is invisible to the outbox: it leaves the node's verbatim row behind, and if
 the node's last save is still unfinished from before start-up (the process stopped
 before it was replayed, or the raw delete runs right after start-up before the
 first replay), that save is replayed as crash recovery and the node comes back.
+
+#### `lore.nodeDeleteMany(args)` → `Promise<{ results: NodeDeleteManyItem[] }>` (3.27.0)
+
+Batched `nodeDelete` for many ids, for callers that remove hundreds of nodes at
+once (for example stale code nodes after a reindex).
+
+```ts
+const { results } = await lore.nodeDeleteMany({ ids: staleIds, workspace: 'default', purge: true });
+// results[i] = { id, deleted, purged?, verbatimWarning?, error? }, one per distinct id, in request order
+```
+
+- Per id the semantics equal `nodeDelete`: `node.delete` outbox row, graph delete,
+  then `verbatim.tombstone` rows (default) or one `verbatim.purge` row
+  (`purge: true`), WAL `delete_node` append for the active workspace, and the
+  replay guard told about each inline delete. Missing ids report `deleted: false`.
+- `ids` must be a non-empty array of non-empty strings; repeated ids are
+  deduplicated; at most 10,000 ids per call (the call rejects with a message
+  asking you to split the batch). `workspace` is required. One `lib:nodeDeleteMany`
+  audit row is written per call.
+- Ids run in chunks of 50 under per-node locks taken in sorted order, the same
+  discipline as the bulk writers, so concurrent `nodeUpsert` / `nodeDelete` calls
+  cannot deadlock with it. Each chunk's outbox rows are inserted in one
+  transaction, alias existence is checked with one batched read, and a purge is
+  one store call per chunk (LanceDB: one filtered query per 256 ids plus one
+  delete; SQLite: one transaction). A purge still records one `verbatim.purge`
+  row per node: supersession is keyed on a row's `payload.id`, so a chunk-wide
+  row could be dropped or retried over re-created content.
+- One failing id never aborts the others. A failed graph delete sets `error` on
+  that id; a failed verbatim step sets `verbatimWarning` (the pending outbox row
+  completes it on replay).
+- Embedded only; rejects in ArcadeDB mode like `nodeDelete`. `nodeDeleteMany` is
+  attached by the package entry point (`createLore` from `src/index.ts`).
 
 #### `lore.createMcpServer()` → `McpServer`
 
@@ -814,6 +863,7 @@ All types below are importable from `'@groundfloor/lore'`:
 | `LoreDeploymentMode` | `type` | `'embedded' \| 'local' \| 'cloud'`. |
 | `NodeWriteResult` | `type` | Discriminated union returned by `nodeUpsert`. |
 | `NodeDeleteOutcome` | `type` | `{ deleted: boolean; verbatimWarning?: string }`, returned by `nodeDelete`. |
+| `NodeDeleteManyResult`, `NodeDeleteManyItem` | `type` | `{ results: NodeDeleteManyItem[] }`; an item is `NodeDeleteOutcome` plus `id` and `error?`. Returned by `nodeDeleteMany`. |
 | `LoreStorageClient` | `class` | Storage-client facade (cloud-swap point). |
 | `rebuildPieceIndex` | `function` | 3.24.2. Offline D7 piece-index rebuild for a host's `createLore({ dataDir })` root — the API behind `lore migrate piece-vectors --data-dir`. `({ dataDir?, embeddingProvider?, embedding?, force?, dryRun?, drop? })` → `{ action, nodesScanned, nodesRebuilt, piecesIndexed, reason?, basePath, engine, modelId }`. Dispose the host's instance first. See `docs/MIGRATION-3.24.md` §0. |
 | `PieceIndexDataDirInUseError` | `class` | Thrown by `rebuildPieceIndex` when a (Surreal-graph) data root is held by a running process. |

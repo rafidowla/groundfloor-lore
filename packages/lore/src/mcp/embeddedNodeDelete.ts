@@ -6,6 +6,11 @@
  * recorded in the outbox, graph node + relationships removed, verbatim row
  * tombstoned, WAL entry appended — all under the node write lock.
  *
+ * 3.27.0 — `purge: true` swaps the verbatim tombstone for a physical delete of
+ * the node's verbatim rows, `#rev` history and question-alias rows included,
+ * recorded as one `verbatim.purge` outbox row; nothing is re-embedded. MCP
+ * `delete_node` and REST `DELETE /api/node` keep tombstoning.
+ *
  * Before this existed a host deleted through `storageClient.rawGraph()`, which
  * the outbox never saw; a pending `node.upsert` row for that id was then
  * replayed as crash recovery and the node came back. Lives outside server.ts
@@ -17,6 +22,15 @@ import type { WriteAheadLog } from '../engines/writeAheadLog.js';
 import { deleteNodeEverywhere, type NodeDeleteOutcome } from '../core/nodeDeleteService.js';
 import { logEmbeddedWrite } from './embeddedAudit.js';
 import { noteInlineAppliedDelete, type EmbeddedReplayScope } from './embeddedLifecycle.js';
+
+// 3.27.0 — declare the `purge` option on LoreInstance.nodeDelete without editing
+// mcp/server.ts (FROZEN.md): a declaration-merged overload, picked for any call
+// that passes `purge`. The runtime already forwards `args` whole.
+declare module './server.js' {
+    interface LoreInstance {
+        nodeDelete(args: { id: string; workspace: string; purge?: boolean }): Promise<NodeDeleteOutcome>;
+    }
+}
 
 export interface EmbeddedNodeDeleteDeps {
     auditLog: AuditLog;
@@ -33,7 +47,7 @@ export interface EmbeddedNodeDeleteDeps {
 }
 
 export async function embeddedNodeDelete(
-    args: { id: string; workspace: string },
+    args: { id: string; workspace: string; purge?: boolean },
     deps: EmbeddedNodeDeleteDeps,
 ): Promise<NodeDeleteOutcome> {
     const startedAt = Date.now();
@@ -58,6 +72,9 @@ export async function embeddedNodeDelete(
             reason: 'graph node deleted via LoreInstance.nodeDelete',
             logPrefix: '[Lore]',
             onInlineDeleteApplied: (entry) => noteInlineAppliedDelete(deps.replayScope, entry, args.id),
+            // 3.27.0 — `purge: true` physically removes the verbatim rows
+            // (history + aliases included) instead of tombstoning them.
+            ...(args.purge === true ? { purge: true } : {}),
         });
     } catch (err) {
         error = err;

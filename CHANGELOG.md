@@ -4,6 +4,44 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.27.0] — 2026-10-03
+
+### Added
+- **`lore.nodeDelete({ id, workspace, purge: true })`** physically deletes the
+  node's verbatim rows instead of tombstoning them: the canonical row, its
+  `#rev` history rows, and its question-alias rows with their history. No
+  embedding call is made. One `verbatim.purge` outbox row (payload
+  `{ id: 'lore:<id>', ids: [...] }`) makes replay converge to absent; the kind
+  joins the `verbatim` supersession family, and a failed or queued
+  `verbatim.upsert` for an alias id is superseded through `payload.ids`. The
+  outcome gains `purged?: true`. LanceDB gets `purgeWithHistory(ids)` (anchored
+  match, so node `a` never removes node `a#x`); SQLite reuses
+  `physicalDeleteMany`; the cloud store removes exact ids only. MCP
+  `delete_node` and REST `DELETE /api/node` are unchanged.
+
+- **`lore.nodeDeleteMany({ ids, workspace, purge? })`** deletes many nodes in one
+  call with the same per-node semantics as `nodeDelete` (outbox kinds and order,
+  WAL append, replay guard, alias rule) and per-id results; one failing id does
+  not abort the rest. Ids run in chunks of 50 under sorted per-node locks; each
+  chunk batches its outbox inserts, its alias-existence lookup and its purge.
+  Max 10,000 ids per call; one `lib:nodeDeleteMany` audit row. A purge still
+  records one `verbatim.purge` row per node, since supersession keys on
+  `payload.id`. The method is attached in `src/index.ts`; `LoreInstance` exported
+  from there is now `BaseLoreInstance & NodeDeleteManyApi`.
+
+### Changed
+- **LanceDB `purgeWithHistory` is batched.** It used to scan the table once per
+  id; it now runs one filtered query per 256 ids (anchored `X#rev` patterns, same
+  wildcard escaping and `assertSafeLanceId`) and one delete per chunk. Single
+  `nodeDelete({ purge: true })` benefits too. Stores gain an optional
+  `getExistingIds(ids)` used for the batched alias lookup.
+- **Alias tombstones are recorded only for aliases that exist.** A node delete
+  used to record 5 `verbatim.tombstone` rows for `lore:<id>#q0..#q4` whether or
+  not the aliases existed (7 outbox rows per delete). It now records rows only
+  for aliases present in the verbatim store or with a queued `verbatim.upsert`;
+  a node with no aliases records 2 rows. If existence cannot be determined, all
+  five are recorded as before.
+
 ## [3.26.0] — 2026-10-02
 
 Upgrade notes: [`docs/MIGRATION-3.26.md`](docs/MIGRATION-3.26.md).

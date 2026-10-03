@@ -181,10 +181,11 @@ test('delete_node (MCP) then a full replicator-shaped replay: graph absent AND v
         const rowsAfterDelete = await outboxStore.listPendingForWorkspace(WORKSPACE, 1000);
         assert.deepEqual(
             rowsAfterDelete.map((r) => r.operationKind),
-            // 3.21 step 3(e) — delete_node also sweeps the fixed MAX_QUESTIONS
-            // alias-tombstone range (best-effort; a no-op on replay for slots
-            // that never held an alias row) AFTER the main verbatim.tombstone.
-            ['node.upsert', 'verbatim.upsert', 'node.delete', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone', 'verbatim.tombstone'],
+            // 3.21 step 3(e) — delete_node also tombstones the node's question
+            // aliases AFTER the main verbatim.tombstone. 3.27.0 — only aliases
+            // that exist (or have a queued upsert); this node has none, so the
+            // sweep adds no rows (was 5 unconditional no-op rows).
+            ['node.upsert', 'verbatim.upsert', 'node.delete', 'verbatim.tombstone'],
             `delete must record a verbatim.tombstone row AFTER node.delete — got ${JSON.stringify(rowsAfterDelete.map((r) => r.operationKind))}`,
         );
 

@@ -82,6 +82,20 @@ export type OutboxOperationKind =
     // id in outbox/supersession.ts (mirrors the node.upsert/node.delete
     // pairing) — see that file for why the two used to be independent.
     | 'verbatim.tombstone'
+    // 3.27.0 — `LoreInstance.nodeDelete({ purge: true })`: the node's verbatim
+    // rows are PHYSICALLY removed (canonical `lore:<id>`, its `#rev<ts>`
+    // history, its question-alias rows and theirs), not tombstoned — so no
+    // marker text is kept and nothing is re-embedded. Payload:
+    // `{ id: 'lore:<id>', ids: string[] }` — `id` is the canonical key (the
+    // supersession identity, same convention as the neighbours above), `ids`
+    // every verbatim id to purge (always includes `id`; plus the alias ids
+    // that exist or had a pending upsert). Replay is idempotent (deleting an
+    // absent row is a no-op). Joins the `verbatim` supersession family and
+    // cross-supersedes `verbatim.upsert` / `verbatim.tombstone` on `id`; a
+    // stale failed alias upsert is covered through `ids` membership (see
+    // outbox/supersession.ts + sqliteStore.hasNewerReplicatedForKey). Verified
+    // iff every id is absent from the substrate.
+    | 'verbatim.purge'
     // 2026-09-03 (X-markstale audit fix) — both mark_stale entry points
     // (mcp/tools/memory/markStale.ts, POST /api/mark-stale) used to call
     // `graph.markStaleByTags` directly: no outbox row, no per-node lock, so
@@ -329,6 +343,15 @@ export interface OutboxStore {
      *  Optional: a store without it keeps the pre-3.26 behaviour (the
      *  replayed row's own payload is written). */
     newestNodeUpsertAfter?(workspace: string, nodeId: string, sequenceId: number): Promise<OutboxEntry | null>;
+    /** 3.27.0 — of `ids`, those that have a still-queued (`pending`, `failed`
+     *  or `replicating`; not `replicated`, not `dead`) `verbatim.upsert` row in
+     *  `workspace` (payload.id equal to the id). nodeDelete asks this for the
+     *  node's question-alias ids: an alias whose inline write failed (or has
+     *  not been applied yet) is not in the verbatim store, but its queued
+     *  upsert would recreate it on replay, so it still needs a tombstone/purge.
+     *  Optional: a store without it makes the caller fall back to the
+     *  unconditional per-slot alias rows. */
+    queuedVerbatimUpsertIds?(workspace: string, ids: string[]): Promise<string[]>;
     /** Walk every entry that is not yet completed. Used by boot-time
      *  recovery. Returns entries in insertion order. */
     listUnfinished(): Promise<OutboxEntry[]>;

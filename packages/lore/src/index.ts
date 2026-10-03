@@ -122,11 +122,21 @@
  */
 
 export {
-    createLore,
-    type LoreInstance,
     type CreateLoreOptions,
     type LoreDeploymentMode,
 } from './mcp/server.js';
+
+// createLore — the server.ts factory plus `nodeDeleteMany` (3.27.0). server.ts is
+// frozen, so the batched delete is attached here from the instance's own handles.
+import { createLore as createLoreBase, type CreateLoreOptions as CreateLoreOpts, type LoreInstance as BaseLoreInstance } from './mcp/server.js';
+import { attachNodeDeleteMany, type NodeDeleteManyApi } from './mcp/embeddedNodeDeleteMany.js';
+/** The in-process handle returned by {@link createLore}. */
+export type LoreInstance = BaseLoreInstance & NodeDeleteManyApi;
+export async function createLore(opts?: CreateLoreOpts): Promise<LoreInstance> {
+    return attachNodeDeleteMany(await createLoreBase(opts));
+}
+// NodeDeleteManyResult / NodeDeleteManyItem — returned by LoreInstance.nodeDeleteMany() (3.27.0).
+export type { NodeDeleteManyResult, NodeDeleteManyItem } from './core/nodeDeleteManyService.js';
 
 // NodeWriteResult — the discriminated return type of LoreInstance.nodeUpsert().
 // Exported so embedding hosts can branch on result.ok without importing from

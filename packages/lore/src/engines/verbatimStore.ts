@@ -23,6 +23,7 @@ import * as verbatimHistory from './verbatimHistory.js';
 import { assertSafeLanceId, assertSafeLanceHash, isRevisionHistoryId, HISTORY_ID_LIKE_PATTERN } from './verbatimHistory.js';
 import { redactSecrets } from '../security/secretScan.js';
 import * as verbatimBatch from './verbatimBatch.js';
+import { purgeRowsWithHistory, existingIdsInTable } from './verbatimPurgeRows.js';
 import type { VerbatimBatchCtx } from './verbatimBatch.js';
 import { VERBATIM_CHUNK_SIZE, suppliedVector } from './verbatimBatch.js';
 import { embedBatchCap, awaitEmbedMemoryHeadroom } from '../embed/memoryBudget.js';
@@ -1618,6 +1619,28 @@ export class VerbatimStore implements VectorProvider {
             return processed;
         } catch (error) {
             throw new VerbatimStoreError('physicalDeleteMany', (error as Error).message);
+        } finally { this.writeGate.exit(); }
+    }
+
+    /** 3.27.0 — which of `ids` have a row (batched getById; nodeDeleteMany). */
+    async getExistingIds(ids: string[]): Promise<string[]> {
+        if (!this.initialized || !this.table || ids.length === 0) return [];
+        return this.writeGate.run(() => existingIdsInTable(this.table!, ids, VERBATIM_CHUNK_SIZE));
+    }
+
+    /** 3.27.0 — hard-delete `ids` AND their `#rev<ts>` history rows, anchored
+     *  (verbatimPurgeRows.ts); no embedding; one search-epoch bump. */
+    async purgeWithHistory(ids: string[]): Promise<number> {
+        assertWritableRole(this.role, 'purgeWithHistory');
+        if (!this.initialized || !this.table || ids.length === 0) return 0;
+        ids.forEach((id) => assertSafeLanceId(id, 'purgeWithHistory')); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
+        this.writeGate.enter(); try {
+            const all = await purgeRowsWithHistory(this.table, ids, VERBATIM_CHUNK_SIZE);
+            this.bumpSearchEpoch();
+            await this.pieceIndex.deleteForIds(all);
+            return all.length;
+        } catch (error) {
+            throw new VerbatimStoreError('purgeWithHistory', (error as Error).message);
         } finally { this.writeGate.exit(); }
     }
 

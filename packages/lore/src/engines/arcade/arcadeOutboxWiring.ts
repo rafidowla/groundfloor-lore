@@ -205,6 +205,12 @@ export function wireArcadeReplicator(input: {
       const { vector } = await resolveCell(workspace);
       await vector.delete(id);
     },
+    // 3.27.0 — `verbatim.purge`: ArcadeVectorStore hard-deletes (same as its
+    // tombstone mapping above); idempotent per id.
+    purgeVerbatim: async (ids, workspace) => {
+      const { vector } = await resolveCell(workspace);
+      for (const id of ids) await vector.delete(id);
+    },
     // Verifier hooks (self-heal sweep). hasEdge uses a plain param-bound MATCH
     // count via getEdges — no both()/expand() traps.
     hasNode: async (id, workspace) => {

@@ -295,10 +295,16 @@ export async function tombstoneQuestionAliases(input: {
     initiator: string;
     logPrefix: string;
     outboxStore: OutboxStore;
+    /** 3.27.0 — opt-in: tombstone ONLY these alias row ids (`lore:<id>#q<i>`)
+     *  instead of all MAX_QUESTIONS slots. nodeDeleteService passes the aliases
+     *  that exist (or have a queued upsert), so deleting an alias-less node
+     *  records no alias rows. Omitted = every slot (the rewrite caller). */
+    onlyRowIds?: readonly string[];
 }): Promise<void> {
     const { id, workspace, initiator, logPrefix, outboxStore } = input;
     for (let i = 0; i < MAX_QUESTIONS; i++) {
         const rowId = aliasRowId(id, i);
+        if (input.onlyRowIds && !input.onlyRowIds.includes(rowId)) continue;
         try {
             await recordHotWrite(outboxStore, {
                 workspace,

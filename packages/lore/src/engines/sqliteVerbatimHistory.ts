@@ -59,6 +59,20 @@ export function getById(db: DatabaseType, id: string): {
     }
 }
 
+/** 3.27.0 — ids (of `ids`) with a canonical row; one query per 500 ids. Same
+ *  predicate as getById. */
+export function getExistingIds(db: DatabaseType, ids: string[]): string[] {
+    const out: string[] = [];
+    for (let i = 0; i < ids.length; i += 500) {
+        const chunk = ids.slice(i, i + 500);
+        const rows = db.prepare(
+            `SELECT id FROM verbatim WHERE is_canonical = 1 AND id IN (${chunk.map(() => '?').join(', ')})`,
+        ).all(...chunk) as Array<{ id: string }>;
+        for (const r of rows) out.push(r.id);
+    }
+    return out;
+}
+
 export function getContentHashesByIds(db: DatabaseType, ids: string[]): Map<string, string> {
     const out = new Map<string, string>();
     if (ids.length === 0) return out;

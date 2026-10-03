@@ -317,6 +317,13 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         return processed;
     }
 
+    /** 3.27.0 — hard-delete `ids` and their revision history. SQLite keeps
+     *  history rows under the same id, so this is physicalDeleteMany; named
+     *  separately so callers can use one method across engines. */
+    async purgeWithHistory(ids: string[]): Promise<number> {
+        return this.physicalDeleteMany(ids);
+    }
+
     async tombstone(id: string, reason: string): Promise<void> {
         assertWritableRole(this.role, 'tombstone');
         if (!this.initialized) return;
@@ -452,6 +459,12 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     async getById(id: string): ReturnType<VerbatimStoreApi['getById']> {
         if (!this.initialized) return null;
         return sqliteHistory.getById(this.requireDb(), id);
+    }
+
+    /** 3.27.0 — which of `ids` have a canonical row (batched getById; nodeDeleteMany). */
+    async getExistingIds(ids: string[]): Promise<string[]> {
+        if (!this.initialized || ids.length === 0) return [];
+        return sqliteHistory.getExistingIds(this.requireDb(), ids);
     }
 
     async getContentHashesByIds(ids: string[]): Promise<Map<string, string>> {

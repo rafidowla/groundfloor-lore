@@ -17,6 +17,7 @@
  * replicator stays dormant so test-mode invariants hold.
  */
 
+import { purgeVerbatimRows, type PurgeCapableStore } from '../core/verbatimPurge.js';
 import type { LoreNode, LoreEdge } from '../providers/types.js';
 import type { SyncEngine } from '../engines/syncEngine.js';
 import type { WorkspaceGraph } from '../engines/openWorkspaceGraph.js';
@@ -336,6 +337,12 @@ export function wireOutbox(input: {
             tombstoneVerbatim: async (id: string, reason: string, workspace?: string) => {
                 const v = await resolveVerbatim(workspace);
                 await v.tombstone(id, reason);
+            },
+            // 3.27.0 — `verbatim.purge` fan-out (nodeDelete({ purge:true })): hard
+            // delete of the ids + their #rev history, no embedding. Idempotent.
+            purgeVerbatim: async (ids: string[], workspace?: string) => {
+                const v = await resolveVerbatim(workspace);
+                await purgeVerbatimRows(v as PurgeCapableStore, ids, 'node purged (outbox replay)');
             },
             // SP-13 — consolidated verbatim upsert. The replicator merges a
             // run of adjacent verbatim.upsert rows into one of these so

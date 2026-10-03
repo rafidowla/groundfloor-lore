@@ -156,7 +156,10 @@ export function keyOfEntry(entry: OutboxEntry): { family: EntityFamily; key: str
         }
         return { family: 'edge', key: `${sourceId}${EDGE_KEY_SEP}${targetId}${EDGE_KEY_SEP}${relation}` };
     }
-    if (kind === 'verbatim.upsert' || kind === 'verbatim.tombstone') {
+    if (kind === 'verbatim.upsert' || kind === 'verbatim.tombstone' || kind === 'verbatim.purge') {
+        // 3.27.0 — verbatim.purge (nodeDelete({ purge:true })) joins the family
+        // under the canonical `lore:<id>` key, same as tombstone; its alias
+        // ids ride in payload.ids and are matched by VERBATIM_PURGE_IDS_SQL.
         // payload.id is the canonical `lore:<id>` verbatim key. Same identity
         // derivation as node, but its own family so it never cross-supersedes
         // a node op on a colliding key. The two verbatim kinds cross-supersede
@@ -175,7 +178,7 @@ export function keyOfEntry(entry: OutboxEntry): { family: EntityFamily; key: str
  * `keyOfEntry`'s key from a row's `payload` JSON so a bound `key` parameter
  * compares equal to it.
  */
-export function supersessionFamilySql(family: EntityFamily): { kinds: string; keyExpr: string } {
+function baseFamilySql(family: EntityFamily): { kinds: string; keyExpr: string } {
     // 3.26.0 — `json_extract` raises on a payload that is not valid JSON, so
     // one damaged row made this lookup throw for its whole workspace. Guarded,
     // such a row yields NULL and never equals the bound key.
@@ -191,7 +194,7 @@ export function supersessionFamilySql(family: EntityFamily): { kinds: string; ke
             // same keyExpr as node (payload.id), but the disjoint `kinds` set
             // keeps it from matching a node row on a colliding key.
             return {
-                kinds: "('verbatim.upsert', 'verbatim.tombstone')",
+                kinds: "('verbatim.upsert', 'verbatim.tombstone', 'verbatim.purge')",
                 keyExpr: field('$.id'),
             };
         case 'edge':
@@ -202,6 +205,41 @@ export function supersessionFamilySql(family: EntityFamily): { kinds: string; ke
                 keyExpr: `${field('$.sourceId')} || char(0) || ${field('$.targetId')} || char(0) || ${field('$.relation')}`,
             };
     }
+}
+
+/** 3.27.0 - `match` is the WHERE fragment comparing a row to the family key and
+ *  `binds` how many times the key is bound: the verbatim family also matches a
+ *  replicated purge's `payload.ids`. */
+export function supersessionFamilySql(family: EntityFamily): { kinds: string; keyExpr: string; match: { sql: string; binds: number } } {
+    const base = baseFamilySql(family);
+    const match = family === 'verbatim'
+        ? { sql: `(${base.keyExpr} = ? OR ${VERBATIM_PURGE_IDS_SQL})`, binds: 2 }
+        : { sql: `${base.keyExpr} = ?`, binds: 1 };
+    return { ...base, match };
+}
+
+/**
+ * 3.27.0 — extra supersession match for the `verbatim` family: a replicated
+ * `verbatim.purge` row also supersedes a failed row whose key is one of the
+ * purge's `payload.ids` (the node's alias rows `lore:<id>#q<i>`, which carry
+ * their own key and are not `payload.id` of the purge). Binds: the key.
+ */
+export const VERBATIM_PURGE_IDS_SQL =
+    "(operationKind = 'verbatim.purge' AND json_valid(payload) AND EXISTS "
+    + "(SELECT 1 FROM json_each(payload, '$.ids') WHERE json_each.value = ?))";
+
+/** 3.27.0 - OutboxStore.queuedVerbatimUpsertIds for SQLite: the subset of
+ *  `ids` with a not-yet-replicated (pending/failed/replicating) verbatim.upsert
+ *  row. Malformed payloads never match. */
+export function queuedVerbatimUpsertIdsOf(db: { prepare(sql: string): { all(...params: unknown[]): unknown[] } }, workspace: string, ids: string[]): string[] {
+    if (ids.length === 0) return [];
+    const pid = "CASE WHEN json_valid(payload) THEN json_extract(payload, '$.id') END";
+    const rows = db.prepare(
+        `SELECT DISTINCT ${pid} AS pid FROM outbox_entries
+         WHERE workspace = ? AND operationKind = 'verbatim.upsert'
+           AND status IN ('pending', 'failed', 'replicating') AND ${pid} IN (${ids.map(() => '?').join(', ')})`,
+    ).all(workspace, ...ids) as { pid: string }[];
+    return rows.map((r) => r.pid);
 }
 
 /**

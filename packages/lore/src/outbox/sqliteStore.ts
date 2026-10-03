@@ -41,7 +41,7 @@ import type {
     OutboxWorkspaceStats,
     StepStatus,
 } from './types.js';
-import { supersessionFamilySql, ensureNodeUpsertIdIndex, newestNodeUpsertRow, SUPERSEDED_DEAD_ERROR, type EntityFamily } from './supersession.js';
+import { supersessionFamilySql, queuedVerbatimUpsertIdsOf, ensureNodeUpsertIdIndex, newestNodeUpsertRow, SUPERSEDED_DEAD_ERROR, type EntityFamily } from './supersession.js';
 import {
     migrateJsonOutbox,
     DEFAULT_WORKSPACE_BACKFILL,
@@ -467,6 +467,7 @@ export class SqliteOutboxStore implements IOutboxStore {
         return rows.map(rowToEntry);
     }
 
+    async queuedVerbatimUpsertIds(workspace: string, ids: string[]): Promise<string[]> { return queuedVerbatimUpsertIdsOf(this.db, workspace, ids); }
     async listWorkspacesWithPending(): Promise<string[]> {
         const rows = this.db.prepare(
             `SELECT DISTINCT workspace FROM outbox_entries WHERE status IN ('pending', 'failed')`,
@@ -701,9 +702,9 @@ export class SqliteOutboxStore implements IOutboxStore {
              WHERE workspace = ? AND status = 'replicated'
                AND operationKind IN ${familySql.kinds}
                AND sequenceId > ?
-               AND ${familySql.keyExpr} = ?
+               AND ${familySql.match.sql} -- 3.27.0: verbatim also matches a purge's payload.ids
              LIMIT 1`,
-        ).get(workspace, sequenceId, key) as { hit: number } | undefined;
+        ).get(workspace, sequenceId, ...Array<string>(familySql.match.binds).fill(key)) as { hit: number } | undefined;
         return r !== undefined;
     }
 
