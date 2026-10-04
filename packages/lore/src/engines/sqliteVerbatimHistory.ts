@@ -14,6 +14,8 @@
 import type { Database as DatabaseType } from 'better-sqlite3';
 
 import { decodeVector } from './sqliteVerbatimVector.js';
+import { isRealVector } from './verbatimGetVectors.js';
+import { VERBATIM_CHUNK_SIZE } from './verbatimBatch.js';
 import { escapeLikeWildcards, VERBATIM_FILTERABLE_COLUMNS, type VerbatimExportRow } from './verbatimHistory.js';
 
 function parseScopes(raw: unknown): string[] {
@@ -69,6 +71,25 @@ export function getExistingIds(db: DatabaseType, ids: string[]): string[] {
             `SELECT id FROM verbatim WHERE is_canonical = 1 AND id IN (${chunk.map(() => '?').join(', ')})`,
         ).all(...chunk) as Array<{ id: string }>;
         for (const r of rows) out.push(r.id);
+    }
+    return out;
+}
+
+/** 3.27.1 - stored embeddings of the CANONICAL, non-tombstoned rows among `ids`
+ *  (see verbatimGetVectors.ts for the engine-neutral contract). One query per
+ *  VERBATIM_CHUNK_SIZE ids; float32 BLOB -> plain number[] (exact widening, so
+ *  identical to the Lance read). NULL / empty / all-zero vectors are omitted. */
+export function getVectors(db: DatabaseType, ids: string[]): Map<string, number[]> {
+    const out = new Map<string, number[]>();
+    for (let i = 0; i < ids.length; i += VERBATIM_CHUNK_SIZE) {
+        const chunk = ids.slice(i, i + VERBATIM_CHUNK_SIZE);
+        const rows = db.prepare(
+            `SELECT id, vector FROM verbatim WHERE is_canonical = 1 AND is_tombstone = 0 AND id IN (${chunk.map(() => '?').join(', ')})`,
+        ).all(...chunk) as Array<{ id: string; vector: Buffer | null }>;
+        for (const r of rows) {
+            const v = decodeVector(r.vector);
+            if (v && isRealVector(v)) out.set(r.id, Array.from(v));
+        }
     }
     return out;
 }

@@ -236,7 +236,7 @@ export class MissingPayloadError extends Error {
 const NODE_CONTENT_WITNESS_FIELDS = ['type', 'label', 'content', 'project', 'ecosystem'] as const;
 
 /** 3.27.0 — the id set of a `verbatim.purge` payload: `ids` plus `id`, deduped. */
-function purgeIdsOf(payload: Record<string, unknown>): string[] {
+export function purgeIdsOf(payload: Record<string, unknown>): string[] {
     const out = new Set<string>();
     const raw = payload['ids'];
     if (Array.isArray(raw)) for (const x of raw) if (typeof x === 'string' && x) out.add(x);

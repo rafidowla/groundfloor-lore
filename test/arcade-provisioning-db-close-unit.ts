@@ -89,7 +89,7 @@ await test('structural: mcp/arcadeBoot.ts wires both close calls into shutdown()
     assert.ok(/closeTokenDb[\s\S]{0,60}from '\.\.\/engines\/arcade\/arcadeAuthResolver\.js'/.test(importsBlock),
         'arcadeBoot.ts must import closeTokenDb from arcadeAuthResolver.js');
 
-    const shutdownMatch = src.match(/const shutdown = \(reason: string\): void => \{[\s\S]*?\n {8}\};/);
+    const shutdownMatch = src.match(/const shutdown = (?:async )?\(reason: string\): (?:void|Promise<void>) => \{[\s\S]*?\n {8}\};/);
     assert.ok(shutdownMatch, 'could not locate the shutdown() function body in arcadeBoot.ts — has it been renamed/restructured?');
     assert.ok(shutdownMatch![0].includes('closeTokenDb()'), 'shutdown() must call closeTokenDb()');
     assert.ok(shutdownMatch![0].includes('closeRegistryDb()'), 'shutdown() must call closeRegistryDb()');

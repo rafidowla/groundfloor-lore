@@ -171,7 +171,8 @@ export async function lintGraph(query: SurrealQuery): Promise<string[]> {
         const rows = await query(
             `SELECT id, type FROM ${NODE_TABLE}`
             + ` WHERE type != 'note'`
-            + ` AND count(SELECT id FROM ${EDGE_TABLE} WHERE in = $parent.id OR out = $parent.id) = 0`,
+            + ` AND count(SELECT id FROM ${EDGE_TABLE} WHERE in = $parent.id OR out = $parent.id) = 0`
+            + ' ORDER BY id ASC', // 3.27.1: deterministic message order; id is selected
         );
         return rows.map((r) => formatOrphanMessage(String(r['type']), ridToId(r['id'])));
     } catch (error) {

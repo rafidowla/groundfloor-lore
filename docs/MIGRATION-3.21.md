@@ -64,13 +64,47 @@ substrate, under any circumstance.** There is no implicit migration.
   returned before promotion starts. On success it atomically flips
   `workspaces.json`'s `vectorEngine` to `lance`. A failed or crashed
   promotion leaves SQLite authoritative; the next write simply re-checks
-  the threshold. **There is no LanceDB → SQLite direction, automatic or
-  manual** — a workspace already on `lance` stays on `lance`.
+  the threshold. There is no *automatic* LanceDB → SQLite direction — a
+  workspace already on `lance` stays on `lance` until an operator runs the
+  explicit demotion below.
+- **Vector, LanceDB → SQLite (3.27.1)**: explicit and offline:
+  ```bash
+  lore migrate-vectors <workspace> --to sqlite [--dry-run] [--force] [--data-dir <path>]
+  ```
+  (`packages/lore/src/cli/commands/migrateVectors.ts` →
+  `engines/migrateVectorsToSqlite.ts`). Same safety model as
+  `migrate-graph`: refuses while a daemon serves the home; refuses unless
+  the workspace is registered `lance` and has a `lore_verbatim` Lance
+  table; refuses a non-empty `.lore/verbatim.sqlite` unless `--force`
+  (which moves it aside to `verbatim.sqlite.pre-migrate-<stamp>`, never
+  deletes it); refuses at or above `LORE_VECTOR_PROMOTE_ROWS` (the first
+  write would promote it straight back). It then backs up
+  (`<home>/migrate-vectors-backups`), copies every Lance row — canonical,
+  `#rev` history, `#q` aliases, tombstones — with every column and the
+  **stored** vector (the embedder is never called; an all-zero
+  "unembedded" placeholder becomes a NULL vector and is counted), keeps
+  `embedding_model.json` byte-for-byte, carries the D7 piece table over
+  row-for-row (`piece_layout.json` stays valid), and verifies counts by
+  kind, a digest over every row, float32-bit-equal vectors and live
+  getById / vector top-k / bm25 probes on both engines before one atomic
+  `vectorEngine` flip. Any failure before the flip removes the partial
+  SQLite file and leaves the registry on `lance`. The Lance table folders
+  are left in place; the command prints the `rm -rf` lines for
+  `lore_verbatim.lance` / `lore_verbatim_pieces.lance` only — keep the
+  rest of `.lore/lancedb/` (the fingerprint and piece sidecar live there
+  and the SQLite engine still reads them). No env var overrides the
+  per-workspace field afterwards (`LORE_DEFAULT_VECTOR_ENGINE` only
+  affects new workspaces).
+  **Embedding hosts (Atlas)**: stop the host process first — the daemon
+  preflight cannot see an in-process `createLore()` — then run
+  `lore migrate-vectors <ws> --to sqlite --data-dir <the host's dataDir>`
+  and restart; the host's verbatim resolver opens SQLite on next start.
 
 **Practical effect**: every workspace that existed before a host adopts
 3.21 keeps running exactly the substrate pair it always has, until an
-operator runs `lore migrate-graph` (graph) or the automatic row-threshold
-promotion fires (vector, one-way only).
+operator runs `lore migrate-graph` (graph), `lore migrate-vectors`
+(vector, LanceDB → SQLite, 3.27.1) or the automatic row-threshold
+promotion fires (vector, SQLite → LanceDB).
 
 ## 3. Two crashes you will hit if you skip straight to SQLite
 

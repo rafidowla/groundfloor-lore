@@ -47,6 +47,7 @@ import type { LoreUser } from './identity.js';
 import { currentUser } from './identity.js';
 import { loreHomePath } from '../config/loreHome.js';
 import type { AuditLogExporter } from '../audit/exporter.js';
+import { registerAuditLog } from './auditFlush.js';
 import {
     AUDIT_READ_LIMIT,
     ensureAnchor,
@@ -193,6 +194,9 @@ export class AuditLog {
         } catch (err) {
             console.error(`[audit] init failed: ${(err as Error).message}`);
         }
+        // 3.27.1 — make this instance reachable by the shutdown drains
+        // (security/auditFlush.ts) so queued appends are awaited on dispose.
+        registerAuditLog(this);
     }
 
     /**

@@ -12,6 +12,25 @@
  * instead of one table scan per id, and the delete is one `id IN (...)` per
  * `chunkSize` ids. A purge of N ids is therefore ceil(N / PURGE_QUERY_IDS)
  * queries + ceil(rows / chunkSize) deletes, not N scans.
+ *
+ * 3.27.1 — an idempotent no-op purge commits NOTHING. Every LanceDB
+ * `table.delete()` writes a new table version (a _versions + _transactions
+ * file) even when its predicate matches no row. 3.27.0 seeded the delete set
+ * with every requested id, so each outbox replay of an already-purged
+ * `verbatim.purge` row committed an empty version: Atlas's 16,177-node purge
+ * left ~16.7k version files (+266 MB) in lore_verbatim.lance. Now the batch
+ * query covers the exact ids too (`id IN (...) OR <anchored #rev LIKEs>`),
+ * the delete set holds only rows actually found, and no delete runs when
+ * nothing matched. The return value is the ids actually removed.
+ *
+ * VerbatimStore.purgeWithHistory (3.27.1) bumps the search epoch only when
+ * rows were removed. Its piece delete still covers every requested id, but
+ * LancePieceIndex.deleteRows is query-then-delete (no commit when nothing
+ * matches), so a no-op costs a count, not a version. It is kept because a
+ * piece row CAN outlive its verbatim row: a crash between the verbatim delete
+ * and the piece delete leaves a still-valid index with orphan pieces (a FAILED
+ * piece delete instead marks the index incomplete, which stops piece search
+ * until a rebuild), and the outbox replay is what cleans that up.
  */
 import type * as lancedb from '@lancedb/lancedb';
 import { assertSafeLanceId, isRevisionHistoryId, escapeLikeWildcards } from './verbatimHistory.js';
@@ -21,16 +40,19 @@ export const PURGE_QUERY_IDS = 256;
 
 const REV = '#rev';
 
-/** Delete `ids` and their revision-history rows from `table`; returns every id removed. */
+/** Delete `ids` and their revision-history rows from `table`; returns the ids
+ *  actually removed (empty, and no commit, when nothing matched). */
 export async function purgeRowsWithHistory(table: lancedb.Table, ids: string[], chunkSize: number): Promise<string[]> {
     ids.forEach((id) => assertSafeLanceId(id, 'purgeWithHistory'));
     const idSet = new Set<string>(ids);
-    const wanted = new Set<string>(idSet);
+    const wanted = new Set<string>();
     const unique = [...idSet];
     for (let i = 0; i < unique.length; i += PURGE_QUERY_IDS) {
-        const likes = unique.slice(i, i + PURGE_QUERY_IDS)
+        const batch = unique.slice(i, i + PURGE_QUERY_IDS);
+        const exact = `id IN (${batch.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ')})`;
+        const likes = batch
             .map((id) => `id LIKE '${escapeLikeWildcards(id).replace(/'/g, "''")}#rev%' ESCAPE '\\'`);
-        const rows = await table.query().where(likes.join(' OR ')).select(['id']).toArray();
+        const rows = await table.query().where([exact, ...likes].join(' OR ')).select(['id']).toArray();
         for (const raw of rows) {
             const rid = String((raw as Record<string, unknown>).id ?? '');
             // Exact id, or `<id>#rev<ts>` whose prefix (before the LAST #rev) is
@@ -40,6 +62,7 @@ export async function purgeRowsWithHistory(table: lancedb.Table, ids: string[], 
         }
     }
     const all = [...wanted];
+    if (all.length === 0) return all; // 3.27.1 — nothing matched: commit no (empty) version
     all.forEach((id) => assertSafeLanceId(id, 'purgeWithHistory'));
     for (let i = 0; i < all.length; i += chunkSize) {
         const list = all.slice(i, i + chunkSize).map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
@@ -59,4 +82,19 @@ export async function existingIdsInTable(table: lancedb.Table, ids: string[], ch
         for (const raw of rows) found.add(String((raw as Record<string, unknown>).id ?? ''));
     }
     return [...found];
+}
+
+/** 3.27.1 — physicalDeleteMany's chunked `id IN (...)` delete, but each chunk is
+ *  probed first (limit 1) and skipped when nothing matches: LanceDB commits a new
+ *  table version for every delete(), even a zero-row one, so replayed/redundant
+ *  purges of absent ids bloated the version log. Returns true iff any chunk deleted. */
+export async function deleteExistingIds(table: lancedb.Table, ids: string[], chunkSize: number): Promise<boolean> {
+    let any = false;
+    for (let i = 0; i < ids.length; i += chunkSize) {
+        const list = ids.slice(i, i + chunkSize).map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
+        if ((await table.query().where(`id IN (${list})`).select(['id']).limit(1).toArray()).length === 0) continue;
+        await table.delete(`id IN (${list})`);
+        any = true;
+    }
+    return any;
 }

@@ -360,7 +360,7 @@ export async function listIds(
  *  Mirrors VerbatimStore.toPlainVector (private there) so the export reader
  *  emits the SAME shape the carry-import path (ArcadeVectorStore.storePrebuilt)
  *  expects. Returns [] for a missing/unreadable vector. */
-function toPlainVector(v: unknown): number[] {
+export function toPlainVector(v: unknown): number[] {
     if (!v) return [];
     if (Array.isArray(v)) {
         if (v.length === 1 && Array.isArray((v as unknown[])[0])) {

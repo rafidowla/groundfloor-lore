@@ -20,12 +20,13 @@ import { ReadCache, cacheKey } from './cache.js';
 import { BoundedVectorCache } from './boundedVectorCache.js';
 import { computeContentHash } from './contentHash.js';
 import * as verbatimHistory from './verbatimHistory.js';
-import { assertSafeLanceId, assertSafeLanceHash, isRevisionHistoryId, HISTORY_ID_LIKE_PATTERN } from './verbatimHistory.js';
+import { assertSafeLanceId, assertSafeLanceHash, isRevisionHistoryId, HISTORY_ID_LIKE_PATTERN, toPlainVector as toPlainVectorShared } from './verbatimHistory.js';
 import { redactSecrets } from '../security/secretScan.js';
 import * as verbatimBatch from './verbatimBatch.js';
-import { purgeRowsWithHistory, existingIdsInTable } from './verbatimPurgeRows.js';
+import { purgeRowsWithHistory, existingIdsInTable, deleteExistingIds } from './verbatimPurgeRows.js';
 import type { VerbatimBatchCtx } from './verbatimBatch.js';
 import { VERBATIM_CHUNK_SIZE, suppliedVector } from './verbatimBatch.js';
+import { lanceGetVectors, normalizeGetVectorsIds } from './verbatimGetVectors.js';
 import { embedBatchCap, awaitEmbedMemoryHeadroom } from '../embed/memoryBudget.js';
 import { SearchGate } from './searchGate.js';
 import { SearchWorkerDeadlineError } from './verbatimWorkerProtocol.js';
@@ -774,44 +775,7 @@ export class VerbatimStore implements VectorProvider {
      * because Arrow's nullable-sentinel slots leak through. Iterating
      * by index produces a plain JS array LanceDB will accept.
      */
-    private toPlainVector(v: unknown): number[] {
-        if (!v) return [];
-        if (Array.isArray(v)) {
-            // Already a plain array, but Arrow may have leaked a single
-            // FixedSizeList element (a nested array) — flatten one level
-            // if so. Otherwise just coerce to numbers.
-            if (v.length === 1 && Array.isArray((v as unknown[])[0])) {
-                return ((v as unknown[])[0] as unknown[]).map((x) => Number(x));
-            }
-            return v.map((x) => Number(x));
-        }
-        // Arrow Vector — has .toArray() that yields the underlying TypedArray.
-        const arrowLike = v as { toArray?: () => unknown };
-        if (typeof arrowLike.toArray === 'function') {
-            const inner = arrowLike.toArray();
-            if (Array.isArray(inner)) {
-                if (inner.length === 1 && Array.isArray(inner[0])) {
-                    return (inner[0] as unknown[]).map((x) => Number(x));
-                }
-                return inner.map((x) => Number(x));
-            }
-            // toArray() can return a Float32Array directly.
-            const ta = inner as { length?: number; [k: number]: number };
-            if (typeof ta?.length === 'number') {
-                const out: number[] = new Array(ta.length);
-                for (let i = 0; i < ta.length; i++) out[i] = Number(ta[i]);
-                return out;
-            }
-        }
-        // Last-ditch: index access (Float32Array / TypedArray case).
-        const indexed = v as { length?: number; [k: number]: number };
-        if (typeof indexed.length === 'number') {
-            const out: number[] = new Array(indexed.length);
-            for (let i = 0; i < indexed.length; i++) out[i] = Number(indexed[i]);
-            return out;
-        }
-        return [];
-    }
+    private toPlainVector(v: unknown): number[] { return toPlainVectorShared(v); } // 3.27.1: one copy, shared with exportRows/getVectors (verbatimHistory.ts)
 
     /** Same Arrow-sentinel coercion for List<Utf8> fields. */
     private toPlainStringList(v: unknown): string[] {
@@ -1592,8 +1556,9 @@ export class VerbatimStore implements VectorProvider {
      * minutes, and a handful of versions for compact() to merge.
      *
      * Returns the number of ids processed (ids are escaped + chunked; a
-     * non-matching id in a chunk is a harmless no-op). Bumps the search
-     * epoch once at the end.
+     * non-matching id in a chunk is a harmless no-op that commits no LanceDB
+     * version — 3.27.1). Bumps the search epoch once at the end, only if
+     * something was actually deleted.
      */
     async physicalDeleteMany(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'physicalDeleteMany'); if (!this.initialized || !this.table || ids.length === 0) return 0;
@@ -1606,17 +1571,13 @@ export class VerbatimStore implements VectorProvider {
             }
         }
         ids.forEach((id) => assertSafeLanceId(id, 'physicalDeleteMany')); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
-        let processed = 0;
         this.writeGate.enter(); try {
-            for (let i = 0; i < ids.length; i += VERBATIM_CHUNK_SIZE) {
-                const chunk = ids.slice(i, i + VERBATIM_CHUNK_SIZE);
-                const list = chunk.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
-                await this.table.delete(`id IN (${list})`);
-                processed += chunk.length;
+            // 3.27.1 — deleteExistingIds queries first and commits no LanceDB version for absent ids.
+            if (await deleteExistingIds(this.table, ids, VERBATIM_CHUNK_SIZE)) {
+                this.bumpSearchEpoch();
+                await this.pieceIndex.deleteForIds(ids);
             }
-            this.bumpSearchEpoch();
-            await this.pieceIndex.deleteForIds(ids);
-            return processed;
+            return ids.length;
         } catch (error) {
             throw new VerbatimStoreError('physicalDeleteMany', (error as Error).message);
         } finally { this.writeGate.exit(); }
@@ -1628,16 +1589,25 @@ export class VerbatimStore implements VectorProvider {
         return this.writeGate.run(() => existingIdsInTable(this.table!, ids, VERBATIM_CHUNK_SIZE));
     }
 
-    /** 3.27.0 — hard-delete `ids` AND their `#rev<ts>` history rows, anchored
-     *  (verbatimPurgeRows.ts); no embedding; one search-epoch bump. */
+    /** 3.27.1 - stored embeddings by exact canonical row id (engine-neutral; verbatimGetVectors.ts).
+     *  Read only: no write entry, no embed, no promotion. Omits unknown / history / tombstoned /
+     *  unembedded (all-zero placeholder) rows. */
+    async getVectors(ids: string[]): Promise<Map<string, number[]>> {
+        const unique = normalizeGetVectorsIds(ids);
+        if (!this.initialized || !this.table || unique.length === 0) return new Map();
+        return this.writeGate.run(() => lanceGetVectors(this.table!, unique, VERBATIM_CHUNK_SIZE));
+    }
+
+    /** 3.27.0 — hard-delete `ids` + their `#rev<ts>` history (anchored); no embedding.
+     *  3.27.1 — no-op replay: no version, no epoch bump, guarded piece delete (verbatimPurgeRows.ts). */
     async purgeWithHistory(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'purgeWithHistory');
         if (!this.initialized || !this.table || ids.length === 0) return 0;
         ids.forEach((id) => assertSafeLanceId(id, 'purgeWithHistory')); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
         this.writeGate.enter(); try {
             const all = await purgeRowsWithHistory(this.table, ids, VERBATIM_CHUNK_SIZE);
-            this.bumpSearchEpoch();
-            await this.pieceIndex.deleteForIds(all);
+            if (all.length > 0) this.bumpSearchEpoch();
+            await this.pieceIndex.deleteForIds([...new Set([...ids, ...all])]);
             return all.length;
         } catch (error) {
             throw new VerbatimStoreError('purgeWithHistory', (error as Error).message);
@@ -1717,7 +1687,7 @@ export class VerbatimStore implements VectorProvider {
      * History queries (`getHistory(id)`) include the tombstone
      * canonical row plus every preceding `#rev` snapshot.
      */
-    async tombstone(id: string, reason: string): Promise<void> {
+    async tombstone(id: string, reason: string, pre?: { ts: string; vector: number[] }): Promise<void> {
         assertWritableRole(this.role, 'tombstone'); assertSafeLanceId(id, 'tombstone'); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
         this.writeGate.enter(); try {
             if (!this.initialized || !this.table) return;
@@ -1728,7 +1698,7 @@ export class VerbatimStore implements VectorProvider {
             const r = rows[0] as Record<string, unknown>;
             const existingText = String(r.text ?? '');
             if (existingText.startsWith('[TOMBSTONED')) return; // already tombstoned — no-op
-            const ts = new Date().toISOString();
+            const ts = pre?.ts ?? new Date().toISOString(); // 3.27.1 — `pre`: parent-embeds proxy supplies ts + vector (child's stub provider cannot embed)
             // Snapshot the previous content under a #rev id (explicit
             // field copy — see snapshotForRev for why spread is unsafe
             // against Arrow-backed rows).
@@ -1750,7 +1720,7 @@ export class VerbatimStore implements VectorProvider {
             // text accessible after a "TOMBSTONED" marker so a human
             // (or recall) can still read what used to be there.
             const tombstoneText = `[TOMBSTONED ${ts} reason: ${reason}]\n\n${existingText}`;
-            const newVector = await this.embeddingProvider.embedDocument(tombstoneText);
+            const newVector = pre?.vector ?? await this.embeddingProvider.embedDocument(tombstoneText);
             // C3-medium (2026-08-17) — ATOMIC canonical replace. Was
             // delete(id) then add(row): a crash or a failing add between the
             // two permanently lost the canonical row while the caller saw

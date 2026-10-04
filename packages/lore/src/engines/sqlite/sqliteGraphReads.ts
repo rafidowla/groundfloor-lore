@@ -310,7 +310,11 @@ export async function listNodes(
                 params.push(ecosystem);
             }
             const where = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
-            let sql = `SELECT * FROM nodes${where} ORDER BY updatedAt DESC`;
+            // 3.27.1: `id ASC` tie-break. A reindex stamps thousands of rows with one
+            // updatedAt, so `ORDER BY updatedAt DESC` alone leaves the order among ties
+            // (and therefore any "first N" slice) to the planner. idx_nodes_updatedAt
+            // is (updatedAt DESC, id), so this still reads off the index, no sort step.
+            let sql = `SELECT * FROM nodes${where} ORDER BY updatedAt DESC, id ASC`;
             if (effectiveLimit !== undefined) { sql += ' LIMIT ?'; params.push(effectiveLimit); }
             const rows = ctx.db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
             return rows.map((row) => rowToLoreNode(fromSqliteNodeRow(row)));

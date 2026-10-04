@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, setupCommand, lintCommand, authCommand, retentionCommand, compactCommand, maintainCommand, backupCommand, restoreCommand, diagnoseCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, migrateGraphCommand, vectorsCommand, verbatimCommand, modelsCommand, seedWorkspacesCommand, workspacesCommand, operatorCommand, resolveDeferredCommand, recallCommand, getFullCommand, supersedeCommand, markStaleCommand, embedCommand, outboxCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, setupCommand, lintCommand, authCommand, retentionCommand, compactCommand, maintainCommand, backupCommand, restoreCommand, diagnoseCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, migrateGraphCommand, migrateVectorsCommand, vectorsCommand, verbatimCommand, modelsCommand, seedWorkspacesCommand, workspacesCommand, operatorCommand, resolveDeferredCommand, recallCommand, getFullCommand, supersedeCommand, markStaleCommand, embedCommand, outboxCommand } from './commands.js';
 import { embedderCommand } from './embedderCommands.js';
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -70,6 +70,7 @@ Core commands:
   snapshot       One-shot folder scan → HTML snapshot (no workspace ingest)
   migrate        One-off migrations (v1-sqlite → graph, embedding-model swap)
   migrate-graph  Migrate a workspace's graph engine SurrealDB → SQLite (or --rollback)
+  migrate-vectors Migrate a workspace's verbatim store LanceDB → SQLite (offline)
   vectors        SQLite verbatim store tools (today: promote to LanceDB)
   verbatim       LanceDB verbatim store tools (today: reap orphan embeddings)
   maintain       Config-driven capacity maintenance (compaction, version cleanup, retention, ephemeral expiry)
@@ -181,6 +182,9 @@ async function main(): Promise<void> {
             break;
         case 'migrate-graph':
             await migrateGraphCommand(commandArgs);
+            break;
+        case 'migrate-vectors':
+            await migrateVectorsCommand(commandArgs);
             break;
         case 'vectors':
             await vectorsCommand(commandArgs);

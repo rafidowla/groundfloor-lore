@@ -188,6 +188,9 @@ LanceDB-backed workspaces on a host that is not ready to switch. A
 `sqlite`-vector workspace can still be promoted to `lance` automatically in
 the background — see `LORE_VECTOR_PROMOTE_ROWS` below — independent of this
 variable, which only governs what a NEW workspace starts on.
+The reverse (an existing `lance` workspace → `sqlite`) is the explicit,
+offline `lore migrate-vectors <workspace> --to sqlite` (3.27.1; see
+`docs/MIGRATION-3.21.md`) — this variable never moves an existing workspace.
 
 Source: `src/config/workspaces.ts` (`createWorkspace`, fresh-home seeding),
 `src/engines/vectorEngineSelector.ts` (`resolveNewWorkspaceVectorEngine`).

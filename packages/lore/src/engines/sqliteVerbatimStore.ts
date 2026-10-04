@@ -48,8 +48,10 @@ import { openSqliteVerbatimDb, type SqliteVecLoadResult } from './sqliteVerbatim
 import { BruteForceVectorCache, nativeVectorSearch, decodeVector, encodeVector } from './sqliteVerbatimVector.js';
 import { bm25Search as ftsBm25Search, detectSqliteTokenizer, currentFtsTokenizer, rebuildFtsTable } from './sqliteVerbatimFts.js';
 import * as sqliteHistory from './sqliteVerbatimHistory.js';
+import { normalizeGetVectorsIds } from './verbatimGetVectors.js';
 import * as sqliteWrite from './sqliteVerbatimWrite.js';
 import { maybeTriggerPromotion } from './verbatimPromotionTrigger.js';
+import { openVerbatimRawImport, type VerbatimRawImport } from './sqliteVerbatimImport.js';
 
 export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     private initialized = false;
@@ -102,6 +104,13 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     private readonly workspaceName?: string;
     private readonly home?: string;
     private readonly onLancePromoted?: (info: { newLanceDbPath: string }) => void | Promise<void>;
+
+    /** 3.27.1 — internal raw-import handle (like SqliteGraph.importRaw) for
+     *  `lore migrate-vectors --to sqlite`: verbatim ids/timestamps/history,
+     *  no restamp, no fingerprint stamp. See sqliteVerbatimImport.ts. */
+    static openRawImport(basePath: string): Promise<VerbatimRawImport> {
+        return openVerbatimRawImport(basePath);
+    }
 
     constructor(
         basePath: string,
@@ -317,11 +326,18 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         return processed;
     }
 
-    /** 3.27.0 — hard-delete `ids` and their revision history. SQLite keeps
-     *  history rows under the same id, so this is physicalDeleteMany; named
-     *  separately so callers can use one method across engines. */
+    /** 3.27.0 — hard-delete `ids` and their revision history (SQLite keeps
+     *  history rows under the same id). 3.27.1 — one transaction, returns rows
+     *  actually removed, no cache/epoch invalidation on a no-op (purgeRows).
+     *  The piece delete always runs over the requested ids: a DELETE matching
+     *  nothing dirties no page, and it clears pieces orphaned by a crash
+     *  between the verbatim and piece deletes (see verbatimPurgeRows.ts). */
     async purgeWithHistory(ids: string[]): Promise<number> {
-        return this.physicalDeleteMany(ids);
+        assertWritableRole(this.role, 'purgeWithHistory');
+        if (!this.initialized) return 0;
+        const removed = sqliteWrite.purgeRows(this.writeDeps(), ids);
+        await this.pieceIndex?.deleteForIds(ids);
+        return removed;
     }
 
     async tombstone(id: string, reason: string): Promise<void> {
@@ -465,6 +481,13 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     async getExistingIds(ids: string[]): Promise<string[]> {
         if (!this.initialized || ids.length === 0) return [];
         return sqliteHistory.getExistingIds(this.requireDb(), ids);
+    }
+
+    /** 3.27.1 - stored embeddings by exact canonical row id (engine-neutral; verbatimGetVectors.ts). */
+    async getVectors(ids: string[]): Promise<Map<string, number[]>> {
+        const unique = normalizeGetVectorsIds(ids);
+        if (!this.initialized || unique.length === 0) return new Map();
+        return sqliteHistory.getVectors(this.requireDb(), unique);
     }
 
     async getContentHashesByIds(ids: string[]): Promise<Map<string, string>> {

@@ -349,6 +349,26 @@ export function physicalDeleteMany(deps: SqliteWriteDeps, ids: string[]): number
     return processed;
 }
 
+/** 3.27.1 — purgeWithHistory for SQLite (history rows share the id, so the
+ *  exact-id delete already takes them). Unlike physicalDeleteMany it runs
+ *  every chunk in ONE transaction, returns the rows actually deleted, and
+ *  skips onMutate() (vector-cache drop + search-epoch bump) when nothing
+ *  matched, so an outbox replay of an already-purged `verbatim.purge` row
+ *  invalidates nothing. */
+export function purgeRows(deps: SqliteWriteDeps, ids: string[]): number {
+    if (ids.length === 0) return 0;
+    let changes = 0;
+    deps.db.transaction(() => {
+        for (let i = 0; i < ids.length; i += VERBATIM_CHUNK_SIZE) {
+            const chunk = ids.slice(i, i + VERBATIM_CHUNK_SIZE);
+            const placeholders = chunk.map(() => '?').join(', ');
+            changes += Number(deps.db.prepare(`DELETE FROM verbatim WHERE id IN (${placeholders})`).run(...chunk).changes);
+        }
+    })();
+    if (changes > 0) deps.onMutate();
+    return changes;
+}
+
 /** tombstone() — marks the canonical row superseded (is_tombstone=1) and
  *  rewrites its text with the SAME `[TOMBSTONED <ts> reason: ...]` marker
  *  prefix the Lance path uses, so text-shape parity holds across engines

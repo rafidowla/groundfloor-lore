@@ -40,7 +40,9 @@ import { readPieceSidecar } from './pieces/pieceLayout.js';
 
 const DEFAULT_PROMOTE_ROWS = 250_000;
 
-function promoteRowsThreshold(): number {
+/** 3.27.1: exported so `lore migrate-vectors --to sqlite` refuses a store
+ *  that would promote straight back to Lance on its first write. */
+export function promoteRowsThreshold(): number {
     const raw = process.env.LORE_VECTOR_PROMOTE_ROWS;
     if (!raw || raw.trim() === '') return DEFAULT_PROMOTE_ROWS;
     const n = Number(raw);

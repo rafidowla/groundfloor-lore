@@ -188,7 +188,8 @@ export async function listNodeSummaries(
             if (project !== '*') { sql += ' AND project = $project'; vars['project'] = project; }
             // '*'/''/NONE = unscoped row, matches any scope (core/ecosystemMatch.ts).
             if (ecosystem !== '*') { sql += " AND (ecosystem = $ecosystem OR ecosystem = '*' OR ecosystem = '' OR ecosystem = NONE)"; vars['ecosystem'] = ecosystem; }
-            if (ordered) sql += ' ORDER BY updatedAt DESC';
+            // 3.27.1: `id ASC` tie-break; `id` is in both projections above.
+            if (ordered) sql += ' ORDER BY updatedAt DESC, id ASC';
             if (effectiveLimit !== undefined) { sql += ' LIMIT $limit'; vars['limit'] = effectiveLimit; }
             const rows = await ctx.query(sql, vars);
             return rows.map((row) => ({

@@ -52,6 +52,13 @@ export interface PieceIndexStatus {
     reason?: string;
 }
 
+/** 3.27.1: exported as `ensurePieceSchema` so the Lance -> SQLite verbatim
+ *  migration copies Lance piece rows into the same table DDL instead of
+ *  re-embedding them through buildPieceIndex. */
+export function ensurePieceSchema(db: DatabaseType): void {
+    ensureSchema(db);
+}
+
 function ensureSchema(db: DatabaseType): void {
     db.exec(`
         CREATE TABLE IF NOT EXISTS verbatim_pieces (

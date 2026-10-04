@@ -32,6 +32,7 @@ import { createServer, type IncomingMessage, type ServerResponse, type Server as
 import { log } from '../logger.js';
 import { VERSION } from '../version.js';
 import { AuditLog } from '../security/audit.js';
+import { flushAllAuditLogs } from '../security/auditFlush.js';
 import { SqliteOutboxStore } from '../outbox/sqliteStore.js';
 import { readEnvRetryConfig } from '../outbox/retryConfig.js';
 import { ensureAuthToken, getAuthTokenPath } from '../security/authToken.js';
@@ -483,7 +484,7 @@ export async function createArcadeInstance(input: {
         // not apply) — start the outbox replicator after the listener binds.
         arcadeReplicator.start();
         log.info('[Lore MCP] arcade outbox replicator started');
-        const shutdown = (reason: string): void => {
+        const shutdown = async (reason: string): Promise<void> => {
             log.info(`[Lore MCP] arcade shutdown (${reason})`);
             try { limiter.stopSweeper(); } catch { /* already stopped */ }
             void arcadeReplicator.stop();
@@ -494,10 +495,13 @@ export async function createArcadeInstance(input: {
             // token) that nothing on this shutdown path ever closed.
             try { closeTokenDb(); } catch { /* already closed */ }
             try { closeRegistryDb(); } catch { /* already closed */ }
+            // 3.27.1 — await queued audit appends (bounded) before exiting; the
+            // append chain is fire-and-forget, so exit alone dropped the tail.
+            try { await flushAllAuditLogs(); } catch { /* bounded + non-throwing; belt and braces */ }
             process.exit(0);
         };
-        process.on('SIGINT', () => shutdown('SIGINT'));
-        process.on('SIGTERM', () => shutdown('SIGTERM'));
+        process.on('SIGINT', () => { void shutdown('SIGINT'); });
+        process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
     };
 
     const daemonHandle: ArcadeDaemonHandle = { startArcadeListener, outboxStore, auditLog };
@@ -535,6 +539,8 @@ export async function createArcadeInstance(input: {
             try { outboxStore.close(); } catch { /* ignore */ }
             try { closeTokenDb(); } catch { /* ignore */ }
             try { closeRegistryDb(); } catch { /* ignore */ }
+            // 3.27.1 — flush queued audit appends (bounded) before dispose returns.
+            try { await flushAllAuditLogs(); } catch { /* ignore */ }
         },
         _daemon: daemonHandle as unknown as LoreInstance['_daemon'],
     };

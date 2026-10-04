@@ -95,7 +95,7 @@ export async function search(
   // exceeds it — favors the most-recently-updated rows, same tiebreak the
   // shared ranker applies.
   const scanCap = Math.max(clampedLimit, 2000);
-  sql += ` ORDER BY updatedAt DESC LIMIT ${scanCap}`;
+  sql += ` ORDER BY updatedAt DESC, id ASC LIMIT ${scanCap}`; // 3.27.1: deterministic ties
   const res = await http.query(tenantDb, sql, params);
   const candidates = ((res.result ?? []) as NodeRow[]).map((row) => rowToNode(row));
   return rankSearchResults(candidates, query, clampedLimit);
@@ -150,7 +150,7 @@ export async function listNodes(
     sql += ` AND (ecosystem = :ecosystem OR ecosystem = '*' OR ecosystem = '' OR ecosystem IS NULL)`;
     params['ecosystem'] = ecosystem;
   }
-  sql += ` ORDER BY updatedAt DESC`;
+  sql += ` ORDER BY updatedAt DESC, id ASC`; // 3.27.1: deterministic ties
   if (!opts?.unbounded) {
     const effectiveLimit =
       typeof limit === 'number' && Number.isFinite(limit) && limit > 0

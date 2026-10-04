@@ -118,7 +118,8 @@ export async function listNodeSummaries(
             }
             const where = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
             let sql = `SELECT id, type, label FROM nodes${where}`;
-            if (ordered) sql += ' ORDER BY updatedAt DESC';
+            // 3.27.1: `id ASC` tie-break, same rule and index as listNodes.
+            if (ordered) sql += ' ORDER BY updatedAt DESC, id ASC';
             if (effectiveLimit !== undefined) { sql += ' LIMIT ?'; params.push(effectiveLimit); }
             const rows = ctx.db.prepare(sql).all(...params) as Array<{ id: string; type: string; label: string }>;
             return rows.map((row) => ({ id: row.id, type: String(row.type ?? ''), label: String(row.label ?? '') }));

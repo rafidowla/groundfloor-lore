@@ -112,7 +112,8 @@ export async function lintGraph(db: SqliteDb): Promise<string[]> {
             `SELECT id, type FROM nodes
              WHERE type != 'note'
                AND NOT EXISTS (SELECT 1 FROM edges WHERE source_id = nodes.id)
-               AND NOT EXISTS (SELECT 1 FROM edges WHERE target_id = nodes.id)`,
+               AND NOT EXISTS (SELECT 1 FROM edges WHERE target_id = nodes.id)
+             ORDER BY id ASC`, // 3.27.1: deterministic message order
         ).all() as Array<{ id: string; type: string }>;
         return rows.map((r) => formatOrphanMessage(r.type, r.id));
     } catch (error) {

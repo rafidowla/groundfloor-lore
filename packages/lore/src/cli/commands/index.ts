@@ -17,6 +17,7 @@ export { migrateCommand } from './migrate.js';
 export { vectorsCommand } from './vectors.js';
 export { migrateEmbeddingModelCommand } from './migrateEmbedding.js';
 export { migrateGraphCommand } from './migrateGraph.js';
+export { migrateVectorsCommand } from './migrateVectors.js';
 export { modelsCommand } from './models.js';
 export { recallCommand } from './recall.js';
 export { reconnectCommand, reconsumeCommand } from './reconnect.js';

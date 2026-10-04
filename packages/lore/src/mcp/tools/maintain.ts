@@ -27,6 +27,8 @@ import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import type { LoreDeploymentMode } from '../server.js';
 import { runVersionPruneSweep, resolveRetentionDays } from '../versionPruneScheduler.js';
 import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
+import type { OutboxStore } from '../../outbox/types.js';
+import { sweepOrphanAliases, type OrphanAliasSweepResult } from '../../core/orphanAliasSweep.js';
 import { VersionStore } from '../../outbox/versionStore.js';
 import {
     resolveMaintainPolicy,
@@ -91,6 +93,14 @@ export interface MaintainToolsDeps {
      * versionPruneScheduler.ts's own "Scope" section).
      */
     versionStore?: VersionStoreApi;
+    /**
+     * 3.27.1 — per-workspace verbatim resolver, for the orphan-alias sweep
+     * (core/orphanAliasSweep.ts). Optional: absent, the sweep only covers the
+     * active workspace through `store.loreVerbatim`.
+     */
+    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<unknown> };
+    /** 3.27.1 — the outbox, so the sweep skips parents/aliases with a queued save. */
+    outboxStore?: OutboxStore;
 }
 
 /**
@@ -145,7 +155,7 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
             node_action: z.enum(['archive', 'delete']).optional().describe('Retention action (default archive).'),
             cold_signal: z.enum(['retrieval', 'access', 'update']).optional()
                 .describe('Recency clock for "cold": retrieval=last intentional recall/search (default), access=any read incl. graph-view, update=updatedAt proxy.'),
-            disable: z.array(z.enum(['compaction', 'versionCleanup', 'nodeRetention', 'ephemeralExpiry', 'versionsSqlitePrune'])).optional()
+            disable: z.array(z.enum(['compaction', 'versionCleanup', 'nodeRetention', 'ephemeralExpiry', 'versionsSqlitePrune', 'orphanAliasSweep'])).optional()
                 .describe('Operations to skip this run.'),
             versions_sqlite_retention_days: z.number().int().optional()
                 .describe('versions.sqlite pruning is OPT-IN: a no-op unless the host enabled it (LORE_VERSION_PRUNE_ENABLED / createLore versionHistory.pruning). When enabled this can only lengthen the configured window (default 7y). Independent of `retention_days` and `cleanup_versions_older_than`.'),
@@ -178,8 +188,10 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
                 // fed into `overrides.enabled`, which is typed to the engine's
                 // 4 existing ops only.
                 const versionsSqlitePruneDisabled = args.disable?.includes('versionsSqlitePrune') ?? false;
+                // `orphanAliasSweep` (3.27.1) is likewise outside the engine's ops.
+                const orphanAliasSweepDisabled = args.disable?.includes('orphanAliasSweep') ?? false;
                 const enginePolicyDisables = args.disable?.filter(
-                    (op): op is 'compaction' | 'versionCleanup' | 'nodeRetention' | 'ephemeralExpiry' => op !== 'versionsSqlitePrune',
+                    (op): op is 'compaction' | 'versionCleanup' | 'nodeRetention' | 'ephemeralExpiry' => op !== 'versionsSqlitePrune' && op !== 'orphanAliasSweep',
                 ) ?? [];
                 if (enginePolicyDisables.length > 0) {
                     overrides.enabled = {};
@@ -235,10 +247,13 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
                 // the prior behavior.
                 const activeName = active.name;
                 let nodeStore: GraphNodeStore | undefined;
+                // 3.27.1 — the requested workspace's own graph, kept for the orphan-alias sweep below.
+                let sweepGraph: unknown;
                 if (deps.graphRegistry) {
                     const resolved = await resolveTargetGraph(deps.store, deps.graphRegistry, activeName, wsName);
                     if (resolved.ok) {
                         nodeStore = new GraphNodeStore(resolved.graph as unknown as GraphLike);
+                        sweepGraph = resolved.graph;
                     }
                     // If the requested workspace is unknown/missing, leave node
                     // retention off for this run rather than silently retaining the
@@ -246,6 +261,7 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
                     // store-wide sweep below are unaffected.
                 } else if (wsName === activeName) {
                     nodeStore = new GraphNodeStore(deps.store.loreGraph as unknown as GraphLike);
+                    sweepGraph = deps.store.loreGraph;
                 }
                 const perWsPolicy = { ...policy, enabled: { ...policy.enabled, ephemeralExpiry: false } };
                 const wsReport = await runMaintenance(perWsPolicy, {
@@ -348,16 +364,47 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
                     }
                 }
 
+                // 3.27.1 — orphaned question-alias rows left by 3.27.0 deletes that ran
+                // through the search-worker proxy (core/orphanAliasSweep.ts). Per
+                // workspace, like node retention; honours dry_run (count only, the
+                // default); disabled via `disable: ['orphanAliasSweep']`. A graph or
+                // verbatim store that cannot be resolved for the requested workspace
+                // skips the op rather than guessing (same rule as node retention).
+                let orphanAliasSweep: (OrphanAliasSweepResult & { skipped?: string }) | undefined;
+                if (!orphanAliasSweepDisabled) {
+                    try {
+                        const verbatim = deps.workspaceVerbatimResolver
+                            ? await deps.workspaceVerbatimResolver.getOrOpen(wsName)
+                            : (wsName === activeName ? deps.store.loreVerbatim : undefined);
+                        const g = sweepGraph as { getNodesByIds?: unknown } | undefined;
+                        if (!verbatim || !g || typeof g.getNodesByIds !== 'function') {
+                            orphanAliasSweep = { dryRun, scanned: 0, orphans: 0, purged: 0, skippedPending: 0, skippedTombstoned: 0, truncated: false, errors: [], skipped: 'workspace_not_resolvable' };
+                        } else {
+                            orphanAliasSweep = await sweepOrphanAliases({
+                                workspace: wsName, graph: g as { getNodesByIds(ids: string[]): Promise<Map<string, unknown>> },
+                                verbatim, outboxStore: deps.outboxStore, dryRun,
+                            });
+                            if (orphanAliasSweep.orphans > 0) {
+                                console.error(`[Lore] maintain orphan-alias sweep (${wsName}${dryRun ? ', dry run' : ''}): scanned=${orphanAliasSweep.scanned} orphans=${orphanAliasSweep.orphans} purged=${orphanAliasSweep.purged} skippedPending=${orphanAliasSweep.skippedPending} skippedTombstoned=${orphanAliasSweep.skippedTombstoned} truncated=${orphanAliasSweep.truncated}`);
+                            }
+                        }
+                    } catch (err) {
+                        orphanAliasSweep = { dryRun, scanned: 0, orphans: 0, purged: 0, skippedPending: 0, skippedTombstoned: 0, truncated: false, errors: [`orphan alias sweep failed: ${redactError(err)}`] };
+                    }
+                }
+
                 // An ENABLED operation that recorded errors makes the whole
                 // call a failure (`ok: false`, `isError`), not a silent
                 // `ok: true`. Per-op `errors[]` in `reports` is unchanged.
-                const failed = failedOperations([wsReport, storeReport]);
+                const failed: string[] = failedOperations([wsReport, storeReport]);
+                if (orphanAliasSweep && orphanAliasSweep.errors.length > 0) failed.push('orphanAliasSweep');
                 const body = JSON.stringify({
                     ok: failed.length === 0,
                     dryRun,
                     failedOperations: failed,
                     reports: [wsReport, storeReport],
                     versionsSqlite,
+                    orphanAliasSweep,
                 });
                 return failed.length > 0
                     ? { content: [{ type: 'text', text: body }], isError: true }

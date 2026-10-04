@@ -43,7 +43,7 @@
 
 import type { DispatcherSubstrates } from './dispatcher.js';
 import { dispatch, MissingPayloadError, UnwiredOperationKindError, verifyApplied } from './dispatcher.js';
-import { collectVerbatimUpsertRun, consolidateVerbatimRun } from './verbatimConsolidation.js';
+import { consolidateVerbatimAt } from './verbatimPurgeConsolidation.js';
 import { keyOfEntry, SUPERSEDED_DEAD_ERROR, type EntityFamily } from './supersession.js';
 import type { OutboxLagCache } from './lagCache.js';
 import type { OutboxEntry, OutboxStore } from './types.js';
@@ -69,7 +69,8 @@ export const EMBED_BATCH_CONSOLIDATION_CAP: number = parseEnvInt(process.env.LOR
  * SP-13 — max adjacent `verbatim.upsert` rows consolidated into ONE
  * storeBatch dispatch (one LanceDB fragment per run instead of per row).
  * 256 matches the verbatim storeBatch internal BATCH_SIZE. Set to 0 to
- * disable. Env: LORE_REPLICATOR_CONSOLIDATION_MAX (NW-7c).
+ * disable. Env: LORE_REPLICATOR_CONSOLIDATION_MAX (NW-7c). 3.27.1 — also caps
+ * the rows in one consolidated verbatim.purge run (verbatimPurgeConsolidation.ts).
  */
 export const VERBATIM_UPSERT_CONSOLIDATION_CAP: number = parseEnvInt(process.env.LORE_REPLICATOR_CONSOLIDATION_MAX, 256);
 
@@ -530,6 +531,7 @@ export class OutboxReplicator {
             // into a single dispatch. Non-embed entries pass through
             // one-at-a-time (preserves Sprint O ordering for node /
             // edge writes and avoids cross-kind interleaving).
+            const vdeps = this.verbatimConsolidationDeps();
             let i = 0;
             while (i < fresh.length) {
                 const entry = fresh[i];
@@ -552,35 +554,15 @@ export class OutboxReplicator {
                     // embed.batch row was eligible (no consolidation
                     // win) — keeps the cap-overflow branch simple.
                 }
-                // SP-13 — consolidate adjacent verbatim.upsert rows into a
-                // single storeBatch dispatch (one LanceDB fragment per run
-                // instead of per row). Only attempted when the batch hook
-                // is wired AND more than one row is eligible; otherwise the
-                // per-row path runs unchanged (preserves Sprint O ordering).
-                if (entry.operationKind === 'verbatim.upsert'
-                    && VERBATIM_UPSERT_CONSOLIDATION_CAP > 0
-                    && typeof this.substrates.upsertVerbatimBatch === 'function') {
-                    const group = collectVerbatimUpsertRun(fresh, i, VERBATIM_UPSERT_CONSOLIDATION_CAP);
-                    if (group.entries.length > 1) {
-                        // RA-6 guard: drop superseded-failed rows before the
-                        // consolidated dispatch (see consolidateVerbatimRun).
-                        const advancedSeq = await consolidateVerbatimRun({
-                            store: this.store,
-                            substrates: this.substrates,
-                            maxAttempts: this.cfg.maxAttempts,
-                            onReplicated: () => { this.stats.replicated++; },
-                            onFailure: () => { this.stats.failures++; },
-                            onDead: () => { this.stats.dead++; },
-                            log: (m) => this.log(m),
-                            isSupersededFailed: (e) => this.isSupersededFailed(e),
-                            dispatchOne: (e) => this.replicateOne(e),
-                        }, group);
-                        processed += group.entries.length;
-                        if (advancedSeq !== null && advancedSeq > advanced) advanced = advancedSeq;
-                        i += group.entries.length;
-                        continue;
-                    }
-                    // Single eligible row → per-row path (no win). RA-6 per-key guard now lives in replicateOne (F-S04).
+                // SP-13 (verbatim.upsert → one storeBatch) + 3.27.1 (verbatim.purge →
+                // one purgeVerbatim of the union): adjacent runs of >1 row dispatch once;
+                // otherwise the per-row path runs unchanged (Sprint O ordering).
+                const vrun = await consolidateVerbatimAt(vdeps, fresh, i, VERBATIM_UPSERT_CONSOLIDATION_CAP);
+                if (vrun) {
+                    processed += vrun.consumed;
+                    if (vrun.advancedSeq !== null && vrun.advancedSeq > advanced) advanced = vrun.advancedSeq;
+                    i += vrun.consumed;
+                    continue;
                 }
                 const ok = await this.replicateOne(entry);
                 processed++;
@@ -717,6 +699,19 @@ export class OutboxReplicator {
             }
             return false;
         }
+    }
+
+    /** Handles threaded into the verbatim upsert/purge consolidations. */
+    private verbatimConsolidationDeps(): Parameters<typeof consolidateVerbatimAt>[0] {
+        return {
+            store: this.store, substrates: this.substrates, maxAttempts: this.cfg.maxAttempts,
+            onReplicated: () => { this.stats.replicated++; },
+            onFailure: () => { this.stats.failures++; },
+            onDead: () => { this.stats.dead++; },
+            log: (m) => this.log(m),
+            isSupersededFailed: (e) => this.isSupersededFailed(e),
+            dispatchOne: (e) => this.replicateOne(e),
+        };
     }
 
     private async replicateOne(entry: OutboxEntry): Promise<boolean> {

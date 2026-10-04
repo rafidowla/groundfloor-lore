@@ -266,13 +266,18 @@ export class LancePieceIndex {
         }
     }
 
+    /** 3.27.1 — query-then-delete: a LanceDB delete commits a new table
+     *  version even when its predicate matches nothing, so a chunk with no
+     *  piece rows (an already-purged replay, a first upsert) is counted and
+     *  skipped instead of committing an empty version. */
     private async deleteRows(ids: string[]): Promise<void> {
         if (!this.table) return;
         ids.forEach((id) => assertSafeLanceId(id, 'LancePieceIndex.deleteForIds'));
         for (let i = 0; i < ids.length; i += VERBATIM_CHUNK_SIZE) {
             const chunk = ids.slice(i, i + VERBATIM_CHUNK_SIZE);
-            const list = chunk.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
-            await this.table.delete(`nodeId IN (${list})`);
+            const predicate = `nodeId IN (${chunk.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ')})`;
+            if ((await this.table.countRows(predicate)) === 0) continue;
+            await this.table.delete(predicate);
         }
     }
 

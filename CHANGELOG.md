@@ -4,6 +4,94 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.27.1] — 2026-10-03
+
+### Fixed
+- **`verbatim.purge` replay no longer commits empty LanceDB versions.** A
+  `nodeDeleteMany({ purge: true })` of 16k nodes left one `_versions` +
+  `_transactions` file per node on `lore_verbatim.lance`, and the piece table
+  too (+266 MB in Atlas). `purgeRowsWithHistory` now finds rows first (one query
+  per 256 ids: `id IN` OR the anchored `#rev` patterns) and skips the delete when
+  nothing matches. `purgeWithHistory` bumps the search epoch only when something
+  was removed. `lancePieceIndex.deleteRows` counts before it deletes. SQLite
+  purges in one transaction (`purgeRows`) and fires `onMutate` only on change.
+  The replicator now consolidates adjacent same-workspace `verbatim.purge` rows
+  into one dispatch over the union of ids. The cap is shared with SP-13
+  (`LORE_REPLICATOR_CONSOLIDATION_MAX`, default 256). If a consolidated dispatch
+  fails, each row retries on its own. N=300 drain: 300 versions per table before,
+  0 after.
+- **Search-worker isolation (`LORE_SEARCH_WORKER=1`) silently dropped deletes.**
+  - `purgeWithHistory` and `getExistingIds` were missing from
+    `FORWARDED_METHODS`, so on the proxy they returned `0` / `[]`. As a result:
+    - purge removed nothing from the vector store but still reported
+      `purged: true`;
+    - `verbatim.purge` replays failed verification and dead-lettered;
+    - question-alias rows were never tombstoned or purged, in either delete
+      mode.
+  - Default (tombstone) deletes also failed under parent-embeds, because
+    `tombstone()` re-embedded the marker text through the child's stub
+    embedder. They left a `#rev` snapshot behind and then dead-lettered. The
+    proxy now embeds the tombstone text in the parent and forwards `{ ts, vector }`.
+  - A structural test asserts that every `VerbatimStore` method touching native
+    state is either forwarded or on a commented allowlist.
+  - `physicalDeleteMany` now skips the delete, the epoch bump and the piece
+    delete when no id exists.
+- **Audit log is flushed on shutdown.** Queued `audit.jsonl` appends were never
+  awaited by embedded `dispose()` or the daemon's graceful shutdown, so a burst
+  just before exit lost its tail and broke the hash chain's end. Every
+  `AuditLog` now registers itself, and `buildShutdownDrain` (also the arcade
+  boot path) awaits `flushAllAuditLogs()` as its last step. It is bounded at 5 s
+  and warns once on timeout.
+- **Graph enumeration has a deterministic order.** `listNodes`,
+  `listNodeSummaries` and `lintGraph` on the sqlite, surreal and arcade graph
+  engines sorted by `updatedAt DESC` with no tie-breaker. After a reindex,
+  thousands of nodes share a timestamp, so "first N" differed between engines
+  and runs. They now sort `updatedAt DESC, id ASC` (lint: `id ASC`). The existing
+  `(updatedAt DESC, id)` index serves it.
+
+### Added
+- **`lore.getVectors({ ids, workspace })`** returns the stored embeddings as a
+  `Map<nodeId, number[]>` without re-embedding, on both verbatim engines, with
+  bit-identical float32 values. Unknown, tombstoned and unembedded rows are
+  omitted, including Lance's all-zero placeholders. History rows are never
+  returned. Limit: 10,000 ids per call. Cloud workspaces throw
+  `GetVectorsUnsupportedError` (`unsupported_on_engine`). Store level:
+  `getVectors(rowIds)` on LanceDB and SQLite, forwarded by the search worker.
+- **`lore migrate-vectors <ws> --to sqlite [--data-dir] [--dry-run] [--force]`**
+  moves a workspace's verbatim store from LanceDB to SQLite offline, using
+  migrate-graph's safety model:
+  - it refuses if a daemon serves the home, the source isn't lance, the target
+    isn't empty (unless `--force`, which moves it aside), or the row count is at
+    or above the promotion threshold;
+  - it backs up first and copies every row raw, with stored vectors and the
+    piece table, and never calls the embedder;
+  - it verifies with a per-row digest, counts by kind, and live probes;
+  - it flips `vectorEngine` with one atomic registry write.
+
+  Lance files are left in place. Embedding hosts must stop the host first. See
+  `docs/MIGRATION-3.21.md`.
+- **Orphaned question-alias sweep in `maintain`.** Removes `lore:<id>#q<i>`
+  alias rows (and their `#rev` history) whose parent graph node is gone. These
+  are the rows 3.27.0 deletes left behind under the search worker. The MCP
+  `maintain` tool runs it per workspace by default and honours `dry_run`
+  (default `true` counts only). The result gains an `orphanAliasSweep` report,
+  and `disable: ["orphanAliasSweep"]` skips it. The CLI gets
+  `lore maintain --orphan-alias-sweep [--dry-run]` (opt-in, offline).
+  - An alias is purged only when its parent is confirmed absent under the
+    per-node write lock. A failed graph read purges nothing.
+  - A node literally named `foo#q3` is never mistaken for an alias.
+  - Aliases or parents with a queued outbox save are skipped until the queue
+    drains. Aliases that are already tombstoned are kept.
+  - Each pass is capped at 10,000 orphan rows (`truncated: true` means run it
+    again). A second run purges nothing. See `docs/OPERATIONS.md`.
+
+### Upgrade note for search-worker hosts on 3.27.0
+- Requeue any dead-lettered `verbatim.purge` / `verbatim.tombstone` rows. They
+  now converge.
+- Clear the alias rows that 3.27.0 deletes orphaned. Run `maintain` with
+  `dry_run: false` (or `lore maintain --orphan-alias-sweep` offline) once per
+  affected workspace. Run it with the default dry run first to see the count.
+
 ## [3.27.0] — 2026-10-03
 
 ### Added

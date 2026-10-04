@@ -512,7 +512,10 @@ export async function listNodes(
                 sql += " AND (ecosystem = $ecosystem OR ecosystem = '*' OR ecosystem = '' OR ecosystem = NONE)";
                 vars['ecosystem'] = ecosystem;
             }
-            sql += ' ORDER BY updatedAt DESC';
+            // 3.27.1: `id ASC` tie-break (house convention, as search/bulkList). `id` is
+            // already in the SELECT * projection, so Surreal's "order idiom must be
+            // selected" rule is met.
+            sql += ' ORDER BY updatedAt DESC, id ASC';
             if (effectiveLimit !== undefined) {
                 sql += ' LIMIT $limit';
                 vars['limit'] = effectiveLimit;

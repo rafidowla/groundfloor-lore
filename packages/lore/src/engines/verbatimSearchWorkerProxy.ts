@@ -38,6 +38,7 @@ import { VerbatimStore } from './verbatimStore.js';
 import { buildPieceRecords } from './pieces/pieceLayout.js';
 import type { PrebuiltPieceBatchEntry, PieceSearchHit } from './pieces/lancePieceIndex.js';
 import type { PendingPieceRow } from './pieces/pendingPieceQueue.js';
+import { tombstoneViaParentEmbed } from './verbatimWorkerTombstone.js';
 import { EmbeddingFingerprintMismatchError, type FingerprintMismatchKind } from './verbatimFingerprintGate.js';
 import {
     forwardableMethods,
@@ -301,7 +302,7 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
             if (method === 'search' || method === 'store' || method === 'storeBatch') continue;
             // 3.24.1 — overridden below: the bulk writes drain parent-built
             // pieces afterwards, and searchPieces embeds a string query here.
-            if (method === 'bulkAddPrebuiltRows' || method === 'bulkUpsertPrebuiltRows' || method === 'searchPieces') continue;
+            if (method === 'bulkAddPrebuiltRows' || method === 'bulkUpsertPrebuiltRows' || method === 'searchPieces' || method === 'tombstone') continue;
             (this as unknown as Record<string, unknown>)[method] =
                 (...args: unknown[]): Promise<unknown> => this.call(method, args, extractGateOpts(method, args));
         }
@@ -346,6 +347,11 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         }
         const [prepared] = await this.embedLocally([row]);
         await this.withPieceDrain(() => this.call('store', [prepared]));
+    }
+
+    /** 3.27.1 — parent-embeds tombstone: embed the marker text here, not in the stub-provider child (verbatimWorkerTombstone.ts). */
+    override tombstone(id: string, reason: string): Promise<void> {
+        return this.parentEmbedder ? tombstoneViaParentEmbed(this.parentEmbedder, (m, a) => this.call(m, a), id, reason) : this.call('tombstone', [id, reason]) as Promise<void>;
     }
 
     /**

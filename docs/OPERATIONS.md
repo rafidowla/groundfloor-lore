@@ -354,6 +354,27 @@ for example node retention on a SQLite graph, was reported only inside
 report (in 3.25.2 it still exited 0). With `--json`, stdout stays the plain
 reports array and the `FAILED:` summary goes to stderr.
 
+### Orphaned question-alias sweep (3.27.1)
+
+On 3.27.0 with `LORE_SEARCH_WORKER=1`, `nodeDelete` / `nodeDeleteMany` removed the
+graph node but never tombstoned or purged its `lore:<id>#q<i>` question-alias
+verbatim rows (the worker proxy did not forward `getExistingIds`), and nothing
+queued them. They are not recallable, but they keep costing disk and index space.
+`maintain` now sweeps them:
+
+- **MCP `maintain` tool**: runs by default per workspace and honours `dry_run`
+  (default `true` counts only; `dry_run: false` purges). Result key
+  `orphanAliasSweep: { dryRun, scanned, orphans, purged, skippedPending,
+  skippedTombstoned, truncated, errors }`. Skip it with
+  `disable: ["orphanAliasSweep"]`. One log line with the counts is written when
+  orphans are found; sweep errors flip `ok` to `false`.
+- **CLI**: `lore maintain --orphan-alias-sweep [--dry-run]` (opt-in, offline).
+- Only aliases whose parent node is absent from the graph (confirmed under the
+  per-node write lock) are purged, with their `#rev` history. Parents or aliases
+  with a queued outbox save are skipped until the queue drains; already-tombstoned
+  aliases are kept. Capped at 10,000 orphan rows per pass (`truncated: true` means
+  run it again). It never runs on open, and a second run purges nothing.
+
 ### Two ways to run it
 
 | Surface | When | Safety |

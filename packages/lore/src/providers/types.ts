@@ -412,6 +412,14 @@ export interface GraphProvider {
      *                    DEC-ECOSYSTEM-WILDCARD.
      */
     search(query: string, limit?: number, project?: string, ecosystem?: string, excludeHidden?: boolean, signals?: { scanCapHit: boolean }, types?: string[], entities?: string[], topics?: string[]): Promise<LoreNode[]>;
+    /**
+     * Filtered node list. ORDER IS GUARANTEED (3.27.1): `updatedAt` descending, then
+     * `id` ascending among equal `updatedAt` — identical on every graph engine, so a
+     * "first N" slice (`limit`, or a caller's `.slice(0, N)`) is reproducible across
+     * engines and across reindexes (which stamp thousands of rows with one `updatedAt`).
+     * `listNodeSummaries` (unless `ordered:false`) and `bulkList`/`bulkListProjected`
+     * follow the same rule.
+     */
     listNodes(type?: string, tag?: string, project?: string, ecosystem?: string, limit?: number, opts?: { unbounded?: boolean }): Promise<LoreNode[]>;
     getStats(projectFilter?: string): Promise<GraphStats>;
     getTopology(limit?: number, projects?: string[] | string, edgeLimit?: number): Promise<{ nodes: any[]; edges: any[] }>;
@@ -667,5 +675,12 @@ export interface VectorProvider {
     search(query: string, limit?: number, filter?: VerbatimQueryFilter, opts?: { includeHistory?: boolean }, actorScopes?: ReadonlyArray<string>, gate?: { signal?: AbortSignal; deadline?: number }): Promise<VerbatimSearchResult[]>;
     delete(id: string): Promise<void>;
     count(): Promise<number>;
+    /**
+     * 3.27.1 - stored embeddings by exact canonical row id (e.g. `lore:<nodeId>`) as plain
+     * number[]; unknown / history / tombstoned / unembedded rows are OMITTED. At most 10,000 ids
+     * per call. Optional: present on both local verbatim engines; absent on the cloud store
+     * (callers must treat a missing method as "unsupported on this engine").
+     */
+    getVectors?(ids: string[]): Promise<Map<string, number[]>>;
     close(): Promise<void>;
 }

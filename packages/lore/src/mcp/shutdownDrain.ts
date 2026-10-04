@@ -19,6 +19,7 @@ import { drainBackgroundCalibrations } from '../recall/calibration.js';
 import { stopAllAccessTrackers } from '../engines/accessTracker.js';
 import { stopAllRetentionSweeps } from './retentionScheduler.js';
 import { stopIdleSweeper } from '../providers/llmDispatch.js';
+import { flushAllAuditLogs } from '../security/auditFlush.js';
 import { stopEmbedIdleSweeper } from '../providers/localEmbeddingProvider.js';
 import {
     defaultAutolinkTracker,
@@ -485,6 +486,20 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
             if (!s) continue;
             try { s.close(); } catch (e) { logStepError(`${s.name}.close`, e); }
         }
+
+        // 12. 3.27.1 — flush the audit log LAST among the drain steps. appendEntry
+        //     chains fs.promises.appendFile and never awaits it (tool calls must
+        //     not block on audit), and nothing used to await flush() on teardown,
+        //     so a burst of audited writes followed by dispose()/SIGTERM lost the
+        //     queued tail (and truncated the hash chain). Ordered after steps 1-11
+        //     because the outbox replicator, sweepers and writers stopped above are
+        //     the last things that can emit audit rows; running it before the data
+        //     dir can be released (the host removes / re-opens it after dispose()
+        //     returns) is the whole point. Bounded (AUDIT_FLUSH_TIMEOUT_MS) so a
+        //     wedged filesystem warns once and shutdown continues. Covers every
+        //     AuditLog in the process (security/auditFlush.ts registry), which is
+        //     how the daemon path is reached without editing the frozen server.ts.
+        try { await flushAllAuditLogs(); } catch (e) { logStepError('audit.flush', e); }
 
         console.error('[Lore MCP] graceful shutdown complete');
     };

@@ -590,7 +590,7 @@ const client = lore.store.storageClient; // LoreStorageClient
 | Method | Signature | Description |
 |---|---|---|
 | `getNode` | `(id: string, opts?: { workspace? }) => Promise<LoreNode \| null>` | Fetch a single node by id. |
-| `listNodes` | `(type?, tag?, project?, ecosystem?, limit?, opts?: { unbounded?, workspace? }) => Promise<LoreNode[]>` | Filtered node list. |
+| `listNodes` | `(type?, tag?, project?, ecosystem?, limit?, opts?: { unbounded?, workspace? }) => Promise<LoreNode[]>` | Filtered node list. Order is guaranteed: `updatedAt` descending, ties broken by `id` ascending (3.27.1), the same on every graph engine, so `limit` and "first N" slices are reproducible. |
 | `listNodesAsOf` | `(at: string, opts?: { type?, tag?, project?, ecosystem?, limit?, unbounded? }) => Promise<LoreNode[]>` | Bi-temporal "as-of" query — nodes whose `validFrom`/`validUntil` window covers `at` (or that never set one). See `core/temporalQuery.ts`. |
 | `search` | `(query, limit?, project?, ecosystem?, opts?: { workspace? }) => Promise<LoreNode[]>` | Vector + keyword search over nodes. |
 | `verbatimSearch` | `(query, limit?, filter?, opts?: { includeHistory?, workspace? }, scopes?) => Promise<VerbatimResult[]>` | Verbatim fragment search. |
@@ -818,6 +818,37 @@ const { results } = await lore.nodeDeleteMany({ ids: staleIds, workspace: 'defau
 - Embedded only; rejects in ArcadeDB mode like `nodeDelete`. `nodeDeleteMany` is
   attached by the package entry point (`createLore` from `src/index.ts`).
 
+#### `lore.getVectors(args)` → `Promise<Map<string, number[]>>` (3.27.1)
+
+The stored embedding for a set of node ids, read straight from the workspace's
+verbatim store, so a host can write a memory/export file without re-embedding.
+Works the same on the LanceDB and SQLite verbatim engines (it replaces
+`storageClient.rawVerbatim().table`, which exists only on LanceDB).
+
+```ts
+const vectors = await lore.getVectors({ ids: nodeIds, workspace: 'default' });
+// Map<nodeId, number[]> - only nodes that have a real stored embedding
+```
+
+- Takes NODE ids, reads the canonical `lore:<id>` row, returns a `Map` keyed by
+  NODE id. Plain `number[]`; both engines store float32, so the same data returns
+  bit-identical numbers on either (the values are float32 widened to doubles).
+- Omitted, never an error: unknown ids, tombstoned nodes, and nodes with no real
+  embedding (a NULL vector, or the all-zero placeholder a bulk loader writes).
+  `#rev<ts>` history rows and alias rows (`lore:<id>#q<i>`) are never returned.
+  Compare `result.size` with your input to see what was skipped.
+- `ids` is deduplicated; empty `ids` returns an empty `Map`; at most 10,000 ids per
+  call (the call rejects, asking you to split the batch). `workspace` is required.
+  Ids are read in `id IN (...)` chunks of 500.
+- Read only: no write gate, no embedding, no promotion trigger, no audit row (like
+  `recall` / `getNode`; only the write APIs audit).
+- A workspace on the cloud (Dataplane) engine has no cheap stored-vector read; the
+  call rejects with `GetVectorsUnsupportedError` (`code: 'unsupported_on_engine'`)
+  rather than returning an empty `Map`.
+- Embedded only; attached by the package entry point (`createLore` from
+  `src/index.ts`). Store level, both local stores also expose
+  `getVectors(rowIds)` taking exact verbatim row ids (`lore:<id>`).
+
 #### `lore.createMcpServer()` → `McpServer`
 
 Factory for a fresh, fully-configured MCP server. In embedded mode this gives
@@ -864,6 +895,7 @@ All types below are importable from `'@groundfloor/lore'`:
 | `NodeWriteResult` | `type` | Discriminated union returned by `nodeUpsert`. |
 | `NodeDeleteOutcome` | `type` | `{ deleted: boolean; verbatimWarning?: string }`, returned by `nodeDelete`. |
 | `NodeDeleteManyResult`, `NodeDeleteManyItem` | `type` | `{ results: NodeDeleteManyItem[] }`; an item is `NodeDeleteOutcome` plus `id` and `error?`. Returned by `nodeDeleteMany`. |
+| `GetVectorsApi`, `GetVectorsUnsupportedError`, `GET_VECTORS_MAX_IDS` | `type` / `class` / `const` | 3.27.1. The `getVectors` member of `LoreInstance`, the error it throws on a cloud workspace (`code: 'unsupported_on_engine'`), and its 10,000-id cap. |
 | `LoreStorageClient` | `class` | Storage-client facade (cloud-swap point). |
 | `rebuildPieceIndex` | `function` | 3.24.2. Offline D7 piece-index rebuild for a host's `createLore({ dataDir })` root — the API behind `lore migrate piece-vectors --data-dir`. `({ dataDir?, embeddingProvider?, embedding?, force?, dryRun?, drop? })` → `{ action, nodesScanned, nodesRebuilt, piecesIndexed, reason?, basePath, engine, modelId }`. Dispose the host's instance first. See `docs/MIGRATION-3.24.md` §0. |
 | `PieceIndexDataDirInUseError` | `class` | Thrown by `rebuildPieceIndex` when a (Surreal-graph) data root is held by a running process. |

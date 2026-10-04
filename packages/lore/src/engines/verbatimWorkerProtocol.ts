@@ -42,7 +42,12 @@
  *  listed here — it's a plain in-memory field read (VerbatimStore's ctor
  *  sets `this.pieceVectorsIntent` synchronously, before any IPC/init), so
  *  the proxy answers it correctly on its own once its constructor forwards
- *  `pieceVectors` into `super()` — see verbatimSearchWorkerProxy.ts. */
+ *  `pieceVectors` into `super()` — see verbatimSearchWorkerProxy.ts.
+ *
+ *  3.27.1 — purgeWithHistory / getExistingIds (added to VerbatimStore in 3.27.0
+ *  for nodeDelete purge + alias existence checks) were missed here, the third
+ *  recurrence. test/verbatim-worker-forwarding-unit.ts now enumerates the
+ *  store's state-touching methods so a new one cannot be forgotten again. */
 export const FORWARDED_METHODS = [
     'initialize',
     'store',
@@ -52,6 +57,7 @@ export const FORWARDED_METHODS = [
     'bm25Search',
     'getById',
     'getContentHashesByIds',
+    'getVectors', // 3.27.1 - Map result; unboxed by the proxy like getContentHashesByIds
     'listIds',
     'delete',
     'count',
@@ -77,6 +83,14 @@ export const FORWARDED_METHODS = [
     'takePendingPieceRows',
     'upsertPrebuiltPieces',
     'reportPieceBuildFailure',
+    // 3.27.1 — 3.27.0 added these two to VerbatimStore but not here: same bug
+    // class as 1.11. core/verbatimPurge.ts + nodeDeleteService.ts feature-detect
+    // them with `typeof store.x === 'function'` (true on the proxy via
+    // inheritance), then the inherited body ran on the dead parent half and
+    // returned 0 / [] — purge reported success while deleting nothing, and alias
+    // rows (`lore:<id>#q0..4`) were never tombstoned. Neither takes a gate param.
+    'purgeWithHistory',
+    'getExistingIds',
 ] as const;
 
 export type ForwardedMethod = (typeof FORWARDED_METHODS)[number];

@@ -6,6 +6,10 @@
  * section 3: "Demotion is not built. There is a manual CLI `lore vectors
  * promote <ws> [--dry-run]` for operators, using the same procedure").
  *
+ * 3.27.1: demotion now exists as a MANUAL, offline operator command,
+ * `lore migrate-vectors <ws> --to sqlite` (cli/commands/migrateVectors.ts),
+ * which DOES flip `vectorEngine`. Automatic promotion is unchanged.
+ *
  * Does NOT touch `workspaces.json`'s `vectorEngine` field — selection
  * wiring (which engine a workspace declares/uses) is a separate,
  * out-of-scope change; this command promotes whatever `verbatim.sqlite`

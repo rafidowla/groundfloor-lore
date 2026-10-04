@@ -104,6 +104,12 @@ export interface VerbatimStoreApi extends VectorProvider {
      *  back to per-id `getById`. */
     getExistingIds?(ids: string[]): Promise<string[]>;
 
+    /** 3.27.1 - stored embeddings of the CANONICAL rows among `ids` (exact verbatim row ids,
+     *  e.g. `lore:<nodeId>`) as plain number[]; unknown / `#rev` history / tombstoned / unembedded
+     *  rows are omitted, never an error. At most 10,000 ids per call; empty -> empty Map. Read
+     *  only. See engines/verbatimGetVectors.ts. */
+    getVectors(ids: string[]): Promise<Map<string, number[]>>;
+
     /** Reclaim disk after bulk deletes. Lance-specific today (fragment
      *  merge + version prune); a SQLite engine may make this a cheap no-op
      *  (VACUUM is handled elsewhere) but must still implement the method. */

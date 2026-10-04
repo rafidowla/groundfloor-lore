@@ -447,6 +447,9 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
         // versionPruneSweeper). Optional: absent in cloud mode or when the
         // boot-time VersionStore.open() failed.
         versionStore: deps.versionStore,
+        // 3.27.1 — orphan-alias sweep (core/orphanAliasSweep.ts).
+        workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+        outboxStore: deps.outboxStore,
     });
 
     // Feature 8 — versioning tools. versionStore optional.

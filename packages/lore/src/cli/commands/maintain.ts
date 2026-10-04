@@ -36,12 +36,14 @@
  *   --protect-tags <csv>
  *   --node-action archive|delete
  *   --no-compaction | --no-version-cleanup | --no-node-retention | --no-ephemeral
+ *   --orphan-alias-sweep   (3.27.1, opt-in) purge question-alias rows whose parent node is gone
  *   --json
  *   --force
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { runCliOrphanAliasSweep } from './maintainOrphanAliasSweep.js';
 import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { getWorkspacePath, listWorkspaceNames, getActiveWorkspaceName } from '../../config/workspaces.js';
 import { loreHome } from '../../config/loreHome.js';
@@ -148,6 +150,8 @@ workspace deleted from this instance; dry run by default. Run
   --node-action archive|delete         Retention action (default archive).
   --cold-signal retrieval|access|update  Recency clock for "cold" (default retrieval).
   --no-compaction --no-version-cleanup --no-node-retention --no-ephemeral
+  --orphan-alias-sweep                 Also purge orphaned question-alias rows (parent node gone).
+                                       Honours --dry-run. Opens the graph + verbatim store.
   --json                               Emit the raw report as JSON.
   --force                              Bypass the daemon preflight (tests only).
 
@@ -240,7 +244,9 @@ export async function maintainCommand(args: string[]): Promise<void> {
     // Open the graph ONLY when node retention is actually requested — otherwise
     // a LanceDB-only run would race the daemon's single-writer graph handle (the
     // exact case dry-run users hit while the daemon is up).
-    const needGraph = policy.enabled.nodeRetention;
+    const orphanSweep = args.includes('--orphan-alias-sweep');
+    let sweepFailed = false;
+    const needGraph = policy.enabled.nodeRetention || orphanSweep;
     for (const name of targets) {
         let wsPath: string;
         try {
@@ -308,6 +314,14 @@ export async function maintainCommand(args: string[]): Promise<void> {
                 safety: new AlwaysSafe(),
             }, { dryRun, scopeLabel: `workspace:${name}`, onProgress: asJson ? undefined : (l) => console.log(`  ${l}`) });
             reports.push(report);
+            if (orphanSweep) {
+                // 3.27.1 — opt-in sweep of question-alias rows left behind by 3.27.0 deletes.
+                const sweep = await runCliOrphanAliasSweep(name, wsPath, graph, dryRun);
+                const line = `orphan-alias-sweep ${name}: scanned=${sweep.scanned} orphans=${sweep.orphans} purged=${sweep.purged} skippedPending=${sweep.skippedPending} skippedTombstoned=${sweep.skippedTombstoned} truncated=${sweep.truncated}${dryRun ? ' (dry run)' : ''}`;
+                (asJson ? console.error : console.log)(`  ${line}`);
+                for (const e of sweep.errors) console.error(`[maintain] ${e}`);
+                if (sweep.errors.length > 0) sweepFailed = true;
+            }
         } finally {
             if (graph) {
                 const maybeClose = (graph as unknown as { close?: () => void }).close;
@@ -342,7 +356,8 @@ export async function maintainCommand(args: string[]): Promise<void> {
     // cron job or a wrapper script sees the failure the MCP tool already
     // reports as `ok: false` (3.25.2). The reports are printed first, in full.
     // `--json` keeps stdout a plain reports array; the summary goes to stderr.
-    const failed = failedOperations(reports);
+    const failed: string[] = [...failedOperations(reports)];
+    if (sweepFailed) failed.push('orphanAliasSweep');
     if (failed.length > 0) {
         if (asJson) console.error(`[maintain] FAILED: ${failed.join(', ')}`);
         process.exit(1);
