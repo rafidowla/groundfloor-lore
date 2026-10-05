@@ -45,6 +45,7 @@ import { backupWorkspace, type BackupResult } from './backup.js';
 import { SurrealGraph } from './surrealGraph.js';
 import { SqliteGraph } from './sqliteGraph.js';
 import { metadataToSqliteText } from './sqlite/sqliteGraphRow.js';
+import { keywordCandidates } from './probeKeywords.js';
 import type { LoreEdge, LoreNode } from '../providers/types.js';
 
 export interface MigrateGraphToSqliteOptions {
@@ -65,6 +66,10 @@ export interface MigrateGraphToSqliteOptions {
      * the flip. Never set outside a test.
      */
     simulateCrashBeforeFlip?: boolean;
+    /** TEST-ONLY: runs after the count + digest checks, right before the read
+     *  probes — lets a test damage the SQLite copy in a way the digest cannot
+     *  see (e.g. a node that search no longer surfaces). */
+    beforeReadProbes?: (dest: SqliteGraph) => void | Promise<void>;
 }
 
 export interface MigrateGraphToSqliteReport {
@@ -127,6 +132,50 @@ export function digestOf(nodes: LoreNode[], edges: LoreEdge[]): string {
     const sortedEdges = [...edges].sort((a, b) =>
         `${a.sourceId}|${a.targetId}|${a.relation}`.localeCompare(`${b.sourceId}|${b.targetId}|${b.relation}`));
     return canonicalStringify({ nodes: sortedNodes, edges: sortedEdges });
+}
+
+/** SqliteGraph/SurrealGraph clamp `search` limits to this. */
+const SEARCH_LIMIT_CLAMP = 1000;
+
+/** Terms to search for a sampled node: the full label, then whole-word letter runs of the label (or of the content for an unlabeled node). */
+function graphSearchTerms(sample: LoreNode): string[] {
+    const label = (sample.label ?? '').trim();
+    const terms: string[] = [];
+    if (label) terms.push(label);
+    for (const kw of keywordCandidates(label || String(sample.content ?? ''))) if (!terms.includes(kw)) terms.push(kw);
+    return terms;
+}
+
+/**
+ * Search probe: membership of the SAMPLED NODE itself, not top-N set
+ * equality (a term shared by more than the page size would false-abort a
+ * correct migration). The source's own search is the reference: for the
+ * first term whose source results contain the sampled id, the destination
+ * must contain it too (limit = node count, narrowed by the node's type), else
+ * MISMATCH. A `scanCapHit` on either engine, or a source that does not
+ * surface the node at all, is "not verified" — never a MISMATCH.
+ */
+async function probeGraphSearch(
+    source: SurrealGraph, dest: SqliteGraph, sample: LoreNode, nodeCount: number,
+): Promise<{ ok: boolean; detail: string }> {
+    const limit = Math.min(Math.max(nodeCount, 1), SEARCH_LIMIT_CLAMP);
+    const types = sample.type ? [sample.type] : undefined;
+    const terms = graphSearchTerms(sample);
+    let notVerifiedWhy = terms.length === 0 ? 'no searchable term' : 'sampled node not surfaced by the source search';
+    for (const term of terms) {
+        const srcSignals = { scanCapHit: false };
+        const dstSignals = { scanCapHit: false };
+        const [src, dst] = await Promise.all([
+            source.search(term, limit, '*', '*', false, srcSignals, types),
+            dest.search(term, limit, '*', '*', false, dstSignals, types),
+        ]);
+        if (srcSignals.scanCapHit || dstSignals.scanCapHit) { notVerifiedWhy = 'scan cap hit'; continue; }
+        if (!src.some((n) => n.id === sample.id)) continue;
+        if (dst.some((n) => n.id === sample.id)) return { ok: true, detail: `search("${term}"): sampled node ${sample.id} found on both` };
+        if (dst.length >= limit && nodeCount > SEARCH_LIMIT_CLAMP) { notVerifiedWhy = 'result page saturated'; continue; }
+        return { ok: false, detail: `search("${term}"): MISMATCH sqlite missing ${sample.id}` };
+    }
+    return { ok: true, detail: `graph search not verified for ${sample.id} (${notVerifiedWhy})` };
 }
 
 export async function migrateGraphToSqlite(opts: MigrateGraphToSqliteOptions): Promise<MigrateGraphToSqliteReport> {
@@ -211,6 +260,7 @@ export async function migrateGraphToSqlite(opts: MigrateGraphToSqliteOptions): P
         }
 
         // Read probes — live query operations agree, not just raw storage.
+        await opts.beforeReadProbes?.(dest);
         const readProbeDetails: string[] = [];
         let readProbesMatched = true;
         {
@@ -218,16 +268,9 @@ export async function migrateGraphToSqlite(opts: MigrateGraphToSqliteOptions): P
             await reSource.initialize();
             try {
                 if (nodes.length > 0) {
-                    const sample = nodes[0]!;
-                    const term = sample.label.split(/\s+/)[0] || sample.id;
-                    const [srchSrc, srchDst] = await Promise.all([
-                        reSource.search(term, 20, '*', '*', false),
-                        dest.search(term, 20, '*', '*', false),
-                    ]);
-                    const same = canonicalStringify(srchSrc.map((n) => n.id).sort())
-                        === canonicalStringify(srchDst.map((n) => n.id).sort());
-                    readProbeDetails.push(`search("${term}"): ${same ? 'match' : 'MISMATCH'}`);
-                    if (!same) readProbesMatched = false;
+                    const outcome = await probeGraphSearch(reSource, dest, nodes[0]!, nodes.length);
+                    readProbeDetails.push(outcome.detail);
+                    if (!outcome.ok) readProbesMatched = false;
                 }
                 if (edges.length > 0) {
                     const seed = edges[0]!.sourceId;
@@ -284,10 +327,12 @@ export interface RollbackGraphMigrationOptions {
 }
 
 /**
- * rollbackGraphMigration — flip `graphEngine` back to `'surreal'`. Data is
- * untouched on both sides: the Surreal store was never modified by
+ * rollbackGraphMigration — flip `graphEngine` back to `'surreal'`. Nothing is
+ * deleted on either side: the Surreal store was never modified by
  * `migrateGraphToSqlite`, and `graph.sqlite` is left in place (not deleted)
- * rather than risk destroying a copy an operator might still want.
+ * rather than risk destroying a copy an operator might still want. Writes
+ * made after the migration live ONLY in graph.sqlite and are NOT carried back;
+ * the pre-migration backup tarball is the real undo.
  */
 export async function rollbackGraphMigration(opts: RollbackGraphMigrationOptions): Promise<{ workspaceName: string; revertedTo: 'surreal' }> {
     const home = opts.home ?? loreHome();

@@ -34,41 +34,96 @@ export interface FtsReconcileCtx {
     ensureFtsIndex(opts: { minRows?: number; tokenizer?: FtsTokenizerSettings }): Promise<boolean>;
 }
 
+/** Total rows sampled for language/script detection, spread over
+ *  SAMPLE_WINDOWS offset windows across the table (so the sample is not just
+ *  the first rows physically written). 120, not 200: franc costs ~1 ms per
+ *  ~900-char row, and the sample runs inside initialize() under the search
+ *  gate on every open (measured: +75 ms vs the old 60-row sample at 5,000
+ *  rows with 120; ~+150 ms with 200). */
+const SAMPLE_ROWS = 120;
+const SAMPLE_WINDOWS = 4;
+/** Only the head of each text is used for detection: franc cost grows with
+ *  length and a language verdict does not need more. 500, not 1000/2000:
+ *  typical rows are ~900 chars, so a 1000 cap barely trims them (measured on
+ *  120 rows of ~900 chars: old 60-row sample 57 ms; @2000 120 ms; @1000
+ *  116 ms; @500 76 ms). */
+const SAMPLE_TEXT_MAX_CHARS = 500;
+
+const LIVE_ROWS_FILTER = `id NOT LIKE '${HISTORY_ID_LIKE_PATTERN}' AND text NOT LIKE '[TOMBSTONED%'`;
+
 /** Bounded sample of live (non-history, non-tombstoned) row text, for
- *  language detection only — never returns more than maxRows, and never
- *  throws (an empty array is a safe "unknown" input to detectTokenizerProfile). */
-async function sampleTextForTokenizerDetection(ctx: FtsReconcileCtx, maxRows = 60): Promise<string[]> {
+ *  language/script detection only — never returns more than maxRows, and never
+ *  throws. Returns null when the read FAILED (distinct from an empty table), so
+ *  the caller can keep the stored settings instead of treating an I/O hiccup as
+ *  "no evidence" and flipping the index. Tables with more live rows than
+ *  maxRows are read in SAMPLE_WINDOWS equal windows spread evenly over the
+ *  table via the query `.offset()`. */
+async function sampleTextForTokenizerDetection(ctx: FtsReconcileCtx, maxRows = SAMPLE_ROWS): Promise<string[] | null> {
     if (!ctx.table) return [];
     try {
-        const rows = await ctx.table
-            .query()
-            .where(`id NOT LIKE '${HISTORY_ID_LIKE_PATTERN}' AND text NOT LIKE '[TOMBSTONED%'`)
-            .select(['text'])
-            .limit(maxRows)
-            .toArray();
+        const total = await ctx.table.countRows(LIVE_ROWS_FILTER);
+        const windowSize = Math.ceil(maxRows / SAMPLE_WINDOWS);
+        const offsets: number[] = [];
+        if (total <= maxRows) {
+            offsets.push(0);
+        } else {
+            for (let w = 0; w < SAMPLE_WINDOWS; w++) {
+                offsets.push(Math.floor((w * (total - windowSize)) / (SAMPLE_WINDOWS - 1)));
+            }
+        }
         const texts: string[] = [];
-        for (const r of rows) {
-            const row = r as { text?: unknown };
-            if (typeof row.text === 'string' && row.text.length > 0) texts.push(row.text);
+        for (const offset of offsets) {
+            const rows = await ctx.table
+                .query()
+                .where(LIVE_ROWS_FILTER)
+                .select(['text'])
+                .offset(offset)
+                .limit(total <= maxRows ? maxRows : windowSize)
+                .toArray();
+            for (const r of rows) {
+                const row = r as { text?: unknown };
+                if (typeof row.text === 'string' && row.text.length > 0) {
+                    texts.push(row.text.length > SAMPLE_TEXT_MAX_CHARS ? row.text.slice(0, SAMPLE_TEXT_MAX_CHARS) : row.text);
+                }
+            }
         }
         return texts;
     } catch (err) {
         log.error(`[VerbatimStore] tokenizer sample read failed (non-fatal): ${(err as Error).message}`);
-        return [];
+        return null;
+    }
+}
+
+/** Stored settings for the current on-disk index, or null when none/unreadable.
+ *  Feeds the hysteresis in detectTokenizerProfile. */
+function readStoredSettings(ctx: FtsReconcileCtx): FtsTokenizerSettings | null {
+    try {
+        return readTokenizerFingerprint(ctx.basePath);
+    } catch (err) {
+        log.error(`[VerbatimStore] FTS tokenizer fingerprint unreadable (treating as unknown, non-fatal): ${(err as Error).message}`);
+        return null;
     }
 }
 
 /**
  * Sample-driven tokenizer choice for THIS workspace (see
- * ftsTokenizerProfile.ts for the CJK-vs-Latin decision rule). Best-effort:
- * any failure — including "table doesn't exist yet" — falls back to the
- * Latin default rather than throwing. A language-detection hiccup must
- * never block indexing.
+ * ftsTokenizerProfile.ts for the CJK-vs-Latin decision rule and the
+ * clearly-dominant-language rule with hysteresis). `previous` is the stored
+ * sidecar settings; omitted, it is read from the sidecar here so every caller
+ * (including ensureFtsIndex) applies the same hysteresis. Best-effort: any
+ * failure — including "table doesn't exist yet" — falls back to the Latin
+ * default rather than throwing. A language-detection hiccup must never block
+ * indexing.
  */
-export async function detectDesiredTokenizer(ctx: FtsReconcileCtx): Promise<FtsTokenizerSettings> {
+export async function detectDesiredTokenizer(
+    ctx: FtsReconcileCtx,
+    previous?: FtsTokenizerSettings | null,
+): Promise<FtsTokenizerSettings> {
+    const prev = previous === undefined ? readStoredSettings(ctx) : previous;
     try {
         const sample = await sampleTextForTokenizerDetection(ctx);
-        return detectTokenizerProfile(sample);
+        if (sample === null && prev) return prev;
+        return detectTokenizerProfile(sample ?? [], prev ?? undefined);
     } catch (err) {
         log.error(`[VerbatimStore] tokenizer language sampling failed (using Latin default, non-fatal): ${(err as Error).message}`);
         return detectTokenizerProfile([]);
@@ -117,7 +172,6 @@ async function dropTextIndexIfPresent(ctx: FtsReconcileCtx): Promise<void> {
  */
 export async function reconcileFtsTokenizer(ctx: FtsReconcileCtx): Promise<void> {
     if (!ctx.table) return;
-    const desired = await detectDesiredTokenizer(ctx);
     let stored: FtsTokenizerSettings | null;
     try {
         stored = readTokenizerFingerprint(ctx.basePath);
@@ -125,6 +179,7 @@ export async function reconcileFtsTokenizer(ctx: FtsReconcileCtx): Promise<void>
         log.error(`[VerbatimStore] FTS tokenizer fingerprint unreadable (treating as unknown, rebuilding once, non-fatal): ${(err as Error).message}`);
         stored = null;
     }
+    const desired = await detectDesiredTokenizer(ctx, stored);
     if (stored !== null && tokenizerSettingsEqual(stored, desired)) return; // already correct — nothing to do.
 
     // Settings are unknown or stale. Drop any existing index on `text`

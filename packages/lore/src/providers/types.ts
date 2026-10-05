@@ -482,6 +482,9 @@ export interface VerbatimDocument {
  */
 export type VerbatimQueryFilter = Omit<Partial<VerbatimDocument['metadata']>, 'type'> & {
     type?: string | string[];
+    /** Narrow to one row id (`id` is in VERBATIM_FILTERABLE_COLUMNS). Used by
+     *  the migrate-vectors probes to verify a sampled row itself. */
+    id?: string;
 };
 
 /**

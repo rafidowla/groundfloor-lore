@@ -2816,7 +2816,7 @@ enum:
 | `invalid_model` | Configured model id fails the `"org/name"`-shape check (F3). |
 | `integrity_failed` | Cached files exist but don't match the pinned sha256 manifest (default model only, F4) — treated as compromised/corrupt, never trusted. |
 | `busy` | Process-wide concurrency limit reached; call proceeds unranked rather than queuing (F2). |
-| `timeout` | `LORE_RECALL_RERANK_TIMEOUT_MS` (default `3000`) exceeded — enforced by a real `Promise.race`, not cooperative cancellation alone, so it fires even against a scorer that ignores its abort signal. |
+| `timeout` | `LORE_RECALL_RERANK_TIMEOUT_MS` (default `10000`) exceeded — enforced by a real `Promise.race`, not cooperative cancellation alone, so it fires even against a scorer that ignores its abort signal. |
 | `too_few_results` | Fewer than 2 candidates — nothing meaningful to reorder. |
 | `error` | Any other load/scoring exception. |
 
@@ -3869,7 +3869,7 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_RECALL_RERANK_MODEL` | `Xenova/ms-marco-MiniLM-L-6-v2` | Recall |
 | `LORE_RECALL_RERANK_K` | `10` | Recall |
 | `LORE_RECALL_RERANK_MARGIN` | `1.0` | Recall |
-| `LORE_RECALL_RERANK_TIMEOUT_MS` | `3000` | Recall |
+| `LORE_RECALL_RERANK_TIMEOUT_MS` | `10000` | Recall |
 | `LORE_RECALL_RERANK_DTYPE` | `q8` | Recall |
 | `LORE_RECALL_RERANK_IDLE_UNLOAD_MS` | `300000` | Recall |
 | `LORE_RECALL_RERANK_MAX_CONCURRENT` | `2` | Recall |

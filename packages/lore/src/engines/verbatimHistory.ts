@@ -156,7 +156,7 @@ export function buildSqlFilterEntries(filter: Record<string, unknown> | undefine
  * predicates. The injection control for these predicates is NOT an alphabet
  * allowlist — it is the escaping at every interpolation site (single-quote
  * doubling on every value; escapeLanceLike + ESCAPE '\' on every LIKE
- * value). LanceDB 0.27.2's filter API takes raw SQL strings only (no bound
+ * value). LanceDB's filter API (the version pinned in package.json) takes raw SQL strings only (no bound
  * parameters), and the vendor's own escaping helper (toSQL in dist/util.js)
  * quote-doubles exactly as this repo does — so escaped string building is
  * the sanctioned pattern, and any printable character (including the

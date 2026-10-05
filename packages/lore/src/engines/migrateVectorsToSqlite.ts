@@ -36,7 +36,8 @@
  *
  * Any failure before 7 removes the partial `verbatim.sqlite` (+ -wal/-shm)
  * and leaves the registry at 'lance'; a `--force` move-aside copy and the
- * Lance tables are never touched. Lance files stay after success too — the
+ * Lance data are never modified (opening the Lance store for the live probes
+ * can rebuild its keyword index, which is derived data). Lance files stay after success too — the
  * report names the two table folders to delete once satisfied. NOT the whole
  * `.lore/lancedb/` folder: it also holds `embedding_model.json` and
  * `piece_layout.json`, which the SQLite engine still reads.
@@ -57,6 +58,7 @@ import { isDaemonServingHome, daemonRefuseMessage } from '../cli/commands/migrat
 import { backupWorkspace, type BackupResult } from './backup.js';
 import { SqliteVerbatimStore } from './sqliteVerbatimStore.js';
 import { readFingerprint } from './embeddingFingerprint.js';
+import { readTokenizerFingerprint } from './ftsTokenizerProfile.js';
 import { promoteRowsThreshold } from './verbatimPromotion.js';
 import type { SourceRow } from './verbatimPromotionStage.js';
 import type { RawPieceImportRow, RawVerbatimImportRow, VerbatimRawImport } from './sqliteVerbatimImport.js';
@@ -82,6 +84,10 @@ export interface MigrateVectorsToSqliteOptions {
     /** TEST-ONLY failure injection: throw after the first import batch, or
      *  inside verification, to prove the rollback leaves no partial file. */
     simulateFailure?: 'import' | 'verify';
+    /** TEST-ONLY: runs after the import + digest verification, right before
+     *  the live probes (the target's db file is closed) — lets a test corrupt
+     *  the SQLite copy in a way the digest cannot see (e.g. its FTS index). */
+    beforeProbes?: (sqlitePath: string) => void | Promise<void>;
     /** TEST-ONLY: counts every embedder call the migration makes (must stay 0). */
     onEmbedCall?: () => void;
 }
@@ -104,6 +110,8 @@ export interface MigrateVectorsToSqliteReport {
     digest?: string;
     vectorsCompared: number;
     probeDetails: string[];
+    /** Non-fatal notices for the operator (e.g. non-English Lance FTS language). */
+    warnings: string[];
     /** Lance table folders left in place (safe to delete once satisfied). */
     lanceTablePaths: string[];
     durationMs: number;
@@ -219,7 +227,7 @@ export async function migrateVectorsToSqlite(opts: MigrateVectorsToSqliteOptions
         const report: MigrateVectorsToSqliteReport = {
             workspaceName: ws, workspaceDir, dryRun: !!opts.dryRun, counts, tombstones, unembedded, pieces,
             embeddingModel: { modelId: fp.modelId, dimension: fp.dimension }, promoteThreshold: threshold,
-            movedAside: [], sqlitePath, vectorsCompared: 0, probeDetails: [], lanceTablePaths, durationMs: 0,
+            movedAside: [], sqlitePath, vectorsCompared: 0, probeDetails: [], warnings: [], lanceTablePaths, durationMs: 0,
         };
         if (opts.dryRun) {
             report.durationMs = Date.now() - startedAt;
@@ -247,7 +255,7 @@ export async function migrateVectorsToSqlite(opts: MigrateVectorsToSqliteOptions
             const msg = err instanceof Error ? err.message : String(err);
             const aside = report.movedAside.length ? ` Previous target kept at ${report.movedAside[0]}.` : '';
             const wrapped = new (err instanceof MigrateVectorsVerificationError ? MigrateVectorsVerificationError : Error)(
-                `${msg} — vectorEngine UNCHANGED ('lance'); partial ${sqlitePath} removed; Lance store untouched; `
+                `${msg} — vectorEngine UNCHANGED ('lance'); partial ${sqlitePath} removed; Lance data untouched (its keyword index may have been rebuilt on open); `
                 + `backup at ${report.backup!.tarballPath}.${aside}`);
             throw wrapped;
         };
@@ -327,6 +335,7 @@ export async function migrateVectorsToSqlite(opts: MigrateVectorsToSqliteOptions
             }
             imp.close();
             imp = null;
+            await opts.beforeProbes?.(sqlitePath);
             const probes = await runLiveProbes({
                 workspaceDir,
                 provider: nonEmbeddingProvider(fp, opts.onEmbedCall),
@@ -337,6 +346,12 @@ export async function migrateVectorsToSqlite(opts: MigrateVectorsToSqliteOptions
             report.probeDetails = probes.details;
             if (!probes.matched) {
                 throw new MigrateVectorsVerificationError(`live probes differ: ${probes.details.filter((d) => d.startsWith('MISMATCH')).join('; ')}`);
+            }
+            // Read AFTER the probes: opening the Lance store reconciles (and may
+            // write) its FTS tokenizer sidecar. SQLite never uses a language.
+            const ftsLanguage = readTokenizerFingerprint(workspaceDir)?.language;
+            if (ftsLanguage && ftsLanguage !== 'English') {
+                report.warnings.push(`SQLite keyword search applies English stemming only; ${ftsLanguage} stemming and stop-words will not be used after migration.`);
             }
         } catch (err) {
             imp?.close();

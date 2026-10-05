@@ -96,7 +96,11 @@ export const RERANK_TIMEOUT_MS_MAX = 30_000;
 export const DEFAULT_RERANK_MODEL = 'Xenova/ms-marco-MiniLM-L-6-v2';
 export const DEFAULT_RERANK_K = 10;
 export const DEFAULT_RERANK_MARGIN = 1.0;
-export const DEFAULT_RERANK_TIMEOUT_MS = 3000;
+/** 10 s, raised from 3 s (2026-10-04): under heavy host load a single rerank
+ *  call took over 3 s and the stage silently failed open (`reason:'timeout'`),
+ *  skipping rerank for that query. Unloaded rerank of k=10 is well under 1 s,
+ *  so this only changes how long a struggling host waits before falling back. */
+export const DEFAULT_RERANK_TIMEOUT_MS = 10_000;
 export const DEFAULT_RERANK_DTYPE: RerankDtype = 'q8';
 
 export const RERANK_K_MIN = 2;

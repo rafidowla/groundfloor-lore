@@ -95,13 +95,15 @@ export async function migrateVectorsCommand(args: string[]): Promise<void> {
             console.log(`  Live probes:       yes (${r.probeDetails.join('; ') || 'no probes ran — no embedded canonical rows'})`);
         }
         console.log(`  Duration:          ${r.durationMs}ms`);
+        for (const w of r.warnings) console.log(`  Warning:           ${w}`);
         console.log('');
         if (r.dryRun) {
             console.log('✓ dry run: preconditions pass; nothing was written.');
             return;
         }
         console.log(`✓ workspace '${workspaceName}' is now registered with vectorEngine 'sqlite' (${r.sqlitePath}).`);
-        console.log('  The LanceDB tables were left untouched. Once satisfied, delete ONLY:');
+        console.log('  Lance data untouched (its keyword index may have been rebuilt on open).');
+        console.log('  Once satisfied, delete ONLY:');
         for (const p of r.lanceTablePaths) console.log(`    rm -rf "${p}"`);
         console.log('  Keep the rest of .lore/lancedb/ — embedding_model.json and piece_layout.json');
         console.log('  are shared metadata the SQLite engine still reads.');

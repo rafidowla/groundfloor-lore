@@ -100,6 +100,58 @@ const CJK_MIN_SAMPLES = 2;
 const CJK_LANGUAGES: Readonly<Record<string, true>> = { zh: true, ja: true, th: true };
 
 /**
+ * ============================================================================
+ * STEMMING-LANGUAGE SELECTION RULE (non-CJK) — the ONE place this policy lives.
+ * ----------------------------------------------------------------------------
+ * A workspace gets a non-English stemming/stop-word language only when that
+ * language is CLEARLY its main language. `detectLanguage` (franc) returns null
+ * for most short or code-like rows, so a plurality of "whatever few rows
+ * classified" is not evidence: a single stray `fr` vote among 59 unclassified
+ * rows used to make an English/code workspace French. Workspaces may be in
+ * any language; the thresholds below are about how much evidence is needed,
+ * not about which languages are allowed.
+ *
+ *   C = classified votes (non-null, non-CJK), N = rows sampled.
+ *   - English wins when it is the plurality of the classified votes (any
+ *     count) — the long-standing behaviour, unchanged.
+ *   - A non-English language L ENTERS the contest only when
+ *       votes(L) >= LANG_ENTER_MIN_VOTES
+ *       AND votes(L) >  LANG_ENTER_MIN_CLASSIFIED_SHARE * C
+ *       AND votes(L) >= LANG_ENTER_MIN_SAMPLE_SHARE * N.
+ *   - Languages that fail entry are dropped; the winner is the plurality of
+ *     what remains (English always remains if it has >= 1 vote). Nothing
+ *     remaining -> no `language` field (LanceDB's own default).
+ *   - A language that is not in ISO_639_1_TO_LANCEDB_LANGUAGE (e.g. Bengali)
+ *     can win but maps to no `language` field.
+ *
+ * HYSTERESIS (needs the stored sidecar settings as `previous`): the sample is
+ * not ordered, so votes wobble between opens. Without hysteresis a borderline
+ * workspace would rebuild its index on every open.
+ *   a) previous and the new verdict are both "default" (language 'English' or
+ *      absent, otherwise identical) -> keep previous: no rebuild, no flapping
+ *      between English and absent.
+ *   b) previous is a non-English L and L still "stays" —
+ *        votes(L) >= LANG_STAY_MIN_VOTES AND L is the plurality of the
+ *        classified votes (ties keep L) AND votes(L) >= LANG_STAY_MIN_SAMPLE_SHARE * N
+ *      -> keep previous.
+ *   c) otherwise the new verdict applies.
+ * ============================================================================
+ */
+
+/** franc codes that `detectLanguage` passes through un-normalised (they are
+ *  not in its ISO 639-3 -> 639-1 table) but that name a language on the
+ *  allowlist above. Verified: standard Arabic text comes back as 'arb', never
+ *  'ar', so without this alias an Arabic workspace could never be stemmed in
+ *  Arabic. */
+const LANGUAGE_VOTE_ALIASES: Readonly<Record<string, string>> = { arb: 'ar' };
+
+const LANG_ENTER_MIN_VOTES = 5;
+const LANG_ENTER_MIN_CLASSIFIED_SHARE = 0.5;
+const LANG_ENTER_MIN_SAMPLE_SHARE = 0.30;
+const LANG_STAY_MIN_VOTES = 3;
+const LANG_STAY_MIN_SAMPLE_SHARE = 0.05;
+
+/**
  * Codepoint ranges whose scripts have no whitespace word boundaries, so
  * `simple` tokenization collapses a whole sentence into one token: Han
  * (CJK Unified Ideographs + Extension A + compatibility), Hiragana,
@@ -176,12 +228,39 @@ export function isCjkCorpus(sampleTexts: readonly string[]): boolean {
     );
 }
 
+/** "Default" tokenizer: whitespace `simple` tokenizer with English (or no
+ *  explicit) stemming — what an English/code/unclassifiable workspace gets. */
+function isDefaultSettings(s: FtsTokenizerSettings): boolean {
+    return s.baseTokenizer === 'simple' && (s.language === undefined || s.language === 'English');
+}
+
+/** Same tokenizer apart from `language` — the guard that lets hysteresis rule
+ *  (a) return `previous` without hiding a genuine stem/stop-word/lowercase change. */
+function sameApartFromLanguage(a: FtsTokenizerSettings, b: FtsTokenizerSettings): boolean {
+    return tokenizerSettingsEqual({ ...a, language: undefined }, { ...b, language: undefined });
+}
+
+/** Reverse of ISO_639_1_TO_LANCEDB_LANGUAGE: Lance variant name -> ISO 639-1. */
+function isoForLanceLanguage(name: string): string | undefined {
+    for (const [iso, lance] of Object.entries(ISO_639_1_TO_LANCEDB_LANGUAGE)) {
+        if (lance === name) return iso;
+    }
+    return undefined;
+}
+
 /**
  * Sample-driven tokenizer choice. Pure function, deterministic on the given
  * sample, no I/O. Empty/unclassifiable input is the Latin default — a
  * fresh or tiny workspace should not jump to `ngram` on zero evidence.
+ *
+ * `previous` is the settings stored in the sidecar for the current on-disk
+ * index, if any; it enables the hysteresis described at LANG_ENTER_* above.
+ * Omitted, the result depends on the sample alone.
  */
-export function detectTokenizerProfile(sampleTexts: readonly string[]): FtsTokenizerSettings {
+export function detectTokenizerProfile(
+    sampleTexts: readonly string[],
+    previous?: FtsTokenizerSettings,
+): FtsTokenizerSettings {
     // CJK decision: script-based (see isCjkCorpus / hasCjkScript), so it
     // survives samples too short for statistical language ID.
     if (isCjkCorpus(sampleTexts)) {
@@ -192,29 +271,59 @@ export function detectTokenizerProfile(sampleTexts: readonly string[]): FtsToken
     // language, so the vote stays language-based. CJK_LANGUAGES still filters
     // it — a corpus below the script threshold above must not stem in Chinese.
     const languageVotes = new Map<string, number>();
+    let classified = 0;
     for (const text of sampleTexts) {
-        const { language } = detectLanguage(text);
-        if (!language) continue;
+        const detected = detectLanguage(text).language;
+        if (!detected) continue;
+        const language = LANGUAGE_VOTE_ALIASES[detected] ?? detected;
+        if (CJK_LANGUAGES[language]) continue;
         languageVotes.set(language, (languageVotes.get(language) ?? 0) + 1);
+        classified++;
     }
+    const sampled = sampleTexts.length;
 
-    // Latin default. Stem/remove-stop-words in the most-sampled non-CJK
-    // language when it's on the crash-safe allowlist; otherwise omit
-    // `language` entirely rather than guess (see the allowlist doc above).
+    // Entry filter (see the rule block above), then plurality of what remains.
+    // Map iteration order is first-vote order, so ties resolve as they always did.
     let bestLang: string | null = null;
     let bestVotes = 0;
     for (const [lang, votes] of languageVotes) {
-        if (CJK_LANGUAGES[lang]) continue;
+        if (lang !== 'en') {
+            const enters =
+                votes >= LANG_ENTER_MIN_VOTES &&
+                votes > LANG_ENTER_MIN_CLASSIFIED_SHARE * classified &&
+                votes >= LANG_ENTER_MIN_SAMPLE_SHARE * sampled;
+            if (!enters) continue;
+        }
         if (votes > bestVotes) { bestLang = lang; bestVotes = votes; }
     }
     const lanceLanguage = bestLang ? ISO_639_1_TO_LANCEDB_LANGUAGE[bestLang] : undefined;
-    return {
+    const verdict: FtsTokenizerSettings = {
         baseTokenizer: 'simple',
         stem: true,
         removeStopWords: true,
         lowercase: true,
         ...(lanceLanguage ? { language: lanceLanguage } : {}),
     };
+
+    if (previous) {
+        // (a) default -> default: keep exactly what is on disk.
+        if (isDefaultSettings(previous) && isDefaultSettings(verdict) && sameApartFromLanguage(previous, verdict)) {
+            return previous;
+        }
+        // (b) a stored non-English language stays while it still clearly leads.
+        if (previous.baseTokenizer === 'simple' && previous.language && previous.language !== 'English' && sameApartFromLanguage(previous, verdict)) {
+            const prevIso = isoForLanceLanguage(previous.language);
+            const prevVotes = prevIso ? (languageVotes.get(prevIso) ?? 0) : 0;
+            if (prevIso && prevVotes >= LANG_STAY_MIN_VOTES && prevVotes >= LANG_STAY_MIN_SAMPLE_SHARE * sampled) {
+                let leads = true;
+                for (const [lang, votes] of languageVotes) {
+                    if (lang !== prevIso && votes > prevVotes) { leads = false; break; }
+                }
+                if (leads) return previous;
+            }
+        }
+    }
+    return verdict;
 }
 
 /** Field-by-field equality — used to decide whether an on-disk index needs

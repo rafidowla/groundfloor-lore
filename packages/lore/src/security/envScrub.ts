@@ -175,7 +175,7 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_RECALL_RERANK_MODEL',                 // D8 — cross-encoder model id (default Xenova/ms-marco-MiniLM-L-6-v2)
     'LORE_RECALL_RERANK_K',                     // D8 — candidates reranked (default 10, clamp 2-20)
     'LORE_RECALL_RERANK_MARGIN',                // D8 — margin gate for replacing rank #1 (default 1.0)
-    'LORE_RECALL_RERANK_TIMEOUT_MS',            // D8 — stage timeout before failing open (default 3000)
+    'LORE_RECALL_RERANK_TIMEOUT_MS',            // D8 — stage timeout before failing open (default 10000)
     'LORE_RECALL_RERANK_IDLE_UNLOAD_MS',        // D8 — idle-unload for the cached tokenizer/model (default 300000; <=0 falls back to default)
     'LORE_RECALL_RERANK_DTYPE',                 // D8 — ONNX dtype override (default q8)
     'LORE_RECALL_RERANK_MAX_CONCURRENT',        // D8d F2 — process-wide concurrent rerank score runs (default 2, min 1)

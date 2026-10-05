@@ -4,6 +4,77 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.27.2] — 2026-10-04
+
+### Fixed
+- **`migrate-vectors` / `migrate-graph` live probes no longer false-abort on
+  correct data.** The bm25 probe checked that the sampled row was in the
+  *top-50* for a keyword, so a long row that legitimately ranked 51st
+  (Atlas: `MISMATCH bm25("final") sqlite missing <id>`) aborted a correct
+  migration. The probes now verify the sampled row/node itself and still FAIL
+  on a real miss:
+  - bm25: id-filtered membership (`bm25Search(kw, 1, { id })`) on each engine,
+    trying up to 5 keyword candidates in text order. SQLite missing on every
+    candidate is a MISMATCH; Lance returning 0 (e.g. a stop-word) advances to
+    the next candidate and, if none hit, is reported as "bm25 lance not
+    verified" rather than a mismatch. `VerbatimQueryFilter` gains an optional
+    `id`.
+  - vector: self-retrieval (`searchByVector(vec, { topK: 1, filter: { id } })`)
+    must return the sampled id on both engines. Scores are never compared
+    across engines; the old top-N order comparison remains as an
+    informational detail only.
+  - migrate-graph search probe: membership of the sampled node (full label,
+    then whole-word candidates; narrowed by type; limit = node count). A
+    scan-cap hit reports "graph search not verified" instead of a mismatch.
+  - zero probe samples is now reported explicitly ("no probe samples").
+- **Probe keywords work in any script.** `keywordOf` (ASCII-only, matched
+  mid-token: `item12345` -> `item`, `Zürich` -> `rich`) is replaced by
+  `keywordCandidates` (`engines/probeKeywords.ts`): whole-word letter runs in
+  any script, `[TOMBSTONED...]` prefix stripped, CJK/Thai runs allowed at >=3
+  chars. Bengali, Arabic, Russian, accented Latin and CJK rows are now probed
+  instead of silently skipped.
+- **`migrate-graph --rollback` text is honest.** Usage, rollback output and the
+  migrate success hint now say only the registry entry is reverted, writes made
+  after the migration are NOT carried back to SurrealDB, and print the actual
+  pre-migration backup tarball path (the real undo).
+- Failure text now reads "Lance data untouched (its keyword index may have been
+  rebuilt on open)" instead of "Lance store untouched". Stale "LanceDB 0.27.2"
+  comment in `verbatimHistory.ts` corrected.
+- **LanceDB keyword-index language is chosen only when clearly dominant.**
+  `detectTokenizerProfile` picked the stemming/stop-word language by plurality
+  of franc votes over an unordered 60-row sample, so one `fr` vote among 59
+  unclassifiable rows made an English/code workspace French (7 Atlas
+  workspaces). A non-English language now needs >= 5 votes, > 50% of the
+  classified votes and >= 30% of the sampled rows; English keeps its
+  plurality rule. Otherwise the workspace gets English or LanceDB's default.
+  Hysteresis against the stored sidecar (`previous` argument, wired from
+  `reconcileFtsTokenizer` and `detectDesiredTokenizer`) stops borderline
+  workspaces from rebuilding on every open. The sample is now up to 120 rows
+  from 4 windows across the table (was the first 60), each text cut to its
+  first 500 chars. Arabic (franc returns `arb`) now maps to LanceDB's Arabic;
+  it previously could never be selected. The SQLite engine is unaffected.
+  Upgrade note: workspaces previously mis-detected as a non-English language
+  rebuild their LanceDB keyword index once on first open (data untouched;
+  seconds at most); correctly detected workspaces do not rebuild.
+
+### Changed
+- **`migrate-vectors` warns when the Lance FTS index is non-English.** If the
+  Lance tokenizer sidecar records a language other than English, the report
+  (`warnings`) and CLI print: "SQLite keyword search applies English stemming
+  only; <Language> stemming and stop-words will not be used after migration."
+  Not an abort.
+- Notes: repeated `migrate-vectors --force` runs leave stacked
+  `.pre-migrate-<stamp>` directories beside the workspace; delete them once the
+  migration is accepted.
+- **Rerank stage timeout default raised from 3 s to 10 s**
+  (`LORE_RECALL_RERANK_TIMEOUT_MS`, `DEFAULT_RERANK_TIMEOUT_MS`). Under heavy
+  host load a single rerank call exceeded 3 s and the stage failed open
+  (`reason:'timeout'`), silently returning un-reranked results for that
+  query — seen in the 2026-10-04 tapestry-recall embedder bench. Normal
+  rerank latency is unchanged; the new default only bounds how long a
+  struggling host waits before falling back. The env override and its
+  100 ms–30 s clamp are unchanged.
+
 ## [3.27.1] — 2026-10-03
 
 ### Fixed
