@@ -19,6 +19,7 @@
 
 import { getWorkspacePath } from '../../config/workspaces.js';
 import { openGraphForCli } from './shared.js';
+import { parseOrExit } from '../args.js';
 
 export async function vectorsCommand(args: string[]): Promise<void> {
     const target = args[0];
@@ -38,12 +39,12 @@ export async function vectorsCommand(args: string[]): Promise<void> {
 }
 
 async function promoteSubcommand(args: string[]): Promise<void> {
-    const ws = args.find((a) => !a.startsWith('--'));
-    const dryRun = args.includes('--dry-run');
-    if (!ws) {
-        console.error('usage: lore vectors promote <workspace> [--dry-run]');
-        process.exit(1);
-    }
+    const parsed = parseOrExit('vectors promote', args, {
+        bool: ['--dry-run'],
+        positionals: { min: 1, max: 1 },
+    }, { usage: () => console.error('usage: lore vectors promote <workspace> [--dry-run]') });
+    const ws = parsed.positionals[0]!;
+    const dryRun = parsed.has('--dry-run');
 
     const basePath = getWorkspacePath(ws);
     const fs = await import('node:fs');

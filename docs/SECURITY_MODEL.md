@@ -491,7 +491,9 @@ installs the tarball does not inherit those overrides (npm honours them from
 the root manifest only), so its `npm audit` can report transitive findings
 that Lore's gate never sees. As of 3.22.2 there are two: `sharp` 0.33.x, via
 `@lancedb/lancedb`'s optional `@huggingface/transformers@3.0.2`, and `uuid`
-8.x, via `exceljs`. Neither is reachable from Lore. Each host pins both
+8.x, via `exceljs` (no longer applies once a release includes the
+`read-excel-file` swap: `exceljs` is then a devDependency). Neither is
+reachable from Lore. Each host pins both
 itself; the exact `overrides` block is in `docs/MIGRATION-3.22.md` §6.
 Upgrading `@lancedb/lancedb` does not help, because 0.39.0 still declares
 the same optional dependency. The one finding left after those pins,

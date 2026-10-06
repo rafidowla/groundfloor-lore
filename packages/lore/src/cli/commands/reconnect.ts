@@ -1,24 +1,28 @@
 import path from 'path';
 import { loreHome } from '../../config/loreHome.js';
+import { parseOrExit } from '../args.js';
 
 export async function reconsumeCommand(args: string[]): Promise<void> {
     await reconnectCommand([...args, '--apply']);
 }
 
 export async function reconnectCommand(args: string[]): Promise<void> {
+    const parsed = parseOrExit('reconnect', args, {
+        bool: ['--apply', '--force', '--full'],
+        value: ['--k', '--threshold', '--since'],
+    }, { usage: () => console.error('usage: lore reconnect [--apply] [--force] [--full] [--k <n>] [--threshold <x>] [--since <iso>]') });
     const { VerbatimStore } = await import('../../engines/verbatimStore.js');
     const { reconnectGraph } = await import('../../engines/reconnect.js');
     const { openGraphForCli } = await import('./shared.js');
 
-    const apply = args.includes('--apply');
-    const force = args.includes('--force');
-    const full = args.includes('--full');
-    const kIndex = args.indexOf('--k');
-    const tIndex = args.indexOf('--threshold');
-    const sinceIndex = args.indexOf('--since');
-    const k = kIndex >= 0 ? parseInt(args[kIndex + 1], 10) : 5;
-    const threshold = tIndex >= 0 ? parseFloat(args[tIndex + 1]) : 0.65;
-    const sinceArg: string | undefined = sinceIndex >= 0 ? args[sinceIndex + 1] : undefined;
+    const apply = parsed.has('--apply');
+    const force = parsed.has('--force');
+    const full = parsed.has('--full');
+    const kArg = parsed.get('--k');
+    const tArg = parsed.get('--threshold');
+    const k = kArg !== undefined ? parseInt(kArg, 10) : 5;
+    const threshold = tArg !== undefined ? parseFloat(tArg) : 0.65;
+    const sinceArg: string | undefined = parsed.get('--since');
 
     const basePath = loreHome();
     const loreDir = path.join(basePath, '.lore');

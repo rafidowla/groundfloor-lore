@@ -25,37 +25,25 @@
  * (engines/pieces/rebuildPieceIndex.ts).
  */
 
+import { parseOrExit, dataDirFlag } from '../args.js';
 import type { WorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import type { PieceRebuildTarget } from '../../engines/pieces/rebuildPieceIndex.js';
 
-/** Value of `--data-dir <path>` / `--data-dir=<path>`; undefined when absent. */
-function parseDataDir(args: string[]): string | undefined {
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i]!;
-        if (a.startsWith('--data-dir=')) return a.slice('--data-dir='.length);
-        if (a === '--data-dir') {
-            const v = args[i + 1];
-            if (v === undefined || v.startsWith('--')) {
-                console.error('--data-dir requires a path');
-                process.exit(1);
-            }
-            return v;
-        }
-    }
-    return undefined;
-}
-
 export async function migratePieceVectorsCommand(args: string[]): Promise<void> {
-    const dryRun = args.includes('--dry-run');
-    const force = args.includes('--force');
-    const drop = args.includes('--drop');
+    const parsed = parseOrExit('migrate piece-vectors', args, {
+        bool: ['--dry-run', '--force', '--drop'],
+        value: ['--data-dir'],
+    }, { usage: () => console.error('usage: lore migrate piece-vectors [--dry-run] [--force] [--drop] [--data-dir <path>]') });
+    const dryRun = parsed.has('--dry-run');
+    const force = parsed.has('--force');
+    const drop = parsed.has('--drop');
 
     if (drop && (dryRun || force)) {
         console.error('--drop cannot be combined with --dry-run or --force');
         process.exit(1);
     }
 
-    const dataDir = parseDataDir(args);
+    const dataDir = dataDirFlag(parsed);
 
     const { openGraphForCli, CliDaemonLockError } = await import('./shared.js');
     const { resolveVerbatimEngineForPath } = await import('../../engines/openWorkspaceVerbatim.js');

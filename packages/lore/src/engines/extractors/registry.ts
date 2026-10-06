@@ -109,7 +109,7 @@ const EXT_TO_MIME: Record<string, string> = {
     '.jpg': 'image/jpeg',
     '.jpeg': 'image/jpeg',
     '.webp': 'image/webp',
-    // xlsx — ExcelJS replaces the previously blocked SheetJS (CVE).
+    // xlsx — read-excel-file (previously ExcelJS) replaces the blocked SheetJS (CVE).
     '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     '.xls':  'application/vnd.ms-excel',
     '.ods':  'application/vnd.oasis.opendocument.spreadsheet',

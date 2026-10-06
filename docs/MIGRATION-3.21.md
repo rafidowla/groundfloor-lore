@@ -45,8 +45,8 @@ substrate, under any circumstance.** There is no implicit migration.
 
 - **Graph**: the only path from SurrealDB to SQLite is explicit:
   ```bash
-  lore migrate-graph <workspace> --to sqlite [--force]
-  lore migrate-graph <workspace> --rollback [--force]   # registry-entry-only revert
+  lore migrate-graph <workspace> --to sqlite [--force] [--data-dir <path>]
+  lore migrate-graph <workspace> --rollback [--force] [--data-dir <path>]   # registry-entry-only revert
   ```
   (`packages/lore/src/cli/commands/migrateGraph.ts`, added `29d78389`).
   This takes a backup first (`loreHomePath('migrate-graph-backups')`) and
@@ -70,6 +70,7 @@ substrate, under any circumstance.** There is no implicit migration.
 - **Vector, LanceDB → SQLite (3.27.1)**: explicit and offline:
   ```bash
   lore migrate-vectors <workspace> --to sqlite [--dry-run] [--force] [--data-dir <path>]
+                       [--dedupe-identical] [--stamp-from-config]
   ```
   (`packages/lore/src/cli/commands/migrateVectors.ts` →
   `engines/migrateVectorsToSqlite.ts`). Same safety model as
@@ -99,12 +100,31 @@ substrate, under any circumstance.** There is no implicit migration.
   preflight cannot see an in-process `createLore()` — then run
   `lore migrate-vectors <ws> --to sqlite --data-dir <the host's dataDir>`
   and restart; the host's verbatim resolver opens SQLite on next start.
+  **3.28.0 additions:** `--data-dir` is also honoured by `migrate-graph`, and
+  both commands refuse a target whose `workspaces.json` is missing or does not
+  name the workspace (with `--data-dir`, whose workspace path lies outside it).
+  Unknown flags are rejected. `--dedupe-identical` collapses repeated canonical
+  ids whose copies are identical — same content, text, `security_scopes` and
+  metadata; `updatedAt` and the vector are ignored (newest `updatedAt` kept;
+  differing copies still refuse; Lance is not modified). `lore verbatim dedupe
+  <workspace> [--apply]` checks and cleans such duplicates in the Lance table
+  itself, using the same rule; close every host that embeds Lore on that
+  workspace before `--apply`.
+  `--stamp-from-config` stamps a missing `embedding_model.json` from the
+  configured provider when its dimension matches the table's. A workspace with
+  no Lance verbatim table migrates to an empty, stamped SQLite store.
 
 **Practical effect**: every workspace that existed before a host adopts
 3.21 keeps running exactly the substrate pair it always has, until an
 operator runs `lore migrate-graph` (graph), `lore migrate-vectors`
 (vector, LanceDB → SQLite, 3.27.1) or the automatic row-threshold
 promotion fires (vector, SQLite → LanceDB).
+
+Mixed engines per workspace (graph `sqlite` with vectors `lance`, or the
+reverse) are a supported, long-term configuration, not a transitional state.
+Each engine is migrated independently by its own command, so running
+`lore migrate-graph` without `lore migrate-vectors` (a "graph-only" migration)
+is a valid place to stop.
 
 ## 3. Two crashes you will hit if you skip straight to SQLite
 

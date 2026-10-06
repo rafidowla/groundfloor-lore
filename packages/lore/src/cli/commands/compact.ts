@@ -24,6 +24,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { getWorkspacePath } from '../../config/workspaces.js';
 import { loreHome } from '../../config/loreHome.js';
+import { parseOrExit } from '../args.js';
 import { isDaemonServingHome, daemonRefuseMessage, otherDaemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
 import { probeSurrealLock } from '../../engines/surreal/surrealSettle.js';
 import { surrealDataPath } from '../../engines/surreal/surrealConnection.js';
@@ -69,16 +70,29 @@ function fmtBytes(n: number): string {
 }
 
 export async function compactCommand(args: string[]): Promise<void> {
-    if (!args[0] || args[0] === '--help' || args[0] === '-h') {
+    const printHelp = (): void => {
         console.log('Usage: lore compact <workspace> [--lancedb] [--force]');
         console.log('');
         console.log('Reclaims disk space from tombstoned LanceDB rows in the workspace.');
         console.log('Daemon must be down. --force bypasses the preflight (tests only).');
+    };
+    if (args.length === 0) {
+        printHelp();
         return;
     }
-    const workspace = args[0];
-    const rest = args.slice(1);
-    const force = rest.includes('--force');
+    const parsed = parseOrExit('compact', args, {
+        // --lancedb is documented but compaction always targets LanceDB; accepted as a no-op.
+        bool: ['--lancedb', '--force'],
+        positionals: { min: 1, max: 1 },
+        aliases: { '-h': '--help' },
+        help: true,
+    }, { usage: () => console.error('usage: lore compact <workspace> [--lancedb] [--force]') });
+    if (parsed.help) {
+        printHelp();
+        return;
+    }
+    const workspace = parsed.positionals[0]!;
+    const force = parsed.has('--force');
 
     let wsPath: string;
     try {

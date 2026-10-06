@@ -37,6 +37,7 @@ import { redactSecrets } from '../security/secretScan.js';
 import { VerbatimStore } from './verbatimStore.js';
 import { buildPieceRecords } from './pieces/pieceLayout.js';
 import type { PrebuiltPieceBatchEntry, PieceSearchHit } from './pieces/lancePieceIndex.js';
+import type { BulkAddResult } from './verbatimBatch.js';
 import type { PendingPieceRow } from './pieces/pendingPieceQueue.js';
 import { tombstoneViaParentEmbed } from './verbatimWorkerTombstone.js';
 import { EmbeddingFingerprintMismatchError, type FingerprintMismatchKind } from './verbatimFingerprintGate.js';
@@ -385,8 +386,8 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
         await this.withPieceDrain(() => this.call('storeBatch', [prepared]));
     }
 
-    override async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
-        await this.withPieceDrain(() => this.call('bulkAddPrebuiltRows', [rows]));
+    override async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<BulkAddResult> {
+        return this.withPieceDrain(() => this.call('bulkAddPrebuiltRows', [rows]) as Promise<BulkAddResult>);
     }
 
     override async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
@@ -429,14 +430,13 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
      * failure is reported to the child, which marks the index incomplete
      * (not_built + one log.error) rather than serving with holes.
      */
-    private async withPieceDrain(write: () => Promise<unknown>): Promise<void> {
+    private async withPieceDrain<T>(write: () => Promise<T>): Promise<T> {
         if (!this.parentEmbedder || !this.pieceVectors) {
-            await write();
-            return;
+            return await write();
         }
         this.pieceWritesUndrained++;
         try {
-            await write();
+            return await write();
         } finally {
             await this.drainPieces();
         }

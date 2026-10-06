@@ -149,13 +149,14 @@ export function exportRows(db: DatabaseType, opts?: { project?: string }): Verba
             params.push(opts.project);
         }
         const rows = db.prepare(
-            `SELECT id, text, vector, content_hash, type, label, tags, project, ecosystem, updatedAt
+            `SELECT id, text, vector, content_hash, type, label, tags, project, ecosystem, updatedAt, security_scopes
              FROM verbatim WHERE ${clauses.join(' AND ')}`,
         ).all(...params) as Array<Record<string, unknown>>;
         const out: VerbatimExportRow[] = [];
         for (const r of rows) {
             const vec = decodeVector(r.vector as Buffer | null);
             const contentHash = r.content_hash ? String(r.content_hash) : '';
+            const scopes = parseScopes(r.security_scopes);
             out.push({
                 id: String(r.id),
                 text: r.text != null ? String(r.text) : '',
@@ -169,6 +170,7 @@ export function exportRows(db: DatabaseType, opts?: { project?: string }): Verba
                     ecosystem: r.ecosystem != null ? String(r.ecosystem) : undefined,
                     updatedAt: r.updatedAt != null ? String(r.updatedAt) : undefined,
                     contentHash: contentHash || undefined,
+                    ...(scopes.length > 0 ? { security_scopes: scopes } : {}),
                 },
             });
         }

@@ -76,8 +76,11 @@ Query params (route owner: `packages/lore/src/mcp/http/routes/load.ts`):
 - `embed` — `skip` (default), `queued`, `inline`. Per Sprint Z
   principle clause 8, bulk loads default to `skip` to avoid
   saturating the embed lane; the operator runs
-  `lore embed reembed --workspace X --since <load_id>` to backfill
-  vectors after the load.
+  `lore embed reembed --workspace X` to backfill vectors after the
+  load. It re-embeds every node of the workspace; narrow it with
+  `--type <node-type>` or `--tag <tag>`, and preview with `--dry-run`.
+  There is no per-load (`--since`) selector — an unknown flag such as
+  `--since` is a usage error, not ignored.
 
 Body size: capped at `LORE_LOAD_MAX_BYTES` (default 10 GB). Distinct
 from the 10 MB `MAX_BODY_BYTES` cap on every other JSON-body route.

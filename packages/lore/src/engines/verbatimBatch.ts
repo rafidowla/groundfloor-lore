@@ -27,7 +27,8 @@ import { Schema } from 'apache-arrow';
 
 import { log } from '../logger.js';
 import type { BoundedVectorCache } from './boundedVectorCache.js';
-import { assertSafeLanceId, assertSafeLanceHash } from './verbatimHistory.js';
+import { assertSafeLanceId, assertSafeLanceHash, isRevisionHistoryId, toPlainVector, toPlainStringList } from './verbatimHistory.js';
+import { existingIdsInTable } from './verbatimPurgeRows.js';
 import { markBuildStart, markBuildDone } from './indexIntegrity.js';
 import type { FtsTokenizerSettings } from './ftsTokenizerProfile.js';
 import type { VerbatimDocument } from '../providers/types.js';
@@ -95,6 +96,9 @@ export interface VerbatimBatchCtx {
      */
     readonly lancedbPath: string;
     bumpSearchEpoch(): void;
+    /** Called once, by the creator, when ensureVerbatimTable actually creates the table
+     *  (the fingerprint stamp). Optional: a ctx without it simply stamps nothing. */
+    onTableBirth?(): void;
     /** Write-path index ensure (WP4). Defaults: 256 rows, 2000ms debounce. */
     indexEnsureMinRows?: number;
     indexEnsureDebounceMs?: number;
@@ -122,7 +126,7 @@ export interface VerbatimBatchCtx {
  *
  * Returns `created: true` when the shared ensure actually created the table
  * (all callers awaiting the creation see true), so callers can gate
- * table-birth side effects (fingerprint stamp). A plain add on the created
+ * table-birth side effects (done once, in `onTableBirth`: the fingerprint stamp). A plain add on the created
  * branch is safe for DISTINCT ids; a concurrent first write of the SAME id
  * is the separate 3.1-class double-writer race, closed at the
  * nodeService/autolink layer.
@@ -140,6 +144,9 @@ export async function ensureVerbatimTable(
     const init = (async () => {
         try {
             ctx.table = await db.createEmptyTable('lore_verbatim', ctx.verbatimSchema);
+            // Table birth side effect, for EVERY creation path (store, storeBatch,
+            // bulkAdd/UpsertPrebuiltRows). Never throws (stampFingerprint swallows).
+            try { ctx.onTableBirth?.(); } catch { /* best-effort */ }
             return { table: ctx.table, created: true };
         } catch (err) {
             // Cross-process / leftover-dir race — open what already exists.
@@ -153,6 +160,47 @@ export async function ensureVerbatimTable(
     // ctx.table fast-path above takes over.
     init.catch(() => tableInitByCtx.delete(ctx));
     return init;
+}
+
+/**
+ * refreshWriteTable — bring the store's WRITE handle to the latest committed
+ * table version. Call it first thing under the per-path write lane, before any
+ * read that decides what to write (snapshot / existing-id probes) and before
+ * any mergeInsert / add / delete.
+ *
+ * Why (3.28.0): LanceDB `mergeInsert('id')` run from a handle opened BEFORE
+ * another writer's commit does not see that writer's rows and inserts a
+ * duplicate instead of matching (verified for a second connection and for a
+ * second handle on the same connection). The lane orders writers inside one
+ * process; this makes each writer start from the committed state, which also
+ * covers a second process whose writes do not overlap in time.
+ *
+ * `checkoutLatest()` is the cheapest correct API in @lancedb/lancedb 0.37: an
+ * in-place move of the existing handle to the newest manifest (one manifest
+ * read; no reconnect, handle identity kept). Fallbacks: if it throws, reopen
+ * the table; if the handle is null (store opened before the table existed),
+ * try to open the table another writer may have created since. A failure of
+ * both is non-fatal here — the write that follows reports its own error, or
+ * creates the table.
+ */
+export async function refreshWriteTable(ctx: VerbatimBatchCtx): Promise<void> {
+    // NOT gated on ctx.initialized: close() flips it false immediately, yet writers
+    // already queued on the lane still run (drain waits for them) and must refresh
+    // like any other — gating here let a closing store write from a stale handle.
+    if (!ctx.db) return;
+    if (ctx.table) {
+        try { await ctx.table.checkoutLatest(); return; }
+        catch (e) { log.debug(`[VerbatimStore] write-handle checkoutLatest failed; reopening: ${(e as Error).message}`); }
+    }
+    try {
+        // H3: the superseded handle is deliberately NOT close()d here. Non-lane readers (getById, search, countRows...)
+        // read `ctx.table` without the lane and may be mid-query on it; a synchronous native close() under them is a
+        // use-after-close hazard. Dropping the last reference lets the napi finalizer release it once those reads end.
+        ctx.table = await ctx.db.openTable('lore_verbatim');
+    } catch (e) {
+        if (ctx.table === null) return; // table does not exist yet — first write creates it
+        log.debug(`[VerbatimStore] write-handle reopen failed; keeping the current handle: ${(e as Error).message}`);
+    }
 }
 
 /**
@@ -198,24 +246,195 @@ export async function resolveBatchVectors(
 
 /**
  * Sprint Z2 — substrate-native bulk loader append path. Accepts fully-built
- * rows matching the verbatim schema (vector + columns) and appends them in one
- * table.add() call. Skip-embed semantics: the caller passes placeholder
- * zero-vectors so this does NOT call the embedding provider.
+ * rows matching the verbatim schema (vector + columns) and appends them.
+ * Skip-embed semantics: the caller passes placeholder zero-vectors so this
+ * does NOT call the embedding provider.
+ *
+ * Duplicate-canonical fix (3.28.0): this used to be a plain `table.add`, so
+ * re-adding an id that already had a row (a loader re-run, an overlapping
+ * writer) left TWO canonical rows. It now (1) collapses same-id rows
+ * keep-last, (2) plain-appends only into a table this call created or for
+ * ids with no existing row — the common bulk-load case stays ONE add — and
+ * (3) routes ids that already exist through the atomic `mergeInsert('id')`
+ * upsert. Callers MUST hold the store's write mutex (VerbatimStore does).
  */
 export async function bulkAddPrebuiltRows(
     ctx: VerbatimBatchCtx,
     rows: Array<Record<string, unknown>>,
-): Promise<void> {
-    if (rows.length === 0) return;
+): Promise<BulkAddResult> {
+    if (rows.length === 0) return { rejectedCount: 0, rejectedIds: [] };
     if (!ctx.initialized || !ctx.db) {
         throw new Error('VerbatimStore.bulkAddPrebuiltRows: store not initialized');
     }
+    // J4 — an id that fails assertSafeLanceId can never be written or queried
+    // safely. Skip those rows (never write them) and report them, so one bad
+    // id no longer rejects every valid row in the same bulk call.
+    const { safe, rejectedCount, rejectedIds } = partitionSafeBulkRows(rows);
+    if (rejectedCount > 0) {
+        log.warn(`[VerbatimStore.bulkAddPrebuiltRows] skipped ${rejectedCount} of ${rows.length} row(s) with unsafe ids (written: ${safe.length}); first rejected: ${JSON.stringify(rejectedIds.slice(0, 3))}`);
+    }
+    if (safe.length === 0) return { rejectedCount, rejectedIds };
     // ensureVerbatimTable: a concurrent first write must open, not throw
     // "already exists" (see the helper's doc).
-    const { table } = await ensureVerbatimTable(ctx);
-    await table.add(rows as Array<{ [k: string]: unknown }>);
+    const { table, created } = await ensureVerbatimTable(ctx);
+    const deduped = dedupeByIdKeepLast(safe, (r) => String(r['id'] ?? ''));
+    if (created) {
+        await table.add(deduped as Array<{ [k: string]: unknown }>);
+    } else {
+        const ids = deduped.map((r) => String(r['id'] ?? ''));
+        const existing = new Set(await existingIdsInTable(table, ids, VERBATIM_CHUNK_SIZE));
+        const fresh = deduped.filter((r) => !existing.has(String(r['id'] ?? '')));
+        const replace = deduped.filter((r) => existing.has(String(r['id'] ?? '')));
+        if (fresh.length > 0) await table.add(fresh as Array<{ [k: string]: unknown }>);
+        await upsertCanonicalRows(table, replace);
+    }
     ctx.bumpSearchEpoch();
     scheduleSearchIndexesAfterBulk(ctx, await table.countRows());
+    return { rejectedCount, rejectedIds };
+}
+
+/** J4 — result of a bulk prebuilt-row add. Additive: callers that ignore the
+ *  return value keep working. `rejectedIds` is capped at the first
+ *  MAX_REPORTED_REJECTED_IDS ids (each truncated); `rejectedCount` is exact. */
+export interface BulkAddResult {
+    rejectedCount: number;
+    rejectedIds: string[];
+}
+
+export const MAX_REPORTED_REJECTED_IDS = 20;
+
+/** Split rows into those whose id passes assertSafeLanceId and the rest. */
+export function partitionSafeBulkRows(rows: Array<Record<string, unknown>>): {
+    safe: Array<Record<string, unknown>>;
+    rejectedCount: number;
+    rejectedIds: string[];
+} {
+    const safe: Array<Record<string, unknown>> = [];
+    const rejectedIds: string[] = [];
+    let rejectedCount = 0;
+    for (const r of rows) {
+        const id = r['id'];
+        try {
+            assertSafeLanceId(id as string, 'bulkAddPrebuiltRows');
+            safe.push(r);
+        } catch {
+            rejectedCount++;
+            if (rejectedIds.length < MAX_REPORTED_REJECTED_IDS) rejectedIds.push(String(id ?? '').slice(0, 128));
+        }
+    }
+    return { safe, rejectedCount, rejectedIds };
+}
+
+/**
+ * Atomic canonical upsert keyed on `id`, chunked at VERBATIM_CHUNK_SIZE.
+ * `mergeInsert` collapses delete+add into one commit per chunk, so a crash or
+ * an overlapping writer can never leave the id absent or doubled. Same-id
+ * rows within `rows` are collapsed keep-last first (mergeInsert reconciles
+ * source-vs-target, NOT duplicates inside the source).
+ */
+export async function upsertCanonicalRows(
+    table: lancedb.Table,
+    rows: ReadonlyArray<Record<string, unknown>>,
+): Promise<void> {
+    const deduped = dedupeByIdKeepLast(rows, (r) => String(r['id'] ?? ''));
+    for (let i = 0; i < deduped.length; i += VERBATIM_CHUNK_SIZE) {
+        const chunk = deduped.slice(i, i + VERBATIM_CHUNK_SIZE) as Array<{ [k: string]: unknown }>;
+        await table
+            .mergeInsert('id')
+            .whenMatchedUpdateAll()
+            .whenNotMatchedInsertAll()
+            .execute(chunk);
+    }
+}
+
+// Arrow List<Utf8> -> string[]; one shared implementation (indexed access on an
+// Arrow Vector yields undefined — see verbatimHistory.toPlainStringList).
+export { toPlainStringList };
+
+/**
+ * storeBatch preflight — snapshot the CURRENT canonical row of every
+ * non-history doc id as `<id>#rev<ts>` before the batch replaces it. ONE
+ * chunked bulk query + ONE `table.add`, not 2N round-trips. The snapshot
+ * write is best-effort (a failure is logged and must not block the canonical
+ * update); the existing-row QUERY is not — if it fails we cannot know which
+ * canonicals to snapshot, so the error propagates and the batch fails
+ * atomically for the caller to retry. No canonical delete happens here: the
+ * replacement is an atomic upsert (see commitBatchRows).
+ */
+export async function snapshotExistingCanonicals(
+    table: lancedb.Table,
+    docs: ReadonlyArray<{ id: string }>,
+): Promise<void> {
+    const targetIds = docs.filter((d) => !isRevisionHistoryId(d.id)).map((d) => d.id);
+    if (targetIds.length === 0) return;
+    targetIds.forEach((id) => assertSafeLanceId(id, 'storeBatch.preflight')); // SECURITY — outside try so validation errors propagate
+    try {
+        const existing: unknown[] = [];
+        for (let ci = 0; ci < targetIds.length; ci += VERBATIM_CHUNK_SIZE) {
+            const escChunk = targetIds.slice(ci, ci + VERBATIM_CHUNK_SIZE).map((id) => `'${id.replace(/'/g, "''")}'`).join(',');
+            existing.push(...await table.query().where(`id IN (${escChunk})`).toArray());
+        }
+        if (existing.length === 0) return;
+        const ts = new Date().toISOString();
+        const snapshotRows = existing.map((r) => {
+            const rec = r as Record<string, unknown>;
+            return {
+                vector: toPlainVector(rec.vector),
+                id: `${String(rec.id ?? '')}#rev${ts}`,
+                text: rec.text ?? '',
+                type: rec.type ?? '',
+                label: rec.label ?? '',
+                tags: rec.tags ?? '',
+                project: rec.project ?? '',
+                ecosystem: rec.ecosystem ?? '',
+                updatedAt: rec.updatedAt ?? '',
+                security_scopes: toPlainStringList(rec.security_scopes),
+                contentHash: rec.contentHash ?? '',
+            };
+        });
+        try {
+            await table.add(snapshotRows);
+        } catch (snapErr) {
+            log.error(`[VerbatimStore] storeBatch history snapshot failed (history may be incomplete): ${(snapErr as Error).message}`);
+        }
+    } catch (err) {
+        log.error(`[VerbatimStore] storeBatch preflight failed — aborting batch to avoid duplicate canonicals: ${(err as Error).message}`);
+        throw err;
+    }
+}
+
+/**
+ * storeBatch write phase. A table THIS call just created is empty and
+ * (callers hold the store write mutex) nobody else can have written to it, so
+ * the rows go in with one plain add. Otherwise canonical rows go through the
+ * atomic `mergeInsert('id')` upsert — replacing the old per-chunk
+ * `delete(id IN ...)` + `add`, whose gap let an overlapping writer add the
+ * same ids a second time. History ids (`#rev…`) are append-only snapshots and
+ * are plain-added, as before.
+ */
+export async function commitBatchRows(
+    table: lancedb.Table,
+    rows: Array<Record<string, unknown>>,
+    createdTable: boolean,
+): Promise<void> {
+    if (createdTable) {
+        await table.add(rows);
+        return;
+    }
+    const history = rows.filter((r) => isRevisionHistoryId(String(r['id'] ?? '')));
+    const canonical = dedupeByIdKeepLast(
+        rows.filter((r) => !isRevisionHistoryId(String(r['id'] ?? ''))),
+        (r) => String(r['id'] ?? ''),
+    );
+    // H4: ids with no row yet go in with ONE plain add (a big first index is not N/500 mergeInserts); only ids that
+    // already exist take the atomic mergeInsert upsert. Safe against duplicates: the caller holds the per-path write
+    // lane on a freshly refreshed handle (same split as bulkAddPrebuiltRows).
+    const ids = canonical.map((r) => String(r['id'] ?? ''));
+    const existing = new Set(await existingIdsInTable(table, ids, VERBATIM_CHUNK_SIZE));
+    const fresh = canonical.filter((r) => !existing.has(String(r['id'] ?? '')));
+    if (fresh.length > 0) await table.add(fresh);
+    await upsertCanonicalRows(table, canonical.filter((r) => existing.has(String(r['id'] ?? ''))));
+    if (history.length > 0) await table.add(history);
 }
 
 /**
@@ -235,20 +454,9 @@ export async function bulkUpsertPrebuiltRows(
     // ensureVerbatimTable: a concurrent first write must open, not throw
     // "already exists" (see the helper's doc).
     const { table } = await ensureVerbatimTable(ctx);
-    // C3 3.2/3.4 — mergeInsert reconciles source-vs-target, NOT duplicates
-    // WITHIN the source: two rows sharing an id in one batch both landed as
-    // separate canonical rows (getById then returned the stale first one,
-    // permanently). Collapse same-id rows keep-last before chunking; callers
-    // hand rows in temporal order, so last = newest intent.
-    const deduped = dedupeByIdKeepLast(rows, (r) => String(r['id'] ?? ''));
-    for (let i = 0; i < deduped.length; i += VERBATIM_CHUNK_SIZE) {
-        const chunk = deduped.slice(i, i + VERBATIM_CHUNK_SIZE) as Array<{ [k: string]: unknown }>;
-        await table
-            .mergeInsert('id')
-            .whenMatchedUpdateAll()
-            .whenNotMatchedInsertAll()
-            .execute(chunk);
-    }
+    // C3 3.2/3.4 — same-id rows collapse keep-last inside upsertCanonicalRows
+    // (callers hand rows in temporal order, so last = newest intent).
+    await upsertCanonicalRows(table, rows);
     ctx.bumpSearchEpoch();
     scheduleSearchIndexesAfterBulk(ctx, await table.countRows());
 }

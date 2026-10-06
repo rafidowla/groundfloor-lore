@@ -23,6 +23,7 @@
 import path from 'node:path';
 
 import { loreHome } from '../../config/loreHome.js';
+import { parseOrExit } from '../args.js';
 
 interface ReEmbedFlags {
     workspace?: string;
@@ -35,41 +36,23 @@ interface ReEmbedFlags {
 }
 
 function parseReEmbedFlags(args: string[]): ReEmbedFlags {
-    const out: ReEmbedFlags = { dryRun: false, help: false };
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i];
-        if (a === '--help' || a === '-h') {
-            out.help = true;
-            continue;
-        }
-        if (a === '--dry-run') {
-            out.dryRun = true;
-            continue;
-        }
-        if (a === '--workspace' && i + 1 < args.length) {
-            out.workspace = args[++i];
-            continue;
-        }
-        if (a === '--type' && i + 1 < args.length) {
-            out.type = args[++i];
-            continue;
-        }
-        if (a === '--tag' && i + 1 < args.length) {
-            out.tag = args[++i];
-            continue;
-        }
-        if (a === '--filter' && i + 1 < args.length) {
-            // Reserved for a future cypher-where pass-through. For
-            // now we accept + ignore so callers can wire it without
-            // breakage; --type + --tag cover today's use cases.
-            out.filter = args[++i];
-            continue;
-        }
-        if (a === '--batch-size' && i + 1 < args.length) {
-            const n = parseInt(args[++i], 10);
-            if (Number.isFinite(n) && n > 0) out.batchSize = n;
-            continue;
-        }
+    const p = parseOrExit('embed reembed', args, {
+        bool: ['--dry-run'],
+        // --filter is reserved for a future cypher-where pass-through: accepted + ignored.
+        value: ['--workspace', '--type', '--tag', '--filter', '--batch-size'],
+        aliases: { '-h': '--help' },
+        help: true,
+    }, { usage: () => console.error('usage: lore embed reembed --workspace <ws> [--type <t>] [--tag <t>] [--batch-size <n>] [--dry-run]') });
+    const out: ReEmbedFlags = { dryRun: p.has('--dry-run'), help: p.help };
+    if (p.help) return out;
+    out.workspace = p.get('--workspace');
+    out.type = p.get('--type');
+    out.tag = p.get('--tag');
+    out.filter = p.get('--filter');
+    const bs = p.get('--batch-size');
+    if (bs !== undefined) {
+        const n = parseInt(bs, 10);
+        if (Number.isFinite(n) && n > 0) out.batchSize = n;
     }
     return out;
 }

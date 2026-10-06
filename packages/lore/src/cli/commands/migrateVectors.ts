@@ -21,44 +21,48 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { loreHome, resolveLoreHome } from '../../config/loreHome.js';
+import { parseOrExit, dataDirFlag } from '../args.js';
+import { assertWorkspaceTarget } from '../targetGuard.js';
 import { migrateVectorsToSqlite } from '../../engines/migrateVectorsToSqlite.js';
 
 function usage(): void {
     console.error('usage: lore migrate-vectors <workspace> --to sqlite [--dry-run] [--force] [--data-dir <path>]');
+    console.error('                            [--dedupe-identical] [--stamp-from-config]');
     console.error('');
-    console.error('  --to sqlite        Move the workspace\'s verbatim (vector) store from LanceDB to');
-    console.error('                     SQLite. Offline: stop the daemon / embedding host first.');
-    console.error('                     Backs up first; the Lance tables are left in place.');
-    console.error('  --dry-run          Check preconditions and print counts; write nothing.');
-    console.error('  --force            Move an existing non-empty verbatim.sqlite aside to a');
-    console.error('                     timestamped name (never deleted) instead of refusing.');
-    console.error('  --data-dir <path>  Target an embedded host\'s createLore({ dataDir }) root');
-    console.error('                     instead of LORE_HOME (e.g. one Atlas project root).');
-}
-
-function parseDataDir(args: string[]): string | undefined {
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i]!;
-        if (a.startsWith('--data-dir=')) return a.slice('--data-dir='.length);
-        if (a === '--data-dir') return args[i + 1] && !args[i + 1]!.startsWith('--') ? args[i + 1] : '';
-    }
-    return undefined;
+    console.error('  --to sqlite          Move the workspace\'s verbatim (vector) store from LanceDB to');
+    console.error('                       SQLite. Offline: stop the daemon / embedding host first.');
+    console.error('                       Backs up first; the Lance tables are left in place.');
+    console.error('  --dry-run            Check preconditions and print counts; write nothing.');
+    console.error('  --force              Move an existing non-empty verbatim.sqlite aside to a');
+    console.error('                       timestamped name (never deleted) instead of refusing.');
+    console.error('  --data-dir <path>    Target an embedded host\'s createLore({ dataDir }) root');
+    console.error('                       instead of LORE_HOME (e.g. one Atlas project root). The root');
+    console.error('                       must hold a workspaces.json naming <workspace> with a path');
+    console.error('                       inside it; otherwise the command refuses.');
+    console.error('  --dedupe-identical   Collapse source rows that share an id AND have identical');
+    console.error('                       content instead of refusing on the duplicate id.');
+    console.error('  --stamp-from-config  When the source has no embedding_model.json, stamp the');
+    console.error('                       model from the configured embedding provider.');
+    console.error('');
+    console.error('Unknown flags are rejected (a typo such as --dryrun will NOT run for real).');
 }
 
 export async function migrateVectorsCommand(args: string[]): Promise<void> {
-    const dataDir = parseDataDir(args);
-    const skip = new Set<number>();
-    const ddIdx = args.indexOf('--data-dir');
-    if (ddIdx >= 0) skip.add(ddIdx + 1);
-    const toIdx = args.indexOf('--to');
-    if (toIdx >= 0) skip.add(toIdx + 1);
-    const workspaceName = args.find((a, i) => !a.startsWith('--') && !skip.has(i));
-    const to = toIdx >= 0 ? args[toIdx + 1] : undefined;
-    const force = args.includes('--force');
-    const dryRun = args.includes('--dry-run');
+    const parsed = parseOrExit('migrate-vectors', args, {
+        bool: ['--force', '--dry-run', '--dedupe-identical', '--stamp-from-config'],
+        value: ['--to', '--data-dir'],
+        positionals: { min: 1, max: 1 },
+    }, { usage });
+    const workspaceName = parsed.positionals[0]!;
+    const to = parsed.get('--to');
+    const dataDir = dataDirFlag(parsed);
+    const force = parsed.has('--force');
+    const dryRun = parsed.has('--dry-run');
+    const dedupeIdentical = parsed.has('--dedupe-identical');
+    const stampFromConfig = parsed.has('--stamp-from-config');
 
-    if (!workspaceName || to !== 'sqlite' || dataDir === '') {
-        if (dataDir === '') console.error('--data-dir requires a path');
+    if (to !== 'sqlite') {
+        console.error(`lore migrate-vectors: --to sqlite is required${to !== undefined ? ` (got '${to}')` : ''}`);
         usage();
         process.exit(1);
     }
@@ -68,6 +72,17 @@ export async function migrateVectorsCommand(args: string[]): Promise<void> {
     }
 
     const home = dataDir !== undefined ? resolveLoreHome({ dataDir }) : loreHome();
+    // Same pre-write assertion as migrate-graph: the registry must already
+    // exist (the engine would otherwise bootstrap one), name the workspace,
+    // and — with an explicit --data-dir — place it inside that root.
+    console.log(`  Home:      ${home}${dataDir !== undefined ? ' (from --data-dir)' : ''}`);
+    console.log(`  Registry:  ${path.join(home, 'workspaces.json')}`);
+    try {
+        assertWorkspaceTarget({ home, workspaceName, dataDirGiven: dataDir !== undefined });
+    } catch (error) {
+        console.error(`migrate-vectors refused: ${(error as Error).message}`);
+        process.exit(1);
+    }
     const backupOutDir = path.join(home, 'migrate-vectors-backups');
     if (!dryRun) fs.mkdirSync(backupOutDir, { recursive: true });
 
@@ -78,7 +93,10 @@ export async function migrateVectorsCommand(args: string[]): Promise<void> {
     console.log('');
 
     try {
-        const r = await migrateVectorsToSqlite({ workspaceName, home, backupOutDir, force, dryRun });
+        const r = await migrateVectorsToSqlite({
+            workspaceName, home, backupOutDir, force, dryRun,
+            dedupeIdentical, stampFromConfig,
+        });
         console.log('─── Summary ─────────────────────────────────');
         if (r.backup) console.log(`  Backup:            ${path.basename(r.backup.tarballPath)}`);
         console.log(`  Canonical rows:    ${r.counts.canonical}`);
@@ -90,6 +108,9 @@ export async function migrateVectorsCommand(args: string[]): Promise<void> {
         console.log(`  Embedding model:   ${r.embeddingModel.modelId} (${r.embeddingModel.dimension}d)`);
         console.log(`  Promote threshold: ${r.promoteThreshold === 0 ? 'disabled' : r.promoteThreshold}`);
         for (const m of r.movedAside) console.log(`  Moved aside:       ${m}`);
+        if (r.dedupedIds.length > 0) console.log(`  Deduped ids:       ${r.dedupedIds.length} (${r.dedupedRowsDropped} identical duplicate rows dropped)`);
+        if (r.emptySource) console.log('  Empty source:      yes (no rows in the Lance tables)');
+        if (r.stampedFromConfig) console.log('  Model stamp:       taken from the configured embedding provider');
         if (!r.dryRun) {
             console.log(`  Digest match:      yes (${r.vectorsCompared} vectors bit-equal)`);
             console.log(`  Live probes:       yes (${r.probeDetails.join('; ') || 'no probes ran — no embedded canonical rows'})`);

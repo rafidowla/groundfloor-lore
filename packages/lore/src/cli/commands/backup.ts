@@ -52,6 +52,7 @@ import { backupWorkspace } from '../../engines/backup.js';
 import { probeSurrealLock } from '../../engines/surreal/surrealSettle.js';
 import { loadWorkspaces, getActiveWorkspaceName } from '../../config/workspaces.js';
 import { loreHome } from '../../config/loreHome.js';
+import { parseOrExit } from '../args.js';
 import { isDaemonServingHome, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
 
 interface Flags {
@@ -63,40 +64,47 @@ interface Flags {
     allowUnverified?: boolean;
 }
 
+const BACKUP_USAGE_HINT = 'usage: lore backup [--workspace <name>|--all] [--out <dir>] [--keep <n>] [--force] [--allow-unverified]';
+
 function parseFlags(args: string[]): Flags {
+    const p = parseOrExit('backup', args, {
+        bool: ['--all', '--force', '--allow-unverified'],
+        value: ['--workspace', '--out', '--keep'],
+        aliases: { '-h': '--help' },
+        help: true,
+    }, { usage: () => console.error(BACKUP_USAGE_HINT) });
     const out: Flags = {};
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i];
-        if (a === '--workspace' && i + 1 < args.length) out.workspace = args[++i];
-        else if (a === '--all') out.all = true;
-        else if (a === '--out' && i + 1 < args.length) out.outDir = args[++i];
-        else if (a === '--keep' && i + 1 < args.length) {
-            const n = Number(args[++i]);
-            if (!Number.isFinite(n) || n < 1) {
-                console.error(`--keep must be a positive integer; got "${args[i]}"`);
-                process.exit(1);
-            }
-            out.keep = Math.floor(n);
-        } else if (a === '--force') out.force = true;
-        else if (a === '--allow-unverified') out.allowUnverified = true;
-        else if (a === '--help' || a === '-h') {
-            console.log(
-                `Usage: lore backup [--workspace <name>|--all] [--out <dir>] [--keep <n>] [--force]\n` +
-                `                   [--allow-unverified]\n` +
-                `  Coordinated snapshot of one or all workspaces' three substrates\n` +
-                `  (graph engine + SQLite + LanceDB) plus sidecar state, packaged as .tar.gz\n` +
-                `  under --out. Retention: keeps N most recent per workspace (default\n` +
-                `  LORE_BACKUP_KEEP=7).\n` +
-                `  Refuses while the daemon is running, or while the workspace's graph\n` +
-                `  store is otherwise locked (checked directly, not just via the daemon's\n` +
-                `  health port); --force bypasses both.\n` +
-                `  A backup whose graph could not be verified exits non-zero unless\n` +
-                `  --allow-unverified accepts that risk explicitly.\n` +
-                `  Defaults: --workspace=active, --out=./backups, --keep=$LORE_BACKUP_KEEP||7\n`,
-            );
-            process.exit(0);
-        }
+    if (p.help) {
+        console.log(
+            `Usage: lore backup [--workspace <name>|--all] [--out <dir>] [--keep <n>] [--force]\n` +
+            `                   [--allow-unverified]\n` +
+            `  Coordinated snapshot of one or all workspaces' three substrates\n` +
+            `  (graph engine + SQLite + LanceDB) plus sidecar state, packaged as .tar.gz\n` +
+            `  under --out. Retention: keeps N most recent per workspace (default\n` +
+            `  LORE_BACKUP_KEEP=7).\n` +
+            `  Refuses while the daemon is running, or while the workspace's graph\n` +
+            `  store is otherwise locked (checked directly, not just via the daemon's\n` +
+            `  health port); --force bypasses both.\n` +
+            `  A backup whose graph could not be verified exits non-zero unless\n` +
+            `  --allow-unverified accepts that risk explicitly.\n` +
+            `  Defaults: --workspace=active, --out=./backups, --keep=$LORE_BACKUP_KEEP||7\n`,
+        );
+        process.exit(0);
     }
+    out.workspace = p.get('--workspace');
+    if (p.has('--all')) out.all = true;
+    out.outDir = p.get('--out');
+    const keepRaw = p.get('--keep');
+    if (keepRaw !== undefined) {
+        const n = Number(keepRaw);
+        if (!Number.isFinite(n) || n < 1) {
+            console.error(`--keep must be a positive integer; got "${keepRaw}"`);
+            process.exit(1);
+        }
+        out.keep = Math.floor(n);
+    }
+    if (p.has('--force')) out.force = true;
+    if (p.has('--allow-unverified')) out.allowUnverified = true;
     return out;
 }
 

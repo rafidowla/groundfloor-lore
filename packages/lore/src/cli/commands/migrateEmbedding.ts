@@ -1,15 +1,10 @@
 import path from 'path';
 import { loreHome } from '../../config/loreHome.js';
+import { parseOrExit } from '../args.js';
 import type { WorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 
 export async function migrateEmbeddingModelCommand(args: string[]): Promise<void> {
-    const toIdx = args.indexOf('--to');
-    const dimIdx = args.indexOf('--dim');
-    const apply = args.includes('--apply');
-    const force = args.includes('--force');
-
-    const targetModelId = toIdx >= 0 ? args[toIdx + 1] : '';
-    if (!targetModelId) {
+    const usage = (): void => {
         console.error('usage: lore migrate embedding-model --to <modelId> [--dim <n>] [--apply] [--force]');
         console.error('');
         console.error('Examples:');
@@ -20,11 +15,23 @@ export async function migrateEmbeddingModelCommand(args: string[]): Promise<void
         console.error('  lore migrate embedding-model --to BAAI/bge-m3 --dim 1024 --apply');
         console.error('     # cross-dim migration (set LORE_EMBEDDING_PROVIDER=openai_compat and');
         console.error('     # the LORE_EMBEDDING_BASE_URL/MODEL/DIMENSION env vars beforehand)');
+    };
+    const parsed = parseOrExit('migrate embedding-model', args, {
+        bool: ['--apply', '--force'],
+        value: ['--to', '--dim'],
+    }, { usage });
+    const apply = parsed.has('--apply');
+    const force = parsed.has('--force');
+
+    const targetModelId = parsed.get('--to') ?? '';
+    if (!targetModelId) {
+        usage();
         process.exit(1);
     }
-    const targetDimension = dimIdx >= 0 ? Number.parseInt(args[dimIdx + 1], 10) : 384;
+    const dimArg = parsed.get('--dim');
+    const targetDimension = dimArg !== undefined ? Number.parseInt(dimArg, 10) : 384;
     if (!Number.isInteger(targetDimension) || targetDimension <= 0) {
-        console.error(`--dim must be a positive integer (got ${args[dimIdx + 1]})`);
+        console.error(`--dim must be a positive integer (got ${dimArg})`);
         process.exit(1);
     }
 

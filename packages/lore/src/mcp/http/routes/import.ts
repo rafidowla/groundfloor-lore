@@ -36,7 +36,8 @@ import type { StorageBundle } from '../../services.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../../engines/localGraphRegistry.js';
 import { writeImportTable, type ImportTableResult } from './importTable.js';
 import { tagsToArray } from '../../../engines/normalizeTags.js';
-import { assertZipWithinBudget } from '../../../engines/extractors/zipGuard.js';
+import { loadWorkbook, sheetsToTable } from '../../../engines/extractors/xlsxRead.js';
+import { ExtractorError } from '../../../engines/extractors/types.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
@@ -235,72 +236,26 @@ export function parseCsv(buf: Buffer): { headers: string[]; rows: Record<string,
  * Parse an XLSX workbook into header + rows from the first non-empty sheet.
  * Multi-sheet picker is deferred — v0 takes whichever sheet is first.
  *
- * Reuses ExcelJS (already a dep for engines/extractors/xlsx.ts; this is the
- * import-time counterpart). Cells coerce to strings via the same value
- * normalisation rules: RichText → joined text, hyperlinks → display text,
- * Dates → ISO date string, formulas → cached result not the formula string.
+ * Shares the guarded reader with engines/extractors/xlsx.ts (read-excel-file
+ * behind loadWorkbook): zip-bomb preflight, dense-grid memory guard and
+ * merged-cell replay all apply to this import-time path too. Cells coerce to
+ * strings the same way the extractor renders them: rich text → joined text,
+ * hyperlinks → display text, Dates → ISO date string, formulas → cached
+ * result (blank when the file carries none).
  *
  * Exported for unit tests.
  */
 export async function parseXlsx(buf: Buffer): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
-    // audit 2026-06-25 (HIGH, malicious-content DoS) — the extractor path
-    // (engines/extractors/xlsx.ts) zip-bomb-guards before ExcelJS, but this
-    // import-time counterpart did not: ExcelJS.load inflates the zip with no
-    // size cap, so a small bomb uploaded to /api/import could OOM the daemon.
-    // Preflight the declared uncompressed sizes; a non-zip falls through.
+    // audit 2026-06-25 (HIGH, malicious-content DoS) — loadWorkbook preflights
+    // the declared AND real inflated sizes before the reader sees the bytes,
+    // so a small bomb uploaded to /api/import cannot OOM the daemon.
     try {
-        const jszipMod = (await import('jszip')) as any;
-        const JSZip = jszipMod.default ?? jszipMod;
-        const zip = await JSZip.loadAsync(buf);
-        assertZipWithinBudget(zip, 'xlsx-import');
+        return sheetsToTable(await loadWorkbook(buf, 'xlsx-import'));
     } catch (err) {
-        if (/zip bomb|refusing to decompress/i.test((err as Error).message)) {
-            throw new Error((err as Error).message);
-        }
-        // Not a parseable zip → let ExcelJS handle/err appropriately.
+        // Callers report `(err as Error).message`; keep it a plain Error.
+        if (err instanceof ExtractorError) throw new Error(err.message);
+        throw err;
     }
-
-    const ExcelJS = (await import('exceljs')).default;
-    const workbook = new ExcelJS.Workbook();
-    // ExcelJS's published Buffer type pins to a narrower variant than
-    // @types/node's current Buffer<ArrayBufferLike>. Hand it the
-    // underlying ArrayBuffer slice instead; ExcelJS accepts that
-    // overload natively, no escape hatch needed.
-    // Node Buffer's underlying .buffer is always ArrayBuffer (never
-    // SharedArrayBuffer), but TS infers the broader ArrayBufferLike
-    // union — narrow with an assertion so this matches ExcelJS's overload.
-    const ab = buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
-    await workbook.xlsx.load(ab);
-
-    // Pick the first sheet that has at least one populated row. Empty
-    // sheets (sometimes left over from templates) are skipped silently.
-    let sheet: import('exceljs').Worksheet | null = null;
-    for (const ws of workbook.worksheets) {
-        if (ws.rowCount > 0) { sheet = ws; break; }
-    }
-    if (!sheet) return { headers: [], rows: [] };
-
-    const headerRow = sheet.getRow(1);
-    const headers: string[] = [];
-    headerRow.eachCell({ includeEmpty: true }, (cell) => {
-        headers.push(stringifyCell(cell.value).trim());
-    });
-
-    const rows: Record<string, string>[] = [];
-    for (let rowIdx = 2; rowIdx <= sheet.rowCount; rowIdx++) {
-        const row = sheet.getRow(rowIdx);
-        const out: Record<string, string> = {};
-        let anyValue = false;
-        for (let colIdx = 1; colIdx <= headers.length; colIdx++) {
-            const cell = row.getCell(colIdx);
-            const v = stringifyCell(cell.value).trim();
-            if (v) anyValue = true;
-            out[headers[colIdx - 1]!] = v;
-        }
-        if (anyValue) rows.push(out);
-    }
-
-    return { headers, rows };
 }
 
 /**
@@ -366,28 +321,6 @@ export function parseJson(buf: Buffer, format: 'json' | 'jsonl'): { headers: str
     });
 
     return { headers, rows };
-}
-
-function stringifyCell(value: unknown): string {
-    if (value === null || value === undefined) return '';
-    if (typeof value === 'object') {
-        if ('richText' in (value as object)) {
-            return (value as { richText: Array<{ text: string }> }).richText
-                .map(r => r.text).join('');
-        }
-        if (value instanceof Date) {
-            return value.toISOString().slice(0, 10);
-        }
-        // Formula cell: { formula, result }. We want the cached result.
-        if ('result' in (value as object)) {
-            return stringifyCell((value as { result: unknown }).result);
-        }
-        if ('text' in (value as object)) {
-            return String((value as { text: unknown }).text);
-        }
-        return String(value);
-    }
-    return String(value);
 }
 
 /**

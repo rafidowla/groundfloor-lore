@@ -4,6 +4,270 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.28.0] — 2026-10-06
+
+Atlas post-SQLite requests 1–4: duplicate Lance canonical rows, `migrate-vectors`
+edge cases, embedding-fingerprint stamping, and a `--data-dir` bug in
+`migrate-graph`. Also closes a scope-filter fail-open on the Lance engine and two
+places that dropped `security_scopes` (embedding-model migrate, piece-index rebuild),
+and makes `migrate workspace-to-workspace` honour `--data-dir`. Spreadsheet
+extraction moves from `exceljs` to `read-excel-file` (#179).
+
+### Fixed
+- **Duplicate canonical rows in the Lance `lore_verbatim` table.** LanceDB has no
+  unique constraint, and `mergeInsert('id')` from a table handle opened before
+  another handle's commit inserts instead of updating. Overlapping writes in one
+  process (and two `VerbatimStore` instances on the same `lancedb` dir: boot store
+  + resolver store, or two connections written one after the other) produced
+  several rows for one canonical id, which makes `migrate-vectors` refuse.
+  - **Per-path write lane.** `verbatimWriteGate`'s lane is now a module-level map
+    keyed by the realpath of the `lancedb` dir, shared by every `VerbatimStore` on
+    that path in the process. Refcounted, entry deleted when idle; a waiter counts
+    as in-flight (`drain()` / `close()` wait for it); a predecessor's rejection does
+    not poison the next waiter; no lane waits on another store's drain.
+  - **Fresh table handle before every write.** `verbatimBatch.refreshWriteTable`
+    moves the write handle to the newest table version
+    (`Table.checkoutLatest()`, falling back to reopening) inside the lane, before
+    each write. Not gated on `initialized`, so writers queued behind `close()` still
+    refresh. `physicalDelete`, `physicalDeleteMany`, `purgeWithHistory` and
+    `tombstone` no longer bail out early when the instance opened before the table
+    existed.
+  - **Atomic upsert.** `store` / `storeBatch` / `bulkAddPrebuiltRows` /
+    `bulkUpsertPrebuiltRows` no longer do delete-then-add or a plain append.
+    Ids already in the table are updated with chunked `mergeInsert` (keep-last
+    dedupe within a batch); ids not yet present are plain-added, decided on the
+    refreshed handle inside the lane. `bulkAddPrebuiltRows` probes existing ids the
+    same way, and concurrent first writers on a cold table no longer all plain-add.
+    `#rev` history ids stay plain adds. `store()`'s skip-identical check is made
+    inside the lane on the refreshed handle (the earlier read is only a hint). `storeBatch` embeds before it snapshots, so a
+    failed embed leaves no stray `#rev` rows and never removes canonicals.
+  - **There is NO cross-process writer lock (no lockfile, by design).** The lane is
+    in-process only: two processes writing the same Lance store simultaneously can
+    still race and produce duplicates. `lore verbatim dedupe` (below) is the
+    check-and-clean tool for that case.
+  - **Writes after `close()` reject.** A write that reaches the lane after
+    `close()` has released the table handles now rejects with
+    `VerbatimStoreClosedError` (operation `'closed'`) instead of resolving as a
+    silent no-op. `close()` drains in-flight writes for up to 5 s
+    (`LORE_VERBATIM_CLOSE_DRAIN_MS` overrides). The `refreshWriteTable` reopen
+    fallback no longer closes the superseded handle under readers outside the lane.
+- **Embedding fingerprint (`embedding_model.json`) is now stamped on every Lance
+  open and at every table birth.** A workspace with `lore_verbatim.lance` but no
+  fingerprint (Atlas: `trande-finance-solution-for-technolvelty-demo`) made
+  `migrate-vectors` refuse it.
+  - `role: 'read'` opens never opened the write table, so the legacy stamp (gated
+    on `this.table != null`) never ran. Read-role opens now probe the table schema
+    with a short-lived handle (no write, outside the write lane) and stamp.
+  - `bulkAddPrebuiltRows` / `bulkUpsertPrebuiltRows` created the table through
+    `ensureVerbatimTable` without stamping. Table birth now stamps from
+    `ensureVerbatimTable` itself (`VerbatimBatchCtx.onTableBirth`), covering every
+    creation path.
+  - The legacy stamp now requires the table's vector width to equal the provider's
+    dimension; otherwise it logs a warning and stamps nothing. Legacy stamps use
+    `writeFingerprintIfAbsent`, so a racing opener can never overwrite an existing
+    fingerprint; a failed write removes its temp file, and the no-hard-link
+    fallback creates the file exclusively (`O_EXCL`). Strict-mismatch handling and
+    the Null-provider skip are unchanged.
+- **`migrate-graph --data-dir` is honoured.** `migrate-graph` had no `--data-dir`
+  and silently ignored unknown flags, so
+  `migrate-graph default --to sqlite --data-dir <copy>` fell back to `LORE_HOME`
+  and migrated the real default workspace. The flag is now supported for both
+  migrate and `--rollback`, the backup dir is taken from the resolved home, and
+  the resolved home + registry path are printed before any write.
+- **`migrate workspace-to-workspace --data-dir` is honoured.** The command ignored
+  `--data-dir` (it used `LORE_HOME`), accepted unknown flags, and a dry run could
+  create a `workspaces.json`. It now uses the strict parser (`--apply` and
+  `--dry-run` are mutually exclusive), threads `--data-dir` through the daemon
+  probe, the registry and every graph open, prints `Home:` / `Registry:` first,
+  refuses to create a registry, and on `--apply` runs the target guard for both
+  `--from` and `--to`.
+- **Bulk add skips unsafe ids instead of rejecting the whole call.**
+  `bulkAddPrebuiltRows` (and the bulk loader that uses it) threw on a single empty /
+  NUL / over-long id and wrote nothing. Unsafe rows are now skipped and reported:
+  it returns `{ rejectedCount, rejectedIds }` (first 20 ids, each truncated to 128
+  chars; the count is exact), the bulk loader reports an `unsafe_id_skipped` error
+  per listed row and leaves unsafe ids out of its resume `deleteIds`, and one
+  warning is logged per call. Valid rows in the same call are written normally.
+  The SQLite engine returns `{ rejectedCount: 0, rejectedIds: [] }`.
+
+### Added
+- **`lore verbatim dedupe <workspace> [--data-dir <path>] [--apply] [--json]`** —
+  check / clean duplicate canonical ids in a workspace's Lance `lore_verbatim`
+  table (`engines/verbatimDedupe.ts`).
+  - **Check mode is the default** and writes nothing. It reports total rows, `#rev`
+    history rows, distinct ids, identical groups (and removable extra rows) and
+    differing groups (and their extra rows). `--json` prints the report as JSON
+    only on stdout.
+  - **Identity.** Copies of one id are IDENTICAL only when they match on content
+    (`contentHash`, or a text digest when a copy has no hash), the full text, the
+    sorted `security_scopes`, and `type`, `label`, `tags`, `project` and
+    `ecosystem`. `updatedAt` and the vector are not part of identity. Anything else
+    is a differing group. `migrate-vectors --dedupe-identical` uses the same rule
+    (`rowIdentityKey`).
+  - **`--apply` cleans IDENTICAL groups only.** It keeps the copy with the newest
+    `updatedAt` (first in scan order on a tie) and rewrites it with all its
+    columns, vector included. Offline only: daemon preflight, the target guard,
+    then a backup (`<home>/verbatim-dedupe-backups`) before any write. Immediately
+    before each delete it re-reads that chunk from a fresh connection and aborts if
+    anything changed since the scan. A re-scan asserts zero identical groups remain,
+    the distinct-id count is unchanged and history rows are unchanged.
+  - **Close embedded hosts first.** The daemon preflight cannot see an
+    application that embeds Lore in-process, and there is no cross-process lock.
+    `--apply` prints a stderr warning to close every such host on the workspace
+    before running.
+  - **Never touched:** groups whose copies differ and `#rev` history rows. If any
+    differing group exists the command exits 1 (check and apply); resolve those by
+    hand.
+  - **Not applicable** to SQLite workspaces, and nothing to check when there is no
+    Lance table.
+  - **Residual window:** removal and re-add are two Lance commits (delete +
+    add, not `mergeInsert`, which would update all N copies in place and leave N).
+    The kept rows are read into memory before the delete and the add is retried; if
+    it still fails, the error carries the backup path. The table's keyword (FTS)
+    index is derived data and is healed the next time `VerbatimStore` opens the
+    workspace.
+- **`lore doctor` warns about duplicates.** One read-only line per registered Lance
+  workspace that has duplicate canonical ids, naming the group count and extra rows
+  and pointing at `lore verbatim dedupe <ws>` (with `--data-dir` when doctor ran
+  against one). Silent when clean; best-effort, never fails doctor.
+- **`migrate-vectors` flags and cases.**
+  - `--dedupe-identical`: when a canonical id repeats in the Lance table and ALL
+    copies are identical (same rule as `lore verbatim dedupe`: content, text,
+    scopes and metadata; not `updatedAt` or the vector), keep the copy with the newest `updatedAt` (first seen on a tie) in the SQLite
+    import and drop the rest. Lance is never modified. Verification accounts for
+    the dropped rows (`lance scanned == sqlite rows + deduped`). Copies that
+    differ still refuse. Refusals now say whether `--dedupe-identical` would help
+    and list up to 10 ids; the summary prints `Deduped ids:` when it was used.
+  - **An empty Lance source now migrates.** A workspace registered `lance` with no
+    `lore_verbatim` table used to refuse ("nothing to migrate"). It now backs up,
+    creates an empty SQLite store through the normal initialize path (which stamps
+    `embedding_model.json` from the configured provider, as for a new workspace),
+    and flips the registry to `sqlite`. Refuses when embeddings are disabled
+    (`LORE_EMBEDDING_PROVIDER=none`) or the configured model reports no usable
+    dimension. If the run fails, the previous fingerprint file is restored (or
+    removed if there was none). The summary prints `Empty source: yes`.
+  - `--stamp-from-config`: when the Lance table exists but nothing ever stamped
+    `embedding_model.json`, derive the fingerprint from the configured embedding
+    provider. Only when the provider's dimension equals the table's vector
+    dimension (else it refuses); written after the backup, removed again if the
+    run fails, never written on `--dry-run`. The provider is used for identity only
+    and is never asked to embed.
+  - **No-registry dry-run:** registry reads use `loadWorkspacesIfPresent`, so a
+    `--data-dir` (or `LORE_HOME`) without a `workspaces.json` is reported as "no
+    workspace registry found — nothing to migrate" and no registry is created as a
+    side effect, dry-run or not.
+- **Target guard for `migrate-graph` / `migrate-vectors` / `verbatim dedupe
+  --apply` / `migrate workspace-to-workspace --apply`** (`cli/targetGuard.ts`),
+  run before any write. It refuses when the target home's `workspaces.json` is absent (it never bootstraps one), when the
+  registry does not name the workspace, and, with `--data-dir`, when the workspace's
+  registered path resolves outside the data dir (a copied registry still pointing
+  at the original roots). `migrate-graph --data-dir` also requires the directory to
+  exist.
+- **Strict CLI flag parser** (`cli/args.ts`). Each command declares its boolean,
+  value and repeatable flags, aliases and positional arity; unknown flags, a flag
+  missing its value, a value flag given twice, a boolean flag given a value
+  (`--force=1`), and surplus or missing positionals are usage errors raised before
+  any work, printed as `lore <command>: <reason>` plus usage on stderr. A value
+  flag's value is never also counted as a positional (`--to sqlite ws` yields
+  `ws`); a bare `--` ends flag parsing; `--data-dir` values are made absolute.
+  Accepted flags, aliases and `=` forms are unchanged.
+
+### Changed
+- **Upgrade notes — behaviour changes that can break an existing script:**
+  - **Unknown or misspelled flags now fail instead of being ignored** (exit 1; the
+    `migrate` online subcommands keep their historical exit 2), and so do missing
+    flag values and stray positionals. Commands converted to the strict parser:
+    `backup`, `restore`, `compact`, `maintain` (+ `storage`), `retention`,
+    `reconnect` / `reconsume`, `embed reembed`, `outbox drain-failed` /
+    `requeue-dead`, `vectors promote`, `verbatim reap`, `supersede`, `mark-stale`,
+    `snapshot`, `workspaces`, `migrate-graph`, `migrate-vectors`, and the `migrate`
+    subcommands (`v1-sqlite`, `embedding-model`, `piece-vectors`,
+    `workspace-to-workspace`,
+    `list` / `status` / `apply` / `advance` / `rollback`). A script that passed a
+    typo (for example `--dryrun`, which used to run for real) must be fixed.
+  - **`migrate-graph` and `migrate-vectors` now refuse a target whose
+    `workspaces.json` is missing or does not name the workspace**, and with
+    `--data-dir` one whose workspace path is outside that dir. Previously the
+    engines bootstrapped a registry in a bare directory.
+  - **`migrate-graph --rollback` combined with `--to` is now rejected.**
+  - **`migrate-vectors` on a workspace with no Lance `lore_verbatim` table now
+    succeeds** (empty stamped SQLite store, registry flipped) instead of refusing.
+  - `migrate-vectors` and `migrate-graph` print the resolved `Home:` and `Registry:`
+    lines before doing anything.
+  - **Lance legacy fingerprint stamping is stricter:** a table with no fingerprint
+    is stamped only when its vector dimension equals the configured provider's;
+    otherwise a warning is logged and the table is left unstamped (use
+    `migrate-vectors --stamp-from-config` after configuring the right model).
+  - **A write on a closed `VerbatimStore` rejects** with `VerbatimStoreClosedError`
+    instead of silently doing nothing. Embedders that write during shutdown should
+    expect (and may ignore) that error.
+  - **`bulkAddPrebuiltRows` no longer throws on an unsafe id**; it skips the row and
+    reports it in its new return value. A caller that relied on the throw to reject
+    a batch must check `rejectedCount`.
+  - **`migrate workspace-to-workspace` now refuses a missing registry** and, with
+    `--data-dir`, works only on that home.
+  - **Verbatim export rows now carry `security_scopes`** (omitted when empty), on
+    both engines. This includes the HTTP workspace export.
+  - `lore verbatim dedupe` and `--dedupe-identical` treat copies that differ only in
+    scopes or metadata as differing (reported, never removed).
+- **Spreadsheet extraction uses `read-excel-file` instead of `exceljs`** (#179).
+  `exceljs` (an optional production dependency) pulled in archiver / unzipper /
+  fast-csv, which carried most of the `npm audit --omit=dev` findings (5 → 4).
+  `exceljs` is now a devDependency (test fixtures and the parity oracle only);
+  `jszip` becomes a direct dependency. `extractors/xlsx.ts` and the import route's
+  `parseXlsx` share one guarded reader (`xlsxRead.ts`): zip-bomb preflight, then
+  read-excel-file, then merged ranges replayed; OLE2 (encrypted / legacy `.xls`) is
+  rejected as `unsupported` up front. `xlsxSheetScan.ts` refuses a sheet whose dense
+  grid would exceed 10M cells before parsing. Strings match ExcelJS output
+  (`_xHHHH_` escapes decoded, CR/CRLF folded to LF). `read-excel-file`'s `saxen`
+  dependency needs Node >= 20.12.
+
+### Security
+- **Lance `security_scopes` read back as empty, so scope-restricted rows were
+  treated as public (fail-open).** LanceDB returns `List<Utf8>` columns as Arrow
+  Vectors, for which `Array.isArray()` is false and indexed access (`v[i]`)
+  yields `undefined`. Fixed by one shared exported helper, `toPlainStringList`
+  (`verbatimHistory.ts`; iterator / `toArray` first, indexed fallback), used at
+  every site:
+  - `VerbatimHistory.getById` always returned `security_scopes: []` on the Lance
+    engine.
+  - **The Lance search paths** (`searchByVector`, FTS bm25, substring bm25) and
+    `LancePieceIndex.searchPieces` passed the raw Arrow Vector to
+    `applyActorScopeFilter`, whose `normalizeScopes` treats a non-array as "no
+    scopes" (public). Scoped rows were therefore returned to actors lacking the
+    scope. They are now normalised before filtering.
+  - **`VerbatimStore`'s private `toPlainStringList` indexed the Vector**, so
+    history snapshots, batch snapshots and tombstones of scoped rows were written
+    with scopes `['undefined', ...]` (see the residual below).
+  - **Side effects fixed:** `migrate-vectors --to sqlite`'s live `getById` probe
+    mismatched on any scoped row (abort + rollback), and `VerbatimStore.store()`'s
+    skip-identical check never matched scoped rows, so every re-store rewrote them.
+  - The SQLite engine is unchanged.
+  - **Known residual, NOT fixed in this release:** history / tombstone copies written
+    before 3.28.0 may hold the literal scope string `'undefined'`. These fail
+    closed (over-restrictive for scoped rows, not a leak). A repair is a tracked follow-up.
+- **`migrate embedding-model` kept no `security_scopes`.** Preserved non-`lore:` rows
+  (the only copy of that content) were re-stored with no scopes, so restricted rows
+  became public. Scopes are now carried through `exportRows` and restored. The
+  pre-drop read uses an embeddings-disabled provider, so it no longer legacy-stamps
+  the TARGET fingerprint before anything has migrated; if the run does not complete,
+  the source fingerprint is restored byte-for-byte (or removed if there was none).
+  Every store the migration opens is closed.
+- **Piece-index rebuild wrote every piece with empty scopes**, so a restricted row's
+  pieces were searchable by any actor. Each piece now carries its parent row's
+  `security_scopes`, as the live write paths already did.
+
+### Tests
+- New suites (all added to the `npm test` chain and `docs/TEST_INDEX.md`):
+  `test:unit:verbatim-duplicate-writes`, `verbatim-cross-instance-writes`,
+  `verbatim-fingerprint-stamp`, `migrate-vectors-dedupe-empty`,
+  `verbatim-getbyid-scopes`, `cli-strict-args`, `verbatim-dedupe`,
+  `cli-strict-flags-data-dir`, `atlas-post-sqlite-e2e`, `review-h-engine`,
+  `review-i-dedupe-cli`, `review-j-scopes-datadir` (+ `:sqlite`),
+  `test:extractors:xlsx-parity` (59 assertions: a frozen ExcelJS extractor vs
+  38 generated fixtures). `sp25-paranoia`'s F4
+  structural guard now checks the snapshot `IN`-list chunking in `verbatimBatch.ts`.
+
 ## [3.27.2] — 2026-10-04
 
 ### Fixed

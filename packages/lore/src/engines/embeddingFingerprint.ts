@@ -148,6 +148,55 @@ export function writeFingerprint(
 }
 
 /**
+ * Write the fingerprint ONLY if none exists (returns null when one already
+ * does — never overwrites). Used by the legacy stamp (a table that exists
+ * with no fingerprint): the file is staged, then hard-linked into place,
+ * and `link` fails with EEXIST when another opener/process stamped first, so
+ * two racing openers can never overwrite each other's (or table birth's)
+ * stamp. Falls back to a plain exists-check + rename on filesystems without
+ * hard links.
+ */
+export function writeFingerprintIfAbsent(
+    basePath: string,
+    opts: { modelId: string; dimension: number; dtype?: string },
+): EmbeddingFingerprint | null {
+    const fp = fingerprintPath(basePath);
+    if (fs.existsSync(fp)) return null;
+    fs.mkdirSync(path.dirname(fp), { recursive: true });
+    const payload: EmbeddingFingerprint = {
+        modelId: opts.modelId,
+        dimension: opts.dimension,
+        writtenAt: new Date().toISOString(),
+        version: FINGERPRINT_VERSION,
+        ...(opts.dtype ? { dtype: opts.dtype } : {}),
+    };
+    const tmp = `${fp}.tmp-${process.pid}-${Date.now()}`;
+    const body = JSON.stringify(payload, null, 2) + '\n';
+    try {
+        // H5: inside the try so a failed/partial write still reaches the unlink below (no stray .tmp file).
+        fs.writeFileSync(tmp, body, { mode: 0o600 });
+        try {
+            fs.linkSync(tmp, fp);
+        } catch (err) {
+            const code = (err as NodeJS.ErrnoException).code;
+            if (code === 'EEXIST') return null;
+            if (code !== 'EPERM' && code !== 'ENOTSUP' && code !== 'EXDEV') throw err;
+            // No hard links here: create fp itself with O_EXCL ('wx') so exactly one writer wins (was check-then-rename).
+            try {
+                fs.writeFileSync(fp, body, { mode: 0o600, flag: 'wx' });
+            } catch (wxErr) {
+                if ((wxErr as NodeJS.ErrnoException).code === 'EEXIST') return null;
+                try { fs.unlinkSync(fp); } catch { /* a half-written file we created must not look like a stamp */ }
+                throw wxErr;
+            }
+        }
+        return payload;
+    } finally {
+        try { fs.unlinkSync(tmp); } catch { /* already gone */ }
+    }
+}
+
+/**
  * Compatibility check. The "expected" side comes from the runtime
  * EmbeddingProvider (modelId + dimension); the "actual" side is read
  * from disk. Mismatch returns a structured result rather than throwing

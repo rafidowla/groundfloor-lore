@@ -29,16 +29,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import { loreHome } from '../../config/loreHome.js';
+import { parseOrExit, type ArgSpec, type ParsedArgs } from '../args.js';
 import { MigrationsStore } from '../../migration/store.js';
 import { MigrationCoordinator } from '../../migration/coordinator.js';
 import { SqliteMigrationAdapter } from '../../migration/adapters/sqliteMigrationAdapter.js';
 import type { MigrationSpec, SubstrateName, MigrationStatus } from '../../migration/types.js';
-
-function readArg(args: string[], flag: string): string | undefined {
-    const i = args.indexOf(flag);
-    if (i < 0 || i + 1 >= args.length) return undefined;
-    return args[i + 1];
-}
 
 function openCoordinator(): { coord: MigrationCoordinator; store: MigrationsStore } {
     const base = loreHome();
@@ -66,12 +61,21 @@ export async function runMigrateSubcommand(sub: string, args: string[]): Promise
     process.exit(2);
 }
 
+/** Usage-error exit code for these subcommands (historical: 2). */
+const USAGE_EXIT = 2;
+
+function parseSub(sub: string, args: string[], spec: ArgSpec, usageLine: string): ParsedArgs {
+    return parseOrExit(`migrate ${sub}`, args, spec, { usage: () => console.error(usageLine), exitCode: USAGE_EXIT });
+}
+
 function runList(args: string[]): Promise<void> {
+    const parsed = parseSub('list', args, { value: ['--substrate', '--workspace', '--status'] },
+        'usage: lore migrate list [--substrate <name>] [--workspace <name>] [--status <s>]');
     const { coord, store } = openCoordinator();
     try {
-        const substrate = readArg(args, '--substrate') as SubstrateName | undefined;
-        const workspace = readArg(args, '--workspace');
-        const status = readArg(args, '--status') as MigrationStatus | undefined;
+        const substrate = parsed.get('--substrate') as SubstrateName | undefined;
+        const workspace = parsed.get('--workspace');
+        const status = parsed.get('--status') as MigrationStatus | undefined;
         const rows = coord.listMigrations({ substrate, workspace, status });
         if (rows.length === 0) {
             console.log('No migrations recorded.');
@@ -88,13 +92,10 @@ function runList(args: string[]): Promise<void> {
 }
 
 function runStatus(args: string[]): Promise<void> {
+    const parsed = parseSub('status', args, { positionals: { min: 1, max: 1 } }, 'usage: lore migrate status <id>');
     const { coord, store } = openCoordinator();
     try {
-        const id = args[0];
-        if (!id) {
-            console.error('usage: lore migrate status <id>');
-            process.exit(2);
-        }
+        const id = parsed.positionals[0]!;
         const row = coord.getMigration(id);
         if (!row) {
             console.error(`migration not found: ${id}`);
@@ -108,21 +109,20 @@ function runStatus(args: string[]): Promise<void> {
 }
 
 async function runApply(args: string[]): Promise<void> {
-    const specPath = args[0];
-    if (!specPath) {
-        console.error('usage: lore migrate apply <spec.json> [--db-path <sqlite-file>] [--auto]');
-        process.exit(2);
-    }
+    const parsed = parseSub('apply', args, {
+        bool: ['--auto'], value: ['--db-path'], positionals: { min: 1, max: 1 },
+    }, 'usage: lore migrate apply <spec.json> [--db-path <sqlite-file>] [--auto]');
+    const specPath = parsed.positionals[0]!;
     if (!fs.existsSync(specPath)) {
         console.error(`spec file not found: ${specPath}`);
         process.exit(1);
     }
     const spec = JSON.parse(fs.readFileSync(specPath, 'utf8')) as MigrationSpec;
-    const auto = args.includes('--auto');
+    const auto = parsed.has('--auto');
     const { coord, store } = openCoordinator();
     try {
         if (spec.substrate === 'sqlite') {
-            const dbPath = readArg(args, '--db-path');
+            const dbPath = parsed.get('--db-path');
             if (!dbPath) {
                 console.error('sqlite migrations require --db-path <sqlite-file>');
                 process.exit(2);
@@ -156,11 +156,10 @@ async function runApply(args: string[]): Promise<void> {
 }
 
 async function runAdvance(args: string[]): Promise<void> {
-    const id = args[0];
-    if (!id) {
-        console.error('usage: lore migrate advance <id> [--db-path <sqlite-file>]');
-        process.exit(2);
-    }
+    const parsed = parseSub('advance', args, {
+        value: ['--db-path'], positionals: { min: 1, max: 1 },
+    }, 'usage: lore migrate advance <id> [--db-path <sqlite-file>]');
+    const id = parsed.positionals[0]!;
     const { coord, store } = openCoordinator();
     try {
         const existing = coord.getMigration(id);
@@ -169,7 +168,7 @@ async function runAdvance(args: string[]): Promise<void> {
             process.exit(1);
         }
         if (existing.substrate === 'sqlite') {
-            const dbPath = readArg(args, '--db-path');
+            const dbPath = parsed.get('--db-path');
             if (!dbPath) {
                 console.error('sqlite advance requires --db-path <sqlite-file>');
                 process.exit(2);
@@ -187,11 +186,10 @@ async function runAdvance(args: string[]): Promise<void> {
 }
 
 async function runRollback(args: string[]): Promise<void> {
-    const id = args[0];
-    if (!id) {
-        console.error('usage: lore migrate rollback <id> [--db-path <sqlite-file>]');
-        process.exit(2);
-    }
+    const parsed = parseSub('rollback', args, {
+        value: ['--db-path'], positionals: { min: 1, max: 1 },
+    }, 'usage: lore migrate rollback <id> [--db-path <sqlite-file>]');
+    const id = parsed.positionals[0]!;
     const { coord, store } = openCoordinator();
     try {
         const existing = coord.getMigration(id);
@@ -200,7 +198,7 @@ async function runRollback(args: string[]): Promise<void> {
             process.exit(1);
         }
         if (existing.substrate === 'sqlite') {
-            const dbPath = readArg(args, '--db-path');
+            const dbPath = parsed.get('--db-path');
             if (!dbPath) {
                 console.error('sqlite rollback requires --db-path <sqlite-file>');
                 process.exit(2);

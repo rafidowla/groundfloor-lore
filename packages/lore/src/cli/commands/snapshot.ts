@@ -1,20 +1,20 @@
 import fs from 'fs';
 import path from 'path';
+import { parseOrExit } from '../args.js';
 
 export async function snapshotCommand(args: string[]): Promise<void> {
-    const folder = args[0];
-    if (!folder || folder.startsWith('--')) {
-        console.error('usage: lore snapshot <folder> --output <graph.html> [--title "..."]');
-        process.exit(1);
-    }
-    const outIdx = args.indexOf('--output');
-    if (outIdx < 0 || !args[outIdx + 1]) {
+    const parsed = parseOrExit('snapshot', args, {
+        value: ['--output', '--title'],
+        positionals: { min: 1, max: 1 },
+    }, { usage: () => console.error('usage: lore snapshot <folder> --output <graph.html> [--title "..."]') });
+    const folder = parsed.positionals[0]!;
+    const output = parsed.get('--output');
+    if (!output) {
         console.error('--output <path> is required');
         process.exit(1);
     }
-    const outputPath = path.resolve(args[outIdx + 1]);
-    const titleIdx = args.indexOf('--title');
-    const title = titleIdx >= 0 ? args[titleIdx + 1] : `Lore snapshot of ${path.basename(folder)}`;
+    const outputPath = path.resolve(output);
+    const title = parsed.get('--title') ?? `Lore snapshot of ${path.basename(folder)}`;
 
     const absFolder = path.resolve(folder);
     if (!fs.existsSync(absFolder)) {

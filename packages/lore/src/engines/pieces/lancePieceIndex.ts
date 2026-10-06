@@ -23,6 +23,7 @@ import {
     assertSafeLanceId, buildLanceFilterConditions, HISTORY_ID_LIKE_PATTERN,
 } from '../verbatimHistory.js';
 import { VERBATIM_CHUNK_SIZE } from '../verbatimBatch.js';
+import { toPlainStringList } from '../verbatimHistory.js';
 import { log } from '../../logger.js';
 import { applyActorScopeFilter } from '../../security/scopeFilter.js';
 import {
@@ -311,7 +312,7 @@ export class LancePieceIndex {
         const mapped = hits.map((h: Record<string, unknown>) => ({
             nodeId: h.nodeId as string,
             score: typeof h._distance === 'number' ? 1 - (h._distance as number) / 2 : 0,
-            metadata: { security_scopes: (h.security_scopes as string[] | undefined) ?? [] },
+            metadata: { security_scopes: toPlainStringList(h.security_scopes) }, // Arrow vector -> string[] (else normalizeScopes sees non-array = public)
         }));
         return applyActorScopeFilter(mapped, actorScopes).map(({ nodeId, score }) => ({ nodeId, score }));
     }

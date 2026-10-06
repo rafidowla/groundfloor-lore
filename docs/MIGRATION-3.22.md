@@ -119,7 +119,7 @@ Lore cannot pin them from inside its own manifest:
 | Package | Pulled in by | Advisory | Reachable from Lore? |
 |---|---|---|---|
 | `sharp` 0.33.x | `@lancedb/lancedb` optional dep `@huggingface/transformers@3.0.2` (still present in lancedb 0.39.0) | GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c (high) | No — Lore embeds via its own `@huggingface/transformers@^4`, never lancedb's embedding helpers |
-| `uuid` 8.x | `exceljs@4.4.0` (latest; declares `uuid ^8.3.0`) | GHSA-w5hq-g745-h8pq (moderate) | No — the bug needs a caller-supplied `buf` to v3/v5/v6; exceljs calls `v4()` |
+| `uuid` 8.x | `exceljs@4.4.0` (latest; declares `uuid ^8.3.0`) | GHSA-w5hq-g745-h8pq (moderate) | No — the bug needs a caller-supplied `buf` to v3/v5/v6; exceljs calls `v4()`. (Applies to 3.22.x only: later releases replace `exceljs` with `read-excel-file`, which has no `uuid` dependency.) |
 
 Add both to the host's root `package.json`, then `npm install`:
 

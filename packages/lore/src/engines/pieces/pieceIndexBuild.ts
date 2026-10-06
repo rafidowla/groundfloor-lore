@@ -37,7 +37,7 @@ export interface PieceBuildableStore {
         rows: Array<{
             id: string;
             text: string;
-            metadata: { type?: string; label?: string; project?: string; ecosystem?: string };
+            metadata: { type?: string; label?: string; project?: string; ecosystem?: string; security_scopes?: string[] };
         }>;
     }>;
     pieceIndexForMigration(): PieceIndexLike | null;
@@ -222,15 +222,11 @@ export async function buildPieceIndex(
             type: r.metadata.type,
             project: r.metadata.project,
             ecosystem: r.metadata.ecosystem,
-            // D7c — exportRows()'s VerbatimExportRow carries no
-            // security_scopes (verbatimHistory.ts's export shape omits it) —
-            // the same documented gap migrateEmbeddingModel.ts already
-            // accepts for its own non-node-row re-embed path (see that
-            // file's step 0 comment). A node with security_scopes set loses
-            // piece-level scoping until its next incremental write refreshes
-            // its pieces with the real value; canonical-row scope
-            // enforcement is unaffected either way.
-            security_scopes: [] as string[],
+            // Review J3 (3.28.0): carry the parent row's security_scopes onto its
+            // pieces, exactly as the live write paths do (row.security_scopes).
+            // Before this, exportRows() omitted scopes and every rebuilt piece
+            // was public, so a piece search could surface restricted content.
+            security_scopes: r.metadata.security_scopes ?? [],
         }));
         // 3.24.1 — write hooks now swallow piece failures (marking the
         // index incomplete); the rebuild must instead abort loudly, before

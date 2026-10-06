@@ -1,6 +1,7 @@
 import http from 'http';
 import { resolveGraphBasePath, openGraphForCli } from './shared.js';
 import { DEFAULT_PORT } from './migrateWorkspaceToWorkspaceShared.js';
+import { parseOrExit } from '../args.js';
 
 async function tryHttpMarkStale(tags: string[]): Promise<number | null> {
     return new Promise((resolve) => {
@@ -43,11 +44,14 @@ async function tryHttpMarkStale(tags: string[]): Promise<number | null> {
 }
 
 export async function markStaleCommand(args: string[]): Promise<void> {
-    const tagsIdx = args.indexOf('--tags');
-    const tagsRaw = tagsIdx >= 0 ? args[tagsIdx + 1] : undefined;
-    if (!tagsRaw) {
+    const markStaleUsage = (): void => {
         console.error('Usage: lore mark-stale --tags <tag1,tag2,...>');
         console.error('  Example: lore mark-stale --tags orientation-pack');
+    };
+    const parsed = parseOrExit('mark-stale', args, { value: ['--tags'] }, { usage: markStaleUsage });
+    const tagsRaw = parsed.get('--tags');
+    if (!tagsRaw) {
+        markStaleUsage();
         process.exit(1);
     }
     const tags = tagsRaw.split(',').map((t) => t.trim()).filter(Boolean);

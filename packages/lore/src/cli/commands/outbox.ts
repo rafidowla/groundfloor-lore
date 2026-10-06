@@ -43,6 +43,7 @@ import path from 'node:path';
 import type { WorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 
 import { loreHome } from '../../config/loreHome.js';
+import { parseStrict, UsageError, type ArgSpec } from '../args.js';
 import { getActiveWorkspacePath, getActiveWorkspaceName } from '../../config/workspaces.js';
 
 /**
@@ -64,6 +65,13 @@ export interface DrainFlags {
     force: boolean;
 }
 
+const DRAIN_SPEC: ArgSpec = {
+    bool: ['--dry-run', '--check-substrate', '--no-check-substrate', '--mark-dead', '--force'],
+    value: ['--workspace', '--limit'],
+    aliases: { '-h': '--help' },
+    help: true,
+};
+
 export function parseDrainFlags(args: string[]): DrainFlags {
     // Defaults per spec: check-substrate=true (the safe / recovering
     // mode), mark-dead=false (operator must opt-in to destructive
@@ -75,20 +83,20 @@ export function parseDrainFlags(args: string[]): DrainFlags {
         help: false,
         force: false,
     };
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i];
-        if (a === '--help' || a === '-h') { out.help = true; continue; }
-        if (a === '--dry-run') { out.dryRun = true; continue; }
-        if (a === '--check-substrate') { out.checkSubstrate = true; continue; }
-        if (a === '--no-check-substrate') { out.checkSubstrate = false; continue; }
-        if (a === '--mark-dead') { out.markDead = true; continue; }
-        if (a === '--force') { out.force = true; continue; }
-        if (a === '--workspace' && i + 1 < args.length) { out.workspace = args[++i]; continue; }
-        if (a === '--limit' && i + 1 < args.length) {
-            const n = parseInt(args[++i], 10);
-            if (Number.isFinite(n) && n > 0) out.limit = n;
-            continue;
-        }
+    // Strict: unknown flags / missing values / stray positionals throw UsageError
+    // (drainFailedSubcommand turns that into a usage message + exit 1).
+    const p = parseStrict(args, DRAIN_SPEC);
+    if (p.help) { out.help = true; return out; }
+    if (p.has('--dry-run')) out.dryRun = true;
+    if (p.has('--check-substrate')) out.checkSubstrate = true;
+    if (p.has('--no-check-substrate')) out.checkSubstrate = false;
+    if (p.has('--mark-dead')) out.markDead = true;
+    if (p.has('--force')) out.force = true;
+    out.workspace = p.get('--workspace');
+    const lim = p.get('--limit');
+    if (lim !== undefined) {
+        const n = parseInt(lim, 10);
+        if (Number.isFinite(n) && n > 0) out.limit = n;
     }
     return out;
 }
@@ -217,7 +225,15 @@ Run 'lore outbox <subcommand> --help' for details.
 const CHECK_SUBSTRATE_OPEN_BUDGET_MS = 3_000;
 
 async function drainFailedSubcommand(args: string[]): Promise<void> {
-    const flags = parseDrainFlags(args);
+    let flags: DrainFlags;
+    try {
+        flags = parseDrainFlags(args);
+    } catch (e) {
+        if (!(e instanceof UsageError)) throw e;
+        console.error(`lore outbox drain-failed: ${e.message}`);
+        console.error("Run 'lore outbox drain-failed --help' for usage.");
+        process.exit(1);
+    }
     if (flags.help) {
         console.log(DRAIN_HELP);
         return;

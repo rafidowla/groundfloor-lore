@@ -50,6 +50,7 @@ import { restoreWorkspace, peekArchiveManifest } from '../../engines/restore.js'
 import { probeSurrealLock } from '../../engines/surreal/surrealSettle.js';
 import { loadWorkspaces, getActiveWorkspaceName } from '../../config/workspaces.js';
 import { loreHome } from '../../config/loreHome.js';
+import { parseOrExit } from '../args.js';
 import { isDaemonServingHome, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
 
 interface Flags {
@@ -62,37 +63,40 @@ interface Flags {
 }
 
 function parseFlags(args: string[]): Flags {
+    const p = parseOrExit('restore', args, {
+        bool: ['--force', '--allow-unverified', '--allow-name-mismatch'],
+        value: ['--workspace', '--all'],
+        positionals: { max: 1 },
+        aliases: { '-h': '--help' },
+        help: true,
+    }, { usage: () => console.error('usage: lore restore <tarball> [--workspace <name>] [--force] [--allow-unverified] [--allow-name-mismatch]\n       lore restore --all <dir> [--force] [--allow-unverified] [--allow-name-mismatch]') });
     const out: Flags = {};
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i];
-        if (a === '--workspace' && i + 1 < args.length) out.workspace = args[++i];
-        else if (a === '--force') out.force = true;
-        else if (a === '--allow-unverified') out.allowUnverified = true;
-        else if (a === '--allow-name-mismatch') out.allowNameMismatch = true;
-        else if (a === '--all' && i + 1 < args.length) out.all = args[++i];
-        else if (a === '--help' || a === '-h') {
-            console.log(
-                `Usage: lore restore <tarball> [--workspace <name>] [--force] [--allow-unverified] [--allow-name-mismatch]\n` +
-                `       lore restore --all <dir> [--force] [--allow-unverified] [--allow-name-mismatch]\n` +
-                `  Restore a workspace from a backup tarball. Sidelines\n` +
-                `  any existing .lore/ to .lore.pre-restore-<iso> as a\n` +
-                `  rollback path. Operator restarts the daemon after.\n` +
-                `  Refuses while the daemon is running or the destination\n` +
-                `  graph store is locked; --force bypasses both (tests only).\n` +
-                `  Refuses an archive whose own graph was never confirmed\n` +
-                `  readable at backup time; --allow-unverified accepts that risk.\n` +
-                `  Refuses an archive whose manifest names a DIFFERENT workspace\n` +
-                `  than the one you are restoring into; --allow-name-mismatch\n` +
-                `  accepts that risk.\n` +
-                `  --all <dir> restores every lore-backup-*.tar.gz found in <dir>,\n` +
-                `  each into the workspace named in ITS OWN manifest (archives with\n` +
-                `  no recorded workspace name are skipped and reported).\n`,
-            );
-            process.exit(0);
-        } else if (!a.startsWith('--') && !out.tarball) {
-            out.tarball = a;
-        }
+    if (p.help) {
+        console.log(
+            `Usage: lore restore <tarball> [--workspace <name>] [--force] [--allow-unverified] [--allow-name-mismatch]\n` +
+            `       lore restore --all <dir> [--force] [--allow-unverified] [--allow-name-mismatch]\n` +
+            `  Restore a workspace from a backup tarball. Sidelines\n` +
+            `  any existing .lore/ to .lore.pre-restore-<iso> as a\n` +
+            `  rollback path. Operator restarts the daemon after.\n` +
+            `  Refuses while the daemon is running or the destination\n` +
+            `  graph store is locked; --force bypasses both (tests only).\n` +
+            `  Refuses an archive whose own graph was never confirmed\n` +
+            `  readable at backup time; --allow-unverified accepts that risk.\n` +
+            `  Refuses an archive whose manifest names a DIFFERENT workspace\n` +
+            `  than the one you are restoring into; --allow-name-mismatch\n` +
+            `  accepts that risk.\n` +
+            `  --all <dir> restores every lore-backup-*.tar.gz found in <dir>,\n` +
+            `  each into the workspace named in ITS OWN manifest (archives with\n` +
+            `  no recorded workspace name are skipped and reported).\n`,
+        );
+        process.exit(0);
     }
+    out.workspace = p.get('--workspace');
+    if (p.has('--force')) out.force = true;
+    if (p.has('--allow-unverified')) out.allowUnverified = true;
+    if (p.has('--allow-name-mismatch')) out.allowNameMismatch = true;
+    out.all = p.get('--all');
+    out.tarball = p.positionals[0];
     return out;
 }
 

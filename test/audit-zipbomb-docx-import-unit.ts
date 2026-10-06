@@ -8,7 +8,7 @@
  *   1. engines/extractors/docx.ts — handed bytes straight to mammoth, which
  *      inflates the zip internally with no size cap.
  *   2. mcp/http/routes/import.ts `parseXlsx()` — the /api/import counterpart of
- *      the xlsx extractor; called ExcelJS.load() with no preflight.
+ *      the xlsx extractor; called the spreadsheet reader with no preflight.
  *
  * A few-KB archive that DECLARES a multi-GB uncompressed size would OOM the
  * embedded/local daemon through either path. These guards close both.
@@ -58,7 +58,7 @@ await test('/api/import parseXlsx refuses a declared-oversize zip (no OOM)', asy
     await assert.rejects(
         () => parseXlsx(bomb),
         /zip bomb|refusing to decompress/i,
-        'parseXlsx must reject the bomb before ExcelJS.load',
+        'parseXlsx must reject the bomb before the spreadsheet reader',
     );
 });
 

@@ -171,6 +171,14 @@ export async function doctorCommand(args: string[]): Promise<void> {
         } else if (fs.existsSync(loreDir)) {
             console.log('  ⓘ no vector store found (.lore/lancedb or .lore/verbatim.sqlite) — created on first write');
         }
+        // Read-only sweep over registered workspaces: duplicate canonical ids can only exist in LanceDB
+        // (no unique constraint) and make `migrate-vectors` refuse. Silent when clean.
+        try {
+            const { findWorkspacesWithDuplicateIds } = await import('../../engines/verbatimDedupe.js');
+            for (const d of await findWorkspacesWithDuplicateIds(effectiveLoreHome)) {
+                console.log(`  ⚠ workspace '${d.name}': ${d.groups} canonical id(s) have duplicate copies in the LanceDB verbatim table (${d.extraRows} extra row(s)) — run "lore verbatim dedupe ${d.name} --data-dir ${effectiveLoreHome}" to inspect and clean`);
+            }
+        } catch { /* best-effort: never fail doctor over this check */ }
 
         if (fs.existsSync(loreDir)) {
             const tokenPath = path.join(effectiveLoreHome, 'auth.token');

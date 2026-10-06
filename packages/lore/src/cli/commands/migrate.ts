@@ -7,6 +7,7 @@ import { migrateEmbeddingModelCommand } from './migrateEmbedding.js';
 import { migrateWorkspaceToWorkspaceCli } from './migrateWorkspaceToWorkspace.js';
 import { migratePieceVectorsCommand } from './migratePieceVectors.js';
 import { openGraphForCli } from './shared.js';
+import { parseOrExit } from '../args.js';
 
 export async function migrateCommand(args: string[]): Promise<void> {
     const target = args[0];
@@ -66,10 +67,13 @@ export async function migrateCommand(args: string[]): Promise<void> {
         process.exit(1);
     }
 
-    const rest = args.slice(1);
-    const pathArg = rest.find((a) => !a.startsWith('--'));
-    const apply = rest.includes('--apply');
-    const archive = rest.includes('--archive');
+    const parsed = parseOrExit('migrate v1-sqlite', args.slice(1), {
+        bool: ['--apply', '--archive'],
+        positionals: { max: 1 },
+    }, { usage: () => console.error('usage: lore migrate v1-sqlite [<path>] [--apply] [--archive]') });
+    const pathArg = parsed.positionals[0];
+    const apply = parsed.has('--apply');
+    const archive = parsed.has('--archive');
 
     const sqlitePath = pathArg ?? loreHomePath('knowledge.db');
 

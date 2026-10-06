@@ -68,7 +68,7 @@
 | `sw16-batch-hydration-unit.ts` | recallCrossWorkspace, localGraph |
 | `write-side-route-gate-unit.ts` | workspaces, retention, config, actorContext, … |
 
-### engines  (69 tests)
+### engines  (75 tests)
 
 | Test file | Primary modules under test |
 |---|---|
@@ -108,6 +108,9 @@
 | `cli-entry-exit-code-unit.ts` | cli index (a command's exit code survives the final exit) |
 | `memory-backbone-adversarial-unit.ts` | sweeper, contentHash, verbatimStore, consistency, … |
 | `memory-backbone-integration.ts` | verbatimStore, contentHash, sweeper, types, … |
+| `migrate-vectors-dedupe-empty-unit.ts` | migrateVectorsToSqlite, migrateVectorsDedupe (dedupe-identical, empty source, stamp-from-config, no-registry dry-run) |
+| `verbatim-dedupe-unit.ts` | `lore verbatim dedupe` / verbatimDedupe engine (report-only writes nothing, --apply identical groups with backup + newest kept byte-identical, differing groups untouched + non-zero, #rev rows, daemon refusal, SQLite N/A, strict flags, --data-dir copy isolation, migrate-vectors succeeds afterwards) |
+| `review-i-dedupe-cli-unit.ts` | Review slice I: stricter dedupe identity (scopes/tombstone/type/label/tags/project/ecosystem => differing; updatedAt/vector ignored), `verbatim dedupe --apply` pre-delete re-check abort + close-embedded-hosts warning, migrateEmptySource prior-fingerprint restore, doctor hint --data-dir, args `-h`-as-value and dash-leading-value handling |
 | `multi-master-sync-unit.ts` | multiMasterSync |
 | `phase6-p2-strict-schema-and-vocab-unit.ts` | localGraphRegistry, memory, workspaces, inMemoryPendingOpsStore |
 | `phase6-p4-migrate-and-compact-unit.ts` | localGraph, verbatimStore, migrateWorkspaceToWorkspace, compact |
@@ -135,11 +138,23 @@
 | `sweeper-unit.ts` | sweeper, contentHash, verbatimStore, consistency, … |
 | `sync-embedding-unit.ts` | syncEngine, localGraph, verbatimStore, store |
 | `type-retention-unit.ts` | typeRetention, warmStore |
+| `verbatim-duplicate-writes-unit.ts` | verbatimStore, verbatimBatch, verbatimWriteGate |
+| `verbatim-cross-instance-writes-unit.ts` | verbatimStore, verbatimBatch, verbatimWriteGate |
+| `review-h-engine-unit.ts` | verbatimStore, verbatimBatch, verbatimWriteGate, embeddingFingerprint |
+| `verbatim-fingerprint-stamp-unit.ts` | verbatimStore, verbatimBatch, verbatimFingerprintGate, embeddingFingerprint |
+| `verbatim-getbyid-scopes-unit.ts` | verbatimHistory (getById, toPlainStringList), verbatimStore, sqliteVerbatimStore, migrateVectorsToSqlite |
 | `v25-e2e.ts` | localGraph, loader, types, describe, … |
 | `v30-phase-a-e2e.ts` | authoring, crud, types, loader, … |
 | `webhook-receiver-unit.ts` | webhookReceiver |
 | `workspace-lifecycle-adversarial-unit.ts` | backup, restore |
 | `write-queue-unit.ts` | writeQueue |
+
+### extractors  (test/extractors/, spreadsheet suites only listed here)
+
+| Test file | Primary modules under test |
+|---|---|
+| `extractors/xlsx.test.ts` | xlsx, registry, index, types |
+| `extractors/xlsx-parity.test.ts` | xlsx, xlsxRead, xlsxSheetScan, zipGuard (differential test against the frozen ExcelJS oracle in `extractors/xlsx-oracle-exceljs.ts`; pins every documented difference) |
 
 ### outbox  (20 tests)
 
@@ -299,6 +314,10 @@
 | Test file | Primary modules under test |
 |---|---|
 | `O6-drain-cli-unit.ts` | outbox |
+| `cli-strict-args-unit.ts` | cli/args (strict parser), cli/targetGuard, outbox/outboxRequeue flag parsers |
+| `cli-strict-flags-data-dir-unit.ts` | migrate-graph / migrate-vectors `--data-dir` + target guard; unknown-flag rejection across converted commands (spawned CLI) |
+| `review-j-scopes-datadir-unit.ts` | review J1-J4: workspace-to-workspace `--data-dir` isolation / dry run creates nothing / target guard / unknown flags (spawned CLI); embedding-model migrate keeps `security_scopes` + fingerprint integrity; piece rebuild carries scopes; bulk add skips + reports unsafe ids |
+| `atlas-post-sqlite-e2e-unit.ts` | cross-slice Atlas post-SQLite end to end: table-birth + open fingerprint stamp then migrate-vectors without stampFromConfig; duplicates -> verbatim dedupe -> migrate; differing duplicates never auto-fixed; empty workspace migrates stamped; no duplicates after two-instance concurrency; spawned CLI `--data-dir` leaves a HOME stand-in byte-identical |
 | `cli-mode-flag-unit.ts` | modeFlag |
 | `phase6-adversarial-ux-uat.ts` | tokens, workspaces, compact, migrateWorkspaceToWorkspace, … |
 | `seed-workspaces-unit.ts` | seedWorkspaces, workspaces |

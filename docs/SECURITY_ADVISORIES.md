@@ -9,6 +9,18 @@ see below). Historical passes (SW-28, NW-5c, TW-1a, TW-6c) are preserved
 further down for audit-trail purposes; where the same package reappears in
 the Fourth-Pass section, that write-up supersedes the older one.
 
+**Update 2026-10-01 — `exceljs` removed from production dependencies.**
+Spreadsheet reading now uses `read-excel-file` (plus a direct `jszip`
+dependency for the decompression-bomb preflight); `exceljs` is a
+devDependency used only by tests as the parity oracle
+(`test/extractors/xlsx-parity.test.ts`). `npm ls exceljs --omit=dev` is
+empty and the deep `exceljs → archiver/unzipper` chain, including the
+`brace-expansion` finding and the `tmp` / `uuid` / `inflight` / `rimraf` /
+`fstream` / `lodash.isequal` rows below, no longer ships to production or
+to hosts that install the tarball. Those entries are kept as the historical
+record. `npm audit --omit=dev` went from 5 findings (2 moderate, 3 high) to
+4 (2 moderate, 2 high).
+
 ---
 
 ## Summary (current, post-fix)

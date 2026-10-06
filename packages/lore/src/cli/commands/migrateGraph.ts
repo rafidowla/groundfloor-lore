@@ -7,7 +7,9 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { loreHome, loreHomePath } from '../../config/loreHome.js';
+import { loreHome, resolveLoreHome } from '../../config/loreHome.js';
+import { parseOrExit, dataDirFlag } from '../args.js';
+import { assertWorkspaceTarget, requireExistingDir } from '../targetGuard.js';
 import { migrateGraphToSqlite, rollbackGraphMigration } from '../../engines/migrateGraphToSqlite.js';
 
 /**
@@ -26,32 +28,58 @@ export function latestGraphBackup(backupDir: string, workspaceName: string): str
 }
 
 function usage(): void {
-    console.error('usage: lore migrate-graph <workspace> --to sqlite [--force]');
-    console.error('       lore migrate-graph <workspace> --rollback [--force]');
+    console.error('usage: lore migrate-graph <workspace> --to sqlite [--force] [--data-dir <path>]');
+    console.error('       lore migrate-graph <workspace> --rollback [--force] [--data-dir <path>]');
     console.error('');
-    console.error('  --to sqlite   Migrate the named workspace from SurrealDB to the SQLite');
-    console.error('                graph engine. Backs up first; the Surreal store is left in');
-    console.error('                place afterwards as the rollback path.');
-    console.error('  --rollback    Flip a sqlite-registered workspace back to surreal (registry');
-    console.error('                entry only). Nothing is deleted, but writes made after the');
-    console.error('                migration live only in graph.sqlite and are NOT carried');
-    console.error('                back; the pre-migration backup tarball is the real undo.');
-    console.error('  --force       Bypass the daemon preflight (tests / CI only).');
+    console.error('  --to sqlite        Migrate the named workspace from SurrealDB to the SQLite');
+    console.error('                     graph engine. Backs up first; the Surreal store is left in');
+    console.error('                     place afterwards as the rollback path.');
+    console.error('  --rollback         Flip a sqlite-registered workspace back to surreal (registry');
+    console.error('                     entry only). Nothing is deleted, but writes made after the');
+    console.error('                     migration live only in graph.sqlite and are NOT carried');
+    console.error('                     back; the pre-migration backup tarball is the real undo.');
+    console.error('  --force            Bypass the daemon preflight (tests / CI only).');
+    console.error('  --data-dir <path>  Target an existing data root (e.g. a COPY, or an embedded');
+    console.error('                     host\'s createLore({ dataDir })) instead of LORE_HOME. The');
+    console.error('                     root must already hold a workspaces.json naming <workspace>');
+    console.error('                     with a path inside it; otherwise the command refuses.');
+    console.error('');
+    console.error('Unknown flags are rejected. The resolved home and registry path are printed');
+    console.error('before anything is written.');
 }
 
 export async function migrateGraphCommand(args: string[]): Promise<void> {
-    const workspaceName = args.find((a) => !a.startsWith('--'));
-    const force = args.includes('--force');
-    const rollback = args.includes('--rollback');
-    const toIdx = args.indexOf('--to');
-    const to = toIdx >= 0 ? args[toIdx + 1] : undefined;
+    const parsed = parseOrExit('migrate-graph', args, {
+        bool: ['--force', '--rollback'],
+        value: ['--to', '--data-dir'],
+        positionals: { min: 1, max: 1 },
+    }, { usage });
+    const workspaceName = parsed.positionals[0]!;
+    const force = parsed.has('--force');
+    const rollback = parsed.has('--rollback');
+    const to = parsed.get('--to');
+    const dataDir = dataDirFlag(parsed);
 
-    if (!workspaceName || (!rollback && to !== 'sqlite')) {
+    if (rollback ? to !== undefined : to !== 'sqlite') {
+        console.error(rollback
+            ? 'lore migrate-graph: --rollback cannot be combined with --to'
+            : `lore migrate-graph: --to sqlite is required${to !== undefined ? ` (got '${to}')` : ''}`);
         usage();
         process.exit(1);
     }
 
-    const home = loreHome();
+    let home: string;
+    try {
+        if (dataDir !== undefined) requireExistingDir(dataDir, '--data-dir');
+        home = dataDir !== undefined ? resolveLoreHome({ dataDir }) : loreHome();
+        console.log(`  Home:      ${home}${dataDir !== undefined ? ' (from --data-dir)' : ''}`);
+        console.log(`  Registry:  ${path.join(home, 'workspaces.json')}`);
+        assertWorkspaceTarget({ home, workspaceName, dataDirGiven: dataDir !== undefined });
+    } catch (error) {
+        console.error(`migrate-graph refused: ${(error as Error).message}`);
+        process.exit(1);
+    }
+    const backupDir = path.join(home, 'migrate-graph-backups');
 
     if (rollback) {
         console.log(`→ Rolling back workspace '${workspaceName}' to SurrealDB…`);
@@ -61,10 +89,10 @@ export async function migrateGraphCommand(args: string[]): Promise<void> {
             console.log('  Only the registry entry was reverted. graph.sqlite was left on disk, not deleted.');
             console.log('  WARNING: writes made after the migration were stored in graph.sqlite only and are');
             console.log('  NOT carried back — the SurrealDB store is exactly as it was at migration time.');
-            const backup = latestGraphBackup(loreHomePath('migrate-graph-backups'), workspaceName);
+            const backup = latestGraphBackup(backupDir, workspaceName);
             console.log(backup
                 ? `  Pre-migration backup tarball (the real undo): ${backup}`
-                : `  No pre-migration backup tarball found in ${loreHomePath('migrate-graph-backups')}.`);
+                : `  No pre-migration backup tarball found in ${backupDir}.`);
         } catch (error) {
             console.error(`migrate-graph --rollback failed: ${(error as Error).message}`);
             process.exit(1);
@@ -72,7 +100,7 @@ export async function migrateGraphCommand(args: string[]): Promise<void> {
         return;
     }
 
-    const backupOutDir = loreHomePath('migrate-graph-backups');
+    const backupOutDir = backupDir;
     fs.mkdirSync(backupOutDir, { recursive: true });
 
     console.log('');

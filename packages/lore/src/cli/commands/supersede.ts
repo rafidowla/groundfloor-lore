@@ -4,6 +4,7 @@ import { loreHome, loreHomePath } from '../../config/loreHome.js';
 import { withTransactionConflictRetry } from '../../engines/transactionConflictRetry.js';
 import { MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../../engines/nodeFieldLimits.js';
 import { openGraphForCli } from './shared.js';
+import { parseOrExit } from '../args.js';
 import { DEFAULT_PORT } from './migrateWorkspaceToWorkspaceShared.js';
 
 async function tryHttpSupersede(oldId: string, newId: string, reason: string | undefined): Promise<{ ok: boolean; reason?: string } | null> {
@@ -43,15 +44,12 @@ async function tryHttpSupersede(oldId: string, newId: string, reason: string | u
 }
 
 export async function supersedeCommand(args: string[]): Promise<void> {
-    const positional = args.filter((a) => !a.startsWith('--'));
-    const oldId = positional[0];
-    const newId = positional[1];
-    if (!oldId || !newId) {
-        console.error('usage: lore supersede <oldId> <newId> [--reason "free-form note"]');
-        process.exit(1);
-    }
-    const reasonIdx = args.indexOf('--reason');
-    const reason = reasonIdx >= 0 ? args[reasonIdx + 1] : undefined;
+    const parsed = parseOrExit('supersede', args, {
+        value: ['--reason'],
+        positionals: { min: 2, max: 2 },
+    }, { usage: () => console.error('usage: lore supersede <oldId> <newId> [--reason "free-form note"]') });
+    const [oldId, newId] = parsed.positionals as [string, string];
+    const reason = parsed.get('--reason');
     // QA finding 2 (A4 round E, 2026-09-03) — DATA_CONTRACT.md's reason cap
     // (MAX_NODE_FIELD_BYTES, UTF-8 bytes) is enforced by the daemon route
     // (POST /api/node/supersede) when a daemon is running, but the no-daemon

@@ -31,6 +31,7 @@
  *   chunk failed.
  */
 
+import { partitionSafeBulkRows } from '../engines/verbatimBatch.js';
 import type {
     BulkLoaderAdapter,
     BulkLoaderOpts,
@@ -64,7 +65,14 @@ export interface LanceRow {
  * lancedb-vectordb here — the verbatim store already owns that
  * dependency and we don't want a second initialization path.
  */
-export type LanceAddRowsFn = (rows: LanceLoadRow[]) => Promise<void>;
+export type LanceAddRowsFn = (rows: LanceLoadRow[]) => Promise<void | LanceAddRowsResult>;
+
+/** J4 — optional result of an add: rows the store skipped because their id is
+ *  unsafe for LanceDB predicates (never written). `rejectedIds` is capped. */
+export interface LanceAddRowsResult {
+    rejectedCount: number;
+    rejectedIds: string[];
+}
 
 /** Row shape handed to the LanceDB table.add() call. Matches
  *  VerbatimStore's verbatim schema columns. The runner uses
@@ -146,6 +154,7 @@ export class LanceBulkLoaderAdapter implements BulkLoaderAdapter<LanceRow> {
         const o = this.opts;
         const errors: BatchResult['errors'] = [];
         let written = 0;
+        let skippedUnlisted = 0; // J4 — rejected rows beyond the capped, listed ids
         let absOffset = o.baseRowIndex;
 
         // Chunk inside the adapter for the memory-pressure scope guard.
@@ -218,7 +227,9 @@ export class LanceBulkLoaderAdapter implements BulkLoaderAdapter<LanceRow> {
                 // single checkpoint window (default 10k rows).
                 if (this.deleteIds) {
                     const ids = chunkValid.map((r) => r.id);
-                    try { await this.deleteIds(ids); }
+                    // J4 — unsafe ids are never written, and one would make the delete throw
+                    // for the whole chunk, so only delete the safe ones.
+                    try { await this.deleteIds(partitionSafeBulkRows(ids.map((id) => ({ id }))).safe.map((r) => r['id'] as string)); }
                     catch (delErr) {
                         // Non-fatal — fall through to plain add(). If
                         // there are residual duplicates, the verbatim
@@ -229,8 +240,17 @@ export class LanceBulkLoaderAdapter implements BulkLoaderAdapter<LanceRow> {
                         errors.push({ rowIndex: chunkBase, errorMessage: `lance_predelete_failed: ${msg}` });
                     }
                 }
-                await this.addRows(chunkValid);
-                written += chunkValid.length;
+                const res = await this.addRows(chunkValid);
+                const rejected = res && typeof res === 'object' ? res.rejectedCount : 0;
+                written += chunkValid.length - rejected;
+                if (res && rejected > 0) {
+                    // J4 — surface skipped unsafe-id rows as per-row errors.
+                    for (const rid of res.rejectedIds) {
+                        const at = chunkSrc.findIndex((r) => r && String(r.id).slice(0, 128) === rid);
+                        errors.push({ rowIndex: chunkBase + (at < 0 ? 0 : at), errorMessage: 'unsafe_id_skipped' });
+                    }
+                    skippedUnlisted += Math.max(0, rejected - res.rejectedIds.length);
+                }
             } catch (err) {
                 // Whole-chunk add failed (schema mismatch / disk full).
                 // Per Sprint Z principle clause 5 we report every row
@@ -246,7 +266,7 @@ export class LanceBulkLoaderAdapter implements BulkLoaderAdapter<LanceRow> {
             absOffset += chunkSrc.length;
         }
         this.opts = { ...o, baseRowIndex: absOffset };
-        return { written, failed: errors.length, errors };
+        return { written, failed: errors.length + skippedUnlisted, errors };
     }
 
     /** Build a row matching VerbatimStore's schema. Zero-vector

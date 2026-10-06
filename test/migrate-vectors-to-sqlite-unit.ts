@@ -42,6 +42,7 @@ import { VerbatimStore } from '../packages/lore/src/engines/verbatimStore.js';
 import { SqliteVerbatimStore } from '../packages/lore/src/engines/sqliteVerbatimStore.js';
 import { openSqliteVerbatimDb } from '../packages/lore/src/engines/sqliteVerbatimSchema.js';
 import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
+import { NullEmbeddingProvider } from '../packages/lore/src/providers/nullEmbeddingProvider.js';
 
 // New workspaces (incl. createLore's fresh 'default') are born lance here —
 // the source engine this migration moves away from.
@@ -272,7 +273,10 @@ await test('refuses a non-lance source and a lance workspace with no Lance store
     setWorkspaceVectorEngine('mv-sqlite', 'sqlite', home);
     await assert.rejects(migrateVectorsToSqlite({ workspaceName: 'mv-sqlite', home, backupOutDir: outDir(), skipDaemonCheck: true }), /already registered as 'sqlite'/);
     createWorkspace('mv-empty', {}, home);
-    await assert.rejects(migrateVectorsToSqlite({ workspaceName: 'mv-empty', home, backupOutDir: outDir(), skipDaemonCheck: true }), /no LanceDB verbatim store/);
+    // 3.28: a workspace with no Lance store now migrates as an empty source when an embedding
+    // model is configured (see migrate-vectors-dedupe-empty-unit.ts); it still refuses when
+    // embeddings are disabled, because the empty SQLite store could not be stamped.
+    await assert.rejects(migrateVectorsToSqlite({ workspaceName: 'mv-empty', home, backupOutDir: outDir(), skipDaemonCheck: true, embeddingProvider: new NullEmbeddingProvider() }), /no LanceDB verbatim store/);
     assert.equal(resolveWorkspaceVectorEngine('mv-empty', home), 'lance');
 });
 

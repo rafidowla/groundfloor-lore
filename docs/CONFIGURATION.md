@@ -191,6 +191,10 @@ variable, which only governs what a NEW workspace starts on.
 The reverse (an existing `lance` workspace → `sqlite`) is the explicit,
 offline `lore migrate-vectors <workspace> --to sqlite` (3.27.1; see
 `docs/MIGRATION-3.21.md`) — this variable never moves an existing workspace.
+Running a workspace with the graph on `sqlite` and the vectors on `lance` (or
+the reverse) is a supported, long-term configuration, not a transitional
+state; each engine is migrated independently by its own command
+(`lore migrate-graph`, `lore migrate-vectors`).
 
 Source: `src/config/workspaces.ts` (`createWorkspace`, fresh-home seeding),
 `src/engines/vectorEngineSelector.ts` (`resolveNewWorkspaceVectorEngine`).
@@ -2942,6 +2946,19 @@ this setting (logged, dereferenced only) — the same worst case as 3.19.1.
 Source: `src/engines/verbatimStore.ts`, `src/engines/verbatimWriteGate.ts`
 
 ---
+
+### `LORE_VERBATIM_CLOSE_DRAIN_MS`
+
+| | |
+|---|---|
+| **Default** | `5000` |
+| **Surface** | daemon / embedded (VerbatimStore) |
+
+How long `VerbatimStore.close()` waits for in-flight and queued writes on its Lance
+table before giving up (positive integer, milliseconds; anything else uses the
+default). After a drain timeout the table handles are released and any write still
+queued behind `close()` rejects with `VerbatimStoreClosedError` instead of resolving
+as a no-op (3.28.0). Raise it for slow disks or very large batches; tests lower it.
 
 ### `LORE_COMPACT_GRACE_MS`
 

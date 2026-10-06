@@ -305,6 +305,7 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_SEARCH_CACHE_MAX_ENTRIES',         // verbatim search-cache max entries (default 500)
     'LORE_COMPACT_GRACE_MS',                 // LanceDB compact grace window ms (default 600000, 10 min)
     'LORE_VERBATIM_NATIVE_CLOSE',            // VerbatimStore.close() native-handle kill switch (default on; 0/false/off = 3.19.1 dereference-only)
+    'LORE_VERBATIM_CLOSE_DRAIN_MS',          // VerbatimStore.close() write-drain timeout in ms (default 5000); queued writes reject after it
     'LORE_REGISTRY_IDLE_TTL_MS',             // LocalGraphRegistry idle-workspace eviction TTL (default 0 = disabled as of 3.20.0, was 1800000/30 min — docs/PERFORMANCE-MEMORY.md §9)
     'LORE_REGISTRY_SWEEP_MS',               // LocalGraphRegistry background sweep interval (default 600000, 10 min)
     'LORE_VERBATIM_IDLE_TTL_MS',             // WorkspaceVerbatimResolver idle-eviction TTL (default 1800000, 30 min)

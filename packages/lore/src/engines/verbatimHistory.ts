@@ -288,7 +288,7 @@ export async function getById(
             project: typeof r.project === 'string' ? r.project : '',
             ecosystem: typeof r.ecosystem === 'string' ? r.ecosystem : '',
             updatedAt: typeof r.updatedAt === 'string' ? r.updatedAt : '',
-            security_scopes: Array.isArray(r.security_scopes) ? (r.security_scopes as unknown[]).map(String) : [],
+            security_scopes: toPlainStringList(r.security_scopes), // Arrow List<Utf8> is not a JS array; Array.isArray() was always false on Lance
         };
     } catch {
         return null;
@@ -356,6 +356,34 @@ export async function listIds(
     }
 }
 
+/** Coerce a Lance List<Utf8> column value (an Arrow vector, a plain array, or
+ *  an array-like) into a plain string[]. LanceDB returns list columns as Arrow
+ *  vectors, for which Array.isArray() is false, so a bare Array.isArray read
+ *  silently yields []. Returns [] for a missing/unreadable value.
+ *  Shared by VerbatimStore (read paths) and getById (verbatimHistory.ts). */
+export function toPlainStringList(v: unknown): string[] {
+    if (!v) return [];
+    if (Array.isArray(v)) return v.map((x) => String(x));
+    // An Arrow Vector has a `length` but plain indexed access (`v[i]`) yields
+    // undefined — its elements are only reachable via toArray()/get()/iteration.
+    // (The pre-3.28.0 private copy in VerbatimStore indexed it and wrote the
+    // string 'undefined' per element into history snapshots / tombstones.)
+    const arrowLike = v as { toArray?: () => unknown };
+    if (typeof arrowLike.toArray === 'function') {
+        const inner = arrowLike.toArray();
+        if (Array.isArray(inner)) return inner.map((x) => String(x));
+        if (inner && typeof (inner as Iterable<unknown>)[Symbol.iterator] === 'function') return Array.from(inner as Iterable<unknown>, (x) => String(x));
+    }
+    if (typeof (v as Iterable<unknown>)[Symbol.iterator] === 'function') return Array.from(v as Iterable<unknown>, (x) => String(x));
+    const indexed = v as { length?: number; [k: number]: unknown };
+    if (typeof indexed.length === 'number') {
+        const out: string[] = new Array(indexed.length);
+        for (let i = 0; i < indexed.length; i++) out[i] = String(indexed[i]);
+        return out;
+    }
+    return [];
+}
+
 /** Coerce an Arrow / Float32Array / nested-array vector into a plain number[].
  *  Mirrors VerbatimStore.toPlainVector (private there) so the export reader
  *  emits the SAME shape the carry-import path (ArcadeVectorStore.storePrebuilt)
@@ -408,6 +436,8 @@ export interface VerbatimExportRow {
         ecosystem?: string;
         updatedAt?: string;
         contentHash?: string;
+        /** Row's security_scopes; omitted when public/empty. Additive (review J2/J3, 3.28.0). */
+        security_scopes?: string[];
     };
 }
 
@@ -444,6 +474,7 @@ export async function listRowsWithVectors(
             // Exclude `#rev` history snapshots — migrate canonical state only.
             if (!id || isRevisionHistoryId(id)) continue;
             const contentHash = r['contentHash'] != null ? String(r['contentHash']) : '';
+            const scopes = toPlainStringList(r['security_scopes']); // Arrow List<Utf8>, not a JS array
             out.push({
                 id,
                 text: r['text'] != null ? String(r['text']) : '',
@@ -457,6 +488,7 @@ export async function listRowsWithVectors(
                     ecosystem: r['ecosystem'] != null ? String(r['ecosystem']) : undefined,
                     updatedAt: r['updatedAt'] != null ? String(r['updatedAt']) : undefined,
                     contentHash: contentHash || undefined,
+                    ...(scopes.length > 0 ? { security_scopes: scopes } : {}),
                 },
             });
         }

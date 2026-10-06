@@ -21,65 +21,18 @@
  * measurement that verified it.
  */
 
+import { parseOrExit, dataDirFlag } from '../args.js';
 import type { ReclaimStorageResult, ReclaimFileReport } from '../../outbox/reclaimStorage.js';
 
-/** Value of `--data-dir <path>` / `--data-dir=<path>`; undefined when absent. */
-function parseDataDir(args: string[]): string | undefined {
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i]!;
-        if (a.startsWith('--data-dir=')) return a.slice('--data-dir='.length);
-        if (a === '--data-dir') {
-            const v = args[i + 1];
-            if (v === undefined || v.startsWith('--')) {
-                console.error('--data-dir requires a path');
-                process.exit(1);
-            }
-            return v;
-        }
+/** Validated `--prune-older-than <days>`; undefined when absent. */
+function parsePruneOlderThan(raw: string | undefined): number | undefined {
+    if (raw === undefined) return undefined;
+    const n = Number(raw);
+    if (!(Number.isFinite(n) && n > 0)) {
+        console.error(`--prune-older-than requires a positive number of days, got "${raw}"`);
+        process.exit(1);
     }
-    return undefined;
-}
-
-/** Value of `--skip-types a,b,c`; [] when absent. */
-function parseSkipTypes(args: string[]): string[] {
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i]!;
-        if (a.startsWith('--skip-types=')) return splitCsv(a.slice('--skip-types='.length));
-        if (a === '--skip-types') {
-            const v = args[i + 1];
-            if (v === undefined || v.startsWith('--')) {
-                console.error('--skip-types requires a comma-separated list');
-                process.exit(1);
-            }
-            return splitCsv(v);
-        }
-    }
-    return [];
-}
-
-/** Value of `--prune-older-than <days>`; undefined when absent. */
-function parsePruneOlderThan(args: string[]): number | undefined {
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i]!;
-        let raw: string | undefined;
-        if (a.startsWith('--prune-older-than=')) raw = a.slice('--prune-older-than='.length);
-        else if (a === '--prune-older-than') {
-            raw = args[i + 1];
-            if (raw === undefined || raw.startsWith('--')) {
-                console.error('--prune-older-than requires a number of days');
-                process.exit(1);
-            }
-        }
-        if (raw !== undefined) {
-            const n = Number(raw);
-            if (!(Number.isFinite(n) && n > 0)) {
-                console.error(`--prune-older-than requires a positive number of days, got "${raw}"`);
-                process.exit(1);
-            }
-            return n;
-        }
-    }
-    return undefined;
+    return n;
 }
 
 function splitCsv(v: string): string[] {
@@ -156,16 +109,22 @@ function printReport(result: ReclaimStorageResult): void {
 }
 
 export async function maintainStorageCommand(args: string[]): Promise<void> {
-    if (args.includes('--help') || args.includes('-h')) {
+    const parsed = parseOrExit('maintain storage', args, {
+        bool: ['--dry-run', '--json'],
+        value: ['--data-dir', '--skip-types', '--prune-older-than'],
+        aliases: { '-h': '--help' },
+        help: true,
+    }, { usage: () => console.error(HELP) });
+    if (parsed.help) {
         console.log(HELP);
         return;
     }
 
-    const dataDir = parseDataDir(args);
-    const dryRun = args.includes('--dry-run');
-    const asJson = args.includes('--json');
-    const skipTypes = parseSkipTypes(args);
-    const pruneOlderThanDays = parsePruneOlderThan(args);
+    const dataDir = dataDirFlag(parsed);
+    const dryRun = parsed.has('--dry-run');
+    const asJson = parsed.has('--json');
+    const skipTypes = splitCsv(parsed.get('--skip-types') ?? '');
+    const pruneOlderThanDays = parsePruneOlderThan(parsed.get('--prune-older-than'));
 
     const { reclaimStorage, ReclaimDataDirInUseError, ReclaimInsufficientDiskSpaceError } =
         await import('../../outbox/reclaimStorage.js');

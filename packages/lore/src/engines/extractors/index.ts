@@ -10,7 +10,7 @@
  * STUB objects whose extract() method loads the real module on first call.
  * buildDefaultRegistry() itself is synchronous and imports nothing heavy —
  * the real extractor modules (and their native deps: sharp, @napi-rs/canvas,
- * pdfjs-dist, exceljs, mammoth, mailparser) are loaded only when a document
+ * pdfjs-dist, read-excel-file, mammoth, mailparser) are loaded only when a document
  * of that format is actually processed.  Hosts that never process those
  * formats (e.g. Atlas in code-only mode) pay zero load cost.
  */

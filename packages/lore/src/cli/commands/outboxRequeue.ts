@@ -40,6 +40,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { loreHome } from '../../config/loreHome.js';
+import { parseStrict, UsageError, type ArgSpec } from '../args.js';
 import { getActiveWorkspacePath } from '../../config/workspaces.js';
 import type { OutboxEntry, OutboxStore } from '../../outbox/types.js';
 
@@ -58,20 +59,28 @@ const DEFAULT_LIMIT = 5000;
 
 /** Exported for the unit test — flag parsing is the part worth pinning down
  *  without spinning up a store. */
+const REQUEUE_SPEC: ArgSpec = {
+    bool: ['--dry-run'],
+    value: ['--lore-dir', '--workspace', '--kind', '--error-contains', '--limit'],
+    aliases: { '-h': '--help' },
+    help: true,
+};
+
 export function parseRequeueFlags(args: string[]): RequeueFlags {
     const flags: RequeueFlags = { limit: DEFAULT_LIMIT, dryRun: false, help: false };
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i];
-        if (a === '--help' || a === '-h') flags.help = true;
-        else if (a === '--dry-run') flags.dryRun = true;
-        else if (a === '--lore-dir') flags.loreDir = args[++i];
-        else if (a === '--workspace') flags.workspace = args[++i];
-        else if (a === '--kind') flags.operationKind = args[++i];
-        else if (a === '--error-contains') flags.errorContains = args[++i];
-        else if (a === '--limit') {
-            const n = Number.parseInt(args[++i] ?? '', 10);
-            if (Number.isFinite(n) && n > 0) flags.limit = n;
-        }
+    // Strict: unknown flags / missing values / stray positionals throw UsageError
+    // (requeueDeadSubcommand turns that into a usage message + exit code 1).
+    const p = parseStrict(args, REQUEUE_SPEC);
+    if (p.help) { flags.help = true; return flags; }
+    if (p.has('--dry-run')) flags.dryRun = true;
+    flags.loreDir = p.get('--lore-dir');
+    flags.workspace = p.get('--workspace');
+    flags.operationKind = p.get('--kind');
+    flags.errorContains = p.get('--error-contains');
+    const lim = p.get('--limit');
+    if (lim !== undefined) {
+        const n = Number.parseInt(lim, 10);
+        if (Number.isFinite(n) && n > 0) flags.limit = n;
     }
     return flags;
 }
@@ -163,7 +172,15 @@ function printTable(title: string, counts: Record<string, number>): void {
 }
 
 export async function requeueDeadSubcommand(args: string[]): Promise<void> {
-    const flags = parseRequeueFlags(args);
+    let flags: RequeueFlags;
+    try {
+        flags = parseRequeueFlags(args);
+    } catch (e) {
+        if (!(e instanceof UsageError)) throw e;
+        console.error(`lore outbox requeue-dead: ${e.message}`);
+        console.error("Run 'lore outbox requeue-dead --help' for usage.");
+        process.exit(1);
+    }
     if (flags.help) {
         console.log(REQUEUE_HELP);
         return;

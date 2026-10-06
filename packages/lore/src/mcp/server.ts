@@ -1551,9 +1551,8 @@ async function main(): Promise<LoreInstance | void> {
                         : d.embeddingProvider.dimension;
                     lance = new LanceBulkLoaderAdapter({
                         vectorDim: dim,
-                        addRows: async (rows) => {
-                            await localVerbatim.bulkAddPrebuiltRows(rows as unknown as Array<Record<string, unknown>>);
-                        },
+                        // J4 — return the store result (rows skipped for unsafe ids).
+                        addRows: async (rows) => localVerbatim.bulkAddPrebuiltRows(rows as unknown as Array<Record<string, unknown>>),
                         // C3-medium (2026-08-17) — wire the documented Sprint Z3
                         // resume-idempotency hook. Without deleteIds the write
                         // path is a bare append, so a crash-resume re-added the

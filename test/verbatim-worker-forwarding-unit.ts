@@ -62,6 +62,8 @@ const PARENT_SAFE: Record<string, string> = {
     _searchUncached: 'private; reached only via forwarded search()',
     _runVectorSearchUncached: 'private; reached only via forwarded searchByVector()/search()',
     _bm25SearchUncached: 'private; reached only via forwarded bm25Search()',
+    writeLane: 'private; the per-path write lane, entered only from forwarded write methods inside the child (3.28.0)',
+    stampLegacyFingerprintForReadRole: 'private; called from initialize() inside the child (3.28.0)',
     // Observability / offline tooling: no production caller reaches them through the proxy.
     handleCount: 'diagnostic native-handle count; the dead parent half honestly reports 0 (scripts/diagnostics only)',
     pieceIndexForMigration: 'offline migrate/rebuild CLIs open a concrete store directly (pieceIndexBuild.ts), never the proxy',

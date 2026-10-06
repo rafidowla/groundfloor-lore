@@ -34,6 +34,7 @@ import type { Bm25Envelope } from './verbatimBm25Result.js';
 import type { FtsTokenizerSettings } from './ftsTokenizerProfile.js';
 import type { VerbatimExportRow } from './verbatimHistory.js';
 import type { VerbatimStoreApi } from './verbatimStoreApi.js';
+import type { BulkAddResult } from './verbatimBatch.js';
 import type { VerbatimStoreRole } from './verbatimStoreRole.js';
 import { assertWritableRole } from './verbatimStoreRole.js';
 import { applyFingerprintOnOpen, stampFingerprint } from './verbatimFingerprintGate.js';
@@ -288,15 +289,19 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         })));
     }
 
-    async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
+    async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<BulkAddResult> {
         assertWritableRole(this.role, 'bulkAddPrebuiltRows');
-        if (!this.initialized) return;
+        // J4 — SQLite binds ids as parameters (no Lance WHERE-predicate
+        // injection surface), so no id is rejected here; the result shape
+        // matches the Lance store's.
+        if (!this.initialized) return { rejectedCount: 0, rejectedIds: [] };
         sqliteWrite.bulkAddPrebuiltRows(this.writeDeps(), rows);
         this.checkPromotion(rows.length);
         // D7 (3.23) — bulk-loaded rows carry no redaction step upstream
         // (matches sqliteVerbatimWrite.ts's bulkAddPrebuiltRows, which does
         // not redact), so pieces are built from the row fields as supplied.
         await this.pieceIndex?.upsertForRows(rows as unknown as PieceSourceRow[]);
+        return { rejectedCount: 0, rejectedIds: [] };
     }
 
     async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {

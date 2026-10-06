@@ -43,6 +43,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { parseOrExit, type ArgSpec, type ParsedArgs } from '../args.js';
 import { runCliOrphanAliasSweep } from './maintainOrphanAliasSweep.js';
 import { openWorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 import { getWorkspacePath, listWorkspaceNames, getActiveWorkspaceName } from '../../config/workspaces.js';
@@ -67,54 +68,44 @@ import {
     type GraphLike,
 } from '../../engines/maintain/index.js';
 
-/** Flags that take a value (consume the following token). */
-const VALUE_FLAGS = new Set([
-    '--retention-days', '--cleanup-versions-older-than', '--compact-threshold',
-    '--ephemeral-ttl-days', '--ephemeral-patterns', '--protect-tags', '--node-action',
-    '--cold-signal',
-]);
+const MAINTAIN_SPEC: ArgSpec = {
+    bool: [
+        '--dry-run', '--all', '--force', '--json', '--orphan-alias-sweep',
+        '--no-compaction', '--no-version-cleanup', '--no-node-retention', '--no-ephemeral',
+    ],
+    value: [
+        '--retention-days', '--cleanup-versions-older-than', '--compact-threshold',
+        '--ephemeral-ttl-days', '--ephemeral-patterns', '--protect-tags', '--node-action',
+        '--cold-signal',
+    ],
+    positionals: { max: 1 },
+    aliases: { '-h': '--help' },
+    help: true,
+};
 
-function flagValue(args: string[], name: string): string | undefined {
-    const i = args.indexOf(name);
-    return i >= 0 ? args[i + 1] : undefined;
-}
-
-/** First non-flag token that isn't a value-flag's argument. */
-function firstPositional(args: string[]): string | undefined {
-    for (let i = 0; i < args.length; i++) {
-        const a = args[i];
-        if (a.startsWith('--')) {
-            if (VALUE_FLAGS.has(a)) i++; // skip its value
-            continue;
-        }
-        return a;
-    }
-    return undefined;
-}
-
-function buildOverrides(args: string[]): MaintainPolicyOverrides {
+function buildOverrides(args: ParsedArgs): MaintainPolicyOverrides {
     const o: MaintainPolicyOverrides = {};
-    const rd = flagValue(args, '--retention-days');
+    const rd = args.get('--retention-days');
     if (rd !== undefined) o.retentionDays = Number(rd);
-    const cv = flagValue(args, '--cleanup-versions-older-than');
+    const cv = args.get('--cleanup-versions-older-than');
     if (cv !== undefined) o.cleanupVersionsOlderThanMs = parseDuration(cv);
-    const ct = flagValue(args, '--compact-threshold');
+    const ct = args.get('--compact-threshold');
     if (ct !== undefined) o.compactFragmentThreshold = Number(ct);
-    const et = flagValue(args, '--ephemeral-ttl-days');
+    const et = args.get('--ephemeral-ttl-days');
     if (et !== undefined) o.ephemeralWorkspaceTtlDays = Number(et);
-    const ep = flagValue(args, '--ephemeral-patterns');
+    const ep = args.get('--ephemeral-patterns');
     if (ep !== undefined) o.ephemeralWorkspacePatterns = parseList(ep);
-    const pt = flagValue(args, '--protect-tags');
+    const pt = args.get('--protect-tags');
     if (pt !== undefined) o.protectTags = parseList(pt);
-    const na = flagValue(args, '--node-action');
+    const na = args.get('--node-action');
     if (na === 'archive' || na === 'delete') o.nodeRetentionAction = na;
-    const cs = flagValue(args, '--cold-signal');
+    const cs = args.get('--cold-signal');
     if (cs === 'retrieval' || cs === 'access' || cs === 'update') o.coldSignal = cs;
     const enabled: NonNullable<MaintainPolicyOverrides['enabled']> = {};
-    if (args.includes('--no-compaction')) enabled.compaction = false;
-    if (args.includes('--no-version-cleanup')) enabled.versionCleanup = false;
-    if (args.includes('--no-node-retention')) enabled.nodeRetention = false;
-    if (args.includes('--no-ephemeral')) enabled.ephemeralExpiry = false;
+    if (args.has('--no-compaction')) enabled.compaction = false;
+    if (args.has('--no-version-cleanup')) enabled.versionCleanup = false;
+    if (args.has('--no-node-retention')) enabled.nodeRetention = false;
+    if (args.has('--no-ephemeral')) enabled.ephemeralExpiry = false;
     if (Object.keys(enabled).length > 0) o.enabled = enabled;
     return o;
 }
@@ -180,20 +171,21 @@ export async function maintainCommand(args: string[]): Promise<void> {
         return;
     }
 
-    if (args.includes('--help') || args.includes('-h')) {
+    const parsed = parseOrExit('maintain', args, MAINTAIN_SPEC, { usage: () => console.error(HELP) });
+    if (parsed.help) {
         console.log(HELP);
         return;
     }
 
-    const dryRun = args.includes('--dry-run');
-    const asJson = args.includes('--json');
-    const all = args.includes('--all');
-    const force = args.includes('--force');
-    const positional = firstPositional(args);
+    const dryRun = parsed.has('--dry-run');
+    const asJson = parsed.has('--json');
+    const all = parsed.has('--all');
+    const force = parsed.has('--force');
+    const positional = parsed.positionals[0];
 
     let policy: MaintainPolicy;
     try {
-        policy = resolveMaintainPolicy(buildOverrides(args));
+        policy = resolveMaintainPolicy(buildOverrides(parsed));
     } catch (err) {
         console.error(`[maintain] bad policy: ${(err as Error).message}`);
         process.exit(1);
@@ -244,7 +236,7 @@ export async function maintainCommand(args: string[]): Promise<void> {
     // Open the graph ONLY when node retention is actually requested — otherwise
     // a LanceDB-only run would race the daemon's single-writer graph handle (the
     // exact case dry-run users hit while the daemon is up).
-    const orphanSweep = args.includes('--orphan-alias-sweep');
+    const orphanSweep = parsed.has('--orphan-alias-sweep');
     let sweepFailed = false;
     const needGraph = policy.enabled.nodeRetention || orphanSweep;
     for (const name of targets) {

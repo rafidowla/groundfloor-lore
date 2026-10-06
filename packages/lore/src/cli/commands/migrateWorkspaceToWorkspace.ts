@@ -35,8 +35,11 @@ import { openWorkspaceGraph, type WorkspaceGraph } from '../../engines/openWorks
 import { tagsToString } from '../../engines/normalizeTags.js';
 import { VerbatimStore } from '../../engines/verbatimStore.js';
 import type { VerbatimStoreApi } from '../../engines/verbatimStoreApi.js';
-import { getWorkspacePath } from '../../config/workspaces.js';
-import { loreHome } from '../../config/loreHome.js';
+import { loadWorkspacesIfPresent } from '../../config/workspaces.js';
+import { loreHome, resolveLoreHome } from '../../config/loreHome.js';
+import { parseOrExit, dataDirFlag } from '../args.js';
+import { assertWorkspaceTarget, requireExistingDir } from '../targetGuard.js';
+import * as path from 'node:path';
 import { isDaemonServingHome, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
 import { withTransactionConflictRetry } from '../../engines/transactionConflictRetry.js';
 
@@ -55,6 +58,12 @@ export interface MigrateOptions {
     onConflict?: OnConflict;
     /** Bypass the daemon preflight (tests). */
     force?: boolean;
+    /**
+     * Data root to operate on (registry, daemon probe, engine opens). Defaults
+     * to `loreHome()`. Review J1 (3.28.0): `--data-dir` previously never reached
+     * the engine, which always acted on the ambient LORE_HOME.
+     */
+    home?: string;
     /**
      * Pre-opened WorkspaceGraph + VerbatimStore instances. Used by the
      * test suite to avoid a segfault the former native graph engine
@@ -126,12 +135,13 @@ export async function migrateWorkspaceToWorkspace(opts: MigrateOptions): Promise
     if (opts.from === opts.to) {
         throw new Error('--from and --to must differ');
     }
+    const home = opts.home ?? loreHome();
     if (!opts.force) {
         // Round E2, 2026-09-03 — isDaemonUp() alone refused whenever ANY
         // process answered 200 on the port, never checking it served THIS
         // home; isDaemonServingHome() only reports true when the daemon's
         // own Bearer-authenticated /api/health confirms it.
-        if ((await isDaemonServingHome(loreHome())).servesHome) {
+        if ((await isDaemonServingHome(home)).servesHome) {
             console.error(daemonRefuseMessage('lore migrate workspace-to-workspace'));
             process.exit(1);
         }
@@ -140,8 +150,24 @@ export async function migrateWorkspaceToWorkspace(opts: MigrateOptions): Promise
     const apply = !!opts.apply;
     const onConflict: OnConflict = opts.onConflict ?? 'fail';
 
-    const fromPath = getWorkspacePath(opts.from);
-    const toPath = getWorkspacePath(opts.to);
+    // Review J1: read the registry WITHOUT bootstrapping one — a dry run (or any
+    // failing run) against a home with no workspaces.json must create nothing.
+    const registry = loadWorkspacesIfPresent(home);
+    if (!registry) {
+        throw new Error(
+            `no workspaces.json at ${path.join(home, 'workspaces.json')} — refusing to create one; nothing was changed`,
+        );
+    }
+    const pathOf = (name: string): string => {
+        const entry = registry.workspaces.find((w) => w.name === name);
+        if (!entry) {
+            const known = registry.workspaces.map((w) => w.name).join(', ');
+            throw new Error(`workspace_not_found: "${name}" (known: ${known})`);
+        }
+        return entry.path;
+    };
+    const fromPath = pathOf(opts.from);
+    const toPath = pathOf(opts.to);
 
     // Both sides now open whichever engine the workspace declares —
     // openWorkspaceGraph resolves that per-path, so a Surreal-backed source
@@ -151,8 +177,8 @@ export async function migrateWorkspaceToWorkspace(opts: MigrateOptions): Promise
     // see the comment there for what replaced it.)
     const ownsSrcGraph = !opts.injected?.srcGraph;
     const ownsDstGraph = !opts.injected?.dstGraph;
-    const srcGraph = opts.injected?.srcGraph ?? openWorkspaceGraph(fromPath, { workspaceId: opts.from });
-    const dstGraph = opts.injected?.dstGraph ?? openWorkspaceGraph(toPath, { workspaceId: opts.to });
+    const srcGraph = opts.injected?.srcGraph ?? openWorkspaceGraph(fromPath, { workspaceId: opts.from, home });
+    const dstGraph = opts.injected?.dstGraph ?? openWorkspaceGraph(toPath, { workspaceId: opts.to, home });
     if (ownsSrcGraph) await srcGraph.initialize();
     if (ownsDstGraph) await dstGraph.initialize();
 
@@ -408,12 +434,6 @@ export async function migrateWorkspaceToWorkspace(opts: MigrateOptions): Promise
 
 /* ─── CLI argv glue ────────────────────────────────────────────── */
 
-function readFlag(args: string[], name: string): string | undefined {
-    const idx = args.indexOf(name);
-    if (idx === -1 || idx === args.length - 1) return undefined;
-    return args[idx + 1];
-}
-
 function parseTagFlag(raw: string | undefined): { key: string; value: string } | undefined {
     if (!raw) return undefined;
     const eq = raw.indexOf('=');
@@ -421,65 +441,109 @@ function parseTagFlag(raw: string | undefined): { key: string; value: string } |
     return { key: raw.slice(0, eq), value: raw.slice(eq + 1) };
 }
 
+function printUsage(log: (m: string) => void = console.log): void {
+    log('Usage: lore migrate workspace-to-workspace [flags]');
+    log('');
+    log('Required:');
+    log('  --from <name>');
+    log('  --to   <name>');
+    log('');
+    log('Filters (all optional):');
+    log('  --filter-type <csv>           e.g. decision,note,architecture');
+    log('  --filter-tag <key=value>      e.g. owner=rafi or just `value`');
+    log('  --exclude-id-prefix <csv>     e.g. loom-dispatch-,agent-run-');
+    log('');
+    log('Scope:');
+    log('  --include-edges               Copy edges where both endpoints moved.');
+    log('  --include-vectors             Copy lancedb verbatim rows for moved ids.');
+    log('  --delete-source               Remove moved nodes/vectors from source (refused if any');
+    log('                                node/edge copy failed or edges were skipped as dangling).');
+    log('');
+    log('Mode:');
+    log('  --dry-run                     (default) Report counts; no writes.');
+    log('  --apply                       Actually mutate.');
+    log('  --on-conflict skip|overwrite|fail   (default: fail)');
+    log('  --force                       Bypass daemon preflight (tests only).');
+    log('  --data-dir <path>             Operate on this existing data root instead of LORE_HOME');
+    log('                                (must already hold a workspaces.json naming both workspaces).');
+    log('');
+    log('Unknown flags are rejected. The resolved home and registry path are printed first.');
+}
+
 export async function migrateWorkspaceToWorkspaceCli(args: string[]): Promise<void> {
-    if (args[0] === '--help' || args[0] === '-h' || args.length === 0) {
-        console.log('Usage: lore migrate workspace-to-workspace [flags]');
-        console.log('');
-        console.log('Required:');
-        console.log('  --from <name>');
-        console.log('  --to   <name>');
-        console.log('');
-        console.log('Filters (all optional):');
-        console.log('  --filter-type <csv>           e.g. decision,note,architecture');
-        console.log('  --filter-tag <key=value>      e.g. owner=rafi or just `value`');
-        console.log('  --exclude-id-prefix <csv>     e.g. loom-dispatch-,agent-run-');
-        console.log('');
-        console.log('Scope:');
-        console.log('  --include-edges               Copy edges where both endpoints moved.');
-        console.log('  --include-vectors             Copy lancedb verbatim rows for moved ids.');
-        console.log('  --delete-source               Remove moved nodes/vectors from source (refused if any');
-        console.log('                                node/edge copy failed or edges were skipped as dangling).');
-        console.log('');
-        console.log('Mode:');
-        console.log('  --dry-run                     (default) Report counts; no writes.');
-        console.log('  --apply                       Actually mutate.');
-        console.log('  --on-conflict skip|overwrite|fail   (default: fail)');
-        console.log('  --force                       Bypass daemon preflight (tests only).');
+    const parsed = parseOrExit('migrate workspace-to-workspace', args, {
+        bool: ['--include-edges', '--include-vectors', '--delete-source', '--apply', '--dry-run', '--force'],
+        value: ['--from', '--to', '--filter-type', '--filter-tag', '--exclude-id-prefix', '--on-conflict', '--data-dir'],
+        aliases: { '-h': '--help' },
+        help: true,
+    }, { usage: () => printUsage(console.error) });
+    if (parsed.help || args.length === 0) {
+        printUsage();
         return;
     }
-    const from = readFlag(args, '--from');
-    const to = readFlag(args, '--to');
+    const from = parsed.get('--from');
+    const to = parsed.get('--to');
     if (!from || !to) {
         console.error('migrate workspace-to-workspace: --from and --to are required.');
         process.exit(1);
     }
-    const filterTypes = (readFlag(args, '--filter-type') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    const filterTag = parseTagFlag(readFlag(args, '--filter-tag'));
-    const excludeIdPrefixes = (readFlag(args, '--exclude-id-prefix') ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    const includeEdges = args.includes('--include-edges');
-    const includeVectors = args.includes('--include-vectors');
-    const deleteSource = args.includes('--delete-source');
-    const apply = args.includes('--apply');
-    const force = args.includes('--force');
-    const onConflictRaw = readFlag(args, '--on-conflict') ?? 'fail';
+    if (parsed.has('--apply') && parsed.has('--dry-run')) {
+        console.error('migrate workspace-to-workspace: --apply and --dry-run are mutually exclusive.');
+        process.exit(1);
+    }
+    const csv = (v: string | undefined): string[] => (v ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    const filterTypes = csv(parsed.get('--filter-type'));
+    const filterTag = parseTagFlag(parsed.get('--filter-tag'));
+    const excludeIdPrefixes = csv(parsed.get('--exclude-id-prefix'));
+    const includeEdges = parsed.has('--include-edges');
+    const includeVectors = parsed.has('--include-vectors');
+    const deleteSource = parsed.has('--delete-source');
+    const apply = parsed.has('--apply');
+    const force = parsed.has('--force');
+    const dataDir = dataDirFlag(parsed);
+    const onConflictRaw = parsed.get('--on-conflict') ?? 'fail';
     if (onConflictRaw !== 'skip' && onConflictRaw !== 'overwrite' && onConflictRaw !== 'fail') {
         console.error(`--on-conflict must be skip|overwrite|fail (got "${onConflictRaw}")`);
         process.exit(1);
     }
 
-    const report = await migrateWorkspaceToWorkspace({
-        from: from!,
-        to: to!,
-        filterTypes: filterTypes.length > 0 ? filterTypes : undefined,
-        filterTag,
-        excludeIdPrefixes: excludeIdPrefixes.length > 0 ? excludeIdPrefixes : undefined,
-        includeEdges,
-        includeVectors,
-        deleteSource,
-        apply,
-        onConflict: onConflictRaw,
-        force,
-    });
+    // Review J1: resolve the target home FIRST and print it before anything
+    // is written, same as migrate-graph. Every later read/write uses `home`.
+    let home: string;
+    try {
+        if (dataDir !== undefined) requireExistingDir(dataDir, '--data-dir');
+        home = dataDir !== undefined ? resolveLoreHome({ dataDir }) : loreHome();
+        console.log(`  Home:      ${home}${dataDir !== undefined ? ' (from --data-dir)' : ''}`);
+        console.log(`  Registry:  ${path.join(home, 'workspaces.json')}`);
+        if (apply) {
+            assertWorkspaceTarget({ home, workspaceName: from, dataDirGiven: dataDir !== undefined });
+            assertWorkspaceTarget({ home, workspaceName: to, dataDirGiven: dataDir !== undefined });
+        }
+    } catch (error) {
+        console.error(`migrate workspace-to-workspace refused: ${(error as Error).message}`);
+        process.exit(1);
+    }
+
+    let report: MigrateReport;
+    try {
+        report = await migrateWorkspaceToWorkspace({
+            from: from!,
+            to: to!,
+            filterTypes: filterTypes.length > 0 ? filterTypes : undefined,
+            filterTag,
+            excludeIdPrefixes: excludeIdPrefixes.length > 0 ? excludeIdPrefixes : undefined,
+            includeEdges,
+            includeVectors,
+            deleteSource,
+            apply,
+            onConflict: onConflictRaw,
+            force,
+            home,
+        });
+    } catch (error) {
+        console.error(`migrate workspace-to-workspace failed: ${(error as Error).message}`);
+        process.exit(1);
+    }
 
     console.log('');
     console.log(`workspace-to-workspace migration: ${from} → ${to} (${report.appliedMode})`);

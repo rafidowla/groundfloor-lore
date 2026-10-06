@@ -8,11 +8,11 @@ import type { EmbeddingProvider, VectorProvider, VerbatimDocument, VerbatimSearc
 import { LocalEmbeddingProvider } from '../providers/localEmbeddingProvider.js';
 import { warmEmbeddingProvider } from '../providers/embeddingWarmup.js';
 import { isEmbeddingDisabled } from '../providers/nullEmbeddingProvider.js';
-import { applyFingerprintOnOpen, stampFingerprint, EmbeddingFingerprintMismatchError } from './verbatimFingerprintGate.js';
+import { applyFingerprintOnOpen, stampFingerprint, stampLegacyFingerprint, legacyStampDimension, EmbeddingFingerprintMismatchError } from './verbatimFingerprintGate.js';
 import { applyActorScopeFilter } from '../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../security/actorContext.js';
 import { LanceTablePool, resolveLancePoolSize } from './lanceTablePool.js';
-import { VerbatimWriteGate, closeVerbatimNatives, nativeCloseEnabled } from './verbatimWriteGate.js';
+import { VerbatimWriteGate, closeVerbatimNatives, closeDrainTimeoutMs, nativeCloseEnabled } from './verbatimWriteGate.js';
 import { resolvePoolMaxWaiters, resolvePoolAcquireTimeoutMs } from './poolLimits.js';
 import { log } from '../logger.js';
 import { timeRecallStage } from '../recall/recallStageTiming.js';
@@ -20,11 +20,11 @@ import { ReadCache, cacheKey } from './cache.js';
 import { BoundedVectorCache } from './boundedVectorCache.js';
 import { computeContentHash } from './contentHash.js';
 import * as verbatimHistory from './verbatimHistory.js';
-import { assertSafeLanceId, assertSafeLanceHash, isRevisionHistoryId, HISTORY_ID_LIKE_PATTERN, toPlainVector as toPlainVectorShared } from './verbatimHistory.js';
+import { assertSafeLanceId, assertSafeLanceHash, isRevisionHistoryId, HISTORY_ID_LIKE_PATTERN, toPlainVector as toPlainVectorShared, toPlainStringList as toPlainStringListShared } from './verbatimHistory.js';
 import { redactSecrets } from '../security/secretScan.js';
 import * as verbatimBatch from './verbatimBatch.js';
 import { purgeRowsWithHistory, existingIdsInTable, deleteExistingIds } from './verbatimPurgeRows.js';
-import type { VerbatimBatchCtx } from './verbatimBatch.js';
+import type { VerbatimBatchCtx, BulkAddResult } from './verbatimBatch.js';
 import { VERBATIM_CHUNK_SIZE, suppliedVector } from './verbatimBatch.js';
 import { lanceGetVectors, normalizeGetVectorsIds } from './verbatimGetVectors.js';
 import { embedBatchCap, awaitEmbedMemoryHeadroom } from '../embed/memoryBudget.js';
@@ -91,12 +91,24 @@ export class VerbatimStoreError extends Error {
     }
 }
 
+/** H1 (3.28.0 review): a write queued on the per-path lane ran AFTER its store's close() released the
+ *  handles. It did not run; no row changed. Distinct type so callers can tell it from an I/O failure. */
+export class VerbatimStoreClosedError extends VerbatimStoreError {
+    constructor(operation: string) {
+        super('closed', `${operation}: the store was closed before this queued write ran; nothing was written`);
+        this.name = 'VerbatimStoreClosedError';
+    }
+}
+const rethrowAs = (operation: string, error: unknown): VerbatimStoreError =>
+    error instanceof VerbatimStoreClosedError ? error : new VerbatimStoreError(operation, (error as Error).message);
+
 export class VerbatimStore implements VectorProvider {
     private initialized: boolean = false;
+    private handlesReleased: boolean = false; // set once close() has decided the handles are gone; queued lane writes then reject
     private db: lancedb.Connection | null = null;
     private table: lancedb.Table | null = null;
     private nativesClosed: boolean = false; // idempotent-close guard
-    private readonly writeGate = new VerbatimWriteGate(); // gates direct table/db touches
+    private readonly writeGate: VerbatimWriteGate; // gates direct table/db touches; its write lane is keyed by lancedbPath (set in the constructor)
     /**
      * Read-side pool of N additional Table handles on the same on-disk
      * `lore_verbatim` table. Built lazily on first search() (or eagerly
@@ -178,6 +190,7 @@ export class VerbatimStore implements VectorProvider {
         this.pieceVectorsIntent = opts?.pieceVectors ?? false;
         this.lancedbPath = path.join(basePath, '.lore', 'lancedb');
         fs.mkdirSync(this.lancedbPath, { recursive: true });
+        this.writeGate = new VerbatimWriteGate(this.lancedbPath); // 3.28.0 — write lane shared by every store on this path in this process
         // Default to the local Xenova provider when none is injected.
         // Slice 6b/7 will inject a different provider from the server
         // factory; existing direct constructions (CLI scripts, tests
@@ -418,8 +431,49 @@ export class VerbatimStore implements VectorProvider {
             set ftsFallbackWarned(v: boolean) { self.ftsFallbackWarned = v; },
             get lancedbPath() { return self.lancedbPath; },
             bumpSearchEpoch() { self.bumpSearchEpoch(); },
+            // Stamp the fingerprint at table birth so later opens can detect a model-config drift.
+            onTableBirth() { stampFingerprint(self.basePath, self.embeddingProvider, 'table create'); },
         };
         return this._batchCtx;
+    }
+
+    /**
+     * 3.28.0 — the ONLY way a write reaches the table. Takes the per-path write
+     * lane (shared by every VerbatimStore on this Lance path in this process),
+     * then brings this store's table handle up to the latest committed version
+     * BEFORE `fn` reads or writes anything: LanceDB `mergeInsert` from a handle
+     * opened before another writer's commit does not see that row and inserts a
+     * duplicate (verified, stale-handle probe). The refresh also covers a
+     * table another writer created after this store opened with none.
+     */
+    private writeLane<T>(fn: () => Promise<T>): Promise<T> {
+        return this.writeGate.exclusive(async () => {
+            // H1: a write that reaches the lane after close() released this store must REJECT, never no-op as success.
+            if (this.handlesReleased) throw new VerbatimStoreClosedError('write');
+            await verbatimBatch.refreshWriteTable(this.batchCtx);
+            // Re-check: close() can release the handles while the refresh awaits. No await sits between this check and
+            // fn's first read of this.table, so fn never starts on a handle that was just nulled.
+            if (this.handlesReleased) throw new VerbatimStoreClosedError('write');
+            return fn();
+        });
+    }
+
+    /** role:'read' holds no write handle, so a table that exists with no fingerprint was never
+     *  stamped by this open. Probe it with a short-lived handle (schema only, no write, outside
+     *  the write lane) and stamp via the shared legacy rule. Compat checking stays as it was for
+     *  this role (none). Never throws. */
+    private async stampLegacyFingerprintForReadRole(): Promise<void> {
+        let probe: lancedb.Table | null = null;
+        try {
+            if (!this.db || !(await this.db.tableNames()).includes('lore_verbatim')) return;
+            probe = await this.db.openTable('lore_verbatim');
+            const dim = await legacyStampDimension(this.basePath, this.embeddingProvider, probe);
+            if (dim !== undefined) stampLegacyFingerprint(this.basePath, this.embeddingProvider, dim);
+        } catch (err) {
+            log.warn(`[VerbatimStore] read-role fingerprint stamp skipped: ${(err as Error).message}`);
+        } finally {
+            try { probe?.close(); } catch { /* best-effort */ }
+        }
     }
 
     async initialize(): Promise<void> {
@@ -427,7 +481,7 @@ export class VerbatimStore implements VectorProvider {
             if (this.initialized) return;
             // Best-effort embedder warm-up (non-fatal; retried on first embed).
             await warmEmbeddingProvider(this.embeddingProvider, '[VerbatimStore]');
-            this.db = await lancedb.connect(this.lancedbPath); this.nativesClosed = false; // reconnect => close() runs again
+            this.db = await lancedb.connect(this.lancedbPath); this.nativesClosed = false; this.handlesReleased = false; // reconnect => close() runs again
             try {
                 this.table = shouldOpenWriteTable(this.role) ? await this.db.openTable('lore_verbatim') : null; // role:'read' skips this open
             } catch (e) {
@@ -437,7 +491,10 @@ export class VerbatimStore implements VectorProvider {
             // Embedding-model fingerprint check at open: legacy stamp, then
             // warn-only (default) or refuse (strict / injected provider) on a
             // mismatch — policy + rationale in verbatimFingerprintGate.ts.
-            applyFingerprintOnOpen(this.basePath, this.table != null, this.embeddingProvider, this.strictFingerprintCheck);
+            // The legacy stamp verifies the table's vector width against the provider's first.
+            applyFingerprintOnOpen(this.basePath, this.table != null, this.embeddingProvider, this.strictFingerprintCheck,
+                await legacyStampDimension(this.basePath, this.embeddingProvider, this.table));
+            if (!shouldOpenWriteTable(this.role)) await this.stampLegacyFingerprintForReadRole();
             this.initialized = true;
 
             // D7 (3.23) — open/validate the derived piece index. Best-effort:
@@ -619,13 +676,16 @@ export class VerbatimStore implements VectorProvider {
      * Used by `lanceAdapter.addRows` via the LanceAddRowsFn callback
      * wired in mcp/server.ts. NOT a hot-path API — bulk loads only.
      */
-    async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
+    async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<BulkAddResult> {
         assertWritableRole(this.role, 'bulkAddPrebuiltRows');
-        await this.writeGate.run(() => verbatimBatch.bulkAddPrebuiltRows(this.batchCtx, rows));
+        const result = await this.writeGate.run(() => this.writeLane(() => verbatimBatch.bulkAddPrebuiltRows(this.batchCtx, rows)));
         // D7 (3.23) — best-effort piece maintenance; bulk-loaded rows carry
         // no redaction step upstream (Sprint Z2 skip-embed contract), so
         // pieces are built from the row fields exactly as supplied.
-        await this.pieceIndex.upsertForRows(rows as unknown as PieceSourceRow[]);
+        // J4 — rows with unsafe ids were skipped, so they get no pieces either.
+        const written = result.rejectedCount > 0 ? verbatimBatch.partitionSafeBulkRows(rows).safe : rows;
+        await this.pieceIndex.upsertForRows(written as unknown as PieceSourceRow[]);
+        return result;
     }
 
     /**
@@ -644,7 +704,7 @@ export class VerbatimStore implements VectorProvider {
      */
     async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
         assertWritableRole(this.role, 'bulkUpsertPrebuiltRows');
-        await this.writeGate.run(() => verbatimBatch.bulkUpsertPrebuiltRows(this.batchCtx, rows));
+        await this.writeGate.run(() => this.writeLane(() => verbatimBatch.bulkUpsertPrebuiltRows(this.batchCtx, rows)));
         await this.pieceIndex.upsertForRows(rows as unknown as PieceSourceRow[]);
     }
 
@@ -777,21 +837,11 @@ export class VerbatimStore implements VectorProvider {
      */
     private toPlainVector(v: unknown): number[] { return toPlainVectorShared(v); } // 3.27.1: one copy, shared with exportRows/getVectors (verbatimHistory.ts)
 
-    /** Same Arrow-sentinel coercion for List<Utf8> fields. */
-    private toPlainStringList(v: unknown): string[] {
-        if (!v) return [];
-        if (Array.isArray(v)) return v.map((x) => String(x));
-        const indexed = v as { length?: number; [k: number]: unknown };
-        if (typeof indexed.length === 'number') {
-            const out: string[] = new Array(indexed.length);
-            for (let i = 0; i < indexed.length; i++) out[i] = String(indexed[i]);
-            return out;
-        }
-        return [];
-    }
+    /** Same Arrow-sentinel coercion for List<Utf8> fields (shared helper: verbatimHistory.ts). */
+    private toPlainStringList(v: unknown): string[] { return toPlainStringListShared(v); }
 
     private async snapshotForRev(canonicalId: string): Promise<void> {
-        if (!this.initialized || !this.table) return;
+        if (!this.table) return; // not gated on `initialized`: a write queued before close() still snapshots (H1)
         if (this.isHistoryId(canonicalId)) return; // never snapshot a snapshot
         assertSafeLanceId(canonicalId, 'snapshotForRev'); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
         try {
@@ -872,6 +922,26 @@ export class VerbatimStore implements VectorProvider {
         }
     }
 
+    /** SP-13 / 1.10 / 1.M9 skip-identical predicate: `existing` already holds exactly what `doc` would write
+     *  (same contentHash AND same persisted metadata/scopes AND not a tombstone). */
+    private matchesExisting(
+        existing: Awaited<ReturnType<VerbatimStore['getById']>>,
+        doc: VerbatimDocument,
+        effectiveHash: string,
+    ): boolean {
+        if (!existing || existing.contentHash !== effectiveHash) return false;
+        if ((existing.text ?? '').startsWith('[TOMBSTONED')) return false;
+        const sameScopes = JSON.stringify([...(existing.security_scopes ?? [])].sort())
+            === JSON.stringify([...(doc.metadata?.security_scopes ?? [])].sort());
+        return (existing.type ?? '') === (doc.metadata?.type || '') &&
+            (existing.label ?? '') === (doc.metadata?.label || '') &&
+            (existing.tags ?? '') === (doc.metadata?.tags || '') &&
+            (existing.project ?? '') === (doc.metadata?.project || '') &&
+            (existing.ecosystem ?? '') === (doc.metadata?.ecosystem || '') &&
+            (existing.updatedAt ?? '') === (doc.metadata?.updatedAt || '') &&
+            sameScopes;
+    }
+
     async store(doc: VerbatimDocument): Promise<void> {
         // 3.21 step 3(c) — NullEmbeddingProvider: no vector write attempted.
         // The caller's graph node + text already landed via the graph
@@ -922,82 +992,72 @@ export class VerbatimStore implements VectorProvider {
             // 1.M9 — "identical" must also cover the metadata columns the row
             // persists; a text-only match used to silently drop metadata-only
             // updates (project/ecosystem/type/updatedAt/security_scopes).
-            if (!this.isHistoryId(doc.id) && !wasRedacted && effectiveHash) {
-                const existing = await this.getById(doc.id);
-                if (existing && existing.contentHash === effectiveHash) {
-                    const tombstoned = (existing.text ?? '').startsWith('[TOMBSTONED');
-                    const sameScopes = JSON.stringify([...(existing.security_scopes ?? [])].sort())
-                        === JSON.stringify([...(doc.metadata?.security_scopes ?? [])].sort());
-                    const sameMetadata =
-                        (existing.type ?? '') === (doc.metadata?.type || '') &&
-                        (existing.label ?? '') === (doc.metadata?.label || '') &&
-                        (existing.tags ?? '') === (doc.metadata?.tags || '') &&
-                        (existing.project ?? '') === (doc.metadata?.project || '') &&
-                        (existing.ecosystem ?? '') === (doc.metadata?.ecosystem || '') &&
-                        (existing.updatedAt ?? '') === (doc.metadata?.updatedAt || '') &&
-                        sameScopes;
-                    if (!tombstoned && sameMetadata) return;
-                }
-            }
+            // H2 (3.28.0 review): the AUTHORITATIVE skip decision runs inside the write lane, on the table handle
+            // refreshWriteTable just brought current. A check on this store's own (possibly stale) handle let store A
+            // skip "identical" content that store B on the same path had since overwritten, losing A's update. The
+            // pre-lane read below is only a hint that lets an unchanged re-store skip the embed; the lane re-checks.
+            const skipEligible = !this.isHistoryId(doc.id) && !wasRedacted && !!effectiveHash;
+            let hintIdentical = skipEligible && this.matchesExisting(await this.getById(doc.id), doc, effectiveHash);
             // Parent-embeds worker: a supplied vector outranks the cache probe
             // and the provider, whose child-side stub throws (suppliedVector).
-            let vector = suppliedVector(doc) ?? await this.lookupByContentHash(effectiveHash);
-            if (!vector) vector = await this.embeddingProvider.embedDocument(doc.text);
-            this.hashCache.set(effectiveHash, vector);
-
-            // Snapshot the prior canonical row into history before replacing it
-            // (history rows — id contains `#rev` — bypass; already snapshots).
-            if (!this.isHistoryId(doc.id)) {
-                await this.snapshotForRev(doc.id);
-            }
-
-            const row = {
-                vector: this.toPlainVector(vector), // PR #69 P2: normalize Float32Array from cache-hit
-                id: doc.id,
-                text: doc.text,
-                type: doc.metadata?.type || '',
-                label: doc.metadata?.label || '',
-                tags: doc.metadata?.tags || '',
-                project: doc.metadata?.project || '',
-                ecosystem: doc.metadata?.ecosystem || '',
-                updatedAt: doc.metadata?.updatedAt || '',
-                security_scopes: doc.metadata?.security_scopes || [],
-                contentHash: effectiveHash,
-            };
-
-            // C3-medium (2026-08-17) — race-safe first-write creation. Two
-            // concurrent stores to a cold workspace both saw `!this.table` and
-            // both called createEmptyTable; the loser threw "Table
-            // 'lore_verbatim' already exists" (on the ingest-autolink path
-            // that error was only console-logged — the node's semantic edges
-            // were silently never drawn). ensureVerbatimTable turns the lost
-            // race into an openTable; `createdTable` tells us whether WE
-            // created it (plain add into a guaranteed-empty table is safe) or
-            // must take the normal upsert path below.
-            let createdTable = false;
-            if (!this.table) {
-                log.info('[VerbatimStore] Creating new table with explicit schema...');
-                createdTable = (await verbatimBatch.ensureVerbatimTable(this.batchCtx)).created;
-                // Stamp the fingerprint at table-birth so later opens can detect a model-config drift.
-                if (createdTable) stampFingerprint(this.basePath, this.embeddingProvider, 'table create');
-            }
-            const table = this.table!; // set: either pre-existing or just ensured above
-            if (createdTable) {
-                await table.add([row]);
-            } else if (this.isHistoryId(doc.id)) {
-                // History rows are append-only snapshots — plain add.
-                await table.add([row]);
-            } else {
-                // SP-18 — ATOMIC canonical upsert. Was delete(id)+add(row): a
-                // crash between them lost the canonical row permanently (only
-                // restorable manually from history, never via /api/recall).
-                // LanceDB mergeInsert collapses delete+add into one atomic op
-                // keyed on id — a crash leaves the old OR new row, never neither.
-                await table
-                    .mergeInsert('id')
-                    .whenMatchedUpdateAll()
-                    .whenNotMatchedInsertAll()
-                    .execute([row]);
+            let vector: Float32Array | number[] | null = null;
+            let row!: Record<string, unknown> & { id: string; label: string; text: string; type: string; project: string; ecosystem: string; security_scopes: string[] };
+            for (;;) {
+                if (!hintIdentical && !vector) { // embed OUTSIDE the lane — it is the slow step
+                    vector = suppliedVector(doc) ?? await this.lookupByContentHash(effectiveHash);
+                    if (!vector) vector = await this.embeddingProvider.embedDocument(doc.text);
+                    this.hashCache.set(effectiveHash, vector);
+                }
+                // Duplicate-canonical fix (3.28.0): skip check, snapshot + write run under the store's write mutex,
+                // so an overlapping store/storeBatch/bulk call for the same id (or a first-write table-creation race,
+                // where every racer is told `created:true`) cannot interleave with them.
+                const outcome = await this.writeLane(async (): Promise<'written' | 'skipped' | 'need-embed'> => {
+                    if (skipEligible && this.matchesExisting(await verbatimHistory.getById(this.table, true, doc.id), doc, effectiveHash)) return 'skipped';
+                    if (!vector) return 'need-embed'; // the hint said identical, the fresh row says otherwise: embed outside the lane, then retry
+                    row = {
+                        vector: this.toPlainVector(vector), // PR #69 P2: normalize Float32Array from cache-hit
+                        id: doc.id,
+                        text: doc.text,
+                        type: doc.metadata?.type || '',
+                        label: doc.metadata?.label || '',
+                        tags: doc.metadata?.tags || '',
+                        project: doc.metadata?.project || '',
+                        ecosystem: doc.metadata?.ecosystem || '',
+                        updatedAt: doc.metadata?.updatedAt || '',
+                        security_scopes: doc.metadata?.security_scopes || [],
+                        contentHash: effectiveHash,
+                    };
+                    // Snapshot the prior canonical row into history before replacing it
+                    // (history rows — id contains `#rev` — bypass; already snapshots).
+                    if (!this.isHistoryId(doc.id)) {
+                        await this.snapshotForRev(doc.id);
+                    }
+                    // C3-medium (2026-08-17) — race-safe first-write creation. Two
+                    // concurrent stores to a cold workspace both saw `!this.table` and
+                    // both called createEmptyTable; the loser threw "Table
+                    // 'lore_verbatim' already exists". ensureVerbatimTable turns the lost
+                    // race into an openTable; `createdTable` tells us whether WE
+                    // created it (plain add into a guaranteed-empty table is safe) or
+                    // must take the normal upsert path below. H1: write through the
+                    // table it returns, never `this.table!` (null once close() released it).
+                    let table = this.table;
+                    let createdTable = false;
+                    if (!table) {
+                        log.info('[VerbatimStore] Creating new table with explicit schema...');
+                        const ensured = await verbatimBatch.ensureVerbatimTable(this.batchCtx);
+                        table = ensured.table; createdTable = ensured.created;
+                    }
+                    if (createdTable || this.isHistoryId(doc.id)) {
+                        await table.add([row]); // new table / append-only history snapshot — plain add
+                    } else {
+                        // SP-18 — ATOMIC canonical upsert (a crash leaves the old OR new row, never neither).
+                        await table.mergeInsert('id').whenMatchedUpdateAll().whenNotMatchedInsertAll().execute([row]);
+                    }
+                    return 'written';
+                });
+                if (outcome === 'skipped') return;
+                if (outcome === 'written') break;
+                hintIdentical = false;
             }
             // Invalidate search cache so the next recall sees this write.
             this.bumpSearchEpoch();
@@ -1011,7 +1071,7 @@ export class VerbatimStore implements VectorProvider {
                 project: row.project, ecosystem: row.ecosystem, security_scopes: row.security_scopes,
             }]);
         } catch (error: any) {
-            throw new VerbatimStoreError('store', error.message);
+            throw rethrowAs('store', error);
         } finally { this.writeGate.exit(); }
     }
 
@@ -1053,90 +1113,15 @@ export class VerbatimStore implements VectorProvider {
         docs = verbatimBatch.dedupeByIdKeepLast(docs, (d) => d.id);
         if (docs.length === 0) return;
 
-        // Layer 2 preflight (2026-04-30): instead of N round-trips (one
-        // delete + one snapshot per doc), do ONE bulk query for the set
-        // of canonical ids that already exist, write history snapshots
-        // in one .add(), then ONE delete with id IN (...). Net: 3 ops
-        // instead of 2N. The first per-item-loop implementation hung
-        // for 25min on a 16k-doc batch because each LanceDB delete is
-        // a small but non-trivial round-trip.
-        //
-        // C-R2-01 (HIGH, data-loss): the canonical DELETE is DEFERRED out of
-        // this preflight into Phase 3 (just before the bulk add). Collect the
-        // chunk predicates here; the actual delete runs only after embedding
-        // succeeds, so a throw/crash during the seconds-long Phase 2 embed can
-        // never leave canonicals deleted-but-not-re-added.
-        const deferredCanonicalDeletes: string[] = [];
-        if (this.table) {
-            const targetIds = docs
-                .filter((d) => !this.isHistoryId(d.id))
-                .map((d) => d.id);
-            if (targetIds.length > 0) {
-                targetIds.forEach((id) => assertSafeLanceId(id, 'storeBatch.preflight')); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
-                try {
-                    // 1. Bulk query existing canonical rows.
-                    // SP-25 F4: chunk the IN predicate (same CHUNK as physicalDeleteMany)
-                    // so a large batch does not build an unbounded predicate string.
-                    const existing: unknown[] = [];
-                    const chunkEscIdsList: string[] = [];
-                    for (let ci = 0; ci < targetIds.length; ci += VERBATIM_CHUNK_SIZE) {
-                        const chunkIds = targetIds.slice(ci, ci + VERBATIM_CHUNK_SIZE);
-                        const escChunk = chunkIds.map((id) => `'${id.replace(/'/g, "''")}'`).join(',');
-                        chunkEscIdsList.push(escChunk);
-                        const rows = await this.table.query().where(`id IN (${escChunk})`).toArray();
-                        existing.push(...rows);
-                    }
-
-                    // 2. Bulk-add them as <id>#rev<ts> snapshots.
-                    if (existing.length > 0) {
-                        const ts = new Date().toISOString();
-                        const snapshotRows = existing.map((r) => {
-                            const rec = r as Record<string, unknown>;
-                            return {
-                                vector: this.toPlainVector(rec.vector),
-                                id: `${String(rec.id ?? '')}#rev${ts}`,
-                                text: rec.text ?? '',
-                                type: rec.type ?? '',
-                                label: rec.label ?? '',
-                                tags: rec.tags ?? '',
-                                project: rec.project ?? '',
-                                ecosystem: rec.ecosystem ?? '',
-                                updatedAt: rec.updatedAt ?? '',
-                                security_scopes: this.toPlainStringList(rec.security_scopes),
-                                contentHash: rec.contentHash ?? '',
-                            };
-                        });
-                        // History snapshot is BEST-EFFORT — a snapshot write
-                        // failure must not block the canonical update (but it must
-                        // also not skip the delete below).
-                        try {
-                            await this.table.add(snapshotRows);
-                        } catch (snapErr) {
-                            log.error(`[VerbatimStore] storeBatch history snapshot failed (history may be incomplete): ${(snapErr as Error).message}`);
-                        }
-
-                        // 3. C-R2-01: DEFER the canonical delete to Phase 3
-                        //    (after embed). Collect the predicates now; the
-                        //    bulk-add in Phase 3 deletes immediately before it
-                        //    adds, so the delete+add stay adjacent and a failed
-                        //    embed in between leaves the canonicals intact.
-                        for (const escChunk of chunkEscIdsList) deferredCanonicalDeletes.push(escChunk);
-                    }
-                } catch (err) {
-                    // audit 2026-06-18 (HIGH, data integrity) — DO NOT swallow.
-                    // The existing-canonical QUERY is not optional: its result
-                    // drives the deferred Phase-3 delete that stops the bulk-add
-                    // from creating DUPLICATE canonical ids. If it fails we cannot
-                    // know which canonicals to retire, so propagate and let the
-                    // whole batch fail atomically for the caller to retry — never
-                    // add new canonicals over a failed preflight. (The history
-                    // snapshot above is the one best-effort step; the canonical
-                    // delete itself is deferred to Phase 3 per C-R2-01.)
-                    log.error(`[VerbatimStore] storeBatch preflight failed — aborting batch to avoid duplicate canonicals: ${(err as Error).message}`);
-                    throw err;
-                }
-            }
-        }
+        // Layer 2 preflight (2026-04-30): history snapshots + canonical retirement
+        // are batched (ONE bulk query + ONE add, not 2N round-trips — the
+        // per-item loop hung 25 min on a 16k-doc batch). Duplicate-canonical fix
+        // (3.28.0): the preflight now runs AFTER the embed phase and INSIDE the
+        // store's write mutex together with the write (see Phase 3), and the old
+        // delete(id IN ...) + add pair is one atomic mergeInsert('id') per chunk.
+        // Embed-first also keeps C-R2-01: a failed/crashed embed can never leave
+        // canonicals deleted-but-not-re-added (nothing is touched until the
+        // vectors exist), and no longer leaves a stray `#rev` snapshot either.
 
         // Phase 1: cache lookup. PR #69 P2: auto-compute hash if omitted.
         // SW-20 (E7): resolve all hashes in CHUNKED `contentHash IN (...)`
@@ -1201,27 +1186,27 @@ export class VerbatimStore implements VectorProvider {
             contentHash: hash,
         }));
 
-        // C3-medium — race-safe creation (see store()'s comment): open the
-        // table a concurrent first write just made instead of throwing
-        // "already exists"; only plain-add into a table WE created.
-        let createdTable = false;
-        if (!this.table) {
-            createdTable = (await verbatimBatch.ensureVerbatimTable(this.batchCtx)).created;
-            if (createdTable) stampFingerprint(this.basePath, this.embeddingProvider, 'table create');
-        }
-        const table = this.table!; // set: either pre-existing or just ensured above
-        if (createdTable) {
-            await table.add(rows);
-        } else {
-            // C-R2-01: embedding (Phase 2) has now succeeded — delete the prior
-            // canonicals (collected in the preflight) immediately before the add
-            // so we never duplicate them, while a failed embed above would have
-            // thrown before reaching here, leaving the canonicals untouched.
-            for (const escChunk of deferredCanonicalDeletes) {
-                await table.delete(`id IN (${escChunk})`);
+        // Phase 3 — preflight snapshot + write, ONE critical section on the
+        // store's write mutex. Without it two overlapping calls for the same ids
+        // both retired-then-added (or, on a cold table, both plain-added into the
+        // shared `created:true` table) and left two canonical rows each. The
+        // table state is read INSIDE the lock, so a concurrent first write that
+        // created the table is seen as pre-existing, never re-created.
+        await this.writeLane(async () => {
+            // C3-medium — race-safe creation (see store()'s comment): open the
+            // table a concurrent first write just made instead of throwing
+            // "already exists"; only plain-add into a table WE created.
+            let table = this.table;
+            let createdTable = false;
+            if (table) {
+                await verbatimBatch.snapshotExistingCanonicals(table, docs);
+            } else {
+                const ensured = await verbatimBatch.ensureVerbatimTable(this.batchCtx);
+                table = ensured.table; createdTable = ensured.created;
+                if (!createdTable) await verbatimBatch.snapshotExistingCanonicals(table, docs); // we created it => guaranteed empty
             }
-            await table.add(rows);
-        }
+            await verbatimBatch.commitBatchRows(table, rows, createdTable);
+        });
 
         // Bulk add touches a lot of canonical rows — invalidate the
         // search cache so the next recall sees the writes.
@@ -1424,7 +1409,7 @@ export class VerbatimStore implements VectorProvider {
                     project: r.project,
                     ecosystem: r.ecosystem,
                     updatedAt: r.updatedAt,
-                    security_scopes: r.security_scopes || [],
+                    security_scopes: this.toPlainStringList(r.security_scopes), // Arrow vector -> string[]: applyActorScopeFilter ignores non-arrays (fail-open)
                 },
             }));
             return applyActorScopeFilter(mapped, actorScopes ?? getCurrentActorScopes());
@@ -1452,6 +1437,8 @@ export class VerbatimStore implements VectorProvider {
      * Returns null if the row doesn't exist or the table hasn't been
      * created yet.
      */
+    // Read-your-handle: reads THIS store's table handle as last refreshed (open or last write); it can lag another
+    // store's commit. Writers needing freshness (store()'s skip check) read inside the write lane after refreshWriteTable.
     async getById(id: string): Promise<{
         contentHash?: string;
         text?: string;
@@ -1538,12 +1525,15 @@ export class VerbatimStore implements VectorProvider {
     async physicalDelete(id: string): Promise<void> {
         assertWritableRole(this.role, 'physicalDelete'); assertSafeLanceId(id, 'physicalDelete'); // D2-inj-1: guard id before WHERE interpolation, mirroring physicalDeleteMany/tombstone — outside try so validation errors propagate
         this.writeGate.enter(); try {
-            if (!this.initialized || !this.table) return;
-            await this.table.delete(`id = '${id.replace(/'/g, "''")}'`);
+            if (!this.initialized || !this.db) return; // table may be null here: another writer can have created it since we opened (writeLane refreshes)
+            await this.writeLane(async () => { // ordered with overlapping writes (3.28.0)
+                if (!this.table) return;
+                await this.table.delete(`id = '${id.replace(/'/g, "''")}'`);
+            });
             this.bumpSearchEpoch();
             await this.pieceIndex.deleteForIds([id]);
         } catch (error) {
-            throw new VerbatimStoreError('physicalDelete', (error as Error).message);
+            throw rethrowAs('physicalDelete', error);
         } finally { this.writeGate.exit(); }
     }
 
@@ -1561,7 +1551,7 @@ export class VerbatimStore implements VectorProvider {
      * something was actually deleted.
      */
     async physicalDeleteMany(ids: string[]): Promise<number> {
-        assertWritableRole(this.role, 'physicalDeleteMany'); if (!this.initialized || !this.table || ids.length === 0) return 0;
+        assertWritableRole(this.role, 'physicalDeleteMany'); if (!this.initialized || !this.db || ids.length === 0) return 0;
         // SP-25 F2: reject oversized ids before building the IN predicate.
         // 512 chars is generous for any legitimate lore: / sha-style id.
         const MAX_ID_LEN = 512;
@@ -1573,13 +1563,13 @@ export class VerbatimStore implements VectorProvider {
         ids.forEach((id) => assertSafeLanceId(id, 'physicalDeleteMany')); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
         this.writeGate.enter(); try {
             // 3.27.1 — deleteExistingIds queries first and commits no LanceDB version for absent ids.
-            if (await deleteExistingIds(this.table, ids, VERBATIM_CHUNK_SIZE)) {
+            if (await this.writeLane(async () => (this.table ? deleteExistingIds(this.table, ids, VERBATIM_CHUNK_SIZE) : false))) { // ordered with overlapping writes (3.28.0)
                 this.bumpSearchEpoch();
                 await this.pieceIndex.deleteForIds(ids);
             }
             return ids.length;
         } catch (error) {
-            throw new VerbatimStoreError('physicalDeleteMany', (error as Error).message);
+            throw rethrowAs('physicalDeleteMany', error);
         } finally { this.writeGate.exit(); }
     }
 
@@ -1602,15 +1592,15 @@ export class VerbatimStore implements VectorProvider {
      *  3.27.1 — no-op replay: no version, no epoch bump, guarded piece delete (verbatimPurgeRows.ts). */
     async purgeWithHistory(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'purgeWithHistory');
-        if (!this.initialized || !this.table || ids.length === 0) return 0;
+        if (!this.initialized || !this.db || ids.length === 0) return 0;
         ids.forEach((id) => assertSafeLanceId(id, 'purgeWithHistory')); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
         this.writeGate.enter(); try {
-            const all = await purgeRowsWithHistory(this.table, ids, VERBATIM_CHUNK_SIZE);
+            const all = await this.writeLane(async () => (this.table ? purgeRowsWithHistory(this.table, ids, VERBATIM_CHUNK_SIZE) : [])); // ordered with overlapping writes (3.28.0)
             if (all.length > 0) this.bumpSearchEpoch();
             await this.pieceIndex.deleteForIds([...new Set([...ids, ...all])]);
             return all.length;
         } catch (error) {
-            throw new VerbatimStoreError('purgeWithHistory', (error as Error).message);
+            throw rethrowAs('purgeWithHistory', error);
         } finally { this.writeGate.exit(); }
     }
 
@@ -1690,60 +1680,68 @@ export class VerbatimStore implements VectorProvider {
     async tombstone(id: string, reason: string, pre?: { ts: string; vector: number[] }): Promise<void> {
         assertWritableRole(this.role, 'tombstone'); assertSafeLanceId(id, 'tombstone'); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
         this.writeGate.enter(); try {
-            if (!this.initialized || !this.table) return;
+            if (!this.initialized || !this.db) return;
             if (this.isHistoryId(id)) return; // never tombstone a snapshot
-            const safe = id.replace(/'/g, "''");
-            const rows = await this.table.query().where(`id = '${safe}'`).limit(1).toArray();
-            if (rows.length === 0) return;
-            const r = rows[0] as Record<string, unknown>;
-            const existingText = String(r.text ?? '');
-            if (existingText.startsWith('[TOMBSTONED')) return; // already tombstoned — no-op
-            const ts = pre?.ts ?? new Date().toISOString(); // 3.27.1 — `pre`: parent-embeds proxy supplies ts + vector (child's stub provider cannot embed)
-            // Snapshot the previous content under a #rev id (explicit
-            // field copy — see snapshotForRev for why spread is unsafe
-            // against Arrow-backed rows).
-            const snapshotRow = {
-                vector: this.toPlainVector(r.vector),
-                id: `${id}#rev${ts}`,
-                text: r.text ?? '',
-                type: r.type ?? '',
-                label: r.label ?? '',
-                tags: r.tags ?? '',
-                project: r.project ?? '',
-                ecosystem: r.ecosystem ?? '',
-                updatedAt: r.updatedAt ?? '',
-                security_scopes: this.toPlainStringList(r.security_scopes),
-                contentHash: r.contentHash ?? '',
-            };
-            await this.table.add([snapshotRow]);
-            // Build the tombstone canonical content. Keep the original
-            // text accessible after a "TOMBSTONED" marker so a human
-            // (or recall) can still read what used to be there.
-            const tombstoneText = `[TOMBSTONED ${ts} reason: ${reason}]\n\n${existingText}`;
-            const newVector = pre?.vector ?? await this.embeddingProvider.embedDocument(tombstoneText);
-            // C3-medium (2026-08-17) — ATOMIC canonical replace. Was
-            // delete(id) then add(row): a crash or a failing add between the
-            // two permanently lost the canonical row while the caller saw
-            // success. mergeInsert collapses them into one atomic op keyed on
-            // id — the same SP-18 pattern store() already uses above; a crash
-            // leaves the OLD or the tombstone row, never neither.
-            await this.table
-                .mergeInsert('id')
-                .whenMatchedUpdateAll()
-                .whenNotMatchedInsertAll()
-                .execute([{
-                    vector: newVector,
-                    id,
-                    text: tombstoneText,
+            // Read-check-write under the store write mutex (3.28.0): an overlapping
+            // store()/storeBatch() otherwise interleaves with the snapshot + upsert.
+            const tombstoned = await this.writeLane(async () => {
+                const table = this.table; // read AFTER the lane's refresh: a store opened before the table existed has none until then
+                if (!table) return false;
+                const safe = id.replace(/'/g, "''");
+                const rows = await table.query().where(`id = '${safe}'`).limit(1).toArray();
+                if (rows.length === 0) return false;
+                const r = rows[0] as Record<string, unknown>;
+                const existingText = String(r.text ?? '');
+                if (existingText.startsWith('[TOMBSTONED')) return false; // already tombstoned — no-op
+                const ts = pre?.ts ?? new Date().toISOString(); // 3.27.1 — `pre`: parent-embeds proxy supplies ts + vector (child's stub provider cannot embed)
+                // Snapshot the previous content under a #rev id (explicit
+                // field copy — see snapshotForRev for why spread is unsafe
+                // against Arrow-backed rows).
+                const snapshotRow = {
+                    vector: this.toPlainVector(r.vector),
+                    id: `${id}#rev${ts}`,
+                    text: r.text ?? '',
                     type: r.type ?? '',
                     label: r.label ?? '',
                     tags: r.tags ?? '',
                     project: r.project ?? '',
                     ecosystem: r.ecosystem ?? '',
-                    updatedAt: ts,
+                    updatedAt: r.updatedAt ?? '',
                     security_scopes: this.toPlainStringList(r.security_scopes),
                     contentHash: r.contentHash ?? '',
-                }]);
+                };
+                await table.add([snapshotRow]);
+                // Build the tombstone canonical content. Keep the original
+                // text accessible after a "TOMBSTONED" marker so a human
+                // (or recall) can still read what used to be there.
+                const tombstoneText = `[TOMBSTONED ${ts} reason: ${reason}]\n\n${existingText}`;
+                const newVector = pre?.vector ?? await this.embeddingProvider.embedDocument(tombstoneText);
+                // C3-medium (2026-08-17) — ATOMIC canonical replace. Was
+                // delete(id) then add(row): a crash or a failing add between the
+                // two permanently lost the canonical row while the caller saw
+                // success. mergeInsert collapses them into one atomic op keyed on
+                // id — the same SP-18 pattern store() already uses above; a crash
+                // leaves the OLD or the tombstone row, never neither.
+                await table
+                    .mergeInsert('id')
+                    .whenMatchedUpdateAll()
+                    .whenNotMatchedInsertAll()
+                    .execute([{
+                        vector: newVector,
+                        id,
+                        text: tombstoneText,
+                        type: r.type ?? '',
+                        label: r.label ?? '',
+                        tags: r.tags ?? '',
+                        project: r.project ?? '',
+                        ecosystem: r.ecosystem ?? '',
+                        updatedAt: ts,
+                        security_scopes: this.toPlainStringList(r.security_scopes),
+                        contentHash: r.contentHash ?? '',
+                    }]);
+                return true;
+            });
+            if (!tombstoned) return;
             // Tombstone is a logical delete from search results — invalidate.
             this.bumpSearchEpoch();
             // D7 (3.23) — tombstoned content is excluded from search/bm25Search,
@@ -1758,7 +1756,7 @@ export class VerbatimStore implements VectorProvider {
             // VerbatimStoreError contract. The graceful no-op cases (store
             // not initialized, row absent, already tombstoned, history id)
             // still return normally above.
-            throw new VerbatimStoreError('tombstone', (error as Error).message);
+            throw rethrowAs('tombstone', error);
         } finally { this.writeGate.exit(); }
     }
 
@@ -1912,7 +1910,7 @@ export class VerbatimStore implements VectorProvider {
                             project: r.project,
                             ecosystem: r.ecosystem,
                             updatedAt: r.updatedAt,
-                            security_scopes: r.security_scopes || [],
+                            security_scopes: this.toPlainStringList(r.security_scopes), // Arrow vector -> string[]: applyActorScopeFilter ignores non-arrays (fail-open)
                         },
                     }));
                     // BM25-ranked (native FTS, indexed or brute-force) — safe
@@ -1995,7 +1993,7 @@ export class VerbatimStore implements VectorProvider {
                     project: r.project,
                     ecosystem: r.ecosystem,
                     updatedAt: r.updatedAt,
-                    security_scopes: r.security_scopes || [],
+                    security_scopes: this.toPlainStringList(r.security_scopes), // Arrow vector -> string[]: applyActorScopeFilter ignores non-arrays (fail-open)
                 },
             }));
             // UNRANKED — every hit forced to 1.0. Callers (recall/retrieve.ts)
@@ -2110,10 +2108,13 @@ export class VerbatimStore implements VectorProvider {
         try {
             this.initialized = false;
             const nativeClose = nativeCloseEnabled();
-            const drained = nativeClose ? await this.writeGate.drain(undefined, `VerbatimStore(${this.lancedbPath})`) : true;
+            const drained = nativeClose ? await this.writeGate.drain(closeDrainTimeoutMs(), `VerbatimStore(${this.lancedbPath})`) : true;
+            this.handlesReleased = true; // from here a write still queued on the lane rejects (H1)
             if (this.readPool) { await this.readPool.close().catch(() => undefined); this.readPool = null; }
             this.readPoolInit = null;
             if (nativeClose && drained) await closeVerbatimNatives({ table: this.table, db: this.db }, this.lancedbPath);
+            // On a drain timeout the natives stay open this round but the references are dropped (existing contract); a write
+            // still queued then rejects via handlesReleased, and one mid-flight fails on the null handle rather than no-op'ing.
             this.db = null; this.table = null; this.searchCache.clear();
             this.hashCache = new BoundedVectorCache(10_000); this.nativesClosed = true;
             await this.pieceIndex.close();

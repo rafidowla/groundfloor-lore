@@ -40,6 +40,7 @@ import {
     RERANK_K_MIN,
     RERANK_K_MAX,
 } from '../../recall/rerankConfig.js';
+import { parseOrExit, type ArgSpec } from '../args.js';
 
 function usage(): string {
     return [
@@ -66,11 +67,17 @@ function usage(): string {
     ].join('\n');
 }
 
-function readFlag(rest: string[], name: string): string | undefined {
-    const idx = rest.indexOf(name);
-    if (idx === -1 || idx === rest.length - 1) return undefined;
-    return rest[idx + 1];
-}
+/** Strict per-subcommand argument specs (unknown flags / extra positionals are usage errors). */
+const SUB_SPECS: Readonly<Record<string, ArgSpec>> = {
+    list: { bool: ['--json'] },
+    active: {},
+    switch: { bool: ['--quiet'], positionals: { min: 1, max: 1 } },
+    show: { bool: ['--json'], positionals: { min: 1, max: 1 } },
+    'set-rerank': { value: ['--model', '--k', '--margin'], positionals: { min: 2, max: 2 } },
+    'get-rerank': { bool: ['--json'], positionals: { min: 1, max: 1 } },
+    'set-vocab-policy': { value: ['--mode', '--types', '--on-mismatch'], positionals: { min: 1, max: 1 } },
+    'get-vocab-policy': { bool: ['--json'], positionals: { min: 1, max: 1 } },
+};
 
 export async function workspacesCommand(args: string[]): Promise<void> {
     const sub = args[0];
@@ -79,7 +86,13 @@ export async function workspacesCommand(args: string[]): Promise<void> {
         return;
     }
     const rest = args.slice(1);
-    const json = rest.includes('--json');
+    const subSpec = SUB_SPECS[sub];
+    // Unknown subcommands fall through to the "Unknown workspaces subcommand" message below.
+    const parsed = subSpec
+        ? parseOrExit(`workspaces ${sub}`, rest, subSpec, { usage: () => console.error(usage()) })
+        : undefined;
+    const readFlag = (_rest: string[], name: string): string | undefined => parsed?.get(name);
+    const json = parsed?.has('--json') ?? false;
 
     if (sub === 'list') {
         const file = loadWorkspaces();
@@ -100,13 +113,13 @@ export async function workspacesCommand(args: string[]): Promise<void> {
     }
 
     if (sub === 'switch') {
-        const name = rest.find(a => !a.startsWith('--'));
+        const name = parsed?.positionals[0];
         if (!name) {
             console.error('switch: missing workspace name. Usage: lore workspaces switch <name>');
             process.exit(1);
         }
         const updated = switchWorkspace(name);
-        if (!rest.includes('--quiet')) {
+        if (!parsed?.has('--quiet')) {
             console.log(`Active workspace: ${updated.active}`);
             console.log('Restart the Lore service to reinitialize against the new workspace.');
         }
@@ -114,7 +127,7 @@ export async function workspacesCommand(args: string[]): Promise<void> {
     }
 
     if (sub === 'show') {
-        const name = rest.find(a => !a.startsWith('--'));
+        const name = parsed?.positionals[0];
         if (!name) {
             console.error('show: missing workspace name.');
             process.exit(1);
@@ -139,7 +152,7 @@ export async function workspacesCommand(args: string[]): Promise<void> {
 
     if (sub === 'set-rerank') {
         // Positional args are `<name> <state>`, in that order.
-        const positionals = rest.filter((a) => !a.startsWith('--'));
+        const positionals = parsed?.positionals ?? [];
         const name = positionals[0];
         const state = positionals[1];
         if (!name || !state) {
@@ -189,7 +202,7 @@ export async function workspacesCommand(args: string[]): Promise<void> {
     }
 
     if (sub === 'get-rerank') {
-        const name = rest.find((a) => !a.startsWith('--'));
+        const name = parsed?.positionals[0];
         if (!name) {
             console.error('get-rerank: missing workspace name.');
             process.exit(1);
@@ -208,7 +221,7 @@ export async function workspacesCommand(args: string[]): Promise<void> {
     }
 
     if (sub === 'set-vocab-policy') {
-        const name = rest.find((a) => !a.startsWith('--'));
+        const name = parsed?.positionals[0];
         if (!name) {
             console.error('set-vocab-policy: missing workspace name.');
             console.error('Usage: lore workspaces set-vocab-policy <name> --mode <allowlist|denylist|open> [--types <csv>] [--on-mismatch <reject|hitl|warn>]');
@@ -242,7 +255,7 @@ export async function workspacesCommand(args: string[]): Promise<void> {
     }
 
     if (sub === 'get-vocab-policy') {
-        const name = rest.find((a) => !a.startsWith('--'));
+        const name = parsed?.positionals[0];
         if (!name) {
             console.error('get-vocab-policy: missing workspace name.');
             process.exit(1);

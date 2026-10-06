@@ -38,6 +38,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { loreHome } from '../../config/loreHome.js';
 import { loadWorkspaces } from '../../config/workspaces.js';
+import { parseOrExit } from '../args.js';
 import {
     computeRetentionPlan,
     validateRule,
@@ -57,12 +58,6 @@ function usage(): string {
         '                                                      Days required for warm-after / delete-after.',
         '  preview <workspace>                                 Dry-run: counts of what would warm/delete now.',
     ].join('\n');
-}
-
-function readFlag(rest: string[], name: string): string | undefined {
-    const idx = rest.indexOf(name);
-    if (idx === -1 || idx === rest.length - 1) return undefined;
-    return rest[idx + 1];
 }
 
 function workspacesJsonPath(): string {
@@ -113,11 +108,18 @@ export async function retentionCommand(args: string[]): Promise<void> {
         console.log(usage());
         return;
     }
-    const rest = args.slice(1);
-    const json = rest.includes('--json');
+    if (sub !== 'list' && sub !== 'set' && sub !== 'preview') {
+        console.error(`Unknown retention subcommand: ${sub}`);
+        console.error(usage());
+        process.exit(1);
+    }
+    const parsed = parseOrExit(`retention ${sub}`, args.slice(1), sub === 'set'
+        ? { bool: ['--json'], value: ['--mode', '--days'], positionals: { max: 2 } }
+        : { bool: ['--json'], positionals: { max: 1 } }, { usage: () => console.error(usage()) });
+    const json = parsed.has('--json');
 
     if (sub === 'list') {
-        const wsName = resolveWorkspaceName(rest.find((a) => !a.startsWith('--')));
+        const wsName = resolveWorkspaceName(parsed.positionals[0]);
         const policies = loadTypePolicies(wsName);
         if (json) {
             console.log(JSON.stringify({ workspace: wsName, typePolicies: policies }, null, 2));
@@ -137,11 +139,10 @@ export async function retentionCommand(args: string[]): Promise<void> {
     }
 
     if (sub === 'set') {
-        const positional = rest.filter((a) => !a.startsWith('--'));
-        const wsName = positional[0];
-        const type = positional[1];
-        const mode = readFlag(rest, '--mode');
-        const daysRaw = readFlag(rest, '--days');
+        const wsName = parsed.positionals[0];
+        const type = parsed.positionals[1];
+        const mode = parsed.get('--mode');
+        const daysRaw = parsed.get('--days');
         if (!wsName || !type || !mode) {
             console.error('set: <workspace> <type> --mode <keep|warm-after|delete-after> [--days <n>]');
             process.exit(1);
@@ -175,7 +176,7 @@ export async function retentionCommand(args: string[]): Promise<void> {
     }
 
     if (sub === 'preview') {
-        const wsName = resolveWorkspaceName(rest.find((a) => !a.startsWith('--')));
+        const wsName = resolveWorkspaceName(parsed.positionals[0]);
         const policies = loadTypePolicies(wsName);
         // Resolve workspace path via loadWorkspaces (each entry carries
         // its own `path`). Lazy-import the graph factory so a `--help`

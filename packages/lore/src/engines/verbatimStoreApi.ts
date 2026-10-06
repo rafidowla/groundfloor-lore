@@ -134,7 +134,7 @@ export interface VerbatimStoreApi extends VectorProvider {
 
     /** Substrate-native bulk loader append path — no embed, caller supplies
      *  placeholder vectors. Bulk-ingest-only, not a hot-path API. */
-    bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void>;
+    bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<{ rejectedCount: number; rejectedIds: string[] }>;
     /** Atomic prebuilt-row upsert keyed on `id` — delete+add collapsed into
      *  one op so a crash mid-write leaves the OLD or NEW row, never neither. */
     bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void>;

@@ -136,10 +136,37 @@ test('F4 — storeBatch SNAPSHOT_CHUNK constant present in source (structural gu
         src.includes('SNAPSHOT_CHUNK') || src.includes('VERBATIM_CHUNK_SIZE'),
         'storeBatch chunking constant present (SNAPSHOT_CHUNK or shared VERBATIM_CHUNK_SIZE)',
     );
-    assert.ok(
-        src.includes('chunkEscIdsList'),
-        'storeBatch delete uses per-chunk escIds list (not a single escIds)',
+    // 3.28.0 (duplicate-canonical fix) moved the chunked IN queries out of
+    // verbatimStore.ts: storeBatch's old per-chunk `delete(id IN chunkEscIdsList)`
+    // no longer exists (canonicals are now replaced by one atomic mergeInsert per
+    // chunk, so there is no delete to chunk). The intent is unchanged — no
+    // unbounded `id IN (...)`, every IN list / payload capped at ≤500 ids — and the
+    // chunking now lives in verbatimBatch.ts. Guard it there, per function.
+    const batch = await import('node:fs').then((fs) =>
+        fs.readFileSync('./packages/lore/src/engines/verbatimBatch.ts', 'utf8')
     );
+    assert.match(batch, /export const VERBATIM_CHUNK_SIZE = 500;/, 'shared chunk constant is still exactly 500');
+    const body = (name: string): string => {
+        const start = batch.indexOf(`export async function ${name}(`);
+        assert.ok(start >= 0, `${name} exists in verbatimBatch.ts`);
+        const end = batch.indexOf('\n}\n', start);
+        return batch.slice(start, end);
+    };
+    // (a) the preflight existing-row lookup (the `id IN (...)` query): chunked loop, IN list built per slice.
+    const snap = body('snapshotExistingCanonicals');
+    assert.match(snap, /ci \+= VERBATIM_CHUNK_SIZE/, 'snapshotExistingCanonicals steps through ids in VERBATIM_CHUNK_SIZE chunks');
+    assert.match(snap, /targetIds\.slice\(ci, ci \+ VERBATIM_CHUNK_SIZE\)/, 'snapshotExistingCanonicals builds each IN list from a bounded slice');
+    assert.ok(
+        snap.indexOf('slice(ci, ci + VERBATIM_CHUNK_SIZE)') < snap.indexOf('id IN ('),
+        'the IN list is built from the chunk slice, not from the full id list',
+    );
+    assert.ok(!/targetIds\s*\.map\([^)]*\)\s*\.join/.test(snap), 'no IN list is built from the whole id list');
+    // (b) the canonical write: mergeInsert payload chunked at the same size.
+    const up = body('upsertCanonicalRows');
+    assert.match(up, /i \+= VERBATIM_CHUNK_SIZE/, 'upsertCanonicalRows writes in VERBATIM_CHUNK_SIZE chunks');
+    assert.match(up, /deduped\.slice\(i, i \+ VERBATIM_CHUNK_SIZE\)/, 'each mergeInsert gets a bounded slice');
+    // (c) storeBatch (verbatimStore.ts) reaches both only through those helpers — it must not grow its own IN list.
+    assert.ok(src.includes('verbatimBatch.snapshotExistingCanonicals(') && src.includes('verbatimBatch.commitBatchRows('), 'storeBatch uses the chunked helpers');
 });
 
 test('F4 — storeBatch IN predicate per-chunk length is bounded at 500 ids', () => {

@@ -52,9 +52,11 @@ import { log } from '../logger.js';
 import { buildPieceIndex, type PieceBuildableStore } from './pieces/pieceIndexBuild.js';
 import {
     checkCompatibility,
+    getFingerprintPath,
     readFingerprintOrLegacy,
     writeFingerprint,
 } from './embeddingFingerprint.js';
+import { NullEmbeddingProvider } from '../providers/nullEmbeddingProvider.js';
 
 export interface MigrateEmbeddingModelOptions {
     /** Model id to migrate to (e.g. "Xenova/multilingual-e5-small"). Required. */
@@ -142,6 +144,26 @@ async function dropVerbatimTable(basePath: string): Promise<boolean> {
 }
 
 /**
+ * Non-`lore:` canonical rows of the existing table. Read-only probe with an
+ * embeddings-disabled provider: it only needs the stored rows, and a real
+ * (target) provider here would legacy-stamp the TARGET model's fingerprint
+ * onto an unfingerprinted table whose dimension happens to match — before
+ * anything has been migrated. The store is always closed (the table handle
+ * must be released before the drop).
+ */
+async function readPreservableRows(basePath: string): Promise<Array<{ id: string; text: string; contentHash: string; metadata: verbatimHistory.VerbatimExportRow['metadata'] }>> {
+    const store = new VerbatimStore(basePath, new NullEmbeddingProvider() as unknown as EmbeddingProvider);
+    // NOT role:'read' — that role opens no write table, so exportRows() would return zero rows.
+    // The NullEmbeddingProvider (modelId 'none') makes the store skip every fingerprint stamp.
+    try {
+        const exported = await store.exportRows();
+        return exported.rows.filter((r) => !r.id.startsWith('lore:'));
+    } finally {
+        await store.close().catch(() => undefined);
+    }
+}
+
+/**
  * Run the migration. Caller is responsible for:
  *   - constructing `graph` (already initialized) and `pluginRegistry`
  *     (already booted + schemas registered)
@@ -217,15 +239,25 @@ export async function migrateEmbeddingModel(
     //    `exportRows()` (same as workspace export) — that residual loss is
     //    a known, documented gap, not a silent one.
     let preservedRows: Array<{ id: string; text: string; contentHash: string; metadata: verbatimHistory.VerbatimExportRow['metadata'] }> = [];
+
+    // Review J2 (3.28.0): remember the SOURCE fingerprint file byte-for-byte so
+    // that anything that stamps the target model before the migration commits
+    // (a legacy stamp at store open, or table-birth stamping during the
+    // re-embed) is undone if the migration does not complete.
+    const fingerprintPath = getFingerprintPath(basePath);
+    let sourceFingerprintRaw: string | null = null;
+    try { sourceFingerprintRaw = fs.readFileSync(fingerprintPath, 'utf8'); } catch { sourceFingerprintRaw = null; }
+    let committed = false;
+    let verbatim: VerbatimStore | null = null;
+
     try {
-        const existingStore = new VerbatimStore(basePath, targetProvider);
-        const exported = await existingStore.exportRows();
-        preservedRows = exported.rows.filter((r) => !r.id.startsWith('lore:'));
+        preservedRows = await readPreservableRows(basePath);
     } catch {
         // No table yet (fresh install) — nothing to preserve.
         preservedRows = [];
     }
 
+    try {
     // 1. Drop the existing table. If this fails, abort BEFORE writing
     //    a new fingerprint — operators must not see "fingerprint says
     //    e5-small" while the table still holds MiniLM vectors.
@@ -240,7 +272,8 @@ export async function migrateEmbeddingModel(
     //    `pruneInferred: false` because we just dropped the vector
     //    table; LoreEdge prune is unrelated to the embedding swap and
     //    would make the operator wait for an unrelated cleanup.
-    const verbatim = new VerbatimStore(basePath, targetProvider);
+    const verbatimStore = new VerbatimStore(basePath, targetProvider);
+    verbatim = verbatimStore;
 
     // 1b. D7c (3.23) — a re-embed swaps the CANONICAL table into the new
     //     model's vector space; any existing piece-level index/sidecar was
@@ -259,12 +292,12 @@ export async function migrateEmbeddingModel(
     //     posture step 0's preservedRows read and step 2b's restore loop
     //     already take toward their own non-critical side effects.
     try {
-        await buildPieceIndex(basePath, verbatim as unknown as PieceBuildableStore, targetProvider, { drop: true });
+        await buildPieceIndex(basePath, verbatimStore as unknown as PieceBuildableStore, targetProvider, { drop: true });
     } catch (err) {
         log.warn(`[migrateEmbeddingModel] piece-index drop failed (continuing — the embedding-model migration itself is unaffected): ${(err as Error).message}`);
     }
 
-    const result = await reconnectGraph(graph, verbatim, {
+    const result = await reconnectGraph(graph, verbatimStore, {
         dryRun: false,
         force: true,
         pruneInferred: false,
@@ -279,7 +312,7 @@ export async function migrateEmbeddingModel(
     let nonNodeRowsPreserved = 0;
     for (const row of preservedRows) {
         try {
-            await verbatim.store({
+            await verbatimStore.store({
                 id: row.id,
                 text: row.text,
                 metadata: {
@@ -289,6 +322,9 @@ export async function migrateEmbeddingModel(
                     project: row.metadata.project ?? '',
                     ecosystem: row.metadata.ecosystem ?? '',
                     updatedAt: row.metadata.updatedAt ?? new Date().toISOString(),
+                    // Review J2: these rows are the ONLY copy, so their access scopes must
+                    // survive the rebuild — dropping them made restricted rows public.
+                    security_scopes: row.metadata.security_scopes ?? [],
                     contentHash: row.contentHash,
                 },
             });
@@ -321,6 +357,7 @@ export async function migrateEmbeddingModel(
     //    the on-disk fingerprint still reflects the previous (now
     //    invalid) state — operator can re-run the migration.
     writeFingerprint(basePath, { modelId: targetModelId, dimension: targetDimension });
+    committed = true;
 
     return {
         skipped: false,
@@ -333,4 +370,16 @@ export async function migrateEmbeddingModel(
         completedAt: new Date().toISOString(),
         nonNodeRowsPreserved,
     };
+    } finally {
+        if (!committed) {
+            // Not committed (abort or failure): put the source fingerprint back exactly as it was.
+            try {
+                if (sourceFingerprintRaw !== null) fs.writeFileSync(fingerprintPath, sourceFingerprintRaw);
+                else fs.rmSync(fingerprintPath, { force: true });
+            } catch (err) {
+                log.error(`[migrateEmbeddingModel] could not restore the source embedding fingerprint: ${(err as Error).message}`);
+            }
+        }
+        if (verbatim) await verbatim.close().catch(() => undefined);
+    }
 }
