@@ -30,6 +30,7 @@ import {
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { redactError } from '../../../security/logRedact.js';
 import { applyRecallOutcome, isRecallOutcomeValue } from '../../../recall/recallOutcome.js';
+import { buildWriteScopeDeps, mutateTargetVisible } from '../../../security/writeTargetGate.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 
 type LoreGraph = LoreGraphHandle;
@@ -117,6 +118,16 @@ export async function tryRecallOutcomeRoute(
                 }
                 throw err;
             }
+        }
+
+        // Row-level security_scopes (write path): hidden node → the exact
+        // node_not_found response below, nothing written.
+        if (!await mutateTargetVisible(
+            { nodeId: parsed.node_id, verbatimId: `lore:${parsed.node_id}` },
+            buildWriteScopeDeps({ workspace, store: deps.store, graphRegistry: deps.graphRegistry, versionStore: deps.versionStore }),
+        )) {
+            writeError(res, 404, 'node_not_found', `node not found: ${parsed.node_id}`, { node_id: parsed.node_id });
+            return true;
         }
 
         const result = await applyRecallOutcome({

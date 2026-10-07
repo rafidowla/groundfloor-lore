@@ -19,7 +19,9 @@ import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE, withEdgeLocks, ty
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import type { OutboxEntry } from '../../../outbox/types.js';
 import { readEdgePriors, markEdgeWritten, undoBulkEdgeWrite, retractBulkEdgeUpsert, reassertBulkEdgeUpsert } from './bulkEdgeRollback.js';
-import { resolveGraph, writeWorkspaceNotFound, ITEM_CAP, type BulkWriteDeps, type BulkResult, type EdgeInput } from './bulkWrite.js';
+import { bulkScopeDeps, deletableBulkIds, visibleEdgeEndpoints, edgeEndpointMissingMessage } from './bulkWriteScope.js';
+import { resolveGraph, writeWorkspaceNotFound } from './bulkWriteWorkspace.js';
+import { ITEM_CAP, type BulkWriteDeps, type BulkResult, type EdgeInput } from './bulkWrite.js';
 
 export async function handleBulkEdges(
     res: ServerResponse,
@@ -90,6 +92,22 @@ export async function handleBulkEdges(
             },
             bidirectional: raw.bidirectional === true,
         });
+    }
+    // Row-scope gate (bound actors only; unbound = null, zero lookups). An edge
+    // with an endpoint the actor cannot see gets exactly the error an edge with a
+    // missing endpoint gets (the engine's own edge_endpoint_missing text), and
+    // never reaches a lock, an outbox row or the graph. A missing endpoint takes
+    // the same branch, so the two cannot be told apart.
+    const visibleEnds = await visibleEdgeEndpoints(plans.map((p) => p.edge), bulkScopeDeps(deps, requestedWorkspace ?? deps.graphRegistry?.activeName() ?? ''));
+    if (visibleEnds) {
+        for (let n = plans.length - 1; n >= 0; n--) {
+            const { idx, edge } = plans[n]!;
+            const srcOk = visibleEnds.has(edge.sourceId);
+            const tgtOk = visibleEnds.has(edge.targetId);
+            if (srcOk && tgtOk) continue;
+            results[idx] = { ok: false, error: edgeEndpointMissingMessage(edge.sourceId, edge.targetId, srcOk, tgtOk) };
+            plans.splice(n, 1);
+        }
     }
     // Round-E X-edges finding (1) — this used to commit the WHOLE batch's
     // edge.upsert rows via recordHotWriteBatch BEFORE any lock was taken
@@ -276,8 +294,25 @@ export async function handleBulkDelete(
         const stripped = raw.startsWith('lore:') ? raw.slice(5) : raw;
         delPlans.push({ idx: i, raw, stripped });
     }
+    // Row-scope gate (bound actors only; unbound = null, zero lookups). An id the
+    // actor cannot see is answered like an id that does not exist
+    // (`deleted:false`, counted in notFound) and dropped from the plan before any
+    // lock, outbox row, graph delete or tombstone. A missing id takes the same branch.
+    let preNotFound = 0;
+    {
+        const deletable = await deletableBulkIds(delPlans.map((p) => p.stripped), bulkScopeDeps(deps, lockWorkspace, targetVerbatim));
+        if (deletable) {
+            for (let n = delPlans.length - 1; n >= 0; n--) {
+                const { idx, raw, stripped } = delPlans[n]!;
+                if (deletable.has(stripped)) continue;
+                results[idx] = { id: raw, ok: true, deleted: false };
+                preNotFound++;
+                delPlans.splice(n, 1);
+            }
+        }
+    }
     let deletedCount = 0;
-    let notFoundCount = 0;
+    let notFoundCount = preNotFound;
     // QA A2 round-4 finding 1 (2026-09-03) — set when ANY chunk's outbox
     // commit fails (see the chunk loop below). Drives the response `ok`
     // flag the same way the round-3 `outboxCommitError` used to: an outbox

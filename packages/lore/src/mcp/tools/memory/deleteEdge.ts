@@ -14,6 +14,7 @@ import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
 import { withEdgeLock } from '../../../core/nodeWriteLock.js';
 import { deleteEdgeOrRestore, type SingleEdgeGraph } from '../../edgeWriteRollback.js';
+import { edgeEndpointHidden, edgeGateDeps } from '../../edgeEndpointGate.js';
 
 export function registerDeleteEdgeTool(mcpServer: McpServer, deps: MemoryToolsDeps): void {
     mcpServer.tool(
@@ -69,7 +70,10 @@ export function registerDeleteEdgeTool(mcpServer: McpServer, deps: MemoryToolsDe
                 // between this call's outbox record and its graph delete,
                 // leaving the outbox order (delete-then-upsert) contradict
                 // what the substrate actually holds after both calls settle.
-                const deleted = await withEdgeLock(resolved.resolvedWorkspace, source_id, target_id, relation, async () => {
+                // Row-level security_scopes: a hidden endpoint answers as "no edge
+                // matched" (deleted = 0), with nothing recorded.
+                const hiddenEndpoint = await edgeEndpointHidden(source_id, target_id, edgeGateDeps(resolved.resolvedWorkspace, resolved.graph));
+                const deleted = hiddenEndpoint ? 0 : await withEdgeLock(resolved.resolvedWorkspace, source_id, target_id, relation, async () => {
                     // 2.3 (2026-08-17) — outbox-first edge.delete, mirroring
                     // DELETE /api/edge (http/routes/edges.ts). edge.upsert and
                     // edge.delete are ONE cross-superseding family

@@ -14,7 +14,6 @@
  * (one cursor per workspace).
  */
 
-import fs from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { StorageBundle } from '../../services.js';
@@ -45,14 +44,15 @@ import {
     loadExtraIngestionRoots,
     loadAllExtraRoots,
     PathAllowlistError,
-    MAX_INGESTION_BYTES,
 } from '../../../security/pathAllowlist.js';
+import { readAllowedFileSync } from './ingestionFileRead.js';
 import { loreHome } from '../../../config/loreHome.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../../engines/localGraphRegistry.js';
 import type { WorkspaceVerbatimResolver } from '../../../outbox/workspaceVerbatimResolver.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../security/exportGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, extractWorkspace, writeJson, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
@@ -62,37 +62,6 @@ import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 // more than the shared handle? Feature-detect and refuse — do not re-narrow to a class.
 type LoreGraph = LoreGraphHandle;
 type LoreVectorStore = VerbatimStoreApi | DataplaneVectorStore;
-
-// F-LOW-E06 — TOCTOU-safe read. assertPathAllowed() stats the file for the
-// size cap, but the file can change/grow between that check and the actual
-// read. Open the path ONCE (fd), fstat the same fd, re-check the cap against
-// the bytes we're about to read, then read via that fd — so the size we
-// validate is the size we read. Closes the stat-then-read window.
-function readAllowedFileSync(resolvedPath: string): Buffer {
-    const fd = fs.openSync(resolvedPath, 'r');
-    try {
-        const st = fs.fstatSync(fd);
-        if (!st.isFile()) {
-            throw new PathAllowlistError(`Not a regular file: ${resolvedPath}`, 'not-a-file');
-        }
-        if (st.size > MAX_INGESTION_BYTES) {
-            throw new PathAllowlistError(
-                `File exceeds ${MAX_INGESTION_BYTES}-byte ingestion cap: ${resolvedPath}`,
-                'too-large',
-            );
-        }
-        const buf = Buffer.allocUnsafe(st.size);
-        let read = 0;
-        while (read < st.size) {
-            const n = fs.readSync(fd, buf, read, st.size - read, read);
-            if (n === 0) break; // truncated mid-read; return what we got
-            read += n;
-        }
-        return read === st.size ? buf : buf.subarray(0, read);
-    } finally {
-        fs.closeSync(fd);
-    }
-}
 
 // F-LOW-E08 — serialize cursor read-modify-write per workspace. Two concurrent
 // reconnect requests for the same workspace could otherwise interleave their
@@ -179,6 +148,9 @@ export async function tryIngestionRoutes(
             // bypass. Gate BEFORE consent so a forbidden caller never triggers
             // a consent prompt. Mirrors nodes-delete.ts:96-111.
             if (bindRouteTarget(res, { requested: reconnectWs, intent: 'write' }) === null) return true;
+            // Rebuilds (apply) and proposes (dry-run) edges over every node, hidden
+            // ones included: operator-only for bound actors, before consent or any scan.
+            if (!requireOperatorForBoundActor(res, 'Graph reconnect')) return true;
             // L-018 — resolve the REQUESTED workspace's substrate so the
             // destructive rebuild targets it, not the boot-active graph.
             // Resolve graph + verbatim from the SAME workspace so they never
@@ -403,6 +375,8 @@ export async function tryIngestionRoutes(
             // L-018 — token-scoped write gate (reconsume always prunes +
             // rebuilds). Gate BEFORE consent. Null principal = legacy bypass.
             if (bindRouteTarget(res, { requested: reconsumeWs, intent: 'write' }) === null) return true;
+            // Re-embeds and re-links every node, hidden ones included: operator-only for bound actors.
+            if (!requireOperatorForBoundActor(res, 'Graph reconsume')) return true;
             // L-018 — resolve the requested workspace's substrate (graph +
             // verbatim from the same ws) so the rebuild never targets boot.
             let reconsumeGraphTarget: LoreGraph = deps.store.loreGraph;

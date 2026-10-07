@@ -24,13 +24,14 @@ import type { StorageBundle } from '../services.js';
 import type { VerbatimStoreApi } from '../../engines/verbatimStoreApi.js';
 import { redactError } from '../../security/logRedact.js';
 import { assertMcpScope } from './mcpScope.js';
-import { assertSafeVerbatimId } from '../../engines/verbatimHistory.js';
+import { assertSafeVerbatimId, isRevisionHistoryId } from '../../engines/verbatimHistory.js';
 import { hybridVerbatimSearch } from '../../engines/verbatimHybridSearch.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
 import { resolveTargetGraph } from './workspaceResolve.js';
-import { verbatimItemVisible } from '../../security/itemScopes.js';
+import { baseNodeId, verbatimItemVisible } from '../../security/itemScopes.js';
 import { getCurrentActorScopes } from '../../security/actorContext.js';
+import { buildWriteScopeDeps, createIdBlockedForCurrentActor, ID_UNAVAILABLE, ID_UNAVAILABLE_MESSAGE } from '../../security/writeTargetGate.js';
 
 /** Hit shape both scorers return on this surface (providers' verbatim row). */
 type VerbatimSearchHit = { id: string; score: number; text: string; metadata: Record<string, unknown> | null };
@@ -89,6 +90,10 @@ export function registerVerbatimTools(mcpServer: McpServer, deps: VerbatimToolsD
                 // 2.5 — reject 'lore:' (node-derived namespace) + '#rev' (internal
                 // revision suffix); a direct verbatim write must not overwrite a
                 // node's canonical row or forge its revision history.
+                const idUnavailable = { content: [{ type: 'text' as const, text: JSON.stringify({ error: ID_UNAVAILABLE, message: ID_UNAVAILABLE_MESSAGE }) }], isError: true };
+                // Row-level security_scopes: a bound actor naming a revision-history id gets the
+                // neutral refusal (pure shape check, no lookup) instead of the shape-specific error below.
+                if (getCurrentActorScopes() !== undefined && isRevisionHistoryId(args.id)) return idUnavailable;
                 assertSafeVerbatimId(args.id, 'store_verbatim');
                 const doc = {
                     id: args.id,
@@ -106,6 +111,11 @@ export function registerVerbatimTools(mcpServer: McpServer, deps: VerbatimToolsD
                 if (deps.workspaceVerbatimResolver) {
                     try {
                         const ws = await deps.workspaceVerbatimResolver.getOrOpen(args.workspace);
+                        // Row-level security_scopes: id taken by an item the bound actor cannot see → neutral refusal.
+                        if (await createIdBlockedForCurrentActor(
+                            { nodeId: baseNodeId(args.id), verbatimId: args.id },
+                            buildWriteScopeDeps({ workspace: args.workspace, store: deps.store, graphRegistry: deps.graphRegistry, versionStore: deps.versionStore, verbatim: ws as never }),
+                        )) return idUnavailable;
                         await ws.store(doc);
                     } catch (err) {
                         if (isWorkspaceNotFound(err)) {
@@ -114,6 +124,10 @@ export function registerVerbatimTools(mcpServer: McpServer, deps: VerbatimToolsD
                         throw err;
                     }
                 } else {
+                    if (await createIdBlockedForCurrentActor(
+                        { nodeId: baseNodeId(args.id), verbatimId: args.id },
+                        buildWriteScopeDeps({ workspace: args.workspace, store: deps.store, graphRegistry: deps.graphRegistry, versionStore: deps.versionStore, verbatim: deps.store.loreVerbatim as never }),
+                    )) return idUnavailable;
                     await deps.store.storageClient.verbatimStore(doc);
                 }
                 return { content: [{ type: 'text', text: JSON.stringify({ ok: true, id: args.id }) }] };

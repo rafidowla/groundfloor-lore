@@ -41,6 +41,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as crypto from 'node:crypto';
 import type { AuditLog } from '../../../security/audit.js';
 import { bindDaemonOperatorLane } from '../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../security/exportGate.js';
 import { writeJson, writeError } from '../helpers.js';
 import {
     provisionApp,
@@ -121,6 +122,11 @@ export async function tryArcadeBackupRoutes(
         return true;
     }
     if (!bindDaemonOperatorLane(res, { intent: backup ? 'read' : 'write' })) return true;
+    // These routes are mounted only in arcadeBoot.ts behind requireOperatorPrincipal, so today no
+    // actor is bound here and this gate never fires. It is defence-in-depth: if they are ever
+    // mounted on the main dispatcher, the lane would admit a cross-workspace-write app token, and
+    // these verbs act on other tenants' cells, so they stay operator-only for bound actors.
+    if (!requireOperatorForBoundActor(res, 'Arcade backup and restore')) return true;
 
     const m = (backup ?? restore)!;
     const tenantId = m[1] ?? '';

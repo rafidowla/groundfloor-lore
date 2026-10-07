@@ -34,6 +34,9 @@ export interface NodesDeps {
     /** Phase 6 P1.B — multi-workspace LocalGraph registry. Optional;
      *  absent → legacy `deps.store.loreGraph` path. */
     graphRegistry?: LocalGraphRegistry;
+    /** Version log; read ONLY by the bound-actor write-scope gate (a deleted hidden node's old
+     *  scopes still protect its id). Absent = that source is skipped. */
+    versionStore?: import('../../../../outbox/versionStoreApi.js').VersionStoreApi;
     /**
      * P2 (isolation) — per-workspace verbatim (LanceDB) resolver. Threaded so
      * GET /api/node/supersession-candidates runs its vector scan against the

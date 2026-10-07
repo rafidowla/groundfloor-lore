@@ -192,6 +192,7 @@ async function dispatchAfterGates(
         deploymentMode: deps.deploymentMode,
         dataplane: deps.dataplane,
         graphRegistry: deps.graphRegistry,
+        versionStore: deps.versionStore, // write-scope gate (bound actors)
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // P2 — supersession-candidates scans the requested ws's LanceDB.
         pendingOpsStore: deps.pendingOpsStore,
         coreNodeTypes: deps.coreNodeTypes,
@@ -214,6 +215,7 @@ async function dispatchAfterGates(
         deploymentMode: deps.deploymentMode,
         dataplane: deps.dataplane,
         graphRegistry: deps.graphRegistry,
+        versionStore: deps.versionStore, // write-scope gate (bound actors)
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // route delete tombstone to requested ws's LanceDB.
         outboxStore: deps.outboxStore,
         outboxLagCache: deps.outboxLagCache,
@@ -264,6 +266,7 @@ async function dispatchAfterGates(
         outboxLagCache: deps.outboxLagCache,
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver, // L-012 — inline embed routes to requested ws's LanceDB.
         supersessionEnforceDefault: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+        versionStore: deps.versionStore, // row-scope gate: deleted-node history for caller-chosen ids.
     })) return;
 
     // Phase 2.5 item 6 — schema-authoring REST mirror at /api/schema/*.
@@ -345,6 +348,9 @@ async function dispatchAfterGates(
         // L-016 — token write-scope gate + workspace-aware write routing.
         graphRegistry: deps.graphRegistry,
         supersessionEnforceDefault: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+        // Row-scope gate for caller-chosen ids (id_unavailable): deleted-node history + per-workspace verbatim row.
+        versionStore: deps.versionStore,
+        workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
     })) return;
 
     if (await tryTopologyRoutes(req, res, url, pathname, {

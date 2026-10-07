@@ -38,6 +38,7 @@ delete process.env['LORE_SEARCH_WORKER'];
 
 const { ArcadeHttp } = await import('../packages/lore/src/engines/arcade/arcadeHttp.js');
 const { ArcadeVectorStore } = await import('../packages/lore/src/engines/arcade/arcadeVectorStore.js');
+const { resolveStoredScopes } = await import('../packages/lore/src/engines/arcade/arcadeVectorStore.js');
 const { ScopedArcadeVectorHandle } = await import('../packages/lore/src/engines/arcade/arcadeScopedHandle.js');
 const { tryRetentionRoutes } = await import('../packages/lore/src/mcp/http/routes/retention.js');
 const { tryWorkspaceExportRoutes } = await import('../packages/lore/src/mcp/http/routes/workspaceExport.js');
@@ -275,6 +276,79 @@ console.log('\nworkspace export is admin-only for bound actors');
         assert.equal((await doHtml('unbound', null)).status, 200);
         assert.equal((await doHtml('unbound', APP)).status, 200);
         assert.equal((await doHtml(finance, mk('bootstrap'))).status, 200);
+    });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// C. Arcade rewrite keeps scopes (parity with Lance / SQLite)
+// ════════════════════════════════════════════════════════════════════════════
+console.log('\narcade verbatim rewrite scope semantics');
+{
+    const vector = new ArcadeVectorStore({ tenantDb: 'db_sea2', http: new ArcadeHttp({ user: 'u', pass: 'p' }), embedder: new DetEmbedProvider() });
+    const ts = '2026-10-06T00:00:00.000Z';
+    const meta = (scopes?: string[]) => ({ type: 'note', label: 'x', tags: '', project: WS, ecosystem: '*', updatedAt: ts, ...(scopes ? { security_scopes: scopes } : {}) });
+    const stored = (id: string): unknown => table.get(id)?.['security_scopes'];
+
+    await test('resolveStoredScopes: explicit array (incl. []) wins; absent keeps existing; new row = public; unreadable existing throws', async () => {
+        assert.equal(resolveStoredScopes(['a', 'b'], 'x'), 'a,b');
+        assert.equal(resolveStoredScopes([], 'x'), '');
+        assert.equal(resolveStoredScopes(undefined, 'finance,sales'), 'finance,sales');
+        assert.equal(resolveStoredScopes(undefined, ['finance']), 'finance');
+        assert.equal(resolveStoredScopes(undefined, undefined), '');
+        assert.equal(resolveStoredScopes(undefined, null), '');
+        assert.throws(() => resolveStoredScopes(undefined, { weird: true }), /unreadable/);
+    });
+
+    await test('store: a rewrite WITHOUT scopes keeps the existing row scopes (not reset to public)', async () => {
+        await vector.store({ id: 'lore:c1', text: 'one', metadata: meta(['finance']) });
+        assert.equal(stored('lore:c1'), 'finance');
+        await vector.store({ id: 'lore:c1', text: 'one changed', metadata: meta() });
+        assert.equal(stored('lore:c1'), 'finance');
+        assert.deepEqual((await vector.getById('lore:c1'))?.security_scopes, ['finance']);
+    });
+
+    await test('store: an explicit [] still makes the row public; an explicit array replaces', async () => {
+        await vector.store({ id: 'lore:c2', text: 'two', metadata: meta(['finance']) });
+        await vector.store({ id: 'lore:c2', text: 'two', metadata: meta([]) });
+        assert.equal(stored('lore:c2'), '');
+        await vector.store({ id: 'lore:c3', text: 'three', metadata: meta(['a']) });
+        await vector.store({ id: 'lore:c3', text: 'three', metadata: meta(['b', 'c']) });
+        assert.equal(stored('lore:c3'), 'b,c');
+    });
+
+    await test('store: a brand-new row without scopes is public (unchanged)', async () => {
+        await vector.store({ id: 'lore:c4', text: 'four', metadata: meta() });
+        assert.equal(stored('lore:c4'), '');
+    });
+
+    await test('store: an unreadable existing row aborts the write (fail closed) — the prior row is untouched', async () => {
+        await vector.store({ id: 'lore:c5', text: 'five', metadata: meta(['finance']) });
+        const before = table.get('lore:c5');
+        const q = ArcadeHttp.prototype.query;
+        ArcadeHttp.prototype.query = async () => { throw new Error('arcade down'); };
+        try { await assert.rejects(() => vector.store({ id: 'lore:c5', text: 'five v2', metadata: meta() }), /arcade down/); }
+        finally { ArcadeHttp.prototype.query = q; }
+        assert.equal(table.get('lore:c5'), before, 'no write happened');
+        // an existing value of an uninterpretable type also aborts instead of publishing
+        table.set('lore:c6', { ...table.get('lore:c5')!, id: 'lore:c6', security_scopes: { weird: true } });
+        await assert.rejects(() => vector.store({ id: 'lore:c6', text: 'six', metadata: meta() }), /unreadable/);
+        assert.deepEqual(table.get('lore:c6')?.['security_scopes'], { weird: true });
+    });
+
+    await test('storePrebuilt (batch/migration path): same semantics — absent keeps, explicit wins, failed read aborts', async () => {
+        const emb = new DetEmbedProvider().dimension;
+        const vec = new Array(emb).fill(0.1);
+        const row = (id: string, scopes?: string[]) => ({ id, text: id, embedding: vec, metadata: meta(scopes) });
+        await vector.storePrebuilt([row('lore:p1', ['finance']), row('lore:p2', ['finance'])]);
+        await vector.storePrebuilt([row('lore:p1'), row('lore:p2', []), row('lore:p3')]);
+        assert.equal(stored('lore:p1'), 'finance', 'absent keeps');
+        assert.equal(stored('lore:p2'), '', 'explicit [] wins');
+        assert.equal(stored('lore:p3'), '', 'new row public');
+        const q = ArcadeHttp.prototype.query;
+        ArcadeHttp.prototype.query = async () => { throw new Error('arcade down'); };
+        try { await assert.rejects(() => vector.storePrebuilt([row('lore:p1')]), /arcade down/); }
+        finally { ArcadeHttp.prototype.query = q; }
+        assert.equal(stored('lore:p1'), 'finance');
     });
 }
 

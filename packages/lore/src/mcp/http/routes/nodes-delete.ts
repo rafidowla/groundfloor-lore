@@ -30,6 +30,7 @@ import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
+import { nodeMutateVisible } from '../../../security/nodeWriteGate.js';
 import { writeWorkspaceRequired, checkOutboxBackpressure, writeJson, writeError } from '../helpers.js';
 import type { OutboxStore } from '../../../outbox/types.js';
 import { recordHotWrite } from '../../../outbox/hotLane.js';
@@ -52,6 +53,8 @@ export interface NodeDeleteDeps {
     deploymentMode: 'local' | 'cloud';
     dataplane: GroundfloorClient | null;
     graphRegistry?: LocalGraphRegistry;
+    /** Version log; read ONLY by the bound-actor write-scope gate. Absent = that source is skipped. */
+    versionStore?: import('../../../outbox/versionStoreApi.js').VersionStoreApi;
     /** Postgres-model isolation — opens the REQUESTED workspace's VerbatimStore
      *  so the tombstone lands in its LanceDB, not the boot store. Absent
      *  (cloud/tests) → boot store fallback. */
@@ -160,6 +163,24 @@ export async function tryNodeDeleteRoute(
 
     const startedAt = Date.now();
     try {
+        // Row-scope write gate (bound actors only; unbound = no lookups). A node this
+        // actor cannot see answers EXACTLY like a missing id (same audit row, same 404
+        // body) and — unlike the missing-id path below — records no outbox row, so a
+        // hidden target leaves no side effect at all. Runs before the node lock.
+        if (!(await nodeMutateVisible(stripped, {
+            workspace: effectiveWorkspace, store: deps.store, graphRegistry: deps.graphRegistry,
+            versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+        }))) {
+            deps.auditLog.log({
+                toolName: 'delete_node',
+                args: { id: stripped, surface: 'http' },
+                result: 'error',
+                resultDetail: 'not-found',
+                durationMs: Date.now() - startedAt,
+            });
+            writeError(res, 404, 'node_not_found', `Node '${id}' not found`, { id });
+            return true;
+        }
         // The whole outbox → graph → verbatim sequence runs under the SHARED
         // per-(workspace,id) write lock `nodeUpsert` holds
         // (core/nodeWriteLock.ts). Unlocked, a concurrent POST /api/node or

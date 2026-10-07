@@ -26,6 +26,7 @@ import {
 import { getCapability } from '../../../providers/llmDispatch.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { bindDaemonOperatorLane } from '../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../security/exportGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import {
     decideApproval,
@@ -146,6 +147,8 @@ export async function tryConfigRoutes(
                     { permission: 'delete' },
                 );
                 if (!dropGate.allowed) { writePermissionDenied(res, dropGate); return true; }
+                // Same operator-only rule as POST /api/orphan/drop (the back-compat drop path).
+                if (!requireOperatorForBoundActor(res, 'Orphan drop')) return true;
                 const d = decideApproval({ policy: orphanDropPolicy, args: { confirm } });
                 if (d.kind === 'needs-self-confirm') {
                     const env = formatSelfConfirmError('orphan_drop', d, orphanDropPolicy.rationale);
@@ -183,6 +186,8 @@ export async function tryConfigRoutes(
             { permission: 'delete' },
         );
         if (!gate.allowed) { writePermissionDenied(res, gate); return true; }
+        // Dropping an orphaned resource + its workspace data: operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Orphan drop')) return true;
         let body: string;
         try {
             body = await readBoundedBody(req);
@@ -260,6 +265,9 @@ export async function tryConfigRoutes(
         // daemon-wide, not per-workspace, so this uses the daemon-operator lane
         // rather than a single-workspace bind.
         if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+        // Daemon-wide config (LLM provider, embedding backend, keys) shapes every workspace:
+        // operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Changing the daemon configuration')) return true;
         let body: string;
         try {
             body = await readBoundedBody(req);

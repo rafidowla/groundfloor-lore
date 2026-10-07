@@ -28,6 +28,8 @@ import { withTransactionConflictRetry } from '../../../engines/transactionConfli
 import { checkWorkspaceQuota, bumpNodeWriteQuota } from '../../../security/workspaceQuota.js';
 import { mcpToolError } from '../mcpToolError.js';
 import { redactError } from '../../../security/logRedact.js';
+import { nodeCreateIdBlocked, supersedesVisibilityFor, type NodeWriteGateHandles } from '../../../security/nodeWriteGate.js';
+import { ID_UNAVAILABLE, ID_UNAVAILABLE_MESSAGE } from '../../../security/writeTargetGate.js';
 import { log } from '../../../logger.js';
 import { MAX_NODE_FIELD_BYTES } from '../../../engines/nodeFieldLimits.js';
 import { MAX_QUESTIONS, MAX_QUESTION_CHARS, MAX_SUMMARY_CHARS, MAX_LIST_ITEMS, MAX_LIST_ITEM_CHARS } from '../../../core/questionAliases.js';
@@ -236,6 +238,25 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                 // raw caller-supplied value.
                 __auditCtx.workspace = scopedWorkspace;
 
+                // Row-scope write gate (bound actors only; unbound = no lookups). The id is
+                // caller-chosen: if an item this actor cannot see already owns it (live node,
+                // deleted node's version log, canonical verbatim row) refuse neutrally BEFORE
+                // vocab/changeset/quota so nothing is written, buffered or parked for it. The
+                // same handles give the supersession policy a visibility callback so a hidden
+                // `supersedes` id behaves exactly like a missing one.
+                const writeGate: NodeWriteGateHandles = {
+                    workspace: scopedWorkspace, store: deps.store, graphRegistry: deps.graphRegistry,
+                    versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+                };
+                if (await nodeCreateIdBlocked(id, writeGate)) {
+                    __auditCtx.errored = true;
+                    __auditCtx.resultDetail = ID_UNAVAILABLE;
+                    return {
+                        content: [{ type: 'text' as const, text: JSON.stringify({ error: ID_UNAVAILABLE, message: ID_UNAVAILABLE_MESSAGE }, null, 2) }],
+                        isError: true,
+                    };
+                }
+
                 // Phase 6 P2 — workspace vocab policy check. Default
                 // policy (no entry) is mode='open' so existing
                 // workspaces don't change behavior.
@@ -441,6 +462,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                     storageClient: deps.store.storageClient,
                     workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
                     hostDefaultEnforce: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+                    isVisible: supersedesVisibilityFor(writeGate),
                 });
 
                 const writeResult = await withTransactionConflictRetry(() => nodeUpsert(
@@ -477,6 +499,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                         autolink,
                         supersessionPolicy,
                         findSupersessionDuplicate,
+                        supersedesVisible: supersedesVisibilityFor(writeGate),
                     },
                 ));
 

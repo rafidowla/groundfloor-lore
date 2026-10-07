@@ -26,6 +26,7 @@ import * as verbatimBatch from './verbatimBatch.js';
 import { purgeRowsWithHistory, existingIdsInTable, deleteExistingIds } from './verbatimPurgeRows.js';
 import type { VerbatimBatchCtx, BulkAddResult } from './verbatimBatch.js';
 import { VERBATIM_CHUNK_SIZE, suppliedVector } from './verbatimBatch.js';
+import { readCanonicalScopes } from './verbatimCanonicalScopes.js';
 import { lanceGetVectors, normalizeGetVectorsIds } from './verbatimGetVectors.js';
 import { embedBatchCap, awaitEmbedMemoryHeadroom } from '../embed/memoryBudget.js';
 import { SearchGate } from './searchGate.js';
@@ -931,8 +932,10 @@ export class VerbatimStore implements VectorProvider {
     ): boolean {
         if (!existing || existing.contentHash !== effectiveHash) return false;
         if ((existing.text ?? '').startsWith('[TOMBSTONED')) return false;
-        const sameScopes = JSON.stringify([...(existing.security_scopes ?? [])].sort())
-            === JSON.stringify([...(doc.metadata?.security_scopes ?? [])].sort());
+        // Undefined scopes mean "keep the row's labels" (see store()), so they never differ.
+        const sameScopes = doc.metadata?.security_scopes === undefined
+            || JSON.stringify([...(existing.security_scopes ?? [])].sort())
+            === JSON.stringify([...doc.metadata.security_scopes].sort());
         return (existing.type ?? '') === (doc.metadata?.type || '') &&
             (existing.label ?? '') === (doc.metadata?.label || '') &&
             (existing.tags ?? '') === (doc.metadata?.tags || '') &&
@@ -1014,6 +1017,12 @@ export class VerbatimStore implements VectorProvider {
                 const outcome = await this.writeLane(async (): Promise<'written' | 'skipped' | 'need-embed'> => {
                     if (skipEligible && this.matchesExisting(await verbatimHistory.getById(this.table, true, doc.id), doc, effectiveHash)) return 'skipped';
                     if (!vector) return 'need-embed'; // the hint said identical, the fresh row says otherwise: embed outside the lane, then retry
+                    // Overwrite without `security_scopes` keeps the existing canonical row's labels; an explicit
+                    // array (incl. []) wins. Resetting to public would also expose the row's #rev history.
+                    let scopes = doc.metadata?.security_scopes;
+                    if (scopes === undefined && this.table && !this.isHistoryId(doc.id)) {
+                        scopes = (await readCanonicalScopes(this.table, [doc.id])).get(doc.id);
+                    }
                     row = {
                         vector: this.toPlainVector(vector), // PR #69 P2: normalize Float32Array from cache-hit
                         id: doc.id,
@@ -1024,7 +1033,7 @@ export class VerbatimStore implements VectorProvider {
                         project: doc.metadata?.project || '',
                         ecosystem: doc.metadata?.ecosystem || '',
                         updatedAt: doc.metadata?.updatedAt || '',
-                        security_scopes: doc.metadata?.security_scopes || [],
+                        security_scopes: scopes || [],
                         contentHash: effectiveHash,
                     };
                     // Snapshot the prior canonical row into history before replacing it
@@ -1199,6 +1208,12 @@ export class VerbatimStore implements VectorProvider {
             let table = this.table;
             let createdTable = false;
             if (table) {
+                // Docs without `security_scopes` keep the existing canonical row's labels (see store()).
+                const inherit = resolved.map((r, i) => (r.doc.metadata?.security_scopes === undefined ? i : -1)).filter((i) => i >= 0);
+                if (inherit.length > 0) {
+                    const kept = await readCanonicalScopes(table, inherit.map((i) => resolved[i].doc.id));
+                    for (const i of inherit) { const k = kept.get(resolved[i].doc.id); if (k) rows[i].security_scopes = k; }
+                }
                 await verbatimBatch.snapshotExistingCanonicals(table, docs);
             } else {
                 const ensured = await verbatimBatch.ensureVerbatimTable(this.batchCtx);

@@ -53,6 +53,10 @@ import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 // gate-test regex without renaming the helper.
 import { recordHotWriteBatch } from '../../../outbox/hotLane.js';
 import { readInlinePriors, retractBulkNodeUpsert, undoBulkGraphWrite } from './bulkWriteRollback.js';
+import { supersedesVisibilityFromDeps } from '../../../security/nodeWriteGate.js';
+import { resolveGraph, writeWorkspaceNotFound } from './bulkWriteWorkspace.js';
+import { bulkScopeDeps, blockedBulkUpsertIds, ID_UNAVAILABLE_ITEM_ERROR, storedScopesResolver } from './bulkWriteScope.js';
+import type { ItemScopeDeps } from '../../../security/itemScopes.js';
 import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE } from '../../../core/nodeWriteLock.js';
 import { flushBulkQueuedEmbeds, buildVerbatimSpec, type VerbatimSpec } from './bulkEmbedFlush.js';
 import { validateQuestionsMeta, mergeQuestionsMetaIntoMetadataJson } from '../../../core/questionAliases.js';
@@ -115,6 +119,8 @@ export interface BulkWriteDeps {
     getWal?: () => import('../../../engines/writeAheadLog.js').WriteAheadLog;
     /** D5 round 2 (#2) — host-level supersession-enforce default. */
     supersessionEnforceDefault?: boolean;
+    /** Version log, so a bound actor's caller-chosen id is also checked against a deleted node's history (bulkWriteScope.ts). Optional; absent = live node + verbatim row only. */
+    versionStore?: ItemScopeDeps['versionStore'];
 }
 
 export const ITEM_CAP = 1000;
@@ -127,37 +133,6 @@ export interface BulkResult {
     /** D5 round 4 (#4) — set when applyWriteTimeSupersedes() partially failed after the write. */
     applied?: string[];
     unapplied?: Array<{ id: string; reason: string }>;
-}
-
-export async function resolveGraph(
-    deps: BulkWriteDeps,
-    requestedWorkspace?: string,
-): Promise<LoreGraph | { error: 'workspace_not_found'; requested: string; known: string[] }> {
-    if (!deps.graphRegistry) return deps.store.loreGraph;
-    const target = requestedWorkspace ?? deps.graphRegistry.activeName();
-    try {
-        // getGraphHandle resolves the DECLARED engine, so a bulk write
-        // lands in the requested workspace's own graph rather than an
-        // empty db for the wrong engine while reporting ok:true. Gate
-        // still runs inside.
-        return await deps.graphRegistry.getGraphHandle(target);
-    } catch (err) {
-        if (err instanceof WorkspaceNotFoundError) {
-            return { error: 'workspace_not_found', requested: err.requested, known: err.known };
-        }
-        throw err;
-    }
-}
-
-/** Canonical-envelope emitter for the resolveGraph() workspace_not_found shape. */
-export function writeWorkspaceNotFound(
-    res: ServerResponse,
-    err: { error: 'workspace_not_found'; requested: string; known: string[] },
-): void {
-    writeError(res, 404, err.error, `workspace not found: ${err.requested}`, {
-        requested: err.requested,
-        known: err.known,
-    });
 }
 
 interface NodeInput {
@@ -352,6 +327,11 @@ async function handleBulkNodes(
     const batchForce = (parsed as { force?: unknown }).force === true;
     // Resolved once for the whole batch (one workspace per bulk request) —
     // same resolver storeNode.ts/postNode.ts/the embedded paths use.
+    // Row-scope deps for the workspace this batch writes to; `supersedesVisible` is
+    // undefined for an unbound caller (zero lookups) — a hidden `supersedes` id /
+    // near-duplicate then behaves exactly like a missing one.
+    const scopeDeps = bulkScopeDeps(deps, lockWorkspace, targetVerbatim);
+    const supersedesVisible = supersedesVisibilityFromDeps(scopeDeps);
     const { policy: supersessionPolicy, findDuplicate: findSupersessionDuplicate } = resolveSupersessionContext({
         workspace: requestedWorkspace ?? deps.graphRegistry?.activeName() ?? '',
         targetGraph,
@@ -360,7 +340,12 @@ async function handleBulkNodes(
         storageClient: deps.store.storageClient,
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
         hostDefaultEnforce: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+        isVisible: supersedesVisible,
     });
+    // Row-scope gate (bound actors only; unbound = empty set, zero lookups).
+    // Every item id is caller-chosen, so one batched pass finds the ids this
+    // actor may not write to (live / deleted / verbatim row it cannot see).
+    const blockedIds = await blockedBulkUpsertIds(items.map((it) => (it as NodeInput | null)?.id), scopeDeps);
     for (let i = 0; i < items.length; i++) {
         const raw = items[i];
         if (!raw || typeof raw !== 'object'
@@ -404,6 +389,11 @@ async function handleBulkNodes(
             .filter((f) => f in (raw as Record<string, unknown>));
         if (forbidden.length > 0) {
             results[i] = { ok: false, id: raw.id as string, error: `unknown_field: ${forbidden.join(', ')}` };
+            continue;
+        }
+        // After the shape/forbidden-field checks, before any outbox row or write.
+        if (blockedIds.has(raw.id)) {
+            results[i] = { ok: false, id: raw.id, error: ID_UNAVAILABLE_ITEM_ERROR };
             continue;
         }
         // 3.21 step 3(e)/3(h) round 2 — summary/entities/topics merge
@@ -460,7 +450,7 @@ async function handleBulkNodes(
         // (nodeService.ts) uses, instead of this route's own existence-only
         // inline check.
         if (itemSupersedes && itemSupersedes.length > 0) {
-            const preCheck = await validateSupersedesIds({ id: raw.id as string, supersedes: itemSupersedes, targetGraph });
+            const preCheck = await validateSupersedesIds({ id: raw.id as string, supersedes: itemSupersedes, targetGraph, isVisible: supersedesVisible });
             if (!preCheck.ok) {
                 results[i] = { ok: false, id: raw.id as string, error: `${preCheck.code}: ${preCheck.error.message}` };
                 continue;
@@ -599,6 +589,7 @@ async function handleBulkNodes(
                             targetGraph: batchGraph, supersedes: itemSupersedes, newId: raw.id as string,
                             workspace: requestedWorkspace!, initiator: 'http:POST /api/nodes/bulk',
                             outboxStore: deps.outboxStore, logPrefix: '[Lore HTTP bulk]',
+                            isVisible: supersedesVisible,
                         });
                         if (!applyResult.ok) {
                             // D5 round 4 (#4) — surface applied/unapplied ids
@@ -626,6 +617,7 @@ async function handleBulkNodes(
                                 ecosystem: (raw as Record<string, unknown>).ecosystem as string,
                             },
                             questions,
+                            resolveStoredScopes: storedScopesResolver(scopeDeps, raw.id as string),
                         });
                     } catch (aliasErr) {
                         // Best-effort, same posture as tombstoneQuestionAliases/
@@ -661,6 +653,8 @@ async function handleBulkNodes(
                                     project: rec.project as string,
                                     ecosystem: rec.ecosystem as string,
                                     text: verbatimText,
+                                    // The node's own scopes (an existing node keeps them across an upsert), as the queued path copies them.
+                                    security_scopes: priors.get(raw.id as string)?.security_scopes,
                                 }),
                             });
                         } catch (err) {
@@ -740,6 +734,7 @@ async function handleBulkNodes(
                                 targetGraph, supersedes: itemSupersedes, newId: raw.id as string,
                                 workspace: requestedWorkspace!, initiator: 'http:POST /api/nodes/bulk',
                                 outboxStore: deps.outboxStore, logPrefix: '[Lore HTTP bulk]',
+                                isVisible: supersedesVisible,
                             });
                             if (!applyResult.ok) {
                                 succeeded--;
@@ -767,6 +762,7 @@ async function handleBulkNodes(
                                     ecosystem: (raw as Record<string, unknown>).ecosystem as string,
                                 },
                                 questions,
+                                resolveStoredScopes: storedScopesResolver(scopeDeps, raw.id as string),
                             });
                         } catch (aliasErr) {
                             console.error(`[Lore HTTP] bulk question-alias fan-out failed for ${raw.id as string} (non-fatal): ${redactError(aliasErr)}`);
@@ -892,6 +888,12 @@ async function upsertOne(
                         ecosystem: node.ecosystem,
                         updatedAt: node.updatedAt,
                         text: verbatimText,
+                        // This path serves graphs without bulkUpsertNodes (ARCADE/cloud), whose node
+                        // rows never carry scopes: they read back [] whatever the verbatim row holds
+                        // (arcadeGraphReads.ts). Pass the scopes only when the graph really reports
+                        // some; otherwise omit so the existing canonical row's scopes are kept, never
+                        // reset to public by a rewrite.
+                        security_scopes: Array.isArray(node.security_scopes) && node.security_scopes.length > 0 ? node.security_scopes : undefined,
                     }),
                 });
             } catch (err) {

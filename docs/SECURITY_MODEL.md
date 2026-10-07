@@ -326,6 +326,32 @@ today). If a future encrypted substrate is wired, each workspace's
 key is independent: deleting one workspace's key would render only
 that workspace's ciphertext unreadable (`src/security/keyring.ts:43`).
 
+### Operator-only operations for bound actors
+
+Row-level `security_scopes` cannot filter whole-workspace or daemon-wide
+operations, so a **bound** actor (`getCurrentActorScopes() !== undefined`)
+may not run the following; they require a daemon operator principal
+(`bootstrap` token or `shared-secret`; `exportAllowedForCurrentActor()`,
+`src/security/exportGate.ts`):
+
+- workspace export and HTML export (3.29)
+- maintenance jobs
+- retention-policy changes
+- workspace switch, rename and delete
+- re-registering an existing workspace name (`register_workspace`)
+- daemon restart and daemon log read
+- ingestion roots
+- `PATCH /api/config`
+- audit-log read (`GET /api/audit`)
+- bulk `/api/load`
+
+Unbound callers (embedded hosts, stdio MCP, daemon-internal work) are
+unchanged and do no extra lookups. "Bound" means local mode with
+`<LORE_HOME>/operator.json` (every request carries the actor) or a
+Clerk-bound actor. Refusal is HTTP 403 `maintenance_forbidden` (REST) or an
+`isError` tool result with the same code (MCP); export keeps its own
+`export_forbidden` code.
+
 ---
 
 ## 8. Cloud tenant-isolation gate — `DATAPLANE_ORG_ID` (SW-05)

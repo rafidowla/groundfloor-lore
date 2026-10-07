@@ -31,6 +31,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { SyncEngine } from '../../../engines/syncEngine.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../security/exportGate.js';
 import { redactError } from '../../../security/logRedact.js';
 import { writeError } from '../helpers.js';
 
@@ -85,6 +86,8 @@ export async function trySyncRoutes(
     if (pathname === '/api/sync/push' && req.method === 'POST') {
         const target = bindRouteTarget(res, { requested, intent: 'write' });
         if (target === null) return true;
+        // Whole-workspace push/pull moves and counts every row, hidden ones included: operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Workspace sync')) return true;
         try {
             const engine = await resolveEngine(deps, target);
             const result = await engine.pushPending();
@@ -105,6 +108,8 @@ export async function trySyncRoutes(
     if (pathname === '/api/sync/pull' && req.method === 'POST') {
         const target = bindRouteTarget(res, { requested, intent: 'write' });
         if (target === null) return true;
+        // Whole-workspace push/pull moves and counts every row, hidden ones included: operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Workspace sync')) return true;
         try {
             const engine = await resolveEngine(deps, target);
             const result = await engine.pullRemote();
@@ -119,6 +124,8 @@ export async function trySyncRoutes(
     if (pathname === '/api/sync/now' && req.method === 'POST') {
         const target = bindRouteTarget(res, { requested, intent: 'write' });
         if (target === null) return true;
+        // Whole-workspace push/pull moves and counts every row, hidden ones included: operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Workspace sync')) return true;
         try {
             const engine = await resolveEngine(deps, target);
             const result = await engine.sync();

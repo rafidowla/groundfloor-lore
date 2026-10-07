@@ -51,6 +51,19 @@ function getSharedEmbedder(): LocalEmbeddingProvider {
   return sharedEmbedder;
 }
 
+/**
+ * Stored (comma-joined) scopes for a verbatim write: an explicit array — including
+ * [] — wins; an absent one keeps the existing row's value ('' = public for a new row).
+ */
+export function resolveStoredScopes(incoming: unknown, existing: unknown): string {
+  if (Array.isArray(incoming)) return (incoming as string[]).join(',');
+  if (existing != null && typeof existing !== 'string' && !Array.isArray(existing)) {
+    // An existing value we cannot interpret might be a restriction — refuse rather than publish.
+    throw new Error('[ArcadeVectorStore] existing security_scopes unreadable — write aborted');
+  }
+  return normalizeScopes(existing).join(',');
+}
+
 export class ArcadeVectorStore {
   /** IMMUTABLE tenant database name — the isolation boundary. */
   private readonly tenantDb: string;
@@ -100,11 +113,11 @@ export class ArcadeVectorStore {
 
     const existing = await this.http.query(
       this.tenantDb,
-      `SELECT contentHash, embedding FROM ${VERBATIM_TYPE} WHERE id = :id LIMIT 1`,
+      `SELECT contentHash, embedding, security_scopes FROM ${VERBATIM_TYPE} WHERE id = :id LIMIT 1`,
       { id: doc.id },
     );
     const existingRow = existing.result?.[0] as
-      | { contentHash?: string; embedding?: number[] }
+      | { contentHash?: string; embedding?: number[]; security_scopes?: unknown }
       | undefined;
 
     let embedding: number[];
@@ -119,9 +132,15 @@ export class ArcadeVectorStore {
     // Stored comma-joined (same on-the-wire shape as DataplaneVectorStore's
     // cloud connector — see security_scopes comment there and
     // scopeFilter.ts's normalizeScopes, which already handles this format).
-    const scopes = Array.isArray(doc.metadata?.security_scopes)
-      ? (doc.metadata!.security_scopes as string[])
-      : [];
+    // Rewrite semantics (same as VerbatimStore / sqliteVerbatimWrite): an EXPLICIT
+    // array (including []) wins; an ABSENT one keeps the existing row's scopes
+    // (the SELECT above is the read — a failure there already aborted the write,
+    // so an unreadable existing row fails closed instead of going public).
+    // Known residual: that read and the UPSERT below are separate statements, so a concurrent
+    // explicit-scope write landing between them can be overwritten by this write's preserved
+    // (older) value. Closing it needs a single statement that keeps the stored column when the
+    // parameter is absent, which this SQL dialect's UPSERT insert path cannot be shown to do
+    // here (no live engine in the unit harness).
     const params = {
       id: doc.id,
       text: doc.text,
@@ -131,7 +150,7 @@ export class ArcadeVectorStore {
       project: doc.metadata?.project ?? '',
       ecosystem: doc.metadata?.ecosystem ?? '',
       updatedAt: doc.metadata?.updatedAt ?? new Date().toISOString(),
-      security_scopes: scopes.join(','),
+      security_scopes: resolveStoredScopes(doc.metadata?.security_scopes, existingRow?.security_scopes),
       contentHash: effectiveHash,
       embedding,
     };
@@ -190,9 +209,17 @@ export class ArcadeVectorStore {
         );
       }
       const effectiveHash = doc.contentHash || computeContentHash(doc.text);
-      const scopes = Array.isArray(doc.metadata?.security_scopes)
-        ? (doc.metadata!.security_scopes as string[])
-        : [];
+      // Same rewrite semantics as store(): absent scopes keep the existing row's
+      // (a failed read throws, aborting this write — fail closed).
+      let keptScopes: unknown;
+      if (!Array.isArray(doc.metadata?.security_scopes)) {
+        const prior = await this.http.query(
+          this.tenantDb,
+          `SELECT security_scopes FROM ${VERBATIM_TYPE} WHERE id = :id LIMIT 1`,
+          { id: doc.id },
+        );
+        keptScopes = (prior.result?.[0] as { security_scopes?: unknown } | undefined)?.security_scopes;
+      }
       const params = {
         id: doc.id,
         text: doc.text,
@@ -202,7 +229,7 @@ export class ArcadeVectorStore {
         project: doc.metadata?.project ?? '',
         ecosystem: doc.metadata?.ecosystem ?? '',
         updatedAt: doc.metadata?.updatedAt ?? new Date().toISOString(),
-        security_scopes: scopes.join(','),
+        security_scopes: resolveStoredScopes(doc.metadata?.security_scopes, keptScopes),
         contentHash: effectiveHash,
         embedding: doc.embedding,
       };

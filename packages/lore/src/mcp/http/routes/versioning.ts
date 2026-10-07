@@ -37,6 +37,7 @@ import type { VerbatimStoreApi } from '../../../engines/verbatimStoreApi.js';
 import type { WriteAheadLog } from '../../../engines/syncEngine.js';
 // 1.M7 (2026-08-17 audit) — changeset commit/rollback write through the
 // shared orchestration (outbox + verbatim + embed), not raw graph writes.
+import { changesetTouchesHiddenNode } from '../../changesetScopeGate.js';
 import { applyChangesetUpsert, applyChangesetDelete, type ChangesetWriteDeps } from '../../changesetWrite.js';
 
 export interface VersioningRouteDeps {
@@ -255,6 +256,13 @@ export async function tryVersioningRoutes(
             // commit applies the staged upsertNode/deleteNode into cs.workspace's
             // graph below.
             if (bindRouteTarget(res, { requested: cs.workspace, intent: 'write' }) === null) return true;
+            // Row-level security_scopes: a changeset touching a node hidden from
+            // the bound actor answers as a missing id (checked before the status
+            // answer so a hidden changeset's state is not revealed either).
+            if (await changesetTouchesHiddenNode(changesetId, deps)) {
+                writeError(res, 404, 'changeset_not_found', `changeset not found: ${changesetId}`, { changeset_id: changesetId });
+                return true;
+            }
             if (cs.status !== 'open') {
                 writeError(res, 409, 'changeset_not_open', `changeset is not open (status: ${cs.status})`, { status: cs.status });
                 return true;
@@ -364,6 +372,11 @@ export async function tryVersioningRoutes(
             // rollback reverses staged upsertNode/deleteNode into cs.workspace's
             // graph below.
             if (bindRouteTarget(res, { requested: cs.workspace, intent: 'write' }) === null) return true;
+            // Row-level security_scopes: hidden node touched → exactly a missing id.
+            if (await changesetTouchesHiddenNode(changesetId, deps)) {
+                writeError(res, 404, 'changeset_not_found', `changeset not found: ${changesetId}`, { changeset_id: changesetId });
+                return true;
+            }
             if (cs.status === 'rolled_back') {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ changeset_id: changesetId, status: 'rolled_back', note: 'already rolled back — no-op' }));

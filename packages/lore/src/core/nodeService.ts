@@ -212,6 +212,7 @@ export interface NodeUpsertHooks {
     supersessionPolicy?: WorkspaceSupersessionPolicy;
     /** D5 — near-duplicate lookup bound to the write's workspace. */
     findSupersessionDuplicate?: FindNearDuplicate;
+    supersedesVisible?: (id: string) => Promise<boolean>; // bound-actor row-scope hook: hidden `supersedes` id == missing id
 }
 
 /** Discriminated result. Plain data — no transport envelope. */
@@ -598,7 +599,7 @@ export async function nodeUpsert(
     //     (#4) all-or-nothing `supersedes` id pre-check, regardless of enforcement.
     const supersessionVerdict = await runSupersessionValidation({
         supersessionPolicy: hooks.supersessionPolicy, findSupersessionDuplicate: hooks.findSupersessionDuplicate,
-        nodeData: nodeData as Record<string, unknown>, id, supersedes: args.supersedes, force: args.force === true, targetGraph,
+        nodeData: nodeData as Record<string, unknown>, id, supersedes: args.supersedes, force: args.force === true, targetGraph, isVisible: hooks.supersedesVisible,
     });
     if (!supersessionVerdict.ok) return { ok: false, code: supersessionVerdict.code, error: supersessionVerdict.error };
     const supersessionWarning = supersessionVerdict.supersessionWarning;

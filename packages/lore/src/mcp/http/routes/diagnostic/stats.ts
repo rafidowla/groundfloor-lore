@@ -9,6 +9,7 @@
 import type { ServerResponse } from 'node:http';
 import { WorkspaceNotFoundError } from '../../../../engines/localGraphRegistry.js';
 import { bindDaemonOperatorLane, bindRouteTarget } from '../../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../../security/exportGate.js';
 import { probeFullCapabilities } from '../../../../engines/extractors/qualityAdvisor.js';
 import { getActiveWorkspaceName, listWorkspaceNames } from '../../../../config/workspaces.js';
 import { gateRoute } from '../../../../security/routeGate.js';
@@ -57,6 +58,9 @@ export async function handleAdminStats(res: ServerResponse, deps: DiagnosticDeps
     // known workspace via the registry below), so it runs in the
     // daemon-operator lane rather than a single-workspace bind.
     if (!bindDaemonOperatorLane(res, { intent: 'read' })) return;
+    // Daemon-wide totals include hidden rows across workspaces, so this is operator-only for
+    // bound actors pending the aggregate-counts decision.
+    if (!requireOperatorForBoundActor(res, 'Cross-workspace admin stats')) return;
     try {
         // Unscoped totals — touches the boot-bound LocalGraph (in local mode each workspace has its own graph store (.lore/graph or .lore/surreal), so this is the
         // ACTIVE workspace's graph; the byWorkspace block below

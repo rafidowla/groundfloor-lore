@@ -107,6 +107,10 @@ export function buildBulkVerbatimMetadata(input: {
     ecosystem?: string;
     text: string;
     updatedAt?: string;
+    /** The node's own row-level scopes. The canonical lore:<id> verbatim row must
+     *  carry them (as the queued outbox path does) or a scoped node's text is
+     *  readable through the verbatim row as public. Omitted → no key (public). */
+    security_scopes?: string[];
 }): VerbatimDocument['metadata'] {
     return {
         type: input.type,
@@ -118,5 +122,6 @@ export function buildBulkVerbatimMetadata(input: {
         // PR #69 P2: populate contentHash so the engine doesn't recompute on
         // every write and the sweep can skip-on-match.
         contentHash: computeContentHash(input.text),
+        ...(Array.isArray(input.security_scopes) ? { security_scopes: [...input.security_scopes] } : {}),
     };
 }

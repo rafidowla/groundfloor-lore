@@ -38,6 +38,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AuditLog } from '../../../security/audit.js';
 import { bindDaemonOperatorLane } from '../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../security/exportGate.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import {
     readBoundedBody,
@@ -235,6 +236,11 @@ async function handleProvision(
     deps: ArcadeAdminDeps,
 ): Promise<true> {
     if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+    // These routes are mounted only in arcadeBoot.ts behind requireOperatorPrincipal, so today no
+    // actor is bound here and this gate never fires. It is defence-in-depth: if they are ever
+    // mounted on the main dispatcher, the lane would admit a cross-workspace-write app token, and
+    // these verbs act on other tenants' cells, so they stay operator-only for bound actors.
+    if (!requireOperatorForBoundActor(res, 'Arcade tenant administration')) return true;
     const body = await readJson(req);
     const customerId = String(body['customerId'] ?? '');
     const appId = String(body['appId'] ?? '');
@@ -263,6 +269,7 @@ async function handleProvision(
 
 function handleListApps(res: ServerResponse, deps: ArcadeAdminDeps): true {
     if (!bindDaemonOperatorLane(res, { intent: 'read' })) return true;
+    if (!requireOperatorForBoundActor(res, 'Arcade tenant administration')) return true;
     // listTenantApps already OMITS db_pass — no secret material leaves here.
     const apps = listTenantApps().map((a) => ({
         customerId: a.tenant_id,
@@ -295,6 +302,7 @@ async function handleIssueToken(
     appId: string,
 ): Promise<true> {
     if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+    if (!requireOperatorForBoundActor(res, 'Arcade tenant administration')) return true;
     if (!ID_RE.test(customerId)) return invalidIdentifier(res, 'customerId');
     if (!ID_RE.test(appId)) return invalidIdentifier(res, 'appId');
     const body = await readJson(req);
@@ -342,6 +350,7 @@ function handleListTokens(
     appId: string,
 ): true {
     if (!bindDaemonOperatorLane(res, { intent: 'read' })) return true;
+    if (!requireOperatorForBoundActor(res, 'Arcade tenant administration')) return true;
     if (!ID_RE.test(customerId)) return invalidIdentifier(res, 'customerId');
     if (!ID_RE.test(appId)) return invalidIdentifier(res, 'appId');
     // Hash-prefix only — no token plaintext is retained or returned.
@@ -360,6 +369,7 @@ async function handleRotateToken(
     appId: string,
 ): Promise<true> {
     if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+    if (!requireOperatorForBoundActor(res, 'Arcade tenant administration')) return true;
     if (!ID_RE.test(customerId)) return invalidIdentifier(res, 'customerId');
     if (!ID_RE.test(appId)) return invalidIdentifier(res, 'appId');
     const body = await readJson(req);
@@ -408,6 +418,7 @@ async function handleRevoke(
     deps: ArcadeAdminDeps,
 ): Promise<true> {
     if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+    if (!requireOperatorForBoundActor(res, 'Arcade tenant administration')) return true;
     const body = await readJson(req);
     const token = body['token'];
     if (typeof token !== 'string' || token.length === 0) {
@@ -435,6 +446,7 @@ async function handleDisable(
     appId: string,
 ): Promise<true> {
     if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+    if (!requireOperatorForBoundActor(res, 'Arcade tenant administration')) return true;
     if (!ID_RE.test(customerId)) return invalidIdentifier(res, 'customerId');
     if (!ID_RE.test(appId)) return invalidIdentifier(res, 'appId');
     try {
@@ -462,6 +474,7 @@ async function handleDestroy(
     appId: string,
 ): Promise<true> {
     if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+    if (!requireOperatorForBoundActor(res, 'Arcade tenant administration')) return true;
     if (!ID_RE.test(customerId)) return invalidIdentifier(res, 'customerId');
     if (!ID_RE.test(appId)) return invalidIdentifier(res, 'appId');
     const body = await readJson(req);

@@ -32,6 +32,7 @@ import type { AuditLog } from '../../../security/audit.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { bindDaemonOperatorLane } from '../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../security/exportGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { loadExtraIngestionRoots, saveExtraIngestionRoots, isIngestionConfigured, isWatchRootSafe } from '../../../security/pathAllowlist.js';
 import { loreHome } from '../../../config/loreHome.js';
@@ -148,6 +149,9 @@ export async function tryAdminRoutes(
         // per-workspace storage reachable by URL/body), so this uses the
         // daemon-operator lane rather than a single-workspace bind.
         if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+        // The sweeper archives and counts every eligible node of the workspace, hidden ones
+        // included (the lane above admits a cross-workspace-write app token): operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Retention sweep')) return true;
         const principal = getCurrentPrincipal();
         let body: string;
         try {
@@ -254,6 +258,10 @@ export async function tryAdminRoutes(
         // per-workspace addressable via URL/body), so this uses the
         // daemon-operator lane rather than a single-workspace bind.
         if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+        // Connectors are a daemon-wide registry that reaches external sources, so sync is
+        // operator-only for bound actors. syncOne only enumerates items (the route counts them
+        // below); it ingests nothing.
+        if (!requireOperatorForBoundActor(res, 'Connector sync')) return true;
         const name = syncMatch[1]!;
         const startMs = Date.now();
         let itemCount = 0;
@@ -348,6 +356,9 @@ export async function tryAdminRoutes(
         // not per-workspace), so this uses the daemon-operator lane rather than a
         // single-workspace bind.
         if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+        // Ingestion roots are daemon-wide (they decide what every workspace may ingest from disk):
+        // operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Changing the ingestion roots')) return true;
         let body: string;
         try {
             body = await readBoundedBody(req);

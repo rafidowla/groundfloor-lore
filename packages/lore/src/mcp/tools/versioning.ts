@@ -41,6 +41,7 @@ import type { VerbatimStoreApi } from '../../engines/verbatimStoreApi.js';
 import type { WriteAheadLog } from '../../engines/syncEngine.js';
 // 1.M7 (2026-08-17 audit) — changeset commit/rollback write through the
 // shared orchestration (outbox + verbatim + embed), not raw graph writes.
+import { changesetTouchesHiddenNode } from '../changesetScopeGate.js';
 import { applyChangesetUpsert, applyChangesetDelete, type ChangesetWriteDeps } from '../changesetWrite.js';
 
 export interface VersioningDeps {
@@ -221,9 +222,6 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 if (!cs) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'changeset_not_found', changeset_id }, null, 2) }], isError: true };
                 }
-                if (cs.status !== 'open') {
-                    return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'changeset_not_open', status: cs.status }, null, 2) }], isError: true };
-                }
 
                 // SP-01 (final-audit 2026-06-18) — commit applies graph writes for
                 // cs.workspace. begin_changeset gated CREATION, but commit takes only
@@ -232,6 +230,15 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 // it cannot write. Re-assert write scope on the changeset's own workspace.
                 const scopeDenied = assertMcpScope(cs.workspace, 'write');
                 if (scopeDenied) return scopeDenied;
+                // Row-level security_scopes: a changeset touching a node hidden from
+                // the bound actor answers as a missing id — checked before the status
+                // answer below so a hidden changeset's state is not revealed either.
+                if (await changesetTouchesHiddenNode(changeset_id, deps)) {
+                    return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'changeset_not_found', changeset_id }, null, 2) }], isError: true };
+                }
+                if (cs.status !== 'open') {
+                    return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'changeset_not_open', status: cs.status }, null, 2) }], isError: true };
+                }
 
                 const writes = await deps.versionStore.getChangesetWrites(changeset_id);
 
@@ -408,6 +415,10 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 // writes; gate on the changeset's workspace (rollback takes only an id).
                 const scopeDenied = assertMcpScope(cs.workspace, 'write');
                 if (scopeDenied) return scopeDenied;
+                // Row-level security_scopes: hidden node touched → exactly a missing id.
+                if (await changesetTouchesHiddenNode(changeset_id, deps)) {
+                    return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'changeset_not_found', changeset_id }, null, 2) }], isError: true };
+                }
                 if (cs.status === 'rolled_back') {
                     return {
                         content: [{ type: 'text' as const, text: JSON.stringify({ changeset_id, status: 'rolled_back', note: 'already rolled back — no-op' }, null, 2) }],

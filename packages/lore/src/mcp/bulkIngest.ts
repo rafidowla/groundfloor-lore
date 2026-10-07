@@ -548,6 +548,9 @@ export async function runBulkIngest(
                             type: String(node.nodeData.type ?? ''),
                             project: String(node.nodeData.project ?? node.workspace),
                             ecosystem: String(node.nodeData.ecosystem ?? node.ecosystem),
+                            // nodeUpsert resolved the node's stored scopes into this same nodeData object
+                            // (an omitted value keeps the existing node's), so alias rows match the node.
+                            security_scopes: node.nodeData['security_scopes'] as string[] | undefined,
                         },
                         questions: node.questions,
                     });

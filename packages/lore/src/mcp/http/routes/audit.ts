@@ -18,6 +18,7 @@ import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { bindDaemonOperatorLane } from '../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../security/exportGate.js';
 import { redactError } from '../../../security/logRedact.js';
 
 export interface AuditDeps {
@@ -115,6 +116,8 @@ export async function tryAuditRoutes(
         // D-021 — audit export is daemon-wide (AuditLog is not per-workspace
         // storage), so this uses the daemon-operator lane.
         if (!bindDaemonOperatorLane(res, { intent: 'read' })) return true;
+        // The log holds every workspace's tool calls and arguments: operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Reading the audit log')) return true;
         try {
             const parsed = new URL(url, 'http://localhost');
             const since = parsed.searchParams.get('since');

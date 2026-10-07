@@ -19,6 +19,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { StorageBundle } from '../services.js';
 import { redactError } from '../../security/logRedact.js';
 import { assertMcpScope } from './mcpScope.js';
+import { maintenanceForbiddenToolResult } from '../../security/exportGate.js';
 import { getCurrentPrincipal } from '../../auth/principal.js';
 import * as path from 'node:path';
 import { getWorkspacePath, loadWorkspacesIfPresent } from '../../config/workspaces.js';
@@ -172,6 +173,10 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
                 // another workspace is refused.
                 const scopeDenied = assertMcpScope(args.workspace as string | undefined, 'write');
                 if (scopeDenied) return scopeDenied;
+                // Whole-workspace compaction / cold-node retention / expiry: operator-only
+                // for bound actors, dry-run included (its counts span hidden rows).
+                const maintenanceDenied = maintenanceForbiddenToolResult('Workspace maintenance');
+                if (maintenanceDenied) return maintenanceDenied;
                 const overrides: MaintainPolicyOverrides = {};
                 if (args.retention_days !== undefined) overrides.retentionDays = args.retention_days;
                 if (args.cleanup_versions_older_than) overrides.cleanupVersionsOlderThanMs = parseDuration(args.cleanup_versions_older_than);

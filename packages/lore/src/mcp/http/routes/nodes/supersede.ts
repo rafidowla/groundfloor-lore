@@ -19,6 +19,7 @@ import { tombstoneQuestionAliases } from '../../../../core/nodeServiceVerbatim.j
 import { log } from '../../../../logger.js';
 import type { LoreGraph, NodesDeps } from './types.js';
 import { redactError } from '../../../../security/logRedact.js';
+import { nodeMutateVisible, supersedeHiddenFailure, type NodeWriteGateHandles } from '../../../../security/nodeWriteGate.js';
 import { MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../../../../engines/nodeFieldLimits.js';
 
 export async function handleSupersede(req: IncomingMessage, res: ServerResponse, url: string, deps: NodesDeps): Promise<void> {
@@ -95,7 +96,15 @@ export async function handleSupersede(req: IncomingMessage, res: ServerResponse,
                 throw err;
             }
         }
-        const result = await targetGraph.supersedeNode(parsed.oldId, parsed.newId, parsed.reason);
+        // Row-scope write gate (bound actors only; unbound = no lookups). A hidden side
+        // gets the engine's own not-found refusal for that side, so the 400 body, audit
+        // row and (absent) side effects are identical to a missing id.
+        const writeGate: NodeWriteGateHandles = {
+            workspace: supersedeWs, store: deps.store, graphRegistry: deps.graphRegistry,
+            versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+        };
+        const result: { ok: boolean; reason?: string } = (await supersedeHiddenFailure(parsed.oldId, parsed.newId, writeGate, (nid) => targetGraph.getNode(nid)))
+            ?? await targetGraph.supersedeNode(parsed.oldId, parsed.newId, parsed.reason);
         if (result.ok) {
             // Parity with the supersede_node MCP tool (its Fix #3 / C-R3-02
             // block): also write the semantic `supersedes` edge so the
@@ -211,9 +220,15 @@ export async function handleUnsupersede(req: IncomingMessage, res: ServerRespons
         // oldId) can be removed too. Without this, unsupersede reversed the
         // denormalized field but left the graph edge asserting the
         // supersession forever — traverse()/subgraph kept showing it.
-        const beforeNode = await targetGraph.getNode(parsed.id);
+        // Row-scope write gate (bound actors only): a hidden node answers like a missing
+        // one (ok=false -> the same 404 {ok:false} + audit row below), untouched.
+        const visible = await nodeMutateVisible(parsed.id, {
+            workspace: unsupersedeWs, store: deps.store, graphRegistry: deps.graphRegistry,
+            versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+        });
+        const beforeNode = visible ? await targetGraph.getNode(parsed.id) : null;
         const priorSupersededBy = beforeNode?.supersededBy ?? null;
-        const ok = await targetGraph.unsupersedeNode(parsed.id);
+        const ok = visible ? await targetGraph.unsupersedeNode(parsed.id) : false;
         if (ok && priorSupersededBy) {
             try {
                 // 3.26.0 — under the triple's edge lock, and outbox-first like

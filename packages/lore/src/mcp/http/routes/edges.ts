@@ -41,6 +41,7 @@ import { getCurrentActorScopes } from '../../../security/actorContext.js';
 import type { AuditLog } from '../../../security/audit.js';
 import { withEdgeLocks, withEdgeLock, type EdgeLockTriple } from '../../../core/nodeWriteLock.js';
 import { writeEdgeOrRestore, deleteEdgeOrRestore } from '../../edgeWriteRollback.js';
+import { assertEdgeEndpointsVisible, edgeEndpointHidden, edgeGateDeps } from '../../edgeEndpointGate.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
 // classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
@@ -250,6 +251,12 @@ export async function tryEdgesRoutes(
             // Sprint O4 — backpressure gate.
             if (checkOutboxBackpressure(res, effectivePostWorkspace, deps.outboxLagCache)) return true;
 
+            // Row-level security_scopes: an endpoint hidden from the bound actor
+            // is refused with the engine's own edge_endpoint_missing error (the
+            // catch below maps it to the same 400 a missing endpoint gets),
+            // before anything is recorded or written.
+            await assertEdgeEndpointsVisible(parsed as { sourceId: string; targetId: string }, edgeGateDeps(effectivePostWorkspace, edgeGraph));
+
             const edge = {
                 sourceId: parsed.sourceId,
                 targetId: parsed.targetId,
@@ -381,7 +388,10 @@ export async function tryEdgesRoutes(
             // cannot remove later an edge this call reported as not deleted
             // (mcp/edgeWriteRollback.ts). deleteEdge is declared on
             // LoreGraphHandle — no capability probe needed.
-            const deleted = await withEdgeLock(effectiveDeleteWorkspace, sourceId, targetId, relation, () => deleteEdgeOrRestore({
+            // Row-level security_scopes: a hidden endpoint answers as "no such
+            // edge" (deleted = 0 → the 404 below), with nothing recorded.
+            const hiddenEndpoint = await edgeEndpointHidden(sourceId, targetId, edgeGateDeps(effectiveDeleteWorkspace, edgeGraph));
+            const deleted = hiddenEndpoint ? 0 : await withEdgeLock(effectiveDeleteWorkspace, sourceId, targetId, relation, () => deleteEdgeOrRestore({
                 graph: edgeGraph, store: deps.outboxStore, workspace: effectiveDeleteWorkspace,
                 sourceId, targetId, relation, initiator: 'http:DELETE /api/edge',
             }));

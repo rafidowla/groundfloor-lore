@@ -9,6 +9,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { redactError } from '../../../security/logRedact.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from '../workspaceResolve.js';
 import { assertMcpScope } from '../mcpScope.js';
+import { nodeMutateVisible } from '../../../security/nodeWriteGate.js';
 import { deleteNodeEverywhere } from '../../../core/nodeDeleteService.js';
 import type { MemoryToolsDeps } from './types.js';
 import { log } from '../../../logger.js';
@@ -59,6 +60,21 @@ export function registerDeleteNodeTool(mcpServer: McpServer, deps: MemoryToolsDe
                 }
                 const delGraph = resolvedDel.graph;
                 __auditCtx.workspace = resolvedDel.resolvedWorkspace;
+                // Row-scope write gate (bound actors only; unbound = no lookups). A node this
+                // actor cannot see answers EXACTLY like a missing id (same envelope as the
+                // not-deleted result below) and never reaches the delete, so no outbox row,
+                // tombstone, WAL entry or inline-delete note is produced for it.
+                if (!(await nodeMutateVisible(id, {
+                    workspace: resolvedDel.resolvedWorkspace, store: deps.store, graphRegistry: deps.graphRegistry,
+                    versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+                }))) {
+                    return {
+                        content: [{
+                            type: 'text' as const,
+                            text: JSON.stringify({ success: true, deleted: false, message: `Node '${id}' not found.` }, null, 2),
+                        }],
+                    };
+                }
                 // The whole outbox → graph → verbatim → WAL sequence runs under
                 // the SHARED per-(workspace,id) write lock `nodeUpsert` holds;
                 // it lives in core/nodeDeleteService.ts (3.26.0), shared with

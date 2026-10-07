@@ -24,7 +24,7 @@
 import type { ServerResponse } from 'node:http';
 import { getCurrentActorScopes } from './actorContext.js';
 import { getCurrentPrincipal } from '../auth/principal.js';
-import { EXPORT_FORBIDDEN } from '../mcp/http/errorCodes.js';
+import { EXPORT_FORBIDDEN, MAINTENANCE_FORBIDDEN } from '../mcp/http/errorCodes.js';
 
 /** True when the current request may run a whole-workspace export. */
 export function exportAllowedForCurrentActor(): boolean {
@@ -46,4 +46,42 @@ export function requireExportAllowed(res: ServerResponse, what: string): boolean
         message: `${what} is restricted to workspace administrators; this actor is confined by row-level security_scopes`,
     }));
     return false;
+}
+
+/** Shared wording for every operator-only refusal (REST and MCP). */
+function operatorOnlyMessage(what: string): string {
+    return `${what} requires a daemon operator credential (bootstrap token or shared secret)`;
+}
+
+/**
+ * Whole-workspace maintenance gate (REST). Same operator rule as the export
+ * gate: unbound callers are unchanged (no lookups), bound actors need a
+ * bootstrap / shared-secret principal. Maintenance jobs delete, rebuild or count
+ * across every row of the workspace — hidden rows included, dry-run counts too —
+ * so they cannot be filtered per row. Writes the 403 `{code, message}` envelope
+ * and returns false when refused; the caller must `return true`. Call it after the
+ * route's own auth/workspace gates and BEFORE any scan, count, lock or write.
+ */
+export function requireOperatorForBoundActor(
+    res: ServerResponse,
+    what: string,
+    code: string = MAINTENANCE_FORBIDDEN,
+): boolean {
+    if (exportAllowedForCurrentActor()) return true;
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ code, message: operatorOnlyMessage(what) }));
+    return false;
+}
+
+/**
+ * MCP equivalent of requireOperatorForBoundActor: null when the caller may
+ * proceed, otherwise the `isError` tool result to return as-is.
+ */
+export function maintenanceForbiddenToolResult(what: string):
+    { content: Array<{ type: 'text'; text: string }>; isError: true } | null {
+    if (exportAllowedForCurrentActor()) return null;
+    return {
+        content: [{ type: 'text', text: JSON.stringify({ error: MAINTENANCE_FORBIDDEN, message: operatorOnlyMessage(what) }) }],
+        isError: true,
+    };
 }

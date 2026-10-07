@@ -20,8 +20,10 @@ import { type RetentionDeps, readBody } from './shared.js';
 import { redactError } from '../../../../security/logRedact.js';
 import { assertSafeVerbatimId, isRevisionHistoryId } from '../../../../engines/verbatimHistory.js';
 import { hybridVerbatimSearch } from '../../../../engines/verbatimHybridSearch.js';
-import { verbatimItemVisible, type ItemScopeDeps } from '../../../../security/itemScopes.js';
+import { baseNodeId, verbatimItemVisible, type ItemScopeDeps } from '../../../../security/itemScopes.js';
 import { getCurrentActorScopes } from '../../../../security/actorContext.js';
+import { visibleVerbatimRowIdsForCurrentActor } from '../../../../security/writeTargetBatch.js';
+import { buildWriteScopeDeps, createIdBlockedForCurrentActor, mutateTargetVisible, ID_UNAVAILABLE, ID_UNAVAILABLE_MESSAGE } from '../../../../security/writeTargetGate.js';
 
 /**
  * Row-level security_scopes gate deps for the boot/active workspace's verbatim
@@ -84,9 +86,44 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
             // Reap is idempotent — re-call with a different prefix or repeat until
             // the response contains no orphans to process the full corpus in batches.
             const REAP_PAGE_CAP = 10_000;
+            // Bound-actor raw-scan bound: one request visibility-checks at most this many listed rows
+            // (the 3.29 page-fill precedent, security/scopePageFill.ts), so an actor who sees almost
+            // nothing cannot make a request walk an unbounded listing.
+            const REAP_RAW_SCAN_CAP = 50_000;
+            const REAP_SCAN_CHUNK = 2_000;
             const rawIds = await store.listIds(prefix);
-            const allIds = rawIds.length > REAP_PAGE_CAP ? rawIds.slice(0, REAP_PAGE_CAP) : rawIds;
-            const reapTruncated = rawIds.length > REAP_PAGE_CAP;
+            let reapTruncated = rawIds.length > REAP_PAGE_CAP;
+            let allIds = reapTruncated ? rawIds.slice(0, REAP_PAGE_CAP) : rawIds;
+            // Row-level security_scopes: a bound actor's reap sees (and can tombstone) only rows it can
+            // see; hidden rows are treated as absent from the listing, counts and sample included. The
+            // page is filled by VISIBLE rows (raw rows are scanned in chunks, filtered, and collected
+            // until REAP_PAGE_CAP visible rows or the raw-scan bound), and `truncated` is decided from
+            // visible rows only, so the response is identical to a store that simply lacks the hidden
+            // rows (while the raw-scan bound is not hit). A `#rev` history row is decided by its
+            // canonical item, so hidden history is not counted. totalIds is not reported for a bound
+            // actor (it would count hidden rows). Residual: hitting the raw-scan bound reports
+            // truncated=true, which reveals only that more than REAP_RAW_SCAN_CAP rows were listed.
+            if (getCurrentActorScopes() !== undefined) {
+                const scopeDeps = itemScopeDeps(deps, deps.store.loreVerbatim as unknown as VerbatimStoreApi);
+                const picked: string[] = [];
+                reapTruncated = false;
+                let scanned = 0;
+                scan: while (scanned < rawIds.length) {
+                    if (scanned >= REAP_RAW_SCAN_CAP) { reapTruncated = true; break; }
+                    const chunk = rawIds.slice(scanned, scanned + Math.min(REAP_SCAN_CHUNK, REAP_RAW_SCAN_CAP - scanned));
+                    scanned += chunk.length;
+                    const visible = await visibleVerbatimRowIdsForCurrentActor(chunk, scopeDeps, (vid) => ({
+                        nodeId: baseNodeId(vid),
+                        verbatimId: isRevisionHistoryId(vid) ? vid.replace(/#rev[^#]*$/, '') : vid,
+                    }));
+                    for (const vid of chunk) {
+                        if (visible && !visible.has(vid)) continue;
+                        if (picked.length >= REAP_PAGE_CAP) { reapTruncated = true; break scan; }
+                        picked.push(vid);
+                    }
+                }
+                allIds = picked;
+            }
             const orphans: string[] = [];
             let alive = 0;
             for (const vid of allIds) {
@@ -141,7 +178,7 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
                 tombstoned,
                 ...(tombstoneFailed > 0 ? { tombstone_failed: tombstoneFailed } : {}),
                 sample: orphans.slice(0, 20),
-                ...(reapTruncated ? { truncated: true, totalIds: rawIds.length } : {}),
+                ...(reapTruncated ? { truncated: true, ...(getCurrentActorScopes() === undefined ? { totalIds: rawIds.length } : {}) } : {}),
             }));
         } catch (reapErr) {
             // X-json400 (2026-09-03 audit) — malformed JSON used to fall
@@ -191,7 +228,11 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
                 writeError(res, 501, 'not_supported', 'tombstone not supported by current vector store backend');
                 return true;
             }
-            await store.tombstone(parsed.id, parsed.reason ?? 'manual tombstone via /api/verbatim/tombstone');
+            // Row-level security_scopes: tombstoning a row the bound actor cannot see answers exactly
+            // like a missing id (tombstone() is a silent no-op there): same 200, nothing written.
+            const tombstoneVisible = getCurrentActorScopes() === undefined
+                || await mutateTargetVisible({ nodeId: baseNodeId(parsed.id), verbatimId: parsed.id }, itemScopeDeps(deps, store as unknown as VerbatimStoreApi));
+            if (tombstoneVisible) await store.tombstone(parsed.id, parsed.reason ?? 'manual tombstone via /api/verbatim/tombstone');
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ ok: true, id: parsed.id }));
         } catch (tsErr) {
@@ -340,6 +381,12 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
                 writeError(res, 400, 'invalid_request', 'id, text, workspace required');
                 return true;
             }
+            // Row-level security_scopes: a bound actor naming a revision-history id gets the neutral
+            // refusal (pure shape check, no lookup) rather than the shape-specific 400 below.
+            if (getCurrentActorScopes() !== undefined && isRevisionHistoryId(p.id)) {
+                writeError(res, 409, ID_UNAVAILABLE, ID_UNAVAILABLE_MESSAGE);
+                return true;
+            }
             // 2.5 — reject 'lore:' namespace + '#rev' suffix (direct write must
             // not overwrite a node's canonical row or forge revision history).
             try {
@@ -372,9 +419,24 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
                 writeError(res, 404, 'workspace_not_found', `workspace not found: ${resolvedStore.requested}`, { requested: resolvedStore.requested, known: resolvedStore.known });
                 return true;
             }
-            if (deps.workspaceVerbatimResolver) {
-                const ws = await deps.workspaceVerbatimResolver.getOrOpen(resolvedStore.resolvedWorkspace);
-                await ws.store(doc);
+            const targetVerbatim = deps.workspaceVerbatimResolver
+                ? await deps.workspaceVerbatimResolver.getOrOpen(resolvedStore.resolvedWorkspace)
+                : undefined;
+            // Row-level security_scopes: a caller-chosen id already taken by an item the bound actor
+            // cannot see (live node, deleted node's version log, or canonical verbatim row) is refused
+            // with the neutral id_unavailable. Gated against the workspace the write goes to.
+            if (await createIdBlockedForCurrentActor(
+                { nodeId: baseNodeId(p.id), verbatimId: p.id },
+                buildWriteScopeDeps({
+                    workspace: resolvedStore.resolvedWorkspace, store: deps.store, graphRegistry: deps.graphRegistry,
+                    versionStore: deps.versionStore, verbatim: (targetVerbatim ?? deps.store.loreVerbatim) as never,
+                }),
+            )) {
+                writeError(res, 409, ID_UNAVAILABLE, ID_UNAVAILABLE_MESSAGE);
+                return true;
+            }
+            if (targetVerbatim) {
+                await targetVerbatim.store(doc);
             } else {
                 await deps.store.storageClient.verbatimStore(doc);
             }

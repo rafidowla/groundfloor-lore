@@ -96,8 +96,11 @@ function upsertCanonical(
 ): void {
     const now = new Date().toISOString();
     const existing = db.prepare(
-        `SELECT rowid FROM verbatim WHERE id = ? AND is_canonical = 1`,
-    ).get(row.id) as { rowid: number } | undefined;
+        `SELECT rowid, security_scopes FROM verbatim WHERE id = ? AND is_canonical = 1`,
+    ).get(row.id) as { rowid: number; security_scopes: string | null } | undefined;
+    // Overwrite without `security_scopes` keeps the existing canonical row's labels; an explicit array
+    // (incl. []) wins. Resetting to public would also expose the row's history snapshots.
+    const scopesJson = row.security_scopes === undefined && existing ? existing.security_scopes : scopesToJson(row.security_scopes);
     if (existing) {
         db.prepare(
             `UPDATE verbatim SET is_canonical = 0, superseded_at = ? WHERE rowid = ?`,
@@ -111,7 +114,7 @@ function upsertCanonical(
     ).run(
         row.id, row.text, row.vector ? encodeVector(row.vector) : null, row.contentHash,
         row.type ?? null, row.label ?? null, row.tags ?? null, row.project ?? null, row.ecosystem ?? null,
-        row.updatedAt ?? '', scopesToJson(row.security_scopes), now, now,
+        row.updatedAt ?? '', scopesJson, now, now,
     );
 }
 
@@ -140,6 +143,11 @@ function replaceCanonical(
     },
 ): void {
     const now = new Date().toISOString();
+    // Same keep-existing-labels rule as upsertCanonical when no `security_scopes` is passed.
+    const kept = row.security_scopes === undefined
+        ? (db.prepare(`SELECT security_scopes FROM verbatim WHERE id = ? AND is_canonical = 1`).get(row.id) as { security_scopes: string | null } | undefined)
+        : undefined;
+    const scopesJson = kept ? kept.security_scopes : scopesToJson(row.security_scopes);
     db.prepare(`DELETE FROM verbatim WHERE id = ? AND is_canonical = 1`).run(row.id);
     db.prepare(
         `INSERT INTO verbatim
@@ -149,7 +157,7 @@ function replaceCanonical(
     ).run(
         row.id, row.text, row.vector ? encodeVector(row.vector) : null, row.contentHash,
         row.type ?? null, row.label ?? null, row.tags ?? null, row.project ?? null, row.ecosystem ?? null,
-        row.updatedAt ?? '', scopesToJson(row.security_scopes), now, now,
+        row.updatedAt ?? '', scopesJson, now, now,
     );
 }
 
@@ -204,8 +212,10 @@ export async function store(deps: SqliteWriteDeps, doc: VerbatimDocument): Promi
     } | undefined;
     if (!wasRedacted && existing && existing.content_hash === contentHash && existing.vector) {
         const existingScopes = existing.security_scopes ? JSON.parse(existing.security_scopes) as string[] : [];
-        const sameScopes = JSON.stringify([...existingScopes].sort())
-            === JSON.stringify([...(doc.metadata?.security_scopes ?? [])].sort());
+        // Undefined scopes mean "keep the row's labels" (upsertCanonical), so they never differ.
+        const sameScopes = doc.metadata?.security_scopes === undefined
+            || JSON.stringify([...existingScopes].sort())
+            === JSON.stringify([...doc.metadata.security_scopes].sort());
         const sameMetadata =
             (existing.type ?? '') === (doc.metadata?.type ?? '') &&
             (existing.label ?? '') === (doc.metadata?.label ?? '') &&

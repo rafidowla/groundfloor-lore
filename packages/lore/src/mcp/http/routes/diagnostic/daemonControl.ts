@@ -8,6 +8,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { requestShutdown } from '../../../shutdownCoordinator.js';
 import { bindDaemonOperatorLane } from '../../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../../security/exportGate.js';
 import { redactError } from '../../../../security/logRedact.js';
 import { writeError } from '../../helpers.js';
 
@@ -16,6 +17,9 @@ export function handleDaemonRestart(res: ServerResponse): void {
     // local mode. Daemon restart is daemon-wide control, not per-workspace, so
     // this uses the daemon-operator lane rather than a single-workspace bind.
     if (!bindDaemonOperatorLane(res, { intent: 'write' })) return;
+    // The lane admits a cross-workspace-write app token; a restart still drains every
+    // workspace's work, so it is operator-only for bound actors.
+    if (!requireOperatorForBoundActor(res, 'Daemon restart')) return;
     res.writeHead(202, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ ok: true, restarting: true }));
     // SP-02 — respond first, THEN run the same ordered drain SIGTERM
@@ -35,6 +39,9 @@ export async function handleDaemonLogs(req: IncomingMessage, res: ServerResponse
     // operational data. Treat reading it as a daemon-admin op (write scope), the
     // same bar as restart. Daemon-operator lane, not a single-workspace bind.
     if (!bindDaemonOperatorLane(res, { intent: 'write' })) return;
+    // The log carries other workspaces' node ids and names, which a bound actor's
+    // row scopes cannot filter: operator-only for bound actors.
+    if (!requireOperatorForBoundActor(res, 'Reading the daemon log')) return;
     try {
         const fs = await import('node:fs');
         const os = await import('node:os');

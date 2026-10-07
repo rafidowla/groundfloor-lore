@@ -20,6 +20,7 @@ import { loreHome } from '../../../../config/loreHome.js';
 import { getCurrentPrincipal } from '../../../../auth/principal.js';
 import { bindRouteTarget } from '../../../../security/routeWorkspaceBinding.js';
 import { gateRoute } from '../../../../security/routeGate.js';
+import { requireOperatorForBoundActor } from '../../../../security/exportGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
 import { WorkspaceNotFoundError } from '../../../../engines/localGraphRegistry.js';
 import { type DiagnosticDeps, type LoreGraph, readWorkspaceStats } from './shared.js';
@@ -182,6 +183,9 @@ export async function handleConsistencyCleanup(res: ServerResponse, url: string,
         // Token write-scope against the requested workspace. Null principal
         // = legacy/local bypass (mirrors nodes-delete.ts:101).
         if (bindRouteTarget(res, { requested: workspace, intent: 'write' }) === null) return;
+        // Orphan cascade-delete + compaction over the whole workspace (a hidden row
+        // can be classified an orphan): operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Consistency cleanup')) return;
         const deleteUnverified = u.searchParams.get('deleteUnverified') === '1' || u.searchParams.get('reclaim') === 'now';
         const { runConsistencySweep } = await import('../../../../diagnostics/sweeper.js');
 

@@ -16,6 +16,7 @@ import { withTransactionConflictRetry } from '../../../engines/transactionConfli
 import { recordHotWrite } from '../../../outbox/hotLane.js';
 import { withEdgeLock } from '../../../core/nodeWriteLock.js';
 import { redactError } from '../../../security/logRedact.js';
+import { supersedeHiddenFailure } from '../../../security/nodeWriteGate.js';
 import { tombstoneQuestionAliases } from '../../../core/nodeServiceVerbatim.js';
 import { MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../../../engines/nodeFieldLimits.js';
 
@@ -80,7 +81,14 @@ export function registerSupersedeNodeTool(mcpServer: McpServer, deps: MemoryTool
                     };
                 }
                 const targetGraph = resolved.graph;
-                const result = await targetGraph.supersedeNode(old_id, new_id, reason);
+                // Row-scope write gate (bound actors only; unbound = no lookups). A hidden side
+                // gets the engine's own not-found refusal for that side, so the envelope and
+                // audit row are identical to a missing id and nothing is written.
+                const result: { ok: boolean; reason?: string } = (await supersedeHiddenFailure(old_id, new_id, {
+                    workspace: resolved.resolvedWorkspace, store: deps.store, graphRegistry: deps.graphRegistry,
+                    versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+                }, (nid) => targetGraph.getNode(nid)))
+                    ?? await targetGraph.supersedeNode(old_id, new_id, reason);
                 if (result.ok) {
                     // Fix #3 — also write the semantic graph edge so the
                     // supersession is queryable via traverse() and visible

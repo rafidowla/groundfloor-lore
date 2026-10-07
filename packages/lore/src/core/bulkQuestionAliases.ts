@@ -38,6 +38,13 @@ export interface BulkAliasNodeShape {
  * `questions` — must not sweep/touch pre-existing aliases, same gate
  * nodeService.ts's own fan-out uses).
  *
+ * Scopes: alias rows must carry the SAME `security_scopes` as the node holds after
+ * the write, or a scoped node's phrasings would be searchable by anyone. The caller
+ * passes `node.security_scopes` when it knows them, else `resolveStoredScopes` (read
+ * only when there are questions to record); a resolver answer of `undefined` means
+ * the scopes could not be determined, and the aliases are NOT written (fail closed,
+ * the old aliases are left untouched) rather than recorded as public.
+ *
  * `updatedAt` on the synthesized node is approximate (`new Date()` at call
  * time, not the row's real DB-assigned timestamp) — the alias row's
  * `metadata.updatedAt` is a freshness hint for direct-hit readers, not
@@ -52,9 +59,16 @@ export async function applyBulkQuestionAliases(input: {
     logPrefix: string;
     node: BulkAliasNodeShape;
     questions: string[] | undefined;
+    /** Reads the node's stored scopes after the write; used only when `node.security_scopes` is absent. */
+    resolveStoredScopes?: () => Promise<string[] | undefined>;
 }): Promise<void> {
-    const { outboxStore, workspace, initiator, logPrefix, node, questions } = input;
+    const { outboxStore, workspace, initiator, logPrefix, node, questions, resolveStoredScopes } = input;
     if (!outboxStore || questions === undefined) return;
+    let scopes = node.security_scopes;
+    if (scopes === undefined && questions.length > 0 && resolveStoredScopes) {
+        scopes = await resolveStoredScopes();
+        if (scopes === undefined) throw new Error(`stored security_scopes of '${node.id}' could not be determined; question aliases not written`);
+    }
     await tombstoneQuestionAliases({ id: node.id, workspace, initiator, logPrefix, outboxStore });
     if (questions.length > 0) {
         const nodeForAlias = {
@@ -62,7 +76,7 @@ export async function applyBulkQuestionAliases(input: {
             type: node.type,
             project: node.project,
             ecosystem: node.ecosystem,
-            security_scopes: node.security_scopes ?? [],
+            security_scopes: scopes ?? [],
             updatedAt: new Date().toISOString(),
         } as unknown as LoreNode;
         await recordQuestionAliases({ id: node.id, workspace, initiator, logPrefix, node: nodeForAlias, questions, outboxStore });

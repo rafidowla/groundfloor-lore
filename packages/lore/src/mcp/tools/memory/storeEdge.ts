@@ -15,6 +15,7 @@ import { redactError } from '../../../security/logRedact.js';
 import { checkWorkspaceQuota } from '../../../security/workspaceQuota.js';
 import { withEdgeLocks, type EdgeLockTriple } from '../../../core/nodeWriteLock.js';
 import { writeEdgeOrRestore } from '../../edgeWriteRollback.js';
+import { assertEdgeEndpointsVisible, edgeGateDeps } from '../../edgeEndpointGate.js';
 
 export function registerStoreEdgeTool(mcpServer: McpServer, deps: MemoryToolsDeps): void {
     mcpServer.tool(
@@ -122,6 +123,11 @@ export function registerStoreEdgeTool(mcpServer: McpServer, deps: MemoryToolsDep
                 }
                 __auditCtx.workspace = resolvedEdge.resolvedWorkspace;
                 __auditCtx.entityId = `${sourceId}->${targetId}:${relation}`;
+
+                // Row-level security_scopes: an endpoint hidden from the bound
+                // actor throws the engine's own edge_endpoint_missing error,
+                // before anything is recorded or written.
+                await assertEdgeEndpointsVisible({ sourceId, targetId }, edgeGateDeps(resolvedEdge.resolvedWorkspace, edgeGraph));
 
                 // Round-E X-edges — the outbox record, the substrate write
                 // (and its endpoint-missing retraction), and the WAL append

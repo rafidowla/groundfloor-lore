@@ -25,7 +25,8 @@ import type { ServerResponse } from 'node:http';
 import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
 import { writeJson, writeError } from '../helpers.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
-import { resolveGraph, writeWorkspaceNotFound, type BulkWriteDeps } from './bulkWrite.js';
+import { resolveGraph, writeWorkspaceNotFound } from './bulkWriteWorkspace.js';
+import type { BulkWriteDeps } from './bulkWrite.js';
 
 const RECALL_TOPIC_CAP = 100;
 

@@ -300,6 +300,8 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
         detectedScope: deps.detectedScope,
         graphBasePath: deps.graphBasePath,
         graphRegistry: deps.graphRegistry,
+        versionStore: deps.versionStore, // import_data row-scope gate (id_unavailable).
+        workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
     });
 
     registerGovernanceTools(mcpServer, {

@@ -47,6 +47,13 @@ import { assertSafeLanceId } from '../../../engines/verbatimHistory.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
+import { exportAllowedForCurrentActor } from '../../../security/exportGate.js';
+import { ID_UNAVAILABLE, ID_UNAVAILABLE_MESSAGE } from '../../../security/writeTargetGate.js';
+import { supersedesVisibilityFromDeps } from '../../../security/nodeWriteGate.js';
+import { importScopeDeps } from './importScope.js';
+import { blockedCreateIdsForCurrentActor } from '../../../security/writeTargetBatch.js';
+import type { ItemScopeDeps } from '../../../security/itemScopes.js';
+import type { VerbatimStoreApi } from '../../../engines/verbatimStoreApi.js';
 // Round-2 review fix (HIGH #1) — bulk import writes via `targetGraph.
 // upsertNode()` directly, bypassing core/nodeService's nodeUpsert()
 // chokepoint entirely, so D5 write-time supersession enforcement never ran
@@ -77,6 +84,10 @@ export interface ImportDeps {
     embedQueue?: { enqueue: (nodeId: string, text: string, workspace?: string) => void };
     /** D5 round 2 (#2) — host-level supersession-enforce default. */
     supersessionEnforceDefault?: boolean;
+    /** Row-scope gate for caller-chosen ids (idColumn): deleted-node history and the
+     *  workspace's canonical verbatim row. Optional; an absent handle skips that source. */
+    versionStore?: ItemScopeDeps['versionStore'];
+    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<VerbatimStoreApi> };
 }
 
 /** What the caller (wizard / SDK / MCP tool) submits. */
@@ -437,6 +448,27 @@ export function buildNode(
 }
 
 /**
+ * Ids of the rows' caller-chosen ids (idColumn) that the current actor must be
+ * refused: held by a live node, a deleted node's version log, or a canonical
+ * verbatim row the actor cannot see. Empty for an unbound actor (no lookups) and
+ * for imports without idColumn (synthesised ids are fresh).
+ */
+async function blockedImportIds(
+    sd: ItemScopeDeps | undefined,
+    rows: Record<string, string>[],
+    mapping: ImportMapping,
+    defaultProject: string,
+): Promise<Set<string>> {
+    if (!sd || !mapping.idColumn) return new Set();
+    const ids: string[] = [];
+    for (let i = 0; i < rows.length; i++) {
+        const built = buildNode(rows[i]!, mapping, defaultProject, i);
+        if ('node' in built && typeof built.node.id === 'string') ids.push(built.node.id);
+    }
+    return blockedCreateIdsForCurrentActor(ids, sd);
+}
+
+/**
  * runImport — pure core that turns a decoded ImportRequest into an
  * ImportResponse. The HTTP route and the MCP tool both wrap this so the
  * per-row write loop only lives in one place.
@@ -511,6 +543,18 @@ export async function runImport(
     // D5 — resolved ONCE for the whole import (one workspace, one entityType
     // per request), same resolver every other write path uses.
     const importWorkspace = targetWorkspace || deps.detectedScope.workspace;
+    // Row-scope gate. `replace` rewrites existing rows wholesale and cannot be
+    // checked row by row, so a bound non-operator may not run it (the REST route
+    // answers 501 and the MCP enum excludes it before this point: defensive).
+    if (body.mode === 'replace' && !exportAllowedForCurrentActor()) {
+        throw new Error('mode="replace" is restricted to workspace administrators');
+    }
+    // Rows whose caller-chosen id is held by an item the actor cannot see are
+    // refused per row below. Bound actors only; unbound callers do no lookups.
+    const scopeDeps = await importScopeDeps(deps, targetGraph, importWorkspace);
+    const blockedIds = await blockedImportIds(scopeDeps, parsed.rows, body.mapping, defaultProject);
+    // undefined for an unbound caller; a hidden `supersedes` id / near-duplicate then behaves like a missing one.
+    const supersedesVisible = scopeDeps ? supersedesVisibilityFromDeps(scopeDeps) : undefined;
     const { policy: supersessionPolicy, findDuplicate: findSupersessionDuplicate } = resolveSupersessionContext({
         workspace: importWorkspace,
         targetGraph,
@@ -518,6 +562,7 @@ export async function runImport(
         bootGraph: deps.store.loreGraph,
         storageClient: deps.store.storageClient,
         hostDefaultEnforce: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+        isVisible: supersedesVisible,
     });
     const enforceThisImport = SUPERSESSION_ENFORCED_TYPES.has(body.mapping.entityType);
 
@@ -527,6 +572,15 @@ export async function runImport(
         if ('error' in built) {
             errors.push(built.error);
             skipped++;
+            continue;
+        }
+
+        // id_unavailable is reported through the row-error list only: never counted
+        // as `skipped` (append mode's skipped count would tell the caller a hidden
+        // id exists) and never written. Runs before the append existence probe.
+        if (typeof built.node.id === 'string' && blockedIds.has(built.node.id)) {
+            errors.push({ row: i + 2, ...(body.mapping.idColumn ? { column: body.mapping.idColumn } : {}), message: `${ID_UNAVAILABLE}: ${ID_UNAVAILABLE_MESSAGE}` });
+            if (errors.length >= MAX_ERROR_REPORT) break;
             continue;
         }
 
@@ -547,7 +601,7 @@ export async function runImport(
         // is checked). Previously this row only got an existence-only check,
         // and only while `supersessionPolicy.enforce` was true.
         if (rowSupersedes && rowSupersedes.length > 0) {
-            const preCheck = await validateSupersedesIds({ id: String(built.node.id ?? ''), supersedes: rowSupersedes, targetGraph });
+            const preCheck = await validateSupersedesIds({ id: String(built.node.id ?? ''), supersedes: rowSupersedes, targetGraph, isVisible: supersedesVisible });
             if (!preCheck.ok) {
                 errors.push({ row: i + 2, message: `${preCheck.code}: ${preCheck.error.message}` });
                 skipped++;
@@ -603,6 +657,7 @@ export async function runImport(
                     targetGraph, supersedes: rowSupersedes, newId: written.id,
                     workspace: importWorkspace, initiator: 'http:POST /api/import',
                     logPrefix: '[Lore HTTP import]',
+                    isVisible: supersedesVisible,
                 });
                 if (!applyResult.ok) {
                     imported--;

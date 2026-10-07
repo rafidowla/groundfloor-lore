@@ -65,6 +65,9 @@ export interface IngestionToolsDeps {
      *  boots without a registry fall back to the boot-bound store —
      *  resolveTargetGraph returns the boot graph when this is undefined. */
     graphRegistry?: LocalGraphRegistry;
+    /** Row-scope gate for import_data's caller-chosen ids (idColumn). */
+    versionStore?: import('../../security/itemScopes.js').ItemScopeDeps['versionStore'];
+    workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<import('../../engines/verbatimStoreApi.js').VerbatimStoreApi> };
 }
 
 export function registerIngestionTools(mcpServer: McpServer, deps: IngestionToolsDeps): void {
@@ -545,6 +548,8 @@ export function registerIngestionTools(mcpServer: McpServer, deps: IngestionTool
                         deploymentMode: 'local',
                         dataplane: null,
                         graphRegistry: deps.graphRegistry,
+                        versionStore: deps.versionStore,
+                        workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
                     },
                     decoded,
                     body,

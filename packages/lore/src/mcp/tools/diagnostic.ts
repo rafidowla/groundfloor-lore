@@ -30,6 +30,7 @@ import { hasLanguageBreakdown } from './search/helpers.js';
 import type { StorageBundle } from '../services.js';
 import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
+import { maintenanceForbiddenToolResult } from '../../security/exportGate.js';
 
 export interface DiagnosticToolsDeps {
     store: StorageBundle;
@@ -134,6 +135,10 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                 // workspaces' stats. Modeled as workspace:"*".
                 const scopeDenied = assertMcpScope('*', 'read');
                 if (scopeDenied) return scopeDenied;
+                // Daemon-wide totals include hidden rows across workspaces, so this is operator-only
+                // for bound actors pending the aggregate-counts decision.
+                const maintenanceDenied = maintenanceForbiddenToolResult('Cross-workspace admin stats');
+                if (maintenanceDenied) return maintenanceDenied;
                 const byWorkspace: Record<string, { nodeCount: number; edgeCount: number }> = {};
                 let totalNodes = 0;
                 let totalEdges = 0;

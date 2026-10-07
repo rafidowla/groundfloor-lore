@@ -40,6 +40,7 @@ import { writePermissionDenied } from '../../../../security/rebacGate.js';
 import { isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { requestShutdown } from '../../../shutdownCoordinator.js';
 import { bindDaemonOperatorLane, bindRouteTarget } from '../../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../../security/exportGate.js';
 import { type WorkspacesDeps, readBody } from './shared.js';
 import { redactError } from '../../../../security/logRedact.js';
 
@@ -163,6 +164,9 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
             }
             // F-B3 — gate on the workspace being switched to (daemon rebinds to it).
             if (denyWorkspaceMutation(res, name)) return true;
+            // Switching rebinds and restarts the whole daemon (every workspace's in-flight
+            // work drains): operator-only for bound actors.
+            if (!requireOperatorForBoundActor(res, 'Switching the active workspace')) return true;
             if (name === getActiveWorkspaceName()) {
                 res.writeHead(200, { 'Content-Type': 'application/json' });
                 res.end(JSON.stringify({ active: name, restarting: false }));
@@ -220,6 +224,9 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
             }
             // F-B3 — gate on the workspace being RENAMED (its current name).
             if (denyWorkspaceMutation(res, oldName)) return true;
+            // Rewrites the shared workspaces.json registry entry for the whole workspace:
+            // operator-only for bound actors.
+            if (!requireOperatorForBoundActor(res, 'Renaming a workspace')) return true;
             const next = renameWorkspace(oldName, newName);
             deps.auditLog.log({
                 toolName: 'workspaces.rename',
@@ -262,6 +269,9 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
             const name = kebabCase(raw);
             // F-B3 — gate on the workspace named in the URL, not the token's own.
             if (denyWorkspaceMutation(res, name)) return true;
+            // Deletes the whole workspace (every row, hidden ones included): operator-only
+            // for bound actors. Refused before the audit entry and any registry change.
+            if (!requireOperatorForBoundActor(res, 'Deleting a workspace')) return true;
             const next = deleteWorkspace(name);
             deps.auditLog.log({
                 toolName: 'workspaces.delete',
@@ -297,6 +307,10 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
         const namePart = decodeURIComponent(pathname.slice('/api/workspaces/'.length, -'/retention'.length));
         // F-B3 — gate on the workspace whose retention policy is being mutated.
         if (denyWorkspaceMutation(res, namePart)) return true;
+        // The daemon sweeper later applies this policy (autoArchiveSupersededAfterDays,
+        // typePolicies delete-after) to EVERY row, including ones this actor cannot see:
+        // changing it is operator-only for bound actors (GET stays open).
+        if (!requireOperatorForBoundActor(res, 'Changing the workspace retention policy')) return true;
         let body: string;
         try {
             body = await readBody(req);

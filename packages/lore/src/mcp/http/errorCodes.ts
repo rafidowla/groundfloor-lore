@@ -91,6 +91,18 @@ export const EXPORT_NOT_IMPLEMENTED = 'export_not_implemented';
  *  daemon operator. Exports are not row-filtered, so they are admin-only
  *  (security/exportGate.ts, HTTP 403). */
 export const EXPORT_FORBIDDEN = 'export_forbidden';
+/** A bulk load (POST /api/load, and cancelling a load job) refused for a BOUND
+ *  actor that is not a daemon operator. The loader copies caller-supplied
+ *  security_scopes verbatim and replaces existing rows by id, so it cannot be
+ *  row-gated; it is operator-only for confined actors (routes/load.ts, HTTP 403). */
+export const LOAD_FORBIDDEN = 'load_forbidden';
+/** A whole-workspace maintenance job (prune-ephemeral, retention sweep, graph
+ *  reconnect/reconsume, consistency cleanup, sync, orphan drop, `maintain`)
+ *  refused for a BOUND actor that is not a daemon operator. These jobs delete,
+ *  rebuild or count items across the whole workspace and cannot be row-gated,
+ *  so even their dry-runs are operator-only for confined actors
+ *  (security/exportGate.ts requireOperatorForBoundActor, HTTP 403). */
+export const MAINTENANCE_FORBIDDEN = 'maintenance_forbidden';
 
 // ── Arcade Slice-5: GA hardening (leases, rate-limit, backup/restore) ──
 /** A provisioner verb (provision/disable/destroy/rotate/migrate) could not

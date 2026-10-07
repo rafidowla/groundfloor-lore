@@ -4,6 +4,67 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.30.0] — 2026-10-07
+
+Row-level `security_scopes` now apply to every write path a bound actor can
+reach, and whole-workspace / daemon-wide control-plane operations are
+operator-only for bound actors (#184). Contract: a bound actor
+(`getCurrentActorScopes() !== undefined`) writing to an item it cannot see gets
+exactly the answer a missing id would get, with no side effects; creating with a
+caller-chosen id held by a hidden item is refused with a neutral
+`id_unavailable`. Unbound actors (local mode without `operator.json`, embedded
+hosts, stdio MCP, daemon-internal work) are unchanged and do no extra lookups.
+No store or on-disk format change, no migration.
+
+### Security
+- **Shared write gate** (`security/writeTargetGate.ts`):
+  `mutateTargetVisible` for existing-item writes; `createIdBlockedForCurrentActor`
+  for create/upsert ids (deny-if-any across the live node, the newest
+  version-log state and the canonical verbatim row; fail closed).
+  `id_unavailable` is REST 409 / MCP `isError` and never mentions scopes.
+- **Node writes** — `POST /api/node` / `store_node` (caller-chosen id,
+  `supersedes` ids and near-duplicate hits), supersede / unsupersede, delete
+  and mark-stale (REST + MCP): a hidden target answers like a missing id — no
+  write, outbox row or version row.
+- **Bulk and import** — `POST /api/nodes/bulk` gives a per-item
+  `id_unavailable` (batched lookups); bulk-delete and `/api/edges/bulk` count
+  hidden ids as not found; bulk supersedes / near-duplicates treat hidden
+  targets as missing. `POST /api/import` / `import_data` reject blocked
+  `idColumn` ids per row; `replace` is operator-only for bound actors.
+- **Edges, outcomes, changesets, verbatim** — single edge create/delete,
+  `recall_outcome`, changeset commit/rollback (`changeset_not_found` when any
+  touched id is hidden), verbatim store / tombstone / reap. Bound actors cannot
+  create `#rev` ids. Reap pages by visible rows (raw-scan bound 50,000).
+- **Supersession** — the cycle walk stops at a hidden hop; a hidden
+  `supersedes` id is reported `old-not-found`, like a missing one.
+- **Operator-only for bound actors** (bootstrap / shared-secret pass, app tokens
+  get 403 `maintenance_forbidden`, MCP `isError`): bulk `POST /api/load` and
+  load-job cancel (`load_forbidden`); maintenance (retention sweeps,
+  prune-ephemeral, graph reconnect / reconsume, orphan drop, consistency
+  cleanup, sync push / pull / now; MCP `prune_ephemeral`, `sync_now`,
+  `maintain`); retention-policy changes; workspace switch / rename / delete and
+  `register_workspace` re-pointing an existing name; daemon restart / logs;
+  ingestion roots, `PATCH /api/config`, `GET /api/audit`, connector sync,
+  `GET /api/admin/stats` / `admin_stats`. Arcade admin verbs carry the same
+  gate as defence in depth (mounted behind `requireOperatorPrincipal` today).
+  See `docs/SECURITY_MODEL.md` § "Operator-only operations for bound actors".
+
+### Fixed
+- Re-storing a verbatim row without scopes no longer resets its
+  `security_scopes` (Lance, SQLite, Arcade); an explicit array, including `[]`,
+  still wins.
+- The bulk inline verbatim mirror and question-alias rows now carry the node's
+  `security_scopes`.
+- Six `governance.ts` MCP handlers reported `register_workspace` as the tool
+  name in their errors.
+
+### Known limitations
+- Arcade scope preservation on re-store is read-then-write, not atomic.
+- Aggregate counts (`stats`, `lore_status`, topology / `corpus_health` totals,
+  report summary) still include hidden rows; `admin_stats` is operator-only
+  until that is decided.
+- Version-history states still carry the stored `supersededBy`.
+
 ## [3.29.0] — 2026-10-06
 
 Row-level `security_scopes` now apply to every direct-read, history, list,

@@ -23,10 +23,12 @@ import { resolveTargetGraph } from '../../../tools/workspaceResolve.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../../security/routeWorkspaceBinding.js';
 import { type RetentionDeps, readBody } from './shared.js';
 import { redactError } from '../../../../security/logRedact.js';
+import { filterMutableNodeIds } from '../../../../security/nodeWriteGate.js';
 import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE } from '../../../../core/nodeWriteLock.js';
 import { recordHotWrite } from '../../../../outbox/hotLane.js';
 import { safePruneEphemeralNodes } from '../../../../engines/safeEphemeralPrune.js';
 import { filterNodesByActorScope } from '../../../../security/scopeFilter.js';
+import { requireOperatorForBoundActor } from '../../../../security/exportGate.js';
 // FIND-2026-06-19-01 — call the pure sweep implementation directly with the
 // SWEEP TARGET's own resolved substrates, instead of deps.runRetentionSweep
 // (a closure fixed over the boot graph/verbatim/active-workspace).
@@ -122,7 +124,13 @@ export async function tryPolicyRoutes(req: IncomingMessage, res: ServerResponse,
             // (read-only), then apply in per-chunk locked + outbox-recorded
             // regions — mirrors bulkWriteEdgesDelete.ts's handleBulkDelete
             // chunking (core/nodeWriteLock.ts BULK_LOCK_CHUNK_SIZE).
-            const matchedIds = await graph.findNodeIdsByTags(parsed.tags);
+            // Row-scope write gate (bound actors only; unbound = no lookups): ids the actor
+            // cannot see are dropped from the match, i.e. counted exactly like ids that do
+            // not exist — never marked, never in `marked`, no outbox row.
+            const matchedIds = await filterMutableNodeIds(await graph.findNodeIdsByTags(parsed.tags), {
+                workspace: target, store: deps.store, graphRegistry: deps.graphRegistry,
+                versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+            });
             let marked = 0;
             let anyOutboxCommitFailure = false;
             for (const chunk of chunkForLocking(matchedIds, BULK_LOCK_CHUNK_SIZE)) {
@@ -206,6 +214,10 @@ export async function tryPolicyRoutes(req: IncomingMessage, res: ServerResponse,
             if (bound === null) return true;
             putTargetWs = bound;
         }
+        // The daemon sweeper later applies this policy (autoArchiveSupersededAfterDays,
+        // typePolicies delete-after) to EVERY row, including ones this actor cannot see:
+        // changing it is operator-only for bound actors (GET stays open).
+        if (!requireOperatorForBoundActor(res, 'Changing the workspace retention policy')) return true;
         let body: string;
         try {
             body = await readBody(req);
@@ -267,6 +279,8 @@ export async function tryPolicyRoutes(req: IncomingMessage, res: ServerResponse,
             if (bound === null) return true;
             sweepTarget = bound;
         }
+        // Whole-workspace archive sweep (dry-run counts and ids included): operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Retention sweep')) return true;
         let body: string;
         try {
             body = await readBody(req);
@@ -402,6 +416,8 @@ export async function tryPolicyRoutes(req: IncomingMessage, res: ServerResponse,
             if (bound === null) return true;
             pruneTarget = bound;
         }
+        // Workspace-wide ephemeral prune deletes every expired row, hidden ones included: operator-only for bound actors.
+        if (!requireOperatorForBoundActor(res, 'Ephemeral prune')) return true;
         let body: string;
         try { body = await readBody(req); }
         catch (err) {

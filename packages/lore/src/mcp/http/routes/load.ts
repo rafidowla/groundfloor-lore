@@ -54,6 +54,22 @@ import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { redactError } from '../../../security/logRedact.js';
+import { exportAllowedForCurrentActor } from '../../../security/exportGate.js';
+import { LOAD_FORBIDDEN } from '../errorCodes.js';
+
+/**
+ * A bound actor (per-row security_scopes confine it) that is not a daemon
+ * operator may not bulk-load: the loader writes caller-supplied security_scopes
+ * verbatim and replaces existing rows (incl. canonical lore:<id> verbatim rows)
+ * by id, neither of which can be checked row by row. Same operator rule as the
+ * whole-workspace export. Writes the 403 and returns true when refused.
+ */
+function denyLoadForBoundActor(res: ServerResponse, what: string): boolean {
+    if (exportAllowedForCurrentActor()) return false;
+    writeError(res, 403, LOAD_FORBIDDEN,
+        `${what} is restricted to workspace administrators; this actor is confined by row-level security_scopes`);
+    return true;
+}
 
 /**
  * SP-04 (retry re-sweep) — token-scoped read gate for GET /api/load/jobs,
@@ -272,6 +288,9 @@ async function handlePostLoad(
     // Token-scoped write gate. Null principal = legacy/local single-token
     // bypass (every existing Z1-T* test runs with no principal bound).
     if (bindRouteTarget(res, { requested: workspace, intent: 'write' }) === null) return true;
+    // Row-scope gate: operator-only for bound actors. Still BEFORE any staging,
+    // backpressure, job row or outbox row (the L-019 rule above).
+    if (denyLoadForBoundActor(res, 'Bulk load')) return true;
 
     // 2. Sprint O4 backpressure — 503 outbox_lag if the workspace is
     //    behind. Same helper hot/bulk routes use; same Retry-After.
@@ -473,6 +492,10 @@ async function handleCancelJob(
         writeError(res, 400, 'invalid_job_id', 'job_id must be a non-empty path segment');
         return true;
     }
+    // Load jobs are operator-created (POST /api/load is operator-only for bound
+    // actors), so a bound non-operator may not stop one. Checked BEFORE the job
+    // lookup so a 403 vs 404 split cannot probe which job ids exist.
+    if (denyLoadForBoundActor(res, 'Cancelling a load job')) return true;
     const job = await deps.loadJobsStore.get(jobId);
     if (!job) {
         writeError(res, 404, 'load_job_not_found', `no load job with id ${jobId}`);

@@ -77,7 +77,8 @@ export function itemVisibleToCurrentActor(item: ItemScopes): boolean {
     return scopesVisibleToCurrentActor(item.scopes);
 }
 
-function stateScopes(state: unknown): string[] | undefined {
+/** Scopes carried by a version-log state object; undefined when the state says nothing (absent key). */
+export function stateScopes(state: unknown): string[] | undefined {
     if (state === null || typeof state !== 'object' || Array.isArray(state)) return undefined;
     // An ABSENT security_scopes key says nothing about the node's labels (a
     // partial/legacy state object): it must not be read as "public". Return

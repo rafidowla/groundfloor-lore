@@ -262,15 +262,25 @@ export async function applyWriteTimeSupersedes(params: {
     initiator: string;
     outboxStore?: OutboxStore;
     logPrefix: string;
+    /** Row-scope hook (write-path security_scopes), bound actors only. Defence in depth behind
+     *  validateSupersedesIds: an id it rejects is never mutated (no mutation, no edge, no outbox row)
+     *  and is reported unapplied with the engine's own missing-id reason, so a caller that forgot to
+     *  validate neither touches a hidden node nor sees a different outcome than for a missing one. */
+    isVisible?: (id: string) => Promise<boolean>;
 }): Promise<
     | { ok: true }
     | { ok: false; code: 'supersedes_partial'; applied: string[]; unapplied: Array<{ id: string; reason: string }>; error: Error }
 > {
-    const { targetGraph, supersedes, newId, workspace, initiator, outboxStore, logPrefix } = params;
+    const { targetGraph, supersedes, newId, workspace, initiator, outboxStore, logPrefix, isVisible } = params;
     const applied: string[] = [];
     const unapplied: Array<{ id: string; reason: string }> = [];
     for (const oldId of supersedes) {
         if (oldId === newId) continue; // a node cannot supersede itself
+        if (isVisible && !(await isVisible(oldId))) {
+            // hidden: identical to the engine's answer for a missing id (-> supersedes_partial), nothing touched
+            unapplied.push({ id: oldId, reason: 'old-not-found' });
+            continue;
+        }
         let result: { ok: boolean; reason?: string };
         try {
             result = await targetGraph.supersedeNode(oldId, newId, 'supersedes (write-time enforcement, D5)');
@@ -359,8 +369,12 @@ export async function validateSupersedesIds(params: {
     id: string;
     supersedes: string[] | undefined;
     targetGraph?: { getNode?(id: string): Promise<SupersedesCheckNode | null | undefined> };
+    /** Row-scope hook (write-path security_scopes). Supplied ONLY for a bound actor by the route/tool
+     *  layer; a `false` answer makes the id behave exactly like a nonexistent one (same `missing`
+     *  message, so the response cannot reveal a hidden node). Absent = unchanged behaviour, no lookups. */
+    isVisible?: (id: string) => Promise<boolean>;
 }): Promise<SupersessionCheckResult> {
-    const { id, supersedes, targetGraph } = params;
+    const { id, supersedes, targetGraph, isVisible } = params;
     if (!supersedes || supersedes.length === 0) return { ok: true };
     const getNode = targetGraph?.getNode?.bind(targetGraph);
     if (!getNode) return { ok: true }; // no read-back available — nothing to validate against (fail open, unchanged pre-round-4 posture)
@@ -370,7 +384,7 @@ export async function validateSupersedesIds(params: {
     const archived: string[] = [];
     for (const sid of uniqueIds) {
         const node = await getNode(sid);
-        if (!node) { missing.push(sid); continue; }
+        if (!node || (isVisible && !(await isVisible(sid)))) { missing.push(sid); continue; }
         if (node.status === 'archived') archived.push(sid);
     }
     if (missing.length > 0) {
@@ -397,6 +411,10 @@ export async function validateSupersedesIds(params: {
             const node = await getNode(current);
             const next = node?.supersededBy;
             if (!next) break;
+            // Row-scope: a hidden hop ends the walk (as a missing node would), so a chain routed
+            // through a node the actor cannot see is never confirmed. targetId was already shown
+            // visible above, so a direct hit needs no lookup.
+            if (next !== targetId && isVisible && !(await isVisible(next))) break;
             if (next === targetId) {
                 return {
                     ok: false,
@@ -439,8 +457,10 @@ export async function runSupersessionValidation(params: {
          *  keeps today's behaviour — the field stays required. */
         queryEdges?(q: { source?: string; target?: string; relation?: string; limit: number; offset: number }): Promise<Array<{ sourceId: string; targetId: string; relation: string }>>;
     };
+    /** Bound-actor row-scope hook, forwarded to validateSupersedesIds (hidden id == missing id). */
+    isVisible?: (id: string) => Promise<boolean>;
 }): Promise<SupersessionCheckResult> {
-    const preCheck = await validateSupersedesIds({ id: params.id, supersedes: params.supersedes, targetGraph: params.targetGraph });
+    const preCheck = await validateSupersedesIds({ id: params.id, supersedes: params.supersedes, targetGraph: params.targetGraph, isVisible: params.isVisible });
     if (!preCheck.ok) return preCheck;
     if (!params.supersessionPolicy?.enforce) return { ok: true };
     const { nodeData } = params;
@@ -544,6 +564,9 @@ export interface ResolveSupersessionContextParams {
      * (today's default, unchanged).
      */
     hostDefaultEnforce?: boolean;
+    /** Bound-actor row-scope hook: a near-duplicate hit the actor cannot see is skipped, so its id is
+     *  never echoed in an `unlisted_near_duplicate` message. Absent for unbound callers (no lookups). */
+    isVisible?: (id: string) => Promise<boolean>;
 }
 
 /**
@@ -574,7 +597,7 @@ export function resolveSupersessionContext(params: ResolveSupersessionContextPar
     policy: WorkspaceSupersessionPolicy;
     findDuplicate: FindNearDuplicate | undefined;
 } {
-    const { workspace, targetGraph, homeDir, bootGraph, storageClient, workspaceVerbatimResolver, hostDefaultEnforce } = params;
+    const { workspace, targetGraph, homeDir, bootGraph, storageClient, workspaceVerbatimResolver, hostDefaultEnforce, isVisible } = params;
     // D5 round 2 (HIGH #1 fix regression, 2026-09-23) — getWorkspaceSupersessionPolicy
     // THROWS "Unknown workspace" when `workspace` has no entry in the resolved
     // home's workspaces.json (e.g. a graph handle opened directly against a
@@ -654,6 +677,7 @@ export function resolveSupersessionContext(params: ResolveSupersessionContextPar
               for (const raw of hits) {
                   const hitId = raw.id.startsWith('lore:') ? raw.id.slice(5) : raw.id;
                   if (hitId === query.id) continue; // never propose a node as its own duplicate
+                  if (isVisible && !(await isVisible(hitId))) continue; // hidden from this actor — never surface it
                   if (getCandidateNode) {
                       let candidate: Record<string, unknown> | null | undefined;
                       try {

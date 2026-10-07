@@ -38,6 +38,7 @@ import {
 import { mcpToolError } from './mcpToolError.js';
 import { log } from '../../logger.js';
 import { safePruneEphemeralNodes } from '../../engines/safeEphemeralPrune.js';
+import { maintenanceForbiddenToolResult } from '../../security/exportGate.js';
 import type { OutboxStore } from '../../outbox/types.js';
 import type { HotSessionSnapshot } from '../../engines/sessionCache.js';
 
@@ -124,6 +125,13 @@ async function upsertHelper(input: {
 }) {
     try {
         const registry = readWorkspaceRegistry();
+        // Re-pointing an EXISTING name changes which data that workspace serves (its ecosystem and
+        // CWD path mapping), the same class of change as a rename, which is operator-only: so it is
+        // operator-only for bound actors. First-time registration and unbound callers are unchanged.
+        if (input.name in registry.projects) {
+            const maintenanceDenied = maintenanceForbiddenToolResult('Re-registering an existing workspace');
+            if (maintenanceDenied) return maintenanceDenied;
+        }
         const { alreadyExisted } = upsertWorkspaceMapping(registry, input.name, {
             ecosystem: input.ecosystem,
             paths: input.pathFragments,
@@ -215,7 +223,7 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                     }],
                 };
             } catch (error) {
-                return mcpToolError('register_workspace', error, log);
+                return mcpToolError('list_workspaces', error, log);
             }
         },
     );
@@ -264,7 +272,7 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                     }],
                 };
             } catch (error) {
-                return mcpToolError('register_workspace', error, log);
+                return mcpToolError('sync_status', error, log);
             }
         },
     );
@@ -289,6 +297,10 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                 // SP-01 — enforce bound-principal workspace scope (write).
                 const scopeDenied = assertMcpScope(workspace, 'write');
                 if (scopeDenied) return scopeDenied;
+                // Whole-workspace push/pull moves and counts every row, hidden ones
+                // included: operator-only for bound actors.
+                const maintenanceDenied = maintenanceForbiddenToolResult('Workspace sync');
+                if (maintenanceDenied) return maintenanceDenied;
                 // Postgres-model isolation (2026-06-19): one boot-bound SyncEngine
                 // (active workspace's). Refuse a non-active target rather than
                 // silently syncing the active workspace under another name.
@@ -313,7 +325,7 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                     content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
                 };
             } catch (error) {
-                return mcpToolError('register_workspace', error, log);
+                return mcpToolError('sync_now', error, log);
             }
         },
     );
@@ -379,7 +391,7 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                     }],
                 };
             } catch (error) {
-                return mcpToolError('register_workspace', error, log);
+                return mcpToolError('resolve_deferred', error, log);
             }
         },
     );
@@ -434,7 +446,7 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                     }],
                 };
             } catch (error) {
-                return mcpToolError('register_workspace', error, log);
+                return mcpToolError('get_hot_context', error, log);
             }
         },
     );
@@ -458,6 +470,10 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                 // SP-01 — enforce bound-principal workspace scope (write).
                 const scopeDenied = assertMcpScope(workspace, 'write');
                 if (scopeDenied) return scopeDenied;
+                // Workspace-wide ephemeral prune deletes (and counts) every expired row,
+                // hidden ones included: operator-only for bound actors.
+                const maintenanceDenied = maintenanceForbiddenToolResult('Ephemeral prune');
+                if (maintenanceDenied) return maintenanceDenied;
                 // Local-mode (Postgres model) — prune the REQUESTED workspace's
                 // ephemeral nodes, not the boot/active store. pruneEphemeralNodes
                 // is a LocalGraph method (the boot storageClient delegates to it);
@@ -527,7 +543,7 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                     }],
                 };
             } catch (error) {
-                return mcpToolError('register_workspace', error, log);
+                return mcpToolError('prune_ephemeral', error, log);
             }
         },
     );

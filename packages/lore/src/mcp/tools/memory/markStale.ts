@@ -13,6 +13,7 @@ import type { MemoryToolsDeps } from './types.js';
 import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
 import { redactError } from '../../../security/logRedact.js';
+import { filterMutableNodeIds } from '../../../security/nodeWriteGate.js';
 import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE } from '../../../core/nodeWriteLock.js';
 import { recordHotWrite } from '../../../outbox/hotLane.js';
 
@@ -82,7 +83,13 @@ export function registerMarkStaleTool(mcpServer: McpServer, deps: MemoryToolsDep
                 // outbox-recorded regions — mirrors bulkWriteEdgesDelete.ts's
                 // handleBulkDelete chunking (core/nodeWriteLock.ts
                 // BULK_LOCK_CHUNK_SIZE).
-                const matchedIds = await resolvedGraph.graph.findNodeIdsByTags(tags);
+                // Row-scope write gate (bound actors only; unbound = no lookups): ids the actor
+                // cannot see are dropped from the match, i.e. counted exactly like ids that do
+                // not exist — never marked, never in `marked`, no outbox row.
+                const matchedIds = await filterMutableNodeIds(await resolvedGraph.graph.findNodeIdsByTags(tags), {
+                    workspace: lockWorkspace, store: deps.store, graphRegistry: deps.graphRegistry,
+                    versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+                });
                 let marked = 0;
                 let anyOutboxCommitFailure = false;
                 for (const chunk of chunkForLocking(matchedIds, BULK_LOCK_CHUNK_SIZE)) {

@@ -21,6 +21,7 @@ import { applyRecallOutcome } from '../../../recall/recallOutcome.js';
 import type { SearchToolsDeps } from './types.js';
 import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
+import { buildWriteScopeDeps, mutateTargetVisible } from '../../../security/writeTargetGate.js';
 
 export function registerRecallOutcomeTool(mcpServer: McpServer, deps: SearchToolsDeps): void {
     mcpServer.tool(
@@ -48,6 +49,16 @@ export function registerRecallOutcomeTool(mcpServer: McpServer, deps: SearchTool
                 if (!resolved.ok) {
                     if ('missing' in resolved) return workspaceRequiredEnvelope();
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'workspace_not_found', requested: resolved.requested, known: resolved.known }, null, 2) }], isError: true };
+                }
+
+                // Row-level security_scopes (write path): a node hidden from the
+                // bound actor is answered exactly like a missing one, nothing written.
+                const visible = await mutateTargetVisible(
+                    { nodeId, verbatimId: `lore:${nodeId}` },
+                    buildWriteScopeDeps({ workspace, store: deps.store, graphRegistry: deps.graphRegistry, versionStore: deps.versionStore }),
+                );
+                if (!visible) {
+                    return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'node_not_found', node_id: nodeId }, null, 2) }], isError: true };
                 }
 
                 const result = await applyRecallOutcome({

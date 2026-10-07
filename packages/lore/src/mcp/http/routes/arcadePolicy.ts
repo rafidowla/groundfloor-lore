@@ -20,6 +20,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AuditLog } from '../../../security/audit.js';
 import { bindDaemonOperatorLane } from '../../../security/routeWorkspaceBinding.js';
+import { requireOperatorForBoundActor } from '../../../security/exportGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeJson, writeError } from '../helpers.js';
 import { getTenantApp } from '../../../engines/arcade/arcadeProvisioner.js';
 import {
@@ -82,6 +83,11 @@ export async function tryArcadePolicyRoutes(
 
         if (method === 'GET') {
             if (!bindDaemonOperatorLane(res, { intent: 'read' })) return true;
+            // These routes are mounted only in arcadeBoot.ts behind requireOperatorPrincipal, so today no
+            // actor is bound here and this gate never fires. It is defence-in-depth: if they are ever
+            // mounted on the main dispatcher, the lane would admit a cross-workspace-write app token, and
+            // these verbs act on other tenants' cells, so they stay operator-only for bound actors.
+            if (!requireOperatorForBoundActor(res, 'Arcade cell policy')) return true;
             const cell = getTenantApp({ customerId: tenantId, appId });
             if (!cell) {
                 writeError(res, 404, 'workspace_not_found', `cell (${tenantId}, ${appId}) not found`);
@@ -94,6 +100,7 @@ export async function tryArcadePolicyRoutes(
 
         if (method === 'PUT') {
             if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+            if (!requireOperatorForBoundActor(res, 'Arcade cell policy')) return true;
             const cell = getTenantApp({ customerId: tenantId, appId });
             if (!cell) {
                 writeError(res, 404, 'workspace_not_found', `cell (${tenantId}, ${appId}) not found`);
@@ -127,6 +134,7 @@ export async function tryArcadePolicyRoutes(
 
         if (method === 'DELETE') {
             if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
+            if (!requireOperatorForBoundActor(res, 'Arcade cell policy')) return true;
             deleteCellVocabPolicy(tenantId, appId);
             auditPolicy(deps, 'delete', { tenantId, appId }, 'success');
             writeJson(res, 200, { tenantId, appId, cleared: true });

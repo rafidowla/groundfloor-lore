@@ -24,6 +24,8 @@ import { withTransactionConflictRetry } from '../../../../engines/transactionCon
 import type { LoreGraph, NodesDeps } from './types.js';
 import { assertSafeLanceId } from '../../../../engines/verbatimHistory.js';
 import { redactError } from '../../../../security/logRedact.js';
+import { nodeCreateIdBlocked, supersedesVisibilityFor, type NodeWriteGateHandles } from '../../../../security/nodeWriteGate.js';
+import { ID_UNAVAILABLE, ID_UNAVAILABLE_MESSAGE } from '../../../../security/writeTargetGate.js';
 
 export async function handlePostNode(req: IncomingMessage, res: ServerResponse, url: string, deps: NodesDeps): Promise<void> {
     // NW-5b — audit-coverage. POST /api/node — the primary HTTP write —
@@ -157,6 +159,20 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
                 throw err;
             }
         }
+        // Row-scope write gate (bound actors only; unbound = no lookups). The id is
+        // caller-chosen: if it is taken by an item this actor cannot see (live node,
+        // deleted node's version log, canonical verbatim row) refuse with the neutral
+        // 409 BEFORE vocab/quota/create-vs-update probing, so nothing is written or
+        // queued (HITL pending-op) for it. Same gate hands the supersession policy a
+        // visibility callback so a hidden `supersedes` id behaves like a missing one.
+        const writeGate: NodeWriteGateHandles = {
+            workspace: requestedWorkspace, store: deps.store, graphRegistry: deps.graphRegistry,
+            versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+        };
+        if (await nodeCreateIdBlocked(nodeData.id as string, writeGate)) {
+            writeError(res, 409, ID_UNAVAILABLE, ID_UNAVAILABLE_MESSAGE);
+            return;
+        }
         // Phase 6 P2 — workspace vocab policy gate. Default mode='open' is a
         // no-op; reject/hitl write their own response, warn surfaces a
         // typeWarning we attach below.
@@ -238,6 +254,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
             storageClient: deps.store.storageClient,
             workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
             hostDefaultEnforce: deps.supersessionEnforceDefault, // D5 round 2 (#2) host switch.
+            isVisible: supersedesVisibilityFor(writeGate),
         });
 
         const writeResult = await withTransactionConflictRetry(() => nodeUpsert(
@@ -269,6 +286,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
                 autolink,
                 supersessionPolicy,
                 findSupersessionDuplicate,
+                supersedesVisible: supersedesVisibilityFor(writeGate),
             },
         ));
         if (!writeResult.ok) {
