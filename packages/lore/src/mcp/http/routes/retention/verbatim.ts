@@ -20,6 +20,23 @@ import { type RetentionDeps, readBody } from './shared.js';
 import { redactError } from '../../../../security/logRedact.js';
 import { assertSafeVerbatimId, isRevisionHistoryId } from '../../../../engines/verbatimHistory.js';
 import { hybridVerbatimSearch } from '../../../../engines/verbatimHybridSearch.js';
+import { verbatimItemVisible, type ItemScopeDeps } from '../../../../security/itemScopes.js';
+import { getCurrentActorScopes } from '../../../../security/actorContext.js';
+
+/**
+ * Row-level security_scopes gate deps for the boot/active workspace's verbatim
+ * routes. The graph and version store are optional sources; resolveItemScopes
+ * falls through to the verbatim row's own labels when they are absent.
+ */
+function itemScopeDeps(deps: RetentionDeps, store: VerbatimStoreApi): ItemScopeDeps {
+    const graph = deps.store.loreGraph as unknown as { getNode?: (id: string) => Promise<{ security_scopes?: unknown } | null> } | undefined;
+    return {
+        workspace: deps.detectedScope?.workspace ?? '',
+        getGraphNode: typeof graph?.getNode === 'function' ? (id) => graph.getNode!(id) : undefined,
+        versionStore: deps.versionStore,
+        getVerbatimRow: (id) => store.getById(id),
+    };
+}
 
 /** Returns true once a response has been written. */
 export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerResponse, url: string, deps: RetentionDeps, pathname: string): Promise<boolean> {
@@ -218,7 +235,11 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
                 writeError(res, 501, 'not_supported', 'verbatim get not supported by current vector store backend');
                 return true;
             }
-            const row = await store.getById(getId);
+            let row = await store.getById(getId);
+            // Row-level security_scopes: a row the bound actor's scopes hide is
+            // reported exactly like a missing id (no existence oracle). Unbound
+            // actor (local / embedded / daemon-internal) is never filtered.
+            if (row && getCurrentActorScopes() !== undefined && !(await verbatimItemVisible(getId, row, itemScopeDeps(deps, store)))) row = null;
             if (!row) {
                 // Not a `writeError` case: this is a data-shaped 404 payload
                 // (`found: false`) that callers pattern-match on, not the
@@ -270,7 +291,16 @@ export async function tryVerbatimRoutes(req: IncomingMessage, res: ServerRespons
                 writeError(res, 501, 'not_supported', 'history not supported by current vector store backend');
                 return true;
             }
-            const revisions = await store.getHistory(histId);
+            // Row-level security_scopes: history is gated by the item's REAL labels
+            // (live node → newest version row → undamaged canonical row), plus the
+            // canonical row's own labels. A hidden item returns the same empty
+            // history as a missing id. Allowed actors see EVERY revision.
+            let hiddenHistory = false;
+            if (getCurrentActorScopes() !== undefined) {
+                const canonical = typeof store.getById === 'function' ? await store.getById(histId) : null;
+                hiddenHistory = !(await verbatimItemVisible(histId, canonical, itemScopeDeps(deps, store)));
+            }
+            const revisions = hiddenHistory ? [] : await store.getHistory(histId);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ id: histId, revisions, count: revisions.length }));
         } catch (histErr) {

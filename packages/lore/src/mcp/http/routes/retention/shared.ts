@@ -8,6 +8,7 @@ import type { StorageBundle } from '../../../services.js';
 import type { AuditLog } from '../../../../security/audit.js';
 import type { LocalGraphRegistry } from '../../../../engines/localGraphRegistry.js';
 import type { WorkspaceVerbatimResolver } from '../../../../outbox/workspaceVerbatimResolver.js';
+import type { VersionStoreApi } from '../../../../outbox/versionStoreApi.js';
 import type { OutboxStore } from '../../../../outbox/types.js';
 import { readBoundedBody } from '../../helpers.js';
 
@@ -37,6 +38,9 @@ export interface RetentionDeps {
      *  boot/active store. Optional so cloud-mode and test fixtures that mock
      *  only StorageBundle fall back to the boot store (behavior unchanged). */
     graphRegistry?: LocalGraphRegistry;
+    /** Version log (optional). Used only to resolve a deleted node's real
+     *  security_scopes for verbatim history gating (security/itemScopes.ts). */
+    versionStore?: Pick<VersionStoreApi, 'getVersions'>;
     /** L-012 — per-workspace verbatim resolver (the same SP-F3
      *  WorkspaceVerbatimResolver the outbox replicator uses). When present,
      *  verbatim reads/searches route to the REQUESTED workspace's LanceDB

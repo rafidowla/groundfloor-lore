@@ -21,6 +21,7 @@ type LoreGraph = LoreGraphHandle;
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { computeCorpusHealth } from '../../corpusHealthCompute.js';
+import { actorRowVisibility } from '../../../security/scopeFilter.js';
 import { redactError } from '../../../security/logRedact.js';
 import { writeError } from '../helpers.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
@@ -84,7 +85,7 @@ export async function tryCorpusRoutes(
             }
             graph = gres.graph as LoreGraph;
         }
-        const report = await computeCorpusHealth(graph, deps.auxStore, workspace);
+        const report = await computeCorpusHealth(graph, deps.auxStore, workspace, actorRowVisibility());
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(report));

@@ -230,12 +230,18 @@ export function computeFreshness(
  * @param workspace - Workspace label for the report (informational).
  * @param ttlHours  - Staleness threshold; omit to use LORE_FRESHNESS_TTL_HOURS.
  * @param nowMs     - Override "now" epoch ms for deterministic tests.
+ * @param rowVisible - Optional per-row visibility predicate (bound actors only —
+ *                     see security/scopeFilter.actorRowVisibility). Rows it
+ *                     rejects are not counted and never appear in staleNodeIds,
+ *                     so hidden nodes leave no trace in the report. Omitted ⇒
+ *                     every row is counted (unchanged behaviour).
  */
 export async function sweepFreshness(
     graph: IFreshnessGraph,
     workspace: string,
     ttlHours?: number,
     nowMs?: number,
+    rowVisible?: (row: { security_scopes?: unknown }) => boolean,
 ): Promise<FreshnessReport> {
     const ttl = readFreshnessTtl(ttlHours);
     const now = nowMs ?? Date.now();
@@ -247,8 +253,9 @@ export async function sweepFreshness(
     const pager = graph.bulkListProjected?.bind(graph);
     if (pager) {
         await forEachNodePage(
-            pager, '*', ['syncedAt'], (rows) => {
+            pager, '*', rowVisible ? ['syncedAt', 'security_scopes'] : ['syncedAt'], (rows) => {
             for (const r of rows) {
+                if (rowVisible && !rowVisible({ security_scopes: r['security_scopes'] })) continue;
                 acc.add({
                     id: String(r['id'] ?? ''),
                     syncedAt: (r['syncedAt'] as string | null) ?? null,
@@ -259,6 +266,9 @@ export async function sweepFreshness(
         return acc.finalize(workspace, ttl);
     }
     const nodes = await graph.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true });
-    for (const node of nodes) acc.add(node);
+    for (const node of nodes) {
+        if (rowVisible && !rowVisible({ security_scopes: node.security_scopes })) continue;
+        acc.add(node);
+    }
     return acc.finalize(workspace, ttl);
 }

@@ -36,6 +36,8 @@ import { expandCandidates, MAX_EXPAND_IDS } from '../../../recall/recallExpand.j
 import { runCrossWorkspaceRecall } from '../../tools/recallCrossWorkspace.js';
 import { redactError } from '../../../security/logRedact.js';
 import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
+import { isActorBound, SCOPE_PAGE_FILL_MAX_SCAN } from '../../../security/scopePageFill.js';
+import { redactHiddenSuccessors } from '../../../security/nodePointers.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { RerankBackend } from '../../../recall/rerankBackend.js';
 
@@ -592,17 +594,43 @@ export async function trySearchRoutes(
             // optimisation — core/ecosystemMatch.ts).
             const nodesEcoParam = urlObj.searchParams.get('ecosystem');
             const nodesEcosystem = nodesEcoParam && nodesEcoParam.length > 0 ? nodesEcoParam : '*';
-            const fetchedRaw = await listGraph.listNodes(type, tag, '*', nodesEcosystem, limit + 1);
-            const fetched = nodesEcosystem === '*'
-                ? fetchedRaw
-                : fetchedRaw.filter((n) => ecosystemMatches((n as { ecosystem?: string }).ecosystem, nodesEcosystem));
-            const hasMore = fetched.length > limit;
-            const nodes = hasMore ? fetched.slice(0, limit) : fetched;
-            // 3.1 (2026-08-17) — row-level security_scopes confinement on the
-            // graph-read results: hide nodes whose security_scopes don't
-            // intersect the bound actor's scopes before the rows are
-            // serialized. Undefined actor scopes ⇒ no filtering.
-            const visibleNodes = filterNodesByActorScope(nodes);
+            const inNodesEcosystem = (n: unknown): boolean =>
+                nodesEcosystem === '*'
+                || ecosystemMatches((n as { ecosystem?: string }).ecosystem, nodesEcosystem);
+            let visibleNodes: Awaited<ReturnType<typeof listGraph.listNodes>>;
+            let hasMore: boolean;
+            if (isActorBound()) {
+                // 3.1 (2026-08-17) row-level security_scopes confinement. This
+                // route has no cursor/offset, so the bound actor's answer must
+                // be the top `limit` VISIBLE rows with `hasMore` = "a further
+                // visible row exists" — the same as if hidden rows did not
+                // exist. Widen the DB window (limit+1, doubling) until that is
+                // decidable, the list is exhausted, or the scan cap
+                // (SCOPE_PAGE_FILL_MAX_SCAN) is hit (then hasMore=true means
+                // "may have more"). Re-reading from the head each time is safe:
+                // listNodes is a stable-ordered prefix scan.
+                let want = limit + 1;
+                for (;;) {
+                    const raw = await listGraph.listNodes(type, tag, '*', nodesEcosystem, want);
+                    const seen = filterNodesByActorScope(raw.filter(inNodesEcosystem));
+                    if (seen.length > limit) { visibleNodes = seen.slice(0, limit); hasMore = true; break; }
+                    if (raw.length < want) { visibleNodes = seen; hasMore = false; break; }
+                    if (want >= SCOPE_PAGE_FILL_MAX_SCAN) { visibleNodes = seen; hasMore = true; break; }
+                    want = Math.min(want * 2, SCOPE_PAGE_FILL_MAX_SCAN);
+                }
+            } else {
+                const fetchedRaw = await listGraph.listNodes(type, tag, '*', nodesEcosystem, limit + 1);
+                const fetched = fetchedRaw.filter(inNodesEcosystem);
+                hasMore = fetched.length > limit;
+                // Unbound actor ⇒ no row-level filtering.
+                visibleNodes = hasMore ? fetched.slice(0, limit) : fetched;
+            }
+            // Bound actors: a visible node must not name a hidden successor
+            // (security/nodePointers.ts). Unbound ⇒ returned as-is, no lookup.
+            visibleNodes = await redactHiddenSuccessors(
+                visibleNodes,
+                (ids) => listGraph.getNodesByIds(ids),
+            );
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ count: visibleNodes.length, hasMore, ecosystem: nodesEcosystem, nodes: visibleNodes }));
         } catch (err) {

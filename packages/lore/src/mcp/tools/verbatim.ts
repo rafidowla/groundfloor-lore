@@ -26,6 +26,11 @@ import { redactError } from '../../security/logRedact.js';
 import { assertMcpScope } from './mcpScope.js';
 import { assertSafeVerbatimId } from '../../engines/verbatimHistory.js';
 import { hybridVerbatimSearch } from '../../engines/verbatimHybridSearch.js';
+import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
+import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
+import { resolveTargetGraph } from './workspaceResolve.js';
+import { verbatimItemVisible } from '../../security/itemScopes.js';
+import { getCurrentActorScopes } from '../../security/actorContext.js';
 
 /** Hit shape both scorers return on this surface (providers' verbatim row). */
 type VerbatimSearchHit = { id: string; score: number; text: string; metadata: Record<string, unknown> | null };
@@ -51,6 +56,12 @@ export interface VerbatimToolsDeps {
      * graphRegistry being optional in the search tools.
      */
     workspaceVerbatimResolver?: { getOrOpen(ws: string): Promise<VerbatimStoreApi> };
+    /** Row-level security_scopes gate for get_verbatim: resolves the item's real
+     *  labels from the workspace's live graph node. Optional — absent falls back
+     *  to the boot graph (cloud / tests). */
+    graphRegistry?: LocalGraphRegistry;
+    /** Version log, so a deleted node's real labels can still be resolved. Optional. */
+    versionStore?: Pick<VersionStoreApi, 'getVersions'>;
 }
 
 export function registerVerbatimTools(mcpServer: McpServer, deps: VerbatimToolsDeps): void {
@@ -193,7 +204,7 @@ export function registerVerbatimTools(mcpServer: McpServer, deps: VerbatimToolsD
                 // L-025 — resolve the REQUESTED workspace's verbatim store
                 // for the getById read; fallback to the boot singleton when
                 // no resolver (cloud/tests).
-                let inner = deps.store.loreVerbatim as { getById?: (id: string) => Promise<{ text?: string; contentHash?: string } | null> };
+                let inner = deps.store.loreVerbatim as { getById?: (id: string) => Promise<{ text?: string; contentHash?: string; security_scopes?: string[] } | null> };
                 if (deps.workspaceVerbatimResolver) {
                     try {
                         inner = await deps.workspaceVerbatimResolver.getOrOpen(args.workspace) as unknown as typeof inner;
@@ -207,7 +218,24 @@ export function registerVerbatimTools(mcpServer: McpServer, deps: VerbatimToolsD
                 if (typeof inner.getById !== 'function') {
                     return { content: [{ type: 'text', text: 'get_verbatim not supported by current verbatim backend' }], isError: true };
                 }
-                const r = await inner.getById(args.id);
+                let r = await inner.getById(args.id);
+                // Row-level security_scopes: a row the bound actor's scopes hide is
+                // reported exactly like an absent one (`{row:null}`). Unbound actor
+                // is never filtered.
+                if (r && getCurrentActorScopes() !== undefined) {
+                    const getById = inner.getById.bind(inner);
+                    const visible = await verbatimItemVisible(args.id, r, {
+                        workspace: args.workspace,
+                        getGraphNode: async (nodeId) => {
+                            const g = await resolveTargetGraph(deps.store, deps.graphRegistry, args.workspace, args.workspace);
+                            if (!g.ok) return null;
+                            return g.graph.getNode(nodeId);
+                        },
+                        versionStore: deps.versionStore,
+                        getVerbatimRow: (id) => getById(id),
+                    });
+                    if (!visible) r = null;
+                }
                 if (!r) {
                     return { content: [{ type: 'text', text: JSON.stringify({ row: null }) }] };
                 }

@@ -22,6 +22,8 @@ import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../engines/localG
 import { listWorkspaceNames } from '../../config/workspaces.js';
 import { assertMcpScope } from './mcpScope.js';
 import { ecosystemMatches } from '../../core/ecosystemMatch.js';
+import { filterNodesByActorScope } from '../../security/scopeFilter.js';
+import { isActorBound, fillVisibleKeysetPage, encodeKeysetCursor, unsealKeysetPayload } from '../../security/scopePageFill.js';
 import { getCurrentPrincipal } from '../../auth/principal.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
 import { hasLanguageBreakdown } from './search/helpers.js';
@@ -301,7 +303,12 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                     };
                 }
                 const stripped = id.startsWith('lore:') ? id.slice(5) : id;
-                const node = await res.graph.getNode(stripped);
+                const fetched = await res.graph.getNode(stripped);
+                // Row-level security_scopes confinement (same rule as its HTTP
+                // twin GET /api/node-full): a node whose scopes the bound
+                // actor lacks is reported EXACTLY like a missing id — same
+                // envelope, no existence oracle. Unbound actor ⇒ no filtering.
+                const node = fetched && filterNodesByActorScope([fetched]).length > 0 ? fetched : null;
                 if (!node) {
                     return {
                         content: [{
@@ -395,7 +402,7 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                 if (cursor !== undefined && cursor !== null && cursor !== '') {
                     try {
                         const json = Buffer.from(cursor, 'base64url').toString('utf8');
-                        const parsed = JSON.parse(json) as { updatedAt?: unknown; id?: unknown };
+                        const parsed = unsealKeysetPayload(JSON.parse(json)) as { updatedAt?: unknown; id?: unknown };
                         if (typeof parsed.updatedAt !== 'string' || typeof parsed.id !== 'string') {
                             return {
                                 content: [{ type: 'text' as const, text: JSON.stringify({ error: 'invalid_cursor', hint: 'cursor payload missing updatedAt or id' }, null, 2) }],
@@ -459,25 +466,56 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                 // resolveWorkspaceScope runs ONCE at boot), so letting it
                 // decide visibility buys no isolation and costs correctness.
                 const effectiveEcosystem = ecosystem ?? '*';
-                const page = await targetGraph.bulkList({
+                const listQuery = {
                     types: typeStr ? [typeStr] : undefined,
                     // Exact membership, case-insensitive (lowercase-on-store
                     // policy) — bulkList folds this itself per engine.
                     tags: tag ? [tag] : undefined,
                     project: undefined,
                     ecosystem: effectiveEcosystem !== '*' ? effectiveEcosystem : undefined,
-                    limit: effectiveLimit,
-                    cursor: cursorPayload,
-                });
-                const hasMore = page.hasMore;
-                // The pushdown above is an OPTIMISATION; this is the decision
-                // point (core/ecosystemMatch.ts). Without it the response
-                // would report a `scope.ecosystem` it had only asked the
-                // engine to honour — DEC-SCOPE-HONESTY rule 1.
-                const scopedRows = effectiveEcosystem === '*'
-                    ? page.nodes
-                    : page.nodes.filter((r) => ecosystemMatches((r as { ecosystem?: unknown }).ecosystem as string | undefined, effectiveEcosystem));
-                const pageNodes: Array<{ id: string; type: string; label: string; tags: string[]; project: string; updatedAt: string }> = scopedRows.map((r) => ({
+                };
+                // The pushdown above is an OPTIMISATION; ecosystemMatches
+                // (core/ecosystemMatch.ts) is the decision point. Without it
+                // the response would report a `scope.ecosystem` it had only
+                // asked the engine to honour — DEC-SCOPE-HONESTY rule 1.
+                const inEcosystem = (r: unknown): boolean =>
+                    effectiveEcosystem === '*'
+                    || ecosystemMatches((r as { ecosystem?: unknown }).ecosystem as string | undefined, effectiveEcosystem);
+
+                let hasMore: boolean;
+                let confinedRows: Array<Record<string, unknown>>;
+                let nextCursor: string | undefined;
+                if (isActorBound()) {
+                    // Bound actor: row-level security_scopes confinement with
+                    // PAGE FILL (security/scopePageFill.ts). A hidden row must
+                    // not shorten the page, flip `hasMore`, or lend its id /
+                    // updatedAt to the cursor — the response is what the actor
+                    // would get if the hidden rows did not exist.
+                    const filled = await fillVisibleKeysetPage({
+                        limit: effectiveLimit,
+                        cursor: cursorPayload,
+                        fetch: (c, n) => targetGraph.bulkList({ ...listQuery, limit: n, cursor: c }),
+                        accept: inEcosystem,
+                    });
+                    hasMore = filled.hasMore;
+                    confinedRows = filled.nodes;
+                    nextCursor = filled.nextCursor ? encodeKeysetCursor(filled.nextCursor) : undefined;
+                } else {
+                    const page = await targetGraph.bulkList({ ...listQuery, limit: effectiveLimit, cursor: cursorPayload });
+                    hasMore = page.hasMore;
+                    // Unbound actor ⇒ no row-level filtering; the cursor is
+                    // derived from the last row of the page, as always.
+                    const scopedRows = page.nodes.filter(inEcosystem);
+                    confinedRows = scopedRows;
+                    const lastRaw = scopedRows[scopedRows.length - 1];
+                    nextCursor = hasMore && lastRaw !== undefined
+                        ? Buffer.from(
+                            JSON.stringify({ updatedAt: String(lastRaw.updatedAt ?? ''), id: String(lastRaw.id ?? '') }),
+                            'utf8',
+                        ).toString('base64url')
+                        : undefined;
+                }
+                const pageNodes: Array<{ id: string; type: string; label: string; tags: string[]; project: string; updatedAt: string }> = confinedRows.map((r) => ({
                     id: String(r.id ?? ''),
                     type: String(r.type ?? ''),
                     label: String(r.label ?? ''),
@@ -485,13 +523,6 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                     project: String(r.project ?? ''),
                     updatedAt: String(r.updatedAt ?? ''),
                 }));
-
-                const nextCursor = hasMore && pageNodes.length > 0
-                    ? Buffer.from(
-                        JSON.stringify({ updatedAt: pageNodes[pageNodes.length - 1]!.updatedAt, id: pageNodes[pageNodes.length - 1]!.id }),
-                        'utf8',
-                    ).toString('base64url')
-                    : undefined;
 
                 // v1.1.1 P2 — _meta envelope. list_nodes is loop-prone:
                 // agents try variations of the type/tag filter when

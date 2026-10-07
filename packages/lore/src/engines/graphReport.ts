@@ -36,6 +36,14 @@ export interface ReportOptions {
     project?: string;
     /** Hard cap on top-N listings. */
     topN?: number;
+    /**
+     * Bound actors only (security/scopeFilter.actorRowVisibility): hubs,
+     * recently-updated and orphan rows the actor cannot see are omitted, so no
+     * hidden node's id/label/type is listed. The Summary counts (Nodes, Edges,
+     * Nodes by type, Edges by confidence) and hub degrees are workspace-wide
+     * aggregates and are NOT filtered.
+     */
+    rowVisible?: (row: { security_scopes?: unknown }) => boolean;
 }
 
 /** Literal caps the source Cypher used for these two sections — NOT
@@ -59,9 +67,9 @@ export async function writeGraphReport(
     // One paged edge walk feeds the confidence tally, the hub degree map,
     // and the orphan-exclusion set — see graphReportAggregates.ts.
     const { confidenceByTier, degreeById, endpointIds } = await computeEdgeAggregates(graph);
-    const topHubsRows = await computeTopHubs(graph, degreeById, topN);
-    const recentRows = await computeRecentlyUpdated(graph, RECENT_LIMIT);
-    const orphanRows = await computeOrphans(graph, endpointIds, ORPHAN_LIMIT);
+    const topHubsRows = await computeTopHubs(graph, degreeById, topN, opts.rowVisible);
+    const recentRows = await computeRecentlyUpdated(graph, RECENT_LIMIT, opts.rowVisible);
+    const orphanRows = await computeOrphans(graph, endpointIds, ORPHAN_LIMIT, opts.rowVisible);
 
     // ─── Markdown assembly ──────────────────────────────────────
     const lines: string[] = [];

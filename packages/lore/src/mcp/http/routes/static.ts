@@ -16,6 +16,7 @@ import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { writeWorkspaceRequired, writeError, generateCspNonce, buildHtmlExportCsp } from '../helpers.js';
 import { exportGraphAsHtml } from '../../../engines/htmlExport.js';
 import { redactError } from '../../../security/logRedact.js';
+import { requireExportAllowed } from '../../../security/exportGate.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
@@ -47,6 +48,9 @@ export async function tryStaticRoutes(
     // served UI dashboard.
     if (url.startsWith('/api/export/html') && req.method === 'GET') {
         const parsed = new URL(url, 'http://localhost');
+        // Row-level security_scopes: the snapshot dumps the graph unfiltered, so
+        // a bound (restricted) actor is refused unless it is a daemon operator.
+        if (!requireExportAllowed(res, 'HTML graph export')) return true;
         // L-007 — mirror readGate.ts (SP-04 read-scope). The export dumps a
         // workspace's full node/edge graph; previously it leaked whatever
         // workspace happened to be boot-active to ANY authenticated caller.

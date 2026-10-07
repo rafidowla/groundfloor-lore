@@ -18,6 +18,8 @@ import { isCrossEcosystemPair } from '../../../../core/ecosystemMatch.js';
 import type { ServerResponse } from 'node:http';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
+import { filterNodesByActorScope, normalizeScopes } from '../../../../security/scopeFilter.js';
+import { getCurrentActorScopes } from '../../../../security/actorContext.js';
 import { resolveReadGraph } from './readGate.js';
 import type { NodesDeps } from './types.js';
 import { redactError } from '../../../../security/logRedact.js';
@@ -96,7 +98,15 @@ export async function handleSupersessionCandidates(res: ServerResponse, url: str
         // 10-min in-memory cache keyed on the workspace too (3.2) — the scan is
         // scoped per-workspace, so a key missing the workspace would leak
         // workspace A's cached candidate pairs to workspace B.
-        const cacheKey = `${scanWorkspace}::${projectFilter ?? '*'}::${minScore}::${typesParam}`;
+        //
+        // The payload carries 240 chars of both nodes' content, and what a
+        // caller may see depends on their security_scopes — so the cache is also
+        // keyed on the actor's scope set (JSON-encoded, so scope names containing
+        // commas cannot collide; or 'unbound'), else a pair built for a
+        // scoped/unbound caller would be replayed to a lesser one.
+        const actorScopes = getCurrentActorScopes();
+        const actorKey = actorScopes === undefined ? 'unbound' : `scopes:${JSON.stringify([...actorScopes].sort())}`;
+        const cacheKey = `${scanWorkspace}::${actorKey}::${projectFilter ?? '*'}::${minScore}::${typesParam}`;
         if (!fresh) {
             const cached = supersessionCandidatesCache.get(cacheKey);
             if (cached && Date.now() - cached.savedAt < 10 * 60 * 1000) {
@@ -153,7 +163,7 @@ export async function handleSupersessionCandidates(res: ServerResponse, url: str
                 // `ecosystem` is projected so the pair check below has the
                 // authoritative graph value; without it every candidate read as
                 // undefined and the confinement was silently a no-op.
-                ['type', 'label', 'content', 'createdAt', 'project', 'ecosystem', 'supersededAt'],
+                ['type', 'label', 'content', 'createdAt', 'project', 'ecosystem', 'supersededAt', 'security_scopes'],
                 (rows) => {
                     for (const r of rows) {
                         const type = (r['type'] as string) ?? '';
@@ -170,6 +180,7 @@ export async function handleSupersessionCandidates(res: ServerResponse, url: str
                             project: (r['project'] as string) ?? '*',
                             ecosystem: (r['ecosystem'] as string) ?? '*',
                             supersededAt,
+                            security_scopes: normalizeScopes(r['security_scopes']),
                         } as import('../../../../providers/types.js').LoreNode);
                     }
                 },
@@ -177,6 +188,17 @@ export async function handleSupersessionCandidates(res: ServerResponse, url: str
         } else {
             const allNodes = await readGraph.listNodes(undefined, undefined, project, '*', undefined, { unbounded: true });
             for (const n of allNodes) if (isCandidate(n)) candidates.push(n);
+        }
+
+        // Row-level security_scopes confinement (finding #20): drop hidden
+        // nodes from the candidate set BEFORE pairing, so a hidden node can
+        // neither be a card's `old`/`new` side nor appear as a similarity
+        // partner (partners are resolved only through candidateById). Unbound
+        // actor ⇒ no filtering.
+        if (actorScopes !== undefined) {
+            const visible = filterNodesByActorScope(candidates);
+            candidates.length = 0;
+            candidates.push(...visible);
         }
 
         type Pair = {

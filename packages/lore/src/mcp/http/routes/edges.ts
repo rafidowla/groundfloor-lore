@@ -35,6 +35,9 @@ import type { OutboxStore } from '../../../outbox/types.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { LoreEdge } from '../../../providers/types.js';
 import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
+import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
+import { openContinuation, sealContinuation, scopePageFillBatchSize, SCOPE_PAGE_FILL_MAX_SCAN } from '../../../security/scopePageFill.js';
+import { getCurrentActorScopes } from '../../../security/actorContext.js';
 import type { AuditLog } from '../../../security/audit.js';
 import { withEdgeLocks, withEdgeLock, type EdgeLockTriple } from '../../../core/nodeWriteLock.js';
 import { writeEdgeOrRestore, deleteEdgeOrRestore } from '../../edgeWriteRollback.js';
@@ -108,24 +111,40 @@ async function resolveTargetGraph(
 }
 
 /**
- * confineEdgesToEcosystem — keep only edges whose BOTH endpoints are visible
- * from `ecosystem`. See the call site for why the hydrated endpoint rows, not a
- * pushdown, decide this.
+ * confineEdges — keep only edges whose BOTH endpoints are visible to the
+ * caller: in `ecosystem` (when not '*') AND not hidden by the bound actor's
+ * row-level security_scopes (finding #20 — an edge's source/target ids and
+ * relation otherwise reveal that a hidden node exists and what it is linked
+ * to). See the call site for why the hydrated endpoint rows decide this.
+ *
+ * One batch `getNodesByIds` over the (already ≤1000-row) page — no per-edge
+ * lookups. An endpoint that does not hydrate cannot be shown to be visible and
+ * drops the edge (fail closed). No-op (and no query) when there is neither an
+ * ecosystem scope nor a bound actor.
  */
-async function confineEdgesToEcosystem(
+async function confineEdges(
     graph: LoreGraph,
     edges: LoreEdge[],
     ecosystem: string,
 ): Promise<LoreEdge[]> {
+    const actorBound = getCurrentActorScopes() !== undefined;
+    if (ecosystem === '*' && !actorBound) return edges;
     const ids = new Set<string>();
     for (const e of edges) { ids.add(e.sourceId); ids.add(e.targetId); }
     const hydrated = await graph.getNodesByIds([...ids]);
-    const visible = (id: string): boolean => {
-        const n = hydrated.get(id);
-        if (!n) return false;
-        return ecosystemMatches((n as { ecosystem?: string }).ecosystem, ecosystem);
-    };
-    return edges.filter((e) => visible(e.sourceId) && visible(e.targetId));
+    const visibleIds = new Set<string>();
+    for (const [id, n] of hydrated) {
+        if (ecosystem !== '*' && !ecosystemMatches((n as { ecosystem?: string }).ecosystem, ecosystem)) continue;
+        visibleIds.add(id);
+    }
+    // Reuse the shared matcher (no new matching logic): wrap each endpoint in
+    // the { security_scopes } shape filterNodesByActorScope reads.
+    const allowed = new Set(
+        filterNodesByActorScope(
+            [...visibleIds].map((id) => ({ id, security_scopes: hydrated.get(id)?.security_scopes })),
+        ).map((x) => x.id),
+    );
+    return edges.filter((e) => allowed.has(e.sourceId) && allowed.has(e.targetId));
 }
 
 export async function tryEdgesRoutes(
@@ -424,6 +443,9 @@ export async function tryEdgesRoutes(
             const requestedWorkspace = u.searchParams.get('workspace') ?? undefined;
             const limit = Math.min(Math.max(Number(u.searchParams.get('limit') ?? '500'), 1), 1000);
             const offset = Math.max(Number(u.searchParams.get('offset') ?? '0'), 0);
+            // Bound actors only: sealed continuation from a scan-capped page
+            // (see scopePageFill.ts). It supersedes `offset` and is opaque.
+            const cursorParam = u.searchParams.get('cursor');
             // R6 #4 — `?ecosystem=` (optional; omitted/'*' = every ecosystem,
             // so existing callers are unchanged). This route paginates raw
             // LoreEdge rows — source, target, relation — across every tenant in
@@ -454,6 +476,102 @@ export async function tryEdgesRoutes(
                 });
                 return true;
             }
+            // Bound actors: validate the sealed cursor BEFORE the hidden-endpoint
+            // check below, so a bad cursor is a 400 whether the named node is
+            // hidden or missing (otherwise 200-vs-400 is an existence oracle).
+            let sealedPos: { o: number; s: number } | undefined;
+            if (getCurrentActorScopes() !== undefined && cursorParam) {
+                const st = openContinuation(cursorParam) as { o?: unknown; s?: unknown } | undefined;
+                if (!st || typeof st.o !== 'number' || typeof st.s !== 'number'
+                    || !Number.isInteger(st.o) || !Number.isInteger(st.s) || st.o < 0 || st.s < 0) {
+                    writeError(res, 400, 'invalid_cursor', 'cursor is not valid');
+                    return true;
+                }
+                sealedPos = { o: st.o, s: st.s };
+            }
+            // Existence oracle: a bound actor naming a `source`/`target` node it
+            // may not see must get exactly what a missing id gets (no edges,
+            // hasMore:false). Without this, confineEdges drops the edges but the
+            // raw-page `hasMore` (and the pagination shape) still reveals that
+            // the hidden node has edges. One batch hydration, one scope check.
+            if (getCurrentActorScopes() !== undefined) {
+                const named = [...new Set([source, target].filter((x): x is string => typeof x === 'string' && x.length > 0))];
+                if (named.length > 0) {
+                    const hydrated = await resolved.graph.getNodesByIds(named);
+                    const hidden = named.some((id) => {
+                        const n = hydrated.get(id);
+                        return n !== undefined && n !== null && filterNodesByActorScope([n]).length === 0;
+                    });
+                    if (hidden) {
+                        writeJson(res, 200, {
+                            count: 0,
+                            hasMore: false,
+                            workspace: resolved.resolvedWorkspace || null,
+                            ecosystem: edgeEcosystem,
+                            edges: [],
+                        });
+                        return true;
+                    }
+                }
+            }
+            if (getCurrentActorScopes() !== undefined) {
+                // Bound actor: PAGE FILL (security/scopePageFill.ts). Edges
+                // dropped because an endpoint is hidden must not shorten the
+                // page or flip `hasMore`, and `offset` must not be a raw
+                // engine offset (the gap between consecutive offsets would
+                // reveal how many hidden edges sit in between). So for a
+                // bound actor `offset` counts VISIBLE edges: the server skips
+                // that many visible edges from the head, then fills `limit`,
+                // then looks ahead for one more visible edge to set `hasMore`.
+                // Total raw edges scanned per request is capped; if the cap
+                // ends the request the page carries `hasMore:true` plus an
+                // opaque sealed `nextCursor` to pass back as `?cursor=`.
+                let rawPos = 0;
+                let skip = offset;
+                if (sealedPos) {
+                    rawPos = sealedPos.o;
+                    skip = sealedPos.s;
+                }
+                const batch = scopePageFillBatchSize(limit);
+                const out: LoreEdge[] = [];
+                let scanned = 0;
+                let foundExtra = false;
+                let exhausted = false;
+                let capped = false;
+                while (!foundExtra && !exhausted && !capped) {
+                    if (scanned >= SCOPE_PAGE_FILL_MAX_SCAN) { capped = true; break; }
+                    const raw = await resolved.graph.queryEdges({
+                        source: source ?? undefined,
+                        target: target ?? undefined,
+                        relation: relation ?? undefined,
+                        limit: batch,
+                        offset: rawPos,
+                    });
+                    if (raw.length === 0) { exhausted = true; break; }
+                    const kept = new Set(await confineEdges(resolved.graph, raw, edgeEcosystem));
+                    for (const e of raw) {
+                        if (scanned >= SCOPE_PAGE_FILL_MAX_SCAN) { capped = true; break; }
+                        scanned++;
+                        rawPos++;
+                        if (!kept.has(e)) continue;
+                        if (skip > 0) { skip--; continue; }
+                        if (out.length < limit) out.push(e);
+                        else { foundExtra = true; break; }
+                    }
+                    if (foundExtra || capped) break;
+                    if (raw.length < batch) exhausted = true;
+                }
+                const body: Record<string, unknown> = {
+                    count: out.length,
+                    hasMore: foundExtra || capped,
+                    workspace: resolved.resolvedWorkspace || null,
+                    ecosystem: edgeEcosystem,
+                    edges: out,
+                };
+                if (capped) body.nextCursor = sealContinuation({ o: rawPos, s: skip });
+                writeJson(res, 200, body);
+                return true;
+            }
             // queryEdges is declared on LoreGraphHandle — every graph
             // substrate implements it directly, no capability probe needed.
             const edges = await resolved.graph.queryEdges({
@@ -476,9 +594,11 @@ export async function tryEdgesRoutes(
             // the engine had more rows at this offset, which is what the caller
             // needs to page correctly. A scoped page can therefore be shorter
             // than `limit` while `hasMore` is true.
-            const scopedEdges = edgeEcosystem === '*'
-                ? edges
-                : await confineEdgesToEcosystem(resolved.graph, edges, edgeEcosystem);
+            //
+            // The same hydration also enforces row-level security_scopes: an edge
+            // touching a node the bound actor may not see is dropped (either
+            // endpoint). Unbound actor + '*' ecosystem issues no extra query.
+            const scopedEdges = await confineEdges(resolved.graph, edges, edgeEcosystem);
             writeJson(res, 200, {
                 count: scopedEdges.length,
                 hasMore: edges.length === limit,

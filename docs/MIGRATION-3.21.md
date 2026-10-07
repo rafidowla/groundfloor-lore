@@ -110,6 +110,38 @@ substrate, under any circumstance.** There is no implicit migration.
   <workspace> [--apply]` checks and cleans such duplicates in the Lance table
   itself, using the same rule; close every host that embeds Lore on that
   workspace before `--apply`.
+  `lore verbatim check-scopes <workspace> [--data-dir <path>] [--json]` is a
+  read-only report for stores written before 3.28.0. The old Lance writer
+  stored history (`#rev`) and tombstone rows with `security_scopes` of
+  `['undefined', …]` (one `'undefined'` per original scope), and
+  `migrate-vectors` copied them into SQLite as `["undefined",…]`. No principal
+  holds such a scope, so the rows fail closed (invisible); live canonical rows
+  are unaffected. The command counts rows per class (`ok`, `all_undefined`,
+  `mixed_undefined`) and per kind (canonical live, canonical tombstone,
+  history), lists up to 20 sample ids per damaged class, works on Lance and
+  SQLite workspaces, writes and repairs nothing (it creates no file, not even
+  SQLite `-wal`/`-shm` sidecars), and exits 0 whenever the check completes.
+  The damaged row itself no longer holds its original scopes.
+  `lore verbatim repair-scopes <workspace> [--data-dir <path>] [--apply] [--json]`
+  restores them, but ONLY where the node version log (`versions.sqlite`)
+  proves them exactly: the same node, a recorded version whose `updatedAt`
+  (and type/label) equals the row's, identical scopes in every matching
+  version, and as many scopes as damaged entries. A damaged tombstone takes
+  the scopes of its same-instant `#rev` sibling once the text proves they are
+  the same row. Everything else is left untouched (it stays invisible, fail
+  closed): rows with no version log or no match, ambiguous or empty matches,
+  count mismatches, live canonical rows, mixed and unreadable rows. A
+  canonical row's current scopes are never copied onto an old row. The default
+  is a dry run that prints a verdict count per damaged row and up to 20
+  sample ids per verdict (ids only: no scope value and no row text is ever
+  printed) and writes nothing. `--apply` is offline like `dedupe --apply`:
+  stop the daemon and close every host that embeds Lore on that workspace
+  first; it takes a backup (path printed), re-reads each row just before
+  writing it, writes only the `security_scopes` column (text, vectors,
+  `updatedAt`, content hash and row count never change), then re-scans and
+  asserts that nothing else moved. `versions.sqlite` is opened read-only.
+  Run `check-scopes` first, and `repair-scopes` (dry run) to see how many rows
+  are provable.
   `--stamp-from-config` stamps a missing `embedding_model.json` from the
   configured provider when its dimension matches the table's. A workspace with
   no Lance verbatim table migrates to an empty, stamped SQLite store.

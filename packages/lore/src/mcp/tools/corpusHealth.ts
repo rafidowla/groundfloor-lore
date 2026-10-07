@@ -18,6 +18,7 @@ import type { StorageBundle } from '../services.js';
 import type { AuxStore } from '../../outbox/auxStore.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import { sweepFreshness, type IFreshnessGraph } from '../../engines/freshnessEngine.js';
+import { actorRowVisibility } from '../../security/scopeFilter.js';
 import { computeCorpusHealth } from '../corpusHealthCompute.js';
 import { assertMcpScope } from './mcpScope.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
@@ -72,7 +73,7 @@ export function registerCorpusHealthTools(server: McpServer, deps: CorpusHealthD
                     };
                 }
                 const graph = resolved.graph;
-                const report = await computeCorpusHealth(graph, deps.auxStore, workspace);
+                const report = await computeCorpusHealth(graph, deps.auxStore, workspace, actorRowVisibility());
 
                 return {
                     content: [{
@@ -130,6 +131,9 @@ export function registerCorpusHealthTools(server: McpServer, deps: CorpusHealthD
                     graph as unknown as IFreshnessGraph,
                     workspace,
                     ttl_hours,
+                    undefined,
+                    // Bound actors: hidden rows are neither counted nor listed in staleNodeIds.
+                    actorRowVisibility(),
                 );
                 return { content: [{ type: 'text' as const, text: JSON.stringify(report, null, 2) }] };
             } catch (error) {

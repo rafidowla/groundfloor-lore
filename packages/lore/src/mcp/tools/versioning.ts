@@ -29,6 +29,9 @@ import type { LoreNode } from '../../providers/types.js';
 import { requireWorkspaceGraph } from '../../engines/requireWorkspaceGraph.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
 import { assertMcpScope } from './mcpScope.js';
+import { nodeHistoryVisible, filterVersionsByActorScope } from './versionScopeGate.js';
+import { filterNodesByActorScope } from '../../security/scopeFilter.js';
+import { redactHiddenSuccessors } from '../../security/nodePointers.js';
 import { checkWorkspaceQuota, type IWorkspaceQuotaStore } from '../../security/workspaceQuota.js';
 import type { WorkspaceEntry } from '../../config/workspaces.js';
 import { log } from '../../logger.js';
@@ -105,7 +108,12 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 // SP-01 — enforce bound-principal workspace scope (read).
                 const scopeDenied = assertMcpScope(workspace, 'read');
                 if (scopeDenied) return scopeDenied;
-                const versions = await deps.versionStore.getVersions(node_id, workspace, limit);
+                // Row-level security_scopes: a node the bound actor's scopes hide
+                // returns the same empty history as a missing id; allowed actors
+                // see every revision.
+                const versions = (await nodeHistoryVisible(node_id, workspace, deps))
+                    ? await deps.versionStore.getVersions(node_id, workspace, limit)
+                    : [];
                 return {
                     content: [{
                         type: 'text' as const,
@@ -151,7 +159,8 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 // SP-01 — enforce bound-principal workspace scope (read).
                 const scopeDenied = assertMcpScope(workspace, 'read');
                 if (scopeDenied) return scopeDenied;
-                const all = await deps.versionStore.getDiff(workspace, since);
+                // Row-level security_scopes: drop entries for hidden nodes.
+                const all = await filterVersionsByActorScope(await deps.versionStore.getDiff(workspace, since), workspace, deps);
                 const trimmed = all.slice(0, limit);
                 return {
                     content: [{
@@ -511,11 +520,14 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 // boundary is already enforced by the graph resolved above — each workspace
                 // is its own database — so the name here only ever DROPPED that workspace's
                 // own rows.
-                const allNodes = await graph.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true });
+                // Row-level security_scopes: a bound actor's snapshot carries only
+                // the nodes it may see (unbound actor → unchanged).
+                const allNodes = filterNodesByActorScope(await graph.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true }));
                 const filtered = include_archived
                     ? allNodes
                     : allNodes.filter((n) => !n.status || n.status !== 'archived');
-                const jsonl = filtered.map((n) => JSON.stringify(n)).join('\n');
+                const jsonl = (await redactHiddenSuccessors(filtered, (ids) => graph.getNodesByIds(ids)))
+                    .map((n) => JSON.stringify(n)).join('\n');
                 return {
                     content: [{
                         type: 'text' as const,
@@ -528,7 +540,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                     }],
                 };
             } catch (error) {
-                return mcpToolError('node_history', error, log);
+                return mcpToolError('export_snapshot', error, log);
             }
         },
     );

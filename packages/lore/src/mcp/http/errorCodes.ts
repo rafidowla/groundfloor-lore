@@ -85,6 +85,12 @@ export const POLICY_MODE_NOT_SUPPORTED = 'policy_mode_not_supported';
  *  ever receives a silently-partial NDJSON bundle (routes/workspaceExport.ts,
  *  HTTP 501). See the Slice-4 deferral note. */
 export const EXPORT_NOT_IMPLEMENTED = 'export_not_implemented';
+/** A whole-workspace export (routes/workspaceExport.ts NDJSON bundle,
+ *  routes/static.ts HTML snapshot) refused for a BOUND actor (a request carrying
+ *  an actor context whose per-row security_scopes confine it) that is not a
+ *  daemon operator. Exports are not row-filtered, so they are admin-only
+ *  (security/exportGate.ts, HTTP 403). */
+export const EXPORT_FORBIDDEN = 'export_forbidden';
 
 // ── Arcade Slice-5: GA hardening (leases, rate-limit, backup/restore) ──
 /** A provisioner verb (provision/disable/destroy/rotate/migrate) could not

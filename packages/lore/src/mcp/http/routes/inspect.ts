@@ -21,7 +21,7 @@ import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
 import { redactError } from '../../../security/logRedact.js';
-import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
+import { isActorBound, fillVisibleKeysetPage, encodeKeysetCursor, unsealKeysetPayload } from '../../../security/scopePageFill.js';
 import { writeError } from '../helpers.js';
 
 export interface InspectRouteDeps {
@@ -156,7 +156,7 @@ export async function tryInspectRoutes(
             if (cursorParam) {
                 try {
                     const json = Buffer.from(cursorParam, 'base64url').toString('utf8');
-                    const parsed = JSON.parse(json) as { updatedAt?: unknown; id?: unknown };
+                    const parsed = unsealKeysetPayload(JSON.parse(json)) as { updatedAt?: unknown; id?: unknown };
                     if (typeof parsed.updatedAt !== 'string' || typeof parsed.id !== 'string') {
                         writeError(res, 400, 'invalid_cursor', 'payload missing updatedAt or id');
                         return true;
@@ -201,25 +201,43 @@ export async function tryInspectRoutes(
                 cursor: cursorPayload ?? undefined,
                 limit,
             };
-            const bl = await targetGraph.bulkList(query);
             // The pushdown is an optimisation; this is the decision point
             // (core/ecosystemMatch.ts) — the response states `ecosystem`, so
             // every row in it must satisfy that scope (DEC-SCOPE-HONESTY r1).
-            const scopedRows = ecosystem === '*'
-                ? bl.nodes
-                : bl.nodes.filter((n) => ecosystemMatches((n as { ecosystem?: unknown }).ecosystem as string | undefined, ecosystem));
-            // 3.1 (2026-08-17) — row-level security_scopes confinement on the
-            // RAW rows before they are projected and serialized (the wire
-            // projection below drops security_scopes). Undefined actor
-            // scopes ⇒ no filtering.
-            const confinedRows = filterNodesByActorScope(scopedRows);
-            const nextCursor = bl.nextCursor
-                ? Buffer.from(JSON.stringify(bl.nextCursor)).toString('base64url')
-                : null;
+            const inEcosystem = (n: unknown): boolean =>
+                ecosystem === '*'
+                || ecosystemMatches((n as { ecosystem?: unknown }).ecosystem as string | undefined, ecosystem);
+            let confinedRows: Array<Record<string, any>>;
+            let hasMore: boolean;
+            let nextCursor: string | null;
+            if (isActorBound()) {
+                // Bound actor: row-level security_scopes confinement with PAGE
+                // FILL (security/scopePageFill.ts) — hidden rows never shorten
+                // the page, flip hasMore, or appear in the cursor. Twin of MCP
+                // list_nodes.
+                const filled = await fillVisibleKeysetPage({
+                    limit: query.limit,
+                    cursor: cursorPayload,
+                    fetch: (c, n) => targetGraph.bulkList({ ...query, limit: n, cursor: c }),
+                    accept: inEcosystem,
+                });
+                confinedRows = filled.nodes;
+                hasMore = filled.hasMore;
+                nextCursor = filled.nextCursor ? encodeKeysetCursor(filled.nextCursor) : null;
+            } else {
+                const bl = await targetGraph.bulkList(query);
+                // Unbound actor ⇒ no row-level filtering (byte-identical to
+                // before): the engine's own cursor passes straight through.
+                confinedRows = bl.nodes.filter(inEcosystem);
+                hasMore = bl.hasMore;
+                nextCursor = bl.nextCursor
+                    ? Buffer.from(JSON.stringify(bl.nextCursor)).toString('base64url')
+                    : null;
+            }
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
-                workspace, ecosystem, count: confinedRows.length, hasMore: bl.hasMore, nextCursor,
+                workspace, ecosystem, count: confinedRows.length, hasMore, nextCursor,
                 nodes: confinedRows.map((n) => ({ id: n.id, type: n.type, label: n.label, tags: n.tags, updatedAt: n.updatedAt })),
             }));
         } catch (err) {

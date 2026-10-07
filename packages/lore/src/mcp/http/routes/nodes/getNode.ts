@@ -16,12 +16,14 @@
  * to each hydrated neighbour in `neighbors1Hop`.
  */
 
+import { getCurrentActorScopes } from '../../../../security/actorContext.js';
 import type { ServerResponse } from 'node:http';
 import { neighbors1Hop, type NeighborGraph } from '../../../../engines/graphNeighbors.js';
 import { ecosystemMatches } from '../../../../core/ecosystemMatch.js';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
 import { filterNodesByActorScope } from '../../../../security/scopeFilter.js';
+import { redactHiddenSuccessor } from '../../../../security/nodePointers.js';
 import { resolveReadGraph } from './readGate.js';
 import type { NodesDeps } from './types.js';
 import { redactError } from '../../../../security/logRedact.js';
@@ -100,8 +102,16 @@ export async function handleGetNode(res: ServerResponse, url: string, deps: Node
         // NeighborGraph) and filter the same way the centre is filtered.
         const neighborIds = [...new Set([...outRows, ...inRows].map((r) => r.id))];
         let scopeById: Map<string, string[]> = new Map(neighborIds.map((id) => [id, []]));
+        // The centre's `supersededBy` target rides in the SAME batched lookup
+        // (bound actors only) so the response costs one getNodesByIds, not two.
+        const successorId = getCurrentActorScopes() !== undefined && typeof node.supersededBy === 'string' && node.supersededBy.length > 0
+            ? node.supersededBy
+            : null;
+        let hydrated: Map<string, { security_scopes?: string[] }> = new Map();
         try {
-            const hydrated = await (readGraph as unknown as NeighborGraph).getNodesByIds(neighborIds);
+            hydrated = await (readGraph as unknown as NeighborGraph).getNodesByIds(
+                successorId !== null && !neighborIds.includes(successorId) ? [...neighborIds, successorId] : neighborIds,
+            );
             for (const [id, n] of hydrated) scopeById.set(id, n.security_scopes ?? []);
         } catch {
             // Hydration failure → empty scopes (public); a transient read error
@@ -132,7 +142,9 @@ export async function handleGetNode(res: ServerResponse, url: string, deps: Node
         ];
         res.writeHead(200, { 'Content-Type': 'application/json' });
         // The reported scope is the ENFORCED scope (DEC-SCOPE-HONESTY rule 1).
-        res.end(JSON.stringify({ node, neighbors, ecosystem }));
+        // A `supersededBy` naming a node the actor cannot see is nulled (nodePointers.ts).
+        const outNode = await redactHiddenSuccessor(node, async () => hydrated);
+        res.end(JSON.stringify({ node: outNode, neighbors, ecosystem }));
     } catch (err) {
         writeError(res, 500, 'internal_error', redactError(err));
     }

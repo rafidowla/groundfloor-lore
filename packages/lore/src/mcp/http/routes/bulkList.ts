@@ -43,12 +43,13 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { StorageBundle } from '../../services.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../../engines/localGraphRegistry.js';
+import { redactHiddenSuccessors } from '../../../security/nodePointers.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeJson, writeError, writeWorkspaceRequired, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { redactError } from '../../../security/logRedact.js';
-import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
+import { isActorBound, fillVisibleKeysetPage, encodeKeysetCursor, unsealKeysetPayload } from '../../../security/scopePageFill.js';
 import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { BulkListQuery } from '../../../providers/types.js';
@@ -93,7 +94,7 @@ function decodeCursor(raw: unknown): CursorPayload | null | { _err: string } {
     if (typeof raw !== 'string') return { _err: 'cursor must be a string' };
     try {
         const json = Buffer.from(raw, 'base64url').toString('utf8');
-        const parsed = JSON.parse(json) as CursorPayload;
+        const parsed = unsealKeysetPayload(JSON.parse(json)) as CursorPayload;
         if (typeof parsed.updatedAt !== 'string' || typeof parsed.id !== 'string') {
             return { _err: 'cursor payload missing updatedAt or id' };
         }
@@ -229,22 +230,46 @@ export async function tryBulkListRoutes(
             limit,
             cursor,
         };
-        const page = await resolved.graph.bulkList(query);
         // The pushdown is an optimisation; this is the decision point (see
         // core/ecosystemMatch.ts). Applied to the RAW rows, which is what the
         // response hands back — `content` included.
-        const scopedNodes = requestedEcosystem === '*'
-            ? page.nodes
-            : page.nodes.filter((n) => ecosystemMatches((n as { ecosystem?: unknown }).ecosystem as string | undefined, requestedEcosystem));
-        // 3.1 (2026-08-17) — row-level security_scopes confinement: hide
-        // nodes whose scopes don't intersect the bound actor's scopes before
-        // the list is serialized. Undefined actor scopes ⇒ no filtering.
-        const confinedNodes = filterNodesByActorScope(scopedNodes);
-        const nextCursor = page.nextCursor ? encodeCursor(page.nextCursor) : null;
+        const inEcosystem = (n: unknown): boolean =>
+            requestedEcosystem === '*'
+            || ecosystemMatches((n as { ecosystem?: unknown }).ecosystem as string | undefined, requestedEcosystem);
+        let confinedNodes: Array<Record<string, unknown>>;
+        let hasMore: boolean;
+        let nextCursor: string | null;
+        if (isActorBound()) {
+            // 3.1 (2026-08-17) row-level security_scopes confinement, with PAGE
+            // FILL (security/scopePageFill.ts): hidden nodes never shorten the
+            // page, flip hasMore, or appear in the cursor — the bound actor
+            // sees exactly what it would if they did not exist.
+            const filled = await fillVisibleKeysetPage({
+                limit,
+                cursor,
+                fetch: (c, n) => resolved.graph.bulkList({ ...query, limit: n, cursor: c }),
+                accept: inEcosystem,
+            });
+            confinedNodes = filled.nodes;
+            hasMore = filled.hasMore;
+            nextCursor = filled.nextCursor ? encodeKeysetCursor(filled.nextCursor) : null;
+        } else {
+            const page = await resolved.graph.bulkList(query);
+            // Unbound actor ⇒ no row-level filtering (byte-identical to before).
+            confinedNodes = page.nodes.filter(inEcosystem);
+            hasMore = page.hasMore;
+            nextCursor = page.nextCursor ? encodeCursor(page.nextCursor) : null;
+        }
+        // Bound actors: a visible node must not name a hidden successor
+        // (security/nodePointers.ts). Unbound ⇒ returned as-is, no lookup.
+        confinedNodes = await redactHiddenSuccessors(
+            confinedNodes,
+            (ids) => resolved.graph.getNodesByIds(ids),
+        );
 
         writeJson(res, 200, {
             count: confinedNodes.length,
-            hasMore: page.hasMore,
+            hasMore,
             nextCursor,
             workspace: resolved.resolvedWorkspace || null,
             ecosystem: requestedEcosystem,

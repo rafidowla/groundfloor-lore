@@ -27,6 +27,7 @@ import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, wri
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../security/routeWorkspaceBinding.js';
 import { redactError } from '../../../security/logRedact.js';
+import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import { withNodeLock } from '../../../core/nodeWriteLock.js';
@@ -172,7 +173,11 @@ export async function tryLifecycleRoutes(
             // boundary is already enforced by the graph resolved above — each workspace
             // is its own database — so the name here only ever DROPPED that workspace's
             // own rows.
-            const allNodes = await graph.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true });
+            // Row-level security_scopes: nodes hidden from a bound actor are treated as
+            // ABSENT — not in the dry-run preview, not in any count, never touched by apply.
+            const allNodes = filterNodesByActorScope(
+                await graph.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true }),
+            );
 
             const cutoff = typeof parsed.older_than_days === 'number'
                 ? new Date(Date.now() - parsed.older_than_days * 86400000).toISOString()
@@ -263,6 +268,7 @@ export async function tryLifecycleRoutes(
                     > => {
                         const fresh = await graph.getNode(node.id);
                         if (!fresh) return null; // deleted since the snapshot.
+                        if (filterNodesByActorScope([fresh]).length === 0) return null; // relabelled out of the actor's view since the snapshot.
                         if (fresh.status === 'protected' || fresh.status === 'archived') return null;
                         if (parsed.classification && fresh.classification !== parsed.classification) return null;
                         if (cutoff && fresh.createdAt >= cutoff) return null;
@@ -479,7 +485,8 @@ export async function tryLifecycleRoutes(
             // graph primitives only: no re-entry (nodeWriteLock.ts rule 1).
             const restored = await withNodeLock(effectiveWorkspace, nodeId, async () => {
                 const found = await graph.getNode(nodeId);
-                if (!found) return null;
+                // Row-level security_scopes: hidden from the bound actor == missing.
+                if (!found || filterNodesByActorScope([found]).length === 0) return null;
                 const prev = found.status ?? 'active';
                 await withTransactionConflictRetry(() => graph.upsertNode({ ...found, status: 'active' }));
                 return { node: found, previousStatus: prev };

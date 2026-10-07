@@ -17,6 +17,8 @@
 import type { ServerResponse } from 'node:http';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
+import { filterNodesByActorScope } from '../../../../security/scopeFilter.js';
+import { redactHiddenSuccessors } from '../../../../security/nodePointers.js';
 import { resolveReadGraph } from './readGate.js';
 import type { NodesDeps } from './types.js';
 import { redactError } from '../../../../security/logRedact.js';
@@ -59,8 +61,19 @@ export async function handleNodesAsOf(res: ServerResponse, url: string, deps: No
             }
             throw validationErr;
         }
+        // Row-level security_scopes confinement (finding #20). `listNodesAsOf`
+        // is a valid-time WINDOW over each node's CURRENT row (validFrom /
+        // validUntil), not a historical snapshot, so the row's current scopes
+        // are the only ones that exist to check — a node is returned only if
+        // the bound actor may see it today (never widens). Hidden rows are
+        // dropped silently and `count` reflects the visible set. Unbound
+        // actor ⇒ no filtering.
+        const visible = await redactHiddenSuccessors(
+            filterNodesByActorScope(nodes),
+            (ids) => readGraph.getNodesByIds(ids),
+        );
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ at, count: nodes.length, nodes }));
+        res.end(JSON.stringify({ at, count: visible.length, nodes: visible }));
     } catch (err) {
         writeError(res, 500, 'internal_error', redactError(err));
     }

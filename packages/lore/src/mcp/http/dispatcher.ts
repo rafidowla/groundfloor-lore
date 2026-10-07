@@ -423,6 +423,9 @@ async function dispatchAfterGates(
         detectedScope: deps.detectedScope,
         graphRegistry: deps.graphRegistry,
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+        // Row-level scope gate for GET /api/verbatim/get|history resolves a
+        // deleted node's real labels through the version log.
+        versionStore: deps.versionStore,
         // ITEM X-pruneeph (2026-09-03) — POST /api/prune-ephemeral's
         // hard-delete path needs this to record node.delete /
         // verbatim.tombstone outbox rows (mirrors the lifecycle routes).

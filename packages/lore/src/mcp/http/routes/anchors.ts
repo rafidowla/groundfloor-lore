@@ -12,6 +12,7 @@ import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../../engines/loc
 import { gateRoute } from '../../../security/routeGate.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
+import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
 import { parseAnchors } from '../../anchorParse.js';
 import { redactError } from '../../../security/logRedact.js';
 import { writeError } from '../helpers.js';
@@ -108,7 +109,9 @@ export async function tryAnchorsRoutes(
         await graph.initialize();
 
         const node = await graph.getNode(nodeId);
-        if (!node) {
+        // Row-level security_scopes confinement: hidden ⇒ same 404 as a
+        // missing id (and never mutated by mark_stale). Unbound ⇒ no-op.
+        if (!node || filterNodesByActorScope([node]).length === 0) {
             writeError(res, 404, 'node_not_found', `node not found: ${nodeId}`, { id: nodeId });
             return true;
         }

@@ -22,6 +22,8 @@ import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../security/routeWorkspaceBinding.js';
 import { redactError } from '../../../security/logRedact.js';
+import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
+import { getCurrentActorScopes } from '../../../security/actorContext.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 
@@ -145,7 +147,9 @@ export async function tryOutcomesRoutes(
             await graph.initialize();
 
             const node = await graph.getNode(nodeId);
-            if (!node) {
+            // Row-level security_scopes: a node hidden from the bound actor is
+            // answered exactly like a missing one, and nothing is written.
+            if (!node || filterNodesByActorScope([node]).length === 0) {
                 writeError(res, 404, 'node_not_found', `node not found: ${nodeId}`, { node_id: nodeId });
                 return true;
             }
@@ -224,8 +228,28 @@ export async function tryOutcomesRoutes(
             }
             if (bindRouteTarget(res, { requested: workspace, intent: 'read' }) === null) return true;
 
-            const outcomes = deps.auxStore.getOutcomes(nodeId, workspace, limit);
-            const counts = deps.auxStore.getOutcomeCount(nodeId, workspace);
+            // Row-level security_scopes: a bound actor lacking the node's scopes
+            // is answered exactly as for a node with no outcome records.
+            let hidden = false;
+            if (getCurrentActorScopes() !== undefined) {
+                let graph: LoreGraph = deps.store.loreGraph;
+                let resolvable = true;
+                if (deps.graphRegistry) {
+                    try {
+                        graph = await deps.graphRegistry.getGraphHandle(workspace);
+                    } catch (err) {
+                        if (!(err instanceof WorkspaceNotFoundError)) throw err;
+                        resolvable = false;
+                    }
+                }
+                if (resolvable) {
+                    await graph.initialize();
+                    const node = await graph.getNode(nodeId);
+                    hidden = node != null && filterNodesByActorScope([node]).length === 0;
+                }
+            }
+            const outcomes = hidden ? [] : deps.auxStore.getOutcomes(nodeId, workspace, limit);
+            const counts = hidden ? { success: 0, failure: 0, partial: 0 } : deps.auxStore.getOutcomeCount(nodeId, workspace);
             const score = calcConfirmationScore(counts.success, counts.failure, counts.partial);
             const total = counts.success + counts.failure + counts.partial;
 

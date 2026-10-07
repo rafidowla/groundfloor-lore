@@ -23,6 +23,7 @@ import type { AuxStore } from '../../outbox/auxStore.js';
 import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
 import { loadWorkspaces } from '../../config/workspaces.js';
 import { assertMcpScope } from './mcpScope.js';
+import { filterNodesByActorScope } from '../../security/scopeFilter.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
 import { log } from '../../logger.js';
@@ -153,7 +154,12 @@ export function registerLifecycleTools(server: McpServer, deps: LifecycleDeps): 
                 // boundary is already enforced by the graph resolved above — each workspace
                 // is its own database — so the name here only ever DROPPED that workspace's
                 // own rows.
-                const allNodes = await graph.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true });
+                // Row-level security_scopes: nodes hidden from a bound actor are treated as
+                // ABSENT — they must not appear in the dry-run preview or in any count
+                // (matched / protected_count), and apply must never touch them.
+                const allNodes = filterNodesByActorScope(
+                    await graph.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true }),
+                );
 
                 const cutoff = older_than_days
                     ? new Date(Date.now() - older_than_days * 86400000).toISOString()
@@ -254,6 +260,7 @@ export function registerLifecycleTools(server: McpServer, deps: LifecycleDeps): 
                         > => {
                             const fresh = await graph.getNode(node.id);
                             if (!fresh) return null; // deleted since the snapshot.
+                            if (filterNodesByActorScope([fresh]).length === 0) return null; // relabelled out of the actor's view since the snapshot.
                             if (fresh.status === 'protected' || fresh.status === 'archived') return null;
                             if (classification && fresh.classification !== classification) return null;
                             if (cutoff && fresh.createdAt >= cutoff) return null;
@@ -434,7 +441,8 @@ export function registerLifecycleTools(server: McpServer, deps: LifecycleDeps): 
                 // (nodeWriteLock.ts rule 1).
                 const restored = await withNodeLock(resolved.resolvedWorkspace, id, async () => {
                     const found = await graph.getNode(id);
-                    if (!found) return null;
+                    // Row-level security_scopes: hidden from the bound actor == missing.
+                    if (!found || filterNodesByActorScope([found]).length === 0) return null;
                     const prev = found.status ?? 'active';
                     await withTransactionConflictRetry(() => graph.upsertNode({ ...found, status: 'active' }));
                     return { node: found, previousStatus: prev };

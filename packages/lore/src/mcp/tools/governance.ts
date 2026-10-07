@@ -26,6 +26,8 @@ import {
 import { loadWorkspaces } from '../../config/workspaces.js';
 import { resolveWorkspaceGraphEngine } from '../../engines/graphEngineSelector.js';
 import { assertMcpScope } from './mcpScope.js';
+import { filterNodesByActorScope } from '../../security/scopeFilter.js';
+import { getCurrentActorScopes } from '../../security/actorContext.js';
 import type { StorageBundle } from '../services.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import type { ISessionCache } from '../../engines/sessionCache.js';
@@ -37,6 +39,31 @@ import { mcpToolError } from './mcpToolError.js';
 import { log } from '../../logger.js';
 import { safePruneEphemeralNodes } from '../../engines/safeEphemeralPrune.js';
 import type { OutboxStore } from '../../outbox/types.js';
+import type { HotSessionSnapshot } from '../../engines/sessionCache.js';
+
+/**
+ * Bound actors only: keep just the hot-cache ids that exist AND are visible
+ * to the actor (one batched getNodesByIds). Hidden and deleted ids are dropped
+ * alike, so the list cannot reveal a hidden node. Lookup failure fails closed.
+ * Unbound actors: snapshot returned untouched.
+ */
+async function confineHotContext(
+    ctx: HotSessionSnapshot,
+    graph: { getNodesByIds(ids: string[]): Promise<Map<string, { security_scopes?: string[] }>> },
+): Promise<HotSessionSnapshot> {
+    if (getCurrentActorScopes() === undefined) return ctx;
+    const ids = Array.isArray(ctx.recent_nodes) ? ctx.recent_nodes : [];
+    if (ids.length === 0) return ctx;
+    let found: Map<string, { security_scopes?: string[] }>;
+    try { found = await graph.getNodesByIds(ids); } catch { return { ...ctx, recent_nodes: [] }; }
+    return {
+        ...ctx,
+        recent_nodes: ids.filter((id) => {
+            const n = found.get(id);
+            return n !== undefined && filterNodesByActorScope([n]).length === 1;
+        }),
+    };
+}
 
 export interface GovernanceToolsDeps {
     store: StorageBundle;
@@ -325,7 +352,14 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                     return workspaceNotFoundEnvelope(resolved.requested, resolved.known);
                 }
                 const { stampResolved } = await import('../../engines/deferred.js');
-                const result = await stampResolved(resolved.graph, id, commit);
+                // Row-level security_scopes: a node the bound actor cannot see
+                // gets the exact missing-node response and is never stamped.
+                // The check runs BEFORE stampResolved so a hidden non-deferred
+                // id cannot be told apart from a missing one by its error.
+                const existing = await resolved.graph.getNode(id);
+                const result = !existing || filterNodesByActorScope([existing]).length === 0
+                    ? null
+                    : await stampResolved(resolved.graph, id, commit);
                 if (!result) {
                     return {
                         content: [{ type: 'text' as const, text: `Deferred node '${id}' not found.` }],
@@ -387,7 +421,12 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                 const targetSessionCache: ISessionCache = resolved.isActive || !deps.graphRegistry
                     ? deps.store.sessionCache
                     : await deps.graphRegistry.sessionCacheFor(resolved.resolvedWorkspace);
-                const context = targetSessionCache.getHotContext();
+                const rawContext = targetSessionCache.getHotContext();
+                // The hot cache holds node ids (recent_nodes) with no per-row
+                // scopes. For a bound actor hydrate them (one batched lookup)
+                // and drop any the actor cannot see, so a hidden node's id is
+                // not disclosed. Unbound actors get the cache verbatim.
+                const context = await confineHotContext(rawContext, resolved.graph);
                 return {
                     content: [{
                         type: 'text' as const,

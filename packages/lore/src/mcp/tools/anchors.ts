@@ -15,6 +15,7 @@ import type { StorageBundle } from '../services.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import { parseAnchors } from '../anchorParse.js';
 import { assertMcpScope } from './mcpScope.js';
+import { filterNodesByActorScope } from '../../security/scopeFilter.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
 import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
@@ -73,7 +74,11 @@ export function registerAnchorTools(server: McpServer, deps: AnchorDeps): void {
                 const graph = resolved.graph;
                 await graph.initialize();
 
-                const node = await graph.getNode(id);
+                const fetched = await graph.getNode(id);
+                // Row-level security_scopes confinement: a node the bound
+                // actor may not see is reported exactly like a missing id
+                // (and is never mutated by mark_stale). Unbound ⇒ no-op.
+                const node = fetched && filterNodesByActorScope([fetched]).length > 0 ? fetched : null;
                 if (!node) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'node_not_found', id }, null, 2) }], isError: true };
                 }

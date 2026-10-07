@@ -22,6 +22,7 @@ import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { sweepFreshness } from '../../../engines/freshnessEngine.js';
+import { actorRowVisibility } from '../../../security/scopeFilter.js';
 import { redactError } from '../../../security/logRedact.js';
 import { writeError } from '../helpers.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
@@ -109,6 +110,9 @@ export async function tryFreshnessRoutes(
             graph,
             workspace,
             ttlHours,
+            undefined,
+            // Bound actors: hidden rows are neither counted nor listed in staleNodeIds.
+            actorRowVisibility(),
         );
 
         res.writeHead(200, { 'Content-Type': 'application/json' });

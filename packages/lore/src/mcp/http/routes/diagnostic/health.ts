@@ -8,6 +8,8 @@
  *                                    health snapshot (FINDING 4, 2026-09-03)
  */
 
+import { getCurrentActorScopes } from '../../../../security/actorContext.js';
+import { filterNodesByActorScope } from '../../../../security/scopeFilter.js';
 import { getCloudHistoryHealth } from '../../../../engines/dataplaneTransaction.js';
 import type { ServerResponse } from 'node:http';
 import type { VerbatimStoreApi } from '../../../../engines/verbatimStoreApi.js';
@@ -113,8 +115,29 @@ export async function handleConsistency(res: ServerResponse, url: string, deps: 
             tableStorage,
             { workspace, sqliteChecks: sqliteChecks.length > 0 ? sqliteChecks : undefined },
         );
+        // Row-level security_scopes: `missingEmbeddings` lists graph node ids.
+        // For a bound actor drop the ids of nodes it cannot see (one batched
+        // lookup) so a hidden node's id is not disclosed. `graphNodeCount`,
+        // `vectorEmbeddingCount` and `orphanEmbeddings` are unfiltered
+        // aggregates / ids with no graph row to scope. Unbound: untouched.
+        let outReport = report;
+        if (getCurrentActorScopes() !== undefined && report.missingEmbeddings.length > 0) {
+            let found: Map<string, { security_scopes?: string[] }> = new Map();
+            try { found = await targetGraph.getNodesByIds(report.missingEmbeddings); } catch { /* fail closed: nothing visible */ }
+            const missing = report.missingEmbeddings.filter((id) => {
+                const n = found.get(id);
+                return n !== undefined && filterNodesByActorScope([n]).length === 1;
+            });
+            outReport = {
+                ...report,
+                missingEmbeddings: missing,
+                hasIssues: missing.length > 0
+                    || report.orphanEmbeddings.length > 0
+                    || report.sqliteOrphans.some((r) => r.orphans.length > 0),
+            };
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(report));
+        res.end(JSON.stringify(outReport));
     } catch (err) {
         writeError(res, 500, 'internal_error', redactError(err));
     }

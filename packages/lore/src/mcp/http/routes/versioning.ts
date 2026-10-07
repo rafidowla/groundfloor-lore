@@ -27,6 +27,9 @@ import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../helpers.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../security/routeWorkspaceBinding.js';
 import { resolveTargetGraph } from '../../tools/workspaceResolve.js';
+import { nodeHistoryVisible, filterVersionsByActorScope } from '../../tools/versionScopeGate.js';
+import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
+import { redactHiddenSuccessors } from '../../../security/nodePointers.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { OutboxStore } from '../../../outbox/types.js';
@@ -111,7 +114,12 @@ export async function tryVersioningRoutes(
                 workspace = target;
             }
             const limit = Math.min(200, Math.max(1, parseInt(params.get('limit') ?? '50', 10) || 50));
-            const versions = await deps.versionStore.getVersions(nodeId, workspace, limit);
+            // Row-level security_scopes: version rows hold full node bodies, so a
+            // node the bound actor's scopes hide returns the same empty history as
+            // a missing id. Allowed actors see every revision (never trimmed).
+            const versions = (await nodeHistoryVisible(nodeId, workspace, deps))
+                ? await deps.versionStore.getVersions(nodeId, workspace, limit)
+                : [];
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ node_id: nodeId, workspace, count: versions.length, versions }));
         } catch (err) {
@@ -154,7 +162,10 @@ export async function tryVersioningRoutes(
                 writeError(res, 400, 'invalid_request', '`since` query param is required (ISO 8601 timestamp)');
                 return true;
             }
-            const all = await deps.versionStore.getDiff(workspace, since);
+            // Row-level security_scopes: drop entries for nodes the bound actor
+            // may not see (never fail the whole response). Counts reflect only
+            // what the actor can see.
+            const all = await filterVersionsByActorScope(await deps.versionStore.getDiff(workspace, since), workspace, deps);
             const trimmed = all.slice(0, limit);
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ workspace, since, total: all.length, returned: trimmed.length, changes: trimmed }));
@@ -455,11 +466,14 @@ export async function tryVersioningRoutes(
             // boundary is already enforced by the graph resolved above — each workspace
             // is its own database — so the name here only ever DROPPED that workspace's
             // own rows.
-            const allNodes = await graph.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true });
+            // Row-level security_scopes: a bound actor's snapshot carries only
+            // the nodes it may see (unbound actor → unchanged).
+            const allNodes = filterNodesByActorScope(await graph.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true }));
             const filtered = includeArchived
                 ? allNodes
                 : allNodes.filter((n) => !n.status || n.status !== 'archived');
-            const jsonl = filtered.map((n) => JSON.stringify(n)).join('\n');
+            const jsonl = (await redactHiddenSuccessors(filtered, (ids) => graph.getNodesByIds(ids)))
+                .map((n) => JSON.stringify(n)).join('\n');
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ workspace, format: 'jsonl', node_count: filtered.length, snapshot: jsonl }));

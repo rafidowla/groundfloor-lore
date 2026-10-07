@@ -72,7 +72,7 @@ Core commands:
   migrate-graph  Migrate a workspace's graph engine SurrealDB → SQLite (or --rollback)
   migrate-vectors Migrate a workspace's verbatim store LanceDB → SQLite (offline)
   vectors        SQLite verbatim store tools (today: promote to LanceDB)
-  verbatim       LanceDB verbatim store tools (reap orphan embeddings; dedupe duplicate ids)
+  verbatim       LanceDB verbatim store tools (reap orphan embeddings; dedupe duplicate ids; check-scopes report; repair-scopes restore)
   maintain       Config-driven capacity maintenance (compaction, version cleanup, retention, ephemeral expiry)
   models         Manage cached LLM models (today: prune unused ONNX weights)
   seed-workspaces  Create the developer + personal seed workspaces (idempotent)

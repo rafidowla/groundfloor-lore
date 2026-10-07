@@ -20,6 +20,8 @@ import type { AuxStore } from '../../outbox/auxStore.js';
 import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import { assertMcpScope } from './mcpScope.js';
+import { filterNodesByActorScope } from '../../security/scopeFilter.js';
+import { getCurrentActorScopes } from '../../security/actorContext.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
 import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
@@ -98,7 +100,9 @@ export function registerOutcomeTools(server: McpServer, deps: OutcomeDeps): void
                 await graph.initialize();
 
                 const node = await graph.getNode(node_id);
-                if (!node) {
+                // Row-level security_scopes: a node hidden from the bound actor is
+                // answered exactly like a missing one, and nothing is written.
+                if (!node || filterNodesByActorScope([node]).length === 0) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'node_not_found', node_id }, null, 2) }], isError: true };
                 }
 
@@ -170,8 +174,24 @@ export function registerOutcomeTools(server: McpServer, deps: OutcomeDeps): void
                 // SP-01 — enforce bound-principal workspace scope (read).
                 const scopeDenied = assertMcpScope(workspace, 'read');
                 if (scopeDenied) return scopeDenied;
-                const outcomes = deps.auxStore.getOutcomes(node_id, workspace, limit);
-                const counts   = deps.auxStore.getOutcomeCount(node_id, workspace);
+                // Row-level security_scopes: a bound actor lacking the node's scopes
+                // is answered exactly as for a node with no outcome records.
+                let hidden = false;
+                if (getCurrentActorScopes() !== undefined) {
+                    const resolved = await resolveTargetGraph(
+                        deps.store,
+                        deps.graphRegistry,
+                        deps.detectedScope?.workspace ?? workspace,
+                        workspace,
+                    );
+                    if (resolved.ok) {
+                        await resolved.graph.initialize();
+                        const node = await resolved.graph.getNode(node_id);
+                        hidden = node != null && filterNodesByActorScope([node]).length === 0;
+                    }
+                }
+                const outcomes = hidden ? [] : deps.auxStore.getOutcomes(node_id, workspace, limit);
+                const counts   = hidden ? { success: 0, failure: 0, partial: 0 } : deps.auxStore.getOutcomeCount(node_id, workspace);
                 const score    = calcConfirmationScore(counts.success, counts.failure, counts.partial);
                 const total    = counts.success + counts.failure + counts.partial;
 

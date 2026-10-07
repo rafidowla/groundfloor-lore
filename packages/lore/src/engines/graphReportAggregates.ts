@@ -112,6 +112,7 @@ export async function computeTopHubs(
     graph: ReportGraph,
     degreeById: ReadonlyMap<string, number>,
     topN: number,
+    rowVisible?: (row: { security_scopes?: unknown }) => boolean,
 ): Promise<HubRow[]> {
     const ranked = Array.from(degreeById.entries())
         .sort(([idA, degA], [idB, degB]) => degB - degA || (idA < idB ? -1 : idA > idB ? 1 : 0));
@@ -123,6 +124,7 @@ export async function computeTopHubs(
         for (const [id, deg] of batch) {
             const node = hydrated.get(id);
             if (!node) continue;
+            if (rowVisible && !rowVisible({ security_scopes: node.security_scopes })) continue;
             out.push({ id, deg, label: node.label, type: node.type });
             if (out.length >= topN) break;
         }
@@ -149,14 +151,19 @@ export interface RecentRow {
  * n.updatedAt <> ''` filter, which `bulkListProjected` does not apply on
  * its own.
  */
-export async function computeRecentlyUpdated(graph: ReportGraph, limit: number): Promise<RecentRow[]> {
+export async function computeRecentlyUpdated(
+    graph: ReportGraph,
+    limit: number,
+    rowVisible?: (row: { security_scopes?: unknown }) => boolean,
+): Promise<RecentRow[]> {
     const out: RecentRow[] = [];
     let cursor: BulkListCursor | null = null;
     do {
         const { rows, nextCursor } = await graph.bulkListProjected(
-            '*', ['label', 'type', 'updatedAt'], DEFAULT_MAINTENANCE_PAGE_SIZE, cursor,
+            '*', rowVisible ? ['label', 'type', 'updatedAt', 'security_scopes'] : ['label', 'type', 'updatedAt'], DEFAULT_MAINTENANCE_PAGE_SIZE, cursor,
         );
         for (const r of rows) {
+            if (rowVisible && !rowVisible({ security_scopes: r['security_scopes'] })) continue;
             const updatedAt = r['updatedAt'];
             if (typeof updatedAt !== 'string' || updatedAt === '') continue;
             out.push({
@@ -195,14 +202,16 @@ export async function computeOrphans(
     graph: ReportGraph,
     endpointIds: ReadonlySet<string>,
     limit: number,
+    rowVisible?: (row: { security_scopes?: unknown }) => boolean,
 ): Promise<OrphanRow[]> {
     const out: OrphanRow[] = [];
     let cursor: BulkListCursor | null = null;
     do {
         const { rows, nextCursor } = await graph.bulkListProjected(
-            '*', ['label', 'type'], DEFAULT_MAINTENANCE_PAGE_SIZE, cursor,
+            '*', rowVisible ? ['label', 'type', 'security_scopes'] : ['label', 'type'], DEFAULT_MAINTENANCE_PAGE_SIZE, cursor,
         );
         for (const r of rows) {
+            if (rowVisible && !rowVisible({ security_scopes: r['security_scopes'] })) continue;
             const id = String(r['id'] ?? '');
             if (endpointIds.has(id)) continue;
             out.push({ id, label: String(r['label'] ?? ''), type: String(r['type'] ?? '') });

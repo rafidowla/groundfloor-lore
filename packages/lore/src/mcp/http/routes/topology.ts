@@ -38,6 +38,7 @@ import { writeWorkspaceRequired, writeError } from '../helpers.js';
 import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
 import { redactError } from '../../../security/logRedact.js';
 import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
+import { getCurrentActorScopes } from '../../../security/actorContext.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
@@ -156,6 +157,59 @@ async function confineTopology(
     return { nodes, edges };
 }
 
+/**
+ * confineTopologyByActor — row-level `security_scopes` for the topology page.
+ *
+ * `getTopology` projects id/label/type/project/supersededBy but NOT
+ * `security_scopes` on any engine, so `filterNodesByActorScope` over the
+ * projected rows is a no-op: a bound actor received the id, label, type and
+ * project of every hidden node, and every edge touching one (edges carry the
+ * hidden id in `from`/`to`; the engine only drops dangling edges when a
+ * `project` filter is set). The hydrated row is the authority, exactly as for
+ * the ecosystem scope above.
+ *
+ * Bound actors only (`getCurrentActorScopes() !== undefined`); unbound actors
+ * return untouched with no extra query. ONE batched `getNodesByIds` covers
+ * the page's nodes, both ends of every edge (so an edge to a visible node
+ * that fell outside the node page is kept, as for an unbound actor) and every
+ * `supersededBy` target. A node that does not hydrate (deleted, or raced
+ * away) is dropped — fail closed. A kept node whose `supersededBy` names a
+ * hidden/absent node has the pointer nulled (security/nodePointers.ts).
+ */
+async function confineTopologyByActor(
+    graph: LoreGraph,
+    nodes: unknown[],
+    edges: unknown[],
+): Promise<{ nodes: unknown[]; edges: unknown[] }> {
+    if (getCurrentActorScopes() === undefined) return { nodes, edges };
+    const rec = (x: unknown): Record<string, unknown> => (x ?? {}) as Record<string, unknown>;
+    const idOf = (n: unknown): string => String(rec(n)['id'] ?? '');
+    const endpoint = (e: unknown, a: string, b: string): string => String(rec(e)[a] ?? rec(e)[b] ?? '');
+    const ids = new Set<string>();
+    for (const n of nodes) {
+        ids.add(idOf(n));
+        const to = rec(n)['supersededBy'];
+        if (typeof to === 'string' && to.length > 0) ids.add(to);
+    }
+    for (const e of edges) { ids.add(endpoint(e, 'from', 'source')); ids.add(endpoint(e, 'to', 'target')); }
+    ids.delete('');
+    const hydrated = await graph.getNodesByIds([...ids]);
+    const visible = new Set<string>();
+    for (const [id, row] of hydrated) {
+        if (filterNodesByActorScope([{ security_scopes: (row as { security_scopes?: string[] }).security_scopes }]).length === 1) visible.add(id);
+    }
+    const keptNodes = nodes
+        .filter((n) => visible.has(idOf(n)))
+        .map((n) => {
+            const to = rec(n)['supersededBy'];
+            if (typeof to !== 'string' || to.length === 0 || visible.has(to)) return n;
+            return { ...rec(n), supersededBy: null, supersededReason: null };
+        });
+    const keptEdges = edges.filter((e) =>
+        visible.has(endpoint(e, 'from', 'source')) && visible.has(endpoint(e, 'to', 'target')));
+    return { nodes: keptNodes, edges: keptEdges };
+}
+
 export async function tryTopologyRoutes(
     req: IncomingMessage,
     res: ServerResponse,
@@ -222,18 +276,20 @@ export async function tryTopologyRoutes(
             const stats = await topoGraph.getStats();
             const truncated = stats.nodeCount > limit;
             const scoped = await confineTopology(topoGraph, topology, ecosystem);
-            // 3.1 (2026-08-17) — row-level security_scopes confinement on the
-            // node list actually serialized (the confined set when a concrete
-            // ecosystem was enforced, the raw page otherwise). The topology
-            // projection carries no security_scopes on any engine today, so this
-            // is a no-op until an engine projects them — the helper is already
-            // in place for when it does.
-            const confinedNodes = filterNodesByActorScope(scoped.nodes ?? topology.nodes);
+            // Row-level security_scopes confinement. The projection carries no
+            // security_scopes, so the actor filter hydrates (bound actors only)
+            // and also drops edges touching a hidden node — see
+            // confineTopologyByActor.
+            const confined = await confineTopologyByActor(
+                topoGraph, scoped.nodes ?? topology.nodes, scoped.edges ?? topology.edges,
+            );
+            const confinedNodes = confined.nodes;
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
                 ...topology,
                 ...scoped,
                 nodes: confinedNodes,
+                edges: confined.edges,
                 ecosystem,
                 truncated,
                 limit,

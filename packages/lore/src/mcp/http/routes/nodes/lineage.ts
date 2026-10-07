@@ -17,6 +17,8 @@ import { requireWorkspaceGraph } from '../../../../engines/requireWorkspaceGraph
 import type { WorkspaceGraph } from '../../../../engines/openWorkspaceGraph.js';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
+import { filterNodesByActorScope } from '../../../../security/scopeFilter.js';
+import { redactHiddenSuccessors } from '../../../../security/nodePointers.js';
 import { resolveReadGraph } from './readGate.js';
 import type { NodesDeps } from './types.js';
 import { redactError } from '../../../../security/logRedact.js';
@@ -61,6 +63,7 @@ export async function handleLineage(res: ServerResponse, url: string, deps: Node
             }
             throw e;
         }
+        const isHiddenFromActor = (n: LoreNode): boolean => filterNodesByActorScope([n]).length === 0;
         const visited = new Set<string>();
         const stripped = startId.startsWith('lore:') ? startId.slice(5) : startId;
 
@@ -70,7 +73,9 @@ export async function handleLineage(res: ServerResponse, url: string, deps: Node
         while (cursor && !visited.has(cursor)) {
             visited.add(cursor);
             const n = await localGraph.getNode(cursor);
-            if (!n) break;
+            // A node the bound actor may not see ends the walk exactly like a
+            // missing one (Rafi 2026-10-06: stop at the gap). Unbound ⇒ no-op.
+            if (!n || isHiddenFromActor(n)) break;
             forward.push(n);
             cursor = n.supersededBy ?? null;
         }
@@ -94,7 +99,9 @@ export async function handleLineage(res: ServerResponse, url: string, deps: Node
                     if (visited.has(predId)) continue;
                     visited.add(predId);
                     const predNode = await localGraph.getNode(predId);
-                    if (!predNode) continue;
+                    // Hidden predecessor ⇒ treated as missing: not returned and
+                    // its own predecessors are not explored.
+                    if (!predNode || isHiddenFromActor(predNode)) continue;
                     depthById.set(predId, depth);
                     backward.push(predNode);
                     next.push(predId);
@@ -110,7 +117,18 @@ export async function handleLineage(res: ServerResponse, url: string, deps: Node
             (depthById.get(b.id)! - depthById.get(a.id)!) || a.id.localeCompare(b.id));
 
         // Compose: backward (oldest predecessors first) → forward (this node + its successors).
-        const chain = [...backward, ...forward];
+        // Row-level security_scopes confinement (finding #20). Both walks stop
+        // at a node the bound actor may not see, exactly as they stop at a
+        // missing/deleted one — a hidden start, a hidden middle version and a
+        // hidden predecessor all answer as if the node did not exist, so the
+        // chain never proves a hidden node sits between two visible ones. A
+        // visible node's `supersededBy` naming a hidden successor is nulled
+        // (`supersededBy`/`supersededReason` — see security/nodePointers.ts).
+        // The final filter is a defensive no-op. Unbound actor ⇒ unchanged.
+        const chain = await redactHiddenSuccessors(
+            filterNodesByActorScope([...backward, ...forward]),
+            (ids) => localGraph.getNodesByIds(ids),
+        );
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             startId,

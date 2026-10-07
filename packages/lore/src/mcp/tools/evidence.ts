@@ -15,6 +15,7 @@ import type { StorageBundle } from '../services.js';
 import type { AuditLog } from '../../security/audit.js';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import { assertMcpScope } from './mcpScope.js';
+import { filterNodesByActorScope } from '../../security/scopeFilter.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
 import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
@@ -80,7 +81,9 @@ export function registerEvidenceTools(server: McpServer, deps: EvidenceDeps): vo
                 await graph.initialize();
 
                 const node = await graph.getNode(id);
-                if (!node) {
+                // Row-level security_scopes: a node hidden from the bound actor is
+                // answered exactly like a missing one — no write, no length leak.
+                if (!node || filterNodesByActorScope([node]).length === 0) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'node_not_found', id }, null, 2) }], isError: true };
                 }
 

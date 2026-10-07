@@ -26,6 +26,7 @@ import { redactError } from '../../../../security/logRedact.js';
 import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE } from '../../../../core/nodeWriteLock.js';
 import { recordHotWrite } from '../../../../outbox/hotLane.js';
 import { safePruneEphemeralNodes } from '../../../../engines/safeEphemeralPrune.js';
+import { filterNodesByActorScope } from '../../../../security/scopeFilter.js';
 // FIND-2026-06-19-01 — call the pure sweep implementation directly with the
 // SWEEP TARGET's own resolved substrates, instead of deps.runRetentionSweep
 // (a closure fixed over the boot graph/verbatim/active-workspace).
@@ -354,7 +355,13 @@ export async function tryPolicyRoutes(req: IncomingMessage, res: ServerResponse,
                 return true;
             }
             const { stampResolved } = await import('../../../../engines/deferred.js');
-            const result = await stampResolved(target as never, parsed.id, parsed.commit);
+            // Row-level security_scopes: a hidden node gets the exact missing-node
+            // 404 and is never stamped (checked before stampResolved so a hidden
+            // non-deferred id is not distinguishable by its error).
+            const existing = await (target as unknown as { getNode(id: string): Promise<{ security_scopes?: string[] } | null | undefined> }).getNode(parsed.id);
+            const result = !existing || filterNodesByActorScope([existing]).length === 0
+                ? null
+                : await stampResolved(target as never, parsed.id, parsed.commit);
             if (!result) {
                 writeError(res, 404, 'not_found', `Deferred node '${parsed.id}' not found.`);
                 return true;

@@ -89,3 +89,19 @@ export function filterNodesByActorScope<T extends { security_scopes?: string[] }
     const wrapped = nodes.map((node) => ({ node, metadata: { security_scopes: node.security_scopes } }));
     return applyActorScopeFilter(wrapped, getCurrentActorScopes()).map((w) => w.node);
 }
+
+/**
+ * Row predicate for paged / projected scans (bulkListProjected rows carry
+ * `security_scopes` as a raw column — array, comma string or null). Returns
+ * `undefined` when no actor is bound, so callers skip both the extra column
+ * and the per-row check; otherwise a predicate that is true iff the bound
+ * actor may see the row.
+ */
+export function actorRowVisibility(): ((row: { security_scopes?: unknown }) => boolean) | undefined {
+    const scopes = getCurrentActorScopes();
+    if (scopes === undefined) return undefined;
+    return (row) => applyActorScopeFilter(
+        [{ metadata: { security_scopes: normalizeScopes(row.security_scopes) } }],
+        scopes,
+    ).length === 1;
+}

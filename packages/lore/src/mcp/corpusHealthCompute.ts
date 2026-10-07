@@ -52,6 +52,11 @@ export async function computeCorpusHealth(
     graph: LoreGraph,
     auxStore: AuxStore,
     workspace: string,
+    // Bound actors only (security/scopeFilter.actorRowVisibility): rows the
+    // actor cannot see are left out of every per-node counter. NOT applied to
+    // edge_count / outcome_totals / corpus_counters, which are workspace-wide
+    // aggregates with no per-row scope to filter on.
+    rowVisible?: (row: { security_scopes?: unknown }) => boolean,
 ): Promise<CorpusHealthReport> {
     await graph.initialize();
 
@@ -104,9 +109,12 @@ export async function computeCorpusHealth(
             pager,
             // R4 #7 — `project`, not workspace (see the else-branch note below).
             '*',
-            ['status', 'classification', 'stale', 'anchor_stale', 'confirmation_score'],
+            rowVisible
+                ? ['status', 'classification', 'stale', 'anchor_stale', 'confirmation_score', 'security_scopes']
+                : ['status', 'classification', 'stale', 'anchor_stale', 'confirmation_score'],
             (rows) => {
                 for (const r of rows) {
+                    if (rowVisible && !rowVisible({ security_scopes: r['security_scopes'] })) continue;
                     const status = (r['status'] as string) || 'active';
                     const cls = (r['classification'] as string) || 'tactical';
                     const csRaw = r['confirmation_score'];
@@ -133,6 +141,7 @@ export async function computeCorpusHealth(
         // own rows.
         const allNodes = await graph.listNodes(undefined, undefined, '*', '*', undefined, { unbounded: true });
         for (const n of allNodes) {
+            if (rowVisible && !rowVisible({ security_scopes: n.security_scopes })) continue;
             fold(n.status ?? 'active', n.classification ?? 'tactical', n.stale, n.anchor_stale, n.confirmation_score ?? 0);
         }
     }

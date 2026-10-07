@@ -91,7 +91,7 @@ export interface ArcadeExtraVector {
     filter?: Partial<VerbatimDocument['metadata']>,
     actorScopes?: ReadonlyArray<string>,
   ): Promise<Bm25Envelope<VerbatimSearchResult>>;
-  getById(id: string): Promise<{ contentHash?: string; text?: string } | null>;
+  getById(id: string): Promise<{ contentHash?: string; text?: string; security_scopes?: string[] } | null>;
 }
 
 /** Full-surface, write-gated LoreGraphHandle wrapper. */
@@ -328,7 +328,7 @@ export class ScopedArcadeVectorHandle implements LoreVectorHandle {
    * guard, not only on the raw adapter — the fix that turns the arcade 501 into
    * a real 2xx read.
    */
-  getById(id: string): Promise<{ contentHash?: string; text?: string } | null> {
+  getById(id: string): Promise<{ contentHash?: string; text?: string; security_scopes?: string[] } | null> {
     return this.inner.getById(id);
   }
   count(): Promise<number> {

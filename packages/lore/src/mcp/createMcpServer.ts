@@ -362,6 +362,8 @@ export function createMcpServer(deps: CreateMcpServerDeps): McpServer {
     registerVerbatimTools(mcpServer, {
         store: deps.store,
         workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+        graphRegistry: deps.graphRegistry, // get_verbatim row-level security_scopes gate.
+        versionStore: deps.versionStore,
     });
 
     // Phase 2 item 4 — SDK-aligned collection_* MCP tools backed by

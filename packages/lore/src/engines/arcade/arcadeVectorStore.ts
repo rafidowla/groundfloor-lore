@@ -434,16 +434,25 @@ export class ArcadeVectorStore {
    * backtick-quoted (ArcadeDB 26.7.1 parses the bare `text` identifier as the
    * TEXT type keyword — same guard as bm25Search).
    */
-  async getById(id: string): Promise<{ contentHash?: string; text?: string } | null> {
+  async getById(id: string): Promise<{ contentHash?: string; text?: string; security_scopes?: string[] } | null> {
     await this.initialize();
     const res = await this.http.query(
       this.tenantDb,
-      `SELECT contentHash, \`text\` FROM ${VERBATIM_TYPE} WHERE id = :id LIMIT 1`,
+      `SELECT contentHash, \`text\`, security_scopes FROM ${VERBATIM_TYPE} WHERE id = :id LIMIT 1`,
       { id },
     );
-    const row = res.result?.[0] as { contentHash?: string; text?: string } | undefined;
+    const row = res.result?.[0] as { contentHash?: string; text?: string; security_scopes?: unknown } | undefined;
     if (!row) return null;
-    return { contentHash: row.contentHash ?? '', text: row.text ?? '' };
+    // security_scopes is stored comma-joined (see upsert); normalise to string[]
+    // exactly like the Lance/SQLite engines' getById (public row → []). The
+    // direct-read scope gate (security/itemScopes.ts) resolves a verbatim-only
+    // item from this field — omitting it made such a row `unknown`, i.e. hidden
+    // from every bound actor.
+    return {
+      contentHash: row.contentHash ?? '',
+      text: row.text ?? '',
+      security_scopes: normalizeScopes(row.security_scopes),
+    };
   }
 
   /** delete — parameterized delete-by-id inside THIS tenant db. */

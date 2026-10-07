@@ -41,6 +41,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { writeError } from '../helpers.js';
+import { requireExportAllowed } from '../../../security/exportGate.js';
 import type { OutboxStore } from '../../../outbox/types.js';
 import type { LocalGraphRegistry } from '../../../engines/localGraphRegistry.js';
 import type { WorkspaceVerbatimResolver } from '../../../outbox/workspaceVerbatimResolver.js';
@@ -75,6 +76,11 @@ export async function tryWorkspaceExportRoutes(
         return true;
     }
     const name = decodeURIComponent(m[1] ?? '');
+
+    // Row-level security_scopes: the bundle is NOT row-filtered, so a bound
+    // (restricted) actor may not export at all unless it is a daemon operator.
+    // Unbound callers are unchanged.
+    if (!requireExportAllowed(res, 'workspace export')) return true;
 
     // D-021 — resolve a CONCRETE target (never literal-undefined). A workspace
     // token bound to a different workspace 403s here; bindRouteTarget writes the

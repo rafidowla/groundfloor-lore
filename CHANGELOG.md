@@ -4,6 +4,86 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.29.0] — 2026-10-06
+
+Row-level `security_scopes` now apply to every direct-read, history, list,
+export and metadata path a bound actor can reach, and two new CLI commands find
+and repair the `['undefined', …]` scope damage written by the pre-3.28.0 Lance
+writer. Contract throughout: a bound actor (`getCurrentActorScopes() !==
+undefined`) lacking an item's scopes observes exactly what it would observe if
+the item did not exist. Unbound actors (local mode, embedded, daemon-internal)
+are unchanged. Filtering is at the route/tool layer only — no store or on-disk
+format change.
+
+### Added
+- **`lore verbatim check-scopes <workspace>`** — read-only report of verbatim
+  rows whose `security_scopes` were stored as `['undefined', …]` (history `#rev`,
+  storeBatch preflight and tombstone rows, plus their SQLite copies from
+  `migrate-vectors`). Classes `ok` / `all_undefined` / `mixed_undefined` /
+  `unreadable`, per kind, with up to 20 sample ids. Lance and SQLite; writes
+  nothing (SQLite opened immutable / readonly).
+- **`lore verbatim repair-scopes <workspace> [--apply]`** — restores a damaged
+  row's scopes ONLY where `versions.sqlite` proves the original: unique
+  `updatedAt` (+ type/label) match, identical scopes across matches, valid
+  non-empty list, label count equal to the damaged entries. Tombstones take
+  their same-instant `#rev` sibling's scopes once the text tail proves identity.
+  Everything else stays fail-closed (compacted / unversioned / live / ambiguous
+  rows are reported, never guessed). Dry run by default (counts + sample ids
+  only); `--apply` is offline, backs up first (refusing if the backup lacks
+  the store), writes only the scopes column
+  (Lance per-chunk re-read, SQLite compare-and-swap), then digest-checks that
+  nothing else moved. A second apply is a no-op. See `docs/MIGRATION-3.21.md`.
+
+### Security
+- **Direct graph reads** — MCP `get_full`, `check_anchors` / `GET
+  /api/nodes/:id/anchors`, `mark_stale`, `GET /api/node/lineage`, `GET
+  /api/nodes/as-of`, `GET /api/edges`, `GET /api/node/supersession-candidates`
+  (result cache keyed by actor scopes), `export_snapshot` / `GET
+  /api/workspaces/:name/snapshot`, and node outcome reads: a hidden node answers
+  exactly like a missing id; a hidden edge endpoint hides the edge; the
+  lineage walk stops at a hidden node as it does at a deleted one.
+- **Verbatim and history** — `GET /api/verbatim/get`, MCP `get_verbatim`, `GET
+  /api/verbatim/history`, `GET /api/nodes/:id/history`, MCP `node_history`, and
+  workspace diff (REST + MCP) are gated by the item's REAL labels
+  (`security/itemScopes.ts`): live graph node, else the newest version-log
+  state (covers deleted nodes), else the undamaged canonical verbatim row.
+  Damaged or unreadable sources resolve to unknown (hidden from bound actors).
+  Allowed actors keep full, untrimmed history. Gating keys on the exact id, so
+  literal `lore:S` / `S#rev…` ids do not inherit node `S`'s labels.
+- **Pagination is no longer an existence oracle** (`security/scopePageFill.ts`).
+  For bound actors `list_nodes`, `GET /api/node-list`, `POST
+  /api/nodes/bulk-list`, `GET /api/nodes` and `GET /api/edges` fill each page
+  with visible rows, look ahead one visible row for `hasMore`, and build the
+  cursor from the last visible row returned. One request scans at most 10,000
+  raw rows; a capped request returns `hasMore: true` with an AES-256-GCM sealed
+  continuation (per-process key, invalid after restart) that names no row. On
+  `/api/edges` a bound actor's `offset` counts visible edges.
+- **Whole-workspace exports are admin-only for bound actors.** `GET
+  /api/workspaces/:name/export` and `GET /api/export/html` are not row-filtered,
+  so a bound actor gets `403 export_forbidden` unless the request principal is a
+  daemon operator (`bootstrap` / `shared-secret`). Unbound callers unchanged.
+- **Hidden-node metadata.** `redact_evidence`, `record_outcome` (MCP + REST),
+  `prune_nodes` / `restore_node` and `resolve_deferred` treat a hidden node as
+  missing. `supersededBy` / `supersededReason` naming a hidden or deleted
+  successor are nulled for bound actors (`security/nodePointers.ts`;
+  `supersededAt` kept). Topology, freshness / `check_freshness`,
+  `corpus_health`, `get_hot_context`, `/api/report` and
+  `/api/diagnose/consistency` drop hidden nodes from their per-node output.
+
+### Fixed
+- **Arcade `getById` returns `security_scopes`** (split from the stored
+  comma-joined column), matching Lance and SQLite. A verbatim-only Arcade doc
+  previously resolved to unknown scopes and was hidden from every bound actor.
+- A version state with no `security_scopes` key no longer resolves as public;
+  it falls through to the previous state / next source / unknown.
+
+### Known limitations
+- Write paths without a row-scope check yet: `POST /api/mark-stale`, node
+  create/update, supersede/unsupersede, bulk writes, node delete, import.
+- Aggregate counts (`stats`, `admin_stats`, `lore_status`, topology totals,
+  `corpus_health` edge/outcome totals, report summary) still include hidden rows.
+- Version-history states still carry the stored `supersededBy`.
+
 ## [3.28.0] — 2026-10-06
 
 Atlas post-SQLite requests 1–4: duplicate Lance canonical rows, `migrate-vectors`

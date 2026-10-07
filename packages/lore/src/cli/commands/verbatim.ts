@@ -167,10 +167,206 @@ async function verbatimDedupeCommand(args: string[]): Promise<void> {
     }
 }
 
+function checkScopesUsage(): void {
+    console.error('usage: lore verbatim check-scopes <workspace> [--data-dir <path>] [--json]');
+    console.error('');
+    console.error('  Read-only report of verbatim rows whose security_scopes were damaged by the');
+    console.error('  pre-3.28.0 writer (history, #rev and tombstone rows stored as [\'undefined\', ...]).');
+    console.error('  Works on LanceDB and SQLite workspaces. Writes nothing and repairs nothing; the');
+    console.error('  damage is fail-closed (the affected rows match no principal).');
+    console.error('  --data-dir <path>  Target an embedded host\'s createLore({ dataDir }) root instead of');
+    console.error('                     LORE_HOME. Must hold a workspaces.json naming <workspace>.');
+    console.error('  --json             Print the report as JSON.');
+    console.error('  Exit code is 0 when the check completes; unknown flags are rejected.');
+}
+
+async function verbatimCheckScopesCommand(args: string[]): Promise<void> {
+    const parsed = parseOrExit('verbatim check-scopes', args, {
+        bool: ['--json'],
+        value: ['--data-dir'],
+        positionals: { min: 1, max: 1 },
+    }, { usage: checkScopesUsage });
+    const workspaceName = parsed.positionals[0]!;
+    const json = parsed.has('--json');
+    const dataDir = dataDirFlag(parsed);
+
+    if (dataDir !== undefined && (!fs.existsSync(dataDir) || !fs.statSync(dataDir).isDirectory())) {
+        console.error(`verbatim check-scopes failed: --data-dir ${dataDir} does not exist or is not a directory`);
+        process.exit(1);
+    }
+    const home = dataDir !== undefined ? resolveLoreHome({ dataDir }) : loreHome();
+    try {
+        assertWorkspaceTarget({ home, workspaceName, dataDirGiven: dataDir !== undefined });
+    } catch (error) {
+        console.error(`verbatim check-scopes refused: ${(error as Error).message}`);
+        process.exit(1);
+    }
+
+    // Read-only: no daemon preflight (same as `dedupe` in report mode).
+    const { checkVerbatimScopes, SCOPE_ROW_KINDS } = await import('../../engines/verbatimCheckScopes.js');
+    let r;
+    try {
+        r = await checkVerbatimScopes({ workspaceName, home });
+    } catch (error) {
+        console.error(`verbatim check-scopes failed: ${(error as Error).message}`);
+        process.exit(1);
+    }
+    if (json) {
+        console.log(JSON.stringify(r, null, 2));
+        return;
+    }
+    console.log(`  Home:      ${home}${dataDir !== undefined ? ' (from --data-dir)' : ''}`);
+    console.log(`  Registry:  ${r.registryPath}`);
+    console.log('');
+    if (r.message) {
+        console.log(r.message);
+        return;
+    }
+    console.log(`Verbatim scope check: '${workspaceName}' (${r.engine}, report only — nothing is written)`);
+    console.log(`  Rows:              ${r.totalRows}`);
+    console.log(`  OK:                ${r.totals.ok}`);
+    console.log(`  All 'undefined':   ${r.totals.all_undefined}`);
+    console.log(`  Mixed 'undefined': ${r.totals.mixed_undefined}`);
+    if (r.totals.unreadable > 0) console.log(`  Unreadable:        ${r.totals.unreadable}`);
+    console.log('');
+    for (const k of SCOPE_ROW_KINDS) {
+        const c = r.byKind[k];
+        console.log(`  ${k.replace('_', ' ').padEnd(20)} ${c.total} row(s): ${c.ok} ok, ${c.all_undefined} all-undefined, ${c.mixed_undefined} mixed${c.unreadable > 0 ? `, ${c.unreadable} unreadable` : ''}`);
+    }
+    for (const cls of ['all_undefined', 'mixed_undefined', 'unreadable'] as const) {
+        const ids = r.samples[cls];
+        if (ids.length === 0) continue;
+        console.log('');
+        console.log(`Sample ids, ${cls} (first ${ids.length} of ${r.totals[cls]}):`);
+        for (const id of ids) console.log(`  - ${id}`);
+    }
+    console.log('');
+    const damaged = r.totals.all_undefined + r.totals.mixed_undefined;
+    console.log(damaged > 0
+        ? `${damaged} row(s) carry damaged scopes. They match no principal (fail-closed). This command repairs nothing.`
+        : 'No damaged scopes found.');
+}
+
+function repairScopesUsage(): void {
+    console.error('usage: lore verbatim repair-scopes <workspace> [--data-dir <path>] [--apply] [--json]');
+    console.error('');
+    console.error('  Restore the ORIGINAL security_scopes of rows damaged by the pre-3.28.0 writer');
+    console.error('  (history, #rev and tombstone rows stored as [\'undefined\', ...]), but ONLY where the');
+    console.error('  original is provable from the node version log (versions.sqlite): same node, the');
+    console.error('  row\'s updatedAt equals one version\'s updatedAt, identical scopes in every matching');
+    console.error('  version, and the same number of scopes as damaged entries. A tombstone takes the');
+    console.error('  scopes of its same-instant #rev sibling. Everything else is left untouched');
+    console.error('  (fail-closed); a canonical row\'s current scopes are never copied onto an old row.');
+    console.error('  Mixed and unreadable rows are never touched. Works on LanceDB and SQLite workspaces.');
+    console.error('  Default is a dry run: per damaged row a verdict (restorable or why not), counts and');
+    console.error('  sample row ids. No scope value and no row text is ever printed. Writes nothing.');
+    console.error('  --apply            Offline only. Backs up first, then writes ONLY the security_scopes');
+    console.error('                     column of the restorable rows (text, vectors, updatedAt and the row');
+    console.error('                     count never change) and re-scans to prove it. CLOSE every app that');
+    console.error('                     embeds Lore on this data dir (Atlas, MIRA, PM Helper) first: the');
+    console.error('                     command cannot detect them; each chunk is re-read just before it is');
+    console.error('                     written and the run aborts if another writer changed a row.');
+    console.error('  --data-dir <path>  Target an embedded host\'s createLore({ dataDir }) root instead of');
+    console.error('                     LORE_HOME. Must hold a workspaces.json naming <workspace>.');
+    console.error('  --json             Print the report as JSON.');
+    console.error('  Unknown flags are rejected.');
+}
+
+async function verbatimRepairScopesCommand(args: string[]): Promise<void> {
+    const parsed = parseOrExit('verbatim repair-scopes', args, {
+        bool: ['--apply', '--json'],
+        value: ['--data-dir'],
+        positionals: { min: 1, max: 1 },
+    }, { usage: repairScopesUsage });
+    const workspaceName = parsed.positionals[0]!;
+    const apply = parsed.has('--apply');
+    const json = parsed.has('--json');
+    const dataDir = dataDirFlag(parsed);
+    // Human text goes to stdout; in --json mode stdout carries ONLY the JSON document.
+    const say = json ? (m: string) => console.error(m) : (m: string) => console.log(m);
+
+    if (dataDir !== undefined && (!fs.existsSync(dataDir) || !fs.statSync(dataDir).isDirectory())) {
+        console.error(`verbatim repair-scopes failed: --data-dir ${dataDir} does not exist or is not a directory`);
+        process.exit(1);
+    }
+    const home = dataDir !== undefined ? resolveLoreHome({ dataDir }) : loreHome();
+    try {
+        assertWorkspaceTarget({ home, workspaceName, dataDirGiven: dataDir !== undefined });
+    } catch (error) {
+        console.error(`verbatim repair-scopes refused: ${(error as Error).message}`);
+        process.exit(1);
+    }
+    say(`  Home:      ${home}${dataDir !== undefined ? ' (from --data-dir)' : ''}`);
+    say(`  Registry:  ${path.join(home, 'workspaces.json')}`);
+    if (apply) {
+        // Embedded hosts run Lore in-process, so the daemon preflight cannot see them. Always on stderr (stdout is JSON-only in --json mode).
+        console.error('WARNING: close every app that embeds Lore on this data dir (Atlas, MIRA, PM Helper) before running --apply; this command cannot detect them. '
+            + 'A concurrent write is caught only by a re-check just before each write, which then aborts the run.');
+    }
+    const backupOutDir = path.join(home, 'verbatim-repair-scopes-backups');
+
+    const { repairVerbatimScopes, REPAIR_VERDICTS } = await import('../../engines/verbatimRepairScopes.js');
+    let r;
+    try {
+        r = await repairVerbatimScopes({ workspaceName, home, apply, backupOutDir });
+    } catch (error) {
+        console.error(`verbatim repair-scopes failed: ${(error as Error).message}`);
+        process.exit(1);
+    }
+    if (json) {
+        console.log(JSON.stringify(r, null, 2));
+        return;
+    }
+    console.log('');
+    if (r.message) {
+        console.log(r.message);
+        return;
+    }
+    console.log(`Verbatim scope repair: '${workspaceName}' (${r.engine}, ${apply ? 'APPLY' : 'dry run — nothing is written'})`);
+    console.log(`  Rows:              ${r.totalRows}`);
+    console.log(`  All 'undefined':   ${r.totals.all_undefined}`);
+    console.log(`  Mixed 'undefined': ${r.totals.mixed_undefined} (never touched)`);
+    if (r.totals.unreadable > 0) console.log(`  Unreadable:        ${r.totals.unreadable} (never touched)`);
+    console.log(`  Version logs read: ${r.versionLog.files.length}${r.versionLog.files.length === 0 ? ' (none found: nothing can be proven)' : ''}`);
+    console.log('');
+    console.log('Verdict per all-undefined row:');
+    for (const v of REPAIR_VERDICTS) {
+        if (r.verdicts[v] === 0) continue;
+        console.log(`  ${v.padEnd(26)} ${r.verdicts[v]}`);
+    }
+    for (const v of REPAIR_VERDICTS) {
+        const ids = r.samples[v];
+        if (ids.length === 0) continue;
+        console.log('');
+        console.log(`Sample ids, ${v} (first ${ids.length} of ${r.verdicts[v]}):`);
+        for (const id of ids) console.log(`  - ${id}`);
+    }
+    console.log('');
+    if (r.status === 'applied') {
+        console.log(`  Backup:            ${r.backup!.tarballPath}`);
+        console.log(`  Restored:          ${r.restored} row(s)`);
+        console.log(`  Verified:          ${r.verified!.totalRows} rows (count unchanged); every other row byte-identical; ${r.verified!.remainingAllUndefined} row(s) still all-undefined (left as they were)`);
+    } else if (r.verdicts.restorable > 0) {
+        console.log(`${r.verdicts.restorable} row(s) are provably restorable. Re-run with --apply to restore them (a backup is taken first; stop the daemon and close embedding hosts first).`);
+    } else if (r.totals.all_undefined === 0) {
+        console.log('No damaged scopes found.');
+    } else {
+        console.log('Nothing is provably restorable. The damaged rows stay as they are (fail-closed).');
+    }
+}
+
 export async function verbatimCommand(args: string[]): Promise<void> {
     const sub = args[0];
     if (sub === 'dedupe') {
         await verbatimDedupeCommand(args.slice(1));
+        return;
+    }
+    if (sub === 'check-scopes') {
+        await verbatimCheckScopesCommand(args.slice(1));
+        return;
+    }
+    if (sub === 'repair-scopes') {
+        await verbatimRepairScopesCommand(args.slice(1));
         return;
     }
     if (sub !== 'reap') {
@@ -178,6 +374,10 @@ export async function verbatimCommand(args: string[]): Promise<void> {
         console.error('       Default prefix: lore: (reap orphaned LoreNode embeddings)');
         console.error('       lore verbatim dedupe <workspace> [--data-dir <path>] [--apply] [--json]');
         console.error('       Check / clean duplicate canonical ids in a workspace\'s LanceDB verbatim table');
+        console.error('       lore verbatim check-scopes <workspace> [--data-dir <path>] [--json]');
+        console.error('       Read-only report of rows whose security_scopes were damaged as [\'undefined\', ...] (Lance or SQLite)');
+        console.error('       lore verbatim repair-scopes <workspace> [--data-dir <path>] [--apply] [--json]');
+        console.error('       Restore those scopes where the node version log proves the original (dry run by default; --apply is offline, backed up)');
         process.exit(1);
     }
     const parsed = parseOrExit('verbatim reap', args.slice(1), {

@@ -7,6 +7,7 @@
  *   GET/DELETE /api/diagnostic/cache-stats — read/reset cache counters
  */
 
+import { actorRowVisibility } from '../../../../security/scopeFilter.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { writeGraphReport } from '../../../../engines/graphReport.js';
 import type { ReportGraph } from '../../../../engines/graphReportAggregates.js';
@@ -78,6 +79,8 @@ export async function handleReport(res: ServerResponse, url: string, deps: Diagn
         const md = await writeGraphReport(reportGraph, {
             project,
             topN: Number.isFinite(topN) ? topN : 20,
+            // Bound actors: hidden nodes are omitted from hubs / recent / orphans.
+            rowVisible: actorRowVisibility(),
         });
         res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
         res.end(md);
