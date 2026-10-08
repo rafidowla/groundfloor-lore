@@ -18,6 +18,8 @@ import { writeWorkspaceRequired, extractWorkspace, writeError, writeGraphEngineE
 import { type DiagnosticDeps, type LoreGraph, readWorkspaceStats } from './shared.js';
 import { redactError } from '../../../../security/logRedact.js';
 import { hasLanguageBreakdown } from '../../../tools/search/helpers.js';
+import { countAudience } from '../../../../security/visibleCounts.js';
+import { visibleGraphStats, visibleCountLabel } from '../../../../security/visibleStats.js';
 import { CloudModeUnsupportedError } from '../../../../engines/cloudModeUnsupportedError.js';
 
 /**
@@ -182,6 +184,24 @@ export async function handleStats(res: ServerResponse, url: string, deps: Diagno
                 if (writeGraphEngineError(res, err)) return;
                 throw err;
             }
+        }
+        // Bound non-operator (app token): totals, type and language breakdowns
+        // are what the token could count by reading its own rows (visible-only,
+        // capped scan, labelled); the verbatim counter has no per-item form, so
+        // it is left out. Unbound and operator callers fall through unchanged.
+        if (countAudience() === 'visible') {
+            const v = await visibleGraphStats(targetGraph, { project: requested, withLanguage: true });
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                workspace: requested,
+                scope: 'workspace',
+                nodeCount: v.nodeCount,
+                edgeCount: v.edgeCount,
+                typeBreakdown: v.typeBreakdown,
+                languageBreakdown: v.languageBreakdown,
+                ...visibleCountLabel(v.lowerBound),
+            }));
+            return;
         }
         // Sprint L5b-final — pass the requested workspace as a
         // project filter so alias workspaces sharing an on-disk

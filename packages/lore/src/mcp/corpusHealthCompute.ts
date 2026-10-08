@@ -17,6 +17,7 @@
 import type { AuxStore } from '../outbox/auxStore.js';
 import { forEachNodePage, type NodePager } from '../engines/nodePager.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
+import { countAudience, countVisibleEdges, forEachVisibleNode } from '../security/visibleCounts.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
 // classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
@@ -40,7 +41,12 @@ export interface CorpusHealthReport {
     scored_nodes: number;
     edge_count: number;
     outcome_totals: ReturnType<AuxStore['getWorkspaceOutcomeTotals']>;
-    corpus_counters: ReturnType<AuxStore['getCorpusCounters']>;
+    /** Absent for a bound non-operator: the cached counters are not countable per item. */
+    corpus_counters?: ReturnType<AuxStore['getCorpusCounters']>;
+    /** Bound non-operator only: every number above counts items visible to the caller. */
+    countScope?: 'visible';
+    /** Bound non-operator only: a scan hit the cap, so the counts are lower bounds. */
+    countsLowerBound?: true;
 }
 
 /**
@@ -53,12 +59,15 @@ export async function computeCorpusHealth(
     auxStore: AuxStore,
     workspace: string,
     // Bound actors only (security/scopeFilter.actorRowVisibility): rows the
-    // actor cannot see are left out of every per-node counter. NOT applied to
-    // edge_count / outcome_totals / corpus_counters, which are workspace-wide
-    // aggregates with no per-row scope to filter on.
+    // actor cannot see are left out of every per-node counter. Operators keep
+    // the workspace-wide edge_count / outcome_totals / corpus_counters; a bound
+    // NON-operator gets the visible-only path below instead.
     rowVisible?: (row: { security_scopes?: unknown }) => boolean,
+    // `cap` lowers the visible-only scan cap (tests only).
+    opts: { cap?: number } = {},
 ): Promise<CorpusHealthReport> {
     await graph.initialize();
+    const visibleOnly = countAudience() === 'visible';
 
     let totalNodes = 0;
     let active = 0, archived = 0, protected_ = 0;
@@ -92,13 +101,40 @@ export async function computeCorpusHealth(
         if (cs > 0) { totalScore += cs; scoredNodes++; }
     };
 
+    const foldRow = (r: Record<string, unknown>): void => {
+        const status = (r['status'] as string) || 'active';
+        const cls = (r['classification'] as string) || 'tactical';
+        const csRaw = r['confirmation_score'];
+        const cs = typeof csRaw === 'number' ? csRaw : (csRaw != null ? Number(csRaw) : 0);
+        // Match rowToLoreNode's stale/anchor_stale coercion (BOOLEAN → true|undefined).
+        const staleRaw = r['stale'];
+        const stale = staleRaw === true || staleRaw === 1 || staleRaw === 'true' ? true : undefined;
+        const anchorStaleRaw = r['anchor_stale'];
+        const anchorStale = anchorStaleRaw === true || anchorStaleRaw === 1 || anchorStaleRaw === 'true' ? true : undefined;
+        fold(status, cls, stale, anchorStale, Number.isFinite(cs) ? cs : 0);
+    };
+
     // P1 scale fix — page the walk projecting only the health columns (no
     // `content`), folding each bounded page. Peak heap is one page. Coerce raw
     // graph values to match rowToLoreNode's defaults (status '' → 'active',
     // classification '' → 'tactical', numeric confirmation_score). Fakes /
     // cloud graphs without getGraphContext fall back to the unbounded scan.
     const pager = (graph as { bulkListProjected?: NodePager }).bulkListProjected?.bind(graph);
-    if (pager) {
+    // Bound non-operator: bounded, visible-only scan (at most the cap in raw
+    // rows, on every engine); also collects the visible ids for outcome_totals.
+    const visibleIds: string[] = [];
+    let nodesLowerBound = false;
+    if (visibleOnly) {
+        const scan = await forEachVisibleNode(
+            graph,
+            { cap: opts.cap, extraColumns: ['status', 'classification', 'stale', 'anchor_stale', 'confirmation_score'] },
+            (r) => {
+                visibleIds.push(String(r['id'] ?? ''));
+                foldRow(r);
+            },
+        );
+        nodesLowerBound = scan.lowerBound;
+    } else if (pager) {
         // anchor_stale is now projected alongside `stale` — both are surfaced
         // by rowToLoreNode's coercion (BOOLEAN → true|undefined), so the paged
         // path folds real anchor_stale counts. Previously this projection
@@ -115,16 +151,7 @@ export async function computeCorpusHealth(
             (rows) => {
                 for (const r of rows) {
                     if (rowVisible && !rowVisible({ security_scopes: r['security_scopes'] })) continue;
-                    const status = (r['status'] as string) || 'active';
-                    const cls = (r['classification'] as string) || 'tactical';
-                    const csRaw = r['confirmation_score'];
-                    const cs = typeof csRaw === 'number' ? csRaw : (csRaw != null ? Number(csRaw) : 0);
-                    // Match rowToLoreNode's stale/anchor_stale coercion (BOOLEAN → true|undefined).
-                    const staleRaw = r['stale'];
-                    const stale = staleRaw === true || staleRaw === 1 || staleRaw === 'true' ? true : undefined;
-                    const anchorStaleRaw = r['anchor_stale'];
-                    const anchorStale = anchorStaleRaw === true || anchorStaleRaw === 1 || anchorStaleRaw === 'true' ? true : undefined;
-                    fold(status, cls, stale, anchorStale, Number.isFinite(cs) ? cs : 0);
+                    foldRow(r);
                 }
             },
         );
@@ -149,6 +176,30 @@ export async function computeCorpusHealth(
     const avgConfirmationScore = scoredNodes > 0
         ? Math.round((totalScore / scoredNodes) * 1000) / 1000
         : 0;
+
+    if (visibleOnly) {
+        const edges = await countVisibleEdges(graph, { cap: opts.cap });
+        return {
+            workspace,
+            total_nodes: totalNodes,
+            active_nodes: active,
+            archived_nodes: archived,
+            protected_nodes: protected_,
+            foundational_nodes: foundational,
+            tactical_nodes: tactical,
+            observational_nodes: observational,
+            unclassified_nodes: unclassified,
+            stale_nodes: staleNodes,
+            anchor_stale_nodes: anchorStaleNodes,
+            avg_confirmation_score: avgConfirmationScore,
+            scored_nodes: scoredNodes,
+            edge_count: edges.edgeCount,
+            // Outcomes of the visible nodes only; corpus_counters are omitted.
+            outcome_totals: auxStore.getOutcomeTotalsForNodes(workspace, visibleIds),
+            countScope: 'visible',
+            ...(nodesLowerBound || edges.lowerBound ? { countsLowerBound: true as const } : {}),
+        };
+    }
 
     const outcomeTotals = auxStore.getWorkspaceOutcomeTotals(workspace);
     const corpusCounters = auxStore.getCorpusCounters(workspace);

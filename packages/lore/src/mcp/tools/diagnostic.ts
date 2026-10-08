@@ -31,6 +31,8 @@ import type { StorageBundle } from '../services.js';
 import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
 import { maintenanceForbiddenToolResult } from '../../security/exportGate.js';
+import { countAudience } from '../../security/visibleCounts.js';
+import { visibleGraphStats, visibleCountLabel } from '../../security/visibleStats.js';
 
 export interface DiagnosticToolsDeps {
     store: StorageBundle;
@@ -80,6 +82,32 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                         }
                         throw err;
                     }
+                }
+                // Bound non-operator (app token): visible-only totals and
+                // breakdowns, labelled; the verbatim counter is left out.
+                // Unbound / operator callers continue unchanged below.
+                if (countAudience() === 'visible') {
+                    const v = await visibleGraphStats(targetGraph, { withLanguage: true });
+                    return {
+                        content: [{
+                            type: 'text' as const,
+                            text: JSON.stringify({
+                                workspace,
+                                scope: 'workspace',
+                                nodeCount: v.nodeCount,
+                                edgeCount: v.edgeCount,
+                                typeBreakdown: v.typeBreakdown,
+                                languageBreakdown: v.languageBreakdown,
+                                ...visibleCountLabel(v.lowerBound),
+                                graphPath: path.join(deps.graphBasePath, '.lore', 'graph'),
+                                engine: !deps.graphRegistry
+                                    ? 'dataplane (cloud)'
+                                    : deps.graphRegistry.graphEngineFor(workspace) === 'surreal'
+                                        ? 'surrealdb (local)'
+                                        : 'legacy graph engine + lancedb (local)',
+                            }, null, 2),
+                        }],
+                    };
                 }
                 const graphStats = await targetGraph.getStats();
                 // getLanguageBreakdown is implemented by LocalGraph, SurrealGraph
@@ -213,8 +241,13 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                     try { targetGraph = await deps.graphRegistry.getGraphHandle(callerWs); }
                     catch { /* unknown ws → fall back to boot store, liveness only */ }
                 }
-                const stats = await targetGraph.getStats();
-                const verbatimCount = await deps.store.storageClient.verbatimCount();
+                // Bound non-operator: visible-only node / edge totals (labelled),
+                // verbatimDocs omitted — it has no per-item form.
+                const visible = countAudience() === 'visible'
+                    ? await visibleGraphStats(targetGraph)
+                    : null;
+                const stats = visible ?? await targetGraph.getStats();
+                const verbatimCount = visible ? undefined : await deps.store.storageClient.verbatimCount();
                 return {
                     content: [{
                         type: 'text' as const,
@@ -231,7 +264,7 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                             graph: {
                                 nodes: stats.nodeCount,
                                 edges: stats.edgeCount,
-                                verbatimDocs: verbatimCount,
+                                ...(visible ? {} : { verbatimDocs: verbatimCount }),
                                 // Sprint-8/commit-8 — report the engine THIS
                                 // workspace declares (per-workspace, via the
                                 // registry) rather than a class check on a graph
@@ -253,6 +286,7 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                                 httpGetFullEndpoint: '/api/node-full',
                             },
                             tip: 'Call recall({topic}) (compact mode, default) or recall({topic, crossProject:true}) for cross-repo. Use get_full({id}) to fetch one body in detail.',
+                            ...(visible ? visibleCountLabel(visible.lowerBound) : {}),
                         }, null, 2),
                     }],
                 };

@@ -11,6 +11,7 @@
  */
 
 import type { CalibrationResult } from './calibration.js';
+import { hideUncountableForCurrentActor } from '../security/exportGate.js';
 import type { RetrieveCalibrationMeta } from './retrieveTypes.js';
 
 export const DEFAULT_RELEVANCE_FLOOR = 2.0;
@@ -228,7 +229,9 @@ export interface RelevanceMetaFields {
      *  opt-in term-coverage signal ran (abstain + abstainTermCoverage on). */
     term_coverage?: number | null;
     calibration: {
-        status: string; version: string; probes: number; rows: number;
+        status: string; version: string; probes: number;
+        /** Raw verbatim row count the fit saw; omitted for a bound non-operator. */
+        rows?: number;
         null_median: number | null; null_scale: number | null; scope: string;
     };
 }
@@ -237,6 +240,10 @@ export interface RelevanceMetaFields {
  *  surface/branch is emitting it (used only for the 'not_applicable'
  *  static variant below, kept for symmetry/debuggability). */
 export function buildRelevanceMeta(meta: RetrieveCalibrationMeta): RelevanceMetaFields {
+    // Security decision: `rows` is the raw (unfiltered) verbatim row count, which
+    // includes rows a bound actor cannot see and cannot be computed per item. Only
+    // the returned value is dropped; the fit, floor and abstention are unchanged.
+    const hideRows = hideUncountableForCurrentActor();
     return {
         top_similarity: meta.topSimilarity,
         top_relevance: meta.topRelevance,
@@ -250,7 +257,7 @@ export function buildRelevanceMeta(meta: RetrieveCalibrationMeta): RelevanceMeta
             status: meta.calibration.status,
             version: meta.calibration.version,
             probes: meta.calibration.probes,
-            rows: meta.calibration.rows,
+            ...(hideRows ? {} : { rows: meta.calibration.rows }),
             null_median: meta.calibration.nullMedian,
             null_scale: meta.calibration.nullScale,
             scope: meta.calibration.scope,

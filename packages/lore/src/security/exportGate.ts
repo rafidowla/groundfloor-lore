@@ -48,6 +48,20 @@ export function requireExportAllowed(res: ServerResponse, what: string): boolean
     return false;
 }
 
+/**
+ * True for a bound NON-operator (app token / Clerk user): the caller class that
+ * must not receive raw corpus counters, pending-sync counts, disk sizes or
+ * other numbers that cannot be computed per visible item. Unbound callers and
+ * operators stay false, so their responses are unchanged and no extra work
+ * runs. Check it BEFORE computing the number, not after.
+ * Pinned (test/counts-review-fixes-unit.ts): with an operator.json identity, a
+ * request with no bearer has a bound actor and a null principal, so it counts as
+ * non-operator and these numbers are hidden.
+ */
+export function hideUncountableForCurrentActor(): boolean {
+    return getCurrentActorScopes() !== undefined && !exportAllowedForCurrentActor();
+}
+
 /** Shared wording for every operator-only refusal (REST and MCP). */
 function operatorOnlyMessage(what: string): string {
     return `${what} requires a daemon operator credential (bootstrap token or shared secret)`;

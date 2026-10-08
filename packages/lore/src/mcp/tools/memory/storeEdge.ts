@@ -12,7 +12,7 @@ import type { MemoryToolsDeps } from './types.js';
 import { log } from '../../../logger.js';
 import { mcpToolError } from '../mcpToolError.js';
 import { redactError } from '../../../security/logRedact.js';
-import { checkWorkspaceQuota } from '../../../security/workspaceQuota.js';
+import { checkWorkspaceQuota, quotaCurrentField } from '../../../security/workspaceQuota.js';
 import { withEdgeLocks, type EdgeLockTriple } from '../../../core/nodeWriteLock.js';
 import { writeEdgeOrRestore } from '../../edgeWriteRollback.js';
 import { assertEdgeEndpointsVisible, edgeGateDeps } from '../../edgeEndpointGate.js';
@@ -112,7 +112,7 @@ export function registerStoreEdgeTool(mcpServer: McpServer, deps: MemoryToolsDep
                                 text: JSON.stringify({
                                     error: 'workspace_quota_exceeded',
                                     dimension: q.dimension,
-                                    current: q.current,
+                                    ...quotaCurrentField(q.current),
                                     cap: q.cap,
                                     workspace: resolvedEdge.resolvedWorkspace,
                                 }, null, 2),

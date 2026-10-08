@@ -14,6 +14,7 @@
 
 import type { LoreNode } from '../../../providers/types.js';
 import type { WorkspaceGraph } from '../../../engines/openWorkspaceGraph.js';
+import { hideUncountableForCurrentActor } from '../../../security/exportGate.js';
 
 /**
  * `getLanguageBreakdown` sits in an awkward spot: `LocalGraph`, `SurrealGraph`
@@ -62,6 +63,12 @@ export async function buildLanguageHint(
     graph: LanguageBreakdownGraph,
     queryLanguage: string,
 ): Promise<LanguageHint | null> {
+    // Security decision: the hint is built from the unfiltered per-language node
+    // counts ("X of Y tagged nodes"), which include rows a bound actor cannot see
+    // and cannot be counted per item. Without the breakdown the mismatch cannot be
+    // judged truthfully, so a bound non-operator gets no hint and the breakdown is
+    // never read. Unbound / operator callers are unchanged.
+    if (hideUncountableForCurrentActor()) return null;
     try {
         const breakdown = await graph.getLanguageBreakdown();
         const total = Object.values(breakdown).reduce((a, b) => a + b, 0);

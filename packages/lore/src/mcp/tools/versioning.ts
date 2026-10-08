@@ -32,7 +32,7 @@ import { assertMcpScope } from './mcpScope.js';
 import { nodeHistoryVisible, filterVersionsByActorScope } from './versionScopeGate.js';
 import { filterNodesByActorScope } from '../../security/scopeFilter.js';
 import { redactHiddenSuccessors } from '../../security/nodePointers.js';
-import { checkWorkspaceQuota, type IWorkspaceQuotaStore } from '../../security/workspaceQuota.js';
+import { checkWorkspaceQuota, quotaCurrentField, type IWorkspaceQuotaStore } from '../../security/workspaceQuota.js';
 import type { WorkspaceEntry } from '../../config/workspaces.js';
 import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
@@ -276,7 +276,7 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                                     text: JSON.stringify({
                                         error: 'workspace_quota_exceeded',
                                         dimension: q.dimension,
-                                        current: q.current,
+                                        ...quotaCurrentField(q.current),
                                         cap: q.cap,
                                         workspace: ws,
                                         changeset_id,

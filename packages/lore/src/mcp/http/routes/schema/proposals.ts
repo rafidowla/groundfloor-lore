@@ -29,7 +29,8 @@ import { gateSchemaApproval } from '../../../../security/schemaApprovalGate.js';
 import { readJsonBody, writeJson, writeError, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { PREFIX, SCHEMA_APPROVE_OPERATION, type SchemaRoutesDeps } from './shared.js';
 import { redactError } from '../../../../security/logRedact.js';
-import { getCurrentPrincipal } from '../../../../auth/principal.js';
+import { deriveSchemaIdentity, SCHEMA_IDENTITY_REFUSED_MESSAGE } from '../../../../security/schemaIdentity.js';
+import { MAINTENANCE_FORBIDDEN } from '../../errorCodes.js';
 
 /**
  * Wave 4.2 — the per-endpoint read/write scope gates (formerly
@@ -54,12 +55,15 @@ export async function tryProposalRoutes(req: IncomingMessage, res: ServerRespons
             // GAP 1 (2026-08-17) — bind proposedBy to the authenticated principal
             // (same identity mapping as the approve route below), so a forged
             // 'human:*' body field can't be the proposer of a destructive change
-            // the caller later self-approves. No principal (legacy/no-auth) →
-            // body passthrough.
-            const principal = getCurrentPrincipal();
-            if (principal?.label) {
-                proposal.proposedBy = `${principal.kind === 'bootstrap' ? 'human' : 'system'}:${principal.label}`;
+            // the caller later self-approves. No principal and no bound actor
+            // (legacy/no-auth, unbound) → body passthrough; a bound actor with no
+            // principal gets a `system:` identity or is refused (schemaIdentity.ts).
+            const identity = deriveSchemaIdentity();
+            if (identity.kind === 'refused') {
+                writeError(res, 403, MAINTENANCE_FORBIDDEN, SCHEMA_IDENTITY_REFUSED_MESSAGE);
+                return true;
             }
+            if (identity.kind === 'derived') proposal.proposedBy = identity.identity;
             const sandbox = await deps.phaseA.schemaAuthoring.propose(proposal);
             // Bound non-operator: counts are recomputed over the rows the caller
             // can see (the stored copy keeps the operator's true totals).
@@ -125,11 +129,15 @@ export async function tryProposalRoutes(req: IncomingMessage, res: ServerRespons
                 // principal, not a client-supplied string. A forged body.approver
                 // (or initiator) would otherwise let one caller approve its own
                 // destructive proposal (isHumanProposer only checks the 'human:'
-                // prefix). Fall back to body.approver only when NO principal is
-                // bound (legacy/no-auth), mirroring approvals.ts handleDecide.
-                const principal = getCurrentPrincipal();
-                const approver = principal?.label
-                    ? `${principal.kind === 'bootstrap' ? 'human' : 'system'}:${principal.label}`
+                // prefix). Fall back to body.approver only when NO principal and NO
+                // actor is bound (legacy/no-auth), mirroring approvals.ts handleDecide.
+                const identity = deriveSchemaIdentity();
+                if (identity.kind === 'refused') {
+                    writeError(res, 403, MAINTENANCE_FORBIDDEN, SCHEMA_IDENTITY_REFUSED_MESSAGE);
+                    return true;
+                }
+                const approver = identity.kind === 'derived'
+                    ? identity.identity
                     : (typeof body.approver === 'string' && body.approver.length > 0 ? body.approver : null);
                 if (!approver) {
                     writeError(res, 400, 'invalid_approve_body', 'body must be {approver: string, note?: string}');

@@ -17,6 +17,7 @@
 
 import type { BulkListCursor, EdgeQuery, GraphStats, LoreEdge, LoreNode } from '../providers/types.js';
 import { DEFAULT_MAINTENANCE_PAGE_SIZE } from './nodePager.js';
+import { forEachVisibleEdge, forEachVisibleNode } from '../security/visibleCounts.js';
 
 /**
  * The graph surface the report aggregates need — a deliberate structural
@@ -65,23 +66,98 @@ export interface EdgeAggregates {
  * what neither needs would be the new abstraction, not the removed one.
  */
 export async function computeEdgeAggregates(graph: ReportGraph): Promise<EdgeAggregates> {
-    const confidenceByTier: Record<string, number> = { extracted: 0, inferred: 0, ambiguous: 0 };
-    const degreeById = new Map<string, number>();
-    const endpointIds = new Set<string>();
+    const agg = emptyEdgeAggregates();
 
     for (let offset = 0; ; offset += EDGE_PAGE) {
         const page = await graph.queryEdges({ limit: EDGE_PAGE, offset });
-        for (const e of page) {
-            const tier = e.confidence ?? 'extracted';
-            confidenceByTier[tier] = (confidenceByTier[tier] ?? 0) + 1;
-            degreeById.set(e.sourceId, (degreeById.get(e.sourceId) ?? 0) + 1);
-            degreeById.set(e.targetId, (degreeById.get(e.targetId) ?? 0) + 1);
-            endpointIds.add(e.sourceId);
-            endpointIds.add(e.targetId);
-        }
+        for (const e of page) foldEdge(agg, e);
         if (page.length < EDGE_PAGE) break;
     }
-    return { confidenceByTier, degreeById, endpointIds };
+    return agg;
+}
+
+function emptyEdgeAggregates(): EdgeAggregates {
+    return { confidenceByTier: { extracted: 0, inferred: 0, ambiguous: 0 }, degreeById: new Map(), endpointIds: new Set() };
+}
+
+function foldEdge(agg: EdgeAggregates, e: LoreEdge): void {
+    const tier = e.confidence ?? 'extracted';
+    agg.confidenceByTier[tier] = (agg.confidenceByTier[tier] ?? 0) + 1;
+    agg.degreeById.set(e.sourceId, (agg.degreeById.get(e.sourceId) ?? 0) + 1);
+    agg.degreeById.set(e.targetId, (agg.degreeById.get(e.targetId) ?? 0) + 1);
+    agg.endpointIds.add(e.sourceId);
+    agg.endpointIds.add(e.targetId);
+}
+
+export interface VisibleSummary {
+    edges: EdgeAggregates & { count: number; lowerBound: boolean };
+    nodes: { count: number; typeBreakdown: Record<string, number>; lowerBound: boolean };
+}
+
+/**
+ * computeVisibleSummary — the Summary inputs for a BOUND non-operator: node
+ * totals / per-type counts over visible nodes, and the edge aggregates (tier
+ * tally, hub degrees, orphan-exclusion set) over edges whose BOTH endpoints are
+ * visible. Each walk is bounded to `cap` raw rows (default
+ * SCOPE_PAGE_FILL_MAX_SCAN) on every engine; `lowerBound` flags a capped walk.
+ */
+export async function computeVisibleSummary(graph: ReportGraph, cap?: number): Promise<VisibleSummary> {
+    const typeBreakdown: Record<string, number> = {};
+    let nodeCount = 0;
+    const nodeScan = await forEachVisibleNode(
+        // bulkListProjected is guaranteed by ReportGraph, so the bulkList
+        // fallback of the shared scan is never reached.
+        { bulkList: () => Promise.reject(new Error('bulkList unavailable')), bulkListProjected: graph.bulkListProjected.bind(graph) },
+        { cap },
+        (row) => {
+            nodeCount++;
+            // Empty types stay out of the breakdown, as in every engine's getStats.
+            const t = String(row['type'] ?? '');
+            if (t) typeBreakdown[t] = (typeBreakdown[t] ?? 0) + 1;
+        },
+    );
+    const agg = emptyEdgeAggregates();
+    let count = 0;
+    const edgeScan = await forEachVisibleEdge(graph, { cap }, (e) => { count++; foldEdge(agg, e); });
+    return {
+        edges: { ...agg, count, lowerBound: edgeScan.lowerBound },
+        nodes: { count: nodeCount, typeBreakdown, lowerBound: nodeScan.lowerBound },
+    };
+}
+
+/**
+ * Raw-row budget for the report's node walks (recently updated, orphans) when
+ * the caller is a bound non-operator: at most `cap` raw rows are read, and
+ * `lowerBound` is set when more raw rows exist beyond it (a one-row peek, so a
+ * workspace of exactly `cap` rows is not flagged). Raw callers pass none.
+ */
+export interface ScanBudget { cap: number; lowerBound: boolean }
+
+/** Page through bulkListProjected, within `budget` when one is given. */
+async function* projectedPages(
+    graph: ReportGraph,
+    columns: readonly string[],
+    budget?: ScanBudget,
+): AsyncGenerator<Array<Record<string, unknown>>> {
+    let cursor: BulkListCursor | null = null;
+    let scanned = 0;
+    for (;;) {
+        let limit = DEFAULT_MAINTENANCE_PAGE_SIZE;
+        if (budget) {
+            const room = budget.cap - scanned;
+            if (room <= 0) {
+                const peek = await graph.bulkListProjected('*', columns, 1, cursor);
+                budget.lowerBound = peek.rows.length > 0;
+                return;
+            }
+            limit = Math.min(limit, room);
+        }
+        const { rows, nextCursor } = await graph.bulkListProjected('*', columns, limit, cursor);
+        scanned += rows.length;
+        yield rows;
+        if (!nextCursor || (budget && rows.length === 0)) return;
+        cursor = nextCursor;
+    }
 }
 
 export interface HubRow {
@@ -155,13 +231,12 @@ export async function computeRecentlyUpdated(
     graph: ReportGraph,
     limit: number,
     rowVisible?: (row: { security_scopes?: unknown }) => boolean,
+    budget?: ScanBudget,
 ): Promise<RecentRow[]> {
     const out: RecentRow[] = [];
-    let cursor: BulkListCursor | null = null;
-    do {
-        const { rows, nextCursor } = await graph.bulkListProjected(
-            '*', rowVisible ? ['label', 'type', 'updatedAt', 'security_scopes'] : ['label', 'type', 'updatedAt'], DEFAULT_MAINTENANCE_PAGE_SIZE, cursor,
-        );
+    for await (const rows of projectedPages(
+        graph, rowVisible ? ['label', 'type', 'updatedAt', 'security_scopes'] : ['label', 'type', 'updatedAt'], budget,
+    )) {
         for (const r of rows) {
             if (rowVisible && !rowVisible({ security_scopes: r['security_scopes'] })) continue;
             const updatedAt = r['updatedAt'];
@@ -174,8 +249,7 @@ export async function computeRecentlyUpdated(
             });
             if (out.length >= limit) return out;
         }
-        cursor = nextCursor;
-    } while (cursor);
+    }
     return out;
 }
 
@@ -203,13 +277,10 @@ export async function computeOrphans(
     endpointIds: ReadonlySet<string>,
     limit: number,
     rowVisible?: (row: { security_scopes?: unknown }) => boolean,
+    budget?: ScanBudget,
 ): Promise<OrphanRow[]> {
     const out: OrphanRow[] = [];
-    let cursor: BulkListCursor | null = null;
-    do {
-        const { rows, nextCursor } = await graph.bulkListProjected(
-            '*', rowVisible ? ['label', 'type', 'security_scopes'] : ['label', 'type'], DEFAULT_MAINTENANCE_PAGE_SIZE, cursor,
-        );
+    for await (const rows of projectedPages(graph, rowVisible ? ['label', 'type', 'security_scopes'] : ['label', 'type'], budget)) {
         for (const r of rows) {
             if (rowVisible && !rowVisible({ security_scopes: r['security_scopes'] })) continue;
             const id = String(r['id'] ?? '');
@@ -217,7 +288,6 @@ export async function computeOrphans(
             out.push({ id, label: String(r['label'] ?? ''), type: String(r['type'] ?? '') });
             if (out.length >= limit) return out;
         }
-        cursor = nextCursor;
-    } while (cursor);
+    }
     return out;
 }

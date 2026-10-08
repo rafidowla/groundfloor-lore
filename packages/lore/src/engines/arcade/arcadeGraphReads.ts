@@ -338,11 +338,13 @@ export async function queryEdgesArcade(
   const where = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
   const limit = Math.min(Math.max(Math.floor(q.limit), 1), 1000);
   const offset = Math.max(Math.floor(q.offset), 0);
-  // No ORDER BY (mirrors graphEdges.queryEdges, which paginates SKIP/LIMIT with
-  // no ordering) — the GET /api/edges contract compares the edge SET, not order.
+  // ORDER BY @rid (unique, immutable record id) so SKIP/LIMIT paging is stable:
+  // forEachVisibleEdge (security/visibleCounts.ts) and every other offset pager
+  // would otherwise duplicate or skip edges between pages. The GET /api/edges
+  // contract still compares the edge SET, not order.
   const sql =
     `SELECT relation, confidence, confidenceScore, outV().id AS sourceId, inV().id AS targetId ` +
-    `FROM ${edgeType} ${where} SKIP ${offset} LIMIT ${limit}`;
+    `FROM ${edgeType} ${where} ORDER BY @rid ASC SKIP ${offset} LIMIT ${limit}`;
   const res = await http.query(tenantDb, sql, params);
   return ((res.result ?? []) as Array<Record<string, unknown>>).map((r) => ({
     sourceId: String(r['sourceId'] ?? ''),

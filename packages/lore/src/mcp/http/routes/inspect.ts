@@ -23,6 +23,8 @@ import { ecosystemMatches } from '../../../core/ecosystemMatch.js';
 import { redactError } from '../../../security/logRedact.js';
 import { isActorBound, fillVisibleKeysetPage, encodeKeysetCursor, unsealKeysetPayload } from '../../../security/scopePageFill.js';
 import { writeError } from '../helpers.js';
+import { countAudience } from '../../../security/visibleCounts.js';
+import { visibleGraphStats, visibleCountLabel } from '../../../security/visibleStats.js';
 
 export interface InspectRouteDeps {
     store: StorageBundle;
@@ -49,14 +51,20 @@ export async function tryInspectRoutes(
         );
         if (!gate.allowed) { writePermissionDenied(res, gate); return true; }
         try {
-            const stats = await deps.store.storageClient.getStats();
+            // Bound non-operator: visible-only totals (labelled) from the boot
+            // graph the storage client reads; verbatimDocs has no per-item form
+            // and is left out. Unbound / operator callers are unchanged.
+            const visible = countAudience() === 'visible'
+                ? await visibleGraphStats(deps.store.loreGraph)
+                : null;
+            const stats = visible ?? await deps.store.storageClient.getStats();
             // INTENTIONALLY boot/active-scoped: /api/lore-status is a snapshot of
             // THIS daemon's active workspace (scope.workspace below is the
             // detected-active name), not a per-request workspace read. The
             // verbatim count here is meant to describe the active workspace's
             // LanceDB, so it stays on the boot storageClient — not a P2
             // per-workspace routing site.
-            const verbatimCount = await deps.store.storageClient.verbatimCount();
+            const verbatimCount = visible ? undefined : await deps.store.storageClient.verbatimCount();
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
                 daemon: 'ok',
@@ -65,7 +73,7 @@ export async function tryInspectRoutes(
                 graph: {
                     nodes: stats.nodeCount,
                     edges: stats.edgeCount,
-                    verbatimDocs: verbatimCount,
+                    ...(visible ? {} : { verbatimDocs: verbatimCount }),
                     // BUGFIX: this used to read `deps.store.loreGraph
                     // instanceof LocalGraph`, which is the BOOT handle — it
                     // reported the boot engine even when
@@ -100,6 +108,7 @@ export async function tryInspectRoutes(
                     httpRecallEndpoint: '/api/recall',
                     httpGetFullEndpoint: '/api/node-full',
                 },
+                ...(visible ? visibleCountLabel(visible.lowerBound) : {}),
             }));
         } catch (err) {
             writeError(res, 500, 'lore_status_failed', redactError(err));

@@ -41,6 +41,7 @@
 
 import type { ServerResponse } from 'node:http';
 import type { WorkspaceEntry } from '../config/workspaces.js';
+import { hideUncountableForCurrentActor } from './exportGate.js';
 
 export interface WorkspaceQuotaSnapshot {
     nodeCount: number;
@@ -96,6 +97,17 @@ export interface QuotaResult {
     dimension?: QuotaDimension;
     current?: number;
     cap?: number;
+}
+
+/**
+ * Security decision (3.31 visible-only counts): `current` is the workspace-wide
+ * node count / storage size, which a bound non-operator must not learn. Spread
+ * this into a quota-rejection body at the position `current` used to occupy;
+ * operators and unbound callers keep the field, app tokens lose it (the reject
+ * decision, status code and every other field are unchanged).
+ */
+export function quotaCurrentField(current: number | undefined): { current?: number } {
+    return hideUncountableForCurrentActor() ? {} : { current };
 }
 
 /**
@@ -163,7 +175,7 @@ export function enforceQuotaOrReject(
     res.end(JSON.stringify({
         error: 'workspace_quota_exceeded',
         dimension: result.dimension,
-        current: result.current,
+        ...quotaCurrentField(result.current),
         cap: result.cap,
         workspace,
         hint: 'raise the cap in workspaces.json, archive content, or switch workspace',

@@ -30,7 +30,10 @@ import {
     computeOrphans,
     computeRecentlyUpdated,
     computeTopHubs,
+    computeVisibleSummary,
+    type EdgeAggregates,
 } from './graphReportAggregates.js';
+import { defaultScanCap, formatVisibleCount } from '../security/visibleCounts.js';
 
 export interface ReportOptions {
     project?: string;
@@ -39,11 +42,18 @@ export interface ReportOptions {
     /**
      * Bound actors only (security/scopeFilter.actorRowVisibility): hubs,
      * recently-updated and orphan rows the actor cannot see are omitted, so no
-     * hidden node's id/label/type is listed. The Summary counts (Nodes, Edges,
-     * Nodes by type, Edges by confidence) and hub degrees are workspace-wide
-     * aggregates and are NOT filtered.
+     * hidden node's id/label/type is listed.
      */
     rowVisible?: (row: { security_scopes?: unknown }) => boolean;
+    /**
+     * Bound NON-operator only (security/visibleCounts.countAudience() ===
+     * 'visible'): the Summary (Nodes, Edges, Nodes by type, Edges by
+     * confidence) and the hub degrees count only visible nodes and edges whose
+     * both endpoints are visible, each walk bounded to the scan cap; a capped
+     * number renders as `<n>+`. Unbound / operator callers leave this unset and
+     * get the workspace-wide aggregates unchanged. `cap` is for tests.
+     */
+    visibleCounts?: { cap?: number };
 }
 
 /** Literal caps the source Cypher used for these two sections — NOT
@@ -62,14 +72,28 @@ export async function writeGraphReport(
     const topN = opts.topN ?? 20;
 
     // ─── Summary ────────────────────────────────────────────────
-    const stats = await graph.getStats();
+    const visible = opts.visibleCounts ? await computeVisibleSummary(graph, opts.visibleCounts.cap) : undefined;
+    const stats = visible
+        ? { nodeCount: visible.nodes.count, edgeCount: visible.edges.count, typeBreakdown: visible.nodes.typeBreakdown }
+        : await graph.getStats();
+    const nodesCapped = visible?.nodes.lowerBound ?? false;
+    const edgesCapped = visible?.edges.lowerBound ?? false;
+    const num = (n: number, capped: boolean): string => (visible ? formatVisibleCount(n, capped) : String(n));
 
     // One paged edge walk feeds the confidence tally, the hub degree map,
     // and the orphan-exclusion set — see graphReportAggregates.ts.
-    const { confidenceByTier, degreeById, endpointIds } = await computeEdgeAggregates(graph);
+    const { confidenceByTier, degreeById, endpointIds }: EdgeAggregates = visible?.edges ?? await computeEdgeAggregates(graph);
     const topHubsRows = await computeTopHubs(graph, degreeById, topN, opts.rowVisible);
-    const recentRows = await computeRecentlyUpdated(graph, RECENT_LIMIT, opts.rowVisible);
-    const orphanRows = await computeOrphans(graph, endpointIds, ORPHAN_LIMIT, opts.rowVisible);
+    // Bound non-operator: the node walks are bounded by the same raw-row cap.
+    const walkCap = visible ? { cap: opts.visibleCounts?.cap ?? defaultScanCap(), lowerBound: false } : undefined;
+    const recentBudget = walkCap && { ...walkCap };
+    const orphanBudget = walkCap && { ...walkCap };
+    const recentRows = await computeRecentlyUpdated(graph, RECENT_LIMIT, opts.rowVisible, recentBudget);
+    // With a capped edge walk most endpoints are unknown, so "no edge seen" does
+    // not mean "no edge": the orphan list is omitted rather than listed wrongly.
+    const orphansUnreliable = edgesCapped;
+    const orphanRows = orphansUnreliable ? [] : await computeOrphans(graph, endpointIds, ORPHAN_LIMIT, opts.rowVisible, orphanBudget);
+    const anyCapped = nodesCapped || edgesCapped || (recentBudget?.lowerBound ?? false) || (orphanBudget?.lowerBound ?? false);
 
     // ─── Markdown assembly ──────────────────────────────────────
     const lines: string[] = [];
@@ -83,8 +107,10 @@ export async function writeGraphReport(
 
     lines.push('## Summary');
     lines.push('');
-    lines.push(`- **Nodes**: ${stats.nodeCount}`);
-    lines.push(`- **Edges**: ${stats.edgeCount}`);
+    lines.push(`- **Nodes**: ${num(stats.nodeCount, nodesCapped)}`);
+    lines.push(`- **Edges**: ${num(stats.edgeCount, edgesCapped)}`);
+    if (visible) lines.push('', '_Counts cover items visible to this caller._');
+    if (visible && anyCapped) lines.push('', '_Counts marked + are lower bounds: the scan limit was reached._');
     lines.push('');
     lines.push('### Nodes by type');
     lines.push('');
@@ -104,7 +130,7 @@ export async function writeGraphReport(
     } else {
         lines.push('| Type | Count |');
         lines.push('|---|---:|');
-        for (const [t, n] of types) lines.push(`| ${t} | ${n} |`);
+        for (const [t, n] of types) lines.push(`| ${t} | ${num(n, nodesCapped)} |`);
     }
     lines.push('');
 
@@ -113,7 +139,7 @@ export async function writeGraphReport(
     lines.push('| Tier | Count |');
     lines.push('|---|---:|');
     for (const tier of ['extracted', 'inferred', 'ambiguous']) {
-        lines.push(`| ${tier} | ${confidenceByTier[tier] ?? 0} |`);
+        lines.push(`| ${tier} | ${num(confidenceByTier[tier] ?? 0, edgesCapped)} |`);
     }
     lines.push('');
 
@@ -125,7 +151,7 @@ export async function writeGraphReport(
         lines.push('| Degree | Type | Label | ID |');
         lines.push('|---:|---|---|---|');
         for (const r of topHubsRows) {
-            lines.push(`| ${r.deg} | ${r.type} | ${escapePipe(r.label)} | \`${r.id}\` |`);
+            lines.push(`| ${visible ? formatVisibleCount(r.deg, edgesCapped) : r.deg} | ${r.type} | ${escapePipe(r.label)} | \`${r.id}\` |`);
         }
     }
     lines.push('');
@@ -146,7 +172,9 @@ export async function writeGraphReport(
 
     lines.push('## Orphans (no edges yet)');
     lines.push('');
-    if (orphanRows.length === 0) {
+    if (orphansUnreliable) {
+        lines.push('_(not shown — too many edges to scan)_');
+    } else if (orphanRows.length === 0) {
         lines.push('_None — every node has at least one edge._');
     } else {
         lines.push(`${orphanRows.length} node(s) without edges — candidates for \`lore reconnect\`:`);

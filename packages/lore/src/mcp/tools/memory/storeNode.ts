@@ -25,7 +25,7 @@ import { resolveSupersessionContext } from '../../../core/supersessionPolicy.js'
 // (same wrapper bulkIngest already uses; no-op for engines that serialize
 // writes internally).
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
-import { checkWorkspaceQuota, bumpNodeWriteQuota } from '../../../security/workspaceQuota.js';
+import { checkWorkspaceQuota, quotaCurrentField, bumpNodeWriteQuota } from '../../../security/workspaceQuota.js';
 import { mcpToolError } from '../mcpToolError.js';
 import { redactError } from '../../../security/logRedact.js';
 import { nodeCreateIdBlocked, supersedesVisibilityFor, type NodeWriteGateHandles } from '../../../security/nodeWriteGate.js';
@@ -387,7 +387,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                                 text: JSON.stringify({
                                     error: 'workspace_quota_exceeded',
                                     dimension: q.dimension,
-                                    current: q.current,
+                                    ...quotaCurrentField(q.current),
                                     cap: q.cap,
                                     workspace: scopedWorkspace,
                                 }, null, 2),

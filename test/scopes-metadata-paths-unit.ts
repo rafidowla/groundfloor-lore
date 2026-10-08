@@ -175,6 +175,7 @@ function fakeAux() {
         updatePruneJob: () => undefined,
         getPruneJob: () => null,
         getWorkspaceOutcomeTotals: () => ({ success: 0, failure: 0, partial: 0 }),
+        getOutcomeTotalsForNodes: () => ({ success: 0, failure: 0, partial: 0 }),
         getCorpusCounters: () => ({}),
     };
     return o;

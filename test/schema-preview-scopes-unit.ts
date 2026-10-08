@@ -297,33 +297,40 @@ async function main(): Promise<void> {
         } finally { await h.close(); await fx.graph.close?.(); }
     });
 
-    await test('REST propose: bound caller with no principal gets visible-only blastRadius; stored copy stays raw', async () => {
+    await test('REST propose: a bound caller with no principal cannot propose a destructive change (3.31 S5: identity is derived, never human:)', async () => {
         const fx = await makeFixture();
         const h = await startHarness(fx);
         try {
             h.setCaller('noprincipal');
             const r = await fetchJson(`${h.baseUrl}/api/schema/proposals`, { method: 'POST', body: removeTenant() });
-            assert.equal(r.status, 201);
-            const br = r.body.blastRadius;
-            assert.equal(br.countScope, 'visible');
-            assert.equal('countsLowerBound' in br, false);
-            assert.equal(br.perChange[0].affectedRowCount, 3);
-            assert.equal(br.perChange[0].readerCount, 2);
-            assert.equal(br.total, 3);
-            assert.equal(h.store.getProposal(r.body.sandboxId)!.blastRadius!.total, 4, 'operator copy keeps true totals');
+            assert.equal(r.status, 403);
         } finally { await h.close(); await fx.graph.close?.(); }
     });
 
-    await test('REST propose: cap -> countsLowerBound true', async () => {
+    await test('blastRadiusForCaller: bound caller with no principal gets visible-only counts; the stored copy stays raw', async () => {
         const fx = await makeFixture();
         const h = await startHarness(fx);
         try {
+            const entry = await h.store.propose(removeTenant());
+            const br = (await as('noprincipal', () => h.store.blastRadiusForCaller(entry)))!;
+            assert.equal(br.countScope, 'visible');
+            assert.equal('countsLowerBound' in br, false);
+            assert.equal(br.perChange[0]!.affectedRowCount, 3);
+            assert.equal(br.perChange[0]!.readerCount, 2);
+            assert.equal(br.total, 3);
+            assert.equal(h.store.getProposal(entry.sandboxId)!.blastRadius!.total, 4, 'operator copy keeps true totals');
+        } finally { await h.close(); await fx.graph.close?.(); }
+    });
+
+    await test('blastRadiusForCaller: cap -> countsLowerBound true', async () => {
+        const fx = await makeFixture();
+        const h = await startHarness(fx);
+        try {
+            const entry = await h.store.propose(removeTenant());
             h.store.previewScanCap = 2;
-            h.setCaller('noprincipal');
-            const r = await fetchJson(`${h.baseUrl}/api/schema/proposals`, { method: 'POST', body: removeTenant() });
-            assert.equal(r.status, 201);
-            assert.equal(r.body.blastRadius.countScope, 'visible');
-            assert.equal(r.body.blastRadius.countsLowerBound, true);
+            const br = (await as('noprincipal', () => h.store.blastRadiusForCaller(entry)))!;
+            assert.equal(br.countScope, 'visible');
+            assert.equal(br.countsLowerBound, true);
         } finally { await h.close(); await fx.graph.close?.(); }
     });
 

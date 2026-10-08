@@ -203,6 +203,32 @@ export class AuxStore {
         };
     }
 
+    /**
+     * Outcome totals restricted to the given node ids (bound non-operator
+     * callers: the ids they can see). Chunked IN lists keep each statement
+     * under SQLite's bound-variable limit.
+     */
+    getOutcomeTotalsForNodes(workspace: string, nodeIds: readonly string[]): { success: number; failure: number; partial: number } {
+        const totals = { success: 0, failure: 0, partial: 0 };
+        const CHUNK = 500;
+        for (let i = 0; i < nodeIds.length; i += CHUNK) {
+            const chunk = nodeIds.slice(i, i + CHUNK);
+            const row = this.db
+                .prepare(
+                    `SELECT
+                       SUM(CASE WHEN status='success' THEN 1 ELSE 0 END) AS s,
+                       SUM(CASE WHEN status='failure' THEN 1 ELSE 0 END) AS f,
+                       SUM(CASE WHEN status='partial' THEN 1 ELSE 0 END) AS p
+                     FROM node_outcomes WHERE workspace = ? AND node_id IN (${chunk.map(() => '?').join(',')})`,
+                )
+                .get(workspace, ...chunk) as Record<string, unknown> | undefined;
+            totals.success += Number(row?.['s'] ?? 0);
+            totals.failure += Number(row?.['f'] ?? 0);
+            totals.partial += Number(row?.['p'] ?? 0);
+        }
+        return totals;
+    }
+
     /* ─── prune_jobs ─────────────────────────────────────────────── */
 
     createPruneJob(workspace: string, options: PruneOptions): string {

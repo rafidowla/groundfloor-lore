@@ -40,6 +40,8 @@ import { redactError } from '../../../security/logRedact.js';
 import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../../../security/actorContext.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
+import { countAudience, countVisibleNodes } from '../../../security/visibleCounts.js';
+import { visibleCountLabel, visibleTopologyOverview } from '../../../security/visibleStats.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
 // classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
@@ -273,8 +275,19 @@ export async function tryTopologyRoutes(
             const ecosystem = ecoParam && ecoParam.length > 0 ? ecoParam : '*';
 
             const topology = await topoGraph.getTopology(limit, projectFilter);
-            const stats = await topoGraph.getStats();
-            const truncated = stats.nodeCount > limit;
+            // Bound non-operator: totalCoreNodes / truncated come from the
+            // visible-only count (labelled), not the raw engine total that also
+            // counts hidden nodes. Unbound / operator callers are unchanged.
+            const visibleTotals = countAudience() === 'visible'
+                ? await countVisibleNodes(topoGraph)
+                : null;
+            const stats = visibleTotals ? { nodeCount: visibleTotals.nodeCount } : await topoGraph.getStats();
+            // A capped visible count is a lower bound: at the limit it may hide more.
+            // The page is cut from RAW rows before the actor confinement below, so a
+            // full raw page may have dropped visible nodes the visible total
+            // (<= limit) does not show: flag it truncated whenever the raw page filled.
+            const truncated = stats.nodeCount > limit
+                || (visibleTotals !== null && (topology.nodes.length >= limit || (visibleTotals.lowerBound && stats.nodeCount >= limit)));
             const scoped = await confineTopology(topoGraph, topology, ecosystem);
             // Row-level security_scopes confinement. The projection carries no
             // security_scopes, so the actor filter hydrates (bound actors only)
@@ -294,6 +307,7 @@ export async function tryTopologyRoutes(
                 truncated,
                 limit,
                 totalCoreNodes: stats.nodeCount,
+                ...(visibleTotals ? visibleCountLabel(visibleTotals.lowerBound) : {}),
             }));
         } catch (err) {
             writeError(res, 500, 'internal_error', redactError(err));
@@ -350,14 +364,27 @@ export async function tryTopologyRoutes(
                 writeError(res, 501, 'cloud_not_implemented', `${operation}: aggregation runs on the local paged node scan`, { operation });
                 return true;
             }
-            const overview = groupBy === 'type'
-                ? await overviewGraph.getTopologyOverviewByType()
-                : await overviewGraph.getTopologyOverview();
+            // Bound non-operator: the same fold over visible nodes and
+            // both-endpoints-visible edges only (bounded scan), labelled.
+            // Unbound / operator callers keep the engine aggregate.
+            const visibleOverview = countAudience() === 'visible'
+                ? await visibleTopologyOverview(overviewGraph, groupBy)
+                : null;
+            const overview = visibleOverview
+                ? visibleOverview.overview
+                : groupBy === 'type'
+                    ? await overviewGraph.getTopologyOverviewByType()
+                    : await overviewGraph.getTopologyOverview();
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             // Report the scope that was enforced — here always '*', which is
             // the only scope this route can honestly claim.
-            res.end(JSON.stringify({ ...overview, groupBy, ecosystem: '*' }));
+            res.end(JSON.stringify({
+                ...overview,
+                groupBy,
+                ecosystem: '*',
+                ...(visibleOverview ? visibleCountLabel(visibleOverview.lowerBound) : {}),
+            }));
         } catch (err) {
             writeError(res, 500, 'internal_error', redactError(err));
         }

@@ -43,6 +43,7 @@ import { redactError } from '../../../security/logRedact.js';
 import { writeError } from '../helpers.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { canPrincipalReadWorkspace } from '../../../security/routeWorkspaceBinding.js';
+import { hideUncountableForCurrentActor } from '../../../security/exportGate.js';
 
 const METRICS_CACHE_MS = 5000;
 const BUILD_VERSION = VERSION;
@@ -145,6 +146,15 @@ async function readLoadJobCounts(store: LoadJobsStore | undefined): Promise<Reco
 /** Build the Prometheus exposition payload. Exported for unit tests. */
 export async function renderMetrics(deps: MetricsDeps): Promise<string> {
     const lines: string[] = [];
+    // Security decision: every count-valued series here (per-workspace node /
+    // edge totals, outbox depth / dead, load jobs by state, embed queue depth)
+    // spans hidden rows and other workspaces and cannot be computed per item.
+    // A bound non-operator gets the process-level series only (build info,
+    // replicator ticks, OTel); the outbox lag max is derived from the global
+    // outbox (all workspaces), so it is hidden and the stats read is skipped. The body is rendered per call and the only
+    // shared cache (countsCache) holds raw counts, so no body is ever served
+    // across caller classes. Unbound / operator output is unchanged.
+    const hideCounts = hideUncountableForCurrentActor();
 
     // ── build_info ─────────────────────────────────────────────
     lines.push('# HELP lore_build_info Daemon build metadata');
@@ -152,16 +162,18 @@ export async function renderMetrics(deps: MetricsDeps): Promise<string> {
     lines.push(fmtLine('lore_build_info', { version: BUILD_VERSION }, 1));
 
     // ── outbox ─────────────────────────────────────────────────
-    lines.push('# HELP lore_outbox_depth Pending outbox entries per workspace');
-    lines.push('# TYPE lore_outbox_depth gauge');
-    lines.push('# HELP lore_outbox_lag_seconds Age of oldest pending outbox entry per workspace');
-    lines.push('# TYPE lore_outbox_lag_seconds gauge');
-    lines.push('# HELP lore_outbox_dead Outbox entries past retry budget per workspace');
-    lines.push('# TYPE lore_outbox_dead gauge');
+    if (!hideCounts) {
+        lines.push('# HELP lore_outbox_depth Pending outbox entries per workspace');
+        lines.push('# TYPE lore_outbox_depth gauge');
+        lines.push('# HELP lore_outbox_lag_seconds Age of oldest pending outbox entry per workspace');
+        lines.push('# TYPE lore_outbox_lag_seconds gauge');
+        lines.push('# HELP lore_outbox_dead Outbox entries past retry budget per workspace');
+        lines.push('# TYPE lore_outbox_dead gauge');
+    }
 
     let aggregateDepth = 0;
     let maxLag = 0;
-    if (deps.getOutboxStats) {
+    if (deps.getOutboxStats && !hideCounts) {
         try {
             const stats = await deps.getOutboxStats();
             aggregateDepth = stats.depth;
@@ -175,40 +187,46 @@ export async function renderMetrics(deps: MetricsDeps): Promise<string> {
             // outbox stats provider failed — emit zeros (better than no scrape).
         }
     }
-    lines.push('# HELP lore_outbox_depth_total Aggregate pending outbox depth across all workspaces');
-    lines.push('# TYPE lore_outbox_depth_total gauge');
-    lines.push(fmtLine('lore_outbox_depth_total', null, aggregateDepth));
-    lines.push('# HELP lore_outbox_lag_seconds_max Worst lagSeconds across workspaces');
-    lines.push('# TYPE lore_outbox_lag_seconds_max gauge');
-    lines.push(fmtLine('lore_outbox_lag_seconds_max', null, maxLag));
+    if (!hideCounts) {
+        lines.push('# HELP lore_outbox_depth_total Aggregate pending outbox depth across all workspaces');
+        lines.push('# TYPE lore_outbox_depth_total gauge');
+        lines.push(fmtLine('lore_outbox_depth_total', null, aggregateDepth));
+    }
+    if (!hideCounts) {
+        lines.push('# HELP lore_outbox_lag_seconds_max Worst lagSeconds across workspaces');
+        lines.push('# TYPE lore_outbox_lag_seconds_max gauge');
+        lines.push(fmtLine('lore_outbox_lag_seconds_max', null, maxLag));
+    }
 
     // ── workspace counts ───────────────────────────────────────
-    const wsCounts = await readWorkspaceCounts(deps.graphRegistry);
-    lines.push('# HELP lore_workspace_nodes Node count per workspace');
-    lines.push('# TYPE lore_workspace_nodes gauge');
-    lines.push('# HELP lore_workspace_edges Edge count per workspace');
-    lines.push('# TYPE lore_workspace_edges gauge');
-    for (const [ws, c] of Object.entries(wsCounts)) {
-        lines.push(fmtLine('lore_workspace_nodes', { workspace: ws }, c.nodeCount));
-        lines.push(fmtLine('lore_workspace_edges', { workspace: ws }, c.edgeCount));
-    }
+    if (!hideCounts) {
+        const wsCounts = await readWorkspaceCounts(deps.graphRegistry);
+        lines.push('# HELP lore_workspace_nodes Node count per workspace');
+        lines.push('# TYPE lore_workspace_nodes gauge');
+        lines.push('# HELP lore_workspace_edges Edge count per workspace');
+        lines.push('# TYPE lore_workspace_edges gauge');
+        for (const [ws, c] of Object.entries(wsCounts)) {
+            lines.push(fmtLine('lore_workspace_nodes', { workspace: ws }, c.nodeCount));
+            lines.push(fmtLine('lore_workspace_edges', { workspace: ws }, c.edgeCount));
+        }
 
-    // ── load jobs ──────────────────────────────────────────────
-    const loadJobs = await readLoadJobCounts(deps.loadJobsStore);
-    lines.push('# HELP lore_load_jobs_total Load jobs by state (Sprint Z)');
-    lines.push('# TYPE lore_load_jobs_total gauge');
-    for (const [state, count] of Object.entries(loadJobs)) {
-        lines.push(fmtLine('lore_load_jobs_total', { state }, count));
-    }
+        // ── load jobs ──────────────────────────────────────────
+        const loadJobs = await readLoadJobCounts(deps.loadJobsStore);
+        lines.push('# HELP lore_load_jobs_total Load jobs by state (Sprint Z)');
+        lines.push('# TYPE lore_load_jobs_total gauge');
+        for (const [state, count] of Object.entries(loadJobs)) {
+            lines.push(fmtLine('lore_load_jobs_total', { state }, count));
+        }
 
-    // ── embed queue ────────────────────────────────────────────
-    let embedDepth = 0;
-    if (deps.embedQueue?.depth) {
-        try { embedDepth = deps.embedQueue.depth(); } catch { /* ignore */ }
+        // ── embed queue ────────────────────────────────────────
+        let embedDepth = 0;
+        if (deps.embedQueue?.depth) {
+            try { embedDepth = deps.embedQueue.depth(); } catch { /* ignore */ }
+        }
+        lines.push('# HELP lore_embed_queue_depth Pending embedding compute jobs');
+        lines.push('# TYPE lore_embed_queue_depth gauge');
+        lines.push(fmtLine('lore_embed_queue_depth', null, embedDepth));
     }
-    lines.push('# HELP lore_embed_queue_depth Pending embedding compute jobs');
-    lines.push('# TYPE lore_embed_queue_depth gauge');
-    lines.push(fmtLine('lore_embed_queue_depth', null, embedDepth));
 
     // ── replicator ─────────────────────────────────────────────
     const replicatorTicks = deps.getReplicatorTicks ? deps.getReplicatorTicks() : 0;

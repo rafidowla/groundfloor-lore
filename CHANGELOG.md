@@ -4,6 +4,94 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.31.0] — 2026-10-08
+
+Aggregate numbers now respect item visibility. Since 3.29.0 / 3.30.0 a bound
+actor could only read and write items it can see, but totals (node and edge
+counts, type breakdowns, health and report summaries, queue depths, disk sizes)
+were still computed over the whole workspace. For a bound non-operator (an app
+token) every number is now either counted over the items that caller can see,
+or omitted when it cannot be counted per item. Unbound callers are unchanged
+(byte-identical responses, no extra lookups); operators (bootstrap /
+shared-secret principals) keep the true totals.
+
+### Security
+- **Visible-only counts** for bound non-operators on `GET /api/stats` and MCP
+  `stats` (`nodeCount`, `edgeCount`, `typeBreakdown`, `languageBreakdown`),
+  `GET /api/lore-status` and MCP `lore_status` (`graph.nodes`, `graph.edges`),
+  `GET /api/topology` (`totalCoreNodes`, `truncated`), `GET /api/topology/overview`
+  (totals, blob/type/aggregate-edge counts), `corpus_health` (MCP and
+  `GET /api/workspaces/:ws/health`: node counters, `edge_count`,
+  `outcome_totals`), `GET /api/report` (summary: nodes, edges, nodes by type,
+  edges by confidence, hub degrees), the freshness sweep and
+  `GET /api/diagnose/consistency` (`graphNodeCount`). An edge counts only if both endpoints exist and are
+  visible. Each scan is capped at 10,000 raw rows per kind; visible-only numbers
+  carry `countScope: 'visible'` and `countsLowerBound: true` when the cap was
+  hit, and text output (the report) shows a capped number as `<n>+` with the
+  line "Counts cover items visible to this caller." When the report's edge walk
+  hits the cap, its orphan list is left out (it would be wrong), and the
+  recently-updated and orphan walks are bounded by the same cap.
+- **Numbers that cannot be counted per item are omitted** for bound
+  non-operators: `/api/health` workspace stats, outbox and per-workspace outbox
+  depths (the readers no longer run for them); the `/metrics` count, outbox,
+  outbox-lag, load-job and embed-queue series; `walPending` in `GET /api/sync/status` and
+  MCP `sync_status`; `_meta.calibration.rows` on recall/search (calibration
+  behaviour unchanged); the corpus-language hint on search/recall;
+  `verbatimDocuments_global` / `verbatimDocs` on stats and status;
+  `corpus_counters` on corpus_health; `vectorEmbeddingCount`,
+  `orphanEmbeddings` and `sqliteOrphans` on the consistency diagnosis.
+- **Quota rejections no longer carry the workspace-wide total**: for bound
+  non-operators the `workspace_quota_exceeded` body (REST 429, `store_node`,
+  `store_edge`, `commit_changeset`) omits `current` (node count or storage
+  bytes); the decision, status and other fields are unchanged.
+- **`GET /api/storage` is operator-only for bound actors** (403
+  `maintenance_forbidden`): disk sizes are its whole purpose.
+- The corpus_health scan for bound non-operators is now bounded (it was a
+  visible-only but uncapped walk).
+- Who counts as an operator is the same rule as the 3.29 export gate: the
+  request's principal is the bootstrap token or a shared-secret service. In
+  local mode with an `operator.json` identity, a request that carries no token
+  (e.g. an unauthenticated `/metrics` scrape or `/api/health` poll) is bound to
+  that identity with no principal, so it gets the hidden-count view; give the
+  scraper the operator token to keep the full numbers.
+- **Schema proposer / approver identity is never self-asserted by a bound
+  caller.** `POST /api/schema/proposals`, `POST /api/schema/proposals/{sandboxId}/approve`
+  and MCP `schema_approve` already bound the identity to a labelled request
+  principal; a bound actor with no principal (only reachable in-process — every
+  HTTP schema and `/mcp` request carries a Bearer principal) could still supply
+  `proposedBy` / `approver` and claim `human:*`. It now gets `system:<portalUserId>`
+  (so it cannot propose a destructive change, and its approval only enqueues the
+  human sign-off), or a 403 `maintenance_forbidden` when it has no id. MCP
+  `schema_propose` no longer honours `proposedBy` from a bound non-operator (app
+  token): it records `system:<label>`. Unbound callers and operators are
+  unchanged. New `security/schemaIdentity.ts`.
+
+### Fixed
+- ArcadeDB `queryEdges` now orders by `@rid`, so offset paging is stable (it
+  could repeat or skip edges between pages).
+- `GET /api/topology` `truncated` for bound non-operators is now true whenever
+  the raw page filled (it could say false after the page was cut).
+
+### Internal
+- `security/visibleCounts.ts` gains a node walker with project and extra
+  projected columns, endpoint info for edge callbacks, and a test cap hook;
+  new `security/visibleStats.ts`; `hideUncountableForCurrentActor()` in
+  `security/exportGate.ts`; `AuxStore.getOutcomeTotalsForNodes` (chunked
+  `IN (...)` query) for visible-only outcome totals. Node scans fill
+  requested columns a `bulkList` row lacks (ArcadeDB) from the full node, end
+  only on an empty page or a null cursor (no early stop on a short page), and
+  flag a lower bound only when another row really exists.
+- On ArcadeDB, nodes carry no `language` property, so a visible-only
+  `languageBreakdown` there groups everything under `null` (same as the raw
+  breakdown on that engine).
+
+### Tests
+- New `counts-hidden`, `counts-visible-stats`, `counts-visible-health` and
+  `counts-review-fixes` unit suites (in the `test` chain).
+- New `schema-identity-binding` unit suite (in the `test` chain);
+  `schema-preview-scopes` now expects the 403 for a principal-less bound
+  destructive proposal.
+
 ## [3.30.1] — 2026-10-07
 
 Mostly ArcadeDB; one fix for all backends (schema previews).

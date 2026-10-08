@@ -31,7 +31,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { SyncEngine } from '../../../engines/syncEngine.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
-import { requireOperatorForBoundActor } from '../../../security/exportGate.js';
+import { hideUncountableForCurrentActor, requireOperatorForBoundActor } from '../../../security/exportGate.js';
 import { redactError } from '../../../security/logRedact.js';
 import { writeError } from '../helpers.js';
 
@@ -56,6 +56,11 @@ function readWorkspaceParam(url: string): string | undefined {
     }
 }
 
+function omitWalPending<T extends { walPending: number }>(status: T): Omit<T, 'walPending'> {
+    const { walPending: _hidden, ...rest } = status;
+    return rest;
+}
+
 async function resolveEngine(deps: SyncDeps, target: string): Promise<SyncEngine> {
     return deps.resolveSyncEngine ? deps.resolveSyncEngine(target) : deps.getSyncEngine();
 }
@@ -75,8 +80,11 @@ export async function trySyncRoutes(
         try {
             const engine = await resolveEngine(deps, target);
             const status = engine.getStatus();
+            // The WAL pending count covers hidden rows and cannot be computed per
+            // item: a bound non-operator gets the status without it.
+            const body = hideUncountableForCurrentActor() ? omitWalPending(status) : status;
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(status));
+            res.end(JSON.stringify(body));
         } catch (err) {
             writeError(res, 500, 'sync_status_failed', redactError(err), { ok: false });
         }

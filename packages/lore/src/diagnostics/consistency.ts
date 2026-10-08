@@ -49,6 +49,7 @@ interface VectorIdsReader {
 import type { ITableStorage } from '../contracts/tables.js';
 import { forEachNodePage, type NodePager, type QueryRows } from '../engines/nodePager.js';
 import { isRevisionHistoryId } from '../engines/verbatimHistory.js';
+import { forEachVisibleNode, type VisibleCountGraph } from '../security/visibleCounts.js';
 
 /** Embedding id prefix used by syncEngine.upsertVectorMirror. */
 const VECTOR_ID_PREFIX = 'lore:';
@@ -77,6 +78,8 @@ export interface GraphReader {
      * engine-agnostic operation; both engines implement it.
      */
     bulkListProjected?: NodePager;
+    /** Bounded page walk used by the bound-non-operator (visible-only) path. */
+    bulkList?: VisibleCountGraph['bulkList'];
 }
 
 /**
@@ -123,6 +126,20 @@ export interface ConsistencyReport {
     graphScanFailed: boolean;
 }
 
+/**
+ * What a bound non-operator gets (diagnoseVisibleConsistency): the vector
+ * count, orphan embeddings and SQLite orphans are judged against the FULL graph
+ * id set, so they are left out; graphNodeCount / missingEmbeddings cover the
+ * visible nodes only, within the scan cap.
+ */
+export type VisibleConsistencyReport = Omit<
+    ConsistencyReport, 'vectorEmbeddingCount' | 'orphanEmbeddings' | 'sqliteOrphans'
+> & {
+    countScope: 'visible';
+    /** The node scan hit the cap, so the counts are lower bounds. */
+    countsLowerBound?: true;
+};
+
 export interface DiagnoseOpts {
     /** Workspace label stamped on the report and used to scope vector
      *  store listings. Required so multi-workspace daemons can run the
@@ -133,6 +150,8 @@ export interface DiagnoseOpts {
     sqliteChecks?: SqliteOrphanCheck[];
     /** Cap on orphans collected per SQLite check. Default 100. */
     sqliteOrphanCap?: number;
+    /** Lower the visible-only scan cap (tests only). */
+    visibleScanCap?: number;
 }
 
 /**
@@ -294,6 +313,60 @@ export async function diagnoseConsistency(
             orphanEmbeddings.length > 0 ||
             sqliteOrphans.some(r => r.orphans.length > 0),
         graphScanFailed,
+    };
+}
+
+/**
+ * Consistency report for a BOUND non-operator: a bounded (cap) walk over the
+ * nodes the caller can see. Callers gate on countAudience() === 'visible'.
+ */
+export async function diagnoseVisibleConsistency(
+    graph: GraphReader,
+    vectorStore: VectorIdsReader | null,
+    opts: DiagnoseOpts,
+): Promise<VisibleConsistencyReport> {
+    const computedAt = new Date().toISOString();
+    const ids = new Set<string>();
+    let lowerBound = false;
+    let graphScanFailed = false;
+    try {
+        if (!graph.bulkList && !graph.bulkListProjected) throw new Error('no bounded node scan on this graph');
+        const scan = await forEachVisibleNode(
+            {
+                bulkList: graph.bulkList ?? (() => Promise.reject(new Error('bulkList unavailable'))),
+                bulkListProjected: graph.bulkListProjected?.bind(graph),
+            },
+            { cap: opts.visibleScanCap, project: opts.workspace },
+            (row) => { ids.add(String(row['id'] ?? '')); },
+        );
+        lowerBound = scan.lowerBound;
+    } catch (err) {
+        console.error(`[diagnoseConsistency] graph node scan failed: ${(err as Error).message}`);
+        graphScanFailed = true;
+    }
+    // Visible node ids with no embedding. The vector list is read only to
+    // diff against; its own size and its orphans are not reported.
+    const vectorIds = new Set<string>();
+    if (vectorStore && !graphScanFailed) {
+        try {
+            for (const id of await vectorStore.listIds(VECTOR_ID_PREFIX, { project: opts.workspace })) {
+                if (!id.startsWith(VECTOR_ID_PREFIX) || isRevisionHistoryId(id)) continue;
+                vectorIds.add(id.slice(VECTOR_ID_PREFIX.length));
+            }
+        } catch (err) {
+            console.error(`[diagnoseConsistency] vectorStore.listIds failed: ${(err as Error).message}`);
+        }
+    }
+    const missingEmbeddings = [...ids].filter((id) => !vectorIds.has(id));
+    return {
+        workspace: opts.workspace,
+        computedAt,
+        graphNodeCount: ids.size,
+        missingEmbeddings,
+        hasIssues: missingEmbeddings.length > 0,
+        graphScanFailed,
+        countScope: 'visible',
+        ...(lowerBound ? { countsLowerBound: true as const } : {}),
     };
 }
 

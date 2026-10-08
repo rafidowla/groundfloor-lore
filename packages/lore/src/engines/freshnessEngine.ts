@@ -42,6 +42,7 @@
 
 import type { LoreNode } from '../providers/types.js';
 import { forEachNodePage, type NodePager } from './nodePager.js';
+import { countAudience, defaultScanCap, forEachVisibleNode } from '../security/visibleCounts.js';
 
 const DEFAULT_TTL_HOURS = 24;
 const HOUR_MS = 3_600_000;
@@ -108,6 +109,10 @@ export interface FreshnessReport {
     staleNodeIds: string[];
     /** ISO 8601 timestamp when this report was generated. */
     generatedAt: string;
+    /** Bound non-operator only: the totals cover visible nodes (see security/visibleCounts.ts). */
+    countScope?: 'visible';
+    /** Bound non-operator only: the scan cap was reached, the totals are a lower bound. */
+    countsLowerBound?: true;
 }
 
 /* ─── Helpers ─────────────────────────────────────────────────────── */
@@ -251,6 +256,32 @@ export async function sweepFreshness(
     // one page. Fakes/DataplaneGraph without bulkListProjected fall back to
     // the unbounded listNodes scan (small / non-local paths).
     const pager = graph.bulkListProjected?.bind(graph);
+    // Bound non-operator: the same walk, but bounded by the visible-count scan
+    // cap on every engine (no unbounded listNodes fallback) and labelled.
+    if (countAudience() === 'visible') {
+        const cap = defaultScanCap();
+        let lowerBound = false;
+        if (pager) {
+            const scan = await forEachVisibleNode(
+                { bulkList: () => Promise.reject(new Error('bulkList unavailable')), bulkListProjected: pager },
+                { cap, extraColumns: ['syncedAt'] },
+                (r) => acc.add({
+                    id: String(r['id'] ?? ''),
+                    syncedAt: (r['syncedAt'] as string | null) ?? null,
+                    updatedAt: (r['updatedAt'] as string | null) ?? null,
+                }),
+            );
+            lowerBound = scan.lowerBound;
+        } else {
+            const nodes = await graph.listNodes(undefined, undefined, '*', '*', cap + 1);
+            lowerBound = nodes.length > cap;
+            for (const node of nodes.slice(0, cap)) {
+                if (rowVisible && !rowVisible({ security_scopes: node.security_scopes })) continue;
+                acc.add(node);
+            }
+        }
+        return { ...acc.finalize(workspace, ttl), countScope: 'visible', ...(lowerBound ? { countsLowerBound: true as const } : {}) };
+    }
     if (pager) {
         await forEachNodePage(
             pager, '*', rowVisible ? ['syncedAt', 'security_scopes'] : ['syncedAt'], (rows) => {

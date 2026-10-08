@@ -10,6 +10,7 @@
 
 import { getCurrentActorScopes } from '../../../../security/actorContext.js';
 import { filterNodesByActorScope } from '../../../../security/scopeFilter.js';
+import { countAudience } from '../../../../security/visibleCounts.js';
 import { getCloudHistoryHealth } from '../../../../engines/dataplaneTransaction.js';
 import type { ServerResponse } from 'node:http';
 import type { VerbatimStoreApi } from '../../../../engines/verbatimStoreApi.js';
@@ -20,7 +21,7 @@ import { loreHome } from '../../../../config/loreHome.js';
 import { getCurrentPrincipal } from '../../../../auth/principal.js';
 import { bindRouteTarget } from '../../../../security/routeWorkspaceBinding.js';
 import { gateRoute } from '../../../../security/routeGate.js';
-import { requireOperatorForBoundActor } from '../../../../security/exportGate.js';
+import { hideUncountableForCurrentActor, requireOperatorForBoundActor } from '../../../../security/exportGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
 import { WorkspaceNotFoundError } from '../../../../engines/localGraphRegistry.js';
 import { type DiagnosticDeps, type LoreGraph, readWorkspaceStats } from './shared.js';
@@ -65,7 +66,7 @@ export function handleHealthLite(res: ServerResponse, deps: DiagnosticDeps): voi
 
 export async function handleConsistency(res: ServerResponse, url: string, deps: DiagnosticDeps): Promise<void> {
     try {
-        const { diagnoseConsistency } = await import('../../../../diagnostics/consistency.js');
+        const { diagnoseConsistency, diagnoseVisibleConsistency } = await import('../../../../diagnostics/consistency.js');
         const u = new URL(url, 'http://x');
         // Sprint L1 — workspace is required. No silent fallback.
         const workspace = u.searchParams.get('workspace');
@@ -110,6 +111,18 @@ export async function handleConsistency(res: ServerResponse, url: string, deps: 
             ? deps.store.tableStorage
             : (deps.graphRegistry ? await deps.graphRegistry.tableStorageFor(workspace) : null)) ?? null;
         const vectorStore = isActive ? ((deps.store.loreVerbatim as VerbatimStoreApi) ?? null) : null;
+        // Bound non-operator: visible-only, capped node walk; the vector count,
+        // orphan embeddings and SQLite orphans are not part of its response.
+        if (countAudience() === 'visible') {
+            const visibleReport = await diagnoseVisibleConsistency(
+                targetGraph,
+                vectorStore,
+                { workspace },
+            );
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(visibleReport));
+            return;
+        }
         const report = await diagnoseConsistency(
             targetGraph as { listNodes: typeof deps.store.loreGraph.listNodes },
             vectorStore,
@@ -117,10 +130,9 @@ export async function handleConsistency(res: ServerResponse, url: string, deps: 
             { workspace, sqliteChecks: sqliteChecks.length > 0 ? sqliteChecks : undefined },
         );
         // Row-level security_scopes: `missingEmbeddings` lists graph node ids.
-        // For a bound actor drop the ids of nodes it cannot see (one batched
-        // lookup) so a hidden node's id is not disclosed. `graphNodeCount`,
-        // `vectorEmbeddingCount` and `orphanEmbeddings` are unfiltered
-        // aggregates / ids with no graph row to scope. Unbound: untouched.
+        // For a bound operator drop the ids of nodes it cannot see (one batched
+        // lookup) so a hidden node's id is not disclosed. Bound non-operators
+        // took the visible-only path above. Unbound: untouched.
         let outReport = report;
         if (getCurrentActorScopes() !== undefined && report.missingEmbeddings.length > 0) {
             let found: Map<string, { security_scopes?: string[] }> = new Map();
@@ -293,6 +305,12 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
         }
         const cfg = deps.configManager.read();
         const orphanState = { blocking: false, orphans: [] as string[] };
+        // Security decision: every number in the counts block (per-workspace
+        // node/edge counts, global totals, outbox depth, known/measured workspace
+        // counts, open-store count) covers hidden rows and other workspaces and
+        // cannot be computed per item. A bound non-operator gets the body without
+        // them and the readers below never run. Unbound / operator are unchanged.
+        const hideCounts = hideUncountableForCurrentActor();
 
         // Sprint O1 — outbox depth + lagSeconds. Computed FIRST so
         // the literal precedes the workspace-counts block below in
@@ -307,7 +325,7 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
             dead: number;
             perWorkspace: Record<string, { depth: number; lagSeconds: number; dead: number }>;
         } | null = null;
-        if (deps.getOutboxStats) {
+        if (!hideCounts && deps.getOutboxStats) {
             try {
                 const s = await deps.getOutboxStats();
                 oxBlock = {
@@ -334,7 +352,7 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
         let globalEdges = 0;
         let knownNames: string[] = [];
         try {
-            knownNames = listWorkspaceNames();
+            knownNames = hideCounts ? [activeName] : listWorkspaceNames();
         } catch {
             knownNames = [activeName];
         }
@@ -366,7 +384,9 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
         const scanAll = wantsScanAll && getCurrentPrincipal() !== null;
         let scannedNames = knownNames;
         let scanned: 'all' | 'open' | 'active' = 'all';
-        if (deps.graphRegistry) {
+        if (hideCounts) {
+            scannedNames = [];
+        } else if (deps.graphRegistry) {
             if (scanAll || typeof deps.graphRegistry.openedNames !== 'function') {
                 scannedNames = knownNames;
                 scanned = 'all';
@@ -441,7 +461,7 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
             refreshedAt: number;
             overThreshold: boolean;
         }> | null = null;
-        if (deps.outboxLagCache) {
+        if (!hideCounts && deps.outboxLagCache) {
             perWorkspaceOutbox = {};
             const snaps = deps.outboxLagCache.allSnapshots();
             for (const [ws, snap] of Object.entries(snaps)) {
@@ -460,12 +480,11 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
         res.end(JSON.stringify({
             status: orphanState.blocking ? 'orphan_decision_required' : 'ok',
             version: VERSION,
-            ...healthExtras(oxBlock),
-            perWorkspaceOutbox,
+            ...(hideCounts ? {} : { ...healthExtras(oxBlock), perWorkspaceOutbox }),
             llmProvider: cfg.llmProvider,
             workspace: activeName,
             // Sprint L2 — per-workspace + global view in one shot.
-            workspaces: {
+            workspaces: hideCounts ? { active: activeName } : {
                 active: activeName,
                 knownCount: knownNames.length,
                 // SP-stampede — how many workspaces this response actually

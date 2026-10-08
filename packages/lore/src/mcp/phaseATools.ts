@@ -46,7 +46,8 @@ import { ClassificationExceptionQueue } from '../security/classificationExceptio
 import { SyncDirectionGuard } from '../security/syncDirectionGuard.js';
 import { ConflictLog } from '../engines/multiMasterSync.js';
 import { assertMcpScope, type McpScopeMode } from './tools/mcpScope.js';
-import { getCurrentPrincipal } from '../auth/principal.js';
+import { deriveSchemaIdentity, deriveSchemaProposerForTool, SCHEMA_IDENTITY_REFUSED_MESSAGE } from '../security/schemaIdentity.js';
+import { MAINTENANCE_FORBIDDEN } from './http/errorCodes.js';
 import { gateSchemaApproval, SCHEMA_APPROVE_OPERATION } from '../security/schemaApprovalGate.js';
 import type { PendingOpsStore } from '../security/pendingOps.js';
 
@@ -110,6 +111,14 @@ function err(message: string): {
     isError: true;
 } {
     return { content: [{ type: 'text', text: message }], isError: true };
+}
+
+/** Refusal for a bound caller whose proposer / approver identity cannot be derived. */
+function identityRefused(): { content: Array<{ type: 'text'; text: string }>; isError: true } {
+    return {
+        content: [{ type: 'text', text: JSON.stringify({ error: MAINTENANCE_FORBIDDEN, message: SCHEMA_IDENTITY_REFUSED_MESSAGE }) }],
+        isError: true,
+    };
 }
 
 /**
@@ -224,10 +233,14 @@ export function registerPhaseATools(host: PhaseAToolHost, ctx: PhaseAContext): v
                     return err('schema_propose: only addNodeType is supported in this MCP tool. Use SchemaAuthoringStore.propose() directly for richer changes.');
                 }
                 const spec = args.addNodeType as NodeTypeSpec;
+                // A bound non-operator cannot choose its own proposer identity
+                // (a forged `human:*` would clear the destructive-proposer check).
+                const identity = deriveSchemaProposerForTool();
+                if (identity.kind === 'refused') return identityRefused();
                 const proposal = buildProposal({
                     base: live,
                     changes: [changeForNodeAdd(spec)],
-                    proposedBy: args.proposedBy as string,
+                    proposedBy: identity.kind === 'derived' ? identity.identity : args.proposedBy as string,
                     note: args.note as string | undefined,
                     transforms: { addNodeType: spec },
                 });
@@ -266,7 +279,7 @@ export function registerPhaseATools(host: PhaseAToolHost, ctx: PhaseAContext): v
         '(destructive_hitl_unavailable_embedded) — approve them against the local daemon instead.',
         {
             sandboxId: z.string(),
-            approver: z.string().optional().describe('Used only when no authenticated principal is bound (legacy/no-auth); otherwise ignored in favor of the bound principal.'),
+            approver: z.string().optional().describe('Used only when no authenticated principal or actor is bound (legacy/no-auth); otherwise ignored in favor of the bound identity.'),
             note: z.string().optional(),
             workspace: workspaceFieldZ,
         },
@@ -280,9 +293,10 @@ export function registerPhaseATools(host: PhaseAToolHost, ctx: PhaseAContext): v
                 // (proposals.ts). A client-supplied args.approver is only a
                 // fallback for legacy/no-auth callers with no bound
                 // principal at all — never used to override one.
-                const principal = getCurrentPrincipal();
-                const approver = principal?.label
-                    ? `${principal.kind === 'bootstrap' ? 'human' : 'system'}:${principal.label}`
+                const identity = deriveSchemaIdentity();
+                if (identity.kind === 'refused') return identityRefused();
+                const approver = identity.kind === 'derived'
+                    ? identity.identity
                     : (typeof args.approver === 'string' && args.approver.length > 0 ? args.approver : null);
                 if (!approver) {
                     return err('schema_approve failed: no authenticated principal bound and no approver supplied');

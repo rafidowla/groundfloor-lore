@@ -8,6 +8,8 @@
  */
 
 import { actorRowVisibility } from '../../../../security/scopeFilter.js';
+import { countAudience } from '../../../../security/visibleCounts.js';
+import { requireOperatorForBoundActor } from '../../../../security/exportGate.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { writeGraphReport } from '../../../../engines/graphReport.js';
 import type { ReportGraph } from '../../../../engines/graphReportAggregates.js';
@@ -81,6 +83,8 @@ export async function handleReport(res: ServerResponse, url: string, deps: Diagn
             topN: Number.isFinite(topN) ? topN : 20,
             // Bound actors: hidden nodes are omitted from hubs / recent / orphans.
             rowVisible: actorRowVisibility(),
+            // Bound non-operator: visible-only, capped Summary numbers.
+            ...(countAudience() === 'visible' ? { visibleCounts: {} } : {}),
         });
         res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8' });
         res.end(md);
@@ -90,6 +94,9 @@ export async function handleReport(res: ServerResponse, url: string, deps: Diagn
 }
 
 export function handleStorage(res: ServerResponse): void {
+    // Disk sizes cover every row, hidden ones included, and are the whole purpose
+    // of this route: operator-only for bound actors, before any directory scan.
+    if (!requireOperatorForBoundActor(res, 'Storage usage')) return;
     try {
         const dataHome = loreHome();
         let workspaces = inspectAllWorkspaces(dataHome);

@@ -38,7 +38,7 @@ import {
 import { mcpToolError } from './mcpToolError.js';
 import { log } from '../../logger.js';
 import { safePruneEphemeralNodes } from '../../engines/safeEphemeralPrune.js';
-import { maintenanceForbiddenToolResult } from '../../security/exportGate.js';
+import { hideUncountableForCurrentActor, maintenanceForbiddenToolResult } from '../../security/exportGate.js';
 import type { OutboxStore } from '../../outbox/types.js';
 import type { HotSessionSnapshot } from '../../engines/sessionCache.js';
 
@@ -259,7 +259,8 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                     content: [{
                         type: 'text' as const,
                         text: JSON.stringify({
-                            walPending: status.walPending,
+                            // Pending WAL count covers hidden rows: omitted for a bound non-operator.
+                            ...(hideUncountableForCurrentActor() ? {} : { walPending: status.walPending }),
                             lastSync: status.lastSync === '1970-01-01T00:00:00.000Z' ? 'never' : status.lastSync,
                             remoteConfigured: status.hasAdapter,
                             autoSyncing: status.isAutoSyncing,
