@@ -39,7 +39,7 @@
  */
 
 import type { ProposedChange } from './authoring.js';
-import type { SchemaGraphOps } from './substrate/schemaGraphOps.js';
+import type { BlastRadiusCounts } from './visibleSchemaPreview.js';
 
 export interface BlastRadiusEntry {
     kind: string;
@@ -77,6 +77,11 @@ export interface BlastRadius {
     perChange: BlastRadiusEntry[];
     /** ISO timestamp the blast radius was computed at (propose-time). */
     computedAt: string;
+    /** Present ('visible') only when a bound non-operator received the counts
+     *  above computed over the rows it can see (schemas/visibleSchemaPreview.ts). */
+    countScope?: 'visible';
+    /** True when a visible-only scan hit the cap: the counts are a lower bound. */
+    countsLowerBound?: boolean;
 }
 
 /**
@@ -87,7 +92,7 @@ export interface BlastRadius {
  */
 export async function computeBlastRadius(
     changes: ReadonlyArray<ProposedChange>,
-    graph: SchemaGraphOps,
+    graph: BlastRadiusCounts,
 ): Promise<BlastRadius> {
     const perChange: BlastRadiusEntry[] = [];
     for (const change of changes) {
@@ -106,7 +111,7 @@ export async function computeBlastRadius(
 
 async function computeOne(
     change: ProposedChange,
-    graph: SchemaGraphOps,
+    graph: BlastRadiusCounts,
 ): Promise<BlastRadiusEntry> {
     const target = String(change.target);
 
@@ -164,7 +169,7 @@ async function computeOne(
 async function countNodesOfType(
     change: ProposedChange,
     nodeType: string,
-    graph: SchemaGraphOps,
+    graph: BlastRadiusCounts,
 ): Promise<BlastRadiusEntry> {
     try {
         const c = await graph.countNodesByType(nodeType);
@@ -181,7 +186,7 @@ async function countNodesOfType(
 async function countEdgesOfRelation(
     change: ProposedChange,
     relation: string,
-    graph: SchemaGraphOps,
+    graph: BlastRadiusCounts,
 ): Promise<BlastRadiusEntry> {
     try {
         const c = await graph.countEdgesByRelation(relation);
@@ -200,7 +205,7 @@ async function countEdgesOfRelation(
  *  protective signal). */
 async function countInboundEdges(
     nodeType: string,
-    graph: SchemaGraphOps,
+    graph: BlastRadiusCounts,
 ): Promise<number | null> {
     try {
         return await graph.countInboundEdgesToType(nodeType);

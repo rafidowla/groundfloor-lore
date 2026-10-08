@@ -30,6 +30,7 @@
  */
 
 import { ArcadeHttp } from './arcadeHttp.js';
+import { upgradeNodeScopes, type NodeScopesUpgradeResult } from './arcadeNodeScopes.js';
 import {
   getRootSecretStore,
   resolveRootPasswordSync,
@@ -97,6 +98,15 @@ export function resetRootTransportForTests(): void {
  */
 export function spikeArcadeServerCommand(command: string): Promise<{ result: unknown[] }> {
   return rootHttp().serverCommand(command);
+}
+
+/**
+ * spikeArcadeUpgradeNodeScopes — the schema-v4 data step (backfill of
+ * LoreNode.security_scopes on pre-v4 rows), root-authed like the DDL it follows.
+ * Provisioner only. Throws on any failure: the caller must not stamp the cell v4.
+ */
+export function spikeArcadeUpgradeNodeScopes(db: string): Promise<NodeScopesUpgradeResult> {
+  return upgradeNodeScopes(db, rootHttp());
 }
 
 /**

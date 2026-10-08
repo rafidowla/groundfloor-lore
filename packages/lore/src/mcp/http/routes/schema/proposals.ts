@@ -61,13 +61,16 @@ export async function tryProposalRoutes(req: IncomingMessage, res: ServerRespons
                 proposal.proposedBy = `${principal.kind === 'bootstrap' ? 'human' : 'system'}:${principal.label}`;
             }
             const sandbox = await deps.phaseA.schemaAuthoring.propose(proposal);
+            // Bound non-operator: counts are recomputed over the rows the caller
+            // can see (the stored copy keeps the operator's true totals).
+            const blastRadius = await deps.phaseA.schemaAuthoring.blastRadiusForCaller(sandbox);
             writeJson(res, 201, {
                 sandboxId: sandbox.sandboxId,
                 proposedAt: sandbox.proposedAt,
                 // Phase 3 item 1 — blast radius rides along when a
                 // graph reader is wired (production); absent in tests
                 // that didn't pass one.
-                ...(sandbox.blastRadius ? { blastRadius: sandbox.blastRadius } : {}),
+                ...(blastRadius ? { blastRadius } : {}),
             });
         } catch (e) {
             // Phase 1 destructive guard messages mention "destructive change";
@@ -89,7 +92,10 @@ export async function tryProposalRoutes(req: IncomingMessage, res: ServerRespons
 
     if (pathname === `${PREFIX}/proposals` && req.method === 'GET') {
         try {
-            writeJson(res, 200, deps.phaseA.schemaAuthoring.listProposals());
+            // Stored blastRadius counts are the operator's; a bound non-operator
+            // reads the proposals without them (entryForCaller).
+            const store = deps.phaseA.schemaAuthoring;
+            writeJson(res, 200, store.listProposals().map((e) => store.entryForCaller(e)));
         } catch (e) { writeError(res, 500, 'list_proposals_failed', redactError(e)); }
         return true;
     }
@@ -108,7 +114,7 @@ export async function tryProposalRoutes(req: IncomingMessage, res: ServerRespons
                 writeError(res, 404, 'proposal_not_found', `no proposal '${sandboxId}'`);
                 return true;
             }
-            writeJson(res, 200, entry);
+            writeJson(res, 200, deps.phaseA.schemaAuthoring.entryForCaller(entry));
             return true;
         }
 

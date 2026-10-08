@@ -4,6 +4,56 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.30.1] — 2026-10-07
+
+Mostly ArcadeDB; one fix for all backends (schema previews).
+
+The 3.29.0 read gates and 3.30.0 write gates were ineffective on
+the ArcadeDB backend: the `LoreNode` vertex had no `security_scopes` property,
+so every Arcade node read back as public and a bound actor could list, read,
+modify or delete items it cannot see. SQLite, LanceDB and the embedded hosts
+were not affected. No change for unbound callers.
+
+### Security
+- **Arcade schema v4: `security_scopes` on the `LoreNode` vertex** (JSON-encoded
+  `string[]`, like `tags`). Every Arcade node write stores it with SQLite
+  parity (explicit array incl. `[]` wins; omitted keeps the prior value; new
+  node → `[]`), and every node projection (`getNode`, `getNodesByIds`, search,
+  `listNodes`, traverse, `bulkList`) returns it, so `resolveItemScopes`, the
+  write gates and the list filters see the real labels.
+- **Arcade `addEdge` with a missing endpoint** now throws the shared
+  `edge_endpoint_missing` wording, identical to the answer for a hidden
+  endpoint (previously an Arcade-specific message told the two apart).
+- **Schema-change previews no longer expose hidden rows** (all backends). For a
+  bound non-operator (app token), `POST /api/schema/migrations/dry-run` draws
+  `sampleRows`, `affectedRowCount` and `totalAffected` from visible rows only;
+  the `blastRadius` returned by `POST /api/schema/proposals` and MCP
+  `schema_propose` is recomputed visible-only; stored proposals read back via
+  the REST list/get routes and `schema_list_proposals` omit `blastRadius`; and
+  `GET /api/schema/migrations/in-flight` drops per-op `deleted` / `modified` /
+  `cursor`. Visible-only numbers carry `countScope: 'visible'` and
+  `countsLowerBound: true` when the 10,000-row scan cap was hit. Unbound callers
+  and operators (bootstrap / shared-secret) are unchanged; the stored proposal
+  keeps the true totals for the operator who approves it. New shared helper
+  `security/visibleCounts.ts`.
+
+### Upgrade
+- A v3 cell is upgraded in place by the existing idempotent DDL replay
+  (`ArcadeGraphStore.initialize()` and `provisionApp`), followed by a paged
+  backfill: each node takes the labels of its canonical `lore:<id>` verbatim
+  row; damaged (`'undefined'`) labels are copied as-is so the node stays
+  fail-closed; a node with no verbatim row gets `[]`. The cell serves nothing
+  until the backfill succeeds; `provisionApp` stamps
+  `tenant_apps.schema_version = 4` only after it, and the admin provision
+  response reports the backfill counts. Re-running is a no-op.
+
+### Tests
+- New `arcade-node-scopes`, `visible-counts` and `schema-preview-scopes` unit
+  suites (in the `test` chain).
+- `test:e2e:arcade-write-scopes-real` (real ArcadeDB 26.7.1 in Docker, not in
+  the default chain): every scoped read and write path, hidden vs missing, plus
+  the v3 → v4 upgrade and backfill.
+
 ## [3.30.0] — 2026-10-07
 
 Row-level `security_scopes` now apply to every write path a bound actor can

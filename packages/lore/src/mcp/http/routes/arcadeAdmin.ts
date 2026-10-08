@@ -257,6 +257,8 @@ async function handleProvision(
             dbUser: result.dbUser,
             secretRef: result.secretRef,
             created: result.created,
+            schemaVersion: result.schemaVersion,
+            nodeScopes: result.nodeScopes,
         });
     } catch (err) {
         auditAdmin(deps, 'provision', { customerId, appId }, 'error', (err as Error).message);

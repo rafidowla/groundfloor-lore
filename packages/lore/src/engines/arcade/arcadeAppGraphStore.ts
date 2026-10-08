@@ -38,6 +38,7 @@
  * an injection-shaped app value ("alpha_app2' OR '1'='1") stays opaque data.
  */
 
+import { assertEdgeEndpoints } from '../dataplaneEdgeShape.js';
 import type {
   GraphStats,
   LoreEdge,
@@ -175,12 +176,10 @@ export class ArcadeAppGraphStore {
     await this.initialize();
     const src = await this.getNode(edge.sourceId);
     const tgt = await this.getNode(edge.targetId);
-    if (!src) {
-      throw new Error(`[ArcadeAppGraphStore] addEdge: source not found: ${edge.sourceId}`);
-    }
-    if (!tgt) {
-      throw new Error(`[ArcadeAppGraphStore] addEdge: target not found: ${edge.targetId}`);
-    }
+    // Same `edge_endpoint_missing` wording as the local engine: the single-edge scope gate
+    // (mcp/edgeEndpointGate.ts) answers a hidden endpoint with exactly this text, so a
+    // truly missing one must read identically or a bound actor could tell them apart.
+    assertEdgeEndpoints(edge, new Set([src ? edge.sourceId : null, tgt ? edge.targetId : null].filter((i): i is string => i !== null)));
     await this.http.command(
       this.tenantDb,
       `CREATE EDGE ${EDGE_TYPE} ` +

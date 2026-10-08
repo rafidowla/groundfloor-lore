@@ -232,12 +232,14 @@ export function registerPhaseATools(host: PhaseAToolHost, ctx: PhaseAContext): v
                     transforms: { addNodeType: spec },
                 });
                 const sandbox = await ctx.schemaAuthoring.propose(proposal);
+                // Bound non-operator: visible-only counts (stored copy stays the operator's).
+                const blastRadius = await ctx.schemaAuthoring.blastRadiusForCaller(sandbox);
                 return ok({
                     sandboxId: sandbox.sandboxId,
                     proposedAt: sandbox.proposedAt,
                     // Phase 3 item 1 — surface blast radius so the
                     // approver sees affected-row counts upfront.
-                    ...(sandbox.blastRadius ? { blastRadius: sandbox.blastRadius } : {}),
+                    ...(blastRadius ? { blastRadius } : {}),
                 });
             } catch (e) { return err(`schema_propose failed: ${(e as Error).message}`); }
         },
@@ -250,7 +252,7 @@ export function registerPhaseATools(host: PhaseAToolHost, ctx: PhaseAContext): v
         async (args) => {
             const gate = gateWorkspace(args, 'read');
             if (gate) return gate;
-            return ok(ctx.schemaAuthoring.listProposals());
+            return ok(ctx.schemaAuthoring.listProposals().map((e) => ctx.schemaAuthoring.entryForCaller(e)));
         },
     );
 

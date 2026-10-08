@@ -36,13 +36,15 @@ import * as crypto from 'node:crypto';
 
 import { DEFAULT_LOCAL_MODEL_DIM } from '../../providers/localEmbeddingProvider.js';
 import { ArcadeHttpError } from './arcadeHttp.js';
-import { graphSchemaDdl, verbatimSchemaDdl } from './arcadeSchema.js';
+import { ARCADE_SCHEMA_VERSION, graphSchemaDdl, verbatimSchemaDdl } from './arcadeSchema.js';
+import type { NodeScopesUpgradeResult } from './arcadeNodeScopes.js';
 import {
   ARCADE_BASE_URL,
   ARCADE_ROOT_USER,
   ARCADE_ROOT_PASSWORD,
   spikeArcadeServerCommand,
   spikeArcadeCommand,
+  spikeArcadeUpgradeNodeScopes,
 } from './arcadeRootTransport.js';
 import {
   provisioningDbPath,
@@ -54,6 +56,7 @@ import {
   loadSecret,
   getTenantAppRow,
   upsertTenantAppRow,
+  stampTenantAppSchemaVersion,
   listTenantAppRows,
   type TenantAppRow,
 } from './arcadeRegistryStore.js';
@@ -89,6 +92,10 @@ export interface ProvisionAppTenantResult {
   secretRef: string;
   /** true if this call created new state; false if it was a no-op repair of an already-active cell. */
   created: boolean;
+  /** Schema version this cell is stamped at after the call (ARCADE_SCHEMA_VERSION on success). */
+  schemaVersion: number;
+  /** v4 data step counts: pre-v4 nodes whose labels were backfilled (all zero on an up-to-date cell). */
+  nodeScopes: NodeScopesUpgradeResult;
 }
 
 // ── naming ───────────────────────────────────────────────────────────────
@@ -132,13 +139,20 @@ async function ensureDatabase(dbName: string): Promise<void> {
 // so the daemon-operator provisioning path here and the adapter lazy-init path
 // cannot drift. Every statement is IF NOT EXISTS, so a re-run against an existing
 // cell upgrades its schema in place (additive-only).
-async function applyDesignASchema(dbName: string, embedDim: number): Promise<void> {
+//
+// Schema v4 added a DATA step on top of the DDL: pre-v4 LoreNode rows have a NULL
+// security_scopes that must be backfilled (from the canonical verbatim row, else [])
+// before the cell is stamped v4. The step runs AFTER both DDL sets (the verbatim type
+// must exist to be read), is idempotent, and throws on failure - provisionApp then
+// fails before the registry stamp, so the cell stays at its old version.
+async function applyDesignASchema(dbName: string, embedDim: number): Promise<NodeScopesUpgradeResult> {
   for (const stmt of graphSchemaDdl()) {
     await spikeArcadeCommand(dbName, stmt);
   }
   for (const stmt of verbatimSchemaDdl(embedDim)) {
     await spikeArcadeCommand(dbName, stmt);
   }
+  return spikeArcadeUpgradeNodeScopes(dbName);
 }
 
 // ── public API ───────────────────────────────────────────────────────────
@@ -149,9 +163,10 @@ async function applyDesignASchema(dbName: string, embedDim: number): Promise<voi
  *
  * Steps:
  *   1. ensureDatabase(tenant_<tenantId>_<appId>)
- *   2. apply Design-A schema DDL (IF NOT EXISTS everywhere)
+ *   2. apply Design-A schema DDL (IF NOT EXISTS everywhere) + the v4 node-scopes backfill
  *   3. create-or-rotate the per-DB service user, admin on exactly one db
- *   4. upsert the tenant_apps SQLite row (source of truth for token registry)
+ *   4. upsert the tenant_apps SQLite row (source of truth for token registry) and
+ *      stamp tenant_apps.schema_version = ARCADE_SCHEMA_VERSION (only after 2 succeeded)
  */
 export async function provisionApp(
   input: ProvisionAppTenantInput,
@@ -179,7 +194,7 @@ export async function provisionApp(
     const dbPass = priorSecret ?? crypto.randomBytes(32).toString('base64url');
 
     await ensureDatabase(dbName);
-    await applyDesignASchema(dbName, embedDim);
+    const nodeScopes = await applyDesignASchema(dbName, embedDim);
     // Only rotate the live ArcadeDB user when we minted a FRESH password
     // (priorSecret undefined). A same-password re-provision is a TRUE no-op.
     await createOrRotateServiceUser(dbUser, dbPass, dbName, {
@@ -197,12 +212,13 @@ export async function provisionApp(
       status: 'active',
       createdAt: existing?.created_at ?? new Date().toISOString(),
     });
+    stampTenantAppSchemaVersion(registryDb, customerId, appId, ARCADE_SCHEMA_VERSION);
     // For non-sqlite backends (keychain/env/kms) write the secret to the external
     // store (the column was set NULL by the upsert above). Under kms this is the
     // envelope-encrypt into arcade_secrets.
     await persistSecret(store, secretRef, dbPass);
 
-    return { db: dbName, dbUser, secretRef, created };
+    return { db: dbName, dbUser, secretRef, created, schemaVersion: ARCADE_SCHEMA_VERSION, nodeScopes };
   }, { registryDbPath: opts?.registryDbPath });
 }
 

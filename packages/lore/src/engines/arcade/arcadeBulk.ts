@@ -29,6 +29,7 @@
 import type { LoreNode } from '../../providers/types.js';
 import type { ArcadeHttp } from './arcadeHttp.js';
 import { NODE_TYPE } from './arcadeSchema.js';
+import { encodeNodeScopes, resolveNodeScopes } from './arcadeNodeScopes.js';
 
 type NodeInput = Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>;
 type UpsertResult = { id: string; ok: boolean; error?: string };
@@ -56,6 +57,7 @@ const SET_FIELDS = [
   'staleAt',
   'ephemeral',
   'ttl_ms',
+  'security_scopes',
 ] as const;
 
 export async function bulkUpsertNodes(
@@ -83,19 +85,24 @@ async function upsertChunk(
   if (chunk.length === 0) return [];
   const now = new Date().toISOString();
 
-  // Pre-fetch existing createdAts for the chunk's ids in one query so an
-  // UPSERT of an existing node preserves its original createdAt.
+  // Pre-fetch existing createdAts (and security_scopes, so an upsert that omits
+  // scopes keeps the prior labels - SQLite parity) for the chunk's ids in one
+  // query so an UPSERT of an existing node preserves its original createdAt.
   const ids = chunk.map((n) => n.id);
   const createdAtById = new Map<string, string>();
+  const scopesById = new Map<string, unknown>();
   try {
     const existing = await http.query(
       tenantDb,
-      `SELECT id, createdAt FROM ${NODE_TYPE} WHERE id IN :ids`,
+      `SELECT id, createdAt, security_scopes FROM ${NODE_TYPE} WHERE id IN :ids`,
       { ids },
     );
     for (const row of (existing.result ?? []) as Array<Record<string, unknown>>) {
       const rid = String(row['id'] ?? '');
-      if (rid) createdAtById.set(rid, String(row['createdAt'] ?? now));
+      if (rid) {
+        createdAtById.set(rid, String(row['createdAt'] ?? now));
+        scopesById.set(rid, row['security_scopes']);
+      }
     }
   } catch {
     // If the pre-fetch fails, fall through to the per-node fallback below,
@@ -126,6 +133,7 @@ async function upsertChunk(
     params[`${p}staleAt`] = (node as { staleAt?: string }).staleAt ?? '';
     params[`${p}ephemeral`] = node.ephemeral ?? false;
     params[`${p}ttl_ms`] = node.ttl_ms ?? 0;
+    params[`${p}security_scopes`] = encodeNodeScopes(resolveNodeScopes(node.security_scopes, scopesById.get(node.id)));
   });
 
   try {

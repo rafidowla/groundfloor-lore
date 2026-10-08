@@ -667,6 +667,9 @@ export function buildGraphReaders(
     };
     const schemaGraphOps: SchemaGraphOps = {
         get engine() { return resolve('schema_graph_engine').engine; },
+        // Full graph handle (rows carry security_scopes) for the visible-only
+        // previews a bound non-operator gets (schemas/visibleSchemaPreview.ts).
+        visibleGraph: () => getGraph(),
         countNodesByType: (type) => resolve('countNodesByType').countNodesByType(type),
         countEdgesByRelation: (relation) => resolve('countEdgesByRelation').countEdgesByRelation(relation),
         countInboundEdgesToType: (type) => resolve('countInboundEdgesToType').countInboundEdgesToType(type),

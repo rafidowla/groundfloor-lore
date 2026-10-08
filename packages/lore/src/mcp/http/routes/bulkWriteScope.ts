@@ -82,8 +82,9 @@ export function visibleEdgeEndpoints(edges: Array<{ sourceId: string; targetId: 
 
 /**
  * The scopes node `id` holds after this item's write, for its question-alias rows (they must
- * carry the node's own scopes, bound or not). The live node first; when its rows carry none
- * (ARCADE keeps scopes on the canonical verbatim row only) the canonical row's own scopes. A
+ * carry the node's own scopes, bound or not). The live node first (Arcade schema v4 stores
+ * `security_scopes` on the LoreNode vertex too); when the node carries none (a pre-v4 or
+ * not-yet-backfilled row, or an engine without the column) the canonical row's own scopes. A
  * node found in neither source has no stored scopes (`[]`). `undefined` = a lookup threw, so the
  * scopes are unknown and callers write no alias rows (fail closed, never public).
  */

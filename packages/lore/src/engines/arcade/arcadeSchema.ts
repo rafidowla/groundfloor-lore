@@ -41,9 +41,12 @@ export const VERBATIM_TYPE = 'LoreVerbatim';
  * tripping over a missing column silently). v1 = slice-1 baseline; v2 = slice-2
  * lifecycle columns (supersededBy/…, stale/staleAt, ephemeral/ttl_ms); v3 =
  * slice-3 wire-parity outcome counters (success/failure/partial_count,
- * confirmation_score).
+ * confirmation_score); v4 = LoreNode.security_scopes (row-level scopes on the
+ * node vertex itself, so the live-node source of security/itemScopes.ts tells the
+ * truth). v4 is the first version that needs a DATA step on top of the additive
+ * DDL (backfill of pre-v4 rows) — see arcadeNodeScopes.upgradeNodeScopes.
  */
-export const ARCADE_SCHEMA_VERSION = 3;
+export const ARCADE_SCHEMA_VERSION = 4;
 
 /**
  * LoreNode scalar properties. STRING for everything the adapter round-trips as
@@ -79,6 +82,10 @@ export const NODE_PROPS: ReadonlyArray<readonly [string, string]> = [
   ['failure_count', 'LONG'],
   ['partial_count', 'LONG'],
   ['confirmation_score', 'DOUBLE'],
+  // ── v4: row-level scopes. JSON-encoded string[] (same encoding as tags). NULL
+  //    means "not yet backfilled" (a pre-v4 row) — never "public"; a stored []
+  //    is the explicit public label. See arcadeNodeScopes.ts.
+  ['security_scopes', 'STRING'],
 ];
 
 /** LoreVerbatim scalar properties (the `embedding` ARRAY_OF_FLOATS + its HNSW

@@ -14,6 +14,7 @@ import type { GraphStats, LoreNode, BulkListQuery, BulkListPage } from '../../pr
 import type { ArcadeHttp } from './arcadeHttp.js';
 import { rankSearchResults } from '../searchRanking.js';
 import { tagsToArray } from '../normalizeTags.js';
+import { parseNodeScopes } from './arcadeNodeScopes.js';
 
 /** Default row cap for search, mirrors the local engine's default. */
 export const DEFAULT_LIST_LIMIT = 20;
@@ -36,7 +37,7 @@ const NODE_SELECT_COLUMNS =
 const SELECT_WITH_LIFECYCLE =
   NODE_SELECT_COLUMNS +
   ', supersededBy, supersededAt, supersededReason, stale, staleAt, ephemeral, ttl_ms' +
-  ', success_count, failure_count, partial_count, confirmation_score';
+  ', success_count, failure_count, partial_count, confirmation_score, security_scopes';
 
 /**
  * search — SEARCH_CONTRACT_VERSION=1 keyword search. Case-insensitive
@@ -286,13 +287,12 @@ export async function bulkListArcadeNodes(
   const pageSize = q.limit + 1;
   const sql =
     `SELECT id, type, label, content, tags, metadata, project, ecosystem, ` +
-    `updatedAt, createdAt FROM ${nodeType} ${where} ` +
+    `updatedAt, createdAt, security_scopes FROM ${nodeType} ${where} ` +
     `ORDER BY updatedAt DESC, id ASC LIMIT ${pageSize}`;
   const res = await http.query(tenantDb, sql, params);
   const rows = (res.result ?? []) as Array<Record<string, unknown>>;
-  // Match LocalGraph's row projection: tags → array; security_scopes → [] (the
-  // LoreNode graph vertex carries no scopes column on arcade, and LocalGraph's
-  // default for an absent value is []).
+  // Match LocalGraph's row projection: tags → array; security_scopes → the stored
+  // labels (v4 column; NULL only on an un-upgraded cell, which cannot serve).
   const projected = rows.map((r) => ({
     id: String(r['id'] ?? ''),
     type: String(r['type'] ?? ''),
@@ -304,7 +304,7 @@ export async function bulkListArcadeNodes(
     ecosystem: String(r['ecosystem'] ?? '*'),
     updatedAt: String(r['updatedAt'] ?? ''),
     createdAt: String(r['createdAt'] ?? ''),
-    security_scopes: [] as string[],
+    security_scopes: parseNodeScopes(r['security_scopes']),
   }));
   const hasMore = projected.length > q.limit;
   const nodes = hasMore ? projected.slice(0, q.limit) : projected;

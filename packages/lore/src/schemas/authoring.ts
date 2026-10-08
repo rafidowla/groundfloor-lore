@@ -64,6 +64,8 @@ import {
 } from './dataSnapshot.js';
 import { computeBlastRadius, type BlastRadius } from './blastRadius.js';
 import type { SchemaGraphOps } from './substrate/schemaGraphOps.js';
+import { countAudience } from '../security/visibleCounts.js';
+import { VisibleSchemaPreview } from './visibleSchemaPreview.js';
 
 /**
  * SchemaProposal — what the AI (or a human author) submits.
@@ -290,6 +292,51 @@ export class SchemaAuthoringStore {
         if (!fs.existsSync(p)) return null;
         try { return JSON.parse(fs.readFileSync(p, 'utf-8')) as SandboxEntry; }
         catch { return null; }
+    }
+
+    /**
+     * Test-only: lowers the visible-preview scan cap (default
+     * SCOPE_PAGE_FILL_MAX_SCAN) so the lower-bound path needs no 10k-row seed.
+     */
+    previewScanCap: number | undefined;
+
+    /**
+     * Visible-only preview over the live graph for a BOUND non-operator
+     * (schemas/visibleSchemaPreview.ts). undefined when the wired graph
+     * reader exposes no full graph handle — callers then withhold the counts
+     * instead of falling back to raw ones.
+     */
+    visiblePreview(): VisibleSchemaPreview | undefined {
+        const g = this.graphReader?.visibleGraph?.();
+        return g ? new VisibleSchemaPreview(g, this.previewScanCap) : undefined;
+    }
+
+    /**
+     * The blastRadius the CURRENT caller may see for `entry`. Unbound caller
+     * and daemon operator: as stored (true totals, no new fields). Bound
+     * non-operator: recomputed over the rows it can see, labelled
+     * `countScope: 'visible'` (+ `countsLowerBound` when capped); undefined
+     * when the entry has none or no visible view is wired.
+     */
+    async blastRadiusForCaller(entry: Pick<SandboxEntry, 'proposal' | 'blastRadius'>): Promise<BlastRadius | undefined> {
+        if (countAudience() === 'raw') return entry.blastRadius;
+        if (!entry.blastRadius) return undefined;
+        const preview = this.visiblePreview();
+        if (!preview) return undefined;
+        const br = await computeBlastRadius(entry.proposal.changes, preview);
+        return { ...br, ...preview.label() };
+    }
+
+    /**
+     * A STORED entry as the current caller may read it back. The stored
+     * blastRadius was counted over every row at propose-time (operator view);
+     * a bound non-operator must not read numbers computed for someone else, so
+     * it is omitted for them. Unbound / operator: the entry unchanged.
+     */
+    entryForCaller(entry: SandboxEntry): SandboxEntry {
+        if (countAudience() === 'raw' || entry.blastRadius === undefined) return entry;
+        const { blastRadius: _hidden, ...rest } = entry;
+        return rest;
     }
 
     /**

@@ -26,6 +26,7 @@
  *      opaque data inside tenant_alpha and can never cross the wall.
  */
 
+import { assertEdgeEndpoints } from '../dataplaneEdgeShape.js';
 import type {
   GraphStats,
   LoreEdge,
@@ -38,6 +39,7 @@ import * as maint from './arcadeMaintenance.js';
 import * as edges from './arcadeGraphEdges.js';
 import { bulkUpsertNodes as bulkUpsertImpl } from './arcadeBulk.js';
 import { graphSchemaDdl, NODE_TYPE, EDGE_TYPE } from './arcadeSchema.js';
+import { encodeNodeScopes, parseNodeScopes, resolveNodeScopes, upgradeNodeScopes } from './arcadeNodeScopes.js';
 import { rowToLoreNode } from '../loreNodeRow.js';
 import type { EdgeQuery, BulkListQuery, BulkListPage } from '../../providers/types.js';
 import { bulkListArcadeNodes, queryEdgesArcade } from './arcadeGraphReads.js';
@@ -62,7 +64,7 @@ const TRAVERSE_NODE_CAP = 500;
 const NODE_FULL_COLUMNS =
   'id, type, label, content, tags, project, ecosystem, metadata, createdAt, updatedAt, ' +
   'supersededBy, supersededAt, supersededReason, stale, staleAt, ephemeral, ttl_ms, ' +
-  'success_count, failure_count, partial_count, confirmation_score';
+  'success_count, failure_count, partial_count, confirmation_score, security_scopes';
 
 /** Row shape ArcadeDB returns for a LoreNode vertex. */
 type NodeRow = Record<string, unknown>;
@@ -85,12 +87,20 @@ export class ArcadeGraphStore {
   // spikes constructing an adapter directly) and pre-provisioning never drift.
   // Every statement is IF NOT EXISTS, so this is a no-op against an already-
   // provisioned cell and only adds the slice-2 lifecycle columns
-  // (supersededBy/…, stale/staleAt, ephemeral/ttl_ms) when they're absent.
+  // (supersededBy/…, stale/staleAt, ephemeral/ttl_ms, security_scopes) when
+  // they're absent.
+  //
+  // v4 DATA STEP: adding security_scopes leaves pre-v4 rows NULL, which must never
+  // be served (they would read as public). upgradeNodeScopes backfills them
+  // (idempotent; first query returns nothing on an up-to-date cell) BEFORE the
+  // schema is marked ready; if it throws, schemaReady stays false and every call
+  // on this store fails - the cell is stale, not half-upgraded-and-serving.
   async initialize(): Promise<void> {
     if (this.schemaReady) return;
     for (const stmt of graphSchemaDdl()) {
       await this.http.command(this.tenantDb, stmt);
     }
+    await upgradeNodeScopes(this.tenantDb, this.http);
     this.schemaReady = true;
   }
 
@@ -144,6 +154,9 @@ export class ArcadeGraphStore {
       failure_count: node.failure_count ?? existing?.failure_count ?? 0,
       partial_count: node.partial_count ?? existing?.partial_count ?? 0,
       confirmation_score: node.confirmation_score ?? existing?.confirmation_score ?? 0,
+      // Row-level scopes (v4) - SQLite parity: explicit array (incl. []) wins,
+      // omitted keeps the prior row's, new node -> [] (public).
+      security_scopes: encodeNodeScopes(resolveNodeScopes(node.security_scopes, existing?.security_scopes)),
     };
     // UPSERT: updates the row matching id, or inserts one if absent. Retried
     // on transient 502/503/504 (retryIdempotentArcadeWrite) — this exact
@@ -162,7 +175,8 @@ export class ArcadeGraphStore {
         `supersededReason = :supersededReason, stale = :stale, staleAt = :staleAt, ` +
         `ephemeral = :ephemeral, ttl_ms = :ttl_ms, ` +
         `success_count = :success_count, failure_count = :failure_count, ` +
-        `partial_count = :partial_count, confirmation_score = :confirmation_score ` +
+        `partial_count = :partial_count, confirmation_score = :confirmation_score, ` +
+        `security_scopes = :security_scopes ` +
         `UPSERT WHERE id = :id`,
       params,
     ));
@@ -197,12 +211,10 @@ export class ArcadeGraphStore {
     // Preflight: both endpoints must exist in THIS db.
     const src = await this.getNode(edge.sourceId);
     const tgt = await this.getNode(edge.targetId);
-    if (!src) {
-      throw new Error(`[ArcadeGraphStore] addEdge: source not found: ${edge.sourceId}`);
-    }
-    if (!tgt) {
-      throw new Error(`[ArcadeGraphStore] addEdge: target not found: ${edge.targetId}`);
-    }
+    // Same `edge_endpoint_missing` wording as the local engine: the single-edge scope gate
+    // (mcp/edgeEndpointGate.ts) answers a hidden endpoint with exactly this text, so a
+    // truly missing one must read identically or a bound actor could tell them apart.
+    assertEdgeEndpoints(edge, new Set([src ? edge.sourceId : null, tgt ? edge.targetId : null].filter((i): i is string => i !== null)));
     // Idempotent per directed (source,target,relation) triple, matching the
     // contract LocalGraph/SurrealGraph's addEdge already guarantee (there is
     // no uniqueness constraint on LoreEdge at the ArcadeDB schema level —
@@ -346,7 +358,7 @@ export class ArcadeGraphStore {
    * this delegates to the SAME pure serializer LocalGraph uses
    * (localGraphReads.rowToLoreNode). That serializer fills the FULL canonical
    * field set with LocalGraph's exact defaults (metadata '{}', ecosystem '*',
-   * security_scopes [], status 'active', classification 'tactical', zeroed/
+   * security_scopes (stored, v4), status 'active', classification 'tactical', zeroed/
    * undefined counters, empty-string→null lifecycle coercion, stale/ephemeral →
    * undefined-when-false so JSON drops them) — no hand-maintained arcade copy to
    * drift.
@@ -377,7 +389,8 @@ export class ArcadeGraphStore {
         tags = [];
       }
     }
-    const node = rowToLoreNode({ ...row, tags });
+    // (1b) security_scopes: JSON string -> string[] (NULL only on an un-upgraded cell, which cannot serve).
+    const node = rowToLoreNode({ ...row, tags, security_scopes: parseNodeScopes(row['security_scopes']) });
     // (2) staleAt — non-enumerable so it survives internal reads but never
     // reaches the JSON wire (LocalGraph parity).
     const staleAtRaw = row['staleAt'] == null ? '' : String(row['staleAt']);

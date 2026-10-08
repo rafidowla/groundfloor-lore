@@ -32,6 +32,7 @@
  */
 
 import { tagsToArray } from '../../engines/normalizeTags.js';
+import type { VisibleSchemaGraph } from '../visibleSchemaPreview.js';
 
 /**
  * Raw Cypher escape hatch LegacySchemaGraphOps talks through. Relocated here
@@ -68,6 +69,15 @@ export interface SchemaGraphOps {
      *  data/manifests, never a live engine choice. 'sqlite' added for the
      *  3.21 step 1b SQLite graph engine (SqliteSchemaGraphOps). */
     readonly engine: 'kuzu' | 'surreal' | 'sqlite';
+
+    /**
+     * Optional: the full graph handle (rows carry `security_scopes`) behind
+     * these ops. Only the daemon's buildGraphReaders adapter supplies it; the
+     * schema previews use it to count what a BOUND non-operator can see
+     * (schemas/visibleSchemaPreview.ts). Absent → previews for such a caller
+     * are withheld rather than falling back to raw counts.
+     */
+    visibleGraph?(): VisibleSchemaGraph;
 
     /* ── counts (blast radius) ─────────────────────────────────────── */
 

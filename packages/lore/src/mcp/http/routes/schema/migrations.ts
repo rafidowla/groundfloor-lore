@@ -18,6 +18,7 @@ import { decompose } from '../../../../schemas/decomposition.js';
 import type { ProposedChange } from '../../../../schemas/authoring.js';
 import { readJsonBody, writeJson, writeError, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { getCurrentPrincipal } from '../../../../auth/principal.js';
+import { countAudience } from '../../../../security/visibleCounts.js';
 import { PREFIX, type SchemaRoutesDeps } from './shared.js';
 // F-M02 / F-M05 / F-M06 / D2-authz-1 — destructive-op approval correlation
 // now lives in the shared module so the orchestrator's migrate phase
@@ -90,6 +91,19 @@ export async function tryMigrationRoutes(req: IncomingMessage, res: ServerRespon
             if (!plan || !Array.isArray(plan.ops) || plan.ops.length === 0) {
                 writeError(res, 400, 'invalid_migration_plan',
                     'body must be a MigrationPlan with a non-empty ops[] array');
+                return true;
+            }
+            // Bound non-operator: counts + sample rows come from the rows the
+            // caller can see only (schemas/visibleSchemaPreview.ts). Unbound and
+            // operator callers keep the original path unchanged.
+            if (countAudience() === 'visible') {
+                const preview = deps.phaseA.schemaAuthoring.visiblePreview();
+                if (!preview) {
+                    writeError(res, 503, 'migration_dry_run_unavailable',
+                        'dry-run preview is not available in this daemon');
+                    return true;
+                }
+                writeJson(res, 200, await preview.dryRun(plan));
                 return true;
             }
             const runner = new MigrationRunner(deps.migrationBackend);
@@ -281,6 +295,15 @@ export async function tryMigrationRoutes(req: IncomingMessage, res: ServerRespon
             return true;
         }
         const state = deps.migrationCheckpointStore.load();
+        // Per-op deleted / modified totals and the resume cursor (a node id for
+        // field ops) are counted over every row, so a bound non-operator gets
+        // the plan and per-op status without them.
+        if (state && countAudience() === 'visible') {
+            writeJson(res, 200, {
+                inFlight: { ...state, ops: state.ops.map(({ deleted: _d, modified: _m, cursor: _c, ...op }) => op) },
+            });
+            return true;
+        }
         writeJson(res, 200, { inFlight: state });
         return true;
     }

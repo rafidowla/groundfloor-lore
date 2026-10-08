@@ -30,6 +30,8 @@ export interface TenantAppRow {
   status: 'active' | 'disabled' | 'destroying';
   created_at: string;
   disabled_at: string | null;
+  /** ArcadeDB per-cell schema stamp (ARCADE_SCHEMA_VERSION once a provision/upgrade fully succeeded; 0 = never stamped). */
+  schema_version: number;
 }
 
 // ── connection lifecycle (single cached handle, keyed by path) ──────────────
@@ -128,7 +130,7 @@ export function getTenantAppRow(
 ): (TenantAppRow & { db_pass: string | null }) | undefined {
   return db
     .prepare(
-      `SELECT tenant_id, app_id, db, db_user, db_pass, secret_ref, status, created_at, disabled_at
+      `SELECT tenant_id, app_id, db, db_user, db_pass, secret_ref, status, created_at, disabled_at, schema_version
        FROM tenant_apps WHERE tenant_id = ? AND app_id = ?`,
     )
     .get(tenantId, appId) as (TenantAppRow & { db_pass: string | null }) | undefined;
@@ -164,10 +166,15 @@ export function upsertTenantAppRow(
   ).run(row);
 }
 
+/** Stamp a cell's schema version. Called only after the DDL + data steps for that version succeeded. */
+export function stampTenantAppSchemaVersion(db: DatabaseType, tenantId: string, appId: string, version: number): void {
+  db.prepare(`UPDATE tenant_apps SET schema_version = ? WHERE tenant_id = ? AND app_id = ?`).run(version, tenantId, appId);
+}
+
 export function listTenantAppRows(db: DatabaseType): TenantAppRow[] {
   return db
     .prepare(
-      `SELECT tenant_id, app_id, db, db_user, secret_ref, status, created_at, disabled_at
+      `SELECT tenant_id, app_id, db, db_user, secret_ref, status, created_at, disabled_at, schema_version
        FROM tenant_apps ORDER BY tenant_id, app_id`,
     )
     .all() as TenantAppRow[];
