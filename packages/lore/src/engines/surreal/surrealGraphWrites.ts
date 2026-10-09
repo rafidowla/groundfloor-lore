@@ -28,6 +28,7 @@ import type { SurrealQuery } from './surrealGraphReads.js';
 import { EDGE_TABLE, ridToId, toNodeRid } from './surrealRecordId.js';
 import { withTransactionConflictRetry } from '../transactionConflictRetry.js';
 import { wouldCreateSupersedeCycle } from '../graphShared/supersedeCycle.js';
+import { supersedeGuardVerdict, type SupersedeResult } from '../graphShared/supersedeGuard.js';
 
 /** The node document as stored. Keys match LocalGraph's column convention 1:1. */
 type NodeDocument = Record<string, unknown>;
@@ -401,12 +402,15 @@ export async function supersedeNode(
     oldId: string,
     newId: string,
     reason?: string,
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<SupersedeResult> {
     if (oldId === newId) return { ok: false, reason: 'self' };
     const oldNode = await getNode(oldId);
     if (!oldNode) return { ok: false, reason: 'old-not-found' };
     const newNode = await getNode(newId);
     if (!newNode) return { ok: false, reason: 'new-not-found' };
+    // Conditional-writes R2: one successor per node (in-process guard only on this engine).
+    const early = supersedeGuardVerdict(oldNode.supersededBy, newId);
+    if (early) return early;
     // 2026-08-17 (functional-correctness, cluster 4 medium) — refuse a
     // supersession that would CLOSE A CYCLE. Mirrors LocalGraph's identical
     // guard (engines/nodeLifecycle.ts) so the two engines can't tell apart —

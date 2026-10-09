@@ -192,6 +192,45 @@ interface TokenRow {
 /** Default token lifetime when a caller doesn't specify one: 30 days. */
 export const DEFAULT_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 
+/** Shortest token lifetime an operator may request (G11). */
+export const MIN_TOKEN_TTL_SECONDS = 60;
+/** Longest token lifetime an operator may request (G11): 365 days. There is no
+ *  non-expiring token — `ttlSeconds: 0` is rejected, not honoured. */
+export const MAX_TOKEN_TTL_SECONDS = 365 * 24 * 60 * 60;
+
+/** Thrown by issueToken / rotateToken for an out-of-contract `ttlSeconds`. The
+ *  admin route maps it to a 400; it is NOT an ArcadeAuthError (that is 403). */
+export class InvalidTokenTtlError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidTokenTtlError';
+  }
+}
+
+/**
+ * validateTokenTtlSeconds — the single G11 gate. Returns an error message when
+ * `value` is not an acceptable explicit lifetime, or null when it is fine.
+ * `undefined` (absent) is NOT validated here: callers apply their own default.
+ * Accepts only finite integers in [MIN_TOKEN_TTL_SECONDS, MAX_TOKEN_TTL_SECONDS];
+ * rejects 0, negatives, NaN/Infinity, non-integers, strings, null, > max.
+ */
+export function validateTokenTtlSeconds(value: unknown): string | null {
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    return `ttlSeconds must be an integer number of seconds between ${MIN_TOKEN_TTL_SECONDS} and ${MAX_TOKEN_TTL_SECONDS}`;
+  }
+  if (value < MIN_TOKEN_TTL_SECONDS || value > MAX_TOKEN_TTL_SECONDS) {
+    return `ttlSeconds must be between ${MIN_TOKEN_TTL_SECONDS} and ${MAX_TOKEN_TTL_SECONDS} (got ${value})`;
+  }
+  return null;
+}
+
+/** Throws InvalidTokenTtlError for a present-but-invalid ttl; no-op for undefined. */
+export function assertValidTokenTtlSeconds(value: unknown): void {
+  if (value === undefined) return;
+  const msg = validateTokenTtlSeconds(value);
+  if (msg) throw new InvalidTokenTtlError(msg);
+}
+
 /** Throttle window for the last_used_at stamp — parity with auth/tokens.ts.
  *  A token persists its last-use stamp at most once per this interval. */
 export const LAST_USED_THROTTLE_MS = 60_000;
@@ -220,8 +259,10 @@ export function issueToken(
     scopes: readonly Scope[];
     /**
      * Token lifetime in seconds. Omitted → DEFAULT_TOKEN_TTL_SECONDS (30 days).
-     * `0` → NON-EXPIRING (expires_at stays NULL); the caller/operator is
-     * responsible for auditing that choice.
+     * Present → must be a finite integer in [MIN_TOKEN_TTL_SECONDS,
+     * MAX_TOKEN_TTL_SECONDS], else InvalidTokenTtlError is thrown (G11: `0`
+     * no longer mints a non-expiring token; negative/NaN no longer fall back
+     * silently to the default).
      */
     ttlSeconds?: number;
     /** Operator-facing label, parity with `lore auth create --label`. Optional;
@@ -230,6 +271,7 @@ export function issueToken(
   },
   opts?: { registryDbPath?: string },
 ): { token: string; expiresAt: string | null } {
+  assertValidTokenTtlSeconds(input.ttlSeconds);
   const cell = getTenantApp(
     { customerId: input.tenantId, appId: input.appId },
     { registryDbPath: opts?.registryDbPath },
@@ -245,12 +287,7 @@ export function issueToken(
   const token = mintToken();
   const now = new Date();
   const ttl = input.ttlSeconds ?? DEFAULT_TOKEN_TTL_SECONDS;
-  // ttl === 0 ⇒ non-expiring (NULL). Negative/NaN are treated as the default
-  // rather than accidentally minting an already-dead token.
-  const expiresAt =
-    ttl === 0
-      ? null
-      : new Date(now.getTime() + (Number.isFinite(ttl) && ttl > 0 ? ttl : DEFAULT_TOKEN_TTL_SECONDS) * 1000).toISOString();
+  const expiresAt = new Date(now.getTime() + ttl * 1000).toISOString();
   const db = openTokenDb(opts?.registryDbPath);
   db.prepare(
     `INSERT INTO arcade_tokens (token_hash, tenant_id, app_id, scopes, created_at, revoked_at, expires_at, label)

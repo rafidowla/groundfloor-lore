@@ -8,6 +8,7 @@
 import type { LoreNode } from '../providers/types.js';
 import type { reconnectOneNode } from '../engines/reconnect.js';
 import type { PendingAutolinkTracker } from '../engines/pendingAutolink.js';
+import type { SupersedeResult } from '../engines/graphShared/supersedeGuard.js';
 
 /** The subset of a graph the write core needs. Both LocalGraph and
  *  DataplaneGraph satisfy this — no cloud hard-wiring. */
@@ -19,7 +20,9 @@ export interface NodeWriteGraph {
      *  satisfy it; minimal test fakes may omit it (falls back to []). */
     getNode?(id: string): Promise<LoreNode | null>;
     /** D5 — used only when a write's `supersedes` list is non-empty. */
-    supersedeNode?(oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }>;
+    supersedeNode?(oldId: string, newId: string, reason?: string): Promise<SupersedeResult>;
+    /** Conditional-writes R2 — optional; reverts a claim this write took when a later id of its `supersedes` list is refused. */
+    unsupersedeNode?(id: string): Promise<boolean>;
     addEdge?(edge: { sourceId: string; targetId: string; relation: string; confidence?: string; confidenceScore?: number }): Promise<unknown>;
 }
 

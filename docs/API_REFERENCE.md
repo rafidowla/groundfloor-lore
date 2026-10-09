@@ -295,7 +295,7 @@ delete an X" without hunting through every family's own table below.
 | `GET /api/nodes` | Type-filtered `LoreNode` list for inspector renderers |
 | `POST /api/nodes/bulk-list` | Cursor-paginated bulk node enumeration (rate-limit-exempt) |
 | `GET /api/subgraph` | Multi-hop BFS ("Look in") — `?ecosystem=` prunes the walk |
-| `POST /api/node/supersede` · `POST /api/node/unsupersede` | Soft-supersede a node and reverse it |
+| `POST /api/node/supersede` · `POST /api/node/unsupersede` | Soft-supersede a node and reverse it. Superseding a node already superseded by a **different** id returns `409` `{ ok:false, error:"already_superseded", reason, supersededBy }`; repeating the same pair is a no-op `{ ok:true, unchanged:true }`. |
 | `GET /api/node/supersession-candidates` | Vector-similarity supersession scan |
 | `GET /api/node/lineage` | Full superseded-by chain |
 | `GET /api/nodes/as-of` | Bi-temporal "as-of" query — nodes valid at a given instant |
@@ -308,7 +308,7 @@ delete an X" without hunting through every family's own table below.
 | `GET /api/edges` | List edges (`?ecosystem=` keeps only edges with BOTH endpoints in scope) |
 | `DELETE /api/edge` | Delete an edge |
 | `POST /api/edges/bulk` | Bulk edge create |
-| `POST /api/nodes/bulk` · `POST /api/nodes/bulk-delete` | Bulk node upsert / delete. Bulk upsert supports `questions?`/`summary?`/`entities?`/`topics?` per row (3.21 step 3(h) round 2 — same caps, alias semantics, and outbox durability as `store_node`/`POST /api/node`; applied per item after that item's graph write succeeds, via `core/bulkQuestionAliases.ts`, not the single-write fan-out directly — see that file for why). Re-upserting a row replaces its aliases, exactly like the single-write path. `POST /api/nodes/bulk-delete` does **not** currently tombstone a deleted row's aliases (known gap — file if this affects you). `runBulkIngest()` (the library-level bulk path used by `bulkIngest`) accepts the same four fields directly on each `BulkIngestNodeArgs` item. |
+| `POST /api/nodes/bulk` · `POST /api/nodes/bulk-delete` | Bulk node upsert / delete. Bulk upsert supports `questions?`/`summary?`/`entities?`/`topics?` per row (3.21 step 3(h) round 2 — same caps, alias semantics, and outbox durability as `store_node`/`POST /api/node`; applied per item after that item's graph write succeeds, via `core/bulkQuestionAliases.ts`, not the single-write fan-out directly — see that file for why). Re-upserting a row replaces its aliases, exactly like the single-write path. Per-row `ifAbsent: true` creates only when the id is free (otherwise that item fails `already_exists: ...`, nothing written; type-checked, never stored). Per-row `supersedes` fails the item `already_superseded: <old> is already superseded by <other>` when an old id has another successor, and a pure retry (every old id already superseded by this id, node exists) returns `{ ok:true, id, unchanged:true }` without rewriting the node. `ifAbsent` and the supersede claim are DB-level atomic on ArcadeDB and SQLite, in-process only elsewhere. `POST /api/nodes/bulk-delete` does **not** currently tombstone a deleted row's aliases (known gap — file if this affects you). `runBulkIngest()` (the library-level bulk path used by `bulkIngest`) accepts the same four fields directly on each `BulkIngestNodeArgs` item. |
 | `POST /api/nodes/prune` | Retention-driven node pruning |
 | `POST /api/nodes/:id/restore` | Restore a pruned/archived node |
 | `GET /api/prune-jobs/:id` | Poll a prune job's status |

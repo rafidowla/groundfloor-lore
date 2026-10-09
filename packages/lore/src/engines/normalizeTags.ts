@@ -24,13 +24,23 @@
  *      First occurrence wins (stable order).
  */
 
-const MAX_TAG_LENGTH = 64;
+export const MAX_TAG_LENGTH = 64;
+
+/**
+ * Canonical form of ONE tag (trim, lowercase, cut to MAX_TAG_LENGTH). The
+ * write path (tagsToArray) and every tag-filter read path must go through
+ * this so a tag written as "Foo:Bar" is found by "foo:bar" and by "Foo:Bar".
+ * Does not split on commas or dedupe — use tagsToArray for tag lists.
+ */
+export function normalizeTag(raw: string): string {
+    return raw.trim().toLowerCase().slice(0, MAX_TAG_LENGTH);
+}
 
 function finalize(parts: string[]): string[] {
     const seen = new Set<string>();
     const out: string[] = [];
     for (const raw of parts) {
-        const t = raw.trim().toLowerCase().slice(0, MAX_TAG_LENGTH);
+        const t = normalizeTag(raw);
         if (!t || seen.has(t)) continue;
         seen.add(t);
         out.push(t);

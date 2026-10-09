@@ -43,6 +43,8 @@ import type { LoreGraphHandle, LoreVectorHandle } from '../../storage/loreStorag
 import type { Bm25Envelope } from '../verbatimBm25Result.js';
 import { ScopeError, type Scope } from './arcadeScopeGuard.js';
 import type { NeighborRow, SubgraphNode, SubgraphEdge } from './arcadeGraphNeighbors.js';
+import type { SupersedeResult } from '../graphShared/supersedeGuard.js';
+import { createNodeIfAbsent, type NodeInput } from '../graphShared/conditionalInsert.js';
 
 /**
  * The methods ArcadeGraphStore exposes BEYOND LoreGraphHandle (deleteEdge /
@@ -117,6 +119,10 @@ export class ScopedArcadeGraphHandle implements LoreGraphHandle {
     this.requireWrite();
     return this.inner.upsertNode(node);
   }
+  insertNodeIfAbsent(node: NodeInput): Promise<LoreNode> {
+    this.requireWrite();
+    return createNodeIfAbsent(this.inner, node);
+  }
   addEdge(edge: LoreEdge): Promise<void> {
     this.requireWrite();
     return this.inner.addEdge(edge);
@@ -129,7 +135,7 @@ export class ScopedArcadeGraphHandle implements LoreGraphHandle {
     this.requireWrite();
     return this.inner.deleteNode(id);
   }
-  supersedeNode(oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }> {
+  supersedeNode(oldId: string, newId: string, reason?: string): Promise<SupersedeResult> {
     this.requireWrite();
     return this.inner.supersedeNode(oldId, newId, reason);
   }

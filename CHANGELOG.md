@@ -4,6 +4,140 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.32.0] — 2026-10-08
+
+Conditional writes, phase 1: a caller can now create a node only if the id is
+free, and a node can no longer be superseded twice by different successors.
+Arcade token lifetimes are validated on issue and rotate, and a token can be
+revoked by its hash prefix. Dependency floors for consumers of the tarball, two
+extractor guards, and a tag-case fix for arcade mode. No on-disk format change.
+
+### Security
+- **G11 — arcade token `ttlSeconds` is now validated** on both
+  `POST /api/arcade/apps/:customerId/:appId/tokens` (issue) and
+  `.../tokens/rotate`. Absent keeps the 30-day default; present must be a finite
+  integer between 60 seconds and 365 days. `0` (which used to mint a
+  non-expiring token), negatives (which silently became 30 days), NaN,
+  fractions, strings, `null` and anything above the maximum now return `400
+  invalid_request` and nothing is issued or rotated. `issueToken` and
+  `rotateToken` enforce the same bounds (`InvalidTokenTtlError`), so no caller can
+  mint a non-expiring arcade token. Rotate now honours an optional `ttlSeconds`
+  (previously the route never passed one); without it the new token still gets
+  the 30-day default, not the old token's remaining lifetime. Local-mode
+  `lore auth issue --ttl` was never affected (it already rejected non-positive
+  values).
+  Tokens already issued with `ttlSeconds: 0` keep their NULL `expires_at` and stay
+  valid until revoked: find them with `list-tokens` (no expiry) and rotate them.
+- **Dependency floors raised.** npm `overrides` apply only to this repository's
+  own install, never to a consumer that installs the tarball, so a consumer
+  with an older lockfile could keep resolving vulnerable versions that Lore's
+  declared ranges still allowed. The declared ranges now exclude them:
+  - `sharp` `^0.35.5` (optional dependency; override kept in sync). Excludes
+    sharp 0.35.4 and earlier: GHSA-wq5f-xc86-pv6w (librsvg).
+  - `mailparser` `^3.9.26` (optional dependency), the first release pinning
+    nodemailer 10.0.9. The `nodemailer` override is `^10.0.9`. Excludes
+    nodemailer 9.x and early 10.x: GHSA-g57g-f23g-4646, GHSA-6vj9-mwq6-2f5v,
+    GHSA-8vvx-rff5-p5rq, GHSA-v53p-9fqp-m79j, GHSA-prgh-xp8r-p3m5.
+  - `@modelcontextprotocol/sdk` `^1.31.0`. Excludes GHSA-6qxp-vccf-f47h.
+  - `zod` is now a declared dependency (`^4.0.0`); Lore imports it directly
+    and uses the v4-only `z.toJSONSchema`. It was previously only transitive.
+  - `linkify-it` override pinned to `^5.0.2` (was `>=5.0.2`, which resolved
+    6.x). linkify-it 6.x changed its CJS export shape and broke
+    `mailparser`'s `require('linkify-it')()`, so `.eml` extraction failed with
+    "mailparser unavailable".
+- **`.eml` extractor** now refuses input over 25 MB (`MAX_EML_BYTES`, error code
+  `too-large`) before the parser runs, and bounds `simpleParser` with a 30 s
+  wall-clock timeout (`EML_PARSE_TIMEOUT_MS`, error code `corrupt`).
+- **HEIC extractor** checks the ISO-BMFF `ftyp` box and a HEIF brand before
+  handing bytes to sharp. Anything else (for example an SVG renamed `.heic`)
+  is rejected without reaching sharp.
+
+### Added
+- **`ifAbsent: true` per item on `POST /api/nodes/bulk`.** If any node exists at
+  the id (including a superseded or stale one) the item fails with
+  `results[i] = { ok:false, id, error:"already_exists: ..." }` and nothing is
+  written for it: no graph row, no vector, no outbox entry, no supersede. Other
+  items are unaffected. A non-boolean value is a per-item validation error
+  (`invalid_if_absent`). The flag is a write directive and is never stored.
+- **Embedded `nodeUpsert({ ifAbsent: true })`** returns
+  `{ ok:false, code:"already_exists" }` instead of overwriting.
+- **Outbox replay of an `ifAbsent` item is insert-only**: the flag rides in the
+  outbox payload, so a replay can never overwrite a node another writer created.
+- **T1 — revoke by hash prefix.** `POST /api/arcade/tokens/revoke` accepts
+  `{ customerId, appId, tokenHashPrefix }` (the 8-character prefix from
+  `list-tokens`) as an alternative to the full `token`. Same rules as rotate:
+  scoped to the tenant + app, prefix of at least 8 characters, an ambiguous
+  prefix is refused, an unknown or cross-cell prefix is `404`. Full-token revoke
+  is unchanged.
+
+### Changed
+- **Supersede guard, for every caller** (bulk `supersedes`,
+  `POST /api/node/supersede`, MCP `supersede_node`, the CLI, embedded). Per old
+  id: empty `supersededBy` proceeds; `supersededBy` equal to the new id is an
+  idempotent retry that changes nothing; a different id fails with
+  `already_superseded: <old> is already superseded by <other>`. **Behaviour
+  change:** a second supersede of an already-superseded node by a different id
+  now fails instead of overwriting `supersededBy`. The REST single route returns
+  `409` with `error:"already_superseded"` (the winner is in `supersededBy`). A
+  missing old id keeps `supersedes_apply_failed` / `old-not-found`.
+- **Bulk item with `supersedes`** that fails the guard writes nothing (the new
+  node is not left behind), and a list where any old id is taken fails whole.
+- **Idempotent bulk retry**: when every old id is already superseded by the
+  item's own id and the node at that id exists, the item returns
+  `ok:true, unchanged:true` and writes nothing (no upsert, no `updatedAt` change,
+  no outbox entry). The node fields of a retried item are therefore NOT
+  rewritten. An `ifAbsent` + `supersedes` retry succeeds for the same reason.
+- Bulk locks now cover the `supersedes` targets as well as the item ids
+  (sorted, still chunked at `BULK_LOCK_CHUNK_SIZE`), so concurrent supersedes
+  of one old node are serialised in-process.
+
+### Fixed
+- **Tag case in arcade mode.** A node written with `"Participant:Bob@Example.COM"`
+  was read back as `"participant:bob@example.com"`, but `bulk-list` / list
+  filtered by the lower-cased tag did not find it: the `tags` column kept the
+  written case and only the read path normalised. Writes on every arcade path
+  (single upsert, app-graph upsert, bulk script) now store tags through the
+  shared `normalizeTag` (trim, lower-case, 64-character cut). The arcade
+  filters (`bulkList`, `listNodes`, `findNodeIdsByTags`) match
+  `tags.toLowerCase() LIKE`, so rows written before this fix are found with no
+  data repair, including long (over 64 characters) mixed-case legacy tags, which
+  match on their normalised 64-character prefix. The sqlite engine's tag
+  filters use the same helper.
+
+### Known advisories
+`npm audit --omit=dev` for a fresh consumer install shows 7 findings (4 high,
+3 moderate), the same count as 3.31.0, from two chains that have no fixed
+upstream release and are not reachable from Lore:
+- `@lancedb/lancedb` > optional `@huggingface/transformers@3.0.2` > nested
+  `sharp@0.33.5` (GHSA-f88m-g3jw-g9cj, GHSA-rgj7-g3m4-5g8c, GHSA-wq5f-xc86-pv6w).
+  That transformers copy is used only by lancedb's embedding registry, which
+  Lore does not use (Lore embeds through its own provider). lancedb 0.40.0 still
+  carries it.
+- `mammoth` > `argparse@1.0.10` > `sprintf-js@1.0.3` (GHSA-hp3w-g68c-fv3c).
+  argparse is used only by mammoth's CLI (`bin/mammoth`), which Lore never
+  runs. mammoth 1.13.0 and sprintf-js 1.1.3 are the latest and still carry it.
+
+A fresh install already resolved the patched sharp, nodemailer and SDK, so the
+counts above do not move; the floors protect consumers with an existing
+lockfile. If you installed Lore before this release, refresh with
+`npm update sharp mailparser nodemailer @modelcontextprotocol/sdk` (or delete
+the lockfile entries and reinstall).
+
+### Notes
+- **DB-level safety on ArcadeDB and SQLite** (the engines that can be shared by
+  more than one Lore process): `ifAbsent` creates use `INSERT` and map the
+  unique-`id` violation to `already_exists`; the supersede claim is a conditional
+  `UPDATE ... WHERE supersededBy is empty or equals the new id` with an
+  affected-row check and a re-read on 0 rows. Ordering for a bulk item: write the
+  new node, then claim the old nodes; a lost claim hands back the claims taken in
+  this call and rolls the new node and its outbox entry back before aliases,
+  embeds and seeding.
+- **Other engines (Surreal, Dataplane/cloud)** are safe in-process only (checked
+  under the node lock); two Lore processes on one such backend can still race.
+- Embedded limitation: a cross-process `already_superseded` found at apply time
+  leaves the new node in place and returns the failure.
+
+
 ## [3.31.0] — 2026-10-08
 
 Aggregate numbers now respect item visibility. Since 3.29.0 / 3.30.0 a bound

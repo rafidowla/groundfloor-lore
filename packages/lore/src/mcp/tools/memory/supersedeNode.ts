@@ -19,6 +19,8 @@ import { redactError } from '../../../security/logRedact.js';
 import { supersedeHiddenFailure } from '../../../security/nodeWriteGate.js';
 import { tombstoneQuestionAliases } from '../../../core/nodeServiceVerbatim.js';
 import { MAX_NODE_FIELD_BYTES, exceedsNodeFieldCap } from '../../../engines/nodeFieldLimits.js';
+import { withNodeLocks } from '../../../core/nodeWriteLock.js';
+import { alreadySupersededMessage, type SupersedeResult } from '../../../engines/graphShared/supersedeGuard.js';
 
 export function registerSupersedeNodeTool(mcpServer: McpServer, deps: MemoryToolsDeps): void {
     mcpServer.tool(
@@ -84,12 +86,13 @@ export function registerSupersedeNodeTool(mcpServer: McpServer, deps: MemoryTool
                 // Row-scope write gate (bound actors only; unbound = no lookups). A hidden side
                 // gets the engine's own not-found refusal for that side, so the envelope and
                 // audit row are identical to a missing id and nothing is written.
-                const result: { ok: boolean; reason?: string } = (await supersedeHiddenFailure(old_id, new_id, {
+                const result: SupersedeResult = await withNodeLocks(_ws, [...new Set([old_id, new_id])], async () => (await supersedeHiddenFailure(old_id, new_id, {
                     workspace: resolved.resolvedWorkspace, store: deps.store, graphRegistry: deps.graphRegistry,
                     versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
                 }, (nid) => targetGraph.getNode(nid)))
-                    ?? await targetGraph.supersedeNode(old_id, new_id, reason);
-                if (result.ok) {
+                    ?? await targetGraph.supersedeNode(old_id, new_id, reason));
+                // Conditional writes R2 — a retry of a supersession that already stands changes nothing.
+                if (result.ok && !result.unchanged) {
                     // Fix #3 — also write the semantic graph edge so the
                     // supersession is queryable via traverse() and visible
                     // as a real edge in the network view. Non-fatal: the
@@ -155,7 +158,7 @@ export function registerSupersedeNodeTool(mcpServer: McpServer, deps: MemoryTool
                         text: JSON.stringify(
                             result.ok
                                 ? { success: true, oldId: old_id, newId: new_id, message: `Marked '${old_id}' as superseded by '${new_id}'.` }
-                                : { success: false, reason: result.reason, message: `Could not supersede: ${result.reason}` },
+                                : { success: false, reason: result.reason, message: result.supersededBy ? `Could not supersede: ${alreadySupersededMessage(old_id, result.supersededBy)}` : `Could not supersede: ${result.reason}` },
                             null,
                             2,
                         ),

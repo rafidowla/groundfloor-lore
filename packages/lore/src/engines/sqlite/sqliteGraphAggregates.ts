@@ -6,6 +6,7 @@
  * SurrealGraph's by construction.
  */
 
+import { normalizeTag } from '../normalizeTags.js';
 import type { BulkListPage, BulkListQuery, EdgeQuery, GraphStats, LoreEdge } from '../../providers/types.js';
 import { LoreGraphError } from '../loreGraphError.js';
 import { clampLimit } from '../topologyOverviewFold.js';
@@ -179,7 +180,7 @@ export async function bulkList(db: SqliteDb, q: BulkListQuery): Promise<BulkList
         params.push(...q.types);
     }
     if (q.tags && q.tags.length > 0) {
-        const lowered = q.tags.map((t) => t.toLowerCase());
+        const lowered = q.tags.map((t) => normalizeTag(t));
         filters.push(`EXISTS (SELECT 1 FROM json_each(nodes.tags) je WHERE je.value IN (${lowered.map(() => '?').join(', ')}))`);
         params.push(...lowered);
     }

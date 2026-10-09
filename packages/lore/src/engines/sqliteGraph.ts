@@ -60,6 +60,7 @@ import {
     type SubgraphNode,
 } from './graphNeighbors.js';
 import type { TopologyOverviewResult } from './topologyOverviewFold.js';
+import type { SupersedeResult } from './graphShared/supersedeGuard.js';
 
 export interface SqliteGraphOptions {
     /** Scopes read-cache keys so switching workspaces never serves a cross-hit. */
@@ -265,6 +266,16 @@ export class SqliteGraph implements LoreGraphHandle {
         });
     }
 
+    /** Conditional-writes R1 — INSERT-only create; throws NodeAlreadyExistsError when the id is taken. */
+    async insertNodeIfAbsent(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>): Promise<LoreNode> {
+        await this.initialize();
+        return this.nodeWriteChain.run(node.id, async () => {
+            const written = await writes.insertNodeIfAbsent(this.db(), node);
+            this.bumpWriteEpoch();
+            return written;
+        });
+    }
+
     async bulkUpsertNodes(
         batch: Array<Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>>,
     ): Promise<Array<{ id: string; ok: boolean; error?: string }>> {
@@ -343,7 +354,7 @@ export class SqliteGraph implements LoreGraphHandle {
 
     /* ── lifecycle / maintenance ─────────────────────────────────── */
 
-    async supersedeNode(oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }> {
+    async supersedeNode(oldId: string, newId: string, reason?: string): Promise<SupersedeResult> {
         await this.initialize();
         return this.nodeWriteChain.run(oldId, async () => {
             const result = await writes.supersedeNode(this.db(), (id) => this.getNode(id), oldId, newId, reason);

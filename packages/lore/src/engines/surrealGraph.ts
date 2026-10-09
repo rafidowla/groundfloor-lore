@@ -87,6 +87,7 @@ import { NODE_TABLE, ridToId, toNodeRid } from './surreal/surrealRecordId.js';
 import * as overview from './surreal/surrealGraphOverview.js';
 import { SurrealSchemaGraphOps } from './surreal/surrealSchemaGraphOps.js';
 import type { TopologyOverviewResult } from './topologyOverviewFold.js';
+import type { SupersedeResult } from './graphShared/supersedeGuard.js';
 
 export interface SurrealGraphOptions {
     /** Scopes read-cache keys so switching workspaces never serves a cross-hit. */
@@ -520,7 +521,7 @@ export class SurrealGraph implements LoreGraphHandle {
 
     /* ── lifecycle / maintenance ─────────────────────────────────── */
 
-    async supersedeNode(oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }> {
+    async supersedeNode(oldId: string, newId: string, reason?: string): Promise<SupersedeResult> {
         await this.initialize();
         return this.nodeWriteChain.run(oldId, async () => {
             const result = await writes.supersedeNode(this.query, (id) => this.getNode(id), oldId, newId, reason);

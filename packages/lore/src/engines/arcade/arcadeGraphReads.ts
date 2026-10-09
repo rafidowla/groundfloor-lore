@@ -13,7 +13,7 @@
 import type { GraphStats, LoreNode, BulkListQuery, BulkListPage } from '../../providers/types.js';
 import type { ArcadeHttp } from './arcadeHttp.js';
 import { rankSearchResults } from '../searchRanking.js';
-import { tagsToArray } from '../normalizeTags.js';
+import { tagsToArray, normalizeTag, MAX_TAG_LENGTH } from '../normalizeTags.js';
 import { parseNodeScopes } from './arcadeNodeScopes.js';
 
 /** Default row cap for search, mirrors the local engine's default. */
@@ -139,8 +139,8 @@ export async function listNodes(
     // CONTRACT-DEVIATION: tags column is JSON-encoded text (see header);
     // matching the quoted tag literal within that text is the closest
     // equivalent to exact-membership without a native array column.
-    sql += ` AND tags LIKE :tag`;
-    params['tag'] = `%"${tag.toLowerCase()}"%`;
+    sql += ` AND tags.toLowerCase() LIKE :tag`;
+    params['tag'] = arcadeTagLikePattern(tag);
   }
   if (project !== '*') {
     sql += ` AND project = :project`;
@@ -202,6 +202,21 @@ export async function getStats(
 }
 
 /**
+ * arcadeTagLikePattern — LIKE pattern matching one tag inside the
+ * JSON-encoded `tags` text. Always paired with `tags.toLowerCase() LIKE`, so
+ * rows written before tags were normalised on write (original case kept in
+ * the column) are still found without a data repair. The tag is normalised
+ * with the shared read/write helper (lowercase + MAX_TAG_LENGTH cut). A tag at
+ * the cut length drops the closing quote: a legacy row may still hold the
+ * uncut tag, whose normalised form is exactly this prefix.
+ */
+export function arcadeTagLikePattern(tag: string): string {
+  const t = normalizeTag(tag);
+  const quoted = JSON.stringify(t);
+  return t.length >= MAX_TAG_LENGTH ? `%${quoted.slice(0, -1)}%` : `%${quoted}%`;
+}
+
+/**
  * arcadeTagsToArray — parse the JSON-encoded tags string column into the
  * canonical normalized string[] (arcade stores tags as JSON, LocalGraph as a
  * STRING[]). Pre-parses the JSON so tagsToArray's Array branch runs instead of
@@ -257,8 +272,8 @@ export async function bulkListArcadeNodes(
     const ors: string[] = [];
     q.tags.forEach((t, i) => {
       const k = `tag${i}`;
-      ors.push(`tags LIKE :${k}`);
-      params[k] = `%"${t.toLowerCase()}"%`;
+      ors.push(`tags.toLowerCase() LIKE :${k}`);
+      params[k] = arcadeTagLikePattern(t);
     });
     filters.push(`(${ors.join(' OR ')})`);
   }

@@ -31,7 +31,13 @@ import {
   hashToken,
   openTokenDbForLifecycle,
   ArcadeAuthError,
+  assertValidTokenTtlSeconds,
+  DEFAULT_TOKEN_TTL_SECONDS,
 } from './arcadeAuthResolver.js';
+import type { Database as DatabaseType } from 'better-sqlite3';
+
+/** Shortest hash prefix rotate/revoke will resolve; `list-tokens` shows 8. */
+export const MIN_TOKEN_PREFIX_LEN = 8;
 
 /**
  * The operator drives rotate from `list-tokens` output, which exposes only a
@@ -45,7 +51,7 @@ export type RotateTarget =
   | { byToken: string }
   | { byPrefix: string; tenantId: string; appId: string };
 
-interface LiveTokenRow {
+export interface LiveTokenRow {
   token_hash: string;
   tenant_id: string;
   app_id: string;
@@ -58,17 +64,65 @@ interface LiveTokenRow {
 export interface RotateResult {
   /** The fresh plaintext token — returned EXACTLY once (only its hash is kept). */
   token: string;
-  /** The new token's expiry (mirrors the OLD token's remaining TTL posture:
-   *  a fresh 30d default when the old token was non-expiring, else it copies
-   *  the mode default — see note below). */
+  /** The new token's expiry: now + ttlSeconds (default 30 days). Never null. */
   expiresAt: string | null;
   /** The retired token's non-secret hash prefix, for operator correlation. */
   supersededPrefix: string;
 }
 
 /** Default arcade token TTL applied to the freshly-minted rotation token when
- *  the operator does not override it — matches DEFAULT_TOKEN_TTL_SECONDS. */
-const DEFAULT_ROTATE_TTL_SECONDS = 30 * 24 * 60 * 60;
+ *  the operator does not override it — matches DEFAULT_TOKEN_TTL_SECONDS. The
+ *  rotated token's lifetime does NOT copy the old token's remaining TTL. */
+const DEFAULT_ROTATE_TTL_SECONDS = DEFAULT_TOKEN_TTL_SECONDS;
+
+/**
+ * findTokenRowByPrefix — shared by rotate and revoke-by-prefix. Prefix lookup,
+ * scoped to the cell so a prefix can never select another cell's token. Returns
+ * undefined for no match or a prefix shorter than MIN_TOKEN_PREFIX_LEN; an
+ * ambiguous prefix within one cell is a hard error (fail loud rather than
+ * silently act on the wrong token).
+ */
+export function findTokenRowByPrefix(
+  db: DatabaseType,
+  tenantId: string,
+  appId: string,
+  prefix: string,
+): LiveTokenRow | undefined {
+  if (prefix.length < MIN_TOKEN_PREFIX_LEN) return undefined;
+  const matches = db
+    .prepare(
+      `SELECT token_hash, tenant_id, app_id, scopes, revoked_at, expires_at, label
+       FROM arcade_tokens
+       WHERE tenant_id = ? AND app_id = ? AND substr(token_hash, 1, length(?)) = ?`,
+    )
+    .all(tenantId, appId, prefix, prefix) as LiveTokenRow[];
+  if (matches.length > 1) {
+    throw new ArcadeAuthError(
+      'unknown_token',
+      `hash prefix '${prefix}' is ambiguous for cell (${tenantId}, ${appId})`,
+    );
+  }
+  return matches[0];
+}
+
+/**
+ * revokeTokenByPrefix — revoke the (single) token in cell (tenantId, appId)
+ * whose hash starts with `prefix`. Throws ArcadeAuthError('unknown_token') when
+ * nothing matches or the prefix is ambiguous. `revoked` is false when the token
+ * was already revoked (idempotent, like revokeToken).
+ */
+export function revokeTokenByPrefix(
+  target: { tenantId: string; appId: string; prefix: string },
+  opts?: { registryDbPath?: string },
+): { revoked: boolean; prefix: string } {
+  const db = openTokenDbForLifecycle(opts?.registryDbPath);
+  const row = findTokenRowByPrefix(db, target.tenantId, target.appId, target.prefix);
+  if (!row) throw new ArcadeAuthError('unknown_token', 'no binding for the token to revoke');
+  const info = db
+    .prepare(`UPDATE arcade_tokens SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL`)
+    .run(new Date().toISOString(), row.token_hash);
+  return { revoked: info.changes > 0, prefix: row.token_hash.slice(0, MIN_TOKEN_PREFIX_LEN) };
+}
 
 /**
  * rotateToken — retire `oldToken`, mint a replacement bound to the SAME cell +
@@ -83,12 +137,12 @@ export function rotateToken(
   input?: { graceSeconds?: number; ttlSeconds?: number },
   opts?: { registryDbPath?: string },
 ): RotateResult {
+  // G11 — same contract as issueToken: absent → default 30d, present → finite
+  // integer in [60s, 365d] or InvalidTokenTtlError. No non-expiring rotation.
+  assertValidTokenTtlSeconds(input?.ttlSeconds);
   const db = openTokenDbForLifecycle(opts?.registryDbPath);
   const graceSeconds = Math.max(0, Math.trunc(input?.graceSeconds ?? 0));
-  const ttlSeconds =
-    input?.ttlSeconds !== undefined && Number.isFinite(input.ttlSeconds) && input.ttlSeconds >= 0
-      ? Math.trunc(input.ttlSeconds)
-      : DEFAULT_ROTATE_TTL_SECONDS;
+  const ttlSeconds = input?.ttlSeconds ?? DEFAULT_ROTATE_TTL_SECONDS;
 
   const newToken = mintToken();
   const newHash = hashToken(newToken);
@@ -103,23 +157,7 @@ export function rotateToken(
         )
         .get(hashToken(target.byToken)) as LiveTokenRow | undefined;
     } else {
-      // Prefix lookup, scoped to the cell so a prefix can never select another
-      // cell's token. A prefix collision within one cell is a hard error (fail
-      // loud rather than silently rotate the wrong token).
-      const matches = db
-        .prepare(
-          `SELECT token_hash, tenant_id, app_id, scopes, revoked_at, expires_at, label
-           FROM arcade_tokens
-           WHERE tenant_id = ? AND app_id = ? AND substr(token_hash, 1, 8) = ?`,
-        )
-        .all(target.tenantId, target.appId, target.byPrefix) as LiveTokenRow[];
-      if (matches.length > 1) {
-        throw new ArcadeAuthError(
-          'unknown_token',
-          `hash prefix '${target.byPrefix}' is ambiguous for cell (${target.tenantId}, ${target.appId})`,
-        );
-      }
-      old = matches[0];
+      old = findTokenRowByPrefix(db, target.tenantId, target.appId, target.byPrefix);
     }
 
     if (!old) throw new ArcadeAuthError('unknown_token', 'no binding for the token to rotate');
@@ -132,8 +170,7 @@ export function rotateToken(
 
     const now = new Date();
     const nowIso = now.toISOString();
-    const newExpiresAt =
-      ttlSeconds === 0 ? null : new Date(now.getTime() + ttlSeconds * 1000).toISOString();
+    const newExpiresAt = new Date(now.getTime() + ttlSeconds * 1000).toISOString();
 
     // (b) INSERT the replacement copying the reach-defining binding verbatim.
     db.prepare(

@@ -55,6 +55,8 @@ import { recordHotWriteBatch } from '../../../outbox/hotLane.js';
 import { readInlinePriors, retractBulkNodeUpsert, undoBulkGraphWrite } from './bulkWriteRollback.js';
 import { supersedesVisibilityFromDeps } from '../../../security/nodeWriteGate.js';
 import { resolveGraph, writeWorkspaceNotFound } from './bulkWriteWorkspace.js';
+import { bulkLockIds, bulkOutboxPayload, guardBulkChunk, writeBulkChunk, undoLostClaim } from './bulkWriteConditional.js';
+import { alreadyExistsError, isNodeAlreadyExists } from '../../../engines/graphShared/conditionalInsert.js';
 import { bulkScopeDeps, blockedBulkUpsertIds, ID_UNAVAILABLE_ITEM_ERROR, storedScopesResolver } from './bulkWriteScope.js';
 import type { ItemScopeDeps } from '../../../security/itemScopes.js';
 import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE } from '../../../core/nodeWriteLock.js';
@@ -75,6 +77,7 @@ import type { OutboxEntry, OutboxStore } from '../../../outbox/types.js';
 import type { WorkspaceVerbatimResolver } from '../../../outbox/workspaceVerbatimResolver.js';
 import type { VerbatimStoreApi } from '../../../engines/verbatimStoreApi.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
+import type { LoreNode } from '../../../providers/types.js';
 
 // Widened when the local graph engine changed: naming CONCRETE classes excluded SurrealGraph.
 type LoreGraph = LoreGraphHandle;
@@ -133,6 +136,8 @@ export interface BulkResult {
     /** D5 round 4 (#4) — set when applyWriteTimeSupersedes() partially failed after the write. */
     applied?: string[];
     unapplied?: Array<{ id: string; reason: string }>;
+    /** Conditional writes R2 — a pure retry of a supersede item: nothing was written. */
+    unchanged?: boolean;
 }
 
 interface NodeInput {
@@ -146,6 +151,8 @@ interface NodeInput {
     /** D5 — per-item supersedes/force, mirrors the single-write surfaces. */
     supersedes?: unknown;
     force?: unknown;
+    /** Conditional writes R1 — create only; fails `already_exists` if any node holds the id. Never stored. */
+    ifAbsent?: unknown;
 }
 
 export interface EdgeInput {
@@ -320,7 +327,7 @@ async function handleBulkNodes(
     // their slot in `results` via an index map so the final result
     // array matches the request order 1:1.
     const items = parsed.nodes as NodeInput[];
-    const validSpecs: Array<{ idx: number; raw: NodeInput; embedMode: BulkEmbedMode; questions: string[] | undefined; supersedes: string[] | undefined; supersessionWarning: string | undefined }> = [];
+    const validSpecs: Array<{ idx: number; raw: NodeInput; embedMode: BulkEmbedMode; questions: string[] | undefined; supersedes: string[] | undefined; supersessionWarning: string | undefined; ifAbsent: boolean }> = [];
     const results: Array<BulkResult & { id?: string }> = new Array(items.length);
     // D5 — batch-level `force` (request body `force: true`) applies to every
     // item that doesn't set its own `force`; an item-level `force` wins.
@@ -391,6 +398,14 @@ async function handleBulkNodes(
             results[i] = { ok: false, id: raw.id as string, error: `unknown_field: ${forbidden.join(', ')}` };
             continue;
         }
+        // Conditional writes R1 — `ifAbsent` is a write-time directive (stripped
+        // like `supersedes`/`force` below); anything but a boolean is refused.
+        const ifAbsentRaw = (raw as Record<string, unknown>).ifAbsent;
+        if (ifAbsentRaw !== undefined && typeof ifAbsentRaw !== 'boolean') {
+            results[i] = { ok: false, id: raw.id as string, error: 'invalid_if_absent: ifAbsent must be a boolean' };
+            continue;
+        }
+        delete (raw as Record<string, unknown>).ifAbsent;
         // After the shape/forbidden-field checks, before any outbox row or write.
         if (blockedIds.has(raw.id)) {
             results[i] = { ok: false, id: raw.id, error: ID_UNAVAILABLE_ITEM_ERROR };
@@ -475,9 +490,14 @@ async function handleBulkNodes(
             itemSupersessionWarning = verdict.supersessionWarning;
         }
         const embedMode = parseBulkEmbedMode(raw.embed, callEmbedMode);
-        validSpecs.push({ idx: i, raw, embedMode, questions: itemQuestions, supersedes: itemSupersedes, supersessionWarning: itemSupersessionWarning });
+        validSpecs.push({ idx: i, raw, embedMode, questions: itemQuestions, supersedes: itemSupersedes, supersessionWarning: itemSupersessionWarning, ifAbsent: ifAbsentRaw === true });
     }
     let succeeded = 0;
+    let unchangedCount = 0; // R2 pure retries: ok, but nothing written and nothing counted against the quota
+    const outcome = {
+        fail: (s: { idx: number; raw: { id?: unknown } }, error: string) => { results[s.idx] = { ok: false, id: s.raw.id as string, error }; },
+        unchanged: (s: { idx: number; raw: { id?: unknown } }) => { unchangedCount++; results[s.idx] = { ok: true, id: s.raw.id as string, unchanged: true }; },
+    };
     // Sprint E2 — LOCAL queued-embed accumulator (one embed.batch row). Collected
     // AFTER substrate upsert succeeds so a failed upsert never leaks in.
     const embedTexts: string[] = [];
@@ -525,16 +545,18 @@ async function handleBulkNodes(
         // chunk — `withNodeLocks` holds all of a chunk's ids, acquired in
         // sorted order (deadlock-free; see nodeWriteLock.ts rule 3).
         for (const lockedChunk of chunkForLocking(validSpecs, BULK_LOCK_CHUNK_SIZE)) {
-            await withNodeLocks(lockWorkspace, lockedChunk.map(({ raw }) => raw.id as string), async () => {
-                // 3.26.0 — the nodes as they are now, so a failed inline seed restores an existing node (bulkWriteRollback.ts).
-                const { chunk, priors } = await readInlinePriors(batchGraph, lockedChunk, (s, error) => { results[s.idx] = { ok: false, id: s.raw.id as string, error }; });
+            await withNodeLocks(lockWorkspace, bulkLockIds(lockedChunk), async () => {
+                // Conditional writes: refuse `ifAbsent` / already-superseded items and skip pure retries BEFORE any side effect.
+                const guarded = await guardBulkChunk(batchGraph, lockedChunk, outcome);
+                // 3.26.0 — the nodes as they are now, so a failed inline seed (or a lost supersede claim) restores an existing node (bulkWriteRollback.ts).
+                const { chunk, priors } = await readInlinePriors(batchGraph, guarded, (s, error) => { results[s.idx] = { ok: false, id: s.raw.id as string, error }; });
                 let chunkEntries: OutboxEntry[] | null = null;
                 if (deps.outboxStore && chunk.length > 0) {
                     try {
-                        chunkEntries = await recordHotWriteBatch(deps.outboxStore, chunk.map(({ raw }) => ({
+                        chunkEntries = await recordHotWriteBatch(deps.outboxStore, chunk.map((spec) => ({
                             workspace: requestedWorkspace!,
                             operationKind: 'node.upsert',
-                            payload: raw as unknown as Record<string, unknown>,
+                            payload: bulkOutboxPayload(spec),
                             initiator: 'http:POST /api/nodes/bulk',
                             operation: 'graph.upsert',
                         })));
@@ -544,9 +566,7 @@ async function handleBulkNodes(
                         return;
                     }
                 }
-                const batchResults = await batchGraph.bulkUpsertNodes(
-                    chunk.map((s) => s.raw as unknown as Parameters<typeof batchGraph.bulkUpsertNodes>[0][number]),
-                );
+                const batchResults = await writeBulkChunk(batchGraph, chunk);
                 for (let k = 0; k < chunk.length; k++) {
                     const { idx, raw, embedMode, questions, supersessionWarning } = chunk[k]!;
                     const br = batchResults[k]!;
@@ -595,10 +615,17 @@ async function handleBulkNodes(
                             // D5 round 4 (#4) — surface applied/unapplied ids
                             // when applyWriteTimeSupersedes() partially
                             // succeeded, instead of collapsing to one message.
+                            if (applyResult.code === 'already_superseded') {
+                                // R2 — another writer holds one of the old nodes: the item fails whole and nothing of it stays (the new node and its outbox row are taken back).
+                                results[idx] = { ok: false, id: raw.id as string, error: `already_superseded: ${applyResult.error.message}` };
+                                succeeded--;
+                                await undoLostClaim({ graph: batchGraph, id: raw.id as string, prior: priors.get(raw.id as string), raw: raw as Record<string, unknown>, outboxStore: deps.outboxStore, entry: chunkEntries?.[k], workspace: requestedWorkspace! });
+                                continue;
+                            }
                             if (applyResult.code === 'supersedes_partial') {
                                 results[idx] = { ok: false, id: raw.id as string, error: `supersedes_partial: ${applyResult.error.message}`, applied: applyResult.applied, unapplied: applyResult.unapplied };
                             } else {
-                                results[idx] = { ok: false, id: raw.id as string, error: `supersedes_apply_failed: ${applyResult.error.message}` };
+                                results[idx] = { ok: false, id: raw.id as string, error: `supersedes_apply_failed: ${(applyResult as { error: Error }).error.message}` };
                             }
                         }
                     }
@@ -699,15 +726,23 @@ async function handleBulkNodes(
         // commit stays atomic with that chunk's sequential write loop, instead
         // of racing a concurrent same-id delete the way the pre-lock commit
         // used to.
-        for (const chunk of chunkForLocking(validSpecs, BULK_LOCK_CHUNK_SIZE)) {
-            await withNodeLocks(lockWorkspace, chunk.map(({ raw }) => raw.id as string), async () => {
+        for (const lockedSpecs of chunkForLocking(validSpecs, BULK_LOCK_CHUNK_SIZE)) {
+            await withNodeLocks(lockWorkspace, bulkLockIds(lockedSpecs), async () => {
+                const chunk = await guardBulkChunk(targetGraph, lockedSpecs, outcome);
+                // A lost supersede claim must restore an existing node: read the priors of the items that have a list.
+                const claimPriors = new Map<string, LoreNode | null>();
+                if (typeof targetGraph.getNode === 'function') {
+                    for (const spec of chunk) if (spec.supersedes?.length && !claimPriors.has(spec.raw.id as string)) {
+                        try { claimPriors.set(spec.raw.id as string, await targetGraph.getNode(spec.raw.id as string)); } catch { /* undo falls back to delete */ }
+                    }
+                }
                 let chunkEntries: OutboxEntry[] | null = null;
                 if (deps.outboxStore && chunk.length > 0) {
                     try {
-                        chunkEntries = await recordHotWriteBatch(deps.outboxStore, chunk.map(({ raw }) => ({
+                        chunkEntries = await recordHotWriteBatch(deps.outboxStore, chunk.map((spec) => ({
                             workspace: requestedWorkspace!,
                             operationKind: 'node.upsert',
-                            payload: raw as unknown as Record<string, unknown>,
+                            payload: bulkOutboxPayload(spec),
                             initiator: 'http:POST /api/nodes/bulk',
                             operation: 'graph.upsert',
                         })));
@@ -719,7 +754,7 @@ async function handleBulkNodes(
                 }
                 for (let k = 0; k < chunk.length; k++) {
                     const { idx, raw, embedMode, questions, supersessionWarning } = chunk[k]!;
-                    let r: BulkResult & { id?: string } = await upsertOne(target, raw, deps, embedMode);
+                    let r: BulkResult & { id?: string } = await upsertOne(target, raw, deps, embedMode, chunk[k]!.ifAbsent);
                     if (r.ok) {
                         succeeded++;
                         if (supersessionWarning) r = { ...r, supersessionWarning };
@@ -738,13 +773,19 @@ async function handleBulkNodes(
                             });
                             if (!applyResult.ok) {
                                 succeeded--;
+                                if (applyResult.code === 'already_superseded') {
+                                    // R2 — see the batchGraph branch: the item fails whole, nothing of it stays.
+                                    results[idx] = { ok: false, id: raw.id as string, error: `already_superseded: ${applyResult.error.message}` };
+                                    await undoLostClaim({ graph: targetGraph, id: raw.id as string, prior: claimPriors.get(raw.id as string), raw: raw as Record<string, unknown>, outboxStore: deps.outboxStore, entry: chunkEntries?.[k], workspace: requestedWorkspace! });
+                                    continue;
+                                }
                                 // D5 round 4 (#4) — surface applied/unapplied
                                 // ids on a partial failure, same as the
                                 // batchGraph branch above.
                                 if (applyResult.code === 'supersedes_partial') {
                                     r = { ok: false, id: raw.id as string, error: `supersedes_partial: ${applyResult.error.message}`, applied: applyResult.applied, unapplied: applyResult.unapplied };
                                 } else {
-                                    r = { ok: false, id: raw.id as string, error: `supersedes_apply_failed: ${applyResult.error.message}` };
+                                    r = { ok: false, id: raw.id as string, error: `supersedes_apply_failed: ${(applyResult as { error: Error }).error.message}` };
                                 }
                             }
                         }
@@ -829,11 +870,12 @@ async function handleBulkNodes(
     deps.auditLog.log({
         toolName: 'bulk_store_nodes',
         args: { count: parsed.nodes.length, workspace: requestedWorkspace ?? null, surface: 'http', embedMode: callEmbedMode },
-        result: succeeded === parsed.nodes.length ? 'success' : 'error',
-        resultDetail: succeeded === parsed.nodes.length ? undefined : `${parsed.nodes.length - succeeded} item failure(s)`,
+        result: succeeded + unchangedCount === parsed.nodes.length ? 'success' : 'error',
+        resultDetail: succeeded + unchangedCount === parsed.nodes.length ? undefined : `${parsed.nodes.length - succeeded - unchangedCount} item failure(s)`,
         durationMs: 0,
     });
-    writeJson(res, 200, { ok: succeeded === parsed.nodes.length, count: parsed.nodes.length, succeeded, results });
+    const okCount = succeeded + unchangedCount;
+    writeJson(res, 200, { ok: okCount === parsed.nodes.length, count: parsed.nodes.length, succeeded: okCount, results });
     return true;
 }
 
@@ -842,6 +884,7 @@ async function upsertOne(
     raw: NodeInput,
     deps: BulkWriteDeps,
     embedMode: BulkEmbedMode = 'inline',
+    ifAbsent = false,
 ): Promise<BulkResult & { id?: string }> {
     if (!raw || typeof raw !== 'object') return { ok: false, error: 'item must be an object' };
     if (typeof raw.id !== 'string' || typeof raw.type !== 'string' || typeof raw.label !== 'string') {
@@ -854,7 +897,7 @@ async function upsertOne(
         // A graph without getNode keeps the pre-3.26 undo (delete).
         const readGraph = storageClient.rawGraph();
         const prior = embedMode === 'inline' && typeof readGraph.getNode === 'function' ? await readGraph.getNode(raw.id) : undefined;
-        const node = await storageClient.upsertNode(raw as never);
+        const node = ifAbsent ? await storageClient.insertNodeIfAbsent(raw as never) : await storageClient.upsertNode(raw as never);
         // Sprint E2 — only legacy 'inline' invokes the synchronous per-item
         // verbatim store. 'queued' rolls up into ONE embed.batch row by the
         // caller after this loop; 'skip' never embeds (caller re-embeds later).
@@ -904,6 +947,6 @@ async function upsertOne(
         }
         return { ok: true, id: raw.id };
     } catch (err) {
-        return { ok: false, id: raw.id, error: (err as Error).message };
+        return { ok: false, id: raw.id, error: isNodeAlreadyExists(err) ? alreadyExistsError(err) : (err as Error).message };
     }
 }

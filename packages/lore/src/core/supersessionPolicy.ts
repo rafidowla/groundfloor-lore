@@ -46,6 +46,7 @@ import { redactError } from '../security/logRedact.js';
 import { log } from '../logger.js';
 import { getWorkspaceSupersessionPolicy, loadWorkspacesIfPresent, type WorkspaceSupersessionPolicy } from '../config/workspaces.js';
 import type { OutboxStore } from '../outbox/types.js';
+import { ALREADY_SUPERSEDED_REASON, alreadySupersededMessage, type SupersedeResult } from '../engines/graphShared/supersedeGuard.js';
 
 /** Node types D5 enforcement applies to. Everything else (bug_pattern,
  *  pattern, etc.) is unaffected — those types don't carry the "this is the
@@ -89,7 +90,7 @@ export type SupersessionCheckCode = 'missing_supersedes_field' | 'prose_supersed
 
 export type SupersessionCheckResult =
     | { ok: true; supersessionWarning?: string }
-    | { ok: false; code: SupersessionCheckCode | 'supersedes_apply_failed'; error: Error };
+    | { ok: false; code: SupersessionCheckCode | 'supersedes_apply_failed' | 'already_superseded'; error: Error };
 
 /**
  * D5 round 4 (#3) — a near-duplicate lookup bound to one workspace, now
@@ -222,7 +223,9 @@ export async function checkSupersessionPolicy(input: SupersessionCheckInput): Pr
  *  LocalGraph and DataplaneGraph already implement this (it's exactly what
  *  the existing `supersede_node` MCP tool calls). */
 export interface SupersessionWriteGraph {
-    supersedeNode(oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }>;
+    supersedeNode(oldId: string, newId: string, reason?: string): Promise<SupersedeResult>;
+    /** Optional: lets a refused claim hand back the claims the same call already took. */
+    unsupersedeNode?(id: string): Promise<boolean>;
     addEdge(edge: { sourceId: string; targetId: string; relation: string; confidence?: string; confidenceScore?: number }): Promise<unknown>;
 }
 
@@ -270,10 +273,19 @@ export async function applyWriteTimeSupersedes(params: {
 }): Promise<
     | { ok: true }
     | { ok: false; code: 'supersedes_partial'; applied: string[]; unapplied: Array<{ id: string; reason: string }>; error: Error }
+    | { ok: false; code: 'already_superseded'; error: Error }
 > {
     const { targetGraph, supersedes, newId, workspace, initiator, outboxStore, logPrefix, isVisible } = params;
     const applied: string[] = [];
     const unapplied: Array<{ id: string; reason: string }> = [];
+    // Conditional-writes R2 — phase 1 claims every old node, phase 2 writes the
+    // edges. A claim refused with `already-superseded` (another successor holds
+    // the node) fails the WHOLE list: the claims this call already took are
+    // handed back (`claimed` = took the node, not just found it already ours) and
+    // no edge is written, so the caller can roll its new node back and leave
+    // nothing behind.
+    const claimed: string[] = [];
+    const lost: Array<{ id: string; by: string }> = [];
     for (const oldId of supersedes) {
         if (oldId === newId) continue; // a node cannot supersede itself
         if (isVisible && !(await isVisible(oldId))) {
@@ -281,17 +293,36 @@ export async function applyWriteTimeSupersedes(params: {
             unapplied.push({ id: oldId, reason: 'old-not-found' });
             continue;
         }
-        let result: { ok: boolean; reason?: string };
+        let result: SupersedeResult;
         try {
             result = await targetGraph.supersedeNode(oldId, newId, 'supersedes (write-time enforcement, D5)');
         } catch (err) {
             result = { ok: false, reason: redactError(err) };
+        }
+        if (!result.ok && result.reason === ALREADY_SUPERSEDED_REASON) {
+            lost.push({ id: oldId, by: result.supersededBy ?? 'another node' });
+            break; // the whole item fails — no point claiming the rest
         }
         if (!result.ok) {
             unapplied.push({ id: oldId, reason: result.reason ?? 'unknown reason' });
             continue; // D5 round 4 (#4): keep going — attempt every remaining id.
         }
         applied.push(oldId);
+        if (!result.unchanged) claimed.push(oldId);
+    }
+    if (lost.length > 0) {
+        for (const id of claimed) {
+            try { await targetGraph.unsupersedeNode?.(id); } catch (err) {
+                log.warn(`${logPrefix} write-time supersedes: could not hand back the claim on '${id}' after a refused list: ${redactError(err)}`);
+            }
+        }
+        return {
+            ok: false,
+            code: 'already_superseded',
+            error: new Error(lost.map((l) => alreadySupersededMessage(l.id, l.by)).join('; ')),
+        };
+    }
+    for (const oldId of applied) {
         const edge = {
             sourceId: newId,
             targetId: oldId,
@@ -382,9 +413,11 @@ export async function validateSupersedesIds(params: {
     const uniqueIds = Array.from(new Set(supersedes)).filter((sid) => sid !== id);
     const missing: string[] = [];
     const archived: string[] = [];
+    const targets = new Map<string, SupersedesCheckNode>();
     for (const sid of uniqueIds) {
         const node = await getNode(sid);
         if (!node || (isVisible && !(await isVisible(sid)))) { missing.push(sid); continue; }
+        targets.set(sid, node);
         if (node.status === 'archived') archived.push(sid);
     }
     if (missing.length > 0) {
@@ -424,6 +457,18 @@ export async function validateSupersedesIds(params: {
             }
             current = next;
         }
+    }
+    // Conditional-writes R2 — a node has one successor. An old node whose
+    // `supersededBy` names a DIFFERENT id refuses the whole write (nothing
+    // written); one already pointing at `id` is an idempotent retry and passes.
+    // Runs after the cycle walk so those inputs keep their existing message.
+    const taken: string[] = [];
+    for (const [sid, node] of targets) {
+        const by = node.supersededBy;
+        if (by && by !== id) taken.push(alreadySupersededMessage(sid, by));
+    }
+    if (taken.length > 0) {
+        return { ok: false, code: 'already_superseded', error: new Error(taken.join('; ')) };
     }
     return { ok: true };
 }
@@ -518,6 +563,7 @@ export async function runSupersessionApply(params: {
 }): Promise<
     | { ok: true }
     | { ok: false; code: 'supersedes_apply_failed'; error: Error }
+    | { ok: false; code: 'already_superseded'; error: Error }
     | { ok: false; code: 'supersedes_partial'; applied: string[]; unapplied: Array<{ id: string; reason: string }>; error: Error }
 > {
     const { supersedes, targetGraph } = params;

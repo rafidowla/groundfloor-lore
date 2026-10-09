@@ -158,9 +158,9 @@ async function main(): Promise<void> {
     seedRegistry(REG, 'svc-pw');
     closeTokenDb();
     // Issue a token that expires immediately (1 second ago via ttlSeconds path):
-    // issue with a tiny positive TTL, then assert expiry after it lapses.
+    // issue with the minimum TTL (60s), then assert expiry after it lapses.
     const { token, expiresAt } = issueToken(
-      { tenantId: 'acme', appId: 'dev', scopes: ['read'], ttlSeconds: 1 },
+      { tenantId: 'acme', appId: 'dev', scopes: ['read'], ttlSeconds: 60 },
       { registryDbPath: REG },
     );
     check('issueToken: returns { token, expiresAt }', typeof token === 'string' && typeof expiresAt === 'string');
@@ -183,11 +183,13 @@ async function main(): Promise<void> {
     const p = resolvePrincipal(live.token, { registryDbPath: REG });
     check('resolvePrincipal: live token resolves to the cell', p.tenantId === 'acme' && p.appId === 'dev');
 
-    // Non-expiring token (ttlSeconds:0).
+    // G11 — ttlSeconds:0 no longer mints a non-expiring token; it throws.
     closeTokenDb();
-    const forever = issueToken({ tenantId: 'acme', appId: 'dev', scopes: ['read'], ttlSeconds: 0 }, { registryDbPath: REG });
-    check('issueToken: ttlSeconds=0 ⇒ non-expiring (expiresAt null)', forever.expiresAt === null);
-    check('resolvePrincipal: non-expiring token resolves', resolvePrincipal(forever.token, { registryDbPath: REG }).appId === 'dev');
+    expectThrow(
+      'issueToken: ttlSeconds=0 ⇒ throws (no non-expiring token, G11)',
+      () => issueToken({ tenantId: 'acme', appId: 'dev', scopes: ['read'], ttlSeconds: 0 }, { registryDbPath: REG }),
+      (e) => e instanceof Error && /ttlSeconds/.test((e as Error).message),
+    );
     closeTokenDb();
     closeRegistryDb();
     fs.rmSync(REG, { force: true });

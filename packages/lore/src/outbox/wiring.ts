@@ -17,6 +17,7 @@
  * replicator stays dormant so test-mode invariants hold.
  */
 
+import { replayIfAbsentUpsert, type ConditionalInsertGraph } from '../engines/graphShared/conditionalInsert.js';
 import { purgeVerbatimRows, type PurgeCapableStore } from '../core/verbatimPurge.js';
 import type { LoreNode, LoreEdge } from '../providers/types.js';
 import type { SyncEngine } from '../engines/syncEngine.js';
@@ -267,9 +268,12 @@ export function wireOutbox(input: {
                 const g = await resolveGraph(workspace);
                 const id = String((payload as { id?: unknown }).id ?? '');
                 const replay = (g as { replayNodeUpsert?: (p: LoreNode, e?: OutboxEntry, n?: NewerSave) => Promise<unknown> }).replayNodeUpsert;
-                await withNodeLock(workspace ?? '', id, () => (typeof replay === 'function'
-                    ? replay(payload as unknown as LoreNode, entry, newerSave(id, entry))
-                    : g.upsertNode(payload as unknown as LoreNode)));
+                // Conditional writes R1 — an `ifAbsent` create replays insert-only (no-op when the id is taken).
+                await withNodeLock(workspace ?? '', id, () => (payload['ifAbsent'] === true
+                    ? replayIfAbsentUpsert(g as unknown as ConditionalInsertGraph, payload)
+                    : typeof replay === 'function'
+                        ? replay(payload as unknown as LoreNode, entry, newerSave(id, entry))
+                        : g.upsertNode(payload as unknown as LoreNode)));
             },
             // Round-E X-edges — edges now DO take a lock: a per-triple one
             // (core/nodeWriteLock.ts `withEdgeLock`), keyed on

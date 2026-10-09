@@ -14,7 +14,8 @@ import { writePermissionDenied } from '../../../../security/rebacGate.js';
 import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, extractWorkspace, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { WorkspaceNotFoundError } from '../../../../engines/localGraphRegistry.js';
 import { recordHotWrite } from '../../../../outbox/hotLane.js';
-import { withEdgeLock, withEdgeLocks, type EdgeLockTriple } from '../../../../core/nodeWriteLock.js';
+import { withEdgeLock, withEdgeLocks, withNodeLocks, type EdgeLockTriple } from '../../../../core/nodeWriteLock.js';
+import { ALREADY_SUPERSEDED_REASON, alreadySupersededMessage, type SupersedeResult } from '../../../../engines/graphShared/supersedeGuard.js';
 import { tombstoneQuestionAliases } from '../../../../core/nodeServiceVerbatim.js';
 import { log } from '../../../../logger.js';
 import type { LoreGraph, NodesDeps } from './types.js';
@@ -103,9 +104,14 @@ export async function handleSupersede(req: IncomingMessage, res: ServerResponse,
             workspace: supersedeWs, store: deps.store, graphRegistry: deps.graphRegistry,
             versionStore: deps.versionStore, workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
         };
-        const result: { ok: boolean; reason?: string } = (await supersedeHiddenFailure(parsed.oldId, parsed.newId, writeGate, (nid) => targetGraph.getNode(nid)))
-            ?? await targetGraph.supersedeNode(parsed.oldId, parsed.newId, parsed.reason);
-        if (result.ok) {
+        const oldId = parsed.oldId;
+        const newId = parsed.newId;
+        // Conditional writes R2 — serialised with every other writer of these ids in this process;
+        // the engine's own conditional claim covers other processes.
+        const result: SupersedeResult = await withNodeLocks(supersedeWs, [...new Set([oldId, newId])], async () => (await supersedeHiddenFailure(oldId, newId, writeGate, (nid) => targetGraph.getNode(nid)))
+            ?? await targetGraph.supersedeNode(oldId, newId, parsed.reason));
+        // A retry of a supersession that already stands changes nothing: no edge rewrite, no alias tombstone.
+        if (result.ok && !result.unchanged) {
             // Parity with the supersede_node MCP tool (its Fix #3 / C-R3-02
             // block): also write the semantic `supersedes` edge so the
             // supersession is queryable via traverse()/subgraph from the REST
@@ -156,6 +162,12 @@ export async function handleSupersede(req: IncomingMessage, res: ServerResponse,
             resultDetail: result.ok ? undefined : result.reason,
             durationMs: 0,
         });
+        if (!result.ok && result.reason === ALREADY_SUPERSEDED_REASON) {
+            writeError(res, 409, 'already_superseded', alreadySupersededMessage(oldId, result.supersededBy ?? ''), {
+                error: 'already_superseded', ok: false, reason: result.reason, supersededBy: result.supersededBy,
+            });
+            return;
+        }
         res.writeHead(result.ok ? 200 : 400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(result));
     } catch (supErr) {

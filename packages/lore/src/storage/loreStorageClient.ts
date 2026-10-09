@@ -59,6 +59,8 @@ import type { Bm25Envelope } from '../engines/verbatimBm25Result.js';
 import { assertSurrealLicenceBoundary } from './surrealLicenceGuard.js';
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
 import { listNodesAsOf as queryNodesAsOf, type ListNodesAsOfOptions } from '../core/temporalQuery.js';
+import type { SupersedeResult } from '../engines/graphShared/supersedeGuard.js';
+import { createNodeIfAbsent, type NodeInput } from '../engines/graphShared/conditionalInsert.js';
 
 /* ─── Public handle types ─────────────────────────────────────────── */
 
@@ -74,8 +76,10 @@ import { listNodesAsOf as queryNodesAsOf, type ListNodesAsOfOptions } from '../c
  * cq-lore-storage-client-as-never).
  */
 export interface LoreGraphHandle extends GraphProvider {
-    supersedeNode(oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }>;
+    supersedeNode(oldId: string, newId: string, reason?: string): Promise<SupersedeResult>;
     unsupersedeNode(id: string): Promise<boolean>;
+    /** Conditional writes R1 — create-only; throws NodeAlreadyExistsError when the id is taken. Engines whose store enforces it (sqlite, arcade) implement it as a DB-level INSERT. */
+    insertNodeIfAbsent?(node: NodeInput): Promise<LoreNode>;
     markStaleByTags(tags: string[]): Promise<number>;
     /**
      * 2026-09-03 (X-markstale audit fix) — the two id-scoped primitives the
@@ -366,6 +370,15 @@ export class LoreStorageClient {
     }
 
     /**
+     * Conditional writes R1 — create only. Not wrapped in the conflict retry: a
+     * retry after a half-applied attempt would find our own row and misreport
+     * `already_exists`. Throws NodeAlreadyExistsError when the id is taken.
+     */
+    async insertNodeIfAbsent(node: NodeInput): Promise<LoreNode> {
+        return createNodeIfAbsent(this.g() as Parameters<typeof createNodeIfAbsent>[0], node);
+    }
+
+    /**
      * (1b) bulkUpsertNodes — RA2-reaudit2 batched write surface. Delegates to
      * the local graph's single-trip bulkUpsertNodes (~1.9x faster than N×
      * upsertNode on a full re-scan: one connection/queue-slot for the batch,
@@ -489,7 +502,7 @@ export class LoreStorageClient {
         oldId: string,
         newId: string,
         reason?: string,
-    ): Promise<{ ok: boolean; reason?: string }> {
+    ): Promise<SupersedeResult> {
         return this.g().supersedeNode(oldId, newId, reason);
     }
 

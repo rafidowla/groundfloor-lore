@@ -28,6 +28,7 @@
  * UNWIRED.
  */
 
+import { replayIfAbsentUpsert } from '../graphShared/conditionalInsert.js';
 import type { OutboxStore } from '../../outbox/types.js';
 import type { DispatcherSubstrates } from '../../outbox/dispatcher.js';
 import type { OutboxLagCache } from '../../outbox/lagCache.js';
@@ -145,6 +146,8 @@ export function wireArcadeReplicator(input: {
   const substrates: DispatcherSubstrates = {
     upsertNode: async (payload, workspace) => {
       const { graph } = await resolveCell(workspace);
+      // Conditional writes R1 — an `ifAbsent` create replays insert-only.
+      if (payload['ifAbsent'] === true) { await replayIfAbsentUpsert(graph, payload); return; }
       await graph.upsertNode(payload as unknown as LoreNode);
     },
     // 3.26.0: both edge handlers hold the per-edge lock the request-path edge

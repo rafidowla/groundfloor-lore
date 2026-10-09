@@ -525,11 +525,15 @@ async function testSecrets(): Promise<void> {
   check('SECRETS', 'issue-token body carries no db secret', !!secret && !issue.raw.includes(secret));
 
   // (c) expired token rejected PRE-HTTP (fail-closed, no ArcadeDB call). Issue a
-  //     token with ttlSeconds:1, wait it out, assert the resolver throws
+  //     token with the minimum ttlSeconds (60 — G11 floor), force its expiry
+  //     into the past in the registry, assert the resolver throws
   //     expired_token WITHOUT any HTTP to ArcadeDB.
-  const shortIssue = await req('POST', `/api/arcade/apps/${CELL_ROT.customerId}/${CELL_ROT.appId}/tokens`, { token: operatorToken, body: { scopes: ['read'], ttlSeconds: 1 } });
+  const shortIssue = await req('POST', `/api/arcade/apps/${CELL_ROT.customerId}/${CELL_ROT.appId}/tokens`, { token: operatorToken, body: { scopes: ['read'], ttlSeconds: 60 } });
   const shortToken = String(shortIssue.json['token']);
-  await new Promise((r) => setTimeout(r, 1300));
+  const registryStore = await dynImport('../packages/lore/src/engines/arcade/arcadeRegistryStore.js');
+  registryStore.openRegistryDb()
+    .prepare(`UPDATE arcade_tokens SET expires_at = ? WHERE token_hash = ?`)
+    .run(new Date(Date.now() - 60_000).toISOString(), mods.authResolver.hashToken(shortToken));
   // Guard: any ArcadeHttp construction here would be a failure of "pre-HTTP".
   await expectThrows(
     'SECRETS',

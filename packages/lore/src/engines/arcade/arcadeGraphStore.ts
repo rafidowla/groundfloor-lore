@@ -26,6 +26,7 @@
  *      opaque data inside tenant_alpha and can never cross the wall.
  */
 
+import { tagsToArray } from '../normalizeTags.js';
 import { assertEdgeEndpoints } from '../dataplaneEdgeShape.js';
 import type {
   GraphStats,
@@ -33,7 +34,8 @@ import type {
   LoreNode,
   TraversalResult,
 } from '../../providers/types.js';
-import { ArcadeHttp, retryIdempotentArcadeWrite } from './arcadeHttp.js';
+import { ArcadeHttp, ArcadeHttpError, retryIdempotentArcadeWrite } from './arcadeHttp.js';
+import { NodeAlreadyExistsError } from '../graphShared/conditionalInsert.js';
 import * as reads from './arcadeGraphReads.js';
 import * as maint from './arcadeMaintenance.js';
 import * as edges from './arcadeGraphEdges.js';
@@ -50,6 +52,7 @@ import {
   type SubgraphNode,
   type SubgraphEdge,
 } from './arcadeGraphNeighbors.js';
+import type { SupersedeResult } from '../graphShared/supersedeGuard.js';
 
 /** Contract cap — mirrors TRAVERSE_NODE_CAP in the local engine. */
 const TRAVERSE_NODE_CAP = 500;
@@ -68,6 +71,19 @@ const NODE_FULL_COLUMNS =
 
 /** Row shape ArcadeDB returns for a LoreNode vertex. */
 type NodeRow = Record<string, unknown>;
+
+/** The column assignments shared by the node UPSERT and the conditional INSERT. */
+const NODE_SET_CLAUSE =
+  `id = :id, type = :type, label = :label, ` +
+    `content = :content, tags = :tags, project = :project, ` +
+    `ecosystem = :ecosystem, metadata = :metadata, ` +
+    `createdAt = :createdAt, updatedAt = :updatedAt, ` +
+    `supersededBy = :supersededBy, supersededAt = :supersededAt, ` +
+    `supersededReason = :supersededReason, stale = :stale, staleAt = :staleAt, ` +
+    `ephemeral = :ephemeral, ttl_ms = :ttl_ms, ` +
+    `success_count = :success_count, failure_count = :failure_count, ` +
+    `partial_count = :partial_count, confirmation_score = :confirmation_score, ` +
+    `security_scopes = :security_scopes`;
 
 export class ArcadeGraphStore {
   /** IMMUTABLE tenant database name — the isolation boundary. */
@@ -117,18 +133,44 @@ export class ArcadeGraphStore {
     await this.initialize();
     const now = new Date().toISOString();
     const existing = await this.getNode(node.id);
+    const params = this.nodeParams(node, existing, now);
+    // UPSERT: updates the row matching id, or inserts one if absent. Retried
+    // on transient 502/503/504 (retryIdempotentArcadeWrite) — this exact
+    // statement is a full-column overwrite keyed by id, so replaying it with
+    // the same params is safe even if a prior attempt's response was lost.
+    // See that helper's doc comment for the real, observed 503 burst this
+    // was written to recover from (ArcadeDB's own vector-index rebuild
+    // saturating the server under rapid sequential writes).
+    await retryIdempotentArcadeWrite(() => this.http.command(
+      this.tenantDb,
+      `UPDATE ${NODE_TYPE} SET ${NODE_SET_CLAUSE} UPSERT WHERE id = :id`,
+      params,
+    ));
+    const stored = await this.getNode(node.id);
+    if (!stored) {
+      throw new Error(`[ArcadeGraphStore] upsertNode failed to persist ${node.id}`);
+    }
+    return stored;
+  }
+
+  /** Bound parameters of a node write; `existing` supplies the read-modify-write defaults. */
+  private nodeParams(
+    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
+    existing: LoreNode | null,
+    now: string,
+  ) {
     const createdAt = existing?.createdAt ?? now;
     // Lifecycle columns are read-modify-write like LocalGraph.upsertNode: an
     // upsert that omits ephemeral/ttl_ms must NOT clobber a value a prior write
     // set. Preserve the existing row's lifecycle fields when the incoming node
     // doesn't carry them; a plain re-store therefore doesn't reset supersession
     // or the ephemeral flag (parity with LocalGraph's SET-branch semantics).
-    const params = {
+    return {
       id: node.id,
       type: node.type ?? '',
       label: node.label ?? '',
       content: node.content ?? '',
-      tags: JSON.stringify(node.tags ?? []),
+      tags: JSON.stringify(tagsToArray(node.tags)),
       project: node.project ?? '',
       // WIRE PARITY (slice-3 close): default ecosystem/metadata to the SAME
       // store-time defaults LocalGraph's schema uses (ecosystem DEFAULT '*';
@@ -158,32 +200,34 @@ export class ArcadeGraphStore {
       // omitted keeps the prior row's, new node -> [] (public).
       security_scopes: encodeNodeScopes(resolveNodeScopes(node.security_scopes, existing?.security_scopes)),
     };
-    // UPSERT: updates the row matching id, or inserts one if absent. Retried
-    // on transient 502/503/504 (retryIdempotentArcadeWrite) — this exact
-    // statement is a full-column overwrite keyed by id, so replaying it with
-    // the same params is safe even if a prior attempt's response was lost.
-    // See that helper's doc comment for the real, observed 503 burst this
-    // was written to recover from (ArcadeDB's own vector-index rebuild
-    // saturating the server under rapid sequential writes).
-    await retryIdempotentArcadeWrite(() => this.http.command(
-      this.tenantDb,
-      `UPDATE ${NODE_TYPE} SET id = :id, type = :type, label = :label, ` +
-        `content = :content, tags = :tags, project = :project, ` +
-        `ecosystem = :ecosystem, metadata = :metadata, ` +
-        `createdAt = :createdAt, updatedAt = :updatedAt, ` +
-        `supersededBy = :supersededBy, supersededAt = :supersededAt, ` +
-        `supersededReason = :supersededReason, stale = :stale, staleAt = :staleAt, ` +
-        `ephemeral = :ephemeral, ttl_ms = :ttl_ms, ` +
-        `success_count = :success_count, failure_count = :failure_count, ` +
-        `partial_count = :partial_count, confirmation_score = :confirmation_score, ` +
-        `security_scopes = :security_scopes ` +
-        `UPSERT WHERE id = :id`,
-      params,
-    ));
-    const stored = await this.getNode(node.id);
-    if (!stored) {
-      throw new Error(`[ArcadeGraphStore] upsertNode failed to persist ${node.id}`);
+  }
+
+  /**
+   * insertNodeIfAbsent — conditional-writes R1. A plain INSERT, so ArcadeDB's
+   * unique index on `LoreNode.id` rejects the row when another writer (this
+   * daemon or any other on the same database) created the id first; that
+   * rejection surfaces as NodeAlreadyExistsError. Not wrapped in
+   * retryIdempotentArcadeWrite: a replayed INSERT would see its own row.
+   * A transport error is resolved by re-reading: a node we did not write
+   * (createdAt differs from this call's stamp) means the id was taken.
+   */
+  async insertNodeIfAbsent(
+    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
+  ): Promise<LoreNode> {
+    await this.initialize();
+    const now = new Date().toISOString();
+    const params = this.nodeParams(node, null, now);
+    try {
+      await this.http.command(this.tenantDb, `INSERT INTO ${NODE_TYPE} SET ${NODE_SET_CLAUSE}`, params);
+    } catch (err) {
+      if (!(err instanceof ArcadeHttpError)) throw err;
+      const present = await this.getNode(node.id);
+      if (present && present.createdAt === now) return present; // our own insert, response lost
+      if (present || /duplicat/i.test(err.body)) throw new NodeAlreadyExistsError(node.id);
+      throw err;
     }
+    const stored = await this.getNode(node.id);
+    if (!stored) throw new Error(`[ArcadeGraphStore] insertNodeIfAbsent failed to persist ${node.id}`);
     return stored;
   }
 
@@ -631,7 +675,7 @@ export class ArcadeGraphStore {
    * mirroring LocalGraph/nodeLifecycle.supersedeNode. Plain parameterized
    * UPDATE — traps don't apply.
    */
-  async supersedeNode(oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }> {
+  async supersedeNode(oldId: string, newId: string, reason?: string): Promise<SupersedeResult> {
     await this.initialize();
     return maint.supersedeNode(this.tenantDb, this.http, (id) => this.getNode(id), oldId, newId, reason);
   }

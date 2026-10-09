@@ -123,6 +123,7 @@ import type { MaintenanceCtx } from './dataplaneGraphMaintenance.js';
 import * as dpTopology from './dataplaneGraphTopology.js';
 import type { TopologyCtx } from './dataplaneGraphTopology.js';
 import { rankSearchResults, SEARCH_SCAN_CAP } from './searchRanking.js';
+import type { SupersedeResult } from './graphShared/supersedeGuard.js';
 
 /**
  * Hard cap on rows scanned by client-side aggregations
@@ -889,7 +890,7 @@ export class DataplaneGraph implements GraphProvider {
         };
     }
 
-    async supersedeNode(oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }> {
+    async supersedeNode(oldId: string, newId: string, reason?: string): Promise<SupersedeResult> {
         return dpMaintenance.supersedeNode(this.maintenanceCtx(), oldId, newId, reason);
     }
 

@@ -13,8 +13,10 @@
 
 import type { LoreEdge, LoreNode } from '../../providers/types.js';
 import { LoreGraphError } from '../loreGraphError.js';
-import { tagsToArray } from '../normalizeTags.js';
+import { tagsToArray, normalizeTag } from '../normalizeTags.js';
 import { wouldCreateSupersedeCycle } from '../graphShared/supersedeCycle.js';
+import { supersedeGuardVerdict, type SupersedeResult } from '../graphShared/supersedeGuard.js';
+import { NodeAlreadyExistsError } from '../graphShared/conditionalInsert.js';
 import type { SqliteDb } from './sqliteGraphSchema.js';
 import { fromSqliteNodeRow, NODE_WRITE_COLUMNS, SQLITE_OUTCOME_COUNTER_SEED, toNodeRow } from './sqliteGraphRow.js';
 
@@ -72,6 +74,35 @@ export async function upsertNode(
     } catch (error) {
         if (error instanceof LoreGraphError) throw error;
         throw sqliteError(`Failed to upsert node '${node.id}'`, 'upsertNode', error);
+    }
+}
+
+/**
+ * insertNodeIfAbsent — conditional-writes R1. A plain INSERT (no ON CONFLICT):
+ * the PRIMARY KEY rejects a duplicate id even when another connection created
+ * it after any read, and that rejection is reported as NodeAlreadyExistsError.
+ * Counter seeds go in on insert exactly as `upsertNode`'s insert branch does.
+ */
+export async function insertNodeIfAbsent(
+    db: SqliteDb,
+    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
+): Promise<LoreNode> {
+    try {
+        const now = new Date().toISOString();
+        const doc = { ...SQLITE_OUTCOME_COUNTER_SEED, ...toNodeRow(node, now, now) };
+        const cols = [...NODE_WRITE_COLUMNS, ...Object.keys(SQLITE_OUTCOME_COUNTER_SEED)];
+        db.prepare(
+            `INSERT INTO nodes (id, ${cols.join(', ')}) VALUES (@id, ${cols.map((c) => `@${c}`).join(', ')})`,
+        ).run({ id: node.id, ...doc });
+        return { ...node, tags: tagsToArray(node.tags), createdAt: now, updatedAt: now, syncedAt: null };
+    } catch (error) {
+        const e = error as { code?: unknown; message?: unknown };
+        if ((typeof e.code === 'string' && e.code.startsWith('SQLITE_CONSTRAINT'))
+            && /UNIQUE|PRIMARY KEY/i.test(String(e.message))) {
+            throw new NodeAlreadyExistsError(node.id);
+        }
+        if (error instanceof LoreGraphError) throw error;
+        throw sqliteError(`Failed to insert node '${node.id}'`, 'insertNodeIfAbsent', error);
     }
 }
 
@@ -221,12 +252,16 @@ export async function supersedeNode(
     oldId: string,
     newId: string,
     reason?: string,
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<SupersedeResult> {
     if (oldId === newId) return { ok: false, reason: 'self' };
     const oldNode = await getNode(oldId);
     if (!oldNode) return { ok: false, reason: 'old-not-found' };
     const newNode = await getNode(newId);
     if (!newNode) return { ok: false, reason: 'new-not-found' };
+    // Conditional-writes R2: one successor per node. Checked here on the read
+    // node and again inside the UPDATE (a second connection can claim between).
+    const early = supersedeGuardVerdict(oldNode.supersededBy, newId);
+    if (early) return early;
 
     const cyclic = await wouldCreateSupersedeCycle(
         oldId,
@@ -238,12 +273,18 @@ export async function supersedeNode(
     try {
         const supersededAt = new Date().toISOString();
         const validUntil = !oldNode.validUntil ? supersededAt : undefined;
-        db.prepare(
+        const res = db.prepare(
             `UPDATE nodes SET supersededBy = ?, supersededAt = ?, supersededReason = ?`
-            + `${validUntil !== undefined ? ', validUntil = ?' : ''} WHERE id = ?`,
+            + `${validUntil !== undefined ? ', validUntil = ?' : ''} WHERE id = ?`
+            + ` AND (supersededBy IS NULL OR supersededBy = '' OR supersededBy = ?)`,
         ).run(...(validUntil !== undefined
-            ? [newId, supersededAt, reason ?? '', validUntil, oldId]
-            : [newId, supersededAt, reason ?? '', oldId]));
+            ? [newId, supersededAt, reason ?? '', validUntil, oldId, newId]
+            : [newId, supersededAt, reason ?? '', oldId, newId]));
+        if (res.changes < 1) {
+            const now = await getNode(oldId);
+            if (!now) return { ok: false, reason: 'old-not-found' };
+            return supersedeGuardVerdict(now.supersededBy, newId) ?? { ok: false, reason: 'old-not-found' };
+        }
         return { ok: true };
     } catch (error) {
         throw sqliteError(`Failed to supersede node '${oldId}' with '${newId}'`, 'supersedeNode', error);
@@ -272,7 +313,7 @@ export async function unsupersedeNode(
 
 /** markStaleByTags — set `stale = 1` on every node carrying ANY of the tags. Exact, lowercased membership. */
 export async function markStaleByTags(db: SqliteDb, tags: string[]): Promise<number> {
-    const normalized = tags.map((t) => t.trim().toLowerCase()).filter(Boolean);
+    const normalized = tags.map((t) => normalizeTag(t)).filter(Boolean);
     if (normalized.length === 0) return 0;
     try {
         const placeholders = normalized.map(() => '?').join(', ');
@@ -289,7 +330,7 @@ export async function markStaleByTags(db: SqliteDb, tags: string[]): Promise<num
 
 /** findNodeIdsByTags — every node id carrying ANY of the tags, read-only. */
 export async function findNodeIdsByTags(db: SqliteDb, tags: string[]): Promise<string[]> {
-    const normalized = tags.map((t) => t.trim().toLowerCase()).filter(Boolean);
+    const normalized = tags.map((t) => normalizeTag(t)).filter(Boolean);
     if (normalized.length === 0) return [];
     try {
         const placeholders = normalized.map(() => '?').join(', ');

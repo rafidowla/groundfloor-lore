@@ -60,8 +60,14 @@ import {
     hashToken,
     listTokensForCell,
     ArcadeAuthError,
+    InvalidTokenTtlError,
+    validateTokenTtlSeconds,
 } from '../../../engines/arcade/arcadeAuthResolver.js';
-import { rotateToken } from '../../../engines/arcade/arcadeTokenLifecycle.js';
+import {
+    rotateToken,
+    revokeTokenByPrefix,
+    MIN_TOKEN_PREFIX_LEN,
+} from '../../../engines/arcade/arcadeTokenLifecycle.js';
 import { CellLeaseHeldError } from '../../../engines/arcade/arcadeCellLease.js';
 import type { Scope } from '../../../engines/arcade/arcadeScopeGuard.js';
 
@@ -201,6 +207,10 @@ export async function tryArcadeAdminRoutes(
             writeError(res, 400, 'invalid_json', 'request body is not valid JSON');
             return true;
         }
+        if (err instanceof InvalidTokenTtlError) {
+            writeError(res, 400, 'invalid_request', err.message);
+            return true;
+        }
         if (err instanceof ArcadeAuthError) {
             // cell_missing / cell_not_active surface as 403 (the cell must be
             // provisioned+active before a token can be issued for it).
@@ -289,6 +299,18 @@ function handleListApps(res: ServerResponse, deps: ArcadeAdminDeps): true {
 
 // ── issue-token ───────────────────────────────────────────────────────────
 
+/** Parse the optional `ttlSeconds` body field. Writes a 400 and returns
+ *  'invalid' when it is present but out of contract; undefined when absent. */
+function parseTtlSeconds(res: ServerResponse, body: Record<string, unknown>): number | undefined | 'invalid' {
+    if (!('ttlSeconds' in body) || body['ttlSeconds'] === undefined) return undefined;
+    const msg = validateTokenTtlSeconds(body['ttlSeconds']);
+    if (msg) {
+        writeError(res, 400, 'invalid_request', msg);
+        return 'invalid';
+    }
+    return body['ttlSeconds'] as number;
+}
+
 function normalizeScopeInput(raw: unknown): Scope[] {
     const arr = Array.isArray(raw) ? raw : [];
     const out: Scope[] = [];
@@ -313,8 +335,11 @@ async function handleIssueToken(
         writeError(res, 400, 'invalid_scopes', "scopes must be a non-empty subset of ['read','write']");
         return true;
     }
-    const ttlSeconds =
-        typeof body['ttlSeconds'] === 'number' ? (body['ttlSeconds'] as number) : undefined;
+    // G11 — absent → default lifetime; present → integer within [60s, 365d].
+    // Anything else (0, negative, NaN, float, string, null, too large) is a 400
+    // and nothing is minted.
+    const ttlSeconds = parseTtlSeconds(res, body);
+    if (ttlSeconds === 'invalid') return true;
     const label = typeof body['label'] === 'string' ? (body['label'] as string) : undefined;
 
     // Refuse un-provisioned/inactive cells BEFORE minting (also enforced inside
@@ -382,6 +407,8 @@ async function handleRotateToken(
     }
     const graceSeconds =
         typeof body['graceSeconds'] === 'number' ? (body['graceSeconds'] as number) : undefined;
+    const ttlSeconds = parseTtlSeconds(res, body);
+    if (ttlSeconds === 'invalid') return true;
     try {
         // Rotate is atomic (single SQLite tx inside rotateToken): the cell can
         // never be left with zero live tokens. The old token keeps working
@@ -389,12 +416,12 @@ async function handleRotateToken(
         // it immediately.
         const { token, expiresAt, supersededPrefix } = rotateToken(
             { byPrefix: tokenHashPrefix, tenantId: customerId, appId },
-            { graceSeconds },
+            { graceSeconds, ttlSeconds },
         );
         auditAdmin(
             deps,
             'rotate-token',
-            { customerId, appId, supersededPrefix, newPrefix: hashToken(token).slice(0, 8), graceSeconds: graceSeconds ?? 0 },
+            { customerId, appId, supersededPrefix, newPrefix: hashToken(token).slice(0, 8), graceSeconds: graceSeconds ?? 0, ttlSeconds: ttlSeconds ?? null },
             'success',
         );
         // New plaintext returned EXACTLY once.
@@ -422,9 +449,14 @@ async function handleRevoke(
     if (!bindDaemonOperatorLane(res, { intent: 'write' })) return true;
     if (!requireOperatorForBoundActor(res, 'Arcade tenant administration')) return true;
     const body = await readJson(req);
+    // T1 — revoke by non-secret hash prefix (as shown by list-tokens), scoped
+    // to a cell exactly like rotate. Full-token revoke below is unchanged.
+    if (body['tokenHashPrefix'] !== undefined && body['token'] === undefined) {
+        return handleRevokeByPrefix(res, deps, body);
+    }
     const token = body['token'];
     if (typeof token !== 'string' || token.length === 0) {
-        writeError(res, 400, 'invalid_request', 'body must carry a non-empty "token" string');
+        writeError(res, 400, 'invalid_request', 'body must carry a non-empty "token" string (or "tokenHashPrefix" with customerId + appId)');
         return true;
     }
     const revoked = revokeToken(token);
@@ -436,6 +468,43 @@ async function handleRevoke(
     // never reached the access log either).
     auditAdmin(deps, 'revoke-token', { tokenHashPrefix: hashToken(token).slice(0, 8), revoked }, 'success');
     writeJson(res, 200, { revoked });
+    return true;
+}
+
+function handleRevokeByPrefix(
+    res: ServerResponse,
+    deps: ArcadeAdminDeps,
+    body: Record<string, unknown>,
+): true {
+    const customerId = String(body['customerId'] ?? '');
+    const appId = String(body['appId'] ?? '');
+    if (!ID_RE.test(customerId)) return invalidIdentifier(res, 'customerId');
+    if (!ID_RE.test(appId)) return invalidIdentifier(res, 'appId');
+    const prefix = body['tokenHashPrefix'];
+    if (typeof prefix !== 'string' || prefix.length < MIN_TOKEN_PREFIX_LEN) {
+        writeError(
+            res,
+            400,
+            'invalid_request',
+            `"tokenHashPrefix" must be a string of at least ${MIN_TOKEN_PREFIX_LEN} characters`,
+        );
+        return true;
+    }
+    try {
+        const { revoked } = revokeTokenByPrefix({ tenantId: customerId, appId, prefix });
+        // Only the hash is known here, so evict every cached facade for the cell;
+        // survivors rebuild on their next request (resolve still gates each call).
+        deps.evictCell?.(customerId, appId);
+        auditAdmin(deps, 'revoke-token', { customerId, appId, tokenHashPrefix: prefix.slice(0, 8), revoked }, 'success');
+        writeJson(res, 200, { revoked });
+    } catch (err) {
+        if (err instanceof ArcadeAuthError) {
+            auditAdmin(deps, 'revoke-token', { customerId, appId, tokenHashPrefix: prefix.slice(0, 8) }, 'error', err.message);
+            writeError(res, 404, 'not_found', 'no revocable token for that prefix');
+            return true;
+        }
+        throw err;
+    }
     return true;
 }
 

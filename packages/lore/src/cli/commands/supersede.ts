@@ -7,7 +7,7 @@ import { openGraphForCli } from './shared.js';
 import { parseOrExit } from '../args.js';
 import { DEFAULT_PORT } from './migrateWorkspaceToWorkspaceShared.js';
 
-async function tryHttpSupersede(oldId: string, newId: string, reason: string | undefined): Promise<{ ok: boolean; reason?: string } | null> {
+async function tryHttpSupersede(oldId: string, newId: string, reason: string | undefined): Promise<{ ok: boolean; reason?: string; supersededBy?: string } | null> {
     let token: string | null = null;
     try {
         token = fs.readFileSync(loreHomePath('auth.token'), 'utf-8').trim();
@@ -32,7 +32,7 @@ async function tryHttpSupersede(oldId: string, newId: string, reason: string | u
                 let body = '';
                 res.on('data', (chunk) => { body += chunk; });
                 res.on('end', () => {
-                    try { resolve(JSON.parse(body) as { ok: boolean; reason?: string }); } catch { resolve(null); }
+                    try { resolve(JSON.parse(body) as { ok: boolean; reason?: string; supersededBy?: string }); } catch { resolve(null); }
                 });
             },
         );
@@ -73,7 +73,7 @@ export async function supersedeCommand(args: string[]): Promise<void> {
             console.log(`(Routed through the running Lore daemon at 127.0.0.1:${DEFAULT_PORT}.)`);
             return;
         }
-        console.error(`✗ Could not supersede: ${httpResult.reason ?? 'unknown'}`);
+        console.error(`✗ Could not supersede: ${httpResult.reason ?? 'unknown'}${httpResult.supersededBy ? ` ('${oldId}' is already superseded by '${httpResult.supersededBy}')` : ''}`);
         console.error('  Common causes: oldId or newId not found, or oldId === newId.');
         process.exit(1);
     }
@@ -88,7 +88,7 @@ export async function supersedeCommand(args: string[]): Promise<void> {
     // clear message instead of the raw driver error.
     const graph = await openGraphForCli(basePath);
     const result = await graph.supersedeNode(oldId, newId, reason);
-    if (result.ok) {
+    if (result.ok && !result.unchanged) {
         // Parity with the supersede_node MCP tool / REST route: also record
         // the semantic `supersedes` edge so traverse()/subgraph show the
         // supersession. The daemon path gets this via POST /api/node/supersede;

@@ -73,12 +73,49 @@ export function setCloudVisionProvider(provider: ICloudVisionProvider | null): v
  * fails (corrupt HEIC, unsupported variant) so the caller still gets
  * a clear signal.
  */
+/**
+ * ISO-BMFF major brands that identify a HEIF/HEIC still image. AVIF is
+ * deliberately absent: this extractor is only registered for
+ * image/heic and image/heif.
+ */
+const HEIF_BRANDS: ReadonlySet<string> = new Set([
+    'heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'hevm', 'hevs', 'mif1', 'msf1',
+]);
+
+/**
+ * True when `input` starts with an ISO-BMFF `ftyp` box (size at 0..3,
+ * 'ftyp' at 4..7) whose major brand — or any compatible brand — is a
+ * HEIF/HEIC brand. Checked before handing bytes to sharp (libvips),
+ * which would otherwise sniff and decode other formats it supports
+ * (e.g. an SVG renamed to .heic).
+ */
+export function hasHeifSignature(input: Buffer): boolean {
+    if (input.byteLength < 12) return false;
+    if (input.toString('latin1', 4, 8) !== 'ftyp') return false;
+    const boxSize = input.readUInt32BE(0);
+    // size 1 = 64-bit largesize follows, 0 = to end of file; both are
+    // legal but not for an ftyp box in practice — bound the brand scan.
+    const end = Math.min(input.byteLength, boxSize >= 16 ? boxSize : 32, 256);
+    if (HEIF_BRANDS.has(input.toString('latin1', 8, 12))) return true;
+    // compatible_brands start after major_brand (8..12) + minor_version (12..16)
+    for (let off = 16; off + 4 <= end; off += 4) {
+        if (HEIF_BRANDS.has(input.toString('latin1', off, off + 4))) return true;
+    }
+    return false;
+}
+
 export const heicExtractor: IExtractor = {
     name: 'heic',
     mimeTypes: ['image/heic', 'image/heif'],
     async extract(input: Buffer, mimeType: string): Promise<ExtractedContent> {
         if (input.byteLength === 0) {
             throw new ExtractorError('Image is empty', 'empty');
+        }
+        if (!hasHeifSignature(input)) {
+            throw new ExtractorError(
+                'Not a HEIC/HEIF image: missing ISO-BMFF ftyp box with a HEIF brand',
+                'corrupt',
+            );
         }
 
         let convertedBuffer: Buffer;

@@ -14,6 +14,7 @@ import { NODE_COLLECTION, EDGE_COLLECTION } from './dataplaneCollections.js';
 import { log } from '../logger.js';
 import { buildDataplaneScopeFilter, type DataplaneScope, type ScopeFilterInput } from './dataplaneScopeFilter.js';
 import { keepInScope } from './dataplaneScopedIo.js';
+import { supersedeGuardVerdict, type SupersedeResult } from './graphShared/supersedeGuard.js';
 
 /** Structural subset of the SDK client these maintenance ops touch. */
 interface MaintenanceClient {
@@ -38,7 +39,7 @@ function scoped(scope: DataplaneScope, input: ScopeFilterInput = {}) {
 }
 
 /** Mark `oldId` superseded by `newId`. Idempotent; validates both exist. */
-export async function supersedeNode(ctx: MaintenanceCtx, oldId: string, newId: string, reason?: string): Promise<{ ok: boolean; reason?: string }> {
+export async function supersedeNode(ctx: MaintenanceCtx, oldId: string, newId: string, reason?: string): Promise<SupersedeResult> {
     if (oldId === newId) return { ok: false, reason: 'self' };
     const scope = ctx.scope();
     await ctx.ensureInitialized(scope);
@@ -47,6 +48,11 @@ export async function supersedeNode(ctx: MaintenanceCtx, oldId: string, newId: s
     if (!oldNode) return { ok: false, reason: 'old-not-found' };
     const newNode = await ctx.tryGet(scope, newId);
     if (!newNode) return { ok: false, reason: 'new-not-found' };
+    // Conditional-writes R2: one successor per node. In-process guard only —
+    // updateByQuery has no compare-and-set, so this engine is not safe against
+    // a second daemon claiming the same node concurrently.
+    const early = supersedeGuardVerdict(typeof oldNode['superseded_by'] === "string" ? oldNode['superseded_by'] : undefined, newId);
+    if (early) return early;
     const ts = new Date().toISOString();
     await ctx.client.updateByQuery(
         tenantId,

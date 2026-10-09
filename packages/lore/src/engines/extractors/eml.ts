@@ -25,83 +25,135 @@ import type { IExtractor, ExtractedContent } from './types.js';
 import { ExtractorError } from './types.js';
 import { capText } from './textCap.js';
 
-export const emlExtractor: IExtractor = {
-    name: 'eml',
-    mimeTypes: ['message/rfc822'],
-    async extract(input: Buffer, mimeType: string): Promise<ExtractedContent> {
-        if (input.byteLength === 0) {
-            throw new ExtractorError('Email is empty', 'empty');
-        }
+/**
+ * Byte cap on a single .eml input. Well below the 50 MB ingestion cap:
+ * mailparser buffers and decodes the whole message (base64 attachments
+ * included) in memory, so a 50 MB message can balloon far past that.
+ */
+export const MAX_EML_BYTES = 25 * 1024 * 1024; // 25 MB
 
-        let mailparser: any;
-        try {
-            mailparser = await import('mailparser');
-        } catch (err) {
-            throw new ExtractorError(
-                `mailparser unavailable: ${(err as Error).message}`,
-                'unsupported',
-            );
-        }
+/**
+ * Wall-clock budget for one `simpleParser` call. mailparser cannot be
+ * cancelled, so on timeout the parse is abandoned (its result is
+ * discarded) and the extractor rejects.
+ */
+export const EML_PARSE_TIMEOUT_MS = 30_000;
 
-        let parsed: any;
-        try {
-            parsed = await mailparser.simpleParser(input);
-        } catch (err) {
-            throw new ExtractorError(
-                `Failed to parse email: ${(err as Error).message}`,
-                'corrupt',
-            );
-        }
+export interface EmlExtractorOptions {
+    maxBytes?: number;
+    parseTimeoutMs?: number;
+    /** Test hook: replaces `mailparser.simpleParser`. */
+    simpleParser?: (input: Buffer) => Promise<any>;
+}
 
-        // Prefer text body; fall back to HTML-stripped (mailparser
-        // does a reasonable job of deriving .text from .html if only
-        // the latter is present, so we usually get something usable).
-        const bodyText = (parsed.text ?? '').trim();
-
-        // Flatten "display" → simple strings for easy serialization.
-        // mailparser returns From/To as { value: [{ address, name }], text }.
-        const flattenAddr = (addr: any): string[] => {
-            if (!addr) return [];
-            if (Array.isArray(addr.value)) {
-                return addr.value.map((v: any) =>
-                    v.name ? `${v.name} <${v.address}>` : v.address,
+export function createEmlExtractor(opts: EmlExtractorOptions = {}): IExtractor {
+    const maxBytes = opts.maxBytes ?? MAX_EML_BYTES;
+    const parseTimeoutMs = opts.parseTimeoutMs ?? EML_PARSE_TIMEOUT_MS;
+    return {
+        name: 'eml',
+        mimeTypes: ['message/rfc822'],
+        async extract(input: Buffer, mimeType: string): Promise<ExtractedContent> {
+            if (input.byteLength === 0) {
+                throw new ExtractorError('Email is empty', 'empty');
+            }
+            if (input.byteLength > maxBytes) {
+                throw new ExtractorError(
+                    `Email is ${input.byteLength} bytes, over the ${maxBytes}-byte limit for .eml input`,
+                    'too-large',
                 );
             }
-            return [addr.text ?? ''];
-        };
 
-        // Compose a header line at the top of text so embedders have
-        // something to latch onto when a body is empty.
-        const headerLine = [
-            parsed.from ? `From: ${flattenAddr(parsed.from).join(', ')}` : null,
-            parsed.to ? `To: ${flattenAddr(parsed.to).join(', ')}` : null,
-            parsed.subject ? `Subject: ${parsed.subject}` : null,
-            parsed.date ? `Date: ${new Date(parsed.date).toISOString()}` : null,
-        ].filter(Boolean).join('\n');
+            let simpleParser: (input: Buffer) => Promise<any>;
+            if (opts.simpleParser) {
+                simpleParser = opts.simpleParser;
+            } else {
+                try {
+                    const mailparser: any = await import('mailparser');
+                    simpleParser = (b) => mailparser.simpleParser(b);
+                } catch (err) {
+                    throw new ExtractorError(
+                        `mailparser unavailable: ${(err as Error).message}`,
+                        'unsupported',
+                    );
+                }
+            }
 
-        // R3-DOS-02 — cap to the 10 MB extracted-text budget.
-        const text = capText(bodyText ? `${headerLine}\n\n${bodyText}` : headerLine);
+            let parsed: any;
+            let timer: NodeJS.Timeout | undefined;
+            try {
+                const parsing = simpleParser(input);
+                // An abandoned parse must not surface as an unhandled rejection.
+                parsing.catch(() => undefined);
+                parsed = await Promise.race([
+                    parsing,
+                    new Promise<never>((_, reject) => {
+                        timer = setTimeout(
+                            () => reject(new Error(`timed out after ${parseTimeoutMs} ms`)),
+                            parseTimeoutMs,
+                        );
+                    }),
+                ]);
+            } catch (err) {
+                throw new ExtractorError(
+                    `Failed to parse email: ${(err as Error).message}`,
+                    'corrupt',
+                );
+            } finally {
+                if (timer) clearTimeout(timer);
+            }
 
-        return {
-            text,
-            metadata: {
-                from: flattenAddr(parsed.from),
-                to: flattenAddr(parsed.to),
-                cc: flattenAddr(parsed.cc),
-                bcc: flattenAddr(parsed.bcc),
-                subject: parsed.subject ?? '',
-                date: parsed.date ? new Date(parsed.date).toISOString() : undefined,
-                messageId: parsed.messageId ?? undefined,
-                inReplyTo: parsed.inReplyTo ?? undefined,
-                references: Array.isArray(parsed.references)
-                    ? parsed.references
-                    : (parsed.references ? [parsed.references] : []),
-                hasAttachments: (parsed.attachments?.length ?? 0) > 0,
-                attachmentCount: parsed.attachments?.length ?? 0,
-            },
-            confidence: 1.0,
-            mimeType,
-            sourceBytes: input.byteLength,
-        };
-    },
-};
+            // Prefer text body; fall back to HTML-stripped (mailparser
+            // does a reasonable job of deriving .text from .html if only
+            // the latter is present, so we usually get something usable).
+            const bodyText = (parsed.text ?? '').trim();
+
+            // Flatten "display" → simple strings for easy serialization.
+            // mailparser returns From/To as { value: [{ address, name }], text }.
+            const flattenAddr = (addr: any): string[] => {
+                if (!addr) return [];
+                if (Array.isArray(addr.value)) {
+                    return addr.value.map((v: any) =>
+                        v.name ? `${v.name} <${v.address}>` : v.address,
+                    );
+                }
+                return [addr.text ?? ''];
+            };
+
+            // Compose a header line at the top of text so embedders have
+            // something to latch onto when a body is empty.
+            const headerLine = [
+                parsed.from ? `From: ${flattenAddr(parsed.from).join(', ')}` : null,
+                parsed.to ? `To: ${flattenAddr(parsed.to).join(', ')}` : null,
+                parsed.subject ? `Subject: ${parsed.subject}` : null,
+                parsed.date ? `Date: ${new Date(parsed.date).toISOString()}` : null,
+            ].filter(Boolean).join('\n');
+
+            // R3-DOS-02 — cap to the 10 MB extracted-text budget.
+            const text = capText(bodyText ? `${headerLine}\n\n${bodyText}` : headerLine);
+
+            return {
+                text,
+                metadata: {
+                    from: flattenAddr(parsed.from),
+                    to: flattenAddr(parsed.to),
+                    cc: flattenAddr(parsed.cc),
+                    bcc: flattenAddr(parsed.bcc),
+                    subject: parsed.subject ?? '',
+                    date: parsed.date ? new Date(parsed.date).toISOString() : undefined,
+                    messageId: parsed.messageId ?? undefined,
+                    inReplyTo: parsed.inReplyTo ?? undefined,
+                    references: Array.isArray(parsed.references)
+                        ? parsed.references
+                        : (parsed.references ? [parsed.references] : []),
+                    hasAttachments: (parsed.attachments?.length ?? 0) > 0,
+                    attachmentCount: parsed.attachments?.length ?? 0,
+                },
+                confidence: 1.0,
+                mimeType,
+                sourceBytes: input.byteLength,
+            };
+        },
+    };
+}
+
+export const emlExtractor: IExtractor = createEmlExtractor();

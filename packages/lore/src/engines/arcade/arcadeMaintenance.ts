@@ -23,6 +23,9 @@
 import type { LoreNode } from '../../providers/types.js';
 import type { ArcadeHttp } from './arcadeHttp.js';
 import { NODE_TYPE } from './arcadeSchema.js';
+import { supersedeGuardVerdict, type SupersedeResult } from '../graphShared/supersedeGuard.js';
+import { normalizeTag } from '../normalizeTags.js';
+import { arcadeTagLikePattern } from './arcadeGraphReads.js';
 
 type NodeRow = Record<string, unknown>;
 type GetNode = (id: string) => Promise<LoreNode | null>;
@@ -34,7 +37,13 @@ const EPHEMERAL_SCAN_CAP = 10_000;
  * supersedeNode — mark `oldId` superseded by `newId`. The node stays in the
  * graph (edges intact); default reads filter it out. Returns {ok:false,reason}
  * for self / old-not-found / new-not-found — byte-for-byte the same reason
- * codes LocalGraph/nodeLifecycle returns. Plain parameterized UPDATE.
+ * codes LocalGraph/nodeLifecycle returns.
+ *
+ * Conditional-writes R2: the node can be claimed by ONE successor. The UPDATE
+ * itself carries the guard (`supersededBy` empty, or already `newId`), so two
+ * daemons on one ArcadeDB cannot both win; 0 affected rows means someone else
+ * claimed (or deleted) it in between, and a re-read tells which. A retry by the
+ * same successor is `{ok:true, unchanged:true}` and writes nothing.
  */
 export async function supersedeNode(
   tenantDb: string,
@@ -43,23 +52,34 @@ export async function supersedeNode(
   oldId: string,
   newId: string,
   reason?: string,
-): Promise<{ ok: boolean; reason?: string }> {
+): Promise<SupersedeResult> {
   if (oldId === newId) return { ok: false, reason: 'self' };
   const oldNode = await getNode(oldId);
   if (!oldNode) return { ok: false, reason: 'old-not-found' };
   const newNode = await getNode(newId);
   if (!newNode) return { ok: false, reason: 'new-not-found' };
+  const early = supersedeGuardVerdict(oldNode.supersededBy, newId);
+  if (early) return early;
   const at = new Date().toISOString();
   // NOTE: the bound param cannot be named `by` — ArcadeDB 26.7.1's SQL parser
   // treats a `:by` placeholder as the `BY` keyword and throws
   // CommandSQLParsingException ("no viable alternative at input 'by'"). Use a
   // non-reserved param name (`newid`). Confirmed live.
-  await http.command(
+  const res = await http.command(
     tenantDb,
     `UPDATE ${NODE_TYPE} SET supersededBy = :newid, supersededAt = :at, ` +
-      `supersededReason = :reason WHERE id = :id`,
+      `supersededReason = :reason WHERE id = :id ` +
+      `AND (supersededBy IS NULL OR supersededBy = '' OR supersededBy = :newid)`,
     { id: oldId, newid: newId, at, reason: reason ?? '' },
   );
+  const count = (res?.result as Array<{ count?: number }> | undefined)?.[0]?.count;
+  // A server that reports no count is treated as success (the pre-guard
+  // behaviour); only an explicit 0 means the guard rejected the update.
+  if (typeof count === 'number' && count < 1) {
+    const now = await getNode(oldId);
+    if (!now) return { ok: false, reason: 'old-not-found' };
+    return supersedeGuardVerdict(now.supersededBy, newId) ?? { ok: false, reason: 'old-not-found' };
+  }
   return { ok: true };
 }
 
@@ -106,7 +126,7 @@ export async function findNodeIdsByTags(
   http: ArcadeHttp,
   tags: string[],
 ): Promise<string[]> {
-  const wanted = tags.map((t) => t.trim().toLowerCase()).filter(Boolean);
+  const wanted = tags.map((t) => normalizeTag(t)).filter(Boolean);
   if (wanted.length === 0) return [];
   const wantedSet = new Set(wanted);
 
@@ -116,8 +136,8 @@ export async function findNodeIdsByTags(
   const likeParts: string[] = [];
   const params: Record<string, unknown> = {};
   wanted.forEach((t, i) => {
-    likeParts.push(`tags LIKE :t${i}`);
-    params[`t${i}`] = `%"${t}"%`;
+    likeParts.push(`tags.toLowerCase() LIKE :t${i}`);
+    params[`t${i}`] = arcadeTagLikePattern(t);
   });
   const candRes = await http.query(
     tenantDb,
@@ -140,7 +160,7 @@ export async function findNodeIdsByTags(
         parsed = [];
       }
     }
-    const rowTags = Array.isArray(parsed) ? parsed.map((x) => String(x).toLowerCase()) : [];
+    const rowTags = Array.isArray(parsed) ? parsed.map((x) => normalizeTag(String(x))) : [];
     if (rowTags.some((t) => wantedSet.has(t))) ids.push(id);
   }
   return ids;

@@ -41,7 +41,9 @@ import { redactId, redactError } from '../security/logRedact.js';
 import { CAPPED_NODE_TEXT_FIELDS, MAX_NODE_FIELD_BYTES, SUPERSEDE_LIFECYCLE_FIELDS, exceedsNodeFieldCap } from '../engines/nodeFieldLimits.js';
 import { log } from '../logger.js';
 import { recordHotWrite } from '../outbox/hotLane.js';
-import { withNodeLock } from './nodeWriteLock.js';
+import { withNodeLocks } from './nodeWriteLock.js';
+import { guardNodeWrite, retractNodeUpsertRow, type NodeGuardFailure } from './nodeServiceConditional.js';
+import { createNodeIfAbsent, isNodeAlreadyExists, type NodeInput } from '../engines/graphShared/conditionalInsert.js';
 import { applyVerbatimFanout, readPriorNode, rollbackPartialWrite } from './nodeServiceVerbatim.js';
 import { validateQuestionsMeta, mergeQuestionsMetaIntoMetadataJson } from './questionAliases.js';
 import {
@@ -161,6 +163,11 @@ export interface NodeUpsertArgs {
     supersedes?: string[];
     /** D5 — bypass the near-duplicate check for this one write. */
     force?: boolean;
+    /** Conditional writes R1 — create only: if any node (superseded or stale
+     *  included) holds `id`, fail `already_exists` and write nothing. Checked
+     *  under the node lock; engines with `insertNodeIfAbsent` (sqlite, arcade)
+     *  also enforce it in the database. Write-time directive, never stored. */
+    ifAbsent?: boolean;
 }
 
 /** Optional orchestration hooks. Each transport wires the subset it used
@@ -242,6 +249,8 @@ export type NodeWriteResult =
           code: 'verbatim_unavailable' | 'invalid_node_id' | 'field_too_large' | 'protected_field' | 'write_failed' | 'invalid_questions_meta'
               // D5 (2026-09-23) — write-time supersession enforcement/effect.
               | 'missing_supersedes_field' | 'prose_supersedes_mismatch' | 'unlisted_near_duplicate' | 'supersedes_apply_failed'
+              // Conditional writes phase 1 — `ifAbsent` refusal / R2 supersede guard.
+              | 'already_exists' | 'already_superseded'
               // D5 round 4 (#4) — supersedeNode failed for some (not all) ids
               // AFTER the new node's own write already succeeded.
               | 'supersedes_partial';
@@ -611,7 +620,10 @@ export async function nodeUpsert(
     //      for the same id cannot land their graph and verbatim/vector
     //      writes in different relative orders (split-brain — see the lock's
     //      doc comment for the full root-cause account).
-    const writeOutcome = await withNodeLock(workspace, id, async (): Promise<{ node: LoreNode; embedPending: boolean } | { verbatimError: Error }> => {
+    //      The lock set is the id PLUS its `supersedes` targets (R2): two writers
+    //      claiming the same old node serialise, and the claim (step 3.5) runs
+    //      inside the same critical section as the guard that checked it.
+    const writeOutcome = await withNodeLocks(workspace, [id, ...(args.supersedes ?? [])], async (): Promise<{ node: LoreNode; embedPending: boolean; superseded: Awaited<ReturnType<typeof runSupersessionApply>> } | { verbatimError: Error } | NodeGuardFailure> => {
         // 1. Outbox-first node.upsert (durability + replay + per-workspace replication).
         //    TW-4a — capture the recorded entry so the verbatim-failure rollback
         //    below can RETRACT it. Without this, deleting the graph node on a
@@ -624,6 +636,9 @@ export async function nodeUpsert(
         //    when the caller omitted them (2.1/2.2 — store_node / POST
         //    /api/node never send scopes; defaulting to [] fails open).
         const priorNode = await readPriorNode(targetGraph, id);
+        // Conditional writes: refuse BEFORE the first side effect (no outbox row).
+        const refused = await guardNodeWrite({ id, supersedes: args.supersedes, ifAbsent: args.ifAbsent, priorNode, targetGraph, isVisible: hooks.supersedesVisible });
+        if (refused) return refused;
         if (nodeData['security_scopes'] === undefined && priorNode !== undefined) {
             nodeData['security_scopes'] = priorNode?.security_scopes ?? [];
         }
@@ -655,8 +670,18 @@ export async function nodeUpsert(
         const versionIntent = { principal: hooks.versionPrincipal ?? 'mcp', policy: hooks.versionHistoryPolicy, recorded: [] as string[] };
         let node: LoreNode;
         try {
-            node = await withVersionIntent(hooks.versionStore, versionIntent, () => targetGraph.upsertNode(nodeData)); // cloud: version in the same transaction (item 8)
+            node = await withVersionIntent(hooks.versionStore, versionIntent, () => args.ifAbsent === true
+                ? createNodeIfAbsent(targetGraph as Parameters<typeof createNodeIfAbsent>[0], nodeData as NodeInput)
+                : targetGraph.upsertNode(nodeData)); // cloud: version in the same transaction (item 8)
         } catch (graphErr) {
+            if (isNodeAlreadyExists(graphErr)) {
+                // Another process won the DB-level insert: nothing of ours is in the graph,
+                // so only the outbox row needs taking back (rollbackPartialWrite would delete the winner).
+                if (hooks.outboxStore && nodeUpsertOutboxEntryId) {
+                    await retractNodeUpsertRow({ store: hooks.outboxStore, entryId: nodeUpsertOutboxEntryId, workspace, graph: targetGraph, id, written: nodeData, initiator });
+                }
+                return { ok: false, code: 'already_exists', error: graphErr };
+            }
             log.error(`${logPrefix} graph upsert failed for ${redactId(id)}: ${redactError(graphErr)} — retracting the node.upsert outbox row so the replicator cannot replay a write the caller was told failed`);
             await rollbackPartialWrite({
                 id,
@@ -699,22 +724,22 @@ export async function nodeUpsert(
         if (fanoutOutcome.error) {
             return { verbatimError: fanoutOutcome.error };
         }
-        return { node, embedPending: fanoutOutcome.embedPending };
+        // 3.5 D5 — apply `supersedes` (if any), independent of enforcement, AFTER
+        // the new node's own write succeeded. See supersessionPolicy.ts.
+        const superseded = await runSupersessionApply({
+            targetGraph, supersedes: args.supersedes, newId: id, workspace, initiator, outboxStore: hooks.outboxStore, logPrefix,
+        });
+        return { node, embedPending: fanoutOutcome.embedPending, superseded };
     });
     if ('verbatimError' in writeOutcome) {
         return { ok: false, code: 'verbatim_unavailable', error: writeOutcome.verbatimError };
     }
-    const { node, embedPending } = writeOutcome;
-
-    // 3.5 D5 — apply `supersedes` (if any), independent of enforcement, AFTER
-    // the new node's own write succeeded. See supersessionPolicy.ts.
-    const supersedeApplied = await runSupersessionApply({
-        targetGraph, supersedes: args.supersedes, newId: id, workspace, initiator, outboxStore: hooks.outboxStore, logPrefix,
-    });
+    if ('code' in writeOutcome) return writeOutcome;
+    const { node, embedPending, superseded: supersedeApplied } = writeOutcome;
     if (!supersedeApplied.ok) {
         return supersedeApplied.code === 'supersedes_partial'
             ? { ok: false, code: 'supersedes_partial', error: supersedeApplied.error, applied: supersedeApplied.applied, unapplied: supersedeApplied.unapplied }
-            : { ok: false, code: 'supersedes_apply_failed', error: supersedeApplied.error };
+            : { ok: false, code: supersedeApplied.code, error: supersedeApplied.error };
     }
 
     // 4. WAL append — active-workspace only (P1.C scope), when wired.

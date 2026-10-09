@@ -9,6 +9,7 @@
  * `graphShared/traverseBfs.ts` BFS core extracted in step 1a.
  */
 
+import { normalizeTag } from '../normalizeTags.js';
 import type { LoreNode, TraversalResult } from '../../providers/types.js';
 import type { ReadCache } from '../cache.js';
 import type { CallTally } from '../callTally.js';
@@ -302,7 +303,7 @@ export async function listNodes(
             if (type) { filters.push('type = ?'); params.push(type); }
             if (tag) {
                 filters.push('EXISTS (SELECT 1 FROM json_each(nodes.tags) je WHERE je.value = ?)');
-                params.push(tag.toLowerCase());
+                params.push(normalizeTag(tag));
             }
             if (project !== '*') { filters.push('project = ?'); params.push(project); }
             if (ecosystem !== '*') {

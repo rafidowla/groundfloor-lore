@@ -4,6 +4,7 @@
  * on the SAME shared `graphShared/traverseBfs.ts` BFS core.
  */
 
+import { normalizeTag } from '../normalizeTags.js';
 import type { DirectedTraversalResult, LoreNodeSummary } from '../../providers/types.js';
 import { cacheKey } from '../cache.js';
 import { LoreGraphError } from '../loreGraphError.js';
@@ -109,7 +110,7 @@ export async function listNodeSummaries(
             if (type) { filters.push('type = ?'); params.push(type); }
             if (tag) {
                 filters.push('EXISTS (SELECT 1 FROM json_each(nodes.tags) je WHERE je.value = ?)');
-                params.push(tag.toLowerCase());
+                params.push(normalizeTag(tag));
             }
             if (project !== '*') { filters.push('project = ?'); params.push(project); }
             if (ecosystem !== '*') {

@@ -591,7 +591,7 @@ await test('applyWriteTimeSupersedes (defence in depth): an id the hook rejects 
         outboxStore: r.outbox, logPrefix: '[t]', isVisible: async (id) => id !== 'hid',
     });
     assert.equal(out.ok, false);
-    assert.deepEqual(out.ok === false && out.unapplied, [{ id: 'hid', reason: 'old-not-found' }], 'same as the engine answers for a missing id');
+    assert.deepEqual(out.ok === false && 'unapplied' in out ? out.unapplied : undefined, [{ id: 'hid', reason: 'old-not-found' }], 'same as the engine answers for a missing id');
     assert.ok(!(await sup(r, 'hid'))!.supersededBy, 'hidden untouched');
     assert.equal((await sup(r, 'vis'))!.supersededBy, 'newer');
     assert.equal(await supersedesEdges(r), 1);

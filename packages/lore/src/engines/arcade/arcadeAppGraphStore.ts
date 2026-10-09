@@ -38,6 +38,7 @@
  * an injection-shaped app value ("alpha_app2' OR '1'='1") stays opaque data.
  */
 
+import { tagsToArray } from '../normalizeTags.js';
 import { assertEdgeEndpoints } from '../dataplaneEdgeShape.js';
 import type {
   GraphStats,
@@ -129,7 +130,7 @@ export class ArcadeAppGraphStore {
       type: node.type ?? '',
       label: node.label ?? '',
       content: node.content ?? '',
-      tags: JSON.stringify(node.tags ?? []),
+      tags: JSON.stringify(tagsToArray(node.tags)),
       project: node.project ?? '',
       ecosystem: node.ecosystem ?? '',
       metadata: node.metadata ?? '',

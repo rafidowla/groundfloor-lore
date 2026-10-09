@@ -28,6 +28,7 @@
  * requests (the isolation test asserts this via a request counter).
  */
 
+import { createNodeIfAbsent } from '../graphShared/conditionalInsert.js';
 import type {
   LoreEdge,
   LoreNode,
@@ -54,6 +55,8 @@ export class ScopeError extends Error {
 export interface GuardableGraph {
   upsertNode(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>): Promise<LoreNode>;
   getNode(id: string): Promise<LoreNode | null>;
+  /** Conditional writes R1 — optional create-only verb (see graphShared/conditionalInsert.ts). */
+  insertNodeIfAbsent?(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>): Promise<LoreNode>;
   addEdge(edge: LoreEdge): Promise<void>;
   addBidirectionalEdge(edge: LoreEdge): Promise<void>;
   traverse(nodeId: string, maxDepth?: number, relation?: string): Promise<TraversalResult[]>;
@@ -91,6 +94,12 @@ export class ScopeGuardedGraph implements GuardableGraph {
   ): Promise<LoreNode> {
     this.requireWrite();
     return this.inner.upsertNode(node);
+  }
+  async insertNodeIfAbsent(
+    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
+  ): Promise<LoreNode> {
+    this.requireWrite();
+    return createNodeIfAbsent(this.inner, node);
   }
   async addEdge(edge: LoreEdge): Promise<void> {
     this.requireWrite();

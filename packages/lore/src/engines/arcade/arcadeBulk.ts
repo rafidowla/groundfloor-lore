@@ -29,6 +29,7 @@
 import type { LoreNode } from '../../providers/types.js';
 import type { ArcadeHttp } from './arcadeHttp.js';
 import { NODE_TYPE } from './arcadeSchema.js';
+import { tagsToArray } from '../normalizeTags.js';
 import { encodeNodeScopes, resolveNodeScopes } from './arcadeNodeScopes.js';
 
 type NodeInput = Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>;
@@ -120,7 +121,7 @@ async function upsertChunk(
     params[`${p}type`] = node.type ?? '';
     params[`${p}label`] = node.label ?? '';
     params[`${p}content`] = node.content ?? '';
-    params[`${p}tags`] = JSON.stringify(node.tags ?? []);
+    params[`${p}tags`] = JSON.stringify(tagsToArray(node.tags));
     params[`${p}project`] = node.project ?? '';
     params[`${p}ecosystem`] = node.ecosystem ?? '';
     params[`${p}metadata`] = node.metadata ?? '';

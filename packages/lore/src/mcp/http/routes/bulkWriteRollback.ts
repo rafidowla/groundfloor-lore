@@ -17,8 +17,8 @@
  */
 import type { LoreNode } from '../../../providers/types.js';
 import type { OutboxStore } from '../../../outbox/types.js';
-import { recordHotWrite } from '../../../outbox/hotLane.js';
 import { restorePayload } from '../../../core/nodeServiceVerbatim.js';
+import { retractNodeUpsertRow } from '../../../core/nodeServiceConditional.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 
 const INITIATOR = 'http:POST /api/nodes/bulk';
@@ -26,7 +26,7 @@ const INITIATOR = 'http:POST /api/nodes/bulk';
 /** `getNode` is optional: a minimal graph without it keeps the pre-3.26 undo (delete). */
 interface ReadGraph { getNode?(id: string): Promise<LoreNode | null> }
 interface WriteGraph { upsertNode(node: never): Promise<unknown>; deleteNode(id: string): Promise<unknown> }
-interface InlineSpec { idx: number; raw: { id?: unknown }; embedMode: string }
+interface InlineSpec { idx: number; raw: { id?: unknown }; embedMode: string; /** A non-empty list needs the prior too: a lost supersede claim restores it. */ supersedes?: string[] }
 
 /**
  * The nodes as they are before a chunk's write, for the items whose write can
@@ -45,7 +45,7 @@ export async function readInlinePriors<S extends InlineSpec>(
     const chunk: S[] = [];
     for (const spec of specs) {
         const id = spec.raw.id as string;
-        if (spec.embedMode === 'inline' && !priors.has(id) && typeof graph.getNode === 'function') {
+        if ((spec.embedMode === 'inline' || !!spec.supersedes?.length) && !priors.has(id) && typeof graph.getNode === 'function') {
             try {
                 priors.set(id, await graph.getNode(id));
             } catch (err) {
@@ -83,11 +83,5 @@ export async function retractBulkNodeUpsert(input: {
     id: string;
     written: Record<string, unknown>;
 }): Promise<void> {
-    const { store, entryId, workspace, graph, id, written } = input;
-    if (!store.removeIfPending) { await store.remove(entryId); return; }
-    if (await store.removeIfPending(entryId)) return;
-    const current = typeof graph.getNode === 'function' ? await graph.getNode(id) : null;
-    await recordHotWrite(store, current
-        ? { workspace, operationKind: 'node.upsert', payload: restorePayload(current, written), initiator: INITIATOR, operation: 'graph.upsert' }
-        : { workspace, operationKind: 'node.delete', payload: { id }, initiator: INITIATOR, operation: 'graph.delete' });
+    await retractNodeUpsertRow({ ...input, initiator: INITIATOR });
 }
