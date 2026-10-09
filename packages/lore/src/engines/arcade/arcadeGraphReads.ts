@@ -37,7 +37,7 @@ const NODE_SELECT_COLUMNS =
 const SELECT_WITH_LIFECYCLE =
   NODE_SELECT_COLUMNS +
   ', supersededBy, supersededAt, supersededReason, stale, staleAt, ephemeral, ttl_ms' +
-  ', success_count, failure_count, partial_count, confirmation_score, security_scopes';
+  ', success_count, failure_count, partial_count, confirmation_score, security_scopes, revision';
 
 /**
  * search — SEARCH_CONTRACT_VERSION=1 keyword search. Case-insensitive
@@ -302,7 +302,7 @@ export async function bulkListArcadeNodes(
   const pageSize = q.limit + 1;
   const sql =
     `SELECT id, type, label, content, tags, metadata, project, ecosystem, ` +
-    `updatedAt, createdAt, security_scopes FROM ${nodeType} ${where} ` +
+    `updatedAt, createdAt, security_scopes, revision FROM ${nodeType} ${where} ` +
     `ORDER BY updatedAt DESC, id ASC LIMIT ${pageSize}`;
   const res = await http.query(tenantDb, sql, params);
   const rows = (res.result ?? []) as Array<Record<string, unknown>>;
@@ -320,6 +320,7 @@ export async function bulkListArcadeNodes(
     updatedAt: String(r['updatedAt'] ?? ''),
     createdAt: String(r['createdAt'] ?? ''),
     security_scopes: parseNodeScopes(r['security_scopes']),
+    revision: Number(r['revision'] ?? 0) || 0,
   }));
   const hasMore = projected.length > q.limit;
   const nodes = hasMore ? projected.slice(0, q.limit) : projected;

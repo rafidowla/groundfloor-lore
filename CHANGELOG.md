@@ -4,6 +4,145 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.33.0] — 2026-10-08
+
+Conditional writes, phase 2. Every node now carries an integer `revision` that
+moves by exactly 1 per accepted write, and outbox replay no longer rewrites
+`updatedAt` or overwrites a newer write (G5). A bulk item, the single-node
+route and the embedded `nodeUpsert` can now say "write only if this node is
+still at revision n" (`ifRevision`) and "only if these other nodes are still at
+these revisions" (`preconditions`). Opt-in: a caller sending neither field sees
+no change. Additive storage change (one new column / property), applied
+automatically on open; see Migration.
+
+### Added (phase 2b)
+- **`ifRevision: n`** on each `POST /api/nodes/bulk` item, on `POST /api/node`
+  and on the embedded `nodeUpsert` options. A non-negative integer; anything
+  else, or `ifRevision` together with `ifAbsent`, is a per-item validation
+  error (`invalid_if_revision`). It is a write-time directive and is never
+  stored. If the node is not at revision `n` the item fails
+  `revision_mismatch: <id> expected revision <n>, found <m|absent>` with
+  `currentRevision: m` (`null` when the node is absent; a pre-revision row
+  reads `0`) and nothing is written for it: no graph row, vector, outbox row
+  or supersede. On success the write lands at `n+1` (`results[i].revision`).
+  The write is the 2a conditional `WHERE id AND revision = n` statement, so a
+  second daemon on the same ArcadeDB cannot slip in between check and write;
+  a lost race is `revision_mismatch`, not retried, and the item's outbox row
+  is retracted. `POST /api/node` returns `409` `{ error:"revision_mismatch",
+  message, currentRevision }`; the embedded call returns
+  `{ ok:false, code:'revision_mismatch', currentRevision, error }`.
+- **`ifRevision` and `supersedes`.** `ifRevision` guards only the item's own
+  node; the Phase 1 supersede guard still applies to the old ids and a failed
+  claim is rolled back as before (a rollback is a new revision). A supersede
+  bumps the new node once per claimed old node, so a landed write ends at
+  `n + 1 + k` for `k` distinct `supersedes` ids. A pure retry (every old id
+  already superseded by this id) with `ifRevision: n` is reported
+  `unchanged:true` only when the stored revision is exactly `n + 1 + k`;
+  stored `n` is a write that never landed and is written normally; any other
+  revision fails `revision_mismatch` (it is ambiguous whether the retry or
+  someone else made it).
+- **`preconditions: [{ id, revision }]`** (max 32; each id valid, distinct from
+  the item's own id; anything else is `invalid_preconditions`; never stored).
+  The item is written only if every listed node is at the listed revision. A
+  failure is `precondition_failed: <id> expected revision <n>, found <m|absent>`
+  plus `failedPreconditions: [{ id, expected, found }]` listing every failing
+  entry (`found: null` for an absent node), and nothing is written for the item.
+  Items apply strictly in array order, so a precondition on a node written by an
+  earlier item of the same batch sees that item's post-write revision. Other
+  items are unaffected. Not available on `POST /api/node`.
+- **In-process guarantee only.** Precondition ids join the item ids and
+  supersede targets in the item's per-node lock set (sorted, deadlock-free; an
+  item with `ifRevision` or `preconditions` always gets a chunk of its own), and
+  the check and the write happen under that lock, so they are serialised against every other
+  writer in this Lore process, including writes accepted but not yet replayed
+  (the graph row is written inline in the request path, never deferred to the
+  replicator). A second Lore daemon on the same database is NOT excluded for
+  `preconditions` (it is for `ifRevision`, which is DB-level). Cross-daemon
+  exclusion is a later phase.
+- **Engines without revisions** (Surreal, cloud/Dataplane) refuse `ifRevision`
+  and `preconditions` with `revision_unsupported` rather than ignoring them.
+- **A failed condition records no outbox row.** The check runs under the
+  item's own chunk locks BEFORE its row is recorded, so a refused item has no
+  row for the replicator to claim (no compensating row, no revision movement on
+  replay). Known residual (cross-daemon only): an `ifRevision` item whose
+  conditional write loses a race AFTER its row was recorded and claimed. If the
+  other daemon moved the node past n (or deleted it), replay of the claimed row
+  and its compensating row is inert / ends on the other daemon's state. If the
+  other daemon deleted and re-created the node BELOW n, the claimed row applies
+  the refused content and the compensating row (claimed revision + 1) restores
+  it, ending 2 revisions above the re-created node with the right content; no
+  clean fix exists without changing the replay gate of every engine.
+
+### Added (phase 2a)
+- **Per-node `revision`.** A new node is `1`; rows written before this change
+  read `0`. It only goes up. It is returned as `revision` on `GET /api/node`
+  (`node.revision`), on every `POST /api/nodes/bulk-list` row, on each
+  `POST /api/nodes/bulk` result item (the revision after the write; an
+  `unchanged:true` retry reports the stored one) and on the embedded
+  `nodeUpsert` result (`node.revision`). `POST /api/node/supersede` returns no
+  node info, so it has no revision field.
+- **What bumps it (by exactly 1, computed by the database in the same
+  statement, so two daemons upserting one id end at +2):** upsert (single, bulk,
+  embedded), supersede (BOTH the old and the new node), unsupersede, mark-stale
+  (only a node that actually turns stale), the other request-path content
+  writes that go through `upsertNode` (archive/activate, anchors, evidence clear,
+  deferred resolve, auto-ingest, sync/import), the maintenance content writes
+  that bypass `upsertNode` (SQLite `archiveNode` of a node not yet archived, and
+  the schema-ops `setNodeMetadata` / `setNodeType` when the value changes), and
+  the rollback restore of a failed write (a restore is a new state, so the
+  revision goes up, never down).
+- **What does not:** outbox replay; embedding and verbatim projection; access
+  times; `record_outcome` / recall-outcome counters and `confirmation_score`
+  (new `upsertNodeKeepRevision` write, used by those callers); an idempotent
+  supersede retry; a Phase 1 `unchanged:true` bulk retry; `importRaw` /
+  migrate (carry the source revision verbatim). Maintenance sweeps that change
+  no node state and are deliberately NOT bumped: `stampAccessTimes`, and the
+  timestamp repair `restoreNode` runs after its (bumping) upsert.
+- **Compensating outbox rows are revision-gated.** When a failed write's outbox
+  row was already claimed by the replicator, the compensating `node.upsert` of
+  the previous state carries the revision and `updatedAt` the rollback restore
+  landed, so replaying it (and the original row) moves nothing. Before, it
+  replayed as a legacy payload and bumped the revision a second time.
+- **Write-ahead outbox carries the revision.** The request path stamps
+  `updatedAt` once; under the node lock it reads the stored revision `r`,
+  records the outbox payload with `revision: r+1` and that `updatedAt`, then
+  writes conditionally (`WHERE ifnull(revision,0) = r`, bumping in SQL). On 0
+  rows (another process moved the node) it re-reads and retries, at most 5
+  times, retracting and re-recording the outbox row so the payload always
+  equals what was written. The bulk path retries in place; when the write lands at a
+  revision other than the one recorded, the item's outbox row is re-recorded at
+  the landed revision (a row the replicator already claimed is left as is: its
+  payload is then lower than what landed, so replay skips it). Two items for the
+  same id in one bulk call never share a lock chunk, so a later item's row is
+  never predicted from an earlier item that failed.
+
+### Fixed
+- **G5: outbox replay rewrote `updatedAt` and could overwrite a newer write.**
+  Replay of a node payload now applies only over an absent or LOWER stored
+  revision, and writes the payload's `revision` and `updatedAt` verbatim. A
+  payload recorded before this change (no `revision`) replays as before. The
+  existing newest-save guard (`newerSave`) is kept: it decides missing-node
+  recreate and delete semantics, which the revision gate does not cover.
+  Supersede / unsupersede / mark-stale have no node-state outbox rows (only edge
+  rows), so their replay cannot bump.
+
+### Migration
+- **SQLite:** `ALTER TABLE nodes ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`,
+  run idempotently (a `PRAGMA table_info` probe) when the graph opens. Existing
+  rows read 0. An older Lore on a migrated file keeps working: it names its own
+  columns on writes and ignores the extra one on reads (rows it inserts read 0).
+- **ArcadeDB:** `revision` LONG property on the node type, added idempotently;
+  `ARCADE_SCHEMA_VERSION` 4 -> 5. Rows without the property read 0.
+
+### Notes
+- **Engines without `revision`:** Surreal (deprecated locally) and
+  Dataplane/cloud do not store a revision; the field is absent there and their
+  writes keep the old replay behaviour.
+- A rolled-back write (a restore after a failed claim) is itself a write and
+  still moves the revision. A client that got a failure for an item should
+  re-read the node before retrying with `ifRevision`.
+
+
 ## [3.32.0] — 2026-10-08
 
 Conditional writes, phase 1: a caller can now create a node only if the id is

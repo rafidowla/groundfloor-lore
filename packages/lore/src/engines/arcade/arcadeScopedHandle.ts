@@ -99,11 +99,22 @@ export interface ArcadeExtraVector {
 /** Full-surface, write-gated LoreGraphHandle wrapper. */
 export class ScopedArcadeGraphHandle implements LoreGraphHandle {
   private readonly scopes: ReadonlySet<Scope>;
+  /** Present only when the wrapped graph has them (conditional writes phase 2a), so feature-detection works through the wrapper. */
+  upsertNodeAtRevision?: LoreGraphHandle['upsertNodeAtRevision'];
+  replayNodeAtRevision?: LoreGraphHandle['replayNodeAtRevision'];
+  upsertNodeKeepRevision?: LoreGraphHandle['upsertNodeKeepRevision'];
   constructor(
     private readonly inner: LoreGraphHandle & ArcadeExtraGraph,
     scopes: readonly Scope[],
   ) {
     this.scopes = new Set(scopes);
+    if (typeof inner.upsertNodeAtRevision === 'function' && typeof inner.replayNodeAtRevision === 'function') {
+      this.upsertNodeAtRevision = (node, expected, at, mustExist) => { this.requireWrite(); return inner.upsertNodeAtRevision!(node, expected, at, mustExist); };
+      this.replayNodeAtRevision = (node) => { this.requireWrite(); return inner.replayNodeAtRevision!(node); };
+    }
+    if (typeof inner.upsertNodeKeepRevision === 'function') {
+      this.upsertNodeKeepRevision = (node) => { this.requireWrite(); return inner.upsertNodeKeepRevision!(node); };
+    }
   }
   private requireWrite(): void {
     if (!this.scopes.has('write')) throw new ScopeError();

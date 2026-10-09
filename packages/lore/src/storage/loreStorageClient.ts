@@ -61,6 +61,7 @@ import { withTransactionConflictRetry } from '../engines/transactionConflictRetr
 import { listNodesAsOf as queryNodesAsOf, type ListNodesAsOfOptions } from '../core/temporalQuery.js';
 import type { SupersedeResult } from '../engines/graphShared/supersedeGuard.js';
 import { createNodeIfAbsent, type NodeInput } from '../engines/graphShared/conditionalInsert.js';
+import { hasRevisionSupport, type RevisionedGraph } from '../engines/graphShared/revision.js';
 
 /* ─── Public handle types ─────────────────────────────────────────── */
 
@@ -75,7 +76,7 @@ import { createNodeIfAbsent, type NodeInput } from '../engines/graphShared/condi
  * conforming implementation (cq-lore-graph-alias-proliferation /
  * cq-lore-storage-client-as-never).
  */
-export interface LoreGraphHandle extends GraphProvider {
+export interface LoreGraphHandle extends GraphProvider, RevisionedGraph {
     supersedeNode(oldId: string, newId: string, reason?: string): Promise<SupersedeResult>;
     unsupersedeNode(id: string): Promise<boolean>;
     /** Conditional writes R1 — create-only; throws NodeAlreadyExistsError when the id is taken. Engines whose store enforces it (sqlite, arcade) implement it as a DB-level INSERT. */
@@ -376,6 +377,23 @@ export class LoreStorageClient {
      */
     async insertNodeIfAbsent(node: NodeInput): Promise<LoreNode> {
         return createNodeIfAbsent(this.g() as Parameters<typeof createNodeIfAbsent>[0], node);
+    }
+
+    /**
+     * Conditional writes phase 2a — write at an expected revision (throws
+     * RevisionConflictError when the stored revision moved). Only on graphs that
+     * support revisions (check `supportsRevision()`); not wrapped in the conflict
+     * retry, which could not tell a retried bump from a foreign one.
+     */
+    async upsertNodeAtRevision(node: NodeInput, expectedRevision: number, updatedAt: string, mustExist?: boolean): Promise<LoreNode> {
+        const g = this.g();
+        if (!hasRevisionSupport(g)) throw new Error('[LoreStorageClient] this graph engine has no revision support');
+        return g.upsertNodeAtRevision(node, expectedRevision, updatedAt, mustExist);
+    }
+
+    /** True when the bound graph keeps a per-node revision (sqlite, arcade). */
+    supportsRevision(): boolean {
+        return hasRevisionSupport(this.g());
     }
 
     /**

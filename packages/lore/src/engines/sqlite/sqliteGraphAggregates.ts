@@ -167,7 +167,7 @@ export async function getTopology(
 /** Exact column set — same as surrealGraphAggregates' BULK_LIST_COLUMNS. */
 const BULK_LIST_COLUMNS = [
     'id', 'type', 'label', 'content', 'tags', 'metadata',
-    'project', 'ecosystem', 'updatedAt', 'createdAt', 'security_scopes',
+    'project', 'ecosystem', 'updatedAt', 'createdAt', 'security_scopes', 'revision',
 ] as const;
 
 /** bulkList — cursor-paginated enumeration on (updatedAt DESC, id ASC). Same keyset contract as surrealGraphAggregates.bulkList. */

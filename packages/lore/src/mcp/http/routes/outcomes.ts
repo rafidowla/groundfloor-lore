@@ -26,6 +26,7 @@ import { filterNodesByActorScope } from '../../../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../../../security/actorContext.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
+import { upsertKeepingRevision } from '../../../engines/graphShared/revision.js';
 
 export interface OutcomesRouteDeps {
     store: StorageBundle;
@@ -167,7 +168,7 @@ export async function tryOutcomesRoutes(
             const counts = deps.auxStore.getOutcomeCount(nodeId, workspace);
             const newScore = calcConfirmationScore(counts.success, counts.failure, counts.partial);
 
-            await withTransactionConflictRetry(() => graph.upsertNode({
+            await withTransactionConflictRetry(() => upsertKeepingRevision(graph, {
                 ...node,
                 success_count: counts.success,
                 failure_count: counts.failure,

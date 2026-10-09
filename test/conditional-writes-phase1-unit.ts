@@ -222,7 +222,8 @@ await test('5. retried supersede with the same new id: ok, unchanged, node + upd
     const rowsBefore = (await pending(r)).length;
     await new Promise((res) => setTimeout(res, 15));
     const retry = await bulk(r, [node('new', 'CHANGED LABEL', { supersedes: ['old'] })]);
-    assert.deepEqual(retry.results[0], { ok: true, id: 'new', unchanged: true });
+    // Phase 2a: created at 1, bumped to 2 by the supersede claim; the retry reports it without bumping.
+    assert.deepEqual(retry.results[0], { ok: true, id: 'new', unchanged: true, revision: 2 });
     assert.equal(retry.ok, true);
     assert.equal(retry.succeeded, 1);
     assert.deepEqual(await r.graph.getNode('new'), nodeBefore, 'node fields of a retried item are not rewritten');
@@ -237,7 +238,7 @@ await test('5b. an ifAbsent + supersedes retry succeeds (unchanged) instead of f
     const a = await bulk(r, [node('new', 'n', { supersedes: ['old'], ifAbsent: true })]);
     assert.equal(a.results[0]!.ok, true, JSON.stringify(a));
     const b = await bulk(r, [node('new', 'n', { supersedes: ['old'], ifAbsent: true })]);
-    assert.deepEqual(b.results[0], { ok: true, id: 'new', unchanged: true });
+    assert.deepEqual(b.results[0], { ok: true, id: 'new', unchanged: true, revision: 2 });
 });
 
 await test('5c. old already superseded by this id but the new node is gone: the item writes the node (not a pure retry)', async () => {
@@ -312,12 +313,13 @@ await test('7. a caller sending none of the new fields gets the pre-change resul
     const r = sqliteRig('legacy');
     await r.graph.initialize();
     const out = await bulk(r, [node('a'), node('b')]);
-    assert.deepEqual(out, { ok: true, count: 2, succeeded: 2, results: [{ ok: true, id: 'a' }, { ok: true, id: 'b' }] });
+    // Phase 2a adds `revision` to each result; nothing else changes.
+    assert.deepEqual(out, { ok: true, count: 2, succeeded: 2, results: [{ ok: true, id: 'a', revision: 1 }, { ok: true, id: 'b', revision: 1 }] });
     const again = await bulk(r, [node('a', 'rewritten')]);
-    assert.deepEqual(again, { ok: true, count: 1, succeeded: 1, results: [{ ok: true, id: 'a' }] });
+    assert.deepEqual(again, { ok: true, count: 1, succeeded: 1, results: [{ ok: true, id: 'a', revision: 2 }] });
     assert.equal((await r.graph.getNode('a'))!.label, 'rewritten', 'a plain bulk write still overwrites');
     const sup = await bulk(r, [node('c', 'c', { supersedes: ['a'] })]);
-    assert.deepEqual(sup, { ok: true, count: 1, succeeded: 1, results: [{ ok: true, id: 'c' }] });
+    assert.deepEqual(sup, { ok: true, count: 1, succeeded: 1, results: [{ ok: true, id: 'c', revision: 2 }] });
     assert.equal((await r.graph.getNode('a'))!.supersededBy, 'c');
     assert.equal((await pendingFor(r, 'a')).every((e) => e.payload?.['ifAbsent'] === undefined), true);
 });

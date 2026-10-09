@@ -42,7 +42,9 @@ import { CAPPED_NODE_TEXT_FIELDS, MAX_NODE_FIELD_BYTES, SUPERSEDE_LIFECYCLE_FIEL
 import { log } from '../logger.js';
 import { recordHotWrite } from '../outbox/hotLane.js';
 import { withNodeLocks } from './nodeWriteLock.js';
-import { guardNodeWrite, retractNodeUpsertRow, type NodeGuardFailure } from './nodeServiceConditional.js';
+import { guardNodeWrite, retractNodeUpsertRow, writeNodeAtRevision, canWriteAtRevision, type NodeGuardFailure } from './nodeServiceConditional.js';
+import { isRevisionConflict, revisionOf } from '../engines/graphShared/revision.js';
+import { parseConditionalFields, revisionMismatchMessage, type FailedPrecondition, type Precondition } from './conditionalChecks.js';
 import { createNodeIfAbsent, isNodeAlreadyExists, type NodeInput } from '../engines/graphShared/conditionalInsert.js';
 import { applyVerbatimFanout, readPriorNode, rollbackPartialWrite } from './nodeServiceVerbatim.js';
 import { validateQuestionsMeta, mergeQuestionsMetaIntoMetadataJson } from './questionAliases.js';
@@ -168,6 +170,10 @@ export interface NodeUpsertArgs {
      *  under the node lock; engines with `insertNodeIfAbsent` (sqlite, arcade)
      *  also enforce it in the database. Write-time directive, never stored. */
     ifAbsent?: boolean;
+    /** Conditional writes phase 2b — write only if THIS node is at exactly this revision (else `revision_mismatch`). */
+    ifRevision?: number;
+    /** Conditional writes phase 2b — write only if every listed node is at its listed revision (else `precondition_failed`). In-process guarantee only. */
+    preconditions?: Precondition[];
 }
 
 /** Optional orchestration hooks. Each transport wires the subset it used
@@ -251,6 +257,8 @@ export type NodeWriteResult =
               | 'missing_supersedes_field' | 'prose_supersedes_mismatch' | 'unlisted_near_duplicate' | 'supersedes_apply_failed'
               // Conditional writes phase 1 — `ifAbsent` refusal / R2 supersede guard.
               | 'already_exists' | 'already_superseded'
+              // Conditional writes phase 2b — `ifRevision` / `preconditions`.
+              | 'revision_mismatch' | 'precondition_failed' | 'revision_unsupported' | 'invalid_if_revision' | 'invalid_preconditions'
               // D5 round 4 (#4) — supersedeNode failed for some (not all) ids
               // AFTER the new node's own write already succeeded.
               | 'supersedes_partial';
@@ -259,6 +267,10 @@ export type NodeWriteResult =
           /** Present only when code === 'supersedes_partial'. */
           applied?: string[];
           unapplied?: Array<{ id: string; reason: string }>;
+          /** Present when code === 'revision_mismatch': the revision found (null = absent). */
+          currentRevision?: number | null;
+          /** Present when code === 'precondition_failed': every entry that did not hold. */
+          failedPreconditions?: FailedPrecondition[];
       };
 
 /* ─── Vocab-policy verdict (shared lookup, transport-shaped envelope) ─ */
@@ -406,6 +418,11 @@ export async function nodeUpsert(
     } catch (e) {
         return { ok: false, code: 'invalid_node_id', error: e as Error };
     }
+
+    // 0-cond. Phase 2b — validate `ifRevision` / `preconditions` before any write.
+    const conditionParse = parseConditionalFields({ id, ifRevision: args.ifRevision, preconditions: args.preconditions, ifAbsent: args.ifAbsent });
+    if (!conditionParse.ok) return { ok: false, code: conditionParse.code, error: new Error(conditionParse.error) };
+    const conditions = conditionParse.conditions;
 
     // 0a-2. Reject an ordinary upsert that tries to CHANGE a supersession-
     //       lifecycle field (QA finding 1, A4 round E, 2026-09-03). MCP
@@ -623,7 +640,7 @@ export async function nodeUpsert(
     //      The lock set is the id PLUS its `supersedes` targets (R2): two writers
     //      claiming the same old node serialise, and the claim (step 3.5) runs
     //      inside the same critical section as the guard that checked it.
-    const writeOutcome = await withNodeLocks(workspace, [id, ...(args.supersedes ?? [])], async (): Promise<{ node: LoreNode; embedPending: boolean; superseded: Awaited<ReturnType<typeof runSupersessionApply>> } | { verbatimError: Error } | NodeGuardFailure> => {
+    const writeOutcome = await withNodeLocks(workspace, [id, ...(args.supersedes ?? []), ...(conditions.preconditions ?? []).map((p) => p.id)], async (): Promise<{ node: LoreNode; embedPending: boolean; superseded: Awaited<ReturnType<typeof runSupersessionApply>> } | { verbatimError: Error } | NodeGuardFailure> => {
         // 1. Outbox-first node.upsert (durability + replay + per-workspace replication).
         //    TW-4a — capture the recorded entry so the verbatim-failure rollback
         //    below can RETRACT it. Without this, deleting the graph node on a
@@ -635,15 +652,18 @@ export async function nodeUpsert(
         //    security_scopes are what the verbatim/vector mirror must carry
         //    when the caller omitted them (2.1/2.2 — store_node / POST
         //    /api/node never send scopes; defaulting to [] fails open).
-        const priorNode = await readPriorNode(targetGraph, id);
+        let priorNode = await readPriorNode(targetGraph, id);
         // Conditional writes: refuse BEFORE the first side effect (no outbox row).
-        const refused = await guardNodeWrite({ id, supersedes: args.supersedes, ifAbsent: args.ifAbsent, priorNode, targetGraph, isVisible: hooks.supersedesVisible });
+        const refused = await guardNodeWrite({ id, supersedes: args.supersedes, ifAbsent: args.ifAbsent, priorNode, targetGraph, isVisible: hooks.supersedesVisible, conditions });
         if (refused) return refused;
         if (nodeData['security_scopes'] === undefined && priorNode !== undefined) {
             nodeData['security_scopes'] = priorNode?.security_scopes ?? [];
         }
         let nodeUpsertOutboxEntryId: string | null = null;
-        if (hooks.outboxStore) {
+        // Phase 2a: on a revision-aware graph the row is recorded INSIDE writeNodeAtRevision (it needs the
+        // predicted revision and, on a cross-daemon conflict, re-records); `ifAbsent` keeps its insert-only row.
+        const atRevision = args.ifAbsent !== true && canWriteAtRevision(targetGraph, priorNode);
+        if (hooks.outboxStore && !atRevision) {
             const nodeUpsertEntry = await recordHotWrite(hooks.outboxStore, {
                 workspace,
                 operationKind: 'node.upsert',
@@ -670,10 +690,34 @@ export async function nodeUpsert(
         const versionIntent = { principal: hooks.versionPrincipal ?? 'mcp', policy: hooks.versionHistoryPolicy, recorded: [] as string[] };
         let node: LoreNode;
         try {
-            node = await withVersionIntent(hooks.versionStore, versionIntent, () => args.ifAbsent === true
-                ? createNodeIfAbsent(targetGraph as Parameters<typeof createNodeIfAbsent>[0], nodeData as NodeInput)
-                : targetGraph.upsertNode(nodeData)); // cloud: version in the same transaction (item 8)
+            if (atRevision) {
+                const written = await writeNodeAtRevision({
+                    graph: targetGraph, id, nodeData, priorNode, store: hooks.outboxStore, workspace, initiator,
+                    write: (expected, at) => withVersionIntent(hooks.versionStore, versionIntent, () => targetGraph.upsertNodeAtRevision!(nodeData as NodeInput, expected, at, conditions.ifRevision !== undefined)),
+                    onEntry: (entryId) => { nodeUpsertOutboxEntryId = entryId; },
+                    noRetry: conditions.ifRevision !== undefined,
+                });
+                node = written.node;
+                priorNode = written.priorNode;
+            } else {
+                node = await withVersionIntent(hooks.versionStore, versionIntent, () => args.ifAbsent === true
+                    ? createNodeIfAbsent(targetGraph as Parameters<typeof createNodeIfAbsent>[0], nodeData as NodeInput)
+                    : targetGraph.upsertNode(nodeData)); // cloud: version in the same transaction (item 8)
+            }
         } catch (graphErr) {
+            if (isRevisionConflict(graphErr) && conditions.ifRevision !== undefined) {
+                // ifRevision: another daemon moved the node between our check and the conditional write — that IS the answer.
+                const now = await targetGraph.getNode!(id).catch(() => null);
+                const found = now ? revisionOf(now) : null;
+                return { ok: false, code: 'revision_mismatch', error: new Error(revisionMismatchMessage(id, conditions.ifRevision, found)), currentRevision: found };
+            }
+            if (isRevisionConflict(graphErr)) {
+                // Another daemon kept moving the node for every attempt: nothing of ours is in the graph and
+                // writeNodeAtRevision already took its row back, so there is nothing to roll back (the
+                // rollback would put a stale copy over the winner).
+                log.error(`${logPrefix} conditional write of ${redactId(id)} lost the revision race on every attempt`);
+                return { ok: false, code: 'write_failed', error: graphErr as Error };
+            }
             if (isNodeAlreadyExists(graphErr)) {
                 // Another process won the DB-level insert: nothing of ours is in the graph,
                 // so only the outbox row needs taking back (rollbackPartialWrite would delete the winner).
@@ -729,6 +773,11 @@ export async function nodeUpsert(
         const superseded = await runSupersessionApply({
             targetGraph, supersedes: args.supersedes, newId: id, workspace, initiator, outboxStore: hooks.outboxStore, logPrefix,
         });
+        // Write-time `supersedes` bumps the new node once per claimed node: report what is stored now.
+        if (args.supersedes && args.supersedes.length > 0 && superseded.ok && atRevision) {
+            const fresh = await targetGraph.getNode!(id).catch(() => null);
+            if (fresh && fresh.revision !== undefined) node = { ...node, revision: fresh.revision };
+        }
         return { node, embedPending: fanoutOutcome.embedPending, superseded };
     });
     if ('verbatimError' in writeOutcome) {

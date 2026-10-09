@@ -36,6 +36,8 @@ import { buildVerbatimText } from '../engines/verbatimSchema.js';
 import { tagsToArray, tagsToString } from '../engines/normalizeTags.js';
 import { computeContentHash } from '../engines/contentHash.js';
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
+import { MAX_REVISION_ATTEMPTS, hasRevisionSupport, isRevisionConflict, revisionOf } from '../engines/graphShared/revision.js';
+import type { RevisionConflictError } from '../engines/graphShared/revision.js';
 import { redactId, redactError } from '../security/logRedact.js';
 import { log } from '../logger.js';
 import { recordHotWrite } from '../outbox/hotLane.js';
@@ -112,8 +114,58 @@ export function restorePayload(prior: LoreNode, written?: Record<string, unknown
 }
 
 /**
+ * Stamp a compensating `node.upsert` payload with the revision and `updatedAt`
+ * of the state the graph actually holds (`landed`), so its replay is gated like
+ * any revisioned payload: applied only over a LOWER stored revision, written
+ * verbatim, never bumped (conditional writes phase 2a). A `landed` node without
+ * a revision (graph without revision support, legacy row) leaves the payload
+ * legacy.
+ */
+export function withLandedRevision(payload: Record<string, unknown>, landed: LoreNode | null | undefined): Record<string, unknown> {
+    const revision = revisionOf(landed);
+    if (revision < 1 || !landed?.updatedAt) return payload;
+    return { ...payload, revision, updatedAt: landed.updatedAt };
+}
+
+/**
+ * Put `prior` back inline and return the node as it landed (revision and
+ * `updatedAt` included) when the graph tracks revisions; undefined otherwise.
+ *
+ * A restore is a new state, so the revision moves up by 1 (it never goes
+ * down). On a revision-aware graph the restore is a conditional write at the
+ * revision just read, with the request path's bounded retry: a loss to another
+ * daemon (or to a stale cached read after a write that threw part-way) carries
+ * the revision actually stored, and the next attempt is based on it. That makes
+ * the returned revision exactly the one this restore landed, never a later
+ * writer's.
+ */
+export async function restoreNodeInline(
+    graph: NodeWriteGraph,
+    prior: LoreNode,
+    written?: Record<string, unknown>,
+): Promise<LoreNode | undefined> {
+    const payload = restorePayload(prior, written);
+    if (!hasRevisionSupport(graph) || typeof graph.getNode !== 'function') {
+        await withTransactionConflictRetry(() => graph.upsertNode(payload));
+        return undefined;
+    }
+    let expected = revisionOf(await graph.getNode(prior.id));
+    for (let attempt = 1; ; attempt++) {
+        try {
+            const at = expected;
+            return await withTransactionConflictRetry(() => graph.upsertNodeAtRevision(payload as never, at, new Date().toISOString()));
+        } catch (err) {
+            if (!isRevisionConflict(err) || attempt >= MAX_REVISION_ATTEMPTS) throw err;
+            expected = (err as RevisionConflictError).actual;
+        }
+    }
+}
+
+/**
  * Undo the graph half of a failed write: restore an existing node, delete one
- * this write created. Resolves true when the node is present afterwards.
+ * this write created. Resolves `kept` true when the node is present
+ * afterwards, with `landed` the restored node when the graph reports a
+ * revision for it ({@link restoreNodeInline}).
  * Throws when the state could not be put back.
  *
  * The restore is unconditional for a node that is still there. Comparing a
@@ -125,16 +177,17 @@ export function restorePayload(prior: LoreNode, written?: Record<string, unknown
  * (`bulkWriteRollback.ts`): a restore that fails while the outbox row is
  * still pending leaves nothing queued to repair the node.
  */
-async function undoGraphWrite(targetGraph: NodeWriteGraph, id: string, prior: PriorNode, written?: Record<string, unknown>): Promise<boolean> {
+async function undoGraphWrite(
+    targetGraph: NodeWriteGraph, id: string, prior: PriorNode, written?: Record<string, unknown>,
+): Promise<{ kept: boolean; landed?: LoreNode }> {
     if (prior === null || prior === undefined) {
         await withTransactionConflictRetry(() => targetGraph.deleteNode(id));
-        return false;
+        return { kept: false };
     }
     // Gone since the pre-write read: a delete that takes no node lock (host
     // raw delete, boot prune) removed it. Do not bring it back.
-    if (await targetGraph.getNode!(id) === null) return false;
-    await withTransactionConflictRetry(() => targetGraph.upsertNode(restorePayload(prior, written)));
-    return true;
+    if (await targetGraph.getNode!(id) === null) return { kept: false };
+    return { kept: true, landed: await restoreNodeInline(targetGraph, prior, written) };
 }
 
 /**
@@ -170,6 +223,8 @@ export async function rollbackPartialWrite(input: {
     const existedBefore = typeof priorNode === 'object' && priorNode !== null;
     // Whether the node is on the graph once the undo ran; the compensating row follows it.
     let nodeKept = existedBefore;
+    // The restored node as the graph reports it (revision + updatedAt), for the compensating row.
+    let restored: LoreNode | undefined;
 
     if (versionStore?.discardVersions && versionIds && versionIds.length > 0) {
         try {
@@ -181,7 +236,9 @@ export async function rollbackPartialWrite(input: {
     }
 
     try {
-        nodeKept = await undoGraphWrite(targetGraph, id, priorNode, written);
+        const undone = await undoGraphWrite(targetGraph, id, priorNode, written);
+        nodeKept = undone.kept;
+        restored = undone.landed;
     } catch (rollbackErr) {
         rollbackError = rollbackErr as Error;
         log.error(`${logPrefix} graph rollback (${existedBefore ? 'restore previous node' : 'deleteNode'}) failed for ${redactId(id)}: ${redactError(rollbackErr)}`);
@@ -193,7 +250,7 @@ export async function rollbackPartialWrite(input: {
                 const removed = await outboxStore.removeIfPending(nodeUpsertOutboxEntryId);
                 if (!removed) {
                     await recordHotWrite(outboxStore, nodeKept
-                        ? { workspace, operationKind: 'node.upsert', payload: restorePayload(priorNode as LoreNode, written), initiator, operation: 'graph.upsert' }
+                        ? { workspace, operationKind: 'node.upsert', payload: withLandedRevision(restorePayload(priorNode as LoreNode, written), restored), initiator, operation: 'graph.upsert' }
                         : { workspace, operationKind: 'node.delete', payload: { id }, initiator, operation: 'graph.delete' });
                     log.warn(`${logPrefix} node.upsert row for ${redactId(id)} was already claimed by the replicator; recorded a compensating ${nodeKept ? 'node.upsert of the previous state' : 'node.delete'} so its replay ends on the rolled-back state (C-R2-03)`);
                 }

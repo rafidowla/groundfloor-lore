@@ -159,9 +159,10 @@ async function main(): Promise<void> {
   console.log('\n=== arcade node security_scopes (schema v4) ===\n');
 
   // ── schema ────────────────────────────────────────────────────────────────
-  await test('schema version is 4 and NODE_PROPS declares security_scopes STRING', () => {
-    assert.equal(ARCADE_SCHEMA_VERSION, 4);
+  await test('schema version is 5 (v5 adds revision) and NODE_PROPS declares security_scopes STRING and revision LONG', () => {
+    assert.equal(ARCADE_SCHEMA_VERSION, 5);
     assert.ok(NODE_PROPS.some(([n, t]) => n === 'security_scopes' && t === 'STRING'));
+    assert.ok(NODE_PROPS.some(([n, t]) => n === 'revision' && t === 'LONG'));
   });
   await test('graph DDL creates the property additively (IF NOT EXISTS)', () => {
     const stmts = graphSchemaDdl().filter((s) => s.includes('security_scopes'));
@@ -373,10 +374,10 @@ async function main(): Promise<void> {
     upsertTenantAppRow(db, { tenantId: 'c', appId: 'a', dbName: 'c_a', dbUser: 'u', dbPass: null, secretRef: 'r', status: 'active', createdAt: '2026-01-01T00:00:00.000Z' });
     assert.equal(getTenantAppRow(db, 'c', 'a')!.schema_version, 0);
     stampTenantAppSchemaVersion(db, 'c', 'a', ARCADE_SCHEMA_VERSION);
-    assert.equal(getTenantAppRow(db, 'c', 'a')!.schema_version, 4);
+    assert.equal(getTenantAppRow(db, 'c', 'a')!.schema_version, 5);
     // A later upsert (re-provision) must not silently drop the stamp.
     upsertTenantAppRow(db, { tenantId: 'c', appId: 'a', dbName: 'c_a', dbUser: 'u', dbPass: null, secretRef: 'r', status: 'active', createdAt: '2026-01-01T00:00:00.000Z' });
-    assert.equal(getTenantAppRow(db, 'c', 'a')!.schema_version, 4);
+    assert.equal(getTenantAppRow(db, 'c', 'a')!.schema_version, 5);
     db.close();
   });
 

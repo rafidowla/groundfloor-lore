@@ -22,6 +22,12 @@ export interface SqliteSchemaOpsDeps {
     deleteEdge(sourceId: string, targetId: string, relation: string): Promise<number>;
     addEdge(edge: { sourceId: string; targetId: string; relation: string }): Promise<void>;
     upsertNode(node: Record<string, unknown>): Promise<unknown>;
+    /**
+     * Drop the graph's read cache after a direct-SQL node write. A node read
+     * from a stale cache would carry the pre-write `type`/`metadata` AND the
+     * pre-bump `revision`, which a conditional writer would then be refused on.
+     */
+    invalidateReads?(): void;
 }
 
 export class SqliteSchemaGraphOps implements SchemaGraphOps {
@@ -125,15 +131,20 @@ export class SqliteSchemaGraphOps implements SchemaGraphOps {
         } catch (error) { throw sqliteError(`getNodeMetadata('${id}')`, error); }
     }
 
+    /** Rewrites the metadata; a changed value is an accepted mutation, so the revision moves up by 1 (in the statement). */
     async setNodeMetadata(id: string, metadata: Record<string, unknown>): Promise<void> {
         try {
-            this.db.prepare('UPDATE nodes SET metadata = ? WHERE id = ?').run(JSON.stringify(metadata), id);
+            const json = JSON.stringify(metadata);
+            this.db.prepare(`UPDATE nodes SET revision = revision + CASE WHEN metadata IS ? THEN 0 ELSE 1 END, metadata = ? WHERE id = ?`).run(json, json, id);
+            this.deps.invalidateReads?.();
         } catch (error) { throw sqliteError(`setNodeMetadata('${id}')`, error); }
     }
 
+    /** Retypes the node; a changed type is an accepted mutation, so the revision moves up by 1 (in the statement). */
     async setNodeType(id: string, newType: string): Promise<void> {
         try {
-            this.db.prepare('UPDATE nodes SET type = ? WHERE id = ?').run(newType, id);
+            this.db.prepare(`UPDATE nodes SET revision = revision + CASE WHEN type IS ? THEN 0 ELSE 1 END, type = ? WHERE id = ?`).run(newType, newType, id);
+            this.deps.invalidateReads?.();
         } catch (error) { throw sqliteError(`setNodeType('${id}')`, error); }
     }
 
@@ -165,6 +176,8 @@ export class SqliteSchemaGraphOps implements SchemaGraphOps {
             const params: unknown[] = [];
             if (typeof createdAt === 'string' && createdAt) { sets.push('createdAt = ?'); params.push(createdAt); }
             if (typeof syncedAt === 'string' && syncedAt) { sets.push('syncedAt = ?'); params.push(syncedAt); }
+            // Deliberately NOT bumped: the upsertNode above is the one accepted mutation
+            // (it bumped); this only repairs the timestamps the upsert stamped.
             if (sets.length > 0) {
                 params.push(id);
                 this.db.prepare(`UPDATE nodes SET ${sets.join(', ')} WHERE id = ?`).run(...params);

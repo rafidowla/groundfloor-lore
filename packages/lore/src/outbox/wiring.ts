@@ -18,6 +18,7 @@
  */
 
 import { replayIfAbsentUpsert, type ConditionalInsertGraph } from '../engines/graphShared/conditionalInsert.js';
+import { replayNodePayload } from '../engines/graphShared/revision.js';
 import { purgeVerbatimRows, type PurgeCapableStore } from '../core/verbatimPurge.js';
 import type { LoreNode, LoreEdge } from '../providers/types.js';
 import type { SyncEngine } from '../engines/syncEngine.js';
@@ -272,8 +273,10 @@ export function wireOutbox(input: {
                 await withNodeLock(workspace ?? '', id, () => (payload['ifAbsent'] === true
                     ? replayIfAbsentUpsert(g as unknown as ConditionalInsertGraph, payload)
                     : typeof replay === 'function'
+                        // The embedded guard applies the revision gate itself (mcp/embeddedLifecycle.ts) next to its delete/newest-save rules.
                         ? replay(payload as unknown as LoreNode, entry, newerSave(id, entry))
-                        : g.upsertNode(payload as unknown as LoreNode)));
+                        // Phase 2a — a payload carrying a `revision` is applied only over an absent or older row and written verbatim; legacy payloads keep the plain upsert.
+                        : replayNodePayload(g, payload, () => g.upsertNode(payload as unknown as LoreNode))));
             },
             // Round-E X-edges — edges now DO take a lock: a per-triple one
             // (core/nodeWriteLock.ts `withEdgeLock`), keyed on

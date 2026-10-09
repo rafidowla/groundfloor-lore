@@ -45,8 +45,10 @@ export const VERBATIM_TYPE = 'LoreVerbatim';
  * node vertex itself, so the live-node source of security/itemScopes.ts tells the
  * truth). v4 is the first version that needs a DATA step on top of the additive
  * DDL (backfill of pre-v4 rows) — see arcadeNodeScopes.upgradeNodeScopes.
+ * v5 = LoreNode.revision (per-node monotonic write counter, conditional writes
+ * Phase 2a). Purely additive: rows without it read as 0, so no data step.
  */
-export const ARCADE_SCHEMA_VERSION = 4;
+export const ARCADE_SCHEMA_VERSION = 5;
 
 /**
  * LoreNode scalar properties. STRING for everything the adapter round-trips as
@@ -86,6 +88,10 @@ export const NODE_PROPS: ReadonlyArray<readonly [string, string]> = [
   //    means "not yet backfilled" (a pre-v4 row) — never "public"; a stored []
   //    is the explicit public label. See arcadeNodeScopes.ts.
   ['security_scopes', 'STRING'],
+  // ── v5: per-node revision (LONG). Bumped by the database in the same
+  //    statement as the write (`revision = ifnull(revision, 0) + 1`); NULL on a
+  //    pre-v5 row reads as 0. No backfill needed.
+  ['revision', 'LONG'],
 ];
 
 /** LoreVerbatim scalar properties (the `embedding` ARRAY_OF_FLOATS + its HNSW

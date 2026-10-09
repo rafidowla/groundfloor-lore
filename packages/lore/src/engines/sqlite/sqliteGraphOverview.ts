@@ -131,10 +131,15 @@ export async function findSupersededByPredecessors(db: SqliteDb, byId: string): 
     }
 }
 
-/** Soft-archive: `status = 'archived'`, and stamp `updatedAt` (the keyset cursor). */
+/**
+ * Soft-archive: `status = 'archived'`, and stamp `updatedAt` (the keyset cursor).
+ * Archiving a node that is not yet archived is an accepted mutation, so the
+ * revision moves up by 1 (computed in the statement); re-archiving one that
+ * already is changes no state and leaves the revision alone.
+ */
 export async function archiveNode(db: SqliteDb, id: string): Promise<void> {
     try {
-        db.prepare(`UPDATE nodes SET status = 'archived', updatedAt = ? WHERE id = ?`).run(new Date().toISOString(), id);
+        db.prepare(`UPDATE nodes SET revision = revision + CASE WHEN ifnull(status, '') = 'archived' THEN 0 ELSE 1 END, status = 'archived', updatedAt = ? WHERE id = ?`).run(new Date().toISOString(), id);
     } catch (error) {
         throw sqliteError(`Failed to archive node '${id}'`, 'archiveNode', error);
     }

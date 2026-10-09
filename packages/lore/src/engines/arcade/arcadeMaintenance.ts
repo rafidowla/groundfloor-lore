@@ -68,7 +68,7 @@ export async function supersedeNode(
   const res = await http.command(
     tenantDb,
     `UPDATE ${NODE_TYPE} SET supersededBy = :newid, supersededAt = :at, ` +
-      `supersededReason = :reason WHERE id = :id ` +
+      `supersededReason = :reason, revision = ifnull(revision, 0) + 1 WHERE id = :id ` +
       `AND (supersededBy IS NULL OR supersededBy = '' OR supersededBy = :newid)`,
     { id: oldId, newid: newId, at, reason: reason ?? '' },
   );
@@ -80,6 +80,13 @@ export async function supersedeNode(
     if (!now) return { ok: false, reason: 'old-not-found' };
     return supersedeGuardVerdict(now.supersededBy, newId) ?? { ok: false, reason: 'old-not-found' };
   }
+  // The successor was modified too (it now carries a predecessor): bump it as well.
+  // Only reached when the claim above was accepted, so an idempotent retry never gets here.
+  await http.command(
+    tenantDb,
+    `UPDATE ${NODE_TYPE} SET revision = ifnull(revision, 0) + 1 WHERE id = :id`,
+    { id: newId },
+  );
   return { ok: true };
 }
 
@@ -96,10 +103,13 @@ export async function unsupersedeNode(
 ): Promise<boolean> {
   const node = await getNode(id);
   if (!node) return false;
+  // Bump only when something is actually being cleared (parity with the SQLite engine):
+  // un-superseding a node that was never superseded is a no-op for its revision.
+  const bump = node.supersededBy ? ', revision = ifnull(revision, 0) + 1' : '';
   await http.command(
     tenantDb,
     `UPDATE ${NODE_TYPE} SET supersededBy = '', supersededAt = '', ` +
-      `supersededReason = '' WHERE id = :id`,
+      `supersededReason = ''${bump} WHERE id = :id`,
     { id },
   );
   return true;
@@ -182,9 +192,18 @@ export async function markStaleByIds(
   const unique = Array.from(new Set(ids.filter((id) => typeof id === 'string' && id.length > 0)));
   if (unique.length === 0) return 0;
   const at = new Date().toISOString();
+  // Two statements, so the revision moves only where the node actually changed:
+  // a row that is not yet stale is bumped; one that already is gets just the
+  // staleAt refresh (an idempotent re-mark must not bump).
   await http.command(
     tenantDb,
-    `UPDATE ${NODE_TYPE} SET stale = true, staleAt = :at WHERE id IN :ids`,
+    `UPDATE ${NODE_TYPE} SET stale = true, staleAt = :at, revision = ifnull(revision, 0) + 1 ` +
+      `WHERE id IN :ids AND (stale IS NULL OR stale = false)`,
+    { at, ids: unique },
+  );
+  await http.command(
+    tenantDb,
+    `UPDATE ${NODE_TYPE} SET staleAt = :at WHERE id IN :ids AND stale = true`,
     { at, ids: unique },
   );
   return unique.length;

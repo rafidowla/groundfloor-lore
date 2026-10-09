@@ -52,6 +52,9 @@ export const DEFAULT_IGNORED_VERSION_FIELDS: readonly string[] = [
     'syncedAt',
     'lastAccessedAt',
     'last_retrieved_at',
+    // Conditional writes 2a: the per-node revision is bumped by the store on every
+    // accepted write, so a re-store of identical content differs only in it.
+    'revision',
 ];
 
 /**

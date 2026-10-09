@@ -276,6 +276,38 @@ export class SqliteGraph implements LoreGraphHandle {
         });
     }
 
+    /** Phase 2a — upsert that leaves the revision alone (outcome-counter writes are not content changes). */
+    async upsertNodeKeepRevision(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>): Promise<LoreNode> {
+        await this.initialize();
+        return this.nodeWriteChain.run(node.id, async () => {
+            const written = await writes.upsertNodeKeepRevision(this.db(), node);
+            this.bumpWriteEpoch();
+            return written;
+        });
+    }
+
+    /** Phase 2a — upsert that lands only at `expectedRevision` (throws RevisionConflictError otherwise). */
+    async upsertNodeAtRevision(
+        node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>, expectedRevision: number, updatedAt: string, mustExist?: boolean,
+    ): Promise<LoreNode> {
+        await this.initialize();
+        return this.nodeWriteChain.run(node.id, async () => {
+            const written = await writes.upsertNodeAtRevision(this.db(), node, expectedRevision, updatedAt, mustExist);
+            this.bumpWriteEpoch();
+            return written;
+        });
+    }
+
+    /** Phase 2a — outbox replay gate: applies only over an absent/older row, verbatim, no bump. */
+    async replayNodeAtRevision(node: LoreNode): Promise<boolean> {
+        await this.initialize();
+        return this.nodeWriteChain.run(node.id, async () => {
+            const applied = await writes.replayNodeAtRevision(this.db(), node);
+            if (applied) this.bumpWriteEpoch();
+            return applied;
+        });
+    }
+
     async bulkUpsertNodes(
         batch: Array<Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>>,
     ): Promise<Array<{ id: string; ok: boolean; error?: string }>> {
@@ -435,6 +467,7 @@ export class SqliteGraph implements LoreGraphHandle {
             db: this.db(),
             deleteNode: (id) => this.deleteNode(id),
             deleteEdge: (s2, t, r) => this.deleteEdge(s2, t, r),
+            invalidateReads: () => this.readCache.bumpEpoch(),
             addEdge: (e) => this.addEdge(e as LoreEdge),
             upsertNode: (n) => this.upsertNode(
                 n as unknown as Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,

@@ -781,7 +781,9 @@ async function main(): Promise<void> {
 
         await check('bulkList: row KEY SET is the contracted wire shape', async () => {
             const page = await g.bulkList({ limit: 50 });
-            assert.deepEqual(Object.keys(page.nodes[0] ?? {}).sort(), [
+            // `revision` (conditional writes phase 2a) is present on engines that track it (sqlite,
+            // arcade) and absent on surreal/dataplane, so it is optional in the contracted shape.
+            assert.deepEqual(Object.keys(page.nodes[0] ?? {}).filter((k) => k !== 'revision').sort(), [
                 'content', 'createdAt', 'ecosystem', 'id', 'label', 'metadata',
                 'project', 'security_scopes', 'tags', 'type', 'updatedAt',
             ], 'the route-facing wire shape, nothing engine-internal');

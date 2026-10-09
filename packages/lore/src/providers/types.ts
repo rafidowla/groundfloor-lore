@@ -13,6 +13,15 @@ export interface LoreNode {
     createdAt: string;
     updatedAt: string;
     syncedAt: string | null;
+    /**
+     * Per-node monotonic revision (conditional writes phase 2a). Starts at 1 on
+     * create and goes up by exactly 1 on every accepted request-path mutation
+     * (upsert, supersede on either node, unsupersede, mark-stale). Outbox replay,
+     * embedding/verbatim projection and access/outcome counters never bump it.
+     * Rows written before the field existed read as 0. Absent on engines that
+     * do not track it (surreal, dataplane).
+     */
+    revision?: number;
     security_scopes?: string[];
     /**
      * ISO 639-1 language code tagged by the caller at ingest, or null

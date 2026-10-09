@@ -38,6 +38,7 @@ import type { AuxStore, OutcomeStatus } from '../outbox/auxStore.js';
 import type { VersionStoreApi } from '../outbox/versionStoreApi.js';
 import type { LoreNode } from '../providers/types.js';
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
+import { upsertKeepingRevision } from '../engines/graphShared/revision.js';
 
 /** Re-exported under this module's own name for callers that don't want
  *  to reach into outbox/auxStore.js directly — but this IS record_outcome's
@@ -63,6 +64,8 @@ export interface RecallOutcomeGraph {
     initialize(): Promise<void>;
     getNode(id: string): Promise<LoreNode | null>;
     upsertNode(node: LoreNode): Promise<LoreNode>;
+    /** Optional (sqlite, arcade): counter-only write that leaves the node's revision alone. */
+    upsertNodeKeepRevision?(node: LoreNode): Promise<LoreNode>;
 }
 
 export interface ApplyRecallOutcomeArgs {
@@ -117,7 +120,7 @@ export async function applyRecallOutcome(args: ApplyRecallOutcomeArgs): Promise<
     const counts = auxStore.getOutcomeCount(nodeId, workspace);
     const newScore = calcConfirmationScore(counts.success, counts.failure, counts.partial);
 
-    await withTransactionConflictRetry(() => graph.upsertNode({
+    await withTransactionConflictRetry(() => upsertKeepingRevision(graph, {
         ...node,
         success_count: counts.success,
         failure_count: counts.failure,

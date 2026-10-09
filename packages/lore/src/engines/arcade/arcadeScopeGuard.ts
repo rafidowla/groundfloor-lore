@@ -57,6 +57,10 @@ export interface GuardableGraph {
   getNode(id: string): Promise<LoreNode | null>;
   /** Conditional writes R1 — optional create-only verb (see graphShared/conditionalInsert.ts). */
   insertNodeIfAbsent?(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>): Promise<LoreNode>;
+  /** Conditional writes phase 2a — optional revision verbs (see graphShared/revision.ts). */
+  upsertNodeAtRevision?(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>, expectedRevision: number, updatedAt: string, mustExist?: boolean): Promise<LoreNode>;
+  replayNodeAtRevision?(node: LoreNode): Promise<boolean>;
+  upsertNodeKeepRevision?(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>): Promise<LoreNode>;
   addEdge(edge: LoreEdge): Promise<void>;
   addBidirectionalEdge(edge: LoreEdge): Promise<void>;
   traverse(nodeId: string, maxDepth?: number, relation?: string): Promise<TraversalResult[]>;
@@ -79,9 +83,21 @@ export class ScopeGuardedGraph implements GuardableGraph {
   private readonly inner: GuardableGraph;
   private readonly scopes: ReadonlySet<Scope>;
 
+  /** Present only when the wrapped graph has them, so revision support is feature-detectable through the guard. */
+  upsertNodeAtRevision?: GuardableGraph['upsertNodeAtRevision'];
+  replayNodeAtRevision?: GuardableGraph['replayNodeAtRevision'];
+  upsertNodeKeepRevision?: GuardableGraph['upsertNodeKeepRevision'];
+
   constructor(inner: GuardableGraph, scopes: ReadonlySet<Scope>) {
     this.inner = inner;
     this.scopes = scopes;
+    if (typeof inner.upsertNodeAtRevision === 'function' && typeof inner.replayNodeAtRevision === 'function') {
+      this.upsertNodeAtRevision = (node, expected, at, mustExist) => { this.requireWrite(); return inner.upsertNodeAtRevision!(node, expected, at, mustExist); };
+      this.replayNodeAtRevision = (node) => { this.requireWrite(); return inner.replayNodeAtRevision!(node); };
+    }
+    if (typeof inner.upsertNodeKeepRevision === 'function') {
+      this.upsertNodeKeepRevision = (node) => { this.requireWrite(); return inner.upsertNodeKeepRevision!(node); };
+    }
   }
 
   private requireWrite(): void {

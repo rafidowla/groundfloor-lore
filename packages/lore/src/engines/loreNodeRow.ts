@@ -97,6 +97,8 @@ export function rowToLoreNode(row: Record<string, unknown>): LoreNode {
         return Number.isFinite(n) ? n : undefined;
     };
 
+    const revision = numOrUndef('revision');
+
     return {
         id: (getValue('id') as string) ?? '',
         type: (getValue('type') as LoreNode['type']) ?? 'note',
@@ -110,6 +112,10 @@ export function rowToLoreNode(row: Record<string, unknown>): LoreNode {
         updatedAt: (getValue('updatedAt') as string) ?? '',
         syncedAt: (getValue('syncedAt') as string) || null,
         security_scopes: (getValue('security_scopes') as string[]) ?? [],
+        // Conditional writes phase 2a. The key is omitted (not set to undefined) when the
+        // projection/engine carries no revision, so a Surreal/Dataplane node has no `revision`
+        // field at all; engines that track it default a missing value to 0 in their own mapper.
+        ...(revision !== undefined ? { revision } : {}),
         language,
         supersededBy: sBy.length > 0 ? sBy : null,
         supersededAt: sAt.length > 0 ? sAt : null,

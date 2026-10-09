@@ -17,7 +17,7 @@
  */
 import type { LoreNode } from '../../../providers/types.js';
 import type { OutboxStore } from '../../../outbox/types.js';
-import { restorePayload } from '../../../core/nodeServiceVerbatim.js';
+import { restoreNodeInline } from '../../../core/nodeServiceVerbatim.js';
 import { retractNodeUpsertRow } from '../../../core/nodeServiceConditional.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 
@@ -66,7 +66,7 @@ export async function undoBulkGraphWrite(
 ): Promise<void> {
     if (!prior) { await withTransactionConflictRetry(() => graph.deleteNode(id)); return; }
     if (typeof graph.getNode === 'function' && await graph.getNode(id) === null) return;
-    await withTransactionConflictRetry(() => graph.upsertNode(restorePayload(prior, written) as never));
+    await restoreNodeInline(graph as never, prior, written);
 }
 
 /**
@@ -82,6 +82,14 @@ export async function retractBulkNodeUpsert(input: {
     graph: ReadGraph;
     id: string;
     written: Record<string, unknown>;
+    /** The revision the item's claimed outbox row carries (see retractNodeUpsertRow). */
+    claimedRevision?: number;
 }): Promise<void> {
     await retractNodeUpsertRow({ ...input, initiator: INITIATOR });
+}
+
+/** The `revision` an item's outbox entry was recorded with (absent for an unstamped/insert-only row). */
+export function entryRevision(entry: { payload?: unknown } | null | undefined): number | undefined {
+    const r = (entry?.payload as { revision?: unknown } | undefined)?.revision;
+    return typeof r === 'number' ? r : undefined;
 }

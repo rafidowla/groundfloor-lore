@@ -47,6 +47,7 @@ import { SqliteGraph } from './sqliteGraph.js';
 import { metadataToSqliteText } from './sqlite/sqliteGraphRow.js';
 import { keywordCandidates } from './probeKeywords.js';
 import type { LoreEdge, LoreNode } from '../providers/types.js';
+import { revisionOf } from './graphShared/revision.js';
 
 export interface MigrateGraphToSqliteOptions {
     workspaceName: string;
@@ -128,6 +129,9 @@ export function withSqliteMetadata(node: LoreNode): LoreNode {
 
 /** Canonical digest of every node + edge: sorted by a stable key, then key-order-normalized JSON. Timestamps are NOT normalized — importRaw preserves them exactly, so they must match byte-for-byte. */
 export function digestOf(nodes: LoreNode[], edges: LoreEdge[]): string {
+    // `revision` is a per-engine write counter (conditional writes phase 2a): a source with no
+    // such field (surreal) reads as 0 on the migrated copy, so both sides are compared as 0-default.
+    nodes = nodes.map((n) => ({ ...n, revision: revisionOf(n) }));
     const sortedNodes = [...nodes].sort((a, b) => a.id.localeCompare(b.id));
     const sortedEdges = [...edges].sort((a, b) =>
         `${a.sourceId}|${a.targetId}|${a.relation}`.localeCompare(`${b.sourceId}|${b.targetId}|${b.relation}`));

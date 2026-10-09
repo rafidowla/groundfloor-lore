@@ -16,6 +16,7 @@ import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceR
 import { enforceStrictFields, enforceVocabPolicy } from '../storeNodeGates.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../../security/routeWorkspaceBinding.js';
 import { nodeUpsert, resolveAutolinkHandles } from '../../../../core/nodeService.js';
+import { parseConditionalFields } from '../../../../core/conditionalChecks.js';
 import { resolveSupersessionContext } from '../../../../core/supersessionPolicy.js';
 // 1.1 (2026-08-17 audit) — retry SurrealDB transaction-conflict write drops
 // (same wrapper bulkIngest already uses; no-op for engines that serialize
@@ -88,6 +89,15 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
         } catch (e) {
             writeError(res, 400, 'invalid_node_id', (e as Error).message);
             return;
+        }
+        // Conditional writes phase 2b — `ifRevision` is a write-time directive: validated and stripped
+        // BEFORE the strict-field gate (it is never stored, and the shared field list stays untouched).
+        let ifRevision: number | undefined;
+        if ('ifRevision' in nodeData) {
+            const parsed = parseConditionalFields({ id: nodeData.id, ifRevision: nodeData.ifRevision, preconditions: undefined });
+            if (!parsed.ok) { writeError(res, 400, parsed.code, parsed.error); return; }
+            ifRevision = parsed.conditions.ifRevision;
+            delete nodeData.ifRevision;
         }
         // Phase 6 P2 — strict additionalProperties:false gate.
         if (enforceStrictFields(nodeData, res).handled) return;
@@ -278,6 +288,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
                 topics: Array.isArray(nodeData.topics) ? nodeData.topics as string[] : undefined,
                 supersedes: Array.isArray(nodeData.supersedes) ? nodeData.supersedes as string[] : undefined,
                 force: nodeData.force === true,
+                ifRevision,
             },
             {
                 outboxStore: deps.outboxStore,
@@ -318,6 +329,15 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
                 writeResult.code === 'supersedes_apply_failed'
             ) {
                 writeError(res, 400, writeResult.code, writeResult.error.message);
+                return;
+            }
+            // Phase 2b — the node is not at the revision the caller based its write on.
+            if (writeResult.code === 'revision_mismatch') {
+                writeError(res, 409, 'revision_mismatch', writeResult.error.message, { currentRevision: writeResult.currentRevision ?? null });
+                return;
+            }
+            if (writeResult.code === 'revision_unsupported') {
+                writeError(res, 400, 'revision_unsupported', writeResult.error.message);
                 return;
             }
             writeError(res, 500, 'internal_error', writeResult.error.message);

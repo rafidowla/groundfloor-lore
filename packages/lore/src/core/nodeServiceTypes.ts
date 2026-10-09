@@ -9,10 +9,11 @@ import type { LoreNode } from '../providers/types.js';
 import type { reconnectOneNode } from '../engines/reconnect.js';
 import type { PendingAutolinkTracker } from '../engines/pendingAutolink.js';
 import type { SupersedeResult } from '../engines/graphShared/supersedeGuard.js';
+import type { RevisionedGraph } from '../engines/graphShared/revision.js';
 
 /** The subset of a graph the write core needs. Both LocalGraph and
  *  DataplaneGraph satisfy this — no cloud hard-wiring. */
-export interface NodeWriteGraph {
+export interface NodeWriteGraph extends RevisionedGraph {
     upsertNode(node: Record<string, unknown>): Promise<LoreNode>;
     deleteNode(id: string): Promise<unknown>;
     /** Optional read-back used to mirror the existing row's security_scopes

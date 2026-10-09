@@ -62,7 +62,8 @@ CREATE TABLE IF NOT EXISTS nodes (
     success_count INTEGER NOT NULL DEFAULT 0,
     failure_count INTEGER NOT NULL DEFAULT 0,
     partial_count INTEGER NOT NULL DEFAULT 0,
-    confirmation_score REAL NOT NULL DEFAULT 0
+    confirmation_score REAL NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(type);
 CREATE INDEX IF NOT EXISTS idx_nodes_updatedAt ON nodes(updatedAt DESC, id);
@@ -142,8 +143,35 @@ export function openSqliteGraph(basePath: string): SqliteGraphConnection {
     db.pragma('busy_timeout = 5000');
     db.function('lore_lower', loreLower);
     db.exec(NODES_DDL);
+    ensureRevisionColumn(db);
     db.exec(EDGES_DDL);
     return { db, dataPath };
+}
+
+/**
+ * ensureRevisionColumn — conditional writes phase 2a. A graph.sqlite created
+ * before the per-node `revision` existed has a `nodes` table without the
+ * column, and `CREATE TABLE IF NOT EXISTS` leaves it that way. This engine has
+ * no migration list (the user_version runner lives in the arcade registry DB
+ * only), so the additive upgrade is an idempotent probe-then-ALTER on open:
+ *
+ *   - already there (fresh DB, or opened before) -> no-op;
+ *   - missing -> `ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`; existing rows
+ *     read 0 and the first accepted write makes it 1.
+ *
+ * A second process racing the same ALTER gets "duplicate column name"; that is
+ * the migration already done, so it is swallowed. An older Lore opening the
+ * migrated file keeps working: its INSERT/UPDATE statements name their columns
+ * and the new one has a default.
+ */
+export function ensureRevisionColumn(db: SqliteDb): void {
+    const cols = db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === 'revision')) return;
+    try {
+        db.exec('ALTER TABLE nodes ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+    } catch (error) {
+        if (!/duplicate column name/i.test((error as Error).message)) throw error;
+    }
 }
 
 /**

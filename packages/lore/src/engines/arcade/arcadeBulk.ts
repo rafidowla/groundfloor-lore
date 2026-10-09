@@ -115,7 +115,8 @@ async function upsertChunk(
   const params: Record<string, unknown> = {};
   chunk.forEach((node, idx) => {
     const p = `n${idx}_`;
-    const assignments = SET_FIELDS.map((f) => `${f} = :${p}${f}`).join(', ');
+    // The DATABASE bumps the revision (a new row's NULL reads as 0 -> 1).
+    const assignments = SET_FIELDS.map((f) => `${f} = :${p}${f}`).join(', ') + ', revision = ifnull(revision, 0) + 1';
     statements.push(`UPDATE ${NODE_TYPE} SET ${assignments} UPSERT WHERE id = :${p}id;`);
     params[`${p}id`] = node.id;
     params[`${p}type`] = node.type ?? '';

@@ -324,7 +324,12 @@ function normalizeTimestamps(node: unknown, ranks: Map<string, number>): unknown
     if (Array.isArray(node)) return node.map((v) => normalizeTimestamps(v, ranks));
     if (node && typeof node === 'object') {
         const out: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(node as Record<string, unknown>)) out[k] = normalizeTimestamps(v, ranks);
+        for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+            // `revision` (conditional writes phase 2a) exists on sqlite/arcade only; surreal and
+            // dataplane have no such field, so it is not part of the cross-engine contract.
+            if (k === 'revision') continue;
+            out[k] = normalizeTimestamps(v, ranks);
+        }
         return out;
     }
     return node;

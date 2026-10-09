@@ -26,6 +26,7 @@ import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolv
 import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
 import { withTransactionConflictRetry } from '../../engines/transactionConflictRetry.js';
+import { upsertKeepingRevision } from '../../engines/graphShared/revision.js';
 
 export interface OutcomeDeps {
     store: StorageBundle;
@@ -115,7 +116,7 @@ export function registerOutcomeTools(server: McpServer, deps: OutcomeDeps): void
                 const newScore = calcConfirmationScore(counts.success, counts.failure, counts.partial);
 
                 // Update the graph node with new counters + score.
-                await withTransactionConflictRetry(() => graph.upsertNode({
+                await withTransactionConflictRetry(() => upsertKeepingRevision(graph, {
                     ...node,
                     success_count:      counts.success,
                     failure_count:      counts.failure,

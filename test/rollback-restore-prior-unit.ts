@@ -427,9 +427,9 @@ async function seedNode(lore: Lore, id: string): Promise<unknown> {
     assert.ok(before);
     return before;
 }
-/** Everything a reader sees except the write time and counters a rewrite re-stamps. */
+/** Everything a reader sees except the write time, counters and `revision` (which only goes up: a restore is a write) that a rewrite re-stamps. */
 function comparable(node: unknown): Record<string, unknown> {
-    const { updatedAt: _u, version: _v, ...rest } = node as Record<string, unknown>;
+    const { updatedAt: _u, version: _v, revision: _r, ...rest } = node as Record<string, unknown>;
     return rest;
 }
 /** Make every `verbatim.upsert` outbox record fail until the returned function is called. */
@@ -496,18 +496,25 @@ for (const engine of ['sqlite', 'surreal'] as const) {
 
     await test(`[${engine}] a graph write that lands and then throws is undone`, async () => {
         const before = await seedNode(lore, 'half-applied');
-        type RawGraph = { upsertNode(n: unknown): Promise<unknown> };
+        type RawGraph = { upsertNode(n: unknown): Promise<unknown>; upsertNodeAtRevision?: (...a: unknown[]) => Promise<unknown> };
         const graph = lore.store.storageClient.rawGraph() as unknown as RawGraph;
         const original = graph.upsertNode;
+        const originalAt = graph.upsertNodeAtRevision;
         let thrown = 0;
+        // The write and the inline restore both go through the conditional verb on a revision-aware graph (the plain one elsewhere); the first call of either lands and then throws.
         graph.upsertNode = async function (this: RawGraph, n: unknown) {
             const out = await original.call(this, n);
             if (thrown++ === 0) throw new Error('injected: connection lost after the write landed');
             return out;
         };
+        if (originalAt) graph.upsertNodeAtRevision = async function (this: RawGraph, ...a: unknown[]) {
+            const out = await originalAt.apply(this, a);
+            if (thrown++ === 0) throw new Error('injected: connection lost after the write landed');
+            return out;
+        };
         try {
             await assert.rejects(() => lore.nodeUpsert({ id: 'half-applied', workspace: WS, ecosystem: '*', nodeData: REPLACE('half-applied') }), /connection lost/);
-        } finally { graph.upsertNode = original; }
+        } finally { graph.upsertNode = original; if (originalAt) graph.upsertNodeAtRevision = originalAt; }
         assert.equal(thrown, 2, 'the failed write, then the restore');
         assert.deepEqual(comparable(await read(lore, 'half-applied')), comparable(before));
         assert.equal((await pendingRows(lore)).length, 0, 'no row left to replay');

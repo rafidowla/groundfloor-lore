@@ -17,6 +17,7 @@ import { tagsToArray, normalizeTag } from '../normalizeTags.js';
 import { wouldCreateSupersedeCycle } from '../graphShared/supersedeCycle.js';
 import { supersedeGuardVerdict, type SupersedeResult } from '../graphShared/supersedeGuard.js';
 import { NodeAlreadyExistsError } from '../graphShared/conditionalInsert.js';
+import { RevisionConflictError } from '../graphShared/revision.js';
 import type { SqliteDb } from './sqliteGraphSchema.js';
 import { fromSqliteNodeRow, NODE_WRITE_COLUMNS, SQLITE_OUTCOME_COUNTER_SEED, toNodeRow } from './sqliteGraphRow.js';
 
@@ -44,13 +45,92 @@ export async function upsertNode(
     db: SqliteDb,
     node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
 ): Promise<LoreNode> {
+    return writeNode(db, node, { mode: 'bump', updatedAt: new Date().toISOString() });
+}
+
+/**
+ * upsertNodeKeepRevision — upsert that does NOT move the revision. For writes that
+ * only refresh derived counters (outcome success/failure/partial counts and the
+ * confirmation score): they are not content changes, so a caller holding a
+ * revision must not see it move. A node that does not exist yet is created at 1.
+ */
+export async function upsertNodeKeepRevision(
+    db: SqliteDb,
+    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
+): Promise<LoreNode> {
+    return writeNode(db, node, { mode: 'keep', updatedAt: new Date().toISOString() });
+}
+
+/**
+ * upsertNodeAtRevision — upsert that lands ONLY if the stored revision is still
+ * `expectedRevision` (an absent row counts as 0), writing `updatedAt` as given
+ * and revision = expected + 1. A mismatch throws RevisionConflictError carrying
+ * the revision actually stored, so the caller can re-read and retry. With
+ * `mustExist` (an `ifRevision` write: "update the node that is at n") the
+ * statement is a pure UPDATE, so a row that is absent, or deleted by another
+ * connection after any read, is a conflict and is never created.
+ */
+export async function upsertNodeAtRevision(
+    db: SqliteDb,
+    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
+    expectedRevision: number,
+    updatedAt: string,
+    mustExist = false,
+): Promise<LoreNode> {
+    return writeNode(db, node, { mode: 'conditional', expectedRevision, updatedAt, mustExist });
+}
+
+/**
+ * replayNodeAtRevision — outbox replay of a node payload that carries a
+ * `revision`. Applies only when the row is absent or its revision is LOWER than
+ * the payload's, writing the payload's revision and `updatedAt` verbatim (no
+ * bump, no new timestamp). Returns whether anything was written.
+ */
+export async function replayNodeAtRevision(db: SqliteDb, node: LoreNode): Promise<boolean> {
+    const revision = node.revision ?? 0;
     try {
-        const now = new Date().toISOString();
+        await writeNode(db, node, {
+            mode: 'replay', revision,
+            updatedAt: node.updatedAt || new Date().toISOString(),
+            createdAt: node.createdAt || undefined,
+        });
+        return true;
+    } catch (error) {
+        if (error instanceof RevisionConflictError) return false;
+        throw error;
+    }
+}
+
+type NodeWriteMode =
+    | { mode: 'bump'; updatedAt: string }
+    | { mode: 'keep'; updatedAt: string }
+    | { mode: 'conditional'; updatedAt: string; expectedRevision: number; mustExist?: boolean }
+    | { mode: 'replay'; updatedAt: string; revision: number; createdAt?: string };
+
+/**
+ * The one INSERT … ON CONFLICT DO UPDATE every upsert flavour shares. The
+ * revision is computed IN SQL (`nodes.revision + 1`), never read-then-written
+ * here, so a second connection on the same file cannot lose a bump:
+ *   bump        INSERT revision 1;  UPDATE revision + 1.
+ *   keep        INSERT revision 1;  UPDATE revision unchanged (counter-only writes).
+ *   conditional INSERT expected+1;  UPDATE revision + 1 WHERE revision = expected.
+ *   replay      INSERT payload rev; UPDATE revision = payload rev WHERE revision < payload rev.
+ * A conditional/replay write that changes no row throws RevisionConflictError.
+ */
+async function writeNode(
+    db: SqliteDb,
+    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
+    m: NodeWriteMode,
+): Promise<LoreNode> {
+    try {
+        const now = m.updatedAt;
         const existing = readRawNode(db, node.id);
         const isInsert = existing === null;
+        // ifRevision never creates: an absent row is a conflict (actual 0), judged before anything is written.
+        if (isInsert && m.mode === 'conditional' && m.mustExist) throw new RevisionConflictError(node.id, m.expectedRevision, 0);
         const createdAt = !isInsert && typeof existing!['createdAt'] === 'string'
             ? (existing!['createdAt'] as string)
-            : now;
+            : ((m.mode === 'replay' && m.createdAt) || now);
         const doc = isInsert
             ? { ...SQLITE_OUTCOME_COUNTER_SEED, ...toNodeRow(node, createdAt, now) }
             : toNodeRow(node, createdAt, now, existing!);
@@ -59,10 +139,27 @@ export async function upsertNode(
             ? [...NODE_WRITE_COLUMNS, ...Object.keys(SQLITE_OUTCOME_COUNTER_SEED)]
             : [...NODE_WRITE_COLUMNS];
         const setClause = cols.map((c) => `${c} = @${c}`).join(', ');
-        db.prepare(
-            `INSERT INTO nodes (id, ${cols.join(', ')}) VALUES (@id, ${cols.map((c) => `@${c}`).join(', ')}) `
-            + `ON CONFLICT(id) DO UPDATE SET ${setClause}`,
-        ).run({ id: node.id, ...doc });
+        const insertRevision = m.mode === 'bump' || m.mode === 'keep' ? 1 : m.mode === 'conditional' ? m.expectedRevision + 1 : m.revision;
+        const updateRevision = m.mode === 'replay' ? '@rev_new' : m.mode === 'keep' ? 'nodes.revision' : 'nodes.revision + 1';
+        const guard = m.mode === 'bump' || m.mode === 'keep' ? ''
+            : m.mode === 'conditional' ? ' WHERE nodes.revision = @rev_expected' : ' WHERE nodes.revision < @rev_new';
+        // mustExist: a pure UPDATE, so a row deleted by another connection after the read above is a conflict, not an insert.
+        const res = m.mode === 'conditional' && m.mustExist
+            ? db.prepare(`UPDATE nodes SET ${setClause}, revision = nodes.revision + 1 WHERE id = @id AND nodes.revision = @rev_expected`)
+                .run({ id: node.id, ...doc, rev_expected: m.expectedRevision })
+            : db.prepare(
+                `INSERT INTO nodes (id, ${cols.join(', ')}, revision) VALUES (@id, ${cols.map((c) => `@${c}`).join(', ')}, @rev_insert) `
+                + `ON CONFLICT(id) DO UPDATE SET ${setClause}, revision = ${updateRevision}${guard}`,
+            ).run({
+                id: node.id, ...doc, rev_insert: insertRevision,
+                ...(m.mode === 'conditional' ? { rev_expected: m.expectedRevision } : {}),
+                ...(m.mode === 'replay' ? { rev_new: m.revision } : {}),
+            });
+        if (res.changes === 0) {
+            const actual = (db.prepare('SELECT revision FROM nodes WHERE id = ?').get(node.id) as { revision: number } | undefined)?.revision ?? 0;
+            throw new RevisionConflictError(node.id, m.mode === 'conditional' ? m.expectedRevision : m.mode === 'replay' ? m.revision : 0, actual);
+        }
+        const stored = db.prepare('SELECT revision FROM nodes WHERE id = ?').get(node.id) as { revision: number } | undefined;
 
         return {
             ...node,
@@ -70,9 +167,10 @@ export async function upsertNode(
             createdAt,
             updatedAt: now,
             syncedAt: null,
+            revision: stored?.revision ?? insertRevision,
         };
     } catch (error) {
-        if (error instanceof LoreGraphError) throw error;
+        if (error instanceof LoreGraphError || error instanceof RevisionConflictError) throw error;
         throw sqliteError(`Failed to upsert node '${node.id}'`, 'upsertNode', error);
     }
 }
@@ -92,9 +190,9 @@ export async function insertNodeIfAbsent(
         const doc = { ...SQLITE_OUTCOME_COUNTER_SEED, ...toNodeRow(node, now, now) };
         const cols = [...NODE_WRITE_COLUMNS, ...Object.keys(SQLITE_OUTCOME_COUNTER_SEED)];
         db.prepare(
-            `INSERT INTO nodes (id, ${cols.join(', ')}) VALUES (@id, ${cols.map((c) => `@${c}`).join(', ')})`,
+            `INSERT INTO nodes (id, ${cols.join(', ')}, revision) VALUES (@id, ${cols.map((c) => `@${c}`).join(', ')}, 1)`,
         ).run({ id: node.id, ...doc });
-        return { ...node, tags: tagsToArray(node.tags), createdAt: now, updatedAt: now, syncedAt: null };
+        return { ...node, tags: tagsToArray(node.tags), createdAt: now, updatedAt: now, syncedAt: null, revision: 1 };
     } catch (error) {
         const e = error as { code?: unknown; message?: unknown };
         if ((typeof e.code === 'string' && e.code.startsWith('SQLITE_CONSTRAINT'))
@@ -123,12 +221,13 @@ export async function importRaw(
     edges: LoreEdge[],
 ): Promise<{ nodeCount: number; edgeCount: number }> {
     const insertNode = db.prepare(
-        `INSERT INTO nodes (id, ${NODE_WRITE_COLUMNS.join(', ')}, success_count, failure_count, partial_count, confirmation_score, lastAccessedAt, last_retrieved_at)
-         VALUES (@id, ${NODE_WRITE_COLUMNS.map((c) => `@${c}`).join(', ')}, @success_count, @failure_count, @partial_count, @confirmation_score, @lastAccessedAt, @last_retrieved_at)
+        `INSERT INTO nodes (id, ${NODE_WRITE_COLUMNS.join(', ')}, success_count, failure_count, partial_count, confirmation_score, lastAccessedAt, last_retrieved_at, revision)
+         VALUES (@id, ${NODE_WRITE_COLUMNS.map((c) => `@${c}`).join(', ')}, @success_count, @failure_count, @partial_count, @confirmation_score, @lastAccessedAt, @last_retrieved_at, @revision)
          ON CONFLICT(id) DO UPDATE SET ${NODE_WRITE_COLUMNS.map((c) => `${c} = excluded.${c}`).join(', ')},
              success_count = excluded.success_count, failure_count = excluded.failure_count,
              partial_count = excluded.partial_count, confirmation_score = excluded.confirmation_score,
-             lastAccessedAt = excluded.lastAccessedAt, last_retrieved_at = excluded.last_retrieved_at`,
+             lastAccessedAt = excluded.lastAccessedAt, last_retrieved_at = excluded.last_retrieved_at,
+             revision = excluded.revision`,
     );
     const insertEdge = db.prepare(
         `INSERT INTO edges (source_id, target_id, relation, confidence, confidenceScore)
@@ -148,6 +247,7 @@ export async function importRaw(
                 confirmation_score: n.confirmation_score ?? 0,
                 lastAccessedAt: n.lastAccessedAt ?? '',
                 last_retrieved_at: n.last_retrieved_at ?? '',
+                revision: typeof n.revision === 'number' && Number.isFinite(n.revision) ? n.revision : 0,
             });
         }
         for (const e of es) {
@@ -273,13 +373,21 @@ export async function supersedeNode(
     try {
         const supersededAt = new Date().toISOString();
         const validUntil = !oldNode.validUntil ? supersededAt : undefined;
-        const res = db.prepare(
-            `UPDATE nodes SET supersededBy = ?, supersededAt = ?, supersededReason = ?`
-            + `${validUntil !== undefined ? ', validUntil = ?' : ''} WHERE id = ?`
-            + ` AND (supersededBy IS NULL OR supersededBy = '' OR supersededBy = ?)`,
-        ).run(...(validUntil !== undefined
-            ? [newId, supersededAt, reason ?? '', validUntil, oldId, newId]
-            : [newId, supersededAt, reason ?? '', oldId, newId]));
+        // Phase 2a: the claim bumps the OLD node's revision in the same UPDATE; the NEW
+        // node (otherwise untouched) is bumped in the same transaction — both sides of
+        // an accepted supersede move, an idempotent retry (early return above) moves neither.
+        const claim = db.transaction((): number => {
+            const r = db.prepare(
+                `UPDATE nodes SET supersededBy = ?, supersededAt = ?, supersededReason = ?, revision = revision + 1`
+                + `${validUntil !== undefined ? ', validUntil = ?' : ''} WHERE id = ?`
+                + ` AND (supersededBy IS NULL OR supersededBy = '' OR supersededBy = ?)`,
+            ).run(...(validUntil !== undefined
+                ? [newId, supersededAt, reason ?? '', validUntil, oldId, newId]
+                : [newId, supersededAt, reason ?? '', oldId, newId]));
+            if (r.changes >= 1) db.prepare('UPDATE nodes SET revision = revision + 1 WHERE id = ?').run(newId);
+            return r.changes;
+        });
+        const res = { changes: claim() };
         if (res.changes < 1) {
             const now = await getNode(oldId);
             if (!now) return { ok: false, reason: 'old-not-found' };
@@ -302,7 +410,10 @@ export async function unsupersedeNode(
     try {
         const clearValidUntil = Boolean(node.validUntil) && node.validUntil === node.supersededAt;
         db.prepare(
-            `UPDATE nodes SET supersededBy = '', supersededAt = '', supersededReason = ''`
+            // Phase 2a: bump only when there was a supersession to clear (the CASE reads the
+            // pre-update row); un-superseding a current node changes nothing.
+            `UPDATE nodes SET supersededBy = '', supersededAt = '', supersededReason = '',`
+            + ` revision = revision + CASE WHEN supersededBy != '' THEN 1 ELSE 0 END`
             + `${clearValidUntil ? `, validUntil = ''` : ''} WHERE id = ?`,
         ).run(id);
         return true;
@@ -318,7 +429,7 @@ export async function markStaleByTags(db: SqliteDb, tags: string[]): Promise<num
     try {
         const placeholders = normalized.map(() => '?').join(', ');
         const result = db.prepare(
-            `UPDATE nodes SET stale = 1 WHERE EXISTS (
+            `UPDATE nodes SET stale = 1, revision = revision + CASE WHEN stale = 1 THEN 0 ELSE 1 END WHERE EXISTS (
                  SELECT 1 FROM json_each(nodes.tags) je WHERE je.value IN (${placeholders})
              )`,
         ).run(...normalized);
@@ -351,7 +462,11 @@ export async function markStaleByIds(db: SqliteDb, ids: string[]): Promise<numbe
     if (unique.length === 0) return 0;
     try {
         const placeholders = unique.map(() => '?').join(', ');
-        const result = db.prepare(`UPDATE nodes SET stale = 1 WHERE id IN (${placeholders})`).run(...unique);
+        const result = db.prepare(
+            // Phase 2a: only a node that actually turns stale bumps — which also keeps an outbox
+            // replay of a mark_stale chunk (ids already stale) from bumping a second time.
+            `UPDATE nodes SET stale = 1, revision = revision + CASE WHEN stale = 1 THEN 0 ELSE 1 END WHERE id IN (${placeholders})`,
+        ).run(...unique);
         return result.changes;
     } catch (error) {
         throw sqliteError(`Failed to mark ${unique.length} node(s) stale by id`, 'markStaleByIds', error);

@@ -26,7 +26,6 @@
  *      opaque data inside tenant_alpha and can never cross the wall.
  */
 
-import { tagsToArray } from '../normalizeTags.js';
 import { assertEdgeEndpoints } from '../dataplaneEdgeShape.js';
 import type {
   GraphStats,
@@ -36,12 +35,14 @@ import type {
 } from '../../providers/types.js';
 import { ArcadeHttp, ArcadeHttpError, retryIdempotentArcadeWrite } from './arcadeHttp.js';
 import { NodeAlreadyExistsError } from '../graphShared/conditionalInsert.js';
+import { RevisionConflictError, revisionOf } from '../graphShared/revision.js';
 import * as reads from './arcadeGraphReads.js';
 import * as maint from './arcadeMaintenance.js';
 import * as edges from './arcadeGraphEdges.js';
 import { bulkUpsertNodes as bulkUpsertImpl } from './arcadeBulk.js';
 import { graphSchemaDdl, NODE_TYPE, EDGE_TYPE } from './arcadeSchema.js';
-import { encodeNodeScopes, parseNodeScopes, resolveNodeScopes, upgradeNodeScopes } from './arcadeNodeScopes.js';
+import { parseNodeScopes, upgradeNodeScopes } from './arcadeNodeScopes.js';
+import { NODE_SET_CLAUSE, NODE_KEEP_CLAUSE, NODE_INSERT_CLAUSE, NODE_REPLAY_CLAUSE, nodeWriteParams } from './arcadeNodeWrite.js';
 import { rowToLoreNode } from '../loreNodeRow.js';
 import type { EdgeQuery, BulkListQuery, BulkListPage } from '../../providers/types.js';
 import { bulkListArcadeNodes, queryEdgesArcade } from './arcadeGraphReads.js';
@@ -67,23 +68,10 @@ const TRAVERSE_NODE_CAP = 500;
 const NODE_FULL_COLUMNS =
   'id, type, label, content, tags, project, ecosystem, metadata, createdAt, updatedAt, ' +
   'supersededBy, supersededAt, supersededReason, stale, staleAt, ephemeral, ttl_ms, ' +
-  'success_count, failure_count, partial_count, confirmation_score, security_scopes';
+  'success_count, failure_count, partial_count, confirmation_score, security_scopes, revision';
 
 /** Row shape ArcadeDB returns for a LoreNode vertex. */
 type NodeRow = Record<string, unknown>;
-
-/** The column assignments shared by the node UPSERT and the conditional INSERT. */
-const NODE_SET_CLAUSE =
-  `id = :id, type = :type, label = :label, ` +
-    `content = :content, tags = :tags, project = :project, ` +
-    `ecosystem = :ecosystem, metadata = :metadata, ` +
-    `createdAt = :createdAt, updatedAt = :updatedAt, ` +
-    `supersededBy = :supersededBy, supersededAt = :supersededAt, ` +
-    `supersededReason = :supersededReason, stale = :stale, staleAt = :staleAt, ` +
-    `ephemeral = :ephemeral, ttl_ms = :ttl_ms, ` +
-    `success_count = :success_count, failure_count = :failure_count, ` +
-    `partial_count = :partial_count, confirmation_score = :confirmation_score, ` +
-    `security_scopes = :security_scopes`;
 
 export class ArcadeGraphStore {
   /** IMMUTABLE tenant database name — the isolation boundary. */
@@ -133,7 +121,7 @@ export class ArcadeGraphStore {
     await this.initialize();
     const now = new Date().toISOString();
     const existing = await this.getNode(node.id);
-    const params = this.nodeParams(node, existing, now);
+    const params = nodeWriteParams(node, existing, now);
     // UPSERT: updates the row matching id, or inserts one if absent. Retried
     // on transient 502/503/504 (retryIdempotentArcadeWrite) — this exact
     // statement is a full-column overwrite keyed by id, so replaying it with
@@ -153,53 +141,114 @@ export class ArcadeGraphStore {
     return stored;
   }
 
-  /** Bound parameters of a node write; `existing` supplies the read-modify-write defaults. */
-  private nodeParams(
+  /**
+   * upsertNodeKeepRevision — write that leaves `revision` alone, for counter-only
+   * updates (outcome counts + confirmation score), which are not content changes.
+   * A row that does not exist yet goes through the normal create path (revision 1).
+   */
+  async upsertNodeKeepRevision(
     node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
-    existing: LoreNode | null,
-    now: string,
-  ) {
-    const createdAt = existing?.createdAt ?? now;
-    // Lifecycle columns are read-modify-write like LocalGraph.upsertNode: an
-    // upsert that omits ephemeral/ttl_ms must NOT clobber a value a prior write
-    // set. Preserve the existing row's lifecycle fields when the incoming node
-    // doesn't carry them; a plain re-store therefore doesn't reset supersession
-    // or the ephemeral flag (parity with LocalGraph's SET-branch semantics).
-    return {
-      id: node.id,
-      type: node.type ?? '',
-      label: node.label ?? '',
-      content: node.content ?? '',
-      tags: JSON.stringify(tagsToArray(node.tags)),
-      project: node.project ?? '',
-      // WIRE PARITY (slice-3 close): default ecosystem/metadata to the SAME
-      // store-time defaults LocalGraph's schema uses (ecosystem DEFAULT '*';
-      // metadata read-back defaults to '{}'), so a node posted without these
-      // fields round-trips identically on both backends instead of persisting an
-      // empty string that rowToLoreNode's `?? '*'` / `?? '{}'` can't rescue.
-      ecosystem: node.ecosystem && node.ecosystem.length > 0 ? node.ecosystem : '*',
-      metadata: node.metadata && node.metadata.length > 0 ? node.metadata : '{}',
-      createdAt,
-      updatedAt: now,
-      supersededBy: node.supersededBy ?? existing?.supersededBy ?? '',
-      supersededAt: node.supersededAt ?? existing?.supersededAt ?? '',
-      supersededReason: node.supersededReason ?? existing?.supersededReason ?? '',
-      stale: node.stale ?? existing?.stale ?? false,
-      staleAt: (node as { staleAt?: string }).staleAt ?? (existing as { staleAt?: string } | null)?.staleAt ?? '',
-      ephemeral: node.ephemeral ?? existing?.ephemeral ?? false,
-      ttl_ms: node.ttl_ms ?? existing?.ttl_ms ?? 0,
-      // Feature-2 outcome counters — read-modify-write preserve (like the
-      // lifecycle columns): a plain re-store must not reset counts a prior
-      // record_outcome set. Default 0 / 0.0 on first insert (LocalGraph schema
-      // default) so a fresh node's full-projection read emits 0, not undefined.
-      success_count: node.success_count ?? existing?.success_count ?? 0,
-      failure_count: node.failure_count ?? existing?.failure_count ?? 0,
-      partial_count: node.partial_count ?? existing?.partial_count ?? 0,
-      confirmation_score: node.confirmation_score ?? existing?.confirmation_score ?? 0,
-      // Row-level scopes (v4) - SQLite parity: explicit array (incl. []) wins,
-      // omitted keeps the prior row's, new node -> [] (public).
-      security_scopes: encodeNodeScopes(resolveNodeScopes(node.security_scopes, existing?.security_scopes)),
-    };
+  ): Promise<LoreNode> {
+    await this.initialize();
+    const existing = await this.getNode(node.id);
+    if (!existing) return this.upsertNode(node);
+    const params = nodeWriteParams(node, existing, new Date().toISOString());
+    await retryIdempotentArcadeWrite(() => this.http.command(
+      this.tenantDb,
+      `UPDATE ${NODE_TYPE} SET ${NODE_KEEP_CLAUSE} WHERE id = :id`,
+      params,
+    ));
+    const stored = await this.getNode(node.id);
+    if (!stored) throw new Error(`[ArcadeGraphStore] upsertNodeKeepRevision failed to persist ${node.id}`);
+    return stored;
+  }
+
+  /**
+   * upsertNodeAtRevision — conditional write (phase 2a). Writes the node and
+   * lands revision `expectedRevision + 1` ONLY if the stored revision is still
+   * `expectedRevision` (an absent row is 0, and so is a pre-v5 row). The guard
+   * rides in the statement itself (`WHERE ifnull(revision, 0) = :expected`), so
+   * two daemons on one database cannot both win; 0 affected rows throws
+   * RevisionConflictError. `updatedAt` is the stamp the caller already recorded
+   * in its outbox payload. Not wrapped in retryIdempotentArcadeWrite: a replayed
+   * conditional UPDATE would see its own bump and report a conflict.
+   */
+  async upsertNodeAtRevision(
+    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
+    expectedRevision: number,
+    updatedAt: string,
+    mustExist = false,
+  ): Promise<LoreNode> {
+    await this.initialize();
+    const existing = await this.getNode(node.id);
+    const actual = revisionOf(existing);
+    // ifRevision never creates: an absent row is a conflict (the UPDATE branch below cannot create one, so a row deleted after this read is a conflict too).
+    if (!existing && mustExist) throw new RevisionConflictError(node.id, expectedRevision, 0);
+    if (actual !== expectedRevision) throw new RevisionConflictError(node.id, expectedRevision, actual);
+    const params = nodeWriteParams(node, existing, updatedAt);
+    if (!existing) {
+      try {
+        await this.http.command(this.tenantDb, `INSERT INTO ${NODE_TYPE} SET ${NODE_INSERT_CLAUSE}`, params);
+      } catch (err) {
+        if (!(err instanceof ArcadeHttpError)) throw err;
+        const present = await this.getNode(node.id);
+        if (present && present.updatedAt === updatedAt && present.createdAt === updatedAt) return present; // our own insert, response lost
+        if (present || /duplicat/i.test(err.body)) throw new RevisionConflictError(node.id, expectedRevision, revisionOf(present));
+        throw err;
+      }
+    } else {
+      const res = await this.http.command(
+        this.tenantDb,
+        `UPDATE ${NODE_TYPE} SET ${NODE_SET_CLAUSE} WHERE id = :id AND ifnull(revision, 0) = :expectedRevision`,
+        { ...params, expectedRevision },
+      );
+      const count = (res?.result as Array<{ count?: number }> | undefined)?.[0]?.count;
+      if (typeof count === 'number' && count < 1) {
+        throw new RevisionConflictError(node.id, expectedRevision, revisionOf(await this.getNode(node.id)));
+      }
+    }
+    const stored = await this.getNode(node.id);
+    if (!stored) throw new Error(`[ArcadeGraphStore] upsertNodeAtRevision failed to persist ${node.id}`);
+    return stored;
+  }
+
+  /**
+   * replayNodeAtRevision — outbox replay of a node payload that carries a
+   * revision. Applies ONLY if the row is absent or its revision is LOWER than the
+   * payload's, and then writes the payload's revision and updatedAt verbatim (no
+   * bump). Absent: INSERT (a duplicate means another writer got there first, so
+   * it is re-evaluated as an existing row). Existing: the guard rides in the
+   * UPDATE (`ifnull(revision, 0) < :revision`) so a concurrent newer write wins.
+   * Returns whether the payload was applied.
+   */
+  async replayNodeAtRevision(node: LoreNode): Promise<boolean> {
+    await this.initialize();
+    const revision = revisionOf(node);
+    const existing = await this.getNode(node.id);
+    if (existing) return this.replayOverExisting(existing, node, revision);
+    const params = { ...nodeWriteParams(node, null, node.updatedAt, node.createdAt), revision };
+    try {
+      await this.http.command(this.tenantDb, `INSERT INTO ${NODE_TYPE} SET ${NODE_REPLAY_CLAUSE}`, params);
+      return true;
+    } catch (err) {
+      if (!(err instanceof ArcadeHttpError)) throw err;
+      const present = await this.getNode(node.id);
+      if (!present && !/duplicat/i.test(err.body)) throw err;
+      // Another writer created the row between our read and the INSERT: judge it as an existing row.
+      return present ? this.replayOverExisting(present, node, revision) : false;
+    }
+  }
+
+  private async replayOverExisting(existing: LoreNode, node: LoreNode, revision: number): Promise<boolean> {
+    if (revisionOf(existing) >= revision) return false;
+    const params = { ...nodeWriteParams(node, existing, node.updatedAt), revision };
+    const res = await this.http.command(
+      this.tenantDb,
+      `UPDATE ${NODE_TYPE} SET ${NODE_REPLAY_CLAUSE} WHERE id = :id AND ifnull(revision, 0) < :revision`,
+      params,
+    );
+    const count = (res?.result as Array<{ count?: number }> | undefined)?.[0]?.count;
+    return !(typeof count === 'number' && count < 1);
   }
 
   /**
@@ -216,9 +265,9 @@ export class ArcadeGraphStore {
   ): Promise<LoreNode> {
     await this.initialize();
     const now = new Date().toISOString();
-    const params = this.nodeParams(node, null, now);
+    const params = nodeWriteParams(node, null, now);
     try {
-      await this.http.command(this.tenantDb, `INSERT INTO ${NODE_TYPE} SET ${NODE_SET_CLAUSE}`, params);
+      await this.http.command(this.tenantDb, `INSERT INTO ${NODE_TYPE} SET ${NODE_INSERT_CLAUSE}`, params);
     } catch (err) {
       if (!(err instanceof ArcadeHttpError)) throw err;
       const present = await this.getNode(node.id);
@@ -434,7 +483,8 @@ export class ArcadeGraphStore {
       }
     }
     // (1b) security_scopes: JSON string -> string[] (NULL only on an un-upgraded cell, which cannot serve).
-    const node = rowToLoreNode({ ...row, tags, security_scopes: parseNodeScopes(row['security_scopes']) });
+    // (1c) revision: a row from before schema v5 has none and reads 0.
+    const node = rowToLoreNode({ ...row, tags, security_scopes: parseNodeScopes(row['security_scopes']), revision: Number(row['revision'] ?? 0) || 0 });
     // (2) staleAt — non-enumerable so it survives internal reads but never
     // reaches the JSON wire (LocalGraph parity).
     const staleAtRaw = row['staleAt'] == null ? '' : String(row['staleAt']);

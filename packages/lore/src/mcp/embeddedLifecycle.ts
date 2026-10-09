@@ -33,6 +33,8 @@
  */
 
 import { log } from '../logger.js';
+import { hasRevisionSupport, payloadRevision, revisionOf, type RevisionedGraph } from '../engines/graphShared/revision.js';
+import type { LoreNode } from '../providers/types.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
 import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import type { LocalGraphRegistry } from '../engines/localGraphRegistry.js';
@@ -242,6 +244,25 @@ export interface GuardableGraph {
     upsertNode(payload: unknown): Promise<unknown>;
 }
 
+/** True when `payload` carries a revision above the stored row's and the graph can replay it (phase 2a). */
+function replayWouldApply(target: unknown, payload: unknown, existing: unknown): boolean {
+    const rev = payloadRevision(payload as Record<string, unknown>);
+    return rev !== undefined && hasRevisionSupport(target) && revisionOf(existing as { revision?: unknown }) < rev;
+}
+
+const replayRevisioned = (target: unknown, payload: unknown): Promise<boolean> =>
+    (target as Required<RevisionedGraph>).replayNodeAtRevision(payload as LoreNode);
+
+/** Write a replayed payload: a revisioned one verbatim through the replay gate, a legacy one with the plain upsert. */
+async function writeReplayed(target: GuardableGraph, payload: unknown): Promise<unknown> {
+    const rec = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>;
+    if (payloadRevision(rec) !== undefined && hasRevisionSupport(target)) {
+        await replayRevisioned(target, payload);
+        return typeof rec['id'] === 'string' ? target.getNode(rec['id']) : null;
+    }
+    return target.upsertNode(payload);
+}
+
 /**
  * embeddedGuardedGraph — wrap a LocalGraph so the OUTBOX REPLICATOR's
  * `node.upsert` re-application becomes a no-op when the node already exists
@@ -308,9 +329,13 @@ export function embeddedGuardedGraph<T extends GuardableGraph>(graph: T, scope?:
                     const id = payload?.id;
                     if (typeof id === 'string') {
                         const existing = await target.getNode(id);
-                        if (existing) return existing; // already applied inline — skip the racy re-write
+                        if (existing) {
+                            // Phase 2a — an older stored revision is brought up to the payload's (verbatim, never bumped).
+                            if (replayWouldApply(target, payload, existing)) { await replayRevisioned(target, payload); return target.getNode(id); }
+                            return existing; // already applied inline — skip the racy re-write
+                        }
                     }
-                    return target.upsertNode(payload);
+                    return writeReplayed(target, payload);
                 };
             }
             if (prop === 'replayNodeUpsert') {
@@ -326,7 +351,11 @@ export function embeddedGuardedGraph<T extends GuardableGraph>(graph: T, scope?:
                         if (entry) scope?.preBootNodeUpserts?.delete(entry.id);
                     };
                     const existing = await target.getNode(id);
-                    if (existing) { settled(); return existing; }
+                    if (existing) {
+                        // Phase 2a — an older stored revision is brought up to the payload's (verbatim, never bumped); otherwise skip as before.
+                        if (replayWouldApply(target, payload, existing)) { await replayRevisioned(target, payload); settled(); return target.getNode(id); }
+                        settled(); return existing;
+                    }
                     let recreate = shouldReplayRecreate(scope, entry, mark);
                     let toWrite: unknown = payload;
                     if (recreate) {
@@ -347,7 +376,7 @@ export function embeddedGuardedGraph<T extends GuardableGraph>(graph: T, scope?:
                     }
                     // A throw leaves the scope untouched and the row retries
                     // with the same decision; see "no fall-back" above.
-                    const created = await target.upsertNode(toWrite);
+                    const created = await writeReplayed(target, toWrite);
                     settled();
                     return created;
                 };

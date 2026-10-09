@@ -254,9 +254,9 @@ async function replayNew(r: Rig, seen: Set<string>): Promise<OutboxEntry[]> {
     return rows;
 }
 const nodeRows = (rows: OutboxEntry[], id: string) => rows.filter((e) => (e.payload as { id?: unknown })?.id === id && String(e.operationKind).startsWith('node.'));
-/** What a reader sees, without the write stamps a rewrite renews. */
+/** What a reader sees, without the write stamps a rewrite renews (`revision` only goes up: a restore is a write). */
 function comparable(node: unknown): Record<string, unknown> {
-    const { updatedAt: _u, version: _v, syncedAt: _s, ...rest } = node as Record<string, unknown>;
+    const { updatedAt: _u, version: _v, syncedAt: _s, revision: _r, ...rest } = node as Record<string, unknown>;
     return rest;
 }
 /** Seed one node through the route itself and return it plus the ids of the outbox rows already there. */
@@ -344,8 +344,12 @@ for (const engine of ['sqlite', 'surreal'] as const) {
             const g = r.graph as unknown as { bulkUpsertNodes(batch: unknown[]): Promise<Array<{ id: string; ok: boolean; error?: string }>> };
             const original = g.bulkUpsertNodes.bind(r.graph);
             g.bulkUpsertNodes = async (batch) => (batch as Array<{ id: string }>).map((n) => ({ id: n.id, ok: false, error: 'SIMULATED substrate constraint violation' }));
+            // Phase 2a: a revision-aware engine writes a stamped item through the conditional verb, so fail that one too.
+            const at = r.graph as unknown as { upsertNodeAtRevision?: (...a: unknown[]) => Promise<unknown> };
+            const originalAt = at.upsertNodeAtRevision;
+            if (originalAt) at.upsertNodeAtRevision = async () => { throw new Error('SIMULATED substrate constraint violation'); };
             let out: Item[];
-            try { out = await bulk(r, [UPDATE('keep-me')], 'skip'); } finally { g.bulkUpsertNodes = original; }
+            try { out = await bulk(r, [UPDATE('keep-me')], 'skip'); } finally { g.bulkUpsertNodes = original; if (originalAt) at.upsertNodeAtRevision = originalAt; }
             assert.equal(out[0]!.ok, false);
             const rows = await replayNew(r, seen);
             assert.deepEqual(nodeRows(rows, 'keep-me').map((e) => e.operationKind), ['node.upsert', 'node.upsert']);
