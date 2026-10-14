@@ -236,11 +236,19 @@ export function flattenRevisionDir(stagedModelDir: string, revision: string | un
 
 /**
  * Resolve `@huggingface/transformers`'s own legacy cache directory
- * (`<package-root>/.cache/`) via Node module resolution against the
- * installed package's `package.json` — never a hardcoded `node_modules/...`
- * path, so this keeps working under npm/pnpm/yarn workspace linking or a
- * relocated `node_modules`. Mirrors the package's own `env.js` computation
+ * (`<package-root>/.cache/`) via Node module resolution of the installed
+ * package — never a hardcoded `node_modules/...` path, so this keeps working
+ * under npm/pnpm/yarn workspace linking or a relocated `node_modules`.
+ * Mirrors the package's own `env.js` computation
  * (`DEFAULT_CACHE_DIR = path.join(<package-root>, '/.cache/')`).
+ *
+ * Resolves the package's entry point and walks up to the `package.json`
+ * that names it. `require.resolve('@huggingface/transformers/package.json')`
+ * is NOT usable: 4.x declares an `exports` map without `./package.json`, so
+ * it throws ERR_PACKAGE_PATH_NOT_EXPORTED — which silently disabled this
+ * step from 3.24.0 (transformers 4.3) on, so every fresh LORE_HOME
+ * downloaded the model and an offline host could not embed at all.
+ *
  * Returns `undefined` if the package can't be resolved (should not happen
  * in a working install, but this path must never throw — a missing legacy
  * cache is simply "step 2 finds nothing", not an error).
@@ -248,8 +256,17 @@ export function flattenRevisionDir(stagedModelDir: string, revision: string | un
 export function resolveLegacyTransformersCacheDir(): string | undefined {
     try {
         const require = createRequire(import.meta.url);
-        const pkgJsonPath = require.resolve('@huggingface/transformers/package.json');
-        return path.join(path.dirname(pkgJsonPath), '.cache');
+        let dir = path.dirname(require.resolve('@huggingface/transformers'));
+        for (;;) {
+            const pkgJsonPath = path.join(dir, 'package.json');
+            if (fs.existsSync(pkgJsonPath)) {
+                const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8')) as { name?: unknown };
+                if (pkg.name === '@huggingface/transformers') return path.join(dir, '.cache');
+            }
+            const parent = path.dirname(dir);
+            if (parent === dir) return undefined;
+            dir = parent;
+        }
     } catch {
         return undefined;
     }

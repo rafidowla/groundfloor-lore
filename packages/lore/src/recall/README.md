@@ -100,6 +100,7 @@ interface UnifiedResultItem {
   matchedBy: MatchKind[];        // D4
   score: number;                 // D4
   stale_warning?: true;
+  embedded?: false;              // 3.34 N5: present ONLY on a hit with no 'semantic' in matchedBy and no similarity
 }
 ```
 

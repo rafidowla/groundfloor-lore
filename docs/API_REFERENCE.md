@@ -197,7 +197,7 @@ takes is decided by its class (`DEC-SCOPE-SURFACE-CLASS`):
   `search` / `recall` / `structured_query`) — defaults to the daemon-detected
   scope; `?ecosystem=` overrides it.
 - **ENUMERATION / TOPOLOGY** (`GET /api/node`, `GET /api/subgraph`,
-  `GET /api/node-list`, `GET /api/nodes`, `POST /api/nodes/bulk-list`,
+  `GET /api/node-list`, `GET /api/nodes`, `POST /api/nodes/bulk-list`, `POST /api/nodes/recallable`,
   `GET /api/topology`, `GET /api/edges`, MCP `list_nodes` / `traverse`) —
   defaults to `*` (every ecosystem), so omitting the parameter is unchanged
   behaviour.
@@ -294,6 +294,7 @@ delete an X" without hunting through every family's own table below.
 | `GET /api/node-list` | List nodes |
 | `GET /api/nodes` | Type-filtered `LoreNode` list for inspector renderers |
 | `POST /api/nodes/bulk-list` | Cursor-paginated bulk node enumeration (rate-limit-exempt). Every row carries `revision` (0 for pre-revision rows; absent on Surreal and cloud/Dataplane). |
+| `POST /api/nodes/recallable` | "Are these writes recallable yet?" (3.34.0). Body `{workspace, ids[] | allBeforeNow:true, timeoutMs?}`. Returns per-id `recallable` / `pending` (`queued`, `awaiting_index`, `embed_failed`) / `not_found` plus overall `ready`; a timeout is a 200 with `timedOut:true`. Errors: `recallable_too_many_ids` (400, carries `max`/`received`), `recallable_invalid_request` (400), `workspace_required` (400), `workspace_not_found` (404), `recallable_not_supported` (501). Own rate bucket (`recallable` / `arcade_recallable`). Knobs: `LORE_RECALLABLE_TIMEOUT_MS`, `LORE_RECALLABLE_MAX_TIMEOUT_MS`, `LORE_RECALLABLE_MAX_IDS` (CONFIGURATION 3a.3). |
 | `GET /api/subgraph` | Multi-hop BFS ("Look in") — `?ecosystem=` prunes the walk |
 | `POST /api/node/supersede` · `POST /api/node/unsupersede` | Soft-supersede a node and reverse it. Superseding a node already superseded by a **different** id returns `409` `{ ok:false, error:"already_superseded", reason, supersededBy }`; repeating the same pair is a no-op `{ ok:true, unchanged:true }`. |
 | `GET /api/node/supersession-candidates` | Vector-similarity supersession scan |

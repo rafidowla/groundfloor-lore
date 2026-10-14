@@ -61,6 +61,8 @@ import {
 } from './graphNeighbors.js';
 import type { TopologyOverviewResult } from './topologyOverviewFold.js';
 import type { SupersedeResult } from './graphShared/supersedeGuard.js';
+import { isSqliteTransientDeleteError } from './graphShared/deleteOutcome.js';
+import { notSupportedIntegrity, SQLITE_INTEGRITY_REASON } from './graphShared/integrityNotSupported.js';
 
 export interface SqliteGraphOptions {
     /** Scopes read-cache keys so switching workspaces never serves a cross-hit. */
@@ -324,6 +326,12 @@ export class SqliteGraph implements LoreGraphHandle {
         this.bumpWriteEpoch();
         return results;
     }
+
+    /** 3.34.0 (M3a): the delete routes' bounded retry classifier. */
+    isTransientDeleteError(err: unknown): boolean { return isSqliteTransientDeleteError(err); }
+    /** 3.34.0: explicit not_supported (see SQLITE_INTEGRITY_REASON). */
+    async integrityScan() { return notSupportedIntegrity(SQLITE_INTEGRITY_REASON); }
+    async integrityRemove(_rids: string[]) { return notSupportedIntegrity(SQLITE_INTEGRITY_REASON); }
 
     async deleteNode(id: string): Promise<boolean> {
         await this.initialize();

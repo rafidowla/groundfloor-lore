@@ -28,6 +28,8 @@
  * and alpha_user / beta_user created (see test/spike-arcadedb-setup.ts).
  */
 
+// Must stay the first import: maps LORE_ARCADE_E2E_URL / _ROOT_PASSWORD onto ARCADE_BASE_URL / ARCADE_ROOT_PASSWORD (see arcade-e2e-env.ts).
+import { ARCADE_E2E_BASE_URL, ARCADE_E2E_ROOT_PASSWORD } from './arcade-e2e-env.js';
 import {
   arcadeClientForToken,
   type ArcadeTenantClient,
@@ -411,7 +413,7 @@ async function testIsolation(
   );
 
   // I8 — auth-wall: raw HTTP as alpha_user against tenant_beta => 401/403.
-  const alphaRawHttp = new ArcadeHttp({ user: 'alpha_user', pass: 'AlphaPass123!' });
+  const alphaRawHttp = new ArcadeHttp({ user: 'alpha_user', pass: 'AlphaPass123!' }, ARCADE_E2E_BASE_URL);
   try {
     await alphaRawHttp.query('tenant_beta', 'SELECT 1 as x');
     check('I8 auth-wall: alpha_user querying tenant_beta is rejected', false, 'no error thrown');
@@ -467,7 +469,7 @@ async function testIsolation(
     );
     arcadeClientForToken('unknown-token-xyz');
   });
-  const reResolved = arcadeClientForToken('token-alpha');
+  const reResolved = arcadeClientForToken('token-alpha', ARCADE_E2E_BASE_URL);
   check(
     'I11b token-map: token-alpha always resolves to tenant_alpha, never tenant_beta',
     reResolved.db === 'tenant_alpha' && alpha.db === 'tenant_alpha',
@@ -533,8 +535,8 @@ async function main(): Promise<void> {
 
   await waitUntilReady();
 
-  const alpha = arcadeClientForToken('token-alpha');
-  const beta = arcadeClientForToken('token-beta');
+  const alpha = arcadeClientForToken('token-alpha', ARCADE_E2E_BASE_URL);
+  const beta = arcadeClientForToken('token-beta', ARCADE_E2E_BASE_URL);
 
   console.log('\n[SEED] warming embedder + seeding both tenants...');
   const embedderWarmupStart = Date.now();

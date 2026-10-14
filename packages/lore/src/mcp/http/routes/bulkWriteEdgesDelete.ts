@@ -17,6 +17,7 @@ import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { recordHotWrite, recordHotWriteBatch, retractHotWriteOrCompensate } from '../../../outbox/hotLane.js';
 import { withNodeLocks, chunkForLocking, BULK_LOCK_CHUNK_SIZE, withEdgeLocks, type EdgeLockTriple } from '../../../core/nodeWriteLock.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
+import { deleteNodeAndText, deleteIncompleteMessage, type DeleteTextStore } from '../../../engines/graphShared/deleteOutcome.js';
 import type { OutboxEntry } from '../../../outbox/types.js';
 import { readEdgePriors, markEdgeWritten, undoBulkEdgeWrite, retractBulkEdgeUpsert, reassertBulkEdgeUpsert } from './bulkEdgeRollback.js';
 import { bulkScopeDeps, deletableBulkIds, visibleEdgeEndpoints, edgeEndpointMissingMessage } from './bulkWriteScope.js';
@@ -282,7 +283,7 @@ export async function handleBulkDelete(
     // idempotent — re-deleting an already-gone id returns false and
     // is reported as `deleted:false` (non-fatal, matches W9 shape).
     const idItems = parsed.ids as unknown[];
-    const results: Array<{ id: string; ok: boolean; deleted?: boolean; error?: string }> = new Array(idItems.length);
+    const results: Array<{ id: string; ok: boolean; deleted?: boolean; nodeDeleted?: boolean; error?: string }> = new Array(idItems.length);
     interface DelPlan { idx: number; raw: string; stripped: string; }
     const delPlans: DelPlan[] = [];
     for (let i = 0; i < idItems.length; i++) {
@@ -313,6 +314,7 @@ export async function handleBulkDelete(
     }
     let deletedCount = 0;
     let notFoundCount = preNotFound;
+    let deleteIncompleteCount = 0;
     // QA A2 round-4 finding 1 (2026-09-03) — set when ANY chunk's outbox
     // commit fails (see the chunk loop below). Drives the response `ok`
     // flag the same way the round-3 `outboxCommitError` used to: an outbox
@@ -371,34 +373,32 @@ export async function handleBulkDelete(
                 for (let k = 0; k < chunk.length; k++) {
                     const { idx, raw, stripped } = chunk[k]!;
                     try {
-                        const wasDeleted = await withTransactionConflictRetry(() => target.deleteNode(stripped));
-                        if (!wasDeleted) {
+                        // 3.34.0 (M3a) — node delete + text delete via the engine-neutral honest-delete
+                        // contract: bounded retries on both writes; a text delete that still fails is
+                        // `delete_incomplete`, never `deleted:true`. L-042 — the verbatim store is the
+                        // REQUESTED workspace's (resolved above), not the boot singleton.
+                        const reason = 'graph node deleted via /api/nodes/bulk-delete';
+                        const outcome = await deleteNodeAndText({
+                            graph: target,
+                            text: targetVerbatim as unknown as DeleteTextStore,
+                            nodeId: stripped,
+                            textId: `lore:${stripped}`,
+                            reason,
+                        });
+                        if (outcome.status === 'not_found') {
                             notFoundCount++;
                             // 404 is non-fatal — the operator's cleanup script may
                             // re-issue IDs that are already gone (idempotent).
                             results[idx] = { id: raw, ok: true, deleted: false };
                             continue;
                         }
-                        // L-042 — tombstone the REQUESTED workspace's verbatim store
-                        // (resolved above), not the boot singleton.
-                        const verbatim = targetVerbatim as unknown as {
-                            tombstone?: (id: string, reason: string) => Promise<void>;
-                            delete: (id: string) => Promise<void>;
-                        };
-                        try {
-                            const reason = 'graph node deleted via /api/nodes/bulk-delete';
-                            if (typeof verbatim.tombstone === 'function') {
-                                await verbatim.tombstone(`lore:${stripped}`, reason);
-                            } else {
-                                await verbatim.delete(`lore:${stripped}`);
-                            }
-                            // QA A2 finding 2 (2026-09-03) — record a verbatim.tombstone
-                            // outbox row, sequenced AFTER this id's batched node.delete
-                            // row committed above, so a stale pending verbatim.upsert
-                            // from an earlier create can't later replay and resurrect
-                            // the content this call just tombstoned (outbox/types.ts).
-                            // Non-fatal: the synchronous tombstone above already ran.
-                            if (deps.outboxStore) {
+                        // QA A2 finding 2 (2026-09-03) — record a verbatim.tombstone outbox row,
+                        // sequenced AFTER this id's batched node.delete row, so a stale pending
+                        // verbatim.upsert can't replay and resurrect the content. Recorded for
+                        // `delete_incomplete` too: it is what lets the replicator finish the text
+                        // delete that failed here. Non-fatal on its own failure.
+                        if (deps.outboxStore) {
+                            try {
                                 await recordHotWrite(deps.outboxStore, {
                                     workspace: lockWorkspace,
                                     operationKind: 'verbatim.tombstone',
@@ -406,9 +406,9 @@ export async function handleBulkDelete(
                                     initiator: 'http:POST /api/nodes/bulk-delete',
                                     operation: 'verbatim.tombstone',
                                 });
+                            } catch (err) {
+                                console.error(`[Lore HTTP] bulk-delete verbatim tombstone outbox row failed for ${stripped}: ${redactError(err)}`);
                             }
-                        } catch (err) {
-                            console.error(`[Lore HTTP] bulk-delete verbatim op failed for ${stripped}: ${redactError(err)}`);
                         }
                         // Round-E X-edges — buffer the delete to the WAL for
                         // async sync, mirroring store_edge/nodeService's
@@ -418,6 +418,13 @@ export async function handleBulkDelete(
                         // never buffered for a sync push to remove remotely.
                         if (isActiveWorkspace && deps.getWal) {
                             deps.getWal().append('delete_node', { id: stripped });
+                        }
+                        if (outcome.status === 'delete_incomplete') {
+                            // The node is gone (WAL appended above) but its text may still be searchable.
+                            console.error(`[Lore HTTP] bulk-delete text delete failed for ${stripped}: ${redactError(outcome.textError)}`);
+                            deleteIncompleteCount++;
+                            results[idx] = { id: raw, ok: false, deleted: false, nodeDeleted: true, error: deleteIncompleteMessage(stripped, outcome.textError) };
+                            continue;
                         }
                         deletedCount++;
                         results[idx] = { id: raw, ok: true, deleted: true };
@@ -463,17 +470,19 @@ export async function handleBulkDelete(
     deps.auditLog.log({
         toolName: 'bulk_delete_nodes',
         args: { count: parsed.ids.length, workspace: requestedWorkspace ?? null, surface: 'http' },
-        result: anyOutboxCommitFailure ? 'error' : 'success',
+        result: anyOutboxCommitFailure || deleteIncompleteCount > 0 ? 'error' : 'success',
         resultDetail: anyOutboxCommitFailure
             ? 'one or more chunks failed to commit their outbox rows'
-            : `${deletedCount} deleted · ${notFoundCount} not-found`,
+            : `${deletedCount} deleted · ${notFoundCount} not-found` + (deleteIncompleteCount > 0 ? ` · ${deleteIncompleteCount} delete_incomplete` : ''),
         durationMs: 0,
     });
     writeJson(res, 200, {
-        ok: !anyOutboxCommitFailure,
+        ok: !anyOutboxCommitFailure && deleteIncompleteCount === 0,
         count: parsed.ids.length,
         deleted: deletedCount,
         notFound: notFoundCount,
+        // 3.34.0 (M3a): present only when a node was removed but its text delete failed.
+        ...(deleteIncompleteCount > 0 ? { deleteIncomplete: deleteIncompleteCount } : {}),
         results,
     });
     return true;

@@ -4,6 +4,276 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [Unreleased]
+
+## [3.34.0] — 2026-10-14
+
+Arcade-mode must-fix release for Nokshi (brief of 2026-10-12): M1–M6 plus N5.
+Replay takes the node lock and write outcomes are never guessed (M1, M2);
+deletes are honest, replay is delete-aware, the bulk timeout fallback no longer
+overlaps, and an operator repair route removes index-less ghost records (M3 —
+M3b is hardened and repairable, root cause unconfirmed); semantic recall no
+longer ships embeddings back and heap sizing guidance is documented as
+estimates (M4); `GET /ready` checks ArcadeDB (M5); the arcade listener enforces
+a Host-header allowlist (M6); `POST /api/nodes/recallable` answers "are these
+writes recallable yet" so clients stop polling recall (N5). New behaviour is
+defined as engine-neutral optional contracts with SQLite implementations and
+explicit `not_supported` answers elsewhere. All changes are additive; existing
+success shapes are unchanged. Not in this release: S1/S2 (cross-daemon
+preconditions, atomic batches; planned for 3.35.0) and N1–N4, N6–N11.
+
+### Fixed — arcade write outcome and replay (M1, M2)
+- **Correction to 3.33.0 ("In-process guarantee only").** That entry said the
+  per-node lock serialised a conditional write against every other writer in the
+  process, "including writes accepted but not yet replayed". On the arcade
+  engine that was wrong: the outbox replay handlers (`node.upsert`,
+  `node.delete`) did not take the lock, so a replay of an earlier accepted
+  write could land between a request's outbox record and its own graph write.
+  Symptoms: a false `already_exists` on an `ifAbsent` create, a false
+  `revision_mismatch` / `revision_conflict` on an `ifRevision` write, and a
+  plain stamped write landing at `r+2` instead of `r+1`.
+- **Arcade replay takes the request-path node lock.** The `node.upsert` and
+  `node.delete` replay handlers now run under the same per-node lock the request
+  paths take. The outbox lane key `arcade:<tenantId>:<appId>` is mapped to the
+  request-side lock workspace (the cell's `appId`) so both sides contend on one
+  key. The wait is bounded per replicator TICK, not per row (`nodeLockWaitMs`
+  option of `wireArcadeReplicator`, default 2000 ms): all node replays of a tick
+  share one budget, refilled at tick start. A free lock is always taken at once
+  (a try-lock probe, not a timer); a held lock is waited for only while the
+  budget lasts, then the row is deferred immediately. A deferred row goes back to
+  `pending` (no attempt counted, never `failed`) and the remaining rows of that
+  node are skipped for the tick so replay order is kept. This matters because a
+  bulk chunk holds up to 50 node locks at once: a chunk stuck on a slow ArcadeDB
+  call costs one budget per tick, not 50 waits. `markStale` replay is unchanged
+  (not locked).
+- **Write outcome is no longer guessed (M2).** A client-side timeout (plain
+  `Error`, not an `ArcadeHttpError`) on the `INSERT` or `UPDATE` branch of
+  `upsertNodeAtRevision`, on `insertNodeIfAbsent`, or on the post-write
+  read-back now triggers a re-read. If the stored row is our own write the call
+  succeeds; if a rival wrote it the usual `already_exists` /
+  `revision_conflict` is raised; if the outcome is still unknown the call fails
+  `outcome_unknown` carrying the current revision. No compensating row is ever
+  built on an unknown outcome: the bulk route keeps the item's outbox row
+  (it replays) and the single-write path (`nodeUpsert`) skips its rollback.
+- **Conditional single writes retry a busy ArcadeDB.** `upsertNodeAtRevision`
+  and `insertNodeIfAbsent` now retry the whole attempt (read, guarded write,
+  re-read) on a 502/503/504 that provably wrote nothing — e.g. 26.7.1's
+  `ConcurrentModificationException ... Please retry the operation` while the
+  vector index rebuilds under burst writes. Same bound as `upsertNode`
+  (`QUERY_MAX_RETRIES` = 2, full-jitter backoff capped at 400 ms). A rival
+  write, our own committed write and an unknown outcome are never retried; a
+  persistent refusal still surfaces as `arcade_unavailable`.
+- **Stable error-code prefixes on per-item bulk errors.** Every failed item's
+  `error` starts with `<code>: `. New or newly guaranteed codes:
+  `outcome_unknown` (item also carries `currentRevision`: a number, `null` when
+  the node is absent, omitted when the re-read itself failed),
+  `arcade_unavailable` (ArcadeDB 502/503/504), `arcade_error` (other ArcadeDB
+  HTTP errors), `timeout`, `write_failed` (anything else without a code of its
+  own). `already_exists`, `revision_conflict`, `revision_mismatch` and
+  `precondition_failed` keep their existing shape; an error message that
+  already starts with a code is not prefixed twice. This includes an item
+  refused because the read before its write failed (nothing was written):
+  `<code>: could not read the node before writing: ...; nothing was written`,
+  coded by the same rules. Additive: callers matching on the old free-text
+  messages should match on the prefix.
+
+### Fixed — deletes, delete-aware replay, arcade bulk writes (M3)
+- **A delete never answers `deleted:true` while its text is searchable (M3a).** Deleting a
+  node is two writes: the graph node, then its text (the verbatim row text search reads). The bulk
+  and single delete routes used to log a failed text delete and still answer success. Both now go
+  through one engine-neutral helper (`engines/graphShared/deleteOutcome.ts`:
+  `deleteNodeAndText`, `withBoundedRetry`). Transient failures are retried up to 5 attempts with a
+  capped, jittered backoff; the classifier is supplied by the engine through the new optional
+  `GraphProvider.isTransientDeleteError` (ArcadeDB: HTTP 503, and any response whose body is a
+  concurrent-modification answer ("Concurrent modification ... Please retry the operation" /
+  `ConcurrentModificationException`; captured live on 26.7.1 as a 503); SQLite: `SQLITE_BUSY` / `SQLITE_LOCKED` / "database is locked" and the historical
+  transaction-conflict wording; Dataplane: none, so it keeps the historical transaction-conflict
+  default). A failure of the node delete itself is thrown unchanged (nothing was applied).
+  - New error code **`delete_incomplete`**: the node was deleted but the text delete still failed
+    after the retries, so the text may still be searchable.
+  - `POST /api/nodes/bulk-delete`: a `delete_incomplete` item is
+    `{id, ok:false, deleted:false, nodeDeleted:true, error:"delete_incomplete: ..."}`. New item
+    field **`nodeDeleted`** (only on these items). New response field **`deleteIncomplete: n`**,
+    present only when n > 0; the response `ok` is false in that case. Success shapes are unchanged.
+  - `DELETE /api/node/:id`: answers **500 `delete_incomplete`** with `{id, nodeDeleted:true}`.
+    The `verbatim.tombstone` outbox row and the WAL entry are still written. The 404
+    (`node_not_found`) and success bodies are unchanged. The MCP `delete_node` tool is unchanged.
+  - Retry semantics: after `delete_incomplete` the node is gone, so a manual retry of the same
+    call answers not-found. Convergence of the text relies on the queued `verbatim.tombstone`
+    outbox row; on a lane with no outbox a retry will not clear the text.
+- **A replayed older upsert can no longer resurrect a later-deleted node.** The shared
+  replicator (`outbox/replicator.ts` + `outbox/deleteAwareReplay.ts`) now treats an upsert row
+  of ANY status (including `failed`) as dead (`SUPERSEDED_DEAD_ERROR`) when a LATER delete row
+  for the same entity exists that is `pending`, `replicating` or `replicated`. A `failed` or
+  `dead` delete does not count. Families: node (`node.delete`), edge (`edge.delete`), verbatim
+  (`verbatim.tombstone` / `verbatim.purge`). It uses the new optional outbox-store probe
+  `hasNewerDeleteForKey` (implemented by `SqliteOutboxStore`) and fails open: a store without the
+  probe, a throwing probe, or a keyless entry leaves the row to replay as before. It applies to
+  the SQLite lane and the arcade lane alike. The verbatim consolidation gate no longer requires
+  status `failed`. The arcade `deleteNode` replay was already under the node lock (slice 1);
+  this slice adds a test for it.
+- **arcade bulk upsert no longer overlaps a timed-out script with its fallback (M3b hardening).**
+  When a chunk's sqlscript failed (including a client-side timeout, where ArcadeDB may still be
+  running it) the chunk used to be re-run node by node immediately. A failed script is now
+  settled first by re-reading the chunk's ids: updatedAt equal to this script's stamp with
+  revision prior+1 means applied (ok, not re-run); still at its prior revision with an older
+  updatedAt, or absent before and after, means provably unapplied (re-run alone); anything else
+  (moved by someone else, vanished, or the re-read itself failed) is **`outcome_unknown`** with
+  `currentRevision` where known, and NO fallback write. A failed pre-fetch read applied nothing,
+  so only that case writes per node. Catches are narrowed to transport/server failures and log
+  the error class (never the message); other errors propagate. Residual: ArcadeDB can still be
+  executing the original script when the re-read happens, in which case the re-read sees the
+  prior state and the item is re-run alone.
+- **Report as: hardened and repairable, root cause unconfirmed.** The original index divergence
+  that produced ghost records has not been reproduced; see the repair route below.
+- **Found live (26.7.1): a null-id ghost made `ArcadeGraphStore.initialize()` throw** (`[arcadeNodeScopes]
+  backfill made no progress`), because the scope backfill pages `security_scopes IS NULL` and a ghost
+  matches forever. Any fresh store on such a cell fails on first use. The repair route's capability now
+  runs the schema DDL only (not the backfill), so it works on exactly that cell; ordinary calls on a
+  cell holding a ghost still fail closed until the ghost is repaired.
+
+### Fixed — readiness, Host header, recall memory (M4, M5, M6)
+
+- **M5: readiness route (`GET /ready`, alias `/api/ready`).** `/health` stays a
+  pure liveness answer. `/ready` answers 200 when ArcadeDB is reachable and the
+  root credential authenticates, otherwise 503 `{"status":"not_ready"}` with
+  `Retry-After: 2`. The probe (`list databases`) is cached for 2 s, shared between
+  concurrent callers, bounded by a 2 s timeout, and never stacked behind a hung
+  probe. Exempt from the rate limiter like `/health`. Anonymous callers see the
+  status only; an operator bearer also sees `reason`, `detail`, `latencyMs`.
+  New env: `LORE_ARCADE_READY_CACHE_MS`, `LORE_ARCADE_READY_TIMEOUT_MS`.
+- **M6: Host-header allowlist on the arcade listener.** `arcadeDispatch` now
+  refuses an unlisted `Host` with `403 host_not_allowed` before the rate
+  limiter and before any token or pool work, on every route. Default policy is
+  relaxed (loopback on any port, IP literals, dotless names, missing Host); a
+  dotted public name must be listed in `LORE_ARCADE_ALLOWED_HOSTS`.
+  `LORE_ARCADE_HOST_CHECK=strict` narrows it to the standard listener's exact
+  loopback rule. `isAllowedHost` is now exported and shared.
+- **M4: arcade recall and export memory.** Semantic recall's original statement
+  returns each neighbour as a whole record, so the `embedding` array travels
+  back over HTTP for up to k = max(40, limit x 4) hits (k <= 400): measured on
+  ArcadeDB 26.7.1 at dimension 1024, about 14 KB per hit (562 KB at k = 40,
+  5.6 MB at k = 400). Semantic recall now selects the scalar columns only, ON by
+  default (`LORE_ARCADE_RECALL_PROJECTION=off|0|false` restores the old
+  statement), with an automatic latch-off fallback if ArcadeDB rejects it or
+  returns an unexpected row shape. Verified live against ArcadeDB 26.7.1 (1,013
+  nodes, dimension 1024, 12 query / limit / filter cases): identical ids, order,
+  scores and mapped fields, and 23x fewer response bytes (5.6 MB to 0.24 MB at
+  k = 400). `ArcadeVectorStore.dumpAll` (backup/export) no longer issues an
+  unbounded `SELECT ... embedding FROM LoreVerbatim`; it keyset-pages 200 rows
+  at a time (live check: 1,013 rows, each exactly once, in id order, 6
+  statements). Heap sizing guidance, labelled as estimates, added to
+  `docs/CONFIGURATION.md` section 3a.
+- **Found by the live ArcadeDB 26.7.1 check (all fixed in this slice).** (1) The
+  first projected statement read `vertex.<col>`; `expand()` yields flat rows, so
+  every column came back null while the statement "succeeded" (it would have
+  returned id-less hits without tripping the latch). It now selects the flat
+  columns, and the row parser rejects rows without a string `id`. (2) `list
+  users` is not a valid server command on 26.7.1 (HTTP 400), so the `/ready`
+  probe would have held 503 forever; it now runs `list databases`. (3) `:after`
+  is a reserved word in 26.7.1 SQL, so the `dumpAll` keyset cursor failed with a
+  syntax error; the parameter is now `:lastId`.
+
+### Fixed — embedding model cache
+- **A fresh LORE_HOME no longer downloads the embedding model it already has.**
+  Since 3.24.0 (`@huggingface/transformers` 4.x) `resolveLegacyTransformersCacheDir()`
+  always returned `undefined`: it located the package with
+  `require.resolve('@huggingface/transformers/package.json')`, and 4.x's
+  `exports` map does not export `./package.json`, so the call threw
+  `ERR_PACKAGE_PATH_NOT_EXPORTED` and the catch swallowed it. Step 2 of
+  `resolveEmbedModelDir` (copy from the transformers.js cache in
+  `node_modules`, no network) was therefore skipped on every fresh models
+  directory, which fell through to a download (~23 s measured) — and, with
+  `LORE_MODELS_OFFLINE` or no network, to `EmbedModelUnavailableError` even
+  though the model was installed. It also made the model-server timing tests
+  flaky on a slow network. The resolver now resolves the package entry point
+  and walks up to the directory whose `package.json` names the package.
+  Regression test: `test/model-legacy-cache-resolve-unit.ts`.
+
+### Added — arcade integrity repair route (M3b)
+- **`POST /api/arcade/apps/:tenant/:app/repair-integrity`** (operator lane): finds and removes
+  "ghost" `LoreNode` records (a bucket record the unique `LoreNode[id]` index has no entry for, so
+  `WHERE id = :id` can neither read nor delete it). Body `{dryRun?: boolean (default true),
+  rids?: string[] (at most 1000, each like "#12:3")}`. Dry run: read-only, returns
+  `{ok, dryRun, scanned, suspects[]}` where each suspect is `{rid, id, revision, createdAt,
+  scanFound, indexFound, indexRid}`. Real run (`dryRun:false`) additionally returns
+  `removed[]`, `absent[]`, `refused[{rid, reason:"live_readable"}]`. Removal is by `@rid`; a
+  record the id lookup can read is refused, one already gone is `absent`, a re-run is a no-op.
+  Scoped to the cell named in the path (the cell's own service account, under the cell lease),
+  rate limited in the `arcade_migrate` class, and audited as `arcade.repair-integrity` (counts
+  and up to 50 record ids; never node content). Codes: `method_not_allowed` (405),
+  `payload_too_large` (413), invalid JSON (400), `bad_request` (400, non-boolean `dryRun`),
+  `invalid_rids` (400), `invalid_identifier` (400), `cell_missing` (404), `secret_missing` (500),
+  `cell_lease_held` (409, with `holder` and `retryAfterSec`), `not_supported` (501).
+- New optional engine-neutral capability on `GraphProvider` (existing signatures unchanged):
+  `isTransientDeleteError?(err)`, `integrityScan?()`, `integrityRemove?(rids)`. ArcadeDB
+  implements all three; SQLite implements the classifier and answers `not_supported` for the
+  integrity pair (its node id is the table key, so there is no separate index that can diverge
+  from the rows); Dataplane answers `not_supported` for the integrity pair. New types
+  `GraphIntegrityScan`, `GraphIntegrityRemoval`, `GraphIntegritySuspect`.
+- The `arcade_migrate` rate class (cap 2, refill 2 per 10 minutes) now also covers
+  `repair-integrity`, because a full bucket scan is heavy.
+
+### Added — recallable route and recall `embedded: false` (N5)
+
+- **N5: `POST /api/nodes/recallable` - "are my writes recallable yet?".** Replaces
+  polling `recall`. Body `{workspace, ids[] | allBeforeNow:true, timeoutMs?}`;
+  answers per id `recallable` / `pending` (`reason`: `queued`, `awaiting_index`,
+  `embed_failed`) / `not_found`, plus `ready`, `timedOut`, `waitedMs`,
+  `indexChecks`, `counts`, and for `allBeforeNow` `highWaterSequenceId`,
+  `queuedRemaining`, `sampled`. A timeout is a `200` status, never an error. Ids
+  are bound to the request's workspace (an id elsewhere is `not_found`).
+  Engine-neutral: new optional capabilities `VectorProvider.indexedIds?`,
+  `OutboxStore.embedStatesForNodes?` / `embedBacklog?`, one waiter
+  (`core/recallableWaiter.ts`), one shared contract test. ArcadeDB "recallable"
+  = outbox row replicated AND a bounded `vector.neighbors` self-check on the
+  node's own embedding answers (projected shape, one batched statement per
+  round); SQLite answers from the outbox plus its local vector store; Dataplane
+  answers `501 recallable_not_supported`. The waiter parks on the replicator tick
+  (`OutboxLagCache.waitForRefresh`) or a capped backoff, never a tight loop.
+  Available on the arcade listener (added to the arcade allowlist) and the
+  embedded/local HTTP server.
+  - New error codes: `recallable_too_many_ids` (400, `max`, `received`),
+    `recallable_invalid_request` (400), `recallable_not_supported` (501);
+    existing `workspace_required` (400) and `workspace_not_found` (404) apply.
+  - New rate buckets: `recallable` (20 burst, 60/min) and `arcade_recallable`.
+  - New env: `LORE_RECALLABLE_TIMEOUT_MS` (10000), `LORE_RECALLABLE_MAX_TIMEOUT_MS`
+    (60000, larger requests are clamped), `LORE_RECALLABLE_MAX_IDS` (500, hard max 1000).
+- **Found by the live ArcadeDB 26.7.1 check (fixed in this slice).** The first
+  index self-check passed a bare scalar subquery as the query vector; a subquery
+  evaluates to a list of rows and 26.7.1 answers HTTP 500 `Unsupported query
+  vector type: Object[]` (the fallback masked it at twice the statements). The
+  statement now indexes the row: `(SELECT embedding ... WHERE id = :id)[0].embedding`.
+  Verified live: ids non-null, projected `id, distance` rows (no embedding), a
+  row stored without an embedding is correctly not indexed, and the
+  client-vector fallback returns the same answer.
+- **Recall: additive per-hit `embedded: false`.** A hybrid recall can return a
+  node from the keyword leg before its embedding exists. Such a hit (no
+  `semantic` in `matchedBy`, no `similarity`) now carries `embedded: false` on
+  the flat projection, summary `hits[]`, full `knowledge[]` and compact
+  `candidates[]`. Absent on every other hit; no existing field changed. It means
+  "not shown to be embedded", so a keyword-only hit on an embedded node also
+  carries it. Use `/api/nodes/recallable`, not "the hit came back", as the
+  readiness signal.
+
+### Tests
+
+- **Real-ArcadeDB e2e suites can target an externally managed server.** The
+  suites that need a live ArcadeDB 26.7.1 hard-coded `http://localhost:2480`
+  (and the spike root password), so they collided with any other ArcadeDB on
+  the host. Set `LORE_ARCADE_E2E_URL` (e.g. `http://127.0.0.1:2497`) plus
+  `LORE_ARCADE_E2E_ROOT_PASSWORD` or `LORE_ARCADE_E2E_ROOT_PASSWORD_FILE` and
+  the suites use that server instead; in that mode
+  `startArcadeContainer()` / `stopArcadeContainer()` in
+  `test/spike-arcadedb-helpers.ts` are no-ops (no `docker run` / `docker rm`).
+  The mapping lives in the new `test/arcade-e2e-env.ts`, imported first by each
+  real-ArcadeDB suite so the product's `ARCADE_BASE_URL` /
+  `ARCADE_ROOT_PASSWORD` module-load reads see it. With none of the variables
+  set, behaviour is unchanged (`localhost:2480`, `SpikeRoot123!`).
+  `arcade-write-scopes-real-e2e.ts` is untouched: it already runs its own
+  container on `LORE_ARCADE_WSCOPE_PORT` (default 2490). Test-only; no product
+  source changed.
+
 ## [3.33.0] — 2026-10-08
 
 Conditional writes, phase 2. Every node now carries an integer `revision` that

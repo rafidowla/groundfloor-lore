@@ -50,6 +50,7 @@ interface ReplStateMap {
     [workspace: string]: OutboxReplicationState;
 }
 
+import { embedStateOfStatus, mergeEmbedState, embedTargetsOf, type EmbedRowState } from './recallableQueries.js';
 export class FileOutboxStore implements IOutboxStore {
     private readonly filePath: string;
     private readonly replStatePath: string;
@@ -305,6 +306,38 @@ export class FileOutboxStore implements IOutboxStore {
             if (typeof pid === 'string' && want.has(pid)) out.add(pid);
         }
         return [...out];
+    }
+
+    /** 3.34.0 (N5) - see OutboxStore.embedStatesForNodes. */
+    async embedStatesForNodes(workspace: string, nodeIds: string[]): Promise<Map<string, 'queued' | 'dead' | 'replicated'>> {
+        const want = new Set(nodeIds);
+        const best = new Map<string, { state: EmbedRowState; seq: number }>();
+        for (const e of Object.values(this.readAll())) {
+            if (e.workspace !== workspace || (e.operationKind !== 'verbatim.upsert' && e.operationKind !== 'embed.batch')) continue;
+            const state = embedStateOfStatus(e.status ?? '');
+            if (!state) continue;
+            for (const id of embedTargetsOf(e.operationKind, e.payload)) {
+                if (want.has(id)) best.set(id, mergeEmbedState(best.get(id), { state, seq: e.sequenceId ?? 0 }));
+            }
+        }
+        return new Map([...best].map(([k, v]) => [k, v.state]));
+    }
+
+    /** 3.34.0 (N5) - see OutboxStore.embedBacklog. */
+    async embedBacklog(workspace: string, upToSequenceId: number | null, sampleLimit: number): Promise<{ highWaterSequenceId: number; queued: number; sampleNodeIds: string[] }> {
+        const rows = Object.values(this.readAll()).filter((e) => e.workspace === workspace);
+        const hw = rows.reduce((m, e) => Math.max(m, e.sequenceId ?? 0), 0);
+        if (upToSequenceId === null) return { highWaterSequenceId: hw, queued: 0, sampleNodeIds: [] };
+        const embed = rows.filter((e) => (e.operationKind === 'verbatim.upsert' || e.operationKind === 'embed.batch') && (e.sequenceId ?? 0) <= upToSequenceId);
+        const queued = embed.filter((e) => embedStateOfStatus(e.status ?? '') === 'queued').length;
+        const sample: string[] = [];
+        for (const e of embed.filter((x) => x.status === 'replicated').sort((a, b) => (b.sequenceId ?? 0) - (a.sequenceId ?? 0))) {
+            for (const id of embedTargetsOf(e.operationKind as string, e.payload)) {
+                if (sample.length < sampleLimit && !sample.includes(id)) sample.push(id);
+            }
+            if (sample.length >= sampleLimit) break;
+        }
+        return { highWaterSequenceId: hw, queued, sampleNodeIds: sample };
     }
 
     async listWorkspacesWithPending(): Promise<string[]> {

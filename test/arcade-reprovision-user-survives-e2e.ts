@@ -36,6 +36,8 @@
  * Pre-req: ArcadeDB 26.7.1 on :2480 with root password SpikeRoot123!.
  */
 
+// Must stay the first import: maps LORE_ARCADE_E2E_URL / _ROOT_PASSWORD onto ARCADE_BASE_URL / ARCADE_ROOT_PASSWORD (see arcade-e2e-env.ts).
+import './arcade-e2e-env.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';

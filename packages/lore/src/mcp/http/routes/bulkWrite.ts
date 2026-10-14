@@ -57,7 +57,7 @@ import { supersedesVisibilityFromDeps } from '../../../security/nodeWriteGate.js
 import { resolveGraph, writeWorkspaceNotFound } from './bulkWriteWorkspace.js';
 import { bulkLockIds, bulkOutboxPayload, checkChunkConditions, checkSpecConditions, chunkSpecsForLocking, freshRevision, guardBulkChunk, writeStamped, type ConditionalSpec, type RevisionStamp, stampBulkRevisions, writeBulkChunk, undoLostClaim, reconcileOutboxRevision } from './bulkWriteConditional.js';
 import { ItemConditionError, parseConditionalFields, type FailedPrecondition, type Precondition } from '../../../core/conditionalChecks.js';
-import { alreadyExistsError, isNodeAlreadyExists } from '../../../engines/graphShared/conditionalInsert.js';
+import { classifyItemWriteError, isOutcomeUnknownResult } from './bulkWriteErrors.js';
 import { bulkScopeDeps, blockedBulkUpsertIds, ID_UNAVAILABLE_ITEM_ERROR, storedScopesResolver } from './bulkWriteScope.js';
 import type { ItemScopeDeps } from '../../../security/itemScopes.js';
 import { withNodeLocks } from '../../../core/nodeWriteLock.js';
@@ -862,7 +862,7 @@ async function handleBulkNodes(
                                 ecosystem: (raw as Record<string, unknown>).ecosystem as string,
                             }));
                         }
-                    } else if (deps.outboxStore && chunkEntries) {
+                    } else if (deps.outboxStore && chunkEntries && !isOutcomeUnknownResult(r)) { // outcome_unknown: keep the row, it replays (M2)
                         // QA A2 round-4 finding 2 (2026-09-03) — `upsertOne`'s outer
                         // catch (a genuine post-outbox-commit substrate failure) AND
                         // its own inline-verbatim rollback branch both return here as
@@ -993,6 +993,6 @@ async function upsertOne(
         return { ok: true, id: raw.id, ...(node.revision !== undefined ? { revision: node.revision } : {}) };
     } catch (err) {
         if (err instanceof ItemConditionError) return { ok: false, id: raw.id, ...err.payload };
-        return { ok: false, id: raw.id, error: isNodeAlreadyExists(err) ? alreadyExistsError(err) : (err as Error).message };
+        return { ...classifyItemWriteError(err), id: raw.id };
     }
 }

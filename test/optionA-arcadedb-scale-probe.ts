@@ -32,6 +32,8 @@
  * Pre-req: arcade-spike up on :2480 (root SpikeRoot123!).
  */
 
+// Must stay the first import: maps LORE_ARCADE_E2E_URL / _ROOT_PASSWORD onto ARCADE_BASE_URL / ARCADE_ROOT_PASSWORD (see arcade-e2e-env.ts).
+import { ARCADE_E2E_ROOT_PASSWORD } from './arcade-e2e-env.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
@@ -74,7 +76,7 @@ function containerFdCount(): number | null {
 
 async function main(): Promise<void> {
   process.env['ARCADE_BASE_URL'] = ARCADE_BASE_URL;
-  process.env['ARCADE_ROOT_PASSWORD'] = 'SpikeRoot123!';
+  process.env['ARCADE_ROOT_PASSWORD'] = ARCADE_E2E_ROOT_PASSWORD;
   process.env['LORE_ARCADE_SECRET_BACKEND'] = 'sqlite';
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'scale-'));

@@ -20,14 +20,27 @@
  *     graphql, redis, cypher, gremlin
  *   - GET /api/v1/ready returns HTTP 204 (empty body) when healthy.
  *   - Root user auth confirmed via JAVA_OPTS='-Darcadedb.server.rootPassword=...'.
+ *
+ * EXTERNAL SERVER MODE (test-only): set LORE_ARCADE_E2E_URL (e.g.
+ * http://127.0.0.1:2497) plus LORE_ARCADE_E2E_ROOT_PASSWORD or
+ * LORE_ARCADE_E2E_ROOT_PASSWORD_FILE to point the suites at an ArcadeDB you
+ * manage yourself. In that mode startArcadeContainer()/stopArcadeContainer()
+ * are no-ops (never `docker run` / `docker rm`). With none of these set the
+ * defaults below are unchanged (localhost:2480, SpikeRoot123!, own container).
+ * See test/arcade-e2e-env.ts.
  */
 
 import { spawnSync } from "node:child_process";
+import {
+  ARCADE_E2E_EXTERNAL,
+  ARCADE_E2E_BASE_URL,
+  ARCADE_E2E_ROOT_PASSWORD,
+} from "./arcade-e2e-env.js";
 
 export const ARCADE_CONTAINER_NAME = "arcade-spike";
-export const ARCADE_BASE_URL = "http://localhost:2480";
+export const ARCADE_BASE_URL = ARCADE_E2E_BASE_URL;
 export const ARCADE_ROOT_USER = "root";
-export const ARCADE_ROOT_PASSWORD = "SpikeRoot123!";
+export const ARCADE_ROOT_PASSWORD = ARCADE_E2E_ROOT_PASSWORD;
 
 /**
  * STABLE release pin (2026-07-03 recheck): newest numbered, non-SNAPSHOT tag
@@ -58,6 +71,7 @@ function basicAuthHeader(user: string, pass: string): string {
 
 /** Start the ArcadeDB container (idempotent — removes any stale container first). */
 export function startArcadeContainer(image: string = ARCADE_STABLE_TAG): void {
+  if (ARCADE_E2E_EXTERNAL) return; // external server: managed by the operator, not us
   spawnSync("docker", ["rm", "-f", ARCADE_CONTAINER_NAME], { stdio: "ignore" });
   const run = spawnSync("docker", [
     "run",
@@ -77,6 +91,7 @@ export function startArcadeContainer(image: string = ARCADE_STABLE_TAG): void {
 
 /** Stop and remove the spike container. */
 export function stopArcadeContainer(): void {
+  if (ARCADE_E2E_EXTERNAL) return; // external server: never docker rm it
   spawnSync("docker", ["rm", "-f", ARCADE_CONTAINER_NAME], { stdio: "ignore" });
 }
 

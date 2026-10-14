@@ -198,6 +198,15 @@ for (const engine of ['sqlite', 'lance'] as const) {
                 for (const slot of [`lore:%`, ...Array.from({ length: 5 }, (_, a) => `#q${a}`)]) {
                     const idOf = (base: string) => (slot === 'lore:%' ? `lore:${base}` : `lore:${base}${slot}`);
                     const [m, s] = [await v.getById(idOf(mIds[i]!)), await v.getById(idOf(sIds[i]!))];
+                    if (i === 5 && slot === '#q4') {
+                        // The queued alias upsert. 3.34.0 delete-aware replay: for the many path the upsert and its
+                        // tombstone were both pending at the first drain, so the older upsert is dead-skipped and the
+                        // row is never created; the per-id path drained that upsert BEFORE its delete existed, so the
+                        // row was created, then tombstoned. Either way no live text is left.
+                        assert.ok(!m || Boolean(m.text?.startsWith('[TOMBSTONED')), 'many path: queued alias holds no live text');
+                        assert.ok(s && Boolean(s.text?.startsWith('[TOMBSTONED')), 'per-id path: queued alias row is tombstoned');
+                        continue;
+                    }
                     assert.equal(Boolean(m), Boolean(s), `row presence for ${idOf(mIds[i]!)}`);
                     if (m && s) {
                         assert.equal(Boolean(m.text?.startsWith('[TOMBSTONED')), Boolean(s.text?.startsWith('[TOMBSTONED')), `tombstone state for ${idOf(mIds[i]!)}`);

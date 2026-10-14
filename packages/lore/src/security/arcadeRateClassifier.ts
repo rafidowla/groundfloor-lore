@@ -9,7 +9,7 @@
  *
  * Bucket classes (per design):
  *   arcade_provision  — POST provision: cap 5, refill 5/min (DDL + user create).
- *   arcade_migrate    — import/export/backup/restore: cap 2, refill 2/10min.
+ *   arcade_migrate    — import/export/backup/restore/repair-integrity: cap 2, refill 2/10min.
  *   arcade_admin      — issue/revoke/list tokens, policy: cap 20, refill 60/min.
  *   destructive       — destroy/disable (reuse the existing destructive class).
  *   generic           — tenant data plane (reuse existing generic).
@@ -38,6 +38,8 @@ export function arcadeBucketConfigs(): Record<string, BucketConfig> {
     arcade_migrate: { capacity: 2, refillPerMs: 2 / 600_000 },
     // token/policy admin — generous but bounded.
     arcade_admin: { capacity: 20, refillPerMs: 60 / 60_000 },
+    // 3.34.0 (N5) recallable-now holds a connection up to the timeout; keyed per token like the data plane.
+    arcade_recallable: { capacity: 20, refillPerMs: 60 / 60_000 },
   };
 }
 
@@ -48,6 +50,8 @@ export function arcadeBucketConfigs(): Record<string, BucketConfig> {
  */
 export function classifyArcadeRequest(pathname: string, method: string): string | null {
   if (pathname === '/health' || pathname === '/api/health') return null;
+  // 3.34.0 M5 — readiness is exempt like liveness (it has its own 2s result cache).
+  if (pathname === '/ready' || pathname === '/api/ready') return null;
 
   if (pathname.startsWith('/api/arcade/')) {
     // destroy (DELETE bare cell) / disable → destructive
@@ -55,13 +59,14 @@ export function classifyArcadeRequest(pathname: string, method: string): string 
     if (/\/disable$/.test(pathname) && method === 'POST') return 'destructive';
     // provision (POST /api/arcade/apps)
     if (pathname === '/api/arcade/apps' && method === 'POST') return 'arcade_provision';
-    // migrate family: import/export/backup/restore
-    if (/\/(import|export|backup|restore)$/.test(pathname)) return 'arcade_migrate';
+    // migrate family: import/export/backup/restore (+ repair-integrity: a full bucket scan)
+    if (/\/(import|export|backup|restore|repair-integrity)$/.test(pathname)) return 'arcade_migrate';
     // everything else operator (issue/revoke/list tokens, policy, list-apps)
     return 'arcade_admin';
   }
 
   // Tenant data plane — the existing generic/destructive model, keyed per-token.
+  if (pathname === '/api/nodes/recallable' && method === 'POST') return 'arcade_recallable';
   if (pathname.startsWith('/api/')) {
     if (method === 'DELETE') return 'destructive';
     return 'generic';

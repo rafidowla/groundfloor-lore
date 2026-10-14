@@ -92,8 +92,8 @@ function sha256(s: string): string {
     return crypto.createHash('sha256').update(s, 'utf8').digest('hex');
 }
 
-/** Build the cell's RAW service-account adapters (403-walled to one db). */
-async function rawAdaptersFor(
+/** Build the cell's RAW service-account adapters (403-walled to one db). Also used by arcadeRepair.ts. */
+export async function rawAdaptersFor(
     tenantId: string,
     appId: string,
 ): Promise<{ graph: ArcadeGraphStore; vector: ArcadeVectorStore; db: string } | { error: { status: number; code: string; message: string } }> {

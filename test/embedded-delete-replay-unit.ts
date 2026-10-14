@@ -423,12 +423,13 @@ for (const engine of ['sqlite', 'surreal'] as const) {
         assert.ok(upsertPayload, 'payload captured by the first case');
         // "Crash" between the outbox commit and the graph write: the row is
         // durable, the node never reached the graph.
-        ({ lore } = await crashWithPendingSave(lore, home, { ...upsertPayload!, id: 'crash-recovered', label: 'recovered' }, false));
+        let recoveredRow: string;
+        ({ lore, rowId: recoveredRow } = await crashWithPendingSave(lore, home, { ...upsertPayload!, id: 'crash-recovered', label: 'recovered' }, false));
         await drain(lore);
         const node = await read(lore, 'crash-recovered');
         assert.ok(node, 'the pre-boot row must re-create the node it describes');
         assert.equal(node!.label, 'recovered');
-        assert.equal(lore._daemon.replayScope!.preBootNodeUpserts?.size, 0, 'a recovered row leaves the boot snapshot');
+        assert.equal(lore._daemon.replayScope!.preBootNodeUpserts?.has(recoveredRow), false, 'a recovered row leaves the boot snapshot (rows now skipped as superseded-by-a-later-delete never replay, so their ids can remain; that is harmless)');
     });
 
     await test(`[${engine}] crash-left save + nodeDelete after start-up (node never written): stays deleted`, async () => {

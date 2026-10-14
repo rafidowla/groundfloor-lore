@@ -19,6 +19,7 @@ import { buildLanguageHint } from '../mcp/tools/search/helpers.js';
 import { buildRelevanceMeta, type RelevanceMetaFields } from './abstention.js';
 import type { PieceVectorsMeta } from './pieceSeedSearch.js';
 import { toSnakeRerankMeta, type SnakeRerankMeta } from './rerankStage.js';
+import { isNotEmbeddedHit } from './retrievalProjection.js';
 
 /* ─── RecallResult shape (canonical; embedded lore.recall returns it) ─── */
 
@@ -35,6 +36,9 @@ export interface RecallHit {
      *  Additive only — absent for keyword/traversal-only matches. */
     similarity?: number;
     relevance?: number;
+    /** 3.34 N5: `false` when the hit lacks 'semantic' in matchedBy and has no
+     *  similarity (see retrievalProjection.isNotEmbeddedHit). Additive; absent otherwise. */
+    embedded?: false;
     /** D8b: this hit's cross-encoder re-rank score. Absent unless `rerank`
      *  was enabled for this call AND the stage actually applied. */
     rerank_score?: number;
@@ -251,6 +255,8 @@ export interface RecallCandidate {
     score: number;
     matchedBy: string[];
     updatedAt: string;
+    /** 3.34 N5: see RecallHit.embedded — same semantics. */
+    embedded?: false;
     /** D8b: see RecallHit.rerank_score — same semantics. */
     rerank_score?: number;
 }
@@ -268,6 +274,7 @@ export function buildCompactCandidates(outcome: RetrieveOutcome): RecallCandidat
             score: r.score,
             matchedBy: r.matchedBy,
             updatedAt: n.updatedAt,
+            ...(isNotEmbeddedHit(r.matchedBy, r.similarity) ? { embedded: false as const } : {}), // 3.34 N5
             ...(r.rerankScore !== undefined ? { rerank_score: r.rerankScore } : {}),
         };
     });
@@ -384,7 +391,7 @@ export async function buildRecallResult(
     // reordering logic needed here, only carrying the already-present score
     // through so full-mode `knowledge` / summary `hits` (and auto_full,
     // which slices `trimmed` below) can surface it.
-    const recalled = outcome.results.map((r) => ({ node: r.node, source: mapSource(r.source), similarity: r.similarity, relevance: r.relevance, rerankScore: r.rerankScore }));
+    const recalled = outcome.results.map((r) => ({ node: r.node, source: mapSource(r.source), notEmbedded: isNotEmbeddedHit(r.matchedBy, r.similarity), similarity: r.similarity, relevance: r.relevance, rerankScore: r.rerankScore }));
     const related: RecallRelated[] = outcome.related.map((r) => {
         const n = r.node as LoreNode;
         return { id: n.id, type: n.type, label: n.label, project: n.project, snippet: snippetOf(n.content), via: r.via, relation: r.relation, depth: r.depth };
@@ -426,7 +433,7 @@ export async function buildRecallResult(
             // `related` is retrieve()'s own separate array, this is a direct
             // count of it, not arithmetic over `knowledge`.
             connectedMatches: related.length,
-            knowledge: recalled.map(({ node, source, similarity, relevance, rerankScore }) => {
+            knowledge: recalled.map(({ node, source, similarity, relevance, rerankScore, notEmbedded }) => {
                 const n = node as LoreNode & { language?: string | null; stale?: boolean };
                 return {
                     id: n.id, type: n.type, label: n.label, content: n.content, tags: n.tags,
@@ -434,6 +441,7 @@ export async function buildRecallResult(
                     ...(n.stale ? { stale_warning: true } : {}),
                     ...(similarity !== undefined && similarity !== null ? { similarity } : {}),
                     ...(relevance !== undefined && relevance !== null ? { relevance } : {}),
+                    ...(notEmbedded ? { embedded: false as const } : {}), // 3.34 N5
                     ...(rerankScore !== undefined ? { rerank_score: rerankScore } : {}), // D8b
                 };
             }),
@@ -481,7 +489,7 @@ export async function buildRecallResult(
     return {
         topic, mode: 'summary', searchMode, scope: { workspace: workspaceScope, ecosystem: ecosystemScope }, queryId,
         crossProject, totalRecalled: recalled.length, shown: trimmed.length, projectsSeen: [...projectsSeen],
-        hits: trimmed.map(({ node, source, similarity, relevance, rerankScore }) => {
+        hits: trimmed.map(({ node, source, similarity, relevance, rerankScore, notEmbedded }) => {
             const n = node as LoreNode & { stale?: boolean };
             return {
                 id: n.id, type: n.type, label: n.label, project: n.project, tags: n.tags,
@@ -489,6 +497,7 @@ export async function buildRecallResult(
                 ...(n.stale ? { stale_warning: true } : {}),
                 ...(similarity !== undefined && similarity !== null ? { similarity } : {}),
                 ...(relevance !== undefined && relevance !== null ? { relevance } : {}),
+                ...(notEmbedded ? { embedded: false as const } : {}), // 3.34 N5
                 ...(rerankScore !== undefined ? { rerank_score: rerankScore } : {}), // D8b
             };
         }),

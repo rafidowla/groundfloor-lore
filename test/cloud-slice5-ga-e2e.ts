@@ -20,6 +20,8 @@
  * Pre-req: arcade-spike container up on :2480 (root SpikeRoot123!).
  */
 
+// Must stay the first import: maps LORE_ARCADE_E2E_URL / _ROOT_PASSWORD onto ARCADE_BASE_URL / ARCADE_ROOT_PASSWORD (see arcade-e2e-env.ts).
+import { ARCADE_E2E_BASE_URL, ARCADE_E2E_ROOT_PASSWORD } from './arcade-e2e-env.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
@@ -41,8 +43,10 @@ async function section(name: string, fn: () => Promise<void>): Promise<void> {
   try { await fn(); } catch (e) { fail++; failures.push(`${name} THREW: ${(e as Error).stack ?? e}`); console.log(`  [FAIL] ${name} THREW: ${(e as Error).message}`); }
 }
 
-const ROOT_PASS = 'SpikeRoot123!';
-const BASE = 'http://localhost:2480';
+const ROOT_PASS = ARCADE_E2E_ROOT_PASSWORD;
+const BASE = ARCADE_E2E_BASE_URL;
+// Port the https reverse proxies forward to (2480 unless LORE_ARCADE_E2E_URL says otherwise).
+const ARCADE_PORT = Number(new URL(BASE).port || 2480);
 
 function scratchDir(): string {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'slice5-'));
@@ -293,7 +297,7 @@ async function tlsSuite(): Promise<void> {
   if (!gen) { check('TLS', 'openssl available for cert generation', false, 'skipping proxy legs'); return; }
   const { caPath, certPath, keyPath, badCertPath, badKeyPath } = gen;
 
-  const proxy = await startHttpsProxy(certPath, keyPath, 2480);
+  const proxy = await startHttpsProxy(certPath, keyPath, ARCADE_PORT);
   const proxyUrl = `https://localhost:${proxy.port}`;
   try {
     // (m) https WITHOUT CA file → cert validation fails loud (self-signed).
@@ -325,7 +329,7 @@ async function tlsSuite(): Promise<void> {
   // (n) SAN mismatch: a cert whose SAN is 'wrong.example' presented on a
   // 127.0.0.1 connect → rejected even WITH its CA trusted.
   if (badCertPath && badKeyPath) {
-    const badProxy = await startHttpsProxy(badCertPath, badKeyPath, 2480);
+    const badProxy = await startHttpsProxy(badCertPath, badKeyPath, ARCADE_PORT);
     try {
       process.env['LORE_ARCADE_CA_FILE'] = caPath; // trust the CA…
       resetAgents(await import('../packages/lore/src/engines/arcade/arcadeHttp.js'));

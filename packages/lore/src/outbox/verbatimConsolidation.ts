@@ -127,7 +127,7 @@ export async function consolidateVerbatimRun(
     const items: Array<Record<string, unknown>> = [];
     for (let k = 0; k < group.entries.length; k++) {
         const e = group.entries[k];
-        if (e.status === 'failed' && await deps.isSupersededFailed(e)) {
+        if (await deps.isSupersededFailed(e)) {
             await deps.store.markEntryStatus!(e.id, 'dead', { error: SUPERSEDED_DEAD_ERROR });
             deps.onDead();
             deps.log(`[outbox replicator] entry ${e.id} (verbatim.upsert consolidated) skipped: superseded by newer same-key write`);

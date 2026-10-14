@@ -1456,6 +1456,195 @@ Source: `src/engines/arcade/arcadeKmsSecretStore.ts`
 
 ---
 
+### `LORE_ARCADE_ALLOWED_HOSTS`
+
+| | |
+|---|---|
+| **Default** | _(empty — built-in relaxed policy, see below)_ |
+| **Surface** | daemon (arcade HTTP listener) |
+
+Extra `Host` header values the arcade listener accepts (DNS-rebinding defence,
+3.34.0). Comma-separated entries: `name` (any port), `name:port` (exact port),
+`*.suffix` (any subdomain, not the bare suffix), `[::1]`, or `*` to disable the
+check entirely. A malformed entry is ignored and never widens the policy.
+
+The listener binds `127.0.0.1` and every route except `/health` and `/ready`
+needs a bearer token, so this is defence in depth. The default (relaxed) policy
+accepts loopback names on any port, IP literals, dotless single-label names
+(`lore`, a container or service name), and a request with no `Host` header.
+**A dotted DNS name is refused `403 host_not_allowed` until listed**, so a
+deployment reached through a public name (for example `lore.example.com`
+through a reverse proxy that forwards the original `Host`) must set
+`LORE_ARCADE_ALLOWED_HOSTS=lore.example.com`. The boot log prints the active
+policy.
+
+Source: `src/security/arcadeHostPolicy.ts`
+
+---
+
+### `LORE_ARCADE_HOST_CHECK`
+
+| | |
+|---|---|
+| **Default** | _(unset — relaxed)_ |
+| **Surface** | daemon (arcade HTTP listener) |
+
+`strict` limits the arcade listener to the exact loopback `name:port` forms the
+standard listener accepts plus `LORE_ARCADE_ALLOWED_HOSTS`, and refuses a
+request with no `Host`. Use it when nothing forwards to the daemon under a
+different port or an internal service name.
+
+Source: `src/security/arcadeHostPolicy.ts`
+
+---
+
+### `LORE_ARCADE_READY_CACHE_MS`
+
+| | |
+|---|---|
+| **Default** | `2000` |
+| **Surface** | daemon (arcade readiness route) |
+
+How long the result of the `/ready` ArcadeDB probe is reused. The probe runs
+at most once per interval however often `/ready` is polled, and concurrent
+callers share one in-flight probe.
+
+Source: `src/mcp/arcadeReadiness.ts`
+
+---
+
+### `LORE_ARCADE_READY_TIMEOUT_MS`
+
+| | |
+|---|---|
+| **Default** | `2000` |
+| **Surface** | daemon (arcade readiness route) |
+
+Socket deadline for the `/ready` probe. A probe that exceeds it answers not
+ready (`reason: "timeout"`), and no second probe starts until the first
+settles, so a hung ArcadeDB cannot accumulate connections.
+
+Source: `src/mcp/arcadeReadiness.ts`
+
+---
+
+### `LORE_ARCADE_RECALL_PROJECTION`
+
+| | |
+|---|---|
+| **Default** | _(on)_ |
+| **Surface** | daemon (arcade semantic recall) |
+
+On by default. Semantic recall selects only the scalar columns it
+uses (`id`, `text`, `type`, `label`, `tags`, `project`, `ecosystem`,
+`updatedAt`, `security_scopes`, `distance`) from `vector.neighbors(...)` instead
+of the whole record, so the `embedding` array is not serialised back for every
+neighbour. `off` / `0` / `false` restores the original whole-record statement.
+Verified against ArcadeDB 26.7.1 (1,013 nodes, dimension 1024; measured over 12
+query / limit / filter cases): identical ids, order, scores and mapped fields,
+and 23x fewer response bytes (limit 100, k = 400: 5.6 MB down to 0.24 MB;
+limit 10, k = 40: 562 KB down to 24.5 KB). If ArcadeDB rejects the statement
+(HTTP 4xx) or returns an unexpected row shape (for example a row without a
+string `id`), recall logs a warning, falls back to the original statement for
+that and every later query in the process, and still answers. A 5xx or network
+error is surfaced, not latched. Results are identical either way.
+
+Source: `src/engines/arcade/arcadeRecallProjection.ts`
+
+---
+
+### 3a.1 Readiness: `/ready` vs `/health`
+
+- `GET /health` is liveness. It answers `200` whenever the process serves and
+  never calls ArcadeDB, so a database blip cannot turn into a restart loop on a
+  platform that uses `/health` for liveness.
+- `GET /ready` (alias `/api/ready`; `HEAD` allowed) is readiness. It answers
+  `200 {"status":"ready"}` when the daemon can reach ArcadeDB and the root
+  credential still authenticates (`list databases`, a server-level command that
+  touches no tenant database), otherwise `503 {"status":"not_ready"}` with
+  `Retry-After: 2`. It is unauthenticated, exempt from the rate limiter like
+  `/health`, and sends `Cache-Control: no-store`. An operator bearer
+  additionally sees `reason` (`timeout`, `unreachable`, `auth_failed`,
+  `unavailable`), a truncated `detail`, `latencyMs` and `checkedAgeMs`.
+  Recovery needs no restart: the next probe after the cache interval re-checks.
+- One tenant's missing database is a per-tenant failure on that tenant's own
+  calls. It does not take the whole daemon out of rotation.
+
+### 3a.2 ArcadeDB heap sizing (ESTIMATES, not measurements)
+
+> Nothing in this section was measured on a live ArcadeDB. The figures are
+> arithmetic from vector count x dimension x bytes plus an assumed overhead
+> factor. Treat them as a starting point and confirm with your own load test.
+
+Raw vector bytes = `nodes x dimension x 4` (float32). The vector index
+(`vector.neighbors`, an HNSW-style graph) is assumed to hold the vectors plus
+neighbour lists in memory; an overhead factor of 1.5x to 3x on the raw bytes is
+a reasonable planning range. Add the JVM base, ArcadeDB page cache and the
+documents themselves. A recall also returns up to `k = max(40, limit x 4)`
+neighbours (at most 400); with `LORE_ARCADE_RECALL_PROJECTION=off` each neighbour travels as a JSON
+record that includes its embedding (measured on ArcadeDB 26.7.1: about 14 KB
+per hit at dimension 1024, because the embedding appears twice in the record),
+which is garbage the JVM must collect on every call. That transient cost is
+what the default projection removes (measured: 23x fewer response bytes).
+
+| Nodes | Dimension | Raw vectors | Index in memory (1.5x-3x) | Suggested `-Xmx` (estimate) |
+|---|---|---|---|---|
+| 10,000 | 384 | ~15 MB | ~25-45 MB | 1 GB is ample for the index; headroom goes to recall garbage |
+| 10,000 | 1024 | ~41 MB | ~60-120 MB | 1 GB workable at low concurrency; 2 GB for polling clients |
+| 100,000 | 1024 | ~410 MB | ~0.6-1.2 GB | 3-4 GB |
+| 1,000,000 | 1024 | ~4.1 GB | ~6-12 GB | 12-16 GB, and plan for sharding |
+
+Guidance:
+- Leave the OS and ArcadeDB's off-heap page cache their own room; `-Xmx` is not
+  the container limit. Set the container limit to about `-Xmx` plus 25-50%.
+- Per-request garbage with projection off is about `k x dimension x 14`
+  bytes (measured 562 KB at k = 40 and 5.6 MB at k = 400, dimension 1024);
+  with the default projection it is about 25 KB and 240 KB. Several clients recalling in a
+  tight loop multiply that, which is a likely contributor to the out-of-memory
+  seen at 1 GB. Prefer the embed-flush route (when available) over polling
+  recall to learn that a write became searchable, and leave
+  `LORE_ARCADE_RECALL_PROJECTION` at its default (on).
+- `POST /api/arcade/apps/:tenant/:app/backup` (backup / migration bundle) reads every row of
+  `LoreVerbatim` including embeddings. 3.34.0 pages that read (200 rows per
+  statement, keyset on `id`) so ArcadeDB's heap no longer holds the whole table
+  at once, but Lore still assembles the bundle in its own memory. Run exports
+  off-peak.
+
+### 3a.3 "Recallable now" route (`POST /api/nodes/recallable`)
+
+Added in 3.34.0 (N5). Answers "can I recall these writes yet?" without polling
+`recall`. It is engine-neutral: ArcadeDB (arcade mode and the embedded server),
+SQLite (local) and the embedded HTTP server all expose it; an engine that cannot
+read embedding presence (Dataplane) answers `501 recallable_not_supported`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LORE_RECALLABLE_TIMEOUT_MS` | `10000` | Wait used when the request omits `timeoutMs`. |
+| `LORE_RECALLABLE_MAX_TIMEOUT_MS` | `60000` | Upper bound. A larger `timeoutMs` is clamped to this, not rejected. |
+| `LORE_RECALLABLE_MAX_IDS` | `500` | Largest `ids` list accepted (hard maximum 1000). Over the cap is `400 recallable_too_many_ids`. |
+
+- Body: `{"workspace": "...", "ids": ["..."], "timeoutMs": 5000}` or
+  `{"workspace": "...", "allBeforeNow": true}` (exactly one of `ids` /
+  `allBeforeNow`). `workspace` is required and `"*"` is refused. Ids resolve only
+  inside that workspace; an id elsewhere answers `not_found`.
+- A timeout is a normal `200` with `ready: false, timedOut: true`, never an
+  error. Per id: `recallable`, `pending` (with `reason`: `queued`,
+  `awaiting_index`, `embed_failed`) or `not_found`.
+- `allBeforeNow` snapshots the outbox high-water mark when the request arrives,
+  so writes made afterwards never extend the wait.
+- ArcadeDB "recallable" means the outbox row has replicated AND the vector index
+  answers for the node (a bounded `vector.neighbors` check on the node's own
+  embedding; the index trails replication by about 0.15-1 s). The waiter does
+  not poll in a tight loop: it parks on the replicator tick or a capped backoff
+  (at least 100 ms apart) and asks the index one batched question per round.
+- Rate limit: own bucket, `recallable` (20 burst, 60 per minute) on the standard
+  listener and `arcade_recallable` on the arcade listener.
+- A recall hit that came only from the keyword leg (no `semantic` in
+  `matchedBy`, no `similarity`) now carries `embedded: false`; do not treat
+  "the hit came back" as proof the node is embedded.
+
+---
+
 ## 4. Maintenance (`lore maintain`)
 
 All `LORE_MAINTAIN_*` variables control the policy resolved by

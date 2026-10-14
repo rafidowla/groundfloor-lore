@@ -20,6 +20,7 @@ import type { OutboxStore } from '../../../outbox/types.js';
 import { restoreNodeInline } from '../../../core/nodeServiceVerbatim.js';
 import { retractNodeUpsertRow } from '../../../core/nodeServiceConditional.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
+import { preReadFailureMessage } from './bulkWriteErrors.js';
 
 const INITIATOR = 'http:POST /api/nodes/bulk';
 
@@ -49,7 +50,7 @@ export async function readInlinePriors<S extends InlineSpec>(
             try {
                 priors.set(id, await graph.getNode(id));
             } catch (err) {
-                fail(spec, `could not read the node before writing: ${(err as Error).message}; nothing was written`);
+                fail(spec, preReadFailureMessage(err));
                 continue;
             }
         }

@@ -38,6 +38,8 @@
  * Exits non-zero on any functional, isolation, or scope failure.
  */
 
+// Must stay the first import: maps LORE_ARCADE_E2E_URL / _ROOT_PASSWORD onto ARCADE_BASE_URL / ARCADE_ROOT_PASSWORD (see arcade-e2e-env.ts).
+import { ARCADE_E2E_BASE_URL, ARCADE_E2E_ROOT_PASSWORD } from './arcade-e2e-env.js';
 import { waitUntilReady } from './spike-arcadedb-helpers.js';
 import { assertStableVersion } from './spike-arcadedb-appgrid-helpers.js';
 import {
@@ -486,7 +488,7 @@ async function runRawHttpAuthWall(
   targetLabel: string,
   expectBlocked: boolean,
 ): Promise<void> {
-  const rawHttp = new ArcadeHttp({ user: attackerCreds.user, pass: attackerCreds.pass });
+  const rawHttp = new ArcadeHttp({ user: attackerCreds.user, pass: attackerCreds.pass }, ARCADE_E2E_BASE_URL);
   try {
     await rawHttp.query(targetDb, 'SELECT id FROM LoreNode LIMIT 1');
     if (expectBlocked) {
@@ -581,7 +583,7 @@ async function runPlantedCrossAppEdge(bCells: Cells): Promise<void> {
 
   // As root: fetch the raw RIDs and CREATE EDGE directly across app_id boundary
   // inside tenant_alpha (bypassing all adapter app_id predicates).
-  const rootHttp = new ArcadeHttp({ user: 'root', pass: 'SpikeRoot123!' });
+  const rootHttp = new ArcadeHttp({ user: 'root', pass: ARCADE_E2E_ROOT_PASSWORD }, ARCADE_E2E_BASE_URL);
   const plantedTargetId = app2Seed.nodeIds[7]!;
   await rootHttp.command(
     'tenant_alpha',
@@ -629,7 +631,7 @@ async function runSemanticMagnet(bCells: Cells): Promise<void> {
   const { ArcadeAppVectorStore: RawVectorStoreCtor } = await import(
     '../packages/lore/src/engines/arcade/arcadeAppVectorStore.js'
   );
-  const telemetryHttp = new ArcadeHttp({ user: 'alpha_user', pass: 'AlphaPass123!' });
+  const telemetryHttp = new ArcadeHttp({ user: 'alpha_user', pass: 'AlphaPass123!' }, ARCADE_E2E_BASE_URL);
   const telemetryStore = new RawVectorStoreCtor({
     tenantDb: 'tenant_alpha',
     boundAppId: 'app1',
@@ -716,7 +718,7 @@ async function runMissingFilterStaticCheckAndCanary(): Promise<void> {
 
   // M12b — root canary: an intentionally UNFILTERED query against tenant_alpha
   // MUST surface both ALPHA-APP1 and ALPHA-APP2 sentinels.
-  const rootHttp = new ArcadeHttp({ user: 'root', pass: 'SpikeRoot123!' });
+  const rootHttp = new ArcadeHttp({ user: 'root', pass: ARCADE_E2E_ROOT_PASSWORD }, ARCADE_E2E_BASE_URL);
   const res = await rootHttp.query(
     'tenant_alpha',
     `SELECT label FROM LoreNode WHERE label LIKE :pat`,
@@ -736,8 +738,8 @@ async function runMissingFilterStaticCheckAndCanary(): Promise<void> {
 async function testScope(design: Design, tokenBase: string, c: Customer, a: App): Promise<void> {
   const writeToken = `token-${tokenBase}`;
   const roToken = `token-${tokenBase}-ro`;
-  const writeClient = arcadeAppClientForToken(writeToken, design);
-  const roClient = arcadeAppClientForToken(roToken, design);
+  const writeClient = arcadeAppClientForToken(writeToken, design, ARCADE_E2E_BASE_URL);
+  const roClient = arcadeAppClientForToken(roToken, design, ARCADE_E2E_BASE_URL);
 
   // S1 — read-only adapter rejects all 4 write ops before any HTTP call.
   let httpCallsBeforeThrow = 0;
@@ -901,12 +903,12 @@ async function runDesign(design: Design): Promise<DesignRunResult> {
   const factory = design === 'A' ? arcadeAppClientForTokenA : arcadeAppClientForTokenB;
   const clients: Record<Customer, Record<App, ArcadeAppClient>> = {
     alpha: {
-      app1: factory('token-alpha-app1'),
-      app2: factory('token-alpha-app2'),
+      app1: factory('token-alpha-app1', ARCADE_E2E_BASE_URL),
+      app2: factory('token-alpha-app2', ARCADE_E2E_BASE_URL),
     },
     beta: {
-      app1: factory('token-beta-app1'),
-      app2: factory('token-beta-app2'),
+      app1: factory('token-beta-app1', ARCADE_E2E_BASE_URL),
+      app2: factory('token-beta-app2', ARCADE_E2E_BASE_URL),
     },
   };
   const seeds: Record<Customer, Record<App, SeedResult>> = {

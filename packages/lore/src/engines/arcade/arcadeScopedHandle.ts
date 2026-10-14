@@ -94,6 +94,8 @@ export interface ArcadeExtraVector {
     actorScopes?: ReadonlyArray<string>,
   ): Promise<Bm25Envelope<VerbatimSearchResult>>;
   getById(id: string): Promise<{ contentHash?: string; text?: string; security_scopes?: string[] } | null>;
+  /** 3.34.0 (N5) - which canonical row ids the HNSW index answers right now. */
+  indexedIds(ids: string[]): Promise<Set<string>>;
 }
 
 /** Full-surface, write-gated LoreGraphHandle wrapper. */
@@ -103,6 +105,8 @@ export class ScopedArcadeGraphHandle implements LoreGraphHandle {
   upsertNodeAtRevision?: LoreGraphHandle['upsertNodeAtRevision'];
   replayNodeAtRevision?: LoreGraphHandle['replayNodeAtRevision'];
   upsertNodeKeepRevision?: LoreGraphHandle['upsertNodeKeepRevision'];
+  /** 3.34.0 (M3a): forwarded so the delete routes' retry classifier survives the wrapper. */
+  isTransientDeleteError?: (err: unknown) => boolean;
   constructor(
     private readonly inner: LoreGraphHandle & ArcadeExtraGraph,
     scopes: readonly Scope[],
@@ -112,6 +116,7 @@ export class ScopedArcadeGraphHandle implements LoreGraphHandle {
       this.upsertNodeAtRevision = (node, expected, at, mustExist) => { this.requireWrite(); return inner.upsertNodeAtRevision!(node, expected, at, mustExist); };
       this.replayNodeAtRevision = (node) => { this.requireWrite(); return inner.replayNodeAtRevision!(node); };
     }
+    if (typeof inner.isTransientDeleteError === 'function') this.isTransientDeleteError = (e) => inner.isTransientDeleteError!(e);
     if (typeof inner.upsertNodeKeepRevision === 'function') {
       this.upsertNodeKeepRevision = (node) => { this.requireWrite(); return inner.upsertNodeKeepRevision!(node); };
     }
@@ -337,6 +342,10 @@ export class ScopedArcadeVectorHandle implements LoreVectorHandle {
     actorScopes?: ReadonlyArray<string>,
   ): Promise<Bm25Envelope<VerbatimSearchResult>> {
     return this.inner.bm25Search(query, limit, filter, actorScopes);
+  }
+  /** indexedIds (3.34.0 N5) - read verb, passthrough; feature-detected by awaitRecallable. */
+  indexedIds(ids: string[]): Promise<Set<string>> {
+    return this.inner.indexedIds(ids);
   }
   /**
    * getById — single canonical verbatim read, no re-embed. Read verb,

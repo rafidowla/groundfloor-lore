@@ -97,6 +97,8 @@ export class OutboxLagCache {
     private readonly snapshots = new Map<string, LagCacheSnapshot>();
     private readonly warnedMiss = new Set<string>();
     private lastRefreshAt = 0;
+    /** 3.34.0 (N5) - one-shot waiters woken by the next refresh(). */
+    private readonly refreshWaiters = new Set<() => void>();
     private readonly cfg: Required<Omit<LagCacheConfig, 'log'>> & { log: (msg: string) => void };
 
     constructor(cfg: LagCacheConfig) {
@@ -132,6 +134,33 @@ export class OutboxLagCache {
             });
         }
         this.lastRefreshAt = now;
+        if (this.refreshWaiters.size > 0) {
+            const wake = [...this.refreshWaiters];
+            this.refreshWaiters.clear();
+            for (const w of wake) w();
+        }
+    }
+
+    /**
+     * 3.34.0 (N5) - resolve on the replicator's NEXT tick (this cache is refreshed once per tick, so
+     * a tick is the only moment outbox progress can have happened), or after `maxMs`, or when
+     * `signal` aborts - whichever is first. Never rejects. This is what lets awaitRecallable sleep
+     * on replicator progress instead of polling the database.
+     */
+    waitForRefresh(maxMs: number, signal?: AbortSignal): Promise<void> {
+        return new Promise<void>((resolve) => {
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const done = (): void => {
+                if (timer) clearTimeout(timer);
+                this.refreshWaiters.delete(done);
+                signal?.removeEventListener('abort', done);
+                resolve();
+            };
+            this.refreshWaiters.add(done);
+            timer = setTimeout(done, Math.max(0, maxMs));
+            timer.unref?.();
+            if (signal?.aborted) done(); else signal?.addEventListener('abort', done, { once: true });
+        });
     }
 
     /** Synchronous decision used by the hot/bulk request handlers. */

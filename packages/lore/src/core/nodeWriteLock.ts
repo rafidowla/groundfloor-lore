@@ -108,6 +108,90 @@ export async function withNodeLock<T>(
     return nodeWriteLock.run(nodeLockKey(workspace, id), fn);
 }
 
+/** Thrown by {@link withNodeLockWithin} when the lock was not acquired in time; `fn` never ran. */
+export class NodeLockTimeoutError extends Error {
+    constructor(readonly workspace: string, readonly id: string, readonly waitedMs: number) {
+        super(`node lock for (${workspace}, ${id}) not acquired within ${waitedMs} ms`);
+        this.name = 'NodeLockTimeoutError';
+    }
+}
+
+/**
+ * {@link withNodeLock} with a bounded WAIT (3.34.0, arcade outbox replay). If the
+ * lock is not acquired within `waitMs`, rejects with {@link NodeLockTimeoutError}
+ * and `fn` is guaranteed NOT to run: the abandoned queue slot passes through
+ * without calling it. Once `fn` has started there is no timeout, it runs to
+ * completion. Same re-entrancy rule as `withNodeLock`.
+ *
+ * Why: the replicator runs its ticks one at a time, so a replay blocked behind a
+ * request that is itself stuck on a 30 s ArcadeDB timeout would stall the whole
+ * daemon's replication. The caller releases the row back to pending instead.
+ */
+export async function withNodeLockWithin<T>(
+    workspace: string,
+    id: string,
+    waitMs: number,
+    fn: () => Promise<T>,
+): Promise<T> {
+    let state = 'waiting' as 'waiting' | 'running' | 'abandoned'; // mutated from closures; the cast stops TS narrowing it to 'waiting'
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+            if (state !== 'waiting') return;
+            state = 'abandoned';
+            reject(new NodeLockTimeoutError(workspace, id, waitMs));
+        }, waitMs);
+    });
+    const ran = nodeWriteLock.run(nodeLockKey(workspace, id), async () => {
+        if (state === 'abandoned') return undefined as T;
+        state = 'running';
+        clearTimeout(timer);
+        return fn();
+    });
+    try { return await Promise.race([ran, timedOut]); }
+    finally { if (state !== 'abandoned') clearTimeout(timer); }
+}
+
+/** A shared, mutable wait allowance (ms) for {@link withNodeLockBudgeted}. */
+export interface NodeLockWaitBudget { remainingMs: number }
+
+/**
+ * {@link withNodeLockWithin} against a SHARED wait budget (3.34.0, arcade outbox
+ * replay, one budget per replicator tick).
+ *
+ * - Lock free (nobody running or queued on the key): runs `fn` at once, never
+ *   waits, never touches the budget. This is a true try-lock probe
+ *   (`KeyedMutex.isHeld`), not a zero-length timer, so a free lock can never be
+ *   reported busy by timer-vs-microtask ordering.
+ * - Lock held, budget left: waits at most what is left; the time actually waited
+ *   is deducted, and a timeout empties the budget.
+ * - Lock held, budget spent: rejects with {@link NodeLockTimeoutError} at once.
+ *
+ * Why: a bulk chunk holds up to BULK_LOCK_CHUNK_SIZE node locks at once. With a
+ * per-row bound, a chunk stuck on a 30 s ArcadeDB timeout would still cost the
+ * serialised replicator ~(rows x waitMs) per tick. With one budget per tick the
+ * total lock wait is bounded by the budget, however many rows are blocked.
+ */
+export async function withNodeLockBudgeted<T>(
+    workspace: string,
+    id: string,
+    budget: NodeLockWaitBudget,
+    fn: () => Promise<T>,
+): Promise<T> {
+    if (!nodeWriteLock.isHeld(nodeLockKey(workspace, id))) return withNodeLock(workspace, id, fn);
+    if (budget.remainingMs <= 0) throw new NodeLockTimeoutError(workspace, id, 0);
+    const startedAt = Date.now();
+    try {
+        return await withNodeLockWithin(workspace, id, budget.remainingMs, () => {
+            budget.remainingMs = Math.max(0, budget.remainingMs - (Date.now() - startedAt));
+            return fn();
+        });
+    } catch (err) {
+        if (err instanceof NodeLockTimeoutError) budget.remainingMs = 0;
+        throw err;
+    }
+}
+
 /**
  * Run `fn` holding ALL of `ids` for `workspace` at once — for a batch that
  * writes many nodes through ONE substrate call (`bulkUpsertNodes`) and so

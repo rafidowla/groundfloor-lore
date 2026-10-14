@@ -41,6 +41,7 @@
  * the background loop.
  */
 
+import { isSupersededByLaterDelete } from './deleteAwareReplay.js';
 import type { DispatcherSubstrates } from './dispatcher.js';
 import { dispatch, MissingPayloadError, UnwiredOperationKindError, verifyApplied } from './dispatcher.js';
 import { consolidateVerbatimAt } from './verbatimPurgeConsolidation.js';
@@ -48,6 +49,7 @@ import { keyOfEntry, SUPERSEDED_DEAD_ERROR, type EntityFamily } from './superses
 import type { OutboxLagCache } from './lagCache.js';
 import type { OutboxEntry, OutboxStore } from './types.js';
 import { claimEntry, SerialGate } from './replicatorClaim.js';
+import { DeferredEntities, ReplayDeferredError, releaseDeferred } from './replayDeferred.js';
 import { DeadLetterWatch } from './deadLetterWatch.js';
 import { interruptibleSleep, makeStopSignal, type StopSignal } from './interruptibleSleep.js';
 
@@ -189,12 +191,12 @@ export interface ReplicatorWiring {
     config?: Partial<ReplicatorConfig>;
     /** Optional logger; defaults to console.error. */
     log?: (msg: string) => void;
-    /** Sprint O4 — lag cache the replicator refreshes once per tick.
-     *  Routes read it synchronously on the hot path to decide whether
-     *  to return 503 outbox_lag. Optional: when undefined the
-     *  replicator skips the refresh and routes that consult an unwired
-     *  cache fail-open (no backpressure). */
+    /** Sprint O4 — lag cache the replicator refreshes once per tick. Routes read
+     *  it synchronously on the hot path to decide whether to return 503
+     *  outbox_lag. Optional: when undefined the replicator skips the refresh and
+     *  routes that consult an unwired cache fail-open (no backpressure). */
     lagCache?: OutboxLagCache;
+    onTickStart?: () => void; // 3.34.0: called at the start of every tick that has work
 }
 
 export interface ReplicatorStats {
@@ -237,6 +239,7 @@ export class OutboxReplicator {
     private stopSignal: StopSignal | null = null;
     /** 3.26.0 — the loop and tickOnce() never run a tick concurrently. */
     private readonly tickGate = new SerialGate();
+    private readonly deferred = new DeferredEntities(); // 3.34.0: entities with a row deferred this tick
     private readonly stats: ReplicatorStats = {
         replicated: 0, failures: 0, dead: 0, ticks: 0, lastTickMs: 0,
         selfHealed: 0, selfHealSweeps: 0, selfHealExamined: 0, pruned: 0,
@@ -249,7 +252,7 @@ export class OutboxReplicator {
         this.substrates = wiring.substrates;
         this.cfg = { ...DEFAULT_REPLICATOR_CONFIG, ...(wiring.config ?? {}) };
         this.log = wiring.log ?? ((m: string) => console.error(m));
-        this.lagCache = wiring.lagCache;
+        this.lagCache = wiring.lagCache; this.deferred.onTickStart = wiring.onTickStart;
     }
 
     /** Idempotent. No-op if already running. */
@@ -509,6 +512,7 @@ export class OutboxReplicator {
         // per-workspace pass below re-queries listPendingForWorkspace.
         const workspaces = await this.store.listWorkspacesWithPending!();
         if (workspaces.length === 0) return 0;
+        this.deferred.clear();
         let processed = 0;
         for (const ws of workspaces) {
             // Per-workspace fan-out: process the workspace's batch
@@ -535,6 +539,7 @@ export class OutboxReplicator {
             let i = 0;
             while (i < fresh.length) {
                 const entry = fresh[i];
+                if (this.deferred.has(entry)) { i++; continue; } // order: wait for the deferred row
                 if (entry.operationKind === 'embed.batch' && EMBED_BATCH_CONSOLIDATION_CAP > 0) {
                     const group = this.collectEmbedBatchRun(fresh, i);
                     if (group.entries.length > 1) {
@@ -719,7 +724,7 @@ export class OutboxReplicator {
         // stale 'failed' row can CORRUPT a newer same-entity write when
         // replayed. Skip + mark 'dead' if a newer op on the same ENTITY (any
         // kind in the family) already 'replicated' (see isSupersededFailed).
-        if (entry.status === 'failed' && await this.isSupersededFailed(entry)) {
+        if (await this.isSupersededFailed(entry)) {
             await this.store.markEntryStatus!(entry.id, 'dead', { error: SUPERSEDED_DEAD_ERROR });
             this.stats.dead++;
             this.log(`[outbox replicator] entry ${entry.id} (${entry.operationKind}) skipped: superseded by newer same-key write`);
@@ -734,6 +739,7 @@ export class OutboxReplicator {
             this.stats.replicated++;
             return true;
         } catch (err) {
+            if (err instanceof ReplayDeferredError) return releaseDeferred(this.store, entry, err, this.deferred, (m) => this.log(m));
             const msg = (err as Error).message;
             const attempts = (entry.attempts ?? 0) + 1;
             const isUnwired = err instanceof UnwiredOperationKindError;
@@ -762,14 +768,12 @@ export class OutboxReplicator {
         }
     }
 
-    /** F-S03/S04/S05 (RA-6) + cross-kind generalization (2026-07-05) — true
-     *  when a strictly-newer REPLICATED op on the SAME entity (same family,
-     *  ANY kind) already applied, so replaying this failed row would corrupt
-     *  it. keyOfEntry (outbox/supersession.ts) derives the family+identity: a
-     *  node.delete supersedes a failed node.upsert on the same id (+ symmetric
-     *  node/edge cases); a newer verbatim.upsert supersedes a failed one (own
-     *  family, same-kind only). False when no guard/sequenceId/keyless kind. */
+    /** True when replaying `entry` would corrupt newer state. RA-6 (+ cross-kind, supersession.ts): a
+     *  `failed` row with a strictly-newer REPLICATED op on the same entity. 3.34.0: an upsert row of
+     *  ANY status with a later delete (deleteAwareReplay.ts). False when no guard/sequenceId/key. */
     private async isSupersededFailed(entry: OutboxEntry): Promise<boolean> {
+        if (await isSupersededByLaterDelete(this.store, entry, (m) => this.log(m))) return true;
+        if (entry.status !== 'failed') return false;
         const fn = (this.store as { hasNewerReplicatedForKey?: (ws: string, family: EntityFamily, key: string, seq: number) => Promise<boolean> }).hasNewerReplicatedForKey;
         const identity = keyOfEntry(entry);
         if (typeof fn !== 'function' || typeof entry.sequenceId !== 'number'

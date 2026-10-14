@@ -36,10 +36,14 @@ import type {
 import { ArcadeHttp, ArcadeHttpError, retryIdempotentArcadeWrite } from './arcadeHttp.js';
 import { NodeAlreadyExistsError } from '../graphShared/conditionalInsert.js';
 import { RevisionConflictError, revisionOf } from '../graphShared/revision.js';
+import { settleFailedUpsert } from './arcadeWriteSettle.js';
+import { OutcomeUnknownError, readBackAfterWrite, rereadAfterWriteError } from '../graphShared/writeOutcome.js';
 import * as reads from './arcadeGraphReads.js';
 import * as maint from './arcadeMaintenance.js';
 import * as edges from './arcadeGraphEdges.js';
 import { bulkUpsertNodes as bulkUpsertImpl } from './arcadeBulk.js';
+import { isArcadeTransientDeleteError } from './arcadeDeleteClassifier.js';
+import { scanNodeIntegrity, removeNodeRecords, ensureIntegritySchema } from './arcadeIntegrity.js';
 import { graphSchemaDdl, NODE_TYPE, EDGE_TYPE } from './arcadeSchema.js';
 import { parseNodeScopes, upgradeNodeScopes } from './arcadeNodeScopes.js';
 import { NODE_SET_CLAUSE, NODE_KEEP_CLAUSE, NODE_INSERT_CLAUSE, NODE_REPLAY_CLAUSE, nodeWriteParams } from './arcadeNodeWrite.js';
@@ -170,8 +174,8 @@ export class ArcadeGraphStore {
    * rides in the statement itself (`WHERE ifnull(revision, 0) = :expected`), so
    * two daemons on one database cannot both win; 0 affected rows throws
    * RevisionConflictError. `updatedAt` is the stamp the caller already recorded
-   * in its outbox payload. Not wrapped in retryIdempotentArcadeWrite: a replayed
-   * conditional UPDATE would see its own bump and report a conflict.
+   * in its outbox payload. 502/503/504 retry the WHOLE attempt (read, guarded
+   * write, settle): settle rethrows them only when provably nothing applied.
    */
   async upsertNodeAtRevision(
     node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
@@ -179,37 +183,31 @@ export class ArcadeGraphStore {
     updatedAt: string,
     mustExist = false,
   ): Promise<LoreNode> {
-    await this.initialize();
-    const existing = await this.getNode(node.id);
-    const actual = revisionOf(existing);
-    // ifRevision never creates: an absent row is a conflict (the UPDATE branch below cannot create one, so a row deleted after this read is a conflict too).
-    if (!existing && mustExist) throw new RevisionConflictError(node.id, expectedRevision, 0);
-    if (actual !== expectedRevision) throw new RevisionConflictError(node.id, expectedRevision, actual);
-    const params = nodeWriteParams(node, existing, updatedAt);
-    if (!existing) {
-      try {
-        await this.http.command(this.tenantDb, `INSERT INTO ${NODE_TYPE} SET ${NODE_INSERT_CLAUSE}`, params);
-      } catch (err) {
-        if (!(err instanceof ArcadeHttpError)) throw err;
-        const present = await this.getNode(node.id);
-        if (present && present.updatedAt === updatedAt && present.createdAt === updatedAt) return present; // our own insert, response lost
-        if (present || /duplicat/i.test(err.body)) throw new RevisionConflictError(node.id, expectedRevision, revisionOf(present));
-        throw err;
+    return retryIdempotentArcadeWrite(async () => {
+      await this.initialize();
+      const existing = await this.getNode(node.id);
+      const actual = revisionOf(existing);
+      // ifRevision never creates: an absent row is a conflict (the UPDATE branch below cannot create one, so a row deleted after this read is a conflict too).
+      if (!existing && mustExist) throw new RevisionConflictError(node.id, expectedRevision, 0);
+      if (actual !== expectedRevision) throw new RevisionConflictError(node.id, expectedRevision, actual);
+      const params = nodeWriteParams(node, existing, updatedAt);
+      const settle = (err: unknown) => settleFailedUpsert(() => this.getNode(node.id), node.id, err, { existed: !!existing, expectedRevision, updatedAt });
+      if (!existing) {
+        try {
+          await this.http.command(this.tenantDb, `INSERT INTO ${NODE_TYPE} SET ${NODE_INSERT_CLAUSE}`, params);
+        } catch (err) { return settle(err); }
+      } else {
+        let res;
+        try {
+          res = await this.http.command(this.tenantDb, `UPDATE ${NODE_TYPE} SET ${NODE_SET_CLAUSE} WHERE id = :id AND ifnull(revision, 0) = :expectedRevision`, { ...params, expectedRevision });
+        } catch (err) { return settle(err); }
+        const count = (res?.result as Array<{ count?: number }> | undefined)?.[0]?.count;
+        if (typeof count === 'number' && count < 1) {
+          throw new RevisionConflictError(node.id, expectedRevision, revisionOf(await this.getNode(node.id)));
+        }
       }
-    } else {
-      const res = await this.http.command(
-        this.tenantDb,
-        `UPDATE ${NODE_TYPE} SET ${NODE_SET_CLAUSE} WHERE id = :id AND ifnull(revision, 0) = :expectedRevision`,
-        { ...params, expectedRevision },
-      );
-      const count = (res?.result as Array<{ count?: number }> | undefined)?.[0]?.count;
-      if (typeof count === 'number' && count < 1) {
-        throw new RevisionConflictError(node.id, expectedRevision, revisionOf(await this.getNode(node.id)));
-      }
-    }
-    const stored = await this.getNode(node.id);
-    if (!stored) throw new Error(`[ArcadeGraphStore] upsertNodeAtRevision failed to persist ${node.id}`);
-    return stored;
+      return readBackAfterWrite(() => this.getNode(node.id), node.id);
+    });
   }
 
   /**
@@ -255,29 +253,31 @@ export class ArcadeGraphStore {
    * insertNodeIfAbsent — conditional-writes R1. A plain INSERT, so ArcadeDB's
    * unique index on `LoreNode.id` rejects the row when another writer (this
    * daemon or any other on the same database) created the id first; that
-   * rejection surfaces as NodeAlreadyExistsError. Not wrapped in
-   * retryIdempotentArcadeWrite: a replayed INSERT would see its own row.
+   * rejection surfaces as NodeAlreadyExistsError. A 502/503/504 that provably
+   * wrote nothing retries the whole attempt (fresh stamp), as upsertNodeAtRevision.
    * A transport error is resolved by re-reading: a node we did not write
    * (createdAt differs from this call's stamp) means the id was taken.
    */
   async insertNodeIfAbsent(
     node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
   ): Promise<LoreNode> {
-    await this.initialize();
-    const now = new Date().toISOString();
-    const params = nodeWriteParams(node, null, now);
-    try {
-      await this.http.command(this.tenantDb, `INSERT INTO ${NODE_TYPE} SET ${NODE_INSERT_CLAUSE}`, params);
-    } catch (err) {
-      if (!(err instanceof ArcadeHttpError)) throw err;
-      const present = await this.getNode(node.id);
-      if (present && present.createdAt === now) return present; // our own insert, response lost
-      if (present || /duplicat/i.test(err.body)) throw new NodeAlreadyExistsError(node.id);
-      throw err;
-    }
-    const stored = await this.getNode(node.id);
-    if (!stored) throw new Error(`[ArcadeGraphStore] insertNodeIfAbsent failed to persist ${node.id}`);
-    return stored;
+    return retryIdempotentArcadeWrite(async () => {
+      await this.initialize();
+      const now = new Date().toISOString();
+      const params = nodeWriteParams(node, null, now);
+      try {
+        await this.http.command(this.tenantDb, `INSERT INTO ${NODE_TYPE} SET ${NODE_INSERT_CLAUSE}`, params);
+      } catch (err) {
+        // 3.34.0 (M2): re-read after ANY failure (a client-side timeout is a plain Error). If the re-read
+        // cannot be done, or finds nothing after a transport failure, the outcome is unknown.
+        const present = await rereadAfterWriteError(() => this.getNode(node.id), node.id, err);
+        if (present && present.createdAt === now) return present; // our own insert, response lost
+        if (present || (err instanceof ArcadeHttpError && /duplicat/i.test(err.body))) throw new NodeAlreadyExistsError(node.id);
+        if (!(err instanceof ArcadeHttpError)) throw new OutcomeUnknownError(node.id, null, err);
+        throw err;
+      }
+      return readBackAfterWrite(() => this.getNode(node.id), node.id);
+    });
   }
 
   /** getNode — parameterized single-row lookup by id. */
@@ -519,14 +519,7 @@ export class ArcadeGraphStore {
     return map;
   }
 
-  /**
-   * deleteNode — existence-checked delete of the vertex AND its incident
-   * edges. ArcadeDB's `DELETE VERTEX` (as opposed to a plain `DELETE FROM`)
-   * detaches incident edge records as part of the vertex delete, so a
-   * subsequent traverse from a former neighbor sees nothing dangling —
-   * confirmed live against the pinned 26.7.1 container (self-check below).
-   * Returns true iff a row existed and was removed.
-   */
+  /** deleteNode — existence-checked `DELETE VERTEX` (detaches incident edges). True iff a row was removed. */
   async deleteNode(id: string): Promise<boolean> {
     await this.initialize();
     const existing = await this.getNode(id);
@@ -538,6 +531,11 @@ export class ArcadeGraphStore {
     );
     return true;
   }
+
+  isTransientDeleteError = isArcadeTransientDeleteError;
+  // Schema DDL only, not initialize(): its scope backfill throws on a null-id ghost (see ensureIntegritySchema).
+  integrityScan = () => ensureIntegritySchema(this.tenantDb, this.http).then(() => scanNodeIntegrity(this.tenantDb, this.http));
+  integrityRemove = (rids: string[]) => ensureIntegritySchema(this.tenantDb, this.http).then(() => removeNodeRecords(this.tenantDb, this.http, rids));
 
   async addBidirectionalEdge(edge: LoreEdge): Promise<void> {
     await this.addEdge(edge);

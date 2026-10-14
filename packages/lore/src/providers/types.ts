@@ -323,6 +323,38 @@ export interface GraphStats {
  */
 export const SEARCH_CONTRACT_VERSION = 1;
 
+/** One record the id lookup cannot see (see `GraphProvider.integrityScan`). */
+export interface GraphIntegritySuspect {
+    /** Engine record id (ArcadeDB `@rid`, e.g. `#12:3`). Removal is by this, never by `id`. */
+    rid: string;
+    /** The node id stored on the record (null if the record carries none). */
+    id: string | null;
+    revision: number | null;
+    createdAt: string | null;
+    /** Always true for a suspect: the full scan returned the record. */
+    scanFound: true;
+    /** Always false for a suspect: the id lookup did not return THIS record. */
+    indexFound: false;
+    /** Record id the id lookup returns for the same `id`, when it returns a different one (a shadowed duplicate). */
+    indexRid: string | null;
+}
+
+export type GraphIntegrityScan =
+    | { supported: false; status: 'not_supported'; reason: string }
+    | { supported: true; status: 'ok'; scanned: number; suspects: GraphIntegritySuspect[] };
+
+export type GraphIntegrityRemoval =
+    | { supported: false; status: 'not_supported'; reason: string }
+    | {
+          supported: true;
+          status: 'ok';
+          removed: string[];
+          /** Already gone (an earlier run, or a concurrent one): not an error. */
+          absent: string[];
+          /** Refused: the id lookup can read the record, so it is a live node. */
+          refused: Array<{ rid: string; reason: 'live_readable' }>;
+      };
+
 /**
  * Abstract GraphProvider Interface
  * Defines the contract that ANY backend graph (Local SurrealDB, Cloud Dataplane) must satisfy.
@@ -339,6 +371,25 @@ export interface GraphProvider {
      */
     getNodesByIds(ids: string[]): Promise<Map<string, LoreNode>>;
     deleteNode(id: string): Promise<boolean>;
+    /**
+     * 3.34.0 (M3a) — OPTIONAL. Engine classifier for the delete routes' bounded retry
+     * (`engines/graphShared/deleteOutcome.ts`): true when a failed `deleteNode` / text delete is
+     * worth another attempt (a concurrent-modification or "try again" answer from the engine).
+     * Absent = the historical default (`/transaction conflict/i`).
+     */
+    isTransientDeleteError?(err: unknown): boolean;
+    /**
+     * 3.34.0 (slice 2) — OPTIONAL integrity capability: find node records the engine's own id
+     * lookup cannot see (ArcadeDB: bucket records with no `LoreNode[id]` index entry). Read-only.
+     * Engines whose id lookup cannot diverge from their rows answer `not_supported`.
+     */
+    integrityScan?(): Promise<GraphIntegrityScan>;
+    /**
+     * 3.34.0 (slice 2) — OPTIONAL: remove the given suspect records (by engine record id). Refuses
+     * any record the id lookup can still read, and is idempotent (an already-gone record is
+     * reported `absent`, not an error).
+     */
+    integrityRemove?(rids: string[]): Promise<GraphIntegrityRemoval>;
     addEdge(edge: LoreEdge): Promise<void>;
     addBidirectionalEdge(edge: LoreEdge): Promise<void>;
     /**
@@ -694,5 +745,23 @@ export interface VectorProvider {
      * (callers must treat a missing method as "unsupported on this engine").
      */
     getVectors?(ids: string[]): Promise<Map<string, number[]>>;
+    /**
+     * 3.34.0 (N5) - of the canonical row ids (`lore:<nodeId>`), those whose embedding is ANSWERED BY
+     * THE VECTOR INDEX right now (i.e. a similarity search can return them), as opposed to merely
+     * stored. Optional: an engine without it is probed through `getVectors` (stored == searchable on
+     * the local engines), and an engine with neither answers `not_supported` from awaitRecallable.
+     * ArcadeDB: the HNSW index lags the replicated row by 0.15-1 s, so this is a bounded
+     * `vector.neighbors` self-check on each row's own embedding. At most 1,000 ids per call.
+     */
+    indexedIds?(ids: string[]): Promise<Set<string>>;
     close(): Promise<void>;
 }
+
+export type {
+    RecallableState,
+    RecallablePendingReason,
+    RecallableIdStatus,
+    RecallableRequest,
+    RecallableResult,
+    RecallableNotSupported,
+} from './recallableTypes.js';

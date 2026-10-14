@@ -114,6 +114,11 @@ export class KeyedMutex {
         }
     }
 
+    /** True while any op for `key` is running or queued (a try-lock probe: a false answer means `run` starts it without waiting). */
+    isHeld(key: string): boolean {
+        return this.chains.has(key);
+    }
+
     /** Test helper — number of distinct keys with an in-flight tail. */
     size(): number {
         return this.chains.size;

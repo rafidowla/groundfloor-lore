@@ -83,6 +83,7 @@ import { tryNodesRoutes } from './nodes.js';
 import { tryNodeDeleteRoute } from './nodes-delete.js';
 import { tryEdgesRoutes } from './edges.js';
 import { tryBulkListRoutes } from './bulkList.js';
+import { tryRecallableRoutes } from './recallable.js';
 import { tryBulkWriteRoutes } from './bulkWrite.js';
 import { trySearchRoutes } from './search.js';
 import { tryTopologyRoutes } from './topology.js';
@@ -143,6 +144,7 @@ function matchesAllowlist(method: string, pathname: string): boolean {
     ['POST', '/api/query'],
     ['POST', '/api/nodes/bulk'],
     ['POST', '/api/nodes/bulk-list'],
+    ['POST', '/api/nodes/recallable'], // 3.34.0 N5
     ['POST', '/api/nodes/bulk-delete'],
     ['POST', '/api/recall/bulk'],
     ['POST', '/api/edges/bulk'],
@@ -442,6 +444,16 @@ export async function tryArcadeDataRoutes(
           await tryBulkListRoutes(req, res, url, pathname, {
             ...common,
           } as unknown as Parameters<typeof tryBulkListRoutes>[4])
+        )
+          return true;
+
+        // 3.34.0 (N5) — recallable-now. The lane-decorated outbox/lag cache confine the outbox read
+        // to THIS cell's lane; the cell's own vector handle + graph answer the index/existence checks.
+        if (
+          await tryRecallableRoutes(req, res, url, pathname, {
+            ...common,
+            workspaceVerbatimResolver,
+          } as unknown as Parameters<typeof tryRecallableRoutes>[4])
         )
           return true;
 

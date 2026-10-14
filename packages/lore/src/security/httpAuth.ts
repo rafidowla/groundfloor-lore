@@ -172,7 +172,7 @@ function isAllowedOrigin(origin: string | undefined): boolean {
     }
 }
 
-function isAllowedHost(hostHeader: string | undefined, port: number): boolean {
+export function isAllowedHost(hostHeader: string | undefined, port: number): boolean {
     if (!hostHeader) return false;
     // Host is typically "name:port". We only accept exact matches.
     const allowed = new Set<string>([

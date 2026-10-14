@@ -352,6 +352,17 @@ export interface OutboxStore {
      *  Optional: a store without it makes the caller fall back to the
      *  unconditional per-slot alias rows. */
     queuedVerbatimUpsertIds?(workspace: string, ids: string[]): Promise<string[]>;
+    /** 3.34.0 (N5) - per node id, the NEWEST embed-producing outbox row's state: `queued`
+     *  (pending/failed/replicating `verbatim.upsert` with payload.id `lore:<id>`, or `embed.batch`
+     *  listing the id in payload.targetNodeIds), `dead`, or `replicated` (row still present). Ids with
+     *  no row are absent from the map (replicated rows are pruned, so absent == done or never queued).
+     *  Optional: awaitRecallable then judges from the vector index alone. */
+    embedStatesForNodes?(workspace: string, nodeIds: string[]): Promise<Map<string, 'queued' | 'dead' | 'replicated'>>;
+    /** 3.34.0 (N5) - the "everything queued before now" snapshot for `workspace`: `highWaterSequenceId`
+     *  is the newest outbox position (any kind); with `upToSequenceId` it counts the embed-producing
+     *  rows at or below that position that are still queued, and returns the node ids of the newest
+     *  `sampleLimit` replicated ones (for an index spot-check). */
+    embedBacklog?(workspace: string, upToSequenceId: number | null, sampleLimit: number): Promise<{ highWaterSequenceId: number; queued: number; sampleNodeIds: string[] }>;
     /** Walk every entry that is not yet completed. Used by boot-time
      *  recovery. Returns entries in insertion order. */
     listUnfinished(): Promise<OutboxEntry[]>;

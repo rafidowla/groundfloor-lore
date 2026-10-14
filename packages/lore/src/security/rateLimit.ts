@@ -125,6 +125,8 @@ export function buildDefaultBuckets(mode: DeploymentMode): Record<string, Bucket
         reconnect:   { capacity: 2,   refillPerMs: 5 / 600_000 },
         reconsume:   { capacity: 2,   refillPerMs: 5 / 600_000 },
         extract:     { capacity: 10,  refillPerMs: 30 / 60_000 },
+        // 3.34.0 (N5) recallable-now: each call may hold a connection up to the timeout (default 10 s).
+        recallable:  { capacity: 20,  refillPerMs: 60 / 60_000 },
         // Bootstrap token mint: the UI fetches this once per load. A tight
         // burst of 5 + 5/min refill is generous for legitimate use (page
         // reloads, dev hot-reloads) but caps an unauthenticated local
@@ -169,6 +171,8 @@ export function classifyRequest(url: string, method: string): string | null {
     if (pathOnly === '/api/graph/reconnect') return 'reconnect';
     if (pathOnly === '/api/graph/reconsume') return 'reconsume';
     if (pathOnly === '/api/extract') return 'extract';
+    // 3.34.0 (N5): holds a connection for up to the timeout - its own bucket, never the generic one.
+    if (pathOnly === '/api/nodes/recallable' && method === 'POST') return 'recallable';
     if (pathOnly === '/api/auth/bootstrap' && method === 'GET') return 'bootstrap';
 
     // Destructive-class: DELETE, or known mutation endpoints.

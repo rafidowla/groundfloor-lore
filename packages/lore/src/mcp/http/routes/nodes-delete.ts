@@ -34,6 +34,7 @@ import { nodeMutateVisible } from '../../../security/nodeWriteGate.js';
 import { writeWorkspaceRequired, checkOutboxBackpressure, writeJson, writeError } from '../helpers.js';
 import type { OutboxStore } from '../../../outbox/types.js';
 import { recordHotWrite } from '../../../outbox/hotLane.js';
+import { deleteNodeAndText, deleteIncompleteMessage, DELETE_INCOMPLETE_CODE, type DeleteTextStore } from '../../../engines/graphShared/deleteOutcome.js';
 import { withNodeLock } from '../../../core/nodeWriteLock.js';
 import { tombstoneQuestionAliases } from '../../../core/nodeServiceVerbatim.js';
 import type { OutboxLagCache } from '../../../outbox/lagCache.js';
@@ -193,7 +194,7 @@ export async function tryNodeDeleteRoute(
         const outcome = await withNodeLock(
             effectiveWorkspace,
             stripped,
-            async (): Promise<{ deleted: boolean; canTombstone: boolean }> => {
+            async (): Promise<{ deleted: boolean; canTombstone: boolean; textError?: unknown }> => {
                 // O2: outbox-first — record node.delete before substrate.
                 if (deps.outboxStore) {
                     await recordHotWrite(deps.outboxStore, {
@@ -204,44 +205,32 @@ export async function tryNodeDeleteRoute(
                         operation: 'node.delete',
                     });
                 }
-                const deleted = await targetGraph.deleteNode(stripped);
-                if (!deleted) return { deleted: false, canTombstone: false };
-
-                // Mirror MCP delete_node verbatim handling: tombstone if the
-                // store exposes one (LocalVerbatim), else fall back to delete
-                // (DataplaneVectorStore lacks tombstone today).
                 // Postgres-model isolation — tombstone the REQUESTED workspace's
-                // LanceDB (the graph delete above already routed to it), not the boot
-                // store. getOrOpen is cached; fall back to boot when no resolver.
+                // LanceDB (the graph delete routes to it too), not the boot store.
+                // getOrOpen is cached; fall back to boot when no resolver.
                 const targetVerbatim = deps.workspaceVerbatimResolver
                     ? await deps.workspaceVerbatimResolver.getOrOpen(effectiveWorkspace)
                     : deps.store.loreVerbatim;
-                const verbatim = targetVerbatim as unknown as {
-                    tombstone?: (id: string, reason: string) => Promise<void>;
-                    delete: (id: string) => Promise<void>;
-                };
-                const canTombstone = typeof verbatim.tombstone === 'function';
-                // AWAITED, not fire-and-forget. It used to be detached (`.catch`
-                // only) so the HTTP response wouldn't block on a vector flush —
-                // but a detached tombstone escapes the lock, which is the whole
-                // point of holding it: the verbatim write could then land after
-                // a later same-id upsert's, re-tombstoning a live node. The
-                // failure handling is unchanged (log + continue, response still
-                // 200 with `tombstoned`), only the timing is.
-                try {
-                    const reason = 'graph node deleted via DELETE /api/node';
-                    if (canTombstone) {
-                        await verbatim.tombstone!(`lore:${stripped}`, reason);
-                    } else {
-                        await verbatim.delete(`lore:${stripped}`);
-                    }
-                    // QA A2 finding 2 (2026-09-03) — record a verbatim.tombstone
-                    // outbox row AFTER the node.delete row above, so a stale
-                    // pending verbatim.upsert from an earlier POST /api/node on
-                    // this id can't later replay and resurrect the content this
-                    // call just tombstoned (outbox/types.ts). Non-fatal: the
-                    // synchronous tombstone above already ran.
-                    if (deps.outboxStore) {
+                const reason = 'graph node deleted via DELETE /api/node';
+                // 3.34.0 (M3a) — honest delete (engines/graphShared/deleteOutcome.ts): node delete +
+                // tombstone/delete of the text, each with bounded retries. A text delete that still
+                // fails is `delete_incomplete` (HTTP 500 below), never `ok`. AWAITED inside the lock
+                // so a detached tombstone cannot land after a later same-id upsert's.
+                const o = await deleteNodeAndText({
+                    graph: targetGraph,
+                    text: targetVerbatim as unknown as DeleteTextStore,
+                    nodeId: stripped,
+                    textId: `lore:${stripped}`,
+                    reason,
+                });
+                if (o.status === 'not_found') return { deleted: false, canTombstone: false };
+                const canTombstone = o.tombstoned;
+                // QA A2 finding 2 (2026-09-03) — record a verbatim.tombstone outbox row AFTER the
+                // node.delete row above, so a stale pending verbatim.upsert can't replay and resurrect
+                // the content. Recorded for `delete_incomplete` too: the replicator finishes the text
+                // delete that failed here. Best-effort; failures are logged only.
+                if (deps.outboxStore) {
+                    try {
                         await recordHotWrite(deps.outboxStore, {
                             workspace: effectiveWorkspace,
                             operationKind: 'verbatim.tombstone',
@@ -249,16 +238,15 @@ export async function tryNodeDeleteRoute(
                             initiator: 'http:DELETE /api/node',
                             operation: 'verbatim.tombstone',
                         });
-                        // 3.21 step 3(e) — tombstone this node's question
-                        // aliases too (best-effort).
+                        // 3.21 step 3(e) — tombstone this node's question aliases too (best-effort).
                         await tombstoneQuestionAliases({
                             id: stripped, workspace: effectiveWorkspace,
                             initiator: 'http:DELETE /api/node', logPrefix: '[Lore HTTP]',
                             outboxStore: deps.outboxStore,
                         });
+                    } catch (err: unknown) {
+                        console.error(`[Lore HTTP] Verbatim tombstone outbox row failed for ${redactId(stripped)}: ${redactError(err)}`);
                     }
-                } catch (err: unknown) {
-                    console.error(`[Lore HTTP] Verbatim tombstone failed for ${redactId(stripped)}: ${redactError(err)}`);
                 }
                 // ITEM X-walnode (2026-09-03) — mirror the MCP delete_node
                 // tool: append a `delete_node` WAL entry (active-workspace
@@ -267,10 +255,14 @@ export async function tryNodeDeleteRoute(
                 if (isActiveWorkspace && deps.getWal) {
                     deps.getWal().append('delete_node', { id: stripped, workspace: effectiveWorkspace });
                 }
+                if (o.status === 'delete_incomplete') {
+                    console.error(`[Lore HTTP] Text delete failed for ${redactId(stripped)}: ${redactError(o.textError)}`);
+                    return { deleted: true, canTombstone, textError: o.textError };
+                }
                 return { deleted: true, canTombstone };
             },
         );
-        const { deleted, canTombstone } = outcome;
+        const { deleted, canTombstone, textError } = outcome;
         if (!deleted) {
             deps.auditLog.log({
                 toolName: 'delete_node',
@@ -280,6 +272,19 @@ export async function tryNodeDeleteRoute(
                 durationMs: Date.now() - startedAt,
             });
             writeError(res, 404, 'node_not_found', `Node '${id}' not found`, { id });
+            return true;
+        }
+
+        if (textError !== undefined) {
+            deps.auditLog.log({
+                toolName: 'delete_node',
+                args: { id: stripped, surface: 'http' },
+                result: 'error',
+                resultDetail: DELETE_INCOMPLETE_CODE,
+                durationMs: Date.now() - startedAt,
+            });
+            // The node is gone but its text may still be searchable: say so (500), never `ok`.
+            writeError(res, 500, DELETE_INCOMPLETE_CODE, deleteIncompleteMessage(stripped, textError), { id, nodeDeleted: true });
             return true;
         }
 

@@ -15,7 +15,8 @@
  */
 import type { LoreNode } from '../../../providers/types.js';
 import type { OutboxEntry, OutboxStore } from '../../../outbox/types.js';
-import { createNodeIfAbsent, alreadyExistsError, isNodeAlreadyExists, type ConditionalInsertGraph, type NodeInput } from '../../../engines/graphShared/conditionalInsert.js';
+import { classifyItemWriteError, preReadFailureMessage } from './bulkWriteErrors.js';
+import { createNodeIfAbsent, alreadyExistsError, type ConditionalInsertGraph, type NodeInput } from '../../../engines/graphShared/conditionalInsert.js';
 import { alreadySupersededMessage } from '../../../engines/graphShared/supersedeGuard.js';
 import { redactError } from '../../../security/logRedact.js';
 import { entryRevision, retractBulkNodeUpsert, undoBulkGraphWrite } from './bulkWriteRollback.js';
@@ -137,7 +138,7 @@ export async function stampBulkRevisions<S extends ConditionalSpec>(
             if (spec.ifRevision === undefined || spec.ifRevision === predicted) next.set(id, expected + 1);
             chunk.push(spec);
         } catch (err) {
-            fail(spec, `could not read the node before writing: ${(err as Error).message}; nothing was written`);
+            fail(spec, preReadFailureMessage(err));
         }
     }
     return { chunk, stamps };
@@ -244,7 +245,7 @@ export async function reconcileOutboxRevision(input: {
 export async function checkSpecConditions(graph: { getNode?(id: string): Promise<LoreNode | null> }, spec: ConditionalSpec): Promise<ConditionFailure | null> {
     if (!hasConditions(spec)) return null;
     try { return await checkItemConditions(graph, spec.raw.id as string, spec); }
-    catch (err) { return { error: `could not read the node before writing: ${(err as Error).message}; nothing was written` }; }
+    catch (err) { return { error: preReadFailureMessage(err) }; }
 }
 
 /**
@@ -325,7 +326,7 @@ export async function guardBulkChunk<S extends ConditionalSpec>(
                 continue;
             }
         } catch (err) {
-            outcome.fail(spec, `could not read the node before writing: ${(err as Error).message}; nothing was written`);
+            outcome.fail(spec, preReadFailureMessage(err));
             continue;
         }
         keep.push(spec);
@@ -373,7 +374,7 @@ export async function writeBulkChunk(
             out.push({ id, ok: true, ...(node.revision !== undefined ? { revision: node.revision } : {}) });
         } catch (err) {
             if (err instanceof ItemConditionError) out.push({ id, ok: false, ...err.payload });
-            else out.push({ id, ok: false, error: isNodeAlreadyExists(err) ? alreadyExistsError(err) : (err as Error).message });
+            else out.push({ ...classifyItemWriteError(err), id });
         }
     }
     await flush();

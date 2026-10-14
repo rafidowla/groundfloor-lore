@@ -38,6 +38,10 @@
 | `SP-02-graceful-shutdown-unit.ts` | shutdownCoordinator, sweeper, queue |
 | `Z1-load-endpoint-unit.ts` | load, loadJobsStore, types |
 | `bulk-list-route-unit.ts` | bulkList, rateLimit |
+| `recallable-engine-contract-unit.ts` | 3.34 N5 shared contract: awaitRecallable on real SQLite + arcade fake + Dataplane (not_supported); pending/recallable/timeout-as-status, workspace binding, all-before-now high-water mark, bounded index checks, no tight polling |
+| `recallable-route-unit.ts` | POST /api/nodes/recallable: arcade allowlist + auth, own rate bucket, over-cap 400, validation, workspace binding, timeout clamp, 501 |
+| `recallable-arcade-sql-unit.ts` | ArcadeDB index self-check statement (`(subquery)[0].embedding`, projected, `:id`/`:k` only), fallback, transport failures surface, query-count bound |
+| `recall-embedded-flag-unit.ts` | additive `embedded:false` on keyword-only recall hits (projection, summary, full, compact) |
 | `bulk-write-w9-unit.ts` | bulkWrite, rateLimit |
 | `collections-routes-unit.ts` | collections, tables, collectionStorage, transactions |
 | `collections-tools-unit.ts` | collections, tables, collectionStorage, transactions |

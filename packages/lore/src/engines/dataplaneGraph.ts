@@ -124,6 +124,7 @@ import * as dpTopology from './dataplaneGraphTopology.js';
 import type { TopologyCtx } from './dataplaneGraphTopology.js';
 import { rankSearchResults, SEARCH_SCAN_CAP } from './searchRanking.js';
 import type { SupersedeResult } from './graphShared/supersedeGuard.js';
+import { notSupportedIntegrity, dataplaneIntegrityReason } from './graphShared/integrityNotSupported.js';
 
 /**
  * Hard cap on rows scanned by client-side aggregations
@@ -327,6 +328,10 @@ export class DataplaneGraph implements GraphProvider {
     private async tryGet(scope: DataplaneScope, loreId: string): Promise<Record<string, unknown> | null> {
         return scopedGetRow(this.client, scope, NODE_COLLECTION, loreId, this.connection);
     }
+
+    // 3.34.0 (M3a): no isTransientDeleteError here; the delete routes fall back to the historical `transaction conflict` retry.
+    async integrityScan() { return notSupportedIntegrity(dataplaneIntegrityReason); }
+    async integrityRemove(_rids: string[]) { return notSupportedIntegrity(dataplaneIntegrityReason); }
 
     async deleteNode(id: string): Promise<boolean> {
         const scope = this.scope();

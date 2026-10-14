@@ -37,6 +37,7 @@ import { tryNodesRoutes } from './routes/nodes.js';
 import { tryNodeDeleteRoute } from './routes/nodes-delete.js';
 import { tryEdgesRoutes } from './routes/edges.js';
 import { tryBulkListRoutes } from './routes/bulkList.js';
+import { tryRecallableRoutes } from './routes/recallable.js';
 import { tryBulkWriteRoutes } from './routes/bulkWrite.js';
 import { tryImportRoutes } from './routes/import.js';
 import { tryLoadRoutes } from './routes/load.js';
@@ -249,6 +250,18 @@ async function dispatchAfterGates(
         deploymentMode: deps.deploymentMode,
         dataplane: deps.dataplane,
         graphRegistry: deps.graphRegistry,
+    })) return;
+
+    // 3.34.0 (N5) — POST /api/nodes/recallable: block until queued embeds are searchable
+    // (timeout is a status). Same workspace resolution as bulk write/list.
+    if (await tryRecallableRoutes(req, res, url, pathname, {
+        store: deps.store,
+        deploymentMode: deps.deploymentMode,
+        dataplane: deps.dataplane,
+        graphRegistry: deps.graphRegistry,
+        workspaceVerbatimResolver: deps.workspaceVerbatimResolver,
+        outboxStore: deps.outboxStore,
+        outboxLagCache: deps.outboxLagCache,
     })) return;
 
     // W9 (Sprint W follow-on) — bulk-write / bulk-delete / bulk-recall

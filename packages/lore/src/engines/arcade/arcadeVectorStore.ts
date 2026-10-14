@@ -31,10 +31,15 @@ import type {
 import { LocalEmbeddingProvider } from '../../providers/localEmbeddingProvider.js';
 import { makeBm25Envelope } from '../verbatimBm25Result.js';
 import type { Bm25Envelope } from '../verbatimBm25Result.js';
-import { ArcadeHttp } from './arcadeHttp.js';
+import { ArcadeHttp, ArcadeHttpError } from './arcadeHttp.js';
+import { log } from '../../logger.js';
+import { buildProjectedNeighborsSql, buildSelfNeighborsSql, parseProjectedNeighbors, recallProjectionEnabled } from './arcadeRecallProjection.js';
 import { computeContentHash } from '../contentHash.js';
 import { applyActorScopeFilter, normalizeScopes } from '../../security/scopeFilter.js';
 import { verbatimSchemaDdl, VERBATIM_TYPE } from './arcadeSchema.js';
+
+/** N5 index self-check k: >1 so exact-duplicate vectors (tied at distance 0) still include the row itself. */
+const INDEX_SELF_CHECK_K = 16;
 
 /** Candidate over-fetch cap for the client-ranked bm25 lexical path. */
 const BM25_SCAN_CAP = 500;
@@ -63,6 +68,9 @@ export function resolveStoredScopes(incoming: unknown, existing: unknown): strin
   }
   return normalizeScopes(existing).join(',');
 }
+
+/** dumpAll page size: bounds the embeddings ArcadeDB serialises per response. */
+const DUMP_PAGE_SIZE = 200;
 
 export class ArcadeVectorStore {
   /** IMMUTABLE tenant database name — the isolation boundary. */
@@ -245,6 +253,45 @@ export class ArcadeVectorStore {
     }
   }
 
+  /** Latched OFF (per process) once the projected statement misbehaves. */
+  private static projectionLatchedOff = false;
+
+  /**
+   * fetchNeighbors — the raw `{ vertex, distance }` neighbour list. Default: the
+   * original `SELECT vector.neighbors(...)` (whose `vertex` is probably the whole
+   * record incl. its embedding — see arcadeRecallProjection.ts). With
+   * LORE_ARCADE_RECALL_PROJECTION=on, ask ArcadeDB for the scalar columns only;
+   * any 4xx or unrecognisable shape latches the projection off and falls back.
+   */
+  private async fetchNeighbors(qvec: number[], k: number): Promise<Array<Record<string, unknown>>> {
+    if (recallProjectionEnabled() && !ArcadeVectorStore.projectionLatchedOff) {
+      try {
+        const pr = await this.http.query(this.tenantDb, buildProjectedNeighborsSql(VERBATIM_TYPE), { vec: qvec, k });
+        const parsed = parseProjectedNeighbors((pr.result ?? []) as unknown[]);
+        if (parsed) return parsed;
+        ArcadeVectorStore.projectionLatchedOff = true;
+        log.warn('[ArcadeVectorStore] LORE_ARCADE_RECALL_PROJECTION: unexpected row shape; projection disabled for this process');
+      } catch (e) {
+        if (!(e instanceof ArcadeHttpError) || e.status >= 500) throw e; // transient: surface, keep projection on
+        ArcadeVectorStore.projectionLatchedOff = true;
+        log.warn(`[ArcadeVectorStore] LORE_ARCADE_RECALL_PROJECTION: statement rejected (HTTP ${e.status}); projection disabled for this process`);
+      }
+    }
+    // vector.neighbors is the documented native HNSW query on this version.
+    const res = await this.http.query(
+      this.tenantDb,
+      `SELECT vector.neighbors("${VERBATIM_TYPE}[embedding]", :vec, :k) AS neighbors`,
+      { vec: qvec, k },
+    );
+    const wrapper = (res.result ?? [])[0] as { neighbors?: Array<Record<string, unknown>> } | undefined;
+    return wrapper?.neighbors ?? [];
+  }
+
+  /** Test hook — re-arm the opt-in projection after a latch-off. */
+  static resetProjectionLatchForTests(): void {
+    ArcadeVectorStore.projectionLatchedOff = false;
+  }
+
   /**
    * search — embed the query in-process, run native HNSW similarity within THIS
    * tenant db, apply metadata filter (project/type/ecosystem/tags) as an AND
@@ -274,16 +321,7 @@ export class ArcadeVectorStore {
     // CONTRACT-DEVIATION (T3): over-fetch since vector.neighbors can't push
     // the metadata/scope predicates down into the HNSW query itself.
     const k = Math.max(40, limit * 4);
-    // vector.neighbors is the documented native HNSW query on this version.
-    const res = await this.http.query(
-      this.tenantDb,
-      `SELECT vector.neighbors("${VERBATIM_TYPE}[embedding]", :vec, :k) AS neighbors`,
-      { vec: qvec, k },
-    );
-    const wrapper = (res.result ?? [])[0] as
-      | { neighbors?: Array<Record<string, unknown>> }
-      | undefined;
-    const neighbors = wrapper?.neighbors ?? [];
+    const neighbors = await this.fetchNeighbors(qvec, k);
 
     type Candidate = VerbatimSearchResult & { metadata: VerbatimSearchResult['metadata'] };
     const candidates: Candidate[] = [];
@@ -482,6 +520,54 @@ export class ArcadeVectorStore {
     };
   }
 
+  /**
+   * indexedIds (3.34.0 N5) - of the canonical row ids, those the HNSW index ANSWERS right now. The
+   * index lags the replicated row by 0.15-1 s, so "row exists" is not "searchable". Cost: ONE existence
+   * query for the whole batch, then one bounded (`k` = INDEX_SELF_CHECK_K) projected `vector.neighbors`
+   * on each EXISTING row's own embedding, checking that the row's id comes back. Rows that do not exist
+   * yet cost nothing further. If the server rejects the server-side subquery form (any ArcadeDB HTTP error) the check
+   * falls back to reading the embedding and using the shared projected statement.
+   * The k is >1 because exact-duplicate vectors tie at distance 0 and the row must still be in the top k.
+   */
+  async indexedIds(ids: string[]): Promise<Set<string>> {
+    if (ids.length === 0) return new Set();
+    if (ids.length > 1000) throw new Error('indexedIds: at most 1000 ids per call');
+    await this.initialize();
+    const existing = await this.http.query(
+      this.tenantDb,
+      `SELECT id FROM ${VERBATIM_TYPE} WHERE id IN :ids`,
+      { ids },
+    );
+    const present = ((existing.result ?? []) as Array<{ id?: unknown }>)
+      .map((r) => r.id).filter((x): x is string => typeof x === 'string' && x !== '');
+    const out = new Set<string>();
+    for (const id of present) {
+      const hits = await this.selfNeighbors(id);
+      if (hits.includes(id)) out.add(id);
+    }
+    return out;
+  }
+
+  private async selfNeighbors(id: string): Promise<string[]> {
+    const idsOf = (rows: unknown[]): string[] =>
+      rows.map((r) => (r as { id?: unknown }).id).filter((x): x is string => typeof x === 'string' && x !== '');
+    try {
+      const r = await this.http.query(this.tenantDb, buildSelfNeighborsSql(VERBATIM_TYPE), { id, k: INDEX_SELF_CHECK_K });
+      return idsOf(r.result ?? []);
+    } catch (e) {
+      // 26.7.1 answers a bare-id form with HTTP 500 "Unsupported query vector type", and another build
+      // may reject the subquery outright: any server answer falls through to the client-side form
+      // below (a transport failure is not an ArcadeHttpError and surfaces).
+      if (!(e instanceof ArcadeHttpError)) throw e;
+    }
+    const emb = await this.http.query(this.tenantDb, `SELECT embedding FROM ${VERBATIM_TYPE} WHERE id = :id LIMIT 1`, { id });
+    const vec = (emb.result?.[0] as { embedding?: unknown } | undefined)?.embedding;
+    if (!Array.isArray(vec) || vec.length === 0) return [];
+    const pr = await this.http.query(this.tenantDb, buildProjectedNeighborsSql(VERBATIM_TYPE), { vec, k: INDEX_SELF_CHECK_K });
+    return ((pr.result ?? []) as Array<{ id?: unknown }>)
+      .map((r) => r.id).filter((x): x is string => typeof x === 'string' && x !== '');
+  }
+
   /** delete — parameterized delete-by-id inside THIS tenant db. */
   async delete(id: string): Promise<void> {
     await this.initialize();
@@ -495,38 +581,62 @@ export class ArcadeVectorStore {
   /**
    * dumpAll — slice-5 logical BACKUP export: every verbatim row incl. its
    * embedding vector, so a restore can CARRY byte-identical vectors. Root/
-   * service-authed operator path only (arcadeBackup route). Plain parameterless
-   * SELECT WHERE-less projection — no vector.neighbors/expand, so no SQL trap.
-   * `text` is backtick-quoted (26.7.1 parses bare `text` as the TEXT keyword).
+   * service-authed operator path only (arcadeBackup route). No
+   * vector.neighbors/expand, so no SQL trap. `text` is backtick-quoted (26.7.1
+   * parses bare `text` as the TEXT keyword).
+   *
+   * 3.34.0 (M4): this used to be ONE WHERE-less, LIMIT-less SELECT — ArcadeDB
+   * materialised and serialised every embedding in a single response, and
+   * the route runs during normal serving (it takes only the cell lease and an
+   * outbox-drained check), so on a large cell it was a heap spike. It now
+   * walks the table by keyset on the unique `id` index (`id > :lastId ORDER BY
+   * id LIMIT n`), so ArcadeDB never holds more than one page of embeddings at a
+   * time. The accumulated result (and the NDJSON bundle built from it) still
+   * lives in THIS process's memory: that is the Lore-side cost of a backup.
+   * The cursor parameter is `:lastId`, not `:after`: `AFTER` is a reserved word in
+   * ArcadeDB 26.7.1 SQL and `:after` is a syntax error (found by the live check).
    */
   async dumpAll(): Promise<
     Array<{ id: string; text: string; metadata?: Record<string, unknown>; contentHash?: string; embedding?: number[] }>
   > {
     await this.initialize();
-    const res = await this.http.query(
-      this.tenantDb,
-      `SELECT id, \`text\`, type, label, tags, project, ecosystem, updatedAt, ` +
-        `security_scopes, contentHash, embedding FROM ${VERBATIM_TYPE}`,
-    );
-    const rows = (res.result ?? []) as Array<Record<string, unknown>>;
-    return rows.map((r) => ({
-      id: String(r['id'] ?? ''),
-      text: String(r['text'] ?? ''),
-      metadata: {
-        type: r['type'] ?? '',
-        label: r['label'] ?? '',
-        tags: r['tags'] ?? '',
-        project: r['project'] ?? '',
-        ecosystem: r['ecosystem'] ?? '',
-        updatedAt: r['updatedAt'] ?? '',
-        security_scopes:
-          typeof r['security_scopes'] === 'string' && (r['security_scopes'] as string).length > 0
-            ? (r['security_scopes'] as string).split(',')
-            : [],
-      },
-      contentHash: r['contentHash'] ? String(r['contentHash']) : undefined,
-      embedding: Array.isArray(r['embedding']) ? (r['embedding'] as number[]) : undefined,
-    }));
+    const out: Array<{ id: string; text: string; metadata?: Record<string, unknown>; contentHash?: string; embedding?: number[] }> = [];
+    let after = '';
+    for (;;) {
+      const res = await this.http.query(
+        this.tenantDb,
+        `SELECT id, \`text\`, type, label, tags, project, ecosystem, updatedAt, ` +
+          `security_scopes, contentHash, embedding FROM ${VERBATIM_TYPE} ` +
+          `WHERE id > :lastId ORDER BY id LIMIT ${DUMP_PAGE_SIZE}`,
+        { lastId: after },
+      );
+      const rows = (res.result ?? []) as Array<Record<string, unknown>>;
+      for (const r of rows) {
+        out.push({
+          id: String(r['id'] ?? ''),
+          text: String(r['text'] ?? ''),
+          metadata: {
+            type: r['type'] ?? '',
+            label: r['label'] ?? '',
+            tags: r['tags'] ?? '',
+            project: r['project'] ?? '',
+            ecosystem: r['ecosystem'] ?? '',
+            updatedAt: r['updatedAt'] ?? '',
+            security_scopes:
+              typeof r['security_scopes'] === 'string' && (r['security_scopes'] as string).length > 0
+                ? (r['security_scopes'] as string).split(',')
+                : [],
+          },
+          contentHash: r['contentHash'] ? String(r['contentHash']) : undefined,
+          embedding: Array.isArray(r['embedding']) ? (r['embedding'] as number[]) : undefined,
+        });
+      }
+      if (rows.length < DUMP_PAGE_SIZE) break;
+      const last = String(rows[rows.length - 1]?.['id'] ?? '');
+      if (!last || last === after) break; // defensive: never loop on a non-advancing cursor
+      after = last;
+    }
+    return out;
   }
 
   async close(): Promise<void> {

@@ -359,6 +359,14 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_ARCADE_SECRET_BACKEND',            // arcade secret store backend: sqlite (default) | keychain | env
     'LORE_ARCADE_CA_FILE',                   // arcade transport: private-CA file for TLS to a non-localhost ArcadeDB
     'LORE_ARCADE_MAX_CONNECTIONS',           // arcade transport: keep-alive connection cap per baseUrl (default 16)
+    'LORE_ARCADE_ALLOWED_HOSTS',             // arcade listener: extra accepted Host header values (DNS-rebinding allowlist) — hostnames, not secrets
+    'LORE_ARCADE_HOST_CHECK',                // arcade listener: `strict` narrows the Host policy
+    'LORE_ARCADE_READY_CACHE_MS',            // arcade /ready: probe result cache interval (default 2000)
+    'LORE_ARCADE_READY_TIMEOUT_MS',          // arcade /ready: probe socket deadline (default 2000)
+    'LORE_ARCADE_RECALL_PROJECTION',         // arcade recall: scalar-column projection, default on; off|0|false disables
+    'LORE_RECALLABLE_TIMEOUT_MS',            // POST /api/nodes/recallable: default wait (default 10000)
+    'LORE_RECALLABLE_MAX_TIMEOUT_MS',        // recallable: upper bound, larger requests are clamped (default 60000)
+    'LORE_RECALLABLE_MAX_IDS',               // recallable: id-list cap (default 500, hard max 1000)
 
     // ARCADE-MODE slice 5 (GA hardening) — cross-daemon lease backend + KMS
     // envelope-encryption secret store. All READ at boot POST-scrub

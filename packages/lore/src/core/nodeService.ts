@@ -44,6 +44,7 @@ import { recordHotWrite } from '../outbox/hotLane.js';
 import { withNodeLocks } from './nodeWriteLock.js';
 import { guardNodeWrite, retractNodeUpsertRow, writeNodeAtRevision, canWriteAtRevision, type NodeGuardFailure } from './nodeServiceConditional.js';
 import { isRevisionConflict, revisionOf } from '../engines/graphShared/revision.js';
+import { isOutcomeUnknown } from '../engines/graphShared/writeOutcome.js';
 import { parseConditionalFields, revisionMismatchMessage, type FailedPrecondition, type Precondition } from './conditionalChecks.js';
 import { createNodeIfAbsent, isNodeAlreadyExists, type NodeInput } from '../engines/graphShared/conditionalInsert.js';
 import { applyVerbatimFanout, readPriorNode, rollbackPartialWrite } from './nodeServiceVerbatim.js';
@@ -712,9 +713,7 @@ export async function nodeUpsert(
                 return { ok: false, code: 'revision_mismatch', error: new Error(revisionMismatchMessage(id, conditions.ifRevision, found)), currentRevision: found };
             }
             if (isRevisionConflict(graphErr)) {
-                // Another daemon kept moving the node for every attempt: nothing of ours is in the graph and
-                // writeNodeAtRevision already took its row back, so there is nothing to roll back (the
-                // rollback would put a stale copy over the winner).
+                // Lost the race on every attempt: nothing of ours is in the graph and writeNodeAtRevision took its row back (a rollback would overwrite the winner).
                 log.error(`${logPrefix} conditional write of ${redactId(id)} lost the revision race on every attempt`);
                 return { ok: false, code: 'write_failed', error: graphErr as Error };
             }
@@ -726,6 +725,7 @@ export async function nodeUpsert(
                 }
                 return { ok: false, code: 'already_exists', error: graphErr };
             }
+            if (isOutcomeUnknown(graphErr)) throw graphErr; // 3.34.0 M2: unknown outcome - no rollback, no retraction; the pending row replays
             log.error(`${logPrefix} graph upsert failed for ${redactId(id)}: ${redactError(graphErr)} — retracting the node.upsert outbox row so the replicator cannot replay a write the caller was told failed`);
             await rollbackPartialWrite({
                 id,

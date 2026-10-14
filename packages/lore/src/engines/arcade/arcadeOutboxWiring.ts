@@ -40,8 +40,12 @@ import { ArcadeHttp } from './arcadeHttp.js';
 import { ArcadeGraphStore } from './arcadeGraphStore.js';
 import { ArcadeVectorStore } from './arcadeVectorStore.js';
 import { getTenantApp, readSecretAsync, ARCADE_BASE_URL } from './arcadeProvisioner.js';
-import { withEdgeLock } from '../../core/nodeWriteLock.js';
+import { withEdgeLock, withNodeLockBudgeted, NodeLockTimeoutError, type NodeLockWaitBudget } from '../../core/nodeWriteLock.js';
+import { ReplayDeferredError } from '../../outbox/replayDeferred.js';
 import { parseArcadeCellKey } from './arcadeOutboxLane.js';
+
+/** Default bound on how long a node replay waits for a request's node lock before the row goes back to pending. */
+export const DEFAULT_NODE_LOCK_WAIT_MS = 2000;
 
 interface CellAdapters {
   graph: ArcadeGraphStore;
@@ -80,10 +84,15 @@ export function wireArcadeReplicator(input: {
   baseUrl?: string;
   log?: (msg: string) => void;
   maxCachedCells?: number;
+  /** 3.34.0 — total time ONE replicator tick may spend waiting on node locks held by live requests, summed over all its node replays (default {@link DEFAULT_NODE_LOCK_WAIT_MS}). Once spent, a replay whose lock is held defers at once; a free lock always replays. */
+  nodeLockWaitMs?: number;
 }): ArcadeReplicatorHandle {
   const baseUrl = input.baseUrl ?? ARCADE_BASE_URL;
   const maxCells = input.maxCachedCells ?? 64;
+  const nodeLockWaitMs = input.nodeLockWaitMs ?? DEFAULT_NODE_LOCK_WAIT_MS;
   const cache = new Map<string, CellAdapters>();
+  // Per-tick lock-wait budget, refilled by the replicator at each tick start (onTickStart below).
+  const lockBudget: NodeLockWaitBudget = { remainingMs: nodeLockWaitMs };
 
   function cacheKey(t: string, a: string): string {
     return `${t}::${a}`;
@@ -144,13 +153,43 @@ export function wireArcadeReplicator(input: {
     return parseArcadeCellKey(workspaceKey ?? '')?.appId ?? workspaceKey ?? '';
   }
 
+  /** The workspace name the request-path NODE writers lock on for this lane key: the cell's appId (arcadeRequestContext `cellWorkspace`). Same mapping as edgeLockWorkspace. */
+  function nodeLockWorkspace(workspaceKey?: string): string {
+    return edgeLockWorkspace(workspaceKey);
+  }
+
+  /** Run a node replay under the request-path node lock. A free lock is taken at once; a held one is waited for only while this tick's shared budget lasts, then the row is deferred (back to pending). */
+  async function underNodeLock<T>(workspaceKey: string | undefined, id: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await withNodeLockBudgeted(nodeLockWorkspace(workspaceKey), id, lockBudget, fn);
+    } catch (err) {
+      if (err instanceof NodeLockTimeoutError) throw new ReplayDeferredError(`node ${id} is locked by a live request (per-tick lock-wait budget ${nodeLockWaitMs} ms)`);
+      throw err;
+    }
+  }
+
   const substrates: DispatcherSubstrates = {
+    // 3.34.0 (M1): both node handlers hold the per-node lock the request paths
+    // take (core/nodeWriteLock.ts), keyed on the cell's appId via
+    // nodeLockWorkspace, NOT the `arcade:<t>:<a>` lane key (a different key
+    // would serialise nothing). Without it a replay could land between a
+    // request's outbox record and its own write: a false already_exists for an
+    // ifAbsent create, a false revision_mismatch for ifRevision, or an extra
+    // revision bump (r+2) for a plain stamped write. The wait is bounded PER TICK,
+    // not per row: ticks run one at a time, and a bulk chunk holds up to 50 node
+    // locks at once, so a chunk stuck on a 30 s ArcadeDB timeout must not cost
+    // 50 x the wait. All node replays of a tick share one budget (nodeLockWaitMs,
+    // refilled at tick start); once spent, a held lock defers at once (row back to
+    // pending, not failed, via ReplayDeferredError) while a free lock still replays. Taken AFTER resolveCell so a cell lookup never runs
+    // under the lock (leaf lock).
     upsertNode: async (payload, workspace) => {
       const { graph } = await resolveCell(workspace);
-      // Conditional writes R1 — an `ifAbsent` create replays insert-only.
-      if (payload['ifAbsent'] === true) { await replayIfAbsentUpsert(graph, payload); return; }
-      // Phase 2a — a revisioned payload is applied only over an absent or older row and written verbatim (no bump, no new updatedAt); a legacy payload keeps the plain upsert.
-      await replayNodePayload(graph, payload, () => graph.upsertNode(payload as unknown as LoreNode));
+      await underNodeLock(workspace, String(payload['id'] ?? ''), async () => {
+        // Conditional writes R1 — an `ifAbsent` create replays insert-only.
+        if (payload['ifAbsent'] === true) { await replayIfAbsentUpsert(graph, payload); return; }
+        // Phase 2a — a revisioned payload is applied only over an absent or older row and written verbatim (no bump, no new updatedAt); a legacy payload keeps the plain upsert.
+        await replayNodePayload(graph, payload, () => graph.upsertNode(payload as unknown as LoreNode));
+      });
     },
     // 3.26.0: both edge handlers hold the per-edge lock the request-path edge
     // writers take (core/nodeWriteLock.ts), so a replayed write or delete
@@ -168,7 +207,7 @@ export function wireArcadeReplicator(input: {
     },
     deleteNode: async (id, workspace) => {
       const { graph } = await resolveCell(workspace);
-      await graph.deleteNode(id);
+      await underNodeLock(workspace, id, () => graph.deleteNode(id));
     },
     // 2026-09-03 (X-markstale audit fix) — arcade-lane replay of a
     // `node.mark_stale` chunk row (outbox/types.ts). Mirrors deleteNode
@@ -251,6 +290,7 @@ export function wireArcadeReplicator(input: {
     substrates,
     lagCache: input.lagCache,
     log: input.log,
+    onTickStart: () => { lockBudget.remainingMs = nodeLockWaitMs; },
   });
 
   return {

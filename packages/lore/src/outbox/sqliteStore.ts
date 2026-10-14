@@ -41,13 +41,11 @@ import type {
     OutboxWorkspaceStats,
     StepStatus,
 } from './types.js';
+import { embedStatesForNodesOf, embedBacklogOf } from './recallableQueries.js';
 import { supersessionFamilySql, queuedVerbatimUpsertIdsOf, ensureNodeUpsertIdIndex, newestNodeUpsertRow, SUPERSEDED_DEAD_ERROR, type EntityFamily } from './supersession.js';
-import {
-    migrateJsonOutbox,
-    DEFAULT_WORKSPACE_BACKFILL,
-    type MigrationReport,
-} from './sqliteJsonMigration.js';
+import { migrateJsonOutbox, DEFAULT_WORKSPACE_BACKFILL, type MigrationReport } from './sqliteJsonMigration.js';
 import * as reclaimOps from './reclaimOps.js';
+import { sqliteHasNewerDeleteForKey } from './deleteAwareReplay.js';
 
 // Re-exported so existing importers of MigrationReport from this module
 // keep working after the extraction.
@@ -468,6 +466,8 @@ export class SqliteOutboxStore implements IOutboxStore {
     }
 
     async queuedVerbatimUpsertIds(workspace: string, ids: string[]): Promise<string[]> { return queuedVerbatimUpsertIdsOf(this.db, workspace, ids); }
+    async embedStatesForNodes(workspace: string, nodeIds: string[]): Promise<Map<string, 'queued' | 'dead' | 'replicated'>> { return embedStatesForNodesOf(this.db, workspace, nodeIds); }
+    async embedBacklog(workspace: string, upToSequenceId: number | null, sampleLimit: number): Promise<{ highWaterSequenceId: number; queued: number; sampleNodeIds: string[] }> { return embedBacklogOf(this.db, workspace, upToSequenceId, sampleLimit); }
     async listWorkspacesWithPending(): Promise<string[]> {
         const rows = this.db.prepare(
             `SELECT DISTINCT workspace FROM outbox_entries WHERE status IN ('pending', 'failed')`,
@@ -673,18 +673,9 @@ export class SqliteOutboxStore implements IOutboxStore {
     }
 
     /**
-     * F-S03/S04/S05 (RA-6 per-key watermark) + cross-kind generalization
-     * (2026-07-05 durability fix) - has a NEWER row for the same ENTITY
-     * (same workspace + entity identity, ANY operationKind WITHIN the same
-     * entity family) already reached 'replicated' past this row's sequenceId?
-     *
-     * The replicator calls this before replaying a `status='failed'` row.
-     * RA-6 originally scoped supersession to a SINGLE operationKind and so
-     * missed the reverse-op reorderings (a replicated node.delete must
-     * supersede a failed node.upsert on the same id, else the retry
-     * RESURRECTS a deleted node). Supersession is scoped BY ENTITY FAMILY;
-     * `key` is the family's canonical identity (supersessionFamilySql). A row
-     * with no extractable key/family never reaches here. See supersession.ts.
+     * RA-6 per-key watermark, cross-kind within one entity family (supersession.ts): has a NEWER row
+     * for the same entity already reached 'replicated' past this row's sequenceId? The replicator
+     * asks before replaying a `failed` row.
      */
     async hasNewerReplicatedForKey(
         workspace: string,
@@ -706,6 +697,11 @@ export class SqliteOutboxStore implements IOutboxStore {
              LIMIT 1`,
         ).get(workspace, sequenceId, ...Array<string>(familySql.match.binds).fill(key)) as { hit: number } | undefined;
         return r !== undefined;
+    }
+
+    /** 3.34.0: a later delete supersedes this upsert (deleteAwareReplay.ts). */
+    async hasNewerDeleteForKey(ws: string, family: EntityFamily, key: string, seq: number): Promise<boolean> {
+        return sqliteHasNewerDeleteForKey(this.db, ws, family, key, seq);
     }
 
     async readReplicationState(workspace: string): Promise<OutboxReplicationState> {

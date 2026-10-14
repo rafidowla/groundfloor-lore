@@ -43,6 +43,7 @@ import { tryArcadeAdminRoutes } from './http/routes/arcadeAdmin.js';
 import { tryArcadePolicyRoutes } from './http/routes/arcadePolicy.js';
 import { tryArcadeMigrateRoutes } from './http/routes/arcadeMigrate.js';
 import { tryArcadeBackupRoutes } from './http/routes/arcadeBackup.js';
+import { tryArcadeRepairRoutes } from './http/routes/arcadeRepair.js';
 import { tryArcadeDataRoutes } from './http/routes/arcadeData.js';
 import {
     ARCADE_BASE_URL,
@@ -61,6 +62,9 @@ import {
 } from '../security/arcadeRateClassifier.js';
 import { hashToken, closeTokenDb } from '../engines/arcade/arcadeAuthResolver.js';
 import { preflightKmsSelfTest } from '../engines/arcade/arcadeSecretStore.js';
+import { createArcadeReadinessFromEnv, type ArcadeReadiness } from './arcadeReadiness.js';
+import { buildArcadeHostPolicy, type ArcadeHostPolicy } from '../security/arcadeHostPolicy.js';
+import { HOST_NOT_ALLOWED } from './http/errorCodes.js';
 import type { LoreInstance } from './server.js';
 
 /** The tenant bearer prefix (arcadeAuthResolver.mintToken). Only a bearer with
@@ -166,7 +170,7 @@ export function isOperatorBearer(req: IncomingMessage, authToken: string, shared
  * control plane only; everything else 501s deny-by-default so no request can
  * silently fall back to a local substrate that does not exist in this mode.
  */
-async function arcadeDispatch(
+export async function arcadeDispatch(
     req: IncomingMessage,
     res: ServerResponse,
     deps: {
@@ -191,11 +195,41 @@ async function arcadeDispatch(
         /** Slice-5 — the arcade rate limiter (operator control plane + tenant
          *  data plane). /health is exempt. */
         limiter: RateLimiter;
+        /** 3.34.0 M6 — Host-header (DNS-rebinding) allowlist; applied to EVERY route. */
+        hostPolicy: ArcadeHostPolicy;
+        /** 3.34.0 M5 — cached ArcadeDB reachability behind GET /ready. */
+        readiness: ArcadeReadiness;
     },
 ): Promise<void> {
     const url = req.url ?? '/';
     const pathname = url.split('?')[0] ?? '/';
     const method = req.method ?? 'GET';
+
+    // 3.34.0 M6 — Host allowlist FIRST, before health/ready/limiter/auth: a
+    // rebinding page must not learn anything (not even liveness) from the daemon.
+    if (!deps.hostPolicy.isAllowed(req.headers.host)) {
+        writeError(res, 403, HOST_NOT_ALLOWED, 'Host header not allowed (see LORE_ARCADE_ALLOWED_HOSTS)');
+        return;
+    }
+
+    // 3.34.0 M5 — READINESS (separate from /health liveness). Unauthenticated and
+    // exempt from the rate limiter exactly like /health (answered before the
+    // limiter; classifyArcadeRequest also returns null for it). The ArcadeDB
+    // probe is cached + deduplicated inside `readiness`, so polling is cheap.
+    // 200 = ArcadeDB reachable with the root credential; 503 = not. An anonymous
+    // caller gets only the status; the failure reason/detail is operator-only.
+    if ((pathname === '/ready' || pathname === '/api/ready') && (method === 'GET' || method === 'HEAD')) {
+        const r = await deps.readiness.check();
+        const base = { status: r.ready ? 'ready' : 'not_ready', version: VERSION, mode: 'arcade' };
+        const operator = isOperatorBearer(req, deps.authToken, deps.sharedSecret);
+        const body = operator
+            ? { ...base, ...(r.reason ? { reason: r.reason, detail: r.detail } : {}), latencyMs: r.latencyMs, checkedAgeMs: Math.max(0, Date.now() - r.checkedAt) }
+            : base;
+        if (!r.ready) res.setHeader('Retry-After', '2');
+        res.setHeader('Cache-Control', 'no-store');
+        writeJson(res, r.ready ? 200 : 503, body);
+        return;
+    }
 
     // Health is unauthenticated (matches local mode's public /health) AND exempt
     // from rate limiting — checked before the limiter so /health never 429s.
@@ -278,6 +312,8 @@ async function arcadeDispatch(
                     })
                 )
                     return;
+                // Ghost-record repair (3.34.0 slice 2): operator lane, dry-run by default.
+                if (await tryArcadeRepairRoutes(req, res, pathname, { auditLog: deps.auditLog })) return;
                 if (
                     await tryArcadeMigrateRoutes(req, res, url, pathname, {
                         auditLog: deps.auditLog,
@@ -465,9 +501,14 @@ export async function createArcadeInstance(input: {
     // from local.
     const edgeRelations: ReadonlyArray<string> | undefined = undefined;
 
+    // 3.34.0 M5/M6 — Host allowlist + cached readiness probe (see their modules).
+    const hostPolicy = buildArcadeHostPolicy({ port: LORE_HTTP_PORT });
+    const readiness = createArcadeReadinessFromEnv();
+    log.info(`[Lore MCP] arcade ${hostPolicy.describe()}`);
+
     const startArcadeListener = async (): Promise<void> => {
         httpServer = createServer((req: IncomingMessage, res: ServerResponse) => {
-            arcadeDispatch(req, res, { authToken, sharedSecret, auditLog, pool: cellPool, outboxStore, outboxLagCache, edgeRelations, limiter }).catch((err: unknown) => {
+            arcadeDispatch(req, res, { authToken, sharedSecret, auditLog, pool: cellPool, outboxStore, outboxLagCache, edgeRelations, limiter, hostPolicy, readiness }).catch((err: unknown) => {
                 log.error(`[Lore MCP] uncaught arcade dispatch error: ${(err as Error)?.stack ?? String(err)}`);
                 if (!res.headersSent) {
                     writeError(res, 500, 'internal_error', 'internal error');

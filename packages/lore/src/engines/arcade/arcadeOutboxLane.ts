@@ -75,6 +75,12 @@ export function cellOutboxStore(store: OutboxStore, cellKey: string): OutboxStor
     wrapped.readReplicationState = (ws) => store.readReplicationState!(ws);
   if (store.writeReplicationState)
     wrapped.writeReplicationState = (ws, state) => store.writeReplicationState!(ws, state);
+  // 3.34.0 (N5) - recallable-now reads. The workspace argument is IGNORED and replaced by the bound
+  // cell key (same confinement as record()), so a request can never read another cell's lane.
+  if (store.embedStatesForNodes)
+    wrapped.embedStatesForNodes = (_ws, ids) => store.embedStatesForNodes!(cellKey, ids);
+  if (store.embedBacklog)
+    wrapped.embedBacklog = (_ws, upTo, n) => store.embedBacklog!(cellKey, upTo, n);
   return wrapped;
 }
 
@@ -93,10 +99,12 @@ export function cellOutboxStore(store: OutboxStore, cellKey: string): OutboxStor
  * compatibility.
  */
 export function cellLagCache(
-  cache: Pick<OutboxLagCache, 'shouldBackpressure'>,
+  cache: Pick<OutboxLagCache, 'shouldBackpressure'> & Partial<Pick<OutboxLagCache, 'waitForRefresh'>>,
   cellKey: string,
-): { shouldBackpressure: (ws: string) => BackpressureDecision } {
+): { shouldBackpressure: (ws: string) => BackpressureDecision; waitForRefresh?: OutboxLagCache['waitForRefresh'] } {
   return {
     shouldBackpressure: (_ws: string) => cache.shouldBackpressure(cellKey),
+    // 3.34.0 (N5) - the replicator tick is global to the daemon; waking on it is cell-neutral.
+    ...(cache.waitForRefresh ? { waitForRefresh: (ms: number, sig?: AbortSignal) => cache.waitForRefresh!(ms, sig) } : {}),
   };
 }

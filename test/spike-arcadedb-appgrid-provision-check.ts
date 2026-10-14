@@ -17,6 +17,8 @@
  * Run: npx tsx test/spike-arcadedb-appgrid-provision-check.ts
  */
 
+// Must stay the first import: maps LORE_ARCADE_E2E_URL / _ROOT_PASSWORD onto ARCADE_BASE_URL / ARCADE_ROOT_PASSWORD (see arcade-e2e-env.ts).
+import { ARCADE_E2E_BASE_URL, ARCADE_E2E_ROOT_PASSWORD } from './arcade-e2e-env.js';
 import {
   assertStableVersion,
   provisionDesignA,
@@ -74,7 +76,7 @@ async function main(): Promise<void> {
   console.log('\n=== 3. Design A raw-HTTP cross-db check (app wall + customer wall) ===');
   // alpha_app1_user attempts every other cell's db directly.
   const alphaApp1 = aCells.find((c) => c.customer === 'alpha' && c.app === 'app1')!;
-  const attackerHttp = new ArcadeHttp({ user: alphaApp1.user, pass: alphaApp1.pass });
+  const attackerHttp = new ArcadeHttp({ user: alphaApp1.user, pass: alphaApp1.pass }, ARCADE_E2E_BASE_URL);
   for (const target of aCells) {
     if (target.db === alphaApp1.db) continue;
     try {
@@ -149,7 +151,7 @@ async function main(): Promise<void> {
   console.log('\n=== 6. Design B raw-HTTP: customer wall holds (app wall does NOT exist at raw layer) ===');
   const alphaUser = bCustomers.find((c) => c.customer === 'alpha')!;
   const betaUser = bCustomers.find((c) => c.customer === 'beta')!;
-  const alphaRawHttp = new ArcadeHttp({ user: alphaUser.user, pass: alphaUser.pass });
+  const alphaRawHttp = new ArcadeHttp({ user: alphaUser.user, pass: alphaUser.pass }, ARCADE_E2E_BASE_URL);
   try {
     await alphaRawHttp.query(betaUser.db, 'SELECT id FROM LoreNode LIMIT 1');
     check('Design B: alpha_user blocked from tenant_beta (customer wall)', false, 'no error — LEAK');

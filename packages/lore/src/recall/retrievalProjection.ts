@@ -31,6 +31,23 @@ export interface UnifiedResultItem {
     /** D1: `similarity`'s z-score against the workspace's calibration fit.
      *  Additive only; absent when calibration isn't usable (see `_meta`). */
     relevance?: number;
+    /** 3.34 N5: `false` on a hit the vector leg did not surface AND that carries
+     *  no `similarity` — i.e. a keyword/identifier/traversal-only hit. For a node
+     *  whose embedding is still queued this is the signal that "found by recall"
+     *  does NOT yet mean "indexed for semantic recall". Additive: absent
+     *  (never `true`) on every other hit; no existing field changes. See
+     *  `isNotEmbeddedHit`. */
+    embedded?: false;
+}
+
+/** 3.34 N5 false-"ready" trap: a hybrid recall can return a node from the
+ *  keyword leg alone before its embedding exists. Such a hit lacks 'semantic'
+ *  in `matchedBy` and has no `similarity`; those hits get `embedded:false`.
+ *  Note a keyword-only hit on a fully-embedded node (the vector leg simply did
+ *  not rank it) is indistinguishable here and also gets `embedded:false` —
+ *  the flag means "not shown to be embedded", never "proven un-embedded". */
+export function isNotEmbeddedHit(matchedBy: readonly string[] | undefined, similarity: number | null | undefined): boolean {
+    return !(matchedBy ?? []).includes('semantic') && (similarity === undefined || similarity === null);
 }
 
 /** Structural view of a node — both LoreNode shapes satisfy it. */
@@ -60,6 +77,7 @@ function projectNode(
     if (node.stale) item.stale_warning = true;
     if (similarity !== undefined) item.similarity = similarity;
     if (relevance !== undefined) item.relevance = relevance;
+    if (isNotEmbeddedHit(matchedBy, similarity)) item.embedded = false;
     return item;
 }
 

@@ -12,6 +12,8 @@
  * Run: npx tsx test/spike-arcadedb-dp-cell-setup.ts
  */
 
+// Must stay the first import: maps LORE_ARCADE_E2E_URL / _ROOT_PASSWORD onto ARCADE_BASE_URL / ARCADE_ROOT_PASSWORD (see arcade-e2e-env.ts).
+import './arcade-e2e-env.js';
 import {
   provisionApp,
   getTenantApp,
