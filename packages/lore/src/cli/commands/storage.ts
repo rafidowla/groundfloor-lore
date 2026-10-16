@@ -28,7 +28,7 @@ export async function storageCommand(args: string[]): Promise<void> {
         const b = ws.breakdown;
         console.log(line('Graph', b.graphBytes));
         console.log(line('Tabular (SQLite)', b.tabularBytes));
-        console.log(line('Embeddings (Lance)', b.embeddingsBytes));
+        console.log(line('Embeddings (vectors)', b.embeddingsBytes));
         console.log(line('Models', b.modelsBytes));
         console.log(line('Logs', b.logsBytes));
         console.log(line('Config', b.configBytes));

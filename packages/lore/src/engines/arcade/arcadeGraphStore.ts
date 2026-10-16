@@ -34,10 +34,11 @@ import type {
   TraversalResult,
 } from '../../providers/types.js';
 import { ArcadeHttp, ArcadeHttpError, retryIdempotentArcadeWrite } from './arcadeHttp.js';
-import { NodeAlreadyExistsError } from '../graphShared/conditionalInsert.js';
 import { RevisionConflictError, revisionOf } from '../graphShared/revision.js';
-import { settleFailedUpsert } from './arcadeWriteSettle.js';
-import { OutcomeUnknownError, readBackAfterWrite, rereadAfterWriteError } from '../graphShared/writeOutcome.js';
+import { settleFailedInsert, settleFailedUpsert } from './arcadeWriteSettle.js';
+import { commitArcadeNodeBatch } from './arcadeNodeBatch.js';
+import type { NodeBatchCheck, NodeBatchOutcome, NodeBatchSupersedes, NodeBatchWrite } from '../graphShared/nodeBatch.js';
+import { readBackAfterWrite } from '../graphShared/writeOutcome.js';
 import * as reads from './arcadeGraphReads.js';
 import * as maint from './arcadeMaintenance.js';
 import * as edges from './arcadeGraphEdges.js';
@@ -119,9 +120,7 @@ export class ArcadeGraphStore {
    * updatedAt always. tags serialized to a JSON string; all values bound via
    * ArcadeDB `params` (never interpolated).
    */
-  async upsertNode(
-    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
-  ): Promise<LoreNode> {
+  async upsertNode(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>): Promise<LoreNode> {
     await this.initialize();
     const now = new Date().toISOString();
     const existing = await this.getNode(node.id);
@@ -150,9 +149,7 @@ export class ArcadeGraphStore {
    * updates (outcome counts + confirmation score), which are not content changes.
    * A row that does not exist yet goes through the normal create path (revision 1).
    */
-  async upsertNodeKeepRevision(
-    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
-  ): Promise<LoreNode> {
+  async upsertNodeKeepRevision(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>): Promise<LoreNode> {
     await this.initialize();
     const existing = await this.getNode(node.id);
     if (!existing) return this.upsertNode(node);
@@ -255,12 +252,10 @@ export class ArcadeGraphStore {
    * daemon or any other on the same database) created the id first; that
    * rejection surfaces as NodeAlreadyExistsError. A 502/503/504 that provably
    * wrote nothing retries the whole attempt (fresh stamp), as upsertNodeAtRevision.
-   * A transport error is resolved by re-reading: a node we did not write
+   * A transport error is resolved by re-reading (settleFailedInsert): a node we did not write
    * (createdAt differs from this call's stamp) means the id was taken.
    */
-  async insertNodeIfAbsent(
-    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
-  ): Promise<LoreNode> {
+  async insertNodeIfAbsent(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>): Promise<LoreNode> {
     return retryIdempotentArcadeWrite(async () => {
       await this.initialize();
       const now = new Date().toISOString();
@@ -268,16 +263,16 @@ export class ArcadeGraphStore {
       try {
         await this.http.command(this.tenantDb, `INSERT INTO ${NODE_TYPE} SET ${NODE_INSERT_CLAUSE}`, params);
       } catch (err) {
-        // 3.34.0 (M2): re-read after ANY failure (a client-side timeout is a plain Error). If the re-read
-        // cannot be done, or finds nothing after a transport failure, the outcome is unknown.
-        const present = await rereadAfterWriteError(() => this.getNode(node.id), node.id, err);
-        if (present && present.createdAt === now) return present; // our own insert, response lost
-        if (present || (err instanceof ArcadeHttpError && /duplicat/i.test(err.body))) throw new NodeAlreadyExistsError(node.id);
-        if (!(err instanceof ArcadeHttpError)) throw new OutcomeUnknownError(node.id, null, err);
-        throw err;
+        return settleFailedInsert(() => this.getNode(node.id), node.id, err, now);
       }
       return readBackAfterWrite(() => this.getNode(node.id), node.id);
     });
+  }
+
+  /** commitNodeBatch (3.35.0) - atomic precondition touches + guarded writes in one sqlscript; see arcadeNodeBatch.ts. */
+  async commitNodeBatch(checks: NodeBatchCheck[], writes: NodeBatchWrite[], supersedes?: NodeBatchSupersedes): Promise<NodeBatchOutcome> {
+    await this.initialize();
+    return commitArcadeNodeBatch({ tenantDb: this.tenantDb, http: this.http, getNode: (id) => this.getNode(id) }, checks, writes, supersedes);
   }
 
   /** getNode — parameterized single-row lookup by id. */

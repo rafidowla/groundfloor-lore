@@ -27,6 +27,7 @@ import { purgeRowsWithHistory, existingIdsInTable, deleteExistingIds } from './v
 import type { VerbatimBatchCtx, BulkAddResult } from './verbatimBatch.js';
 import { VERBATIM_CHUNK_SIZE, suppliedVector } from './verbatimBatch.js';
 import { readCanonicalScopes } from './verbatimCanonicalScopes.js';
+import { skipIdenticalBatch, skipIdenticalOne, redactBatch } from './verbatimSkipIdentical.js';
 import { lanceGetVectors, normalizeGetVectorsIds } from './verbatimGetVectors.js';
 import { embedBatchCap, awaitEmbedMemoryHeadroom } from '../embed/memoryBudget.js';
 import { SearchGate } from './searchGate.js';
@@ -923,8 +924,7 @@ export class VerbatimStore implements VectorProvider {
         }
     }
 
-    /** SP-13 / 1.10 / 1.M9 skip-identical predicate: `existing` already holds exactly what `doc` would write
-     *  (same contentHash AND same persisted metadata/scopes AND not a tombstone). */
+    /** SP-13 / 1.10 / 1.M9 skip-identical predicate: `existing` already holds what `doc` would write (hash + metadata/scopes, `updatedAt` excepted, not a tombstone). */
     private matchesExisting(
         existing: Awaited<ReturnType<VerbatimStore['getById']>>,
         doc: VerbatimDocument,
@@ -941,8 +941,7 @@ export class VerbatimStore implements VectorProvider {
             (existing.tags ?? '') === (doc.metadata?.tags || '') &&
             (existing.project ?? '') === (doc.metadata?.project || '') &&
             (existing.ecosystem ?? '') === (doc.metadata?.ecosystem || '') &&
-            (existing.updatedAt ?? '') === (doc.metadata?.updatedAt || '') &&
-            sameScopes;
+            sameScopes; // `updatedAt` is deliberately NOT compared (3.35.0): the graph re-stamps it on every re-store; see verbatimSkipIdentical.ts
     }
 
     async store(doc: VerbatimDocument): Promise<void> {
@@ -1015,7 +1014,7 @@ export class VerbatimStore implements VectorProvider {
                 // so an overlapping store/storeBatch/bulk call for the same id (or a first-write table-creation race,
                 // where every racer is told `created:true`) cannot interleave with them.
                 const outcome = await this.writeLane(async (): Promise<'written' | 'skipped' | 'need-embed'> => {
-                    if (skipEligible && this.matchesExisting(await verbatimHistory.getById(this.table, true, doc.id), doc, effectiveHash)) return 'skipped';
+                    if (skipEligible && await skipIdenticalOne(this.table, doc, (cur) => this.matchesExisting(cur, doc, effectiveHash), () => this.bumpSearchEpoch())) return 'skipped';
                     if (!vector) return 'need-embed'; // the hint said identical, the fresh row says otherwise: embed outside the lane, then retry
                     // Overwrite without `security_scopes` keeps the existing canonical row's labels; an explicit
                     // array (incl. []) wins. Resetting to public would also expose the row's #rev history.
@@ -1109,7 +1108,7 @@ export class VerbatimStore implements VectorProvider {
         assertWritableRole(this.role, 'storeBatch'); if (!this.initialized || !this.db) throw new Error('Store not initialized');
         if (docs.length === 0) return;
         this.writeGate.enter(); try {
-        for (const d of docs) d.text = redactSecrets(d.text); // 2.6 — screen secrets
+        const redactedIds = redactBatch(docs); // 2.6 — screen secrets (ids whose text changed are never skipped)
         // C3 3.2/3.3 (2026-08-17) — collapse duplicate canonical ids WITHIN
         // this batch, keep-last. Phase 3 below is ONE delete(id IN (...)) +
         // ONE table.add with a row per doc: two docs sharing an id (e.g. two
@@ -1121,7 +1120,7 @@ export class VerbatimStore implements VectorProvider {
         // unique by construction; dedupe on the raw id is harmless for them.
         docs = verbatimBatch.dedupeByIdKeepLast(docs, (d) => d.id);
         if (docs.length === 0) return;
-
+        if ((docs = await this.writeLane(() => skipIdenticalBatch(this.table, docs, redactedIds, (cur, d, h) => this.matchesExisting(cur, d, h), () => this.bumpSearchEpoch()))).length === 0) return; // 3.35.0 skip-identical
         // Layer 2 preflight (2026-04-30): history snapshots + canonical retirement
         // are batched (ONE bulk query + ONE add, not 2N round-trips — the
         // per-item loop hung 25 min on a 16k-doc batch). Duplicate-canonical fix

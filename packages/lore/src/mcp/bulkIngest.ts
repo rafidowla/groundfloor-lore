@@ -25,9 +25,9 @@ import { applyBulkQuestionAliases } from '../core/bulkQuestionAliases.js';
 import { isVerbatimStore } from '../engines/verbatimStoreApi.js';
 import { embedAndWriteAliasRowsInline } from './bulkIngestAliasSync.js';
 import { writePrecomputedVectors } from './bulkIngestPrecomputed.js';
+import { buildMainRow, partitionUnchanged } from './bulkIngestUnchanged.js';
 import { buildVerbatimText } from '../engines/verbatimSchema.js';
-import { tagsToArray, tagsToString } from '../engines/normalizeTags.js';
-import { computeContentHash } from '../engines/contentHash.js';
+import { tagsToArray } from '../engines/normalizeTags.js';
 import type { EmbeddingProvider } from '../providers/types.js';
 import { isEmbeddingDisabled } from '../providers/nullEmbeddingProvider.js';
 import type { LoreGraph, LoreVectorStore } from './services.js';
@@ -83,6 +83,9 @@ export interface BulkIngestResult {
     count: number;
     succeeded: number;
     results: Array<{ ok: true; id: string } | { ok: false; id: string; error: string }>;
+    /** 3.35.0 (additive, present only when > 0): nodes whose verbatim row was already stored identically, so they were
+     *  neither embedded nor rewritten. They are still counted in `succeeded` and `results`. */
+    skippedUnchanged?: number;
 }
 
 export type BulkIngestNodeArgs = {
@@ -335,6 +338,7 @@ export async function runBulkIngest(
     const embed = opts.embed ?? 'sync';
     const enableAutolink = opts.autolink ?? false;
     const resultSlots: BulkIngestResult['results'] = new Array(nodes.length);
+    let skippedUnchanged = 0;
 
     // ── Step 0: collapse duplicate ids, keep the LAST occurrence ─────────
     // C3 3.4 (2026-08-17, functional-correctness HIGH). Two entries for the
@@ -375,7 +379,8 @@ export async function runBulkIngest(
                     : { ok: false, id: origNodes[i]!.id, error: ws?.error ?? 'superseded_by_later_entry' };
             }
         }
-        return buildResult(origNodes.length, resultSlots);
+        const built = buildResult(origNodes.length, resultSlots);
+        return skippedUnchanged > 0 ? { ...built, skippedUnchanged } : built;
     };
 
     // ── Step 1a: Pre-fetch previousStates (pure reads, no write transactions) ──
@@ -587,17 +592,34 @@ export async function runBulkIngest(
     // ── Step 2: Collect nodes that need vector writes ─────────────────────
     // idx is the ORIGINAL result slot (slotOf) so downstream per-slot writes
     // land on the right input entry even after Step 0 dedupe.
-    const toEmbed: Array<{ node: BulkIngestNodeArgs; idx: number }> = [];
+    const allToEmbed: Array<{ node: BulkIngestNodeArgs; idx: number }> = [];
     for (let i = 0; i < nodes.length; i++) {
         const node = nodes[i]!;
         const result = resultSlots[slotOf(i)];
         if (result?.ok && !node.skipEmbed) {
-            toEmbed.push({ node, idx: slotOf(i) });
+            allToEmbed.push({ node, idx: slotOf(i) });
         }
     }
 
-    if (toEmbed.length === 0) {
+    if (allToEmbed.length === 0) {
         return finish();
+    }
+    const mainText = ({ node }: { node: BulkIngestNodeArgs }): string => buildVerbatimText(
+        String(node.nodeData.label ?? ''),
+        String(node.nodeData.content ?? ''),
+        tagsToArray(node.nodeData.tags as string | string[] | undefined),
+    );
+    // 3.35.0 — pre-embed skip: a node whose verbatim row is already stored identically (and embedded) is neither
+    // embedded nor rewritten (an Atlas re-index after `git pull` re-sends the whole corpus). Applies to `sync` and
+    // `async`; `precomputed` writes the caller's vectors as before. `unchanged` nodes count as completed work for
+    // cancellation: they are fully stored, so a cancel rolls back only nodes that still lacked their vector.
+    let toEmbed = allToEmbed;
+    let unchangedIds = new Set<string>();
+    if (embed !== 'precomputed' && !isEmbeddingDisabled(deps.embeddingProvider)) {
+        const split = await partitionUnchanged(deps, allToEmbed, mainText);
+        toEmbed = split.fresh;
+        skippedUnchanged = split.unchanged.length;
+        unchangedIds = new Set(split.unchanged.map(({ node }) => node.id));
     }
 
     // ── Step 3: Vector writes ─────────────────────────────────────────────
@@ -620,7 +642,7 @@ export async function runBulkIngest(
     }
 
     if (embed === 'precomputed') {
-        return writePrecomputedVectors(toEmbed, resultSlots, deps, finish, writePrebuiltRowsPerWorkspace);
+        return writePrecomputedVectors(allToEmbed, resultSlots, deps, finish, writePrebuiltRowsPerWorkspace);
     }
 
     // 3.21 step 3(c) — NullEmbeddingProvider: no vector write attempted, and
@@ -633,16 +655,20 @@ export async function runBulkIngest(
         return finish();
     }
 
+    if (toEmbed.length === 0) {
+        // Every main row was already stored identically: no embed, no write. Alias rows follow their own path.
+        if (!aborted()) await embedAndWriteAliasRowsInline(deps, allToEmbed, resultSlots, writePrebuiltRowsPerWorkspace);
+        return finish();
+    }
+
     // sync mode: one embedDocumentBatch call → bulkAddPrebuiltRows.
     // When shouldAbort is set, force chunks so cancel can land between them.
-    const texts = toEmbed.map(({ node }) => buildVerbatimText(
-        String(node.nodeData.label ?? ''),
-        String(node.nodeData.content ?? ''),
-        tagsToArray(node.nodeData.tags as string | string[] | undefined),
-    ));
+    const texts = toEmbed.map(mainText);
 
     const abortedPipelineFromToEmbed = (from: number): number[] => {
         const ids = new Set(toEmbed.slice(from).map(({ node }) => node.id));
+        // Nothing embedded yet (from === 0): the unchanged nodes were never completed either, so they roll back too.
+        if (from === 0) unchangedIds.forEach((id) => ids.add(id));
         const out: number[] = [];
         for (let i = 0; i < nodes.length; i++) {
             if (ids.has(nodes[i]!.id)) out.push(i);
@@ -669,20 +695,7 @@ export async function runBulkIngest(
                         const done = chunks.flat();
                         const doneItems = toEmbed.slice(0, s);
                         await writePrebuiltRowsPerWorkspace(deps, doneItems.map(({ node, idx }, i) => ({
-                            node, idx,
-                            row: {
-                                vector: done[i]!,
-                                id: `lore:${node.id}`,
-                                text: texts[i]!,
-                                type: String(node.nodeData.type ?? ''),
-                                label: String(node.nodeData.label ?? ''),
-                                tags: tagsToString(node.nodeData.tags as string | string[] | undefined),
-                                project: String(node.nodeData.project ?? node.ecosystem),
-                                ecosystem: node.ecosystem,
-                                updatedAt: new Date().toISOString(),
-                                security_scopes: (node.nodeData['security_scopes'] as string[] | undefined) ?? [],
-                                contentHash: computeContentHash(texts[i]!),
-                            },
+                            node, idx, row: buildMainRow(node, texts[i]!, done[i]!),
                         })), resultSlots);
                     }
                     await rollbackPipelineIds(abortedPipelineFromToEmbed(s));
@@ -721,27 +734,14 @@ export async function runBulkIngest(
     }
 
     await writePrebuiltRowsPerWorkspace(deps, toEmbed.map(({ node, idx }, i) => ({
-        node, idx,
-        row: {
-            vector: vectors[i]!,
-            id: `lore:${node.id}`,
-            text: texts[i]!,
-            type: String(node.nodeData.type ?? ''),
-            label: String(node.nodeData.label ?? ''),
-            tags: tagsToString(node.nodeData.tags as string | string[] | undefined),
-            project: String(node.nodeData.project ?? node.ecosystem),
-            ecosystem: node.ecosystem,
-            updatedAt: new Date().toISOString(),
-            security_scopes: (node.nodeData['security_scopes'] as string[] | undefined) ?? [],
-            contentHash: computeContentHash(texts[i]!),
-        },
+        node, idx, row: buildMainRow(node, texts[i]!, vectors[i]!),
     })), resultSlots);
 
     // r9 follow-up (Opus review) — question-alias rows must follow the SAME
     // embed mode as the main verbatim row above. Full rationale + the
     // confirmed C4/C6 connection in bulkIngestAliasSync.ts's header.
     if (!aborted()) {
-        await embedAndWriteAliasRowsInline(deps, toEmbed, resultSlots, writePrebuiltRowsPerWorkspace);
+        await embedAndWriteAliasRowsInline(deps, allToEmbed, resultSlots, writePrebuiltRowsPerWorkspace); // all nodes: alias rows are not covered by the main-row skip
     }
 
     return finish();

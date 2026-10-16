@@ -15,6 +15,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 
 /**
  * Exported (SW-11) so other CLI commands that talk to the local daemon over
@@ -173,6 +174,115 @@ export async function isDaemonServingHome(
     } finally {
         clearTimeout(t);
     }
+}
+
+/** A live process found holding a surrealkv store (see {@link findLiveSurrealStoreHolder}). */
+export interface SurrealStoreHolder {
+    pid: number;
+    lockPath: string;
+    /**
+     * True when the OS confirmed that pid has the LOCK file open right now
+     * (lsof / /proc). False when the pid is alive and named by LOCK but the
+     * "has it open" check could not run (no lsof, not Linux, permission) — the
+     * holder is then only *probable*. Destructive callers refuse either way;
+     * callers with no `--force` escape hatch should refuse only when confirmed.
+     */
+    confirmedOpen: boolean;
+}
+
+/**
+ * Whether process `pid` currently has `file` open: true/false when the OS
+ * answered, null when it could not be determined. Never throws.
+ */
+function pidHasFileOpen(pid: number, file: string): boolean | null {
+    if (process.platform === 'linux') {
+        try {
+            const target = fs.realpathSync(file);
+            for (const fd of fs.readdirSync(`/proc/${pid}/fd`)) {
+                try {
+                    if (fs.readlinkSync(`/proc/${pid}/fd/${fd}`) === target) return true;
+                } catch { /* fd closed between readdir and readlink */ }
+            }
+            return false;
+        } catch {
+            return null; // other user's process (EACCES) — fall through to "unknown"
+        }
+    }
+    if (process.platform === 'win32') return null;
+    try {
+        const out = execFileSync('lsof', ['-t', '--', file], {
+            encoding: 'utf-8', timeout: 3_000, stdio: ['ignore', 'pipe', 'ignore'],
+        });
+        return out.split('\n').some((l) => l.trim() === String(pid));
+    } catch (err) {
+        const e = err as NodeJS.ErrnoException & { status?: number | null };
+        // lsof exits 1 with empty output when nothing has the file open.
+        if (e.status === 1 && !(e as { stdout?: string }).stdout) return false;
+        return null; // lsof missing / timed out / failed
+    }
+}
+
+/**
+ * findLiveSurrealStoreHolder — who, if anyone, is holding the surrealkv store
+ * at `storeDir` (pass `surrealDataPath(workspaceDir)`, the REAL on-disk path,
+ * not the literal `.lore/surreal`).
+ *
+ * surrealkv writes the holder's pid into `<storeDir>/LOCK` (`"<pid>\n"`) while
+ * the store is open and LEAVES THE FILE BEHIND after close (verified: the same
+ * pid stays in LOCK after `close()`, and the fd is released), so the file alone
+ * proves nothing and a live pid is not enough either — a long-lived host that
+ * opened and then closed/evicted the store is still alive. The pid must be
+ * alive AND (when the OS can say) still have LOCK open. This is the only
+ * signal that sees an EMBEDDED host or a daemon on a port other than
+ * `LORE_PORT`, neither of which {@link isDaemonServingHome}'s HTTP probe sees.
+ *
+ * Returns null (proceed) when: LOCK is missing/unparsable, the pid is
+ * `process.pid` (this process's own handle), the pid is dead (`ESRCH`), or the
+ * OS confirms the pid no longer has LOCK open. `EPERM` from `kill(pid, 0)`
+ * means the process exists under another user, so it counts as alive. A pid
+ * recycled by an unrelated process shows as "alive, not confirmed open" and is
+ * refused only by callers that accept probable holders (migrate-graph; use
+ * `--force` to bypass).
+ */
+export function findLiveSurrealStoreHolder(storeDir: string): SurrealStoreHolder | null {
+    const lockPath = path.join(storeDir, 'LOCK');
+    let raw: string;
+    try {
+        raw = fs.readFileSync(lockPath, 'utf-8').trim();
+    } catch {
+        return null;
+    }
+    if (!/^\d+$/.test(raw)) return null;
+    const pid = Number(raw);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) return null;
+    try {
+        process.kill(pid, 0);
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EPERM') return null;
+    }
+    const open = pidHasFileOpen(pid, lockPath);
+    if (open === false) return null;
+    return { pid, lockPath, confirmedOpen: open === true };
+}
+
+/**
+ * Refuse message for {@link findLiveSurrealStoreHolder}. `offerForce` is true
+ * only for commands that actually have a `--force` bypass.
+ */
+export function surrealStoreHolderRefuseMessage(
+    command: string,
+    holder: SurrealStoreHolder,
+    offerForce = true,
+): string {
+    const lines = [
+        `${command}: the SurrealDB store at ${path.dirname(holder.lockPath)} is held by a running process (pid ${holder.pid}, per ${holder.lockPath}).`,
+        '',
+        'Quit the app or daemon that uses this Lore home, then retry.',
+    ];
+    if (offerForce) {
+        lines.push('', 'If you are CERTAIN that pid is unrelated (a stale lock whose pid was recycled), bypass with --force.');
+    }
+    return lines.join('\n');
 }
 
 /**

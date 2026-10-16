@@ -6,6 +6,306 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+## [3.35.0] — 2026-10-16
+
+Atomic node batches and supersedes, no silent outbox data loss, `GET /ready` on every mode, and the
+Nokshi 3.35 asks (p)(q)(r). Writes that touch several nodes (`atomic: true` bulk, `supersedes`,
+cross-daemon `preconditions`) now commit in one transaction on ArcadeDB and SQLite (`commitNodeBatch`);
+an acknowledged outbox write is no longer dead-lettered by an ArcadeDB conflict or outage; a refused
+ArcadeDB connection is retried on writes; verbatim re-stores of unchanged content no longer append
+duplicate rows or re-embed; Surreal `%20` store-path visibility and a `migrate-graph` live-holder
+preflight (reported by VideoSnap; behaviour unchanged, existing stores are not moved). All changes are
+additive; existing success shapes are unchanged except where an entry says otherwise. Limits that stay:
+a `revision: 0` precondition on an absent node is single-daemon, Dataplane and SurrealDB have no batch
+primitive (atomic bulk answers `501 not_supported`; supersede keeps its non-atomic apply), and
+`POST /api/import` is non-atomic on every engine.
+
+### Fixed — outbox no longer dead-letters acknowledged writes (a)
+- **The outbox no longer dead-letters acknowledged writes on an ArcadeDB
+  `ConcurrentModificationException` or outage (a).** Under concurrent writers
+  ArcadeDB aborts a commit that raced another on the same page. A sqlscript
+  commit returns that as HTTP **500** (a session commit as 503), and the old
+  retry only recognised 502/503/504, so the replicator counted it as an
+  ordinary failure and dead-lettered the row after `maxAttempts` -- a write the
+  client had been told was accepted was silently lost. Now, on an Arcade lane,
+  a CME or an unreachable server (connection refused/reset, DNS, or 502/503/504
+  with no CME body) leaves the row `failed` with a full-jitter backoff
+  (500 ms base, 60 s cap), does **not** count an attempt, and never dead-letters
+  on attempts. A row is dead-lettered for this reason only after it has been
+  retrying for longer than `LORE_OUTBOX_TRANSIENT_CEILING_MS` (default
+  `86400000`, 24 h), measured from a persisted first-transient timestamp so a
+  restart does not reset it; it is then dead with reason `transient_ceiling`
+  and the error says so. A client-side timeout is deliberately not transient
+  (the write may have committed), and search-worker timeouts remain counted
+  attempts (follow-up). Permanent errors still die at `maxAttempts` as before.
+  SQLite and Dataplane lanes inject no classifier, so they are unchanged.
+- **`retryIdempotentArcadeWrite` retries a 500 CME.** It retries a
+  ConcurrentModificationException in any HTTP status (detected on the response
+  body's `exception`, not the status) with its own budget -- 6 retries,
+  full jitter over 50 ms..1 s -- on top of the unchanged two retries for
+  502/503/504. A 409 DuplicatedKey and other 500s are still not retried.
+  The classifier is shared (`engines/arcade/arcadeTransientErrors.ts`).
+- **The DATA LOSS log line names the reason class** of the newly dead rows,
+  e.g. `(reason: permanent=2, transient_ceiling=1)`.
+
+### Added — dead-letters are visible (p)
+- **Dead-letters are visible (p).** `GET /api/stats?workspace=` now carries
+  `deadLettered` (rows the replicator gave up on, RA-6 superseded rows
+  excluded), plus `deadSuperseded` and `deadByReason`
+  (`permanent` / `transient_ceiling` / `unwired` / `invalid` / `unclassified`
+  for rows that predate the column) for unbound and operator callers; a bound
+  non-operator token gets `deadLettered` only. New read-only
+  `GET /api/outbox/dead?workspace=&limit=&offset=` lists a workspace's dead
+  rows (id, operationKind, nodeId, reason, createdAt, firstTransientAt, deadAt,
+  attempts, transientRetries, sequenceId; `lastError` for unbound/operator
+  callers only), newest first, default 50, hard cap 200, workspace required
+  (`*` refused), read-permission gated and bound-token checked. On the arcade
+  listener the route is allowlisted and pinned to the caller's cell. Absent
+  fields mean "the store cannot say", never zero.
+- **`LORE_OUTBOX_TRANSIENT_CEILING_MS`** (default `86400000`): how long a row
+  may keep retrying transient ArcadeDB failures before it is dead-lettered.
+  Additive SQLite columns `firstTransientAt`, `transientRetries`, `deadReason`
+  on `outbox_entries` are added in place on open; `requeueDead` clears them.
+
+### Fixed — ArcadeDB write races, retries and a hung server (r)
+- **Concurrent `ifAbsent` creates across daemons could both answer `ok` for one id (ArcadeDB).** The settle step
+  after a failed insert treated "the stored row carries my millisecond stamp" as proof the write was ours; two
+  daemons stamping the same millisecond and racing one id both matched the winner's row (46 double-`ok` in 60
+  four-way races on 3.34.x, 0 now). A definite refusal (duplicate key, or a ConcurrentModificationException)
+  proves no write landed and is never matched by stamp: the loser re-reads, finds the winner and answers
+  `already_exists` (`settleFailedInsert` in `engines/arcade/arcadeWriteSettle.ts`); `settleFailedUpsert` has the
+  same guard for revision-conditional writes. A transport failure (timeout) keeps the stamp match.
+- Plain bulk items and `ifAbsent` creates are already retried server-side on CME (6 retries) and on 502/503/504
+  (2 retries) by the 3.35.0 (a) store-level retry; (r) adds no second retry loop and never retries a
+  timeout (outcome unknown). Measured: 0 `arcade_unavailable` in 11,700 `ifAbsent` creates
+  plus 6,820 overlapping plain items over 80 s on two daemons. `LORE_NODE_BATCH_TRACE=1` now also traces
+  store-level retries (`[arcade-retry]`). Docs: `docs/API_REFERENCE.md` (bulk row).
+- **A refused ArcadeDB connection is now retried on writes, and answers `arcade_unavailable`.** `retryIdempotentArcadeWrite`
+  also retries `ECONNREFUSED` (bare, via `cause`, or on every member of a happy-eyeballs `AggregateError`;
+  `isArcadeConnectRefused` in `arcadeTransientErrors.ts`) on the 502/503/504 budget (1 try + 2 retries). A refusal is
+  raised by `connect()` before any byte is sent, so nothing was applied; the settle steps rethrow it instead of
+  re-reading (a down server would fail the re-read and read as `outcome_unknown`), each retry re-judges `ifAbsent` /
+  the revision, and an exhausted refusal maps to `arcade_unavailable` (it was `write_failed`). ECONNRESET, EPIPE,
+  hang-ups, timeouts and aborts are still never retried (outcome unknown).
+- **A hung ArcadeDB (accepts connections, never answers) no longer pins the per-node write lock for
+  minutes.** The lock hold on a hung engine is bounded to about one request timeout
+  (`LORE_ARCADE_REQUEST_TIMEOUT_MS`): the first request timeout inside a hold fails the rest of that
+  hold at once with the same timeout error (outcome-unknown, never a clean "not written"), and a query
+  timeout inside a hold is not retried. Queued writers wait at most `LORE_NODE_LOCK_WAIT_MS` and then
+  fail with HTTP 503 `node_busy` + `Retry-After` (bulk items report it per item; replay defers).
+- **New env knobs** (documented in `docs/CONFIGURATION.md`, allow-listed in `envScrub`): `LORE_ARCADE_REQUEST_TIMEOUT_MS` (30000), `LORE_NODE_LOCK_WAIT_MS` (timeout + 5000), `LORE_PENDING_COMMIT_GRACE_MS` (60000), `LORE_PENDING_COMMIT_SWEEP_MS` (1000).
+- **Repeated replicator log lines (same class + target) are rate-limited**: first occurrence is always
+  logged, then one suppressed-count summary per interval. A new error class is never suppressed.
+
+### Added — `pending_commit` outbox state (R3)
+- **Outbox rows recorded before their graph commit are now `pending_commit` (R3).** A new additive outbox
+  row state: the replicator claims only ready (`pending`/`failed`) rows, so a predicted revision can no
+  longer be replayed before its graph commit has settled. The writer flips the row ready right after a
+  successful commit and retracts it (existing `removeIfPending` path) on a definite failure. Write paths
+  covered: `nodeUpsert` (revision and non-revision paths), `writeNodeAtRevision` (conditional writes),
+  and both `bulkWrite` record sites (chunk and per-item). Rows recorded after their commit are unchanged.
+  An outcome-unknown commit leaves the row `pending_commit` and is settled by re-reading the node's
+  committed revision. A sweep on the replicator tick (and therefore at outbox open after a restart)
+  settles leftovers: committed revision >= row revision flips ready; otherwise the row is retracted once
+  older than `LORE_PENDING_COMMIT_GRACE_MS` (default 60000; acknowledgement happens only after the
+  commit, so a never-committed row was never acknowledged); graph unreachable leaves it
+  `pending_commit` and retries with transient backoff (`LORE_PENDING_COMMIT_SWEEP_MS`, default 1000).
+  SQLite and Arcade; Dataplane unchanged (cloud writes do not use this outbox).
+- **Outbox stats carry an additive `pendingCommit` count** (per workspace). `pending_commit` rows are
+  not counted in `depth`, never stuck, never dead.
+- **Migration.** None needed: `status` is free text. An outbox file from before this release opens with
+  every existing row ready, nothing is lost.
+
+### Added — `commitNodeBatch` and cross-daemon preconditions (S1)
+- **`commitNodeBatch` primitive and cross-daemon preconditions (S1).** One transaction validates a set of
+  node-revision checks and applies revision-guarded writes, all or nothing. ArcadeDB: a single `sqlscript`
+  that writes a `txTouch` counter on every precondition record (a read-only record is not validated at
+  commit) in ascending id order, then the writes; SQLite: `BEGIN IMMEDIATE`. `preconditions` on bulk rows
+  and, new, on `POST /api/node` (`409 precondition_failed`) are now safe across daemons on both engines.
+  A conflict abort is retried (at most 4 attempts in all, i.e. 3 retries, with jittered backoff) and then answered as a retryable
+  `503 contention` (`engines/graphShared/nodeBatchRetry.ts`). Outbox ordering is unchanged from slice 2b
+  (`pending_commit` before the write, ready after commit, retracted on a definite failure). Arcade schema
+  v6 adds `txTouch`. `LORE_NODE_BATCH_TRACE=1` traces attempts. Limits: a `revision: 0` precondition on an
+  absent node stays single-daemon on ArcadeDB; Dataplane and Surreal keep the in-process guarantee.
+
+### Fixed — atomic `supersedes` and re-send repair (q)
+- **`supersedes` is now one atomic commit on ArcadeDB and SQLite, and a re-send repairs a half-done supersede.** The
+  successor write, the mark on each old node and the `supersedes` edge(s) used to be three separate steps, so a
+  failure between them left a successor with no mark or a mark with no edge (Nokshi M1). They now travel in ONE
+  `commitNodeBatch` (new `supersedes` argument; ArcadeDB: one sqlscript transaction, SQLite: the existing
+  `.immediate()` transaction), retried on a concurrent-modification abort by the one D10 helper
+  (`nodeBatchRetry.ts`, at most 4 attempts, every condition re-judged each time). A definite failure leaves
+  nothing: no successor, no mark, no edge, no revision bump. A timeout settles by reading back, never by blind
+  retry. Held `preconditions` ride in the same script. The edge outbox rows (`edge.upsert`) follow the
+  `pending_commit` rules: recorded before the commit, flipped after it, retracted on a definite failure, one set
+  across retries, settled by the old node's mark when the outcome was unknown (`outbox/pendingCommit.ts`).
+- **Re-send repair.** A re-send now checks each old node's mark and each edge. A supersede left half-done by 3.34
+  (mark without edge, or edge without mark) gets exactly the missing half written in the same transaction and the
+  answer is `ok` with an additive `supersedesRepaired: [ids]` (single write and bulk item), not `unchanged`. A fully
+  consistent bulk re-send is still `unchanged:true`.
+- **Refused ArcadeDB connection on the batch path (item 9).** `commitNodeBatch` now answers a refused connect
+  (`isArcadeConnectRefused`: nothing was sent) with a `refused` outcome; the batch retry re-submits it on the
+  same bounded transient budget as `retryIdempotentArcadeWrite` (`engines/graphShared/transientRetry.ts`, 2 retries,
+  100 ms base, 400 ms cap, re-judging all conditions each attempt) and, when exhausted, rethrows the connection error
+  so the item answers `arcade_unavailable` instead of `outcome_unknown`. Reset, EPIPE, hang-up and timeout stay
+  outcome-unknown.
+- Dataplane and SurrealDB keep the previous non-atomic apply (no `commitNodeBatch`; refusing would regress an
+  established write). `POST /api/import` keeps the non-atomic apply on every engine. Docs: `docs/API_REFERENCE.md`.
+
+### Added — atomic bulk across daemons (S2)
+- **`atomic: true` on `POST /api/nodes/bulk`: all-or-nothing node batches across daemons (ArcadeDB, SQLite).** The
+  whole batch, with every per-item `ifAbsent`, `ifRevision` and `preconditions`, commits in ONE `commitNodeBatch`
+  transaction (`mcp/http/routes/bulkWriteAtomic.ts`) or leaves nothing: no node, no revision bump, no history row,
+  no outbox row, no vector. Default `false`; without it the path is unchanged. Caps 100 items / 400 lock ids;
+  `embed:'inline'`, per-item `supersedes` and `edges` are refused `422`, duplicate ids `422`; Dataplane and
+  SurrealDB answer `501 not_supported`. Failures: `409` `already_exists` / `revision_mismatch` /
+  `precondition_failed` (with `failedIndex`), `503` `contention` (a concurrent-modification abort is retried, at most 4 attempts in all, conditions re-judged each time),
+  `lock_timeout`, `outbox_unavailable`, `arcade_unavailable`, `timeout`, and a non-retryable `outcome_unknown`
+  whose `pending_commit` outbox rows are kept for the replicator sweep. A plain item that loses a race is
+  re-stamped and lands; an `ifRevision` item that loses aborts the batch. The graph rows are atomic; recall is
+  not (vectors replay per item; use `POST /api/nodes/recallable`). Measured on two daemons and one ArcadeDB
+  26.7.1 (50-item batches, 150 racing iterations): 0 partial batches, 0 residue after an abort. Not covered:
+  a `revision: 0` precondition on an ABSENT node is still judged in-process (single-daemon) on ArcadeDB, and the in-process node
+  locks and caches are unchanged. Tests: `test:unit:atomic-bulk`, `test:e2e:atomic-bulk-two-daemon`.
+- `settleNodeBatchUnknown` now reports a mixed outcome (some rows landed, some did not) as `OutcomeUnknownError`
+  instead of guessing.
+
+### Fixed — batch commit-time `RecordNotFoundException` is contention; `POST /api/node` pre-write read
+- **A commit-time `RecordNotFoundException` inside a `commitNodeBatch` script is contention, not `arcade_error`.**
+  Reproduced on ArcadeDB 26.7.1 (HTTP 500, "Error on transaction commit", `RecordNotFoundException`, roughly 1 in
+  1,000 to 2,000 racing scripts). Across about 470 such failed scripts the whole transaction rolled back every
+  time (0 stray rows), so `classifyScriptError` now answers `contention` and the bounded D10 retry re-judges.
+  Narrow: `isArcadeCommitRecordNotFound` (`arcadeTransientErrors.ts`). `retryIdempotentArcadeWrite` is NOT
+  extended: a single-statement RNF race could not be reproduced, so all-or-nothing is not shown for it.
+- **`POST /api/node`: an unavailable or timed-out pre-write read is a retryable 503, not a 500.** Only the read
+  of the node's prior state before the write: `503` `{ok:false, code:'timeout'|'arcade_unavailable',
+  retryable:true}` with `Retry-After: 5` (the existing per-item bulk vocabulary). Nothing was written.
+
+### Added — `GET /ready` on every mode (e)
+- **`GET /ready` (alias `/api/ready`) on every mode (e).** The 3.34 arcade-only readiness probe is
+  generalised: the local/cloud listener now answers `/ready` with the same shape (`mode` is the real
+  mode), the same unauthenticated/operator split, rate-limit exemption, `Retry-After: 2` / `no-store`,
+  and the same Host/Origin treatment as `/health`. `/health` stays pure liveness.
+  Local probes one indexed graph read (the embedding model is not part of readiness: writes queue in the
+  outbox); cloud probes an authenticated Dataplane `GET /connectors` (reachability + credential, no
+  tenant write); arcade is unchanged and byte-compatible with 3.34 (pinned by a golden test).
+  The cache/dedupe/timeout machinery moved to a provider-neutral `mcp/readiness.ts`.
+  New env: `LORE_READY_CACHE_MS`, `LORE_READY_TIMEOUT_MS` (every mode); the `LORE_ARCADE_READY_*` names
+  keep working and win in arcade mode. `lore doctor` prints an advisory readiness line.
+- **Fixed: the Dataplane SDK compat facade did not forward `listConnectors`.** Needed by the cloud probe;
+  forwarded only when the underlying SDK has it.
+
+### Fixed — verbatim skip-identical, `bulkIngest`, CLI and stats labels (k, l, m, n, o, p)
+- **Verbatim skip-identical ignores `updatedAt` (l).** The graph re-stamps
+  `updatedAt` on every re-store, and the skip-identical check compared it, so
+  re-storing an unchanged node appended a full duplicate row (and re-embedded
+  it) every time. `store()` now compares content hash and metadata *without*
+  `updatedAt`; on a match it writes no row and calls no embedder, and syncs the
+  canonical row's `updatedAt` in place (SQLite and Lance). A real content,
+  label, tag or scope change still writes a new history row.
+- **`storeBatch()` skips identical documents (m).** SQLite reads the canonical
+  hash for the whole batch up front and embeds only the changed documents, then
+  re-checks inside the write transaction so a concurrent writer storing the same
+  content during the embed cannot produce a duplicate. Lance does the same in a
+  pre-pass. N unchanged + 1 changed document = exactly 1 embed and 1 new row.
+- **`bulkIngest` no longer re-embeds unchanged nodes (o).** `bulkIngest(nodes,
+  { embed: 'sync' | 'async' })` kept verbatim rows flat on a repeat batch but
+  still embedded every node, so a re-index after `git pull` paid one model call
+  per node. It now asks the verbatim store, once per workspace, which main rows
+  are already stored identically (the (l) rule: content hash, type, label, tags,
+  project, ecosystem, scopes, with a stored vector; `updatedAt` ignored) and
+  neither embeds nor rewrites those; the stored vector is already correct, so
+  recall is unchanged. The result gains an additive `skippedUnchanged` count
+  (present only when above 0). `precomputed` and `skipEmbed` are unchanged. SQLite
+  verbatim engine only: the Lance store has no such probe and keeps re-embedding.
+  Nodes with `questions[]` still re-embed their alias rows.
+- **`lore verbatim reclaim` (o).** Collapses the duplicate verbatim rows that
+  the pre-3.35.0 behaviour left in a SQLite store. Per node id, in time order,
+  a run of consecutive rows with identical content (hash, type, label, tags,
+  project, ecosystem, scopes) keeps one row: the canonical row if the run ends
+  at it, else the run's oldest row. A row that differs from its neighbours is
+  never deleted (A,A,B,B,A becomes A,B,A); tombstones and rows with no content
+  hash are never touched. How to run it:
+  1. Dry run first (the default; read-only, safe next to a live host):
+     `lore verbatim reclaim [<workspace>]` or `--lore-dir <.lore dir>` /
+     `--data-dir <path>` for an embedded host. It prints rows, duplicates, a
+     bytes estimate and the file size.
+  2. Stop the host (daemon or embedding app) and back up
+     `<ws>/.lore/verbatim.sqlite`.
+  3. `lore verbatim reclaim ... --apply`. It refuses while any process has the
+     store open (a confirmed holder is never bypassed, `--force` only covers an
+     undetermined holder or a promotion in progress), deletes in one
+     transaction per 500-row chunk, and verifies canonical rows, node ids and
+     the FTS index afterwards. It prints the file size before and after.
+  Space does **not** return to the OS by default: freed pages are reused by
+  later writes but the file keeps its size. Add `--vacuum` (only with
+  `--apply`) to shrink the file; it needs free disk roughly the size of the
+  store while it runs. Lance stores report `not_supported` (use
+  `lore verbatim dedupe` for duplicate ids).
+  Lance search-worker note (applies to (l)/(m)): under the opt-in search worker
+  in *parent-embeds* mode the parent process embeds the text and hands the
+  vector to the worker child, so on Lance the skip still saves the duplicate
+  row but the embed has already been spent in the parent; the embed savings
+  are full on SQLite and on Lance without the worker. The in-place `updatedAt`
+  refresh bumps the search epoch so a worker reopens its snapshot.
+- **`lore storage` counts `verbatim.sqlite` as embeddings (p).** It matched the
+  generic `.sqlite` rule and was reported as Tabular, so the vector store showed
+  as a small number. `verbatim.sqlite` and its `-wal`/`-shm` files are now
+  Embeddings; the CLI line reads "Embeddings (vectors)". JSON keys are unchanged.
+- **`lore outbox drain-failed` heals verbatim rows (n).** The command wired the
+  graph only, so every dead `verbatim.upsert` row came back
+  `content-witness-unwired`. It now opens the workspace verbatim stores through
+  the shared resolver (read-only facade: look-up only) and compares content
+  hashes, so rows whose content is already in the store heal. The per-reason
+  breakdown (counts plus a few ids each) is always printed, `--dry-run`
+  included. New `--lore-dir <.lore dir>` addresses one embedded workspace (the
+  engine is detected from the files on disk); the help text no longer claims
+  the command needs a running daemon.
+- **MCP `stats` / `lore_status` engine label (k).** The label was derived from
+  the graph engine alone, so a SQLite-graph workspace with a Lance verbatim
+  store, or Surreal with a SQLite verbatim store, was reported wrongly. A
+  shared helper (`mcp/tools/engineLabels.ts`) now reports `sqlite (local)`,
+  `surrealdb (local)`, `<graph> + <verbatim> (local)` or `dataplane (cloud)`,
+  and adds a `verbatimEngine` field.
+- **`boundedStreamToFile` no longer leaves a partial file behind when a stream
+  exceeds its cap.** Cleanup unlinked the destination while
+  `createWriteStream`'s lazy open could still be pending, so the open could
+  recreate the file after the unlink. Cleanup now waits for the write stream's
+  `close` before unlinking. This also fixes a flaky
+  `test:unit:bounded-stream-to-file` case (~4/30 runs).
+
+### Fixed — Surreal store paths and `migrate-graph` preflight (g, h, i, j)
+- **`lore migrate-graph` refuses a live holder before taking a backup (j).**
+  The preflight used to be an HTTP probe on `LORE_PORT` only, so an embedded
+  host or a daemon on another port went unseen: the command backed up a live
+  store, then failed after the ~15 s open budget with a driver error. It now
+  reads `<resolved surreal dir>/LOCK` (surrealkv writes the holder's pid there)
+  and refuses, naming the pid and path, when that pid is alive, is not this
+  process, and has the file open (`lsof` / `/proc`; a leftover LOCK from a
+  closed store is not a holder). Missing, unparsable or dead-pid LOCKs
+  proceed. `--force` still bypasses. `openGraphForCli` runs the same check, so
+  other CLI commands refuse fast too.
+- **`lore status` shows the Surreal path actually used (h).** It printed the
+  literal `<home>/.lore/surreal`; it now prints the resolved (URL-escaped)
+  path, via the same resolver as the startup banner.
+- **MCP `stats` `graphPath` reports the engine's real store path (i).** It
+  reported the legacy `.lore/graph` for every engine; sqlite now gives
+  `.lore/graph.sqlite` and surreal the resolved path. Field name and shape are
+  unchanged.
+- **Warn when the Surreal store is relocated (g).** When the resolved data path
+  differs from the literal `<workspaceDir>/.lore/surreal`, opening the store
+  logs one `WARN` line naming both paths and pointing at
+  `docs/BACKUP_RESTORE.md` and `lore migrate-graph`. The line is written
+  unredacted (the logger's path redaction would hide exactly the paths it is
+  there to show). No line when the paths are equal.
+
+### Docs
+- **`BACKUP_RESTORE.md` (f):** the Surreal store lives at the URL-encoded
+  sibling path under spaced paths; back up both trees; recommend
+  `lore migrate-graph <ws> --to sqlite`. Troubleshooting entries added to
+  `GETTING_STARTED.md`.
+
+
 ## [3.34.0] — 2026-10-14
 
 Arcade-mode must-fix release for Nokshi (brief of 2026-10-12): M1–M6 plus N5.

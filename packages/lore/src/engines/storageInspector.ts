@@ -27,7 +27,7 @@ import { loreHome, loreHomePath } from '../config/loreHome.js';
 export interface StorageBreakdown {
     /** Absolute bytes used by the graph substrate — legacy engine files or `.lore/surreal/`. */
     graphBytes: number;
-    /** Bytes used by LanceDB vector store (all index shards + wal). */
+    /** Bytes used by the vector store: the LanceDB directory or `.lore/verbatim.sqlite` (+ its wal/shm). */
     embeddingsBytes: number;
     /**
      * Row-shaped substrates under `.lore/`: collections, ReBAC grants and the
@@ -136,6 +136,11 @@ function categorize(relPath: string): 'graphBytes' | 'embeddingsBytes' | 'tabula
     if (p === '.lore/graph' || p === '.lore/graph.wal' || p === '.lore/graph.backup') return 'graphBytes';
     if (p.startsWith('.lore/graph') || p.startsWith('.lore/sync.wal') || p.startsWith('.lore/hot_session')) return 'graphBytes';
     if (p.startsWith('.lore/surreal')) return 'graphBytes';
+
+    // The SQLite verbatim store IS the vector store on the default engine (embeddings + text), so it belongs with
+    // the Lance directory above. Without this it matched the generic `.sqlite` rule below and `lore storage`
+    // reported the largest file in a workspace as "Tabular".
+    if (/^\.lore\/verbatim\.sqlite(-wal|-shm|-journal)?$/.test(p)) return 'embeddingsBytes';
 
     // Row-shaped substrates that left the graph engine (collections, ReBAC
     // grants, the pending-ops queue). Matched by SHAPE, not by a list of

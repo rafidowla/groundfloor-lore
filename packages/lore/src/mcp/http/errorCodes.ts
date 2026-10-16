@@ -59,6 +59,10 @@ export const WORKSPACE_FORBIDDEN = 'workspace_forbidden';
 export const WORKSPACE_REQUIRED = 'workspace_required';
 /** Emitted by mcp/http/helpers.ts writeOutboxBackpressure (HTTP 503). */
 export const OUTBOX_LAG = 'outbox_lag';
+/** Emitted by mcp/http/helpers.ts writeNodeBusy (HTTP 503, Retry-After) when a node write waited the bounded node-lock budget behind a stuck holder (3.35.0). Nothing was written. */
+export const NODE_BUSY = 'node_busy';
+/** Emitted by mcp/http/helpers.ts writeContention (HTTP 503, retryable) when a node-batch write lost every ConcurrentModificationException retry (3.35.0). Nothing was written. */
+export const CONTENTION = 'contention';
 /** Consent-gated apply denial (routes/admin.ts, routes/ingestion.ts, HTTP 403). */
 export const CONSENT_DENIED = 'consent_denied';
 

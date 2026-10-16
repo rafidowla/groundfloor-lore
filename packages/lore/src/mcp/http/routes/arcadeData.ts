@@ -150,6 +150,7 @@ function matchesAllowlist(method: string, pathname: string): boolean {
     ['POST', '/api/edges/bulk'],
     ['GET', '/api/topology'],
     ['GET', '/api/stats'],
+    ['GET', '/api/outbox/dead'],
     ['GET', '/api/subgraph'],
     ['POST', '/api/verbatim'],
     ['GET', '/api/verbatim/get'],

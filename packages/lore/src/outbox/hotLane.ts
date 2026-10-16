@@ -55,6 +55,30 @@ export interface HotWriteSpec {
     initiator?: string;
     /** Human label for logs. Defaults to operationKind. */
     operation?: string;
+    /** 3.35.0 (R3) - the row is recorded BEFORE the graph commit it describes: store it `pending_commit`
+     *  (invisible to the replicator) and let the writer flip it ready with {@link commitHotRows} once
+     *  the commit succeeded. Ignored by a store without `markCommitted` (the row is then plain `pending`).
+     *  Dataplane (cloud) mode: unchanged by design - cloud writes do not route through this outbox today
+     *  (see outbox/wiring.ts getGraph), so there is no pre-commit row to hold back. A store wrapper MUST
+     *  forward `markCommitted` (arcadeOutboxLane.ts does) or rows silently stay plain `pending`. */
+    pendingCommit?: boolean;
+}
+
+const initialStatus = (store: OutboxStore, spec: HotWriteSpec): 'pending' | 'pending_commit' =>
+    spec.pendingCommit === true && typeof store.markCommitted === 'function' ? 'pending_commit' : 'pending';
+
+/**
+ * 3.35.0 (R3) - flip the rows of {@link HotWriteSpec.pendingCommit} writes ready, right after the graph
+ * commit they were recorded ahead of succeeded. Never throws: the write is committed and about to be
+ * acknowledged, and a row left `pending_commit` is settled by the replicator's sweep, which reads the
+ * node's committed revision (outbox/pendingCommit.ts) - so a failed flip costs latency, not data.
+ */
+export async function commitHotRows(store: OutboxStore | undefined, ids: ReadonlyArray<string | null | undefined>): Promise<void> {
+    const real = ids.filter((i): i is string => typeof i === 'string' && i.length > 0);
+    if (!store || real.length === 0 || typeof store.markCommitted !== 'function') return;
+    try { await store.markCommitted(real); } catch (err) {
+        console.error(`[outbox] could not flip ${real.length} pending_commit row(s) ready (the settle sweep will): ${(err as Error).message}`);
+    }
 }
 
 /**
@@ -93,7 +117,7 @@ export async function recordHotWrite(
         workspace: spec.workspace,
         operationKind: spec.operationKind,
         payload: spec.payload,
-        status: 'pending',
+        status: initialStatus(store, spec),
         attempts: 0,
     };
     await store.record(entry);
@@ -151,7 +175,7 @@ export async function recordHotWriteBatch(
             workspace: spec.workspace,
             operationKind: spec.operationKind,
             payload: spec.payload,
-            status: 'pending',
+            status: initialStatus(store, spec),
             attempts: 0,
         };
     });

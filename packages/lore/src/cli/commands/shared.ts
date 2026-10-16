@@ -2,9 +2,12 @@ import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
 import { loreHome } from '../../config/loreHome.js';
-import { openWorkspaceGraph, type WorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
+import { openWorkspaceGraph, resolveGraphEngineForPath, type WorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
+import { surrealDataPath } from '../../engines/surreal/surrealConnection.js';
 import { LoreGraphError } from '../../engines/loreGraphError.js';
-import { isDaemonServingHome, DEFAULT_PORT, type DaemonHomeProbe } from './migrateWorkspaceToWorkspaceShared.js';
+import {
+    isDaemonServingHome, DEFAULT_PORT, findLiveSurrealStoreHolder, type DaemonHomeProbe,
+} from './migrateWorkspaceToWorkspaceShared.js';
 
 export function findRepoRoot(): string {
     let currentDirectory = process.cwd();
@@ -174,6 +177,20 @@ export async function openGraphForCli(
     const probe = await isDaemonServingHome(home);
     if (probe.servesHome) {
         throw new CliDaemonLockError(cliDaemonLockMessage(httpAlternativeHint));
+    }
+
+    // The HTTP probe above cannot see an embedded host or a daemon on another
+    // port; the surrealkv LOCK file's pid can. Refuse fast instead of sitting
+    // through the open budget. Surreal workspaces only — sqlite has no such lock.
+    if (resolveGraphEngineForPath(basePath, workspaceId !== undefined ? { workspaceId } : {}).engine === 'surreal') {
+        const holder = findLiveSurrealStoreHolder(surrealDataPath(basePath));
+        if (holder?.confirmedOpen) {
+            // Keep the established wording (and its same-port / rejected-credential
+            // variants); only the detection is earlier, and the pid is named.
+            throw new CliDaemonLockError(
+                `${cliDaemonLockMessage(httpAlternativeHint, probe)} The store's LOCK (${holder.lockPath}) names pid ${holder.pid}.`,
+            );
+        }
     }
 
     const prevBudget = process.env['LORE_SURREAL_OPEN_BUDGET_MS'];

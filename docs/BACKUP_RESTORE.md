@@ -25,6 +25,23 @@ directory, packaged as a single `.tar.gz`:
 | **Vector** (LanceDB) | `lancedb/` | Recursive directory copy |
 | **Sidecar state** | `config.json`, schema caches, outbox, etc. | File / directory copy |
 
+> **Surreal store under a path with spaces (or other URL-escaped characters).**
+> The embedded SurrealDB engine URL-normalises its data path, so when the
+> workspace directory has a space (or `#`, `?`, `%`, ...) in it -- for example
+> a home under `~/Library/Application Support/` -- the graph store is **not**
+> at `<home>/.lore/surreal`. It is at the URL-encoded **sibling** path, e.g.
+> `~/Library/Application%20Support/.../.lore/surreal` (a literal `%20`
+> directory next to the real one). Both trees must be backed up if you copy
+> directories by hand. `lore backup` / `lore restore` resolve the real path
+> themselves, and `lore status` prints it. The engine also logs one `WARN`
+> line naming both paths each time it opens such a store. To get rid of the
+> URL step entirely, move the workspace to the SQLite engine:
+> `lore migrate-graph <workspace> --to sqlite` (the store becomes
+> `<home>/.lore/graph.sqlite`; see [`MIGRATION-3.21.md`](./MIGRATION-3.21.md)).
+> `migrate-graph` also refuses while another process (an embedded host, or a
+> daemon on a different port) still has the Surreal store open -- quit that app
+> first, then retry.
+
 A `backup-manifest.json` (workspace name, timestamp, file list, warnings, source
 path) is written into every tarball. Since NW-7h the manifest also carries
 `schemaVersion: 2` and a `catalog` — a per-file SHA-256 + size list of everything

@@ -189,6 +189,9 @@ export async function handleStats(res: ServerResponse, url: string, deps: Diagno
         // are what the token could count by reading its own rows (visible-only,
         // capped scan, labelled); the verbatim counter has no per-item form, so
         // it is left out. Unbound and operator callers fall through unchanged.
+        // 3.35.0 (a)/(p): acknowledged-but-lost writes. A bounded COUNT over one workspace; absent
+        // (not 0) when the outbox store cannot answer, so "none" is never claimed without knowing.
+        const dead = await deps.outboxStore?.deadLetterSummary?.(requested);
         if (countAudience() === 'visible') {
             const v = await visibleGraphStats(targetGraph, { project: requested, withLanguage: true });
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -199,6 +202,7 @@ export async function handleStats(res: ServerResponse, url: string, deps: Diagno
                 edgeCount: v.edgeCount,
                 typeBreakdown: v.typeBreakdown,
                 languageBreakdown: v.languageBreakdown,
+                ...(dead ? { deadLettered: dead.deadLettered } : {}),
                 ...visibleCountLabel(v.lowerBound),
             }));
             return;
@@ -228,6 +232,7 @@ export async function handleStats(res: ServerResponse, url: string, deps: Diagno
             // narrowed to the requested workspace.
             verbatimDocuments_global: await deps.store.storageClient.verbatimCount(),
             languageBreakdown,
+            ...(dead ? { deadLettered: dead.deadLettered, deadSuperseded: dead.deadSuperseded, deadByReason: dead.deadByReason } : {}),
         }));
     } catch (statsErr) {
         writeError(res, 500, 'internal_error', redactError(statsErr));

@@ -104,6 +104,11 @@ export interface VerbatimStoreApi extends VectorProvider {
      *  back to per-id `getById`. */
     getExistingIds?(ids: string[]): Promise<string[]>;
 
+    /** 3.35.0 - bulkIngest's pre-embed probe: the ids of prebuilt rows (`bulkUpsertPrebuiltRows` shape) whose canonical
+     *  row already holds identical content + metadata and an embedded vector (`updatedAt` ignored). Read only.
+     *  Optional: an engine without it (Lance today) keeps the old behaviour of embedding every node. */
+    findUnchangedRowIds?(rows: Array<Record<string, unknown>>): Promise<string[]>;
+
     /** 3.27.1 - stored embeddings of the CANONICAL rows among `ids` (exact verbatim row ids,
      *  e.g. `lore:<nodeId>`) as plain number[]; unknown / `#rev` history / tombstoned / unembedded
      *  rows are omitted, never an error. At most 10,000 ids per call; empty -> empty Map. Read

@@ -82,6 +82,7 @@
  */
 
 import { KeyedMutex } from '../engines/writeQueue.js';
+import { runInHold, nodeLockWaitMs } from '../engines/holdContext.js';
 
 /** Process-wide, shared by every node-mutating path. */
 const nodeWriteLock = new KeyedMutex();
@@ -98,6 +99,14 @@ export function nodeLockKey(workspace: string, id: string): string {
  * different workspaces) never contend. Same-key callers run strictly FIFO
  * in acquisition order; a predecessor's rejection does not propagate.
  *
+ * 3.35.0 (b): the hold is bounded and the WAIT is bounded.
+ *   - `fn` runs inside a lock hold (engines/holdContext.ts): a hung ArcadeDB costs the hold at most
+ *     one request timeout, because requests after the first timeout inside the hold fail at once.
+ *   - A free lock is taken at once (try-lock probe). A held lock is waited for at most
+ *     `nodeLockWaitMs()` (env LORE_NODE_LOCK_WAIT_MS, default request timeout + 5 s) and then the
+ *     caller gets {@link NodeLockTimeoutError} (`fn` never ran): the request path maps it to the
+ *     existing busy/unavailable response instead of queueing behind a hung holder without bound.
+ *
  * `fn` MUST NOT acquire the same key again — see the re-entrancy rule above.
  */
 export async function withNodeLock<T>(
@@ -105,7 +114,10 @@ export async function withNodeLock<T>(
     id: string,
     fn: () => Promise<T>,
 ): Promise<T> {
-    return nodeWriteLock.run(nodeLockKey(workspace, id), fn);
+    if (!nodeWriteLock.isHeld(nodeLockKey(workspace, id))) {
+        return nodeWriteLock.run(nodeLockKey(workspace, id), () => runInHold(fn));
+    }
+    return withNodeLockWithin(workspace, id, nodeLockWaitMs(), fn);
 }
 
 /** Thrown by {@link withNodeLockWithin} when the lock was not acquired in time; `fn` never ran. */
@@ -146,7 +158,7 @@ export async function withNodeLockWithin<T>(
         if (state === 'abandoned') return undefined as T;
         state = 'running';
         clearTimeout(timer);
-        return fn();
+        return runInHold(fn);
     });
     try { return await Promise.race([ran, timedOut]); }
     finally { if (state !== 'abandoned') clearTimeout(timer); }
@@ -178,7 +190,7 @@ export async function withNodeLockBudgeted<T>(
     budget: NodeLockWaitBudget,
     fn: () => Promise<T>,
 ): Promise<T> {
-    if (!nodeWriteLock.isHeld(nodeLockKey(workspace, id))) return withNodeLock(workspace, id, fn);
+    if (!nodeWriteLock.isHeld(nodeLockKey(workspace, id))) return nodeWriteLock.run(nodeLockKey(workspace, id), () => runInHold(fn));
     if (budget.remainingMs <= 0) throw new NodeLockTimeoutError(workspace, id, 0);
     const startedAt = Date.now();
     try {
@@ -207,6 +219,9 @@ export async function withNodeLocks<T>(
     fn: () => Promise<T>,
 ): Promise<T> {
     const keys = [...new Set(ids)].sort();
+    // One wait allowance shared by every key (3.35.0 b): a 50-id chunk behind hung holders must fail
+    // busy after ONE bounded wait, not after 50 of them.
+    const budget: NodeLockWaitBudget = { remainingMs: nodeLockWaitMs() };
     // Build the nested acquisition inside-out so the OUTERMOST acquisition
     // is the lowest sorted key. Each level enters the next only from inside
     // its own critical section, so every key is held for the whole of `fn`.
@@ -214,9 +229,9 @@ export async function withNodeLocks<T>(
     for (let i = keys.length - 1; i >= 0; i--) {
         const key = keys[i]!;
         const inner = acquire;
-        acquire = () => withNodeLock(workspace, key, inner);
+        acquire = () => withNodeLockBudgeted(workspace, key, budget, inner);
     }
-    return acquire();
+    return runInHold(acquire);
 }
 
 /** Test helper — number of keys with an in-flight tail. */

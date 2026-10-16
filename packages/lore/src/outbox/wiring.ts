@@ -30,6 +30,7 @@ import { batchedEmbedderFor } from '../embed/batchedEmbedder.js';
 import { computeContentHash } from '../engines/contentHash.js';
 import { normaliseEcosystem } from '../core/bulkNodeScope.js';
 import { withNodeLock, withNodeLocks, withEdgeLock } from '../core/nodeWriteLock.js';
+import { deferOnNodeLockTimeout } from './replayDeferred.js';
 import { FileOutboxStore } from './store.js';
 import { SqliteOutboxStore } from './sqliteStore.js';
 import type { OutboxEntry, OutboxStore as IOutboxStore } from './types.js';
@@ -39,7 +40,7 @@ import {
 } from './recovery.js';
 import type { DispatcherSubstrates } from './dispatcher.js';
 import { OutboxReplicator, wireReplicator, readEnvSelfHealConfig, readEnvPollConfig } from './replicator.js';
-import { readEnvRetryConfig } from './retryConfig.js';
+import { readEnvRetryConfig, readEnvTransientConfig } from './retryConfig.js';
 import { logResolveFailure } from './resolveFailureLog.js';
 import { OutboxLagCache, readEnvLagCacheConfig } from './lagCache.js';
 import { loadWorkspacesIfPresent } from '../config/workspaces.js';
@@ -270,13 +271,13 @@ export function wireOutbox(input: {
                 const id = String((payload as { id?: unknown }).id ?? '');
                 const replay = (g as { replayNodeUpsert?: (p: LoreNode, e?: OutboxEntry, n?: NewerSave) => Promise<unknown> }).replayNodeUpsert;
                 // Conditional writes R1 — an `ifAbsent` create replays insert-only (no-op when the id is taken).
-                await withNodeLock(workspace ?? '', id, () => (payload['ifAbsent'] === true
+                await deferOnNodeLockTimeout(() => withNodeLock(workspace ?? '', id, () => (payload['ifAbsent'] === true
                     ? replayIfAbsentUpsert(g as unknown as ConditionalInsertGraph, payload)
                     : typeof replay === 'function'
                         // The embedded guard applies the revision gate itself (mcp/embeddedLifecycle.ts) next to its delete/newest-save rules.
                         ? replay(payload as unknown as LoreNode, entry, newerSave(id, entry))
                         // Phase 2a — a payload carrying a `revision` is applied only over an absent or older row and written verbatim; legacy payloads keep the plain upsert.
-                        : replayNodePayload(g, payload, () => g.upsertNode(payload as unknown as LoreNode))));
+                        : replayNodePayload(g, payload, () => g.upsertNode(payload as unknown as LoreNode)))));
             },
             // Round-E X-edges — edges now DO take a lock: a per-triple one
             // (core/nodeWriteLock.ts `withEdgeLock`), keyed on
@@ -299,7 +300,7 @@ export function wireOutbox(input: {
             deleteNode: async (id: string, workspace?: string, entry?: OutboxEntry) => {
                 const g = await resolveGraph(workspace);
                 const replay = (g as { replayNodeDelete?: (id: string, e?: OutboxEntry, n?: NewerSave) => Promise<unknown> }).replayNodeDelete;
-                await withNodeLock(workspace ?? '', id, () => (typeof replay === 'function' ? replay(id, entry, newerSave(id, entry)) : g.deleteNode(id)));
+                await deferOnNodeLockTimeout(() => withNodeLock(workspace ?? '', id, () => (typeof replay === 'function' ? replay(id, entry, newerSave(id, entry)) : g.deleteNode(id))));
             },
             // 2026-09-03 (X-markstale audit fix) — replay of a
             // `node.mark_stale` chunk row. Takes the SAME per-(workspace,id)
@@ -309,7 +310,7 @@ export function wireOutbox(input: {
             // chunk — same rationale as upsertNode/deleteNode above.
             markStale: async (ids: string[], workspace?: string) => {
                 const g = await resolveGraph(workspace);
-                await withNodeLocks(workspace ?? '', ids, () => g.markStaleByIds(ids));
+                await deferOnNodeLockTimeout(() => withNodeLocks(workspace ?? '', ids, () => g.markStaleByIds(ids)));
             },
             deleteEdge: async (payload, workspace?: string) => {
                 const g = await resolveGraph(workspace);
@@ -634,7 +635,7 @@ export function wireOutbox(input: {
     const { maxAttempts } = readEnvRetryConfig();
     const replicator = wireReplicator({
         store, substrates, lagCache,
-        config: { ...selfHealCfg, ...pollCfg, maxAttempts },
+        config: { ...selfHealCfg, ...pollCfg, maxAttempts, ...readEnvTransientConfig() },
     });
 
     return { store, handlers, runBootRecovery, replicator, lagCache };

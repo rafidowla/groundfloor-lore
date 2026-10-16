@@ -97,6 +97,18 @@ async function waitForReady(port: number, timeoutMs = 20_000): Promise<boolean> 
 
 async function spawnCloudDaemon(dataplaneUrl: string): Promise<DaemonHandle> {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-q2-2-'));
+
+    // Since 3.26.0 (cloud parity C items 6/7, CHANGELOG "Cloud data is keyed by a permanent workspace id") a
+    // cloud-mode host refuses a Lore workspace that is not in its own workspaces.json
+    // (cloud_scope_workspace_not_allowed), so seed the workspaces this suite writes to.
+    {
+        const gfHome = path.join(home, '.groundfloor');
+        fs.mkdirSync(gfHome, { recursive: true });
+        fs.writeFileSync(path.join(gfHome, 'workspaces.json'), JSON.stringify({
+            active: 'default',
+            workspaces: ['default', 'tenant-alpha', 'tenant-beta'].map((name) => ({ name, path: path.join(gfHome, name), id: `ws-id-${name}`, createdAt: new Date().toISOString() })),
+        }, null, 2));
+    }
     const port = await findFreePort();
     const env: NodeJS.ProcessEnv = {
         PATH: process.env.PATH,
@@ -131,9 +143,11 @@ async function main(): Promise<void> {
     console.log('='.repeat(72));
 
     const mock: MockDataplane = await startMockDataplane({ defaultWorkspace: DP_WS });
-    /** Rows of `collection` belonging to one LORE workspace (D1: a lore_workspace column in the ONE credential-fixed Dataplane workspace). */
+    /** Rows of `collection` belonging to one LORE workspace (D1: a lore_workspace column in the ONE credential-fixed Dataplane workspace).
+     *  Since 3.26.0 the column holds the workspace's permanent id (seeded as `ws-id-<name>` in spawnCloudDaemon), not its name.
+     *  An update also writes a superseded-revision row (`revision_state: 'history'`, key `<id>#rev<ts>`); only `current` rows are counted. */
     const countFor = (loreWs: string, collection: string): number =>
-        mock.rows(DP_WS, collection).filter((r) => r['lore_workspace'] === loreWs).length;
+        mock.rows(DP_WS, collection).filter((r) => r['lore_workspace'] === `ws-id-${loreWs}` && r['revision_state'] !== 'history').length;
     console.log(`  mock Dataplane at ${mock.url}`);
 
     let h: DaemonHandle | null = null;

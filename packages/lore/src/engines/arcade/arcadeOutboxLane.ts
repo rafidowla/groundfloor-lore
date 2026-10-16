@@ -64,6 +64,11 @@ export function cellOutboxStore(store: OutboxStore, cellKey: string): OutboxStor
   }
   // Forward the optional replicator/health surface when present.
   if (store.removeIfPending) wrapped.removeIfPending = (id) => store.removeIfPending!(id);
+  // 3.35.0 (R3) - without this the lane wrapper hides `markCommitted`, recordHotWrite silently falls back to a
+  // plain `pending` row and the whole pending_commit protection is off for every Arcade write. Row ids are
+  // unguessable and the flip only moves pending_commit -> pending, so it needs no cell confinement.
+  // (listPendingCommit is the replicator sweep's cross-lane read and is deliberately NOT exposed here.)
+  if (store.markCommitted) wrapped.markCommitted = (ids) => store.markCommitted!(ids);
   if (store.claimForReplication) wrapped.claimForReplication = (id) => store.claimForReplication!(id);
   if (store.listPendingForWorkspace)
     wrapped.listPendingForWorkspace = (ws, limit) => store.listPendingForWorkspace!(ws, limit);
@@ -71,6 +76,8 @@ export function cellOutboxStore(store: OutboxStore, cellKey: string): OutboxStor
     wrapped.listWorkspacesWithPending = () => store.listWorkspacesWithPending!();
   if (store.markEntryStatus)
     wrapped.markEntryStatus = (id, status, info) => store.markEntryStatus!(id, status, info);
+  if (store.recordTransientFailure)
+    wrapped.recordTransientFailure = (id, info) => store.recordTransientFailure!(id, info);
   if (store.readReplicationState)
     wrapped.readReplicationState = (ws) => store.readReplicationState!(ws);
   if (store.writeReplicationState)
@@ -81,6 +88,12 @@ export function cellOutboxStore(store: OutboxStore, cellKey: string): OutboxStor
     wrapped.embedStatesForNodes = (_ws, ids) => store.embedStatesForNodes!(cellKey, ids);
   if (store.embedBacklog)
     wrapped.embedBacklog = (_ws, upTo, n) => store.embedBacklog!(cellKey, upTo, n);
+  // 3.35.0 (a) - dead-letter reads. Like the reads above, the workspace argument is IGNORED and
+  // replaced by the bound cell key, so a request can only ever see its own lane's dead rows.
+  if (store.deadLetterSummary)
+    wrapped.deadLetterSummary = (_ws) => store.deadLetterSummary!(cellKey);
+  if (store.listDeadPage)
+    wrapped.listDeadPage = (opts) => store.listDeadPage!({ ...opts, workspace: cellKey });
   return wrapped;
 }
 

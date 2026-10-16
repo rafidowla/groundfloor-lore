@@ -42,6 +42,8 @@ export interface DeadLetterWatchState {
     lastDeadCount: number | null;
     /** Consecutive observations that each added dead rows. */
     consecutiveIncreases: number;
+    /** 3.35.0: per-reason dead counts at the last observation (superseded excluded), to name the reason class of new loss. */
+    lastByReason?: Record<string, number>;
 }
 
 export function newDeadLetterWatchState(): DeadLetterWatchState {
@@ -51,6 +53,7 @@ export function newDeadLetterWatchState(): DeadLetterWatchState {
 export function observeDeadLetters(
     state: DeadLetterWatchState,
     dead: number,
+    byReason?: Record<string, number>,
 ): { state: DeadLetterWatchState; lines: string[] } {
     // The first observation only establishes a baseline. Reporting a
     // pre-existing backlog as "new loss" on every daemon start would be the
@@ -61,20 +64,24 @@ export function observeDeadLetters(
             ? [`[outbox replicator] NOTE: ${dead} dead-lettered row(s) already in the outbox at startup. `
                 + `Those writes are NOT on the substrate. Inspect: lore outbox drain-failed --dry-run`]
             : [];
-        return { state: { lastDeadCount: dead, consecutiveIncreases: 0 }, lines };
+        return { state: { lastDeadCount: dead, consecutiveIncreases: 0, lastByReason: byReason }, lines };
     }
 
     // A drop means an operator drained or requeued them — re-baseline, and
     // reset the escalation streak so a later incident starts from zero.
     if (dead <= state.lastDeadCount) {
-        return { state: { lastDeadCount: dead, consecutiveIncreases: 0 }, lines: [] };
+        return { state: { lastDeadCount: dead, consecutiveIncreases: 0, lastByReason: byReason }, lines: [] };
     }
 
     const added = dead - state.lastDeadCount;
     const consecutiveIncreases = state.consecutiveIncreases + 1;
+    // Reason class of the NEW dead rows (e.g. "permanent=2, transient_ceiling=1"), from the per-reason delta.
+    const reasons = Object.entries(byReason ?? {})
+        .map(([r, n]) => [r, n - (state.lastByReason?.[r] ?? 0)] as const).filter(([, n]) => n > 0)
+        .map(([r, n]) => `${r}=${n}`).join(', ');
     const lines = [
-        `[outbox replicator] DATA LOSS: ${added} write(s) permanently discarded since the last check `
-        + `(${dead} dead-lettered in total). These are NOT on the substrate and will NOT be retried.`,
+        `[outbox replicator] DATA LOSS: ${added} write(s) permanently discarded since the last check`
+        + `${reasons ? ` (reason: ${reasons})` : ''} (${dead} dead-lettered in total). These are NOT on the substrate and will NOT be retried.`,
     ];
 
     if (consecutiveIncreases >= DEAD_LETTER_ESCALATE_TICKS) {
@@ -87,10 +94,10 @@ export function observeDeadLetters(
         );
         // Reset the streak so escalation repeats every N ticks while the
         // incident continues, instead of firing once and going quiet again.
-        return { state: { lastDeadCount: dead, consecutiveIncreases: 0 }, lines };
+        return { state: { lastDeadCount: dead, consecutiveIncreases: 0, lastByReason: byReason }, lines };
     }
 
-    return { state: { lastDeadCount: dead, consecutiveIncreases }, lines };
+    return { state: { lastDeadCount: dead, consecutiveIncreases, lastByReason: byReason }, lines };
 }
 
 /**
@@ -111,8 +118,10 @@ export class DeadLetterWatch {
      * superseded raises `dead` by one, so without this every supersession would
      * read as fresh data loss on the next tick.
      */
-    observe(dead: number, log: (message: string) => void, superseded = 0): void {
-        const result = observeDeadLetters(this.state, Math.max(0, dead - superseded));
+    observe(dead: number, log: (message: string) => void, superseded = 0, deadByReason?: Record<string, number>): void {
+        // 'superseded' rows are not loss (see above), so they are dropped from the reason split too.
+        const byReason = deadByReason && Object.fromEntries(Object.entries(deadByReason).filter(([r]) => r !== 'superseded'));
+        const result = observeDeadLetters(this.state, Math.max(0, dead - superseded), byReason);
         this.state = result.state;
         for (const line of result.lines) log(line);
     }

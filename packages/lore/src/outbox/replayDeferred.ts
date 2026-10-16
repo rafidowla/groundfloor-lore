@@ -12,11 +12,24 @@
  */
 import type { OutboxEntry, OutboxStore } from './types.js';
 import { keyOfEntry } from './supersession.js';
+import { NodeLockTimeoutError } from '../core/nodeWriteLock.js';
 
 export class ReplayDeferredError extends Error {
     constructor(message: string) {
         super(message);
         this.name = 'ReplayDeferredError';
+    }
+}
+
+/**
+ * 3.35.0 (b): the node lock is now taken with a bounded wait. A replay that could not get it in time
+ * has not started, so it is deferred (row back to pending, no attempt counted) rather than failed.
+ */
+export async function deferOnNodeLockTimeout<T>(fn: () => Promise<T>): Promise<T> {
+    try { return await fn(); }
+    catch (err) {
+        if (err instanceof NodeLockTimeoutError) throw new ReplayDeferredError(err.message);
+        throw err;
     }
 }
 

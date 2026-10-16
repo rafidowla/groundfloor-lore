@@ -49,6 +49,8 @@ import {
 import * as aggregates from './sqlite/sqliteGraphAggregates.js';
 import * as directed from './sqlite/sqliteGraphDirected.js';
 import * as writes from './sqlite/sqliteGraphWrites.js';
+import { commitSqliteNodeBatch } from './sqlite/sqliteNodeBatch.js';
+import type { NodeBatchCheck, NodeBatchOutcome, NodeBatchSupersedes, NodeBatchWrite } from './graphShared/nodeBatch.js';
 import * as overview from './sqlite/sqliteGraphOverview.js';
 import { SqliteSchemaGraphOps } from './sqlite/sqliteSchemaGraphOps.js';
 import { CallTally } from './callTally.js';
@@ -298,6 +300,18 @@ export class SqliteGraph implements LoreGraphHandle {
             this.bumpWriteEpoch();
             return written;
         });
+    }
+
+    /**
+     * 3.35.0 - atomic precondition checks + guarded writes in one BEGIN IMMEDIATE transaction (see
+     * sqlite/sqliteNodeBatch.ts). Synchronous end to end, so no per-id mutex is needed: nothing in this
+     * process can interleave with it.
+     */
+    async commitNodeBatch(checks: NodeBatchCheck[], writes: NodeBatchWrite[], supersedes?: NodeBatchSupersedes): Promise<NodeBatchOutcome> {
+        await this.initialize();
+        const out = commitSqliteNodeBatch(this.db(), checks, writes, supersedes);
+        if (out.ok) this.bumpWriteEpoch();
+        return out;
     }
 
     /** Phase 2a — outbox replay gate: applies only over an absent/older row, verbatim, no bump. */

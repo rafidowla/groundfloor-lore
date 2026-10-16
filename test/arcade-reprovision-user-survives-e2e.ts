@@ -29,11 +29,20 @@
  *      authenticating and the NEW one works — proving the fix narrowed the
  *      drop+create to real rotations rather than disabling rotation outright.
  *
- * Run:
- *   LORE_DEPLOYMENT_MODE=arcade ARCADE_BASE_URL=http://localhost:2480 \
- *   ARCADE_ROOT_PASSWORD=SpikeRoot123! npx tsx \
+ * HOW SERVER COMMANDS ARE OBSERVED
+ * The product's Arcade HTTP client (engines/arcade/arcadeHttp.ts) uses
+ * `node:http`, NOT global `fetch`, so a fetch spy sees nothing. This suite puts
+ * a tiny in-process RECORDING PROXY in front of the real server and points the
+ * product at the proxy (ARCADE_BASE_URL). Every request the product makes goes
+ * through the real transport and is forwarded byte-for-byte; the proxy only
+ * records POST /api/v1/server command bodies. No product hook is involved.
+ *
+ * Run (npm run test:e2e:arcade-reprovision-user-survives):
+ *   LORE_ARCADE_E2E_URL=http://127.0.0.1:2622 \
+ *   LORE_ARCADE_E2E_ROOT_PASSWORD_FILE=/path/to/pw npx tsx \
  *   test/arcade-reprovision-user-survives-e2e.ts
- * Pre-req: ArcadeDB 26.7.1 on :2480 with root password SpikeRoot123!.
+ * Pre-req: ArcadeDB 26.7.1 reachable at that URL (or, with no env set,
+ * localhost:2480 with root password SpikeRoot123!).
  */
 
 // Must stay the first import: maps LORE_ARCADE_E2E_URL / _ROOT_PASSWORD onto ARCADE_BASE_URL / ARCADE_ROOT_PASSWORD (see arcade-e2e-env.ts).
@@ -41,6 +50,8 @@ import './arcade-e2e-env.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import * as http from 'node:http';
+import type { AddressInfo } from 'node:net';
 
 // ── env preflight BEFORE importing any arcade module (module-level consts
 //    capture env at import time). LORE_HOME → fresh temp dir so the registry
@@ -48,10 +59,14 @@ import * as fs from 'node:fs';
 const RUN_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-arcade-reprov-'));
 process.env['LORE_HOME'] = RUN_HOME;
 process.env['LORE_DEPLOYMENT_MODE'] = 'arcade';
-const ARCADE_BASE_URL = (process.env['ARCADE_BASE_URL'] =
-  process.env['ARCADE_BASE_URL'] ?? 'http://localhost:2480');
+// UPSTREAM = the real server. The product is pointed at a recording proxy in
+// front of it (started in main(), before the provisioner is imported).
+const UPSTREAM_URL = (process.env['ARCADE_BASE_URL'] =
+  process.env['ARCADE_BASE_URL'] ?? 'http://localhost:2480').replace(/\/+$/, '');
 const ROOT_PASSWORD = (process.env['ARCADE_ROOT_PASSWORD'] =
   process.env['ARCADE_ROOT_PASSWORD'] ?? 'SpikeRoot123!');
+// Direct-to-server base for the test's own probes (credentialWorks, seeding).
+const ARCADE_BASE_URL = UPSTREAM_URL;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const dynImport = async <T = any>(p: string): Promise<T> => (await import(p)) as T;
@@ -76,30 +91,67 @@ function basicAuth(user: string, pw: string): string {
 }
 
 /**
- * server-command SPY. 26.7.1 has NO user-listing verb (`list users` returns
- * "Server command not valid"), so we cannot observe user existence directly.
- * Instead we intercept global fetch and record every POST /api/v1/server
- * command body, so a test window can assert exactly which server commands
- * (create user / drop user) the provisioner issued. This is the direct
- * observable the finding asked for: prove NO drop-user/create-user occurred
- * across an idempotent re-provision.
+ * server-command SPY (recording proxy). 26.7.1 has NO user-listing verb
+ * (`list users` returns "Server command not valid"), so we cannot observe user
+ * existence directly. Instead a local HTTP proxy sits between the product and
+ * the server and records every POST /api/v1/server command body, so a test
+ * window can assert exactly which server commands (create user / drop user)
+ * the provisioner issued. This is the direct observable the finding asked
+ * for: prove NO drop-user/create-user occurred across an idempotent
+ * re-provision. The product's real transport (node:http) is exercised.
  */
 const serverCommandLog: string[] = [];
-const realFetch = globalThis.fetch;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-globalThis.fetch = (async (input: any, init?: any) => {
-  const url = typeof input === 'string' ? input : (input?.url ?? String(input));
-  if (typeof url === 'string' && url.endsWith('/api/v1/server') && init?.body) {
-    try {
-      const parsed = JSON.parse(String(init.body)) as { command?: string };
-      if (parsed.command) serverCommandLog.push(parsed.command);
-    } catch {
-      /* ignore non-JSON */
-    }
-  }
-  return realFetch(input, init);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-}) as any;
+
+function startRecordingProxy(upstream: string): Promise<{ url: string; close: () => Promise<void> }> {
+  const target = new URL(upstream);
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      const body = Buffer.concat(chunks);
+      if (req.method === 'POST' && (req.url ?? '').split('?')[0].endsWith('/api/v1/server') && body.length > 0) {
+        try {
+          const parsed = JSON.parse(body.toString('utf8')) as { command?: string };
+          if (parsed.command) serverCommandLog.push(parsed.command);
+        } catch {
+          /* ignore non-JSON */
+        }
+      }
+      const up = http.request(
+        {
+          hostname: target.hostname,
+          port: target.port || 80,
+          path: req.url,
+          method: req.method,
+          headers: { ...req.headers, host: target.host },
+        },
+        (ures) => {
+          res.writeHead(ures.statusCode ?? 502, ures.headers);
+          ures.pipe(res);
+        },
+      );
+      up.on('error', (e) => {
+        res.writeHead(502);
+        res.end(String(e));
+      });
+      up.end(body);
+    });
+  });
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as AddressInfo).port;
+      resolve({
+        url: `http://127.0.0.1:${port}`,
+        close: () =>
+          new Promise<void>((r) => {
+            server.closeAllConnections?.();
+            server.close(() => r());
+          }),
+      });
+    });
+  });
+}
 
 function serverCmdsMatching(re: RegExp): string[] {
   return serverCommandLog.filter((c) => re.test(c));
@@ -126,6 +178,10 @@ async function credentialWorks(db: string, user: string, pass: string): Promise<
 async function main(): Promise<void> {
   console.log('\n=== ARCADE RE-PROVISION USER-SURVIVES (slice-2 MAJOR pin) ===');
 
+  // Proxy first, THEN import the provisioner: it captures ARCADE_BASE_URL at
+  // module load, so the product must see the proxy URL from the start.
+  const proxy = await startRecordingProxy(UPSTREAM_URL);
+  process.env['ARCADE_BASE_URL'] = proxy.url;
   const provisioner = await dynImport('../packages/lore/src/engines/arcade/arcadeProvisioner.js');
 
   const CELL = { customerId: 'reprovck', appId: 'appone' };
@@ -232,6 +288,11 @@ async function main(): Promise<void> {
     }
     try {
       provisioner.closeRegistryDb();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await proxy.close();
     } catch {
       /* ignore */
     }

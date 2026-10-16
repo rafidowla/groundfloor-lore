@@ -204,6 +204,8 @@ export class DataplaneGraph implements GraphProvider {
         this.workspaceRegistry = config.workspaceRegistry;
     }
 
+    /** `/ready` probe (3.35.0 (e)): GET /connectors via the live (keychain-upgraded) client - authenticated, not workspace-scoped, no write, no schema push. */
+    async probeConnectors(): Promise<void> { await ((this.client as unknown as { listConnectors?: () => Promise<unknown> }).listConnectors?.() ?? Promise.reject(new Error('Dataplane SDK has no listConnectors'))); }
     /** Credential rebuild in place (see DataplaneVectorStore.adoptConnectionFrom): swap the client only. */
     adoptConnectionFrom(other: DataplaneGraph): void {
         this.client = other.client;

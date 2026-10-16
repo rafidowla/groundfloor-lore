@@ -62,6 +62,7 @@ import { listNodesAsOf as queryNodesAsOf, type ListNodesAsOfOptions } from '../c
 import type { SupersedeResult } from '../engines/graphShared/supersedeGuard.js';
 import { createNodeIfAbsent, type NodeInput } from '../engines/graphShared/conditionalInsert.js';
 import { hasRevisionSupport, type RevisionedGraph } from '../engines/graphShared/revision.js';
+import { hasNodeBatchSupport, type NodeBatchCapable } from '../engines/graphShared/nodeBatch.js';
 
 /* ─── Public handle types ─────────────────────────────────────────── */
 
@@ -76,7 +77,7 @@ import { hasRevisionSupport, type RevisionedGraph } from '../engines/graphShared
  * conforming implementation (cq-lore-graph-alias-proliferation /
  * cq-lore-storage-client-as-never).
  */
-export interface LoreGraphHandle extends GraphProvider, RevisionedGraph {
+export interface LoreGraphHandle extends GraphProvider, RevisionedGraph, Partial<NodeBatchCapable> {
     supersedeNode(oldId: string, newId: string, reason?: string): Promise<SupersedeResult>;
     unsupersedeNode(id: string): Promise<boolean>;
     /** Conditional writes R1 — create-only; throws NodeAlreadyExistsError when the id is taken. Engines whose store enforces it (sqlite, arcade) implement it as a DB-level INSERT. */
@@ -389,6 +390,17 @@ export class LoreStorageClient {
         const g = this.g();
         if (!hasRevisionSupport(g)) throw new Error('[LoreStorageClient] this graph engine has no revision support');
         return g.upsertNodeAtRevision(node, expectedRevision, updatedAt, mustExist);
+    }
+
+    /** 3.35.0 - true when the bound graph has the atomic multi-node commit (arcade, sqlite); see graphShared/nodeBatch.ts. */
+    supportsNodeBatch(): boolean {
+        return hasNodeBatchSupport(this.g());
+    }
+
+    /** The bound graph itself when it can commit a node batch, else null (callers keep their single-daemon path). */
+    nodeBatchGraph(): (NodeBatchCapable & LoreGraphHandle) | null {
+        const g = this.g();
+        return hasNodeBatchSupport(g) ? (g as NodeBatchCapable & LoreGraphHandle) : null;
     }
 
     /** True when the bound graph keeps a per-node revision (sqlite, arcade). */

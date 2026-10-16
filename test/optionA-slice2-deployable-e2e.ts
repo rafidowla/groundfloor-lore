@@ -17,8 +17,9 @@
  *     over real HTTP: provision / list / issue-token / list-tokens / revoke /
  *     disable / destroy, each gated by bindDaemonOperatorLane; a non-operator
  *     bearer is rejected 401 by the listener BEFORE any route runs.
- *   - W3 (data plane): the per-request cell-pool / arcadeData HTTP routes are
- *     NOT built in this pass; every non-arcade path 501s
+ *   - W3 (data plane): (HISTORICAL — the tenant data routes were built in cloud
+ *     slice 3, 683201f8; an operator token on them is now 403 tenant_token_required.)
+ *     The per-request cell-pool / arcadeData HTTP routes were NOT built in this pass; every non-arcade path 501s
  *     'not_supported_in_arcade_mode' (deny-by-default). We therefore exercise
  *     the data-plane SUBSTRATE (the proven token -> arcadeCellForToken ->
  *     LoreStorageClient.fromLocal path) directly, which is exactly what the
@@ -42,9 +43,11 @@
  *   (6) ISOLATION REGRESSION  — cross-app + cross-customer + scope adversarial
  *                               through the daemon surface; 3 SQL-trap pins.
  *
- * Run: LORE_DEPLOYMENT_MODE=arcade ARCADE_BASE_URL=http://localhost:2480 \
- *      ARCADE_ROOT_PASSWORD=SpikeRoot123! npx tsx test/optionA-slice2-deployable-e2e.ts
- * (the wrapper below sets these if unset). Pre-req: ArcadeDB 26.7.1 on :2480.
+ * Run: npm run test:e2e:arcade-slice2-deployable   (or directly:
+ *      LORE_ARCADE_E2E_URL=http://127.0.0.1:2622 LORE_ARCADE_E2E_ROOT_PASSWORD_FILE=<file> \
+ *      npx tsx test/optionA-slice2-deployable-e2e.ts)
+ * With no env set it falls back to ARCADE_BASE_URL / localhost:2480 and the spike root
+ * password. Pre-req: ArcadeDB 26.7.1 reachable at that URL.
  */
 
 // Must stay the first import: maps LORE_ARCADE_E2E_URL / _ROOT_PASSWORD onto ARCADE_BASE_URL / ARCADE_ROOT_PASSWORD (see arcade-e2e-env.ts).
@@ -122,7 +125,23 @@ interface HttpResult {
   json: Record<string, unknown>;
   raw: string;
 }
+// Since the slice-5 GA hardening (security/arcadeRateClassifier.ts) the control
+// plane rate-limits per operator principal (arcade_provision: cap 5, refill
+// 5/min). This suite provisions more cells than the burst allows, so a 429 is
+// expected pacing, not a failure: honour retryAfterSec and retry (bounded).
 async function req(
+  method: string,
+  urlPath: string,
+  opts?: { token?: string; body?: unknown },
+): Promise<HttpResult> {
+  for (let attempt = 0; ; attempt++) {
+    const r = await reqOnce(method, urlPath, opts);
+    if (r.status !== 429 || r.json['code'] !== 'rate_limited' || attempt >= 4) return r;
+    const waitSec = Math.min(30, Number(r.json['retryAfterSec'] ?? 5) + 1);
+    await new Promise((res) => setTimeout(res, waitSec * 1000));
+  }
+}
+async function reqOnce(
   method: string,
   urlPath: string,
   opts?: { token?: string; body?: unknown },
@@ -246,13 +265,24 @@ async function testDaemonArcadeMode(): Promise<void> {
   const health = await req('GET', '/health');
   check('DAEMON', '/health 200 + mode:arcade', health.status === 200 && health.json['mode'] === 'arcade', health.raw);
 
-  // Deny-by-default: a non-arcade family path 501s not_supported_in_arcade_mode.
+  // Tenant data routes exist since cloud slice 3 (683201f8, mcp/arcadeBoot.ts):
+  // an operator credential on a DATA path is walled off with 403
+  // tenant_token_required (operators have no data-plane reach in arcade mode).
   const denied = await req('GET', '/api/nodes', { token: operatorToken });
   check(
     'DAEMON',
-    'non-arcade route 501 not_supported_in_arcade_mode',
-    denied.status === 501 && denied.json['code'] === 'not_supported_in_arcade_mode',
+    'operator token on a tenant data route is 403 tenant_token_required',
+    denied.status === 403 && denied.json['code'] === 'tenant_token_required',
     denied.raw,
+  );
+  // Deny-by-default still holds for a non-allowlisted family reached with a
+  // non-operator bearer: falls through tryArcadeDataRoutes to the 501 envelope.
+  const notServed = await req('GET', '/api/workspaces', { token: 'lore_at_not_a_real_token' });
+  check(
+    'DAEMON',
+    'non-allowlisted route 501 not_supported_in_arcade_mode',
+    notServed.status === 501 && notServed.json['code'] === 'not_supported_in_arcade_mode',
+    notServed.raw,
   );
 
   // ── control plane end-to-end (operator) ──────────────────────────────
@@ -447,7 +477,8 @@ async function testProviderCompleteness(): Promise<void> {
   const facadeC = mods.storage.LoreStorageClient.fromLocal({ graph: cellC.graph, verbatim: cellC.verbatim });
   await facadeC.verbatimStore({ id: 'bm-1', text: 'kubernetes ingress controller routing', metadata: { project: 'provtest' } });
   await facadeC.verbatimStore({ id: 'bm-2', text: 'postgres vacuum autovacuum tuning', metadata: { project: 'provtest' } });
-  let bmResults: any[] = [];
+  // verbatimBm25Search returns a {hits, ranked} envelope (7960a332), not a bare array.
+  let bmResults: { hits: any[]; ranked: boolean } = { hits: [], ranked: false };
   let bmThrew = false;
   try {
     bmResults = await facadeC.verbatimBm25Search('kubernetes ingress', 5);
@@ -456,7 +487,7 @@ async function testProviderCompleteness(): Promise<void> {
     check('PROVIDER', 'bm25Search does not throw CloudModeNotImplementedError', false, (e as Error).message);
   }
   if (!bmThrew) {
-    check('PROVIDER', 'bm25Search returns a ranked hit for the k8s doc', bmResults.some((r: any) => r.id === 'bm-1'), `n=${bmResults.length}`);
+    check('PROVIDER', 'bm25Search returns a ranked hit for the k8s doc', bmResults.hits.some((r: any) => r.id === 'bm-1'), `n=${bmResults.hits.length}`);
   }
 
   // --- bulkUpsertNodes: <= ceil(N/chunk) round trips (count HTTP calls) ---

@@ -390,3 +390,19 @@ Stop all Lore processes, then restart the daemon:
 launchctl unload ~/Library/LaunchAgents/com.groundfloor.lore.plist
 launchctl load ~/Library/LaunchAgents/com.groundfloor.lore.plist
 ```
+
+### Graph store is in a `%20` directory / my backup is missing the graph
+The embedded SurrealDB engine URL-escapes its data path, so a home under a
+directory with a space (e.g. `~/Library/Application Support/...`) keeps its
+graph at `.../Application%20Support/.../.lore/surreal`, a sibling of the
+literal path. Run `lore status` to see the path actually used (the `Graph:`
+line) and back up **both** trees if you copy directories by hand. To avoid the
+URL step for good: `lore migrate-graph <workspace> --to sqlite`
+(store: `<home>/.lore/graph.sqlite`). See
+[`BACKUP_RESTORE.md`](./BACKUP_RESTORE.md).
+
+### `lore migrate-graph` says another process holds the store
+`migrate-graph` reads `<store>/LOCK` and refuses, before taking any backup,
+when a live process (named by pid) has the Surreal store open. Quit the app
+that uses this home (or stop its daemon), then retry. `--force` bypasses the
+check (it will then fail at open if the store really is held).

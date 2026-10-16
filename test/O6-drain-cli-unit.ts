@@ -155,11 +155,11 @@ test('T8 buildDrainWiringInput threads an engine-aware per-workspace resolver', 
     const input = buildDrainWiringInput({ loreDir: '/tmp/.lore', bootGraph: fakeGraph, registry });
 
     // getGraph returns the pre-opened boot graph synchronously (boot fallback).
-    assert.equal(input.getGraph(), fakeGraph);
+    assert.equal(input.getGraph!(), fakeGraph);
 
     // getGraphForWorkspace MUST be present (the L-004 fix) …
     assert.equal(typeof input.getGraphForWorkspace, 'function', 'resolver getter present');
-    const resolver = input.getGraphForWorkspace();
+    const resolver = input.getGraphForWorkspace!();
     assert.equal(typeof resolver, 'function', 'resolver is a function');
 
     // … and routes each row's probe to its OWN workspace's graph handle.

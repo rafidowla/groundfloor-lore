@@ -29,6 +29,7 @@
  */
 
 import { createNodeIfAbsent } from '../graphShared/conditionalInsert.js';
+import type { NodeBatchCheck, NodeBatchOutcome, NodeBatchSupersedes, NodeBatchWrite } from '../graphShared/nodeBatch.js';
 import type {
   LoreEdge,
   LoreNode,
@@ -61,6 +62,8 @@ export interface GuardableGraph {
   upsertNodeAtRevision?(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>, expectedRevision: number, updatedAt: string, mustExist?: boolean): Promise<LoreNode>;
   replayNodeAtRevision?(node: LoreNode): Promise<boolean>;
   upsertNodeKeepRevision?(node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>): Promise<LoreNode>;
+  /** 3.35.0 - atomic precondition checks + guarded writes (see graphShared/nodeBatch.ts). */
+  commitNodeBatch?(checks: NodeBatchCheck[], writes: NodeBatchWrite[], supersedes?: NodeBatchSupersedes): Promise<NodeBatchOutcome>;
   addEdge(edge: LoreEdge): Promise<void>;
   addBidirectionalEdge(edge: LoreEdge): Promise<void>;
   traverse(nodeId: string, maxDepth?: number, relation?: string): Promise<TraversalResult[]>;
@@ -87,6 +90,7 @@ export class ScopeGuardedGraph implements GuardableGraph {
   upsertNodeAtRevision?: GuardableGraph['upsertNodeAtRevision'];
   replayNodeAtRevision?: GuardableGraph['replayNodeAtRevision'];
   upsertNodeKeepRevision?: GuardableGraph['upsertNodeKeepRevision'];
+  commitNodeBatch?: GuardableGraph['commitNodeBatch'];
 
   constructor(inner: GuardableGraph, scopes: ReadonlySet<Scope>) {
     this.inner = inner;
@@ -94,6 +98,9 @@ export class ScopeGuardedGraph implements GuardableGraph {
     if (typeof inner.upsertNodeAtRevision === 'function' && typeof inner.replayNodeAtRevision === 'function') {
       this.upsertNodeAtRevision = (node, expected, at, mustExist) => { this.requireWrite(); return inner.upsertNodeAtRevision!(node, expected, at, mustExist); };
       this.replayNodeAtRevision = (node) => { this.requireWrite(); return inner.replayNodeAtRevision!(node); };
+    }
+    if (typeof inner.commitNodeBatch === 'function') {
+      this.commitNodeBatch = (checks, writes, supersedes) => { this.requireWrite(); return inner.commitNodeBatch!(checks, writes, supersedes); };
     }
     if (typeof inner.upsertNodeKeepRevision === 'function') {
       this.upsertNodeKeepRevision = (node) => { this.requireWrite(); return inner.upsertNodeKeepRevision!(node); };

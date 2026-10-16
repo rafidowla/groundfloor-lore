@@ -37,6 +37,13 @@ const suites: Suite[] = [
     { name: 'MVP search burst (concurrent searches during FTS build must not crash)', script: 'mvp-search-burst-e2e.ts' },
     { name: 'MVP tarball install (npm pack -> npm install -> compiled dist/ smoke test)', script: 'mvp-tarball-install-e2e.ts' },
     { name: 'Search worker isolation (child-process crash containment + self-heal)', script: 'verbatim-search-worker-e2e.ts' },
+    // 3.35.0 production-readiness pass (test:e2e:335) - real daemon / real createLore, fresh temp homes
+    { name: '3.35 readiness: default SQLite engine end-to-end (fresh home, restart)', script: 'readiness335-sqlite-default-e2e.ts' },
+    { name: '3.35 readiness: conditional writes ifRevision/ifAbsent over HTTP', script: 'readiness335-conditional-writes-e2e.ts' },
+    { name: '3.35 readiness: outbox no-data-loss under transient replicator failures', script: 'readiness335-outbox-no-dataloss-e2e.ts' },
+    { name: '3.35 readiness: bulkIngest no re-embed on re-ingest (incl. restart)', script: 'readiness335-no-reembed-e2e.ts' },
+    { name: '3.35 readiness: upgrade from a v3.34.0 home (skips without LORE_V334_DIR)', script: 'readiness335-upgrade-from-334-e2e.ts' },
+    { name: '3.35 readiness: /ready in local mode (200 -> 503 -> 200, /health stays up)', script: 'readiness335-ready-local-e2e.ts' },
 ];
 
 function runOne(suite: Suite): Promise<number> {

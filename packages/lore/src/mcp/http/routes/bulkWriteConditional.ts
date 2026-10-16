@@ -20,9 +20,12 @@ import { createNodeIfAbsent, alreadyExistsError, type ConditionalInsertGraph, ty
 import { alreadySupersededMessage } from '../../../engines/graphShared/supersedeGuard.js';
 import { redactError } from '../../../security/logRedact.js';
 import { entryRevision, retractBulkNodeUpsert, undoBulkGraphWrite } from './bulkWriteRollback.js';
-import { recordHotWrite } from '../../../outbox/hotLane.js';
+import { commitHotRows, recordHotWrite } from '../../../outbox/hotLane.js';
 import { MAX_REVISION_ATTEMPTS, hasRevisionSupport, isRevisionConflict, revisionOf, type RevisionedGraph } from '../../../engines/graphShared/revision.js';
 import { BULK_LOCK_CHUNK_SIZE, chunkForLocking } from '../../../core/nodeWriteLock.js';
+import { shouldBatchWrite, writePreconditioned } from '../../../core/preconditionedWrite.js';
+import { hasNodeBatchSupport } from '../../../engines/graphShared/nodeBatch.js';
+import { newSupersedeIntent, type SupersedeIntent } from '../../../core/atomicSupersede.js';
 import { ItemConditionError, REVISION_UNSUPPORTED, checkItemConditions, revisionMismatchMessage, type FailedPrecondition, type Precondition } from '../../../core/conditionalChecks.js';
 
 /** The fields of a validated bulk item the conditional steps look at. */
@@ -35,7 +38,22 @@ export interface ConditionalSpec {
     ifRevision?: number;
     /** Phase 2b — write only if every listed node is at its listed revision. */
     preconditions?: Precondition[];
+    /** 3.35.0 (q) - set by {@link attachSupersedeIntents} when this item's `supersedes` commit atomically with its write. */
+    intent?: SupersedeIntent;
 }
+
+/** (q) Give every item with `supersedes` its atomic-supersede intent (graphs with the batch primitive only). */
+export function attachSupersedeIntents(specs: readonly ConditionalSpec[], graph: unknown, ctx: { workspace: string; initiator: string; store?: OutboxStore }): void {
+    for (const spec of specs) spec.intent = newSupersedeIntent(graph, spec.raw.id as string, spec.supersedes, ctx);
+}
+
+/** (q) The revision the item's node.upsert row predicted: what its write landed, before the marks bumped it. */
+export const landedForRow = (spec: ConditionalSpec | undefined, revision: number | undefined): number | undefined =>
+    revision !== undefined && spec?.intent?.applied ? revision - spec.intent.marks : revision;
+
+/** (q) The additive result field naming the targets whose half-done supersede this write completed. */
+export const repairedField = (spec: ConditionalSpec | undefined): { supersedesRepaired?: string[] } =>
+    spec?.intent?.applied && spec.intent.repaired.length > 0 ? { supersedesRepaired: spec.intent.repaired } : {};
 
 /** Ids a chunk must lock: its own ids, every `supersedes` target and every precondition id. */
 export function bulkLockIds(specs: readonly ConditionalSpec[]): string[] {
@@ -196,6 +214,38 @@ export async function writeStamped(
 }
 
 /**
+ * 3.35.0 (S1) - write an item that carries `preconditions` through the atomic node-batch primitive, so the
+ * preconditions hold ACROSS DAEMONS (see core/preconditionedWrite.ts). Same stamp discipline as
+ * {@link writeStamped}: the item's outbox row was recorded from `stamp`, an `ifRevision` item makes one
+ * attempt and a conflict is its answer, other items re-stamp in place on a revision conflict. An `ifAbsent`
+ * item (no stamp) is an insert. Only call when {@link shouldBatchWrite} holds.
+ */
+export async function writeSpecBatched(
+    graph: Parameters<typeof writePreconditioned>[0],
+    spec: ConditionalSpec,
+    stamp: RevisionStamp | undefined,
+): Promise<LoreNode> {
+    const node = spec.raw as unknown as NodeInput;
+    const preconditions = spec.preconditions ?? [];
+    if (spec.ifAbsent) return writePreconditioned(graph, node, preconditions, { kind: 'insert' }, spec.intent);
+    const st = stamp ?? { expected: revisionOf(await graph.getNode(spec.raw.id as string)), updatedAt: new Date().toISOString() };
+    return writeStamped(graph, spec, st, (expected) =>
+        writePreconditioned(graph, node, preconditions, { kind: 'cas', expected, updatedAt: st.updatedAt, mustExist: spec.ifRevision !== undefined }, spec.intent));
+}
+
+/** The graph write of one bulk item on the per-item path (`upsertOne`): create-only, stamped, batched-preconditions or plain. */
+export async function writeUpsertOneNode(
+    client: { insertNodeIfAbsent(n: never): Promise<LoreNode>; upsertNodeAtRevision(n: never, e: number, at: string, mustExist?: boolean): Promise<LoreNode>; upsertNode(n: never): Promise<LoreNode> },
+    graph: { getNode?(id: string): Promise<LoreNode | null> },
+    raw: { id?: unknown }, ifAbsent: boolean, stamp?: RevisionStamp, spec?: ConditionalSpec,
+): Promise<LoreNode> {
+    if (spec && shouldBatchWrite(graph, spec.preconditions, spec.intent)) return writeSpecBatched(graph, { ...spec, ifAbsent: ifAbsent || spec.ifAbsent }, ifAbsent ? undefined : stamp);
+    return ifAbsent ? client.insertNodeIfAbsent(raw as never)
+        : stamp ? writeStamped(graph, spec ?? { idx: -1, raw }, stamp, (expected) => client.upsertNodeAtRevision(raw as never, expected, stamp.updatedAt, spec?.ifRevision !== undefined))
+        : client.upsertNode(raw as never);
+}
+
+/**
  * Make a stamped item's outbox row say the revision its inline write actually
  * landed. The row was recorded BEFORE any write of the chunk with a predicted
  * `expected + 1`, and the prediction chains same-id items, so it is wrong
@@ -211,7 +261,15 @@ export async function writeStamped(
  * back by a compensating row (that one would sort even higher). Never throws;
  * a failure to re-record puts the original payload back so the write is not lost.
  */
-export async function reconcileOutboxRevision(input: {
+export async function reconcileOutboxRevision(input: ReconcileInput): Promise<OutboxEntry | null | undefined> {
+    const out = await reconcileRevision(input);
+    // R3: the item's write committed (the caller only gets here for an ok item), so its row - recorded
+    // pending_commit ahead of the write - becomes replicable. A row re-recorded above is already ready.
+    if (out) await commitHotRows(input.store, [out.id]);
+    return out;
+}
+
+interface ReconcileInput {
     store: OutboxStore | undefined;
     entry: OutboxEntry | null | undefined;
     stamp: RevisionStamp | undefined;
@@ -219,7 +277,9 @@ export async function reconcileOutboxRevision(input: {
     landed: number | undefined;
     workspace: string;
     id: string;
-}): Promise<OutboxEntry | null | undefined> {
+}
+
+async function reconcileRevision(input: ReconcileInput): Promise<OutboxEntry | null | undefined> {
     const { store, entry, stamp, landed, workspace, id } = input;
     if (!store || !entry || !stamp || landed === undefined) return entry;
     const recorded = entryRevision(entry);
@@ -281,7 +341,10 @@ export async function freshRevision(graph: { getNode?(id: string): Promise<LoreN
  *
  *   - a pure retry (it has `supersedes`, every target is already superseded by
  *     this item's id, and the node at this id exists) is `unchanged`: nothing is
- *     written, not even the item's fields;
+ *     written, not even the item's fields. 3.35.0 (q): on a graph with the atomic
+ *     supersede, a retry is only pure when every `supersedes` EDGE exists too; a
+ *     half-done supersede (3.34 left marks without edges) is written again so the
+ *     missing half is completed (and reported as `supersedesRepaired`);
  *   - a target superseded by a DIFFERENT id fails the item `already_superseded`;
  *   - `ifAbsent` on an id that holds any node fails the item `already_exists`;
  *   - a node that cannot be read fails the item (its write could not be judged).
@@ -289,7 +352,7 @@ export async function freshRevision(graph: { getNode?(id: string): Promise<LoreN
  * Returns the items to write, in order.
  */
 export async function guardBulkChunk<S extends ConditionalSpec>(
-    graph: { getNode?(id: string): Promise<LoreNode | null> },
+    graph: { getNode?(id: string): Promise<LoreNode | null>; queryEdges?(q: { source?: string; target?: string; relation?: string; limit: number; offset: number }): Promise<unknown[]> },
     specs: readonly S[],
     outcome: { fail(spec: NoInfer<S>, error: string, extra?: Record<string, unknown>): void; unchanged(spec: NoInfer<S>, revision?: number): void },
 ): Promise<S[]> {
@@ -312,13 +375,20 @@ export async function guardBulkChunk<S extends ConditionalSpec>(
             }
             if (refusal) { outcome.fail(spec, refusal); continue; }
             if (retried && existing) {
-                if (spec.ifRevision === undefined) { outcome.unchanged(spec, existing.revision); continue; }
+                const repair = hasNodeBatchSupport(graph) && await supersedeEdgeMissing(graph, id, spec.supersedes!);
+                if (spec.ifRevision === undefined) {
+                    if (repair) keep.push({ ...spec, ifAbsent: false }); else outcome.unchanged(spec, existing.revision);
+                    continue;
+                }
                 // Phase 2b — a pure retry that carries ifRevision n. The original request left the node at
                 // n + 1 (its write) + one bump per distinct claimed target, so that exact value is the only
                 // proof "the original landed and nothing else changed". Stored == n means the item never
                 // landed (fall through to a normal conditional write); anything else is ambiguous: mismatch.
                 const stored = revisionOf(existing);
-                if (stored === spec.ifRevision + 1 + new Set(spec.supersedes).size) { outcome.unchanged(spec, stored); continue; }
+                if (stored === spec.ifRevision + 1 + new Set(spec.supersedes).size) {
+                    if (repair) keep.push({ ...spec, ifAbsent: false, ifRevision: stored }); else outcome.unchanged(spec, stored);
+                    continue;
+                }
                 if (stored !== spec.ifRevision) { outcome.fail(spec, revisionMismatchMessage(id, spec.ifRevision, stored), { currentRevision: stored }); continue; }
             }
             if (spec.ifAbsent && existing) {
@@ -334,8 +404,17 @@ export async function guardBulkChunk<S extends ConditionalSpec>(
     return keep;
 }
 
+/** (q) True when any `successor -[supersedes]-> target` edge is missing (a 3.34-style half-done supersede). */
+async function supersedeEdgeMissing(graph: { queryEdges?(q: { source?: string; target?: string; relation?: string; limit: number; offset: number }): Promise<unknown[]> }, successorId: string, targets: readonly string[]): Promise<boolean> {
+    if (typeof graph.queryEdges !== 'function') return false;
+    for (const t of new Set(targets)) {
+        if (t !== successorId && (await graph.queryEdges({ source: successorId, target: t, relation: 'supersedes', limit: 1, offset: 0 })).length === 0) return true;
+    }
+    return false;
+}
+
 /** Per-item result of {@link writeBulkChunk}; `revision` is the stored revision after the write. */
-export type BulkWriteItem = { id: string; ok: boolean; error?: string; revision?: number; currentRevision?: number | null; failedPreconditions?: FailedPrecondition[] };
+export type BulkWriteItem = { id: string; ok: boolean; error?: string; revision?: number; supersedesRepaired?: string[]; currentRevision?: number | null; failedPreconditions?: FailedPrecondition[] };
 
 /**
  * Write a chunk through `bulkUpsertNodes`, keeping the order. A chunk with no
@@ -351,7 +430,7 @@ export async function writeBulkChunk(
     chunk: readonly ConditionalSpec[],
     stamps?: ReadonlyMap<number, RevisionStamp>,
 ): Promise<BulkWriteItem[]> {
-    if (!chunk.some((s) => s.ifAbsent) && !(stamps && stamps.size > 0)) return graph.bulkUpsertNodes(chunk.map((s) => s.raw as unknown as NodeInput));
+    if (!chunk.some((s) => s.ifAbsent || s.intent) && !(stamps && stamps.size > 0)) return graph.bulkUpsertNodes(chunk.map((s) => s.raw as unknown as NodeInput));
     const out: BulkWriteItem[] = [];
     let run: ConditionalSpec[] = [];
     const flush = async (): Promise<void> => {
@@ -361,17 +440,19 @@ export async function writeBulkChunk(
     };
     for (const spec of chunk) {
         const stamp = stamps?.get(spec.idx);
-        if (!spec.ifAbsent && !stamp && !hasConditions(spec)) { run.push(spec); continue; }
+        if (!spec.ifAbsent && !stamp && !hasConditions(spec) && !spec.intent) { run.push(spec); continue; }
         await flush();
         const id = spec.raw.id as string;
         // Phase 2b — the conditions are judged NOW, at the item's turn, so an earlier item of this chunk is visible.
         const refused = await checkSpecConditions(graph as { getNode?(id: string): Promise<LoreNode | null> }, spec);
         if (refused) { out.push({ id, ok: false, ...refused }); continue; }
         try {
-            const node = stamp && hasRevisionSupport(graph)
+            const node = shouldBatchWrite(graph, spec.preconditions, spec.intent)
+                ? await writeSpecBatched(graph, spec, stamp)
+                : stamp && hasRevisionSupport(graph)
                 ? await writeStamped(graph as { getNode?(id: string): Promise<LoreNode | null> }, spec, stamp, (expected) => graph.upsertNodeAtRevision(spec.raw as unknown as NodeInput, expected, stamp.updatedAt, spec.ifRevision !== undefined))
                 : await createNodeIfAbsent(graph, spec.raw as unknown as NodeInput);
-            out.push({ id, ok: true, ...(node.revision !== undefined ? { revision: node.revision } : {}) });
+            out.push({ id, ok: true, ...(node.revision !== undefined ? { revision: node.revision } : {}), ...repairedField(spec) });
         } catch (err) {
             if (err instanceof ItemConditionError) out.push({ id, ok: false, ...err.payload });
             else out.push({ ...classifyItemWriteError(err), id });

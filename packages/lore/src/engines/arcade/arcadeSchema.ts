@@ -47,8 +47,11 @@ export const VERBATIM_TYPE = 'LoreVerbatim';
  * DDL (backfill of pre-v4 rows) — see arcadeNodeScopes.upgradeNodeScopes.
  * v5 = LoreNode.revision (per-node monotonic write counter, conditional writes
  * Phase 2a). Purely additive: rows without it read as 0, so no data step.
+ * v6 = LoreNode.txTouch (3.35.0 commitNodeBatch): a write-only counter the batch
+ * primitive bumps on each PRECONDITION record to turn a read into a validated write
+ * (ArcadeDB does not validate reads). Purely additive; never projected into reads.
  */
-export const ARCADE_SCHEMA_VERSION = 5;
+export const ARCADE_SCHEMA_VERSION = 6;
 
 /**
  * LoreNode scalar properties. STRING for everything the adapter round-trips as
@@ -92,6 +95,11 @@ export const NODE_PROPS: ReadonlyArray<readonly [string, string]> = [
   //    statement as the write (`revision = ifnull(revision, 0) + 1`); NULL on a
   //    pre-v5 row reads as 0. No backfill needed.
   ['revision', 'LONG'],
+  // ── v6: write-only touch counter (3.35.0). `commitNodeBatch` bumps it on every precondition
+  //    record (`txTouch = ifnull(txTouch, 0) + 1`) so a rival commit on that record aborts one of
+  //    the two transactions. Never read, never in a projection; `revision`/`updatedAt` are NOT
+  //    touched by it. A same-value SET (`revision = revision`) does not dirty a record - hence a counter.
+  ['txTouch', 'LONG'],
 ];
 
 /** LoreVerbatim scalar properties (the `embedding` ARRAY_OF_FLOATS + its HNSW

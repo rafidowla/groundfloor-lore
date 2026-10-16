@@ -369,7 +369,57 @@ class FakeArcade {
         if (/^DELETE VERTEX FROM LoreNode WHERE id = :id$/.test(sql)) { this.nodes.delete(String(params['id'])); return { result: [] }; }
         return { result: [] }; // DDL
     }
+    /**
+     * 3.35.0 (q): a write with `supersedes` is ONE commitNodeBatch sqlscript (`BEGIN; ... COMMIT;`). This models what
+     * ArcadeDB does with it: nothing lands unless every statement passes, and a lost claim answers `failed: supersede`.
+     */
+    private runBatchScript(script: string, params: Row): { result: unknown[] } {
+        const lines = script.split('\n');
+        const apply: Array<() => void> = [];
+        const assignOf = (line: string, prefix: string): Row => {
+            const a: Row = {};
+            for (const m of line.matchAll(/(\w+) = :(\w+)/g)) a[m[1]!] = params[m[2]!];
+            void prefix;
+            return a;
+        };
+        for (let i = 0; i < lines.length; i++) {
+            const l = lines[i]!;
+            let m = /^INSERT INTO LoreNode SET (.+);$/.exec(l);
+            if (m) {
+                const a = assignOf(m[1]!, ''); const id = String(a['id']);
+                this.inserts++;
+                this.beforeInsert?.(id, this);
+                if (this.nodes.has(id)) throw new ArcadeHttpError(409, 'Duplicated key [' + id + '] found on index LoreNode[id]');
+                apply.push(() => this.put(id, { ...a, revision: 1 }));
+                continue;
+            }
+            m = /^LET w\d+ = UPDATE LoreNode SET (.+) WHERE id = :(w\d+_id) AND /.exec(l);
+            if (m) {
+                const a = assignOf(m[1]!, ''); const id = String(params[m[2]!]);
+                apply.push(() => this.put(id, { ...a, revision: Number(this.nodes.get(id)?.['revision'] ?? 0) + 1 }));
+                continue;
+            }
+            m = /^LET m\d+ = UPDATE LoreNode SET supersededBy = :sp_sid.* WHERE id = :(m\d+_id) AND /.exec(l);
+            if (m) {
+                this.supersedeUpdates++;
+                const id = String(params[m[1]!]);
+                this.beforeSupersede?.(id, this);
+                const row = this.nodes.get(id);
+                const cur = row?.['supersededBy'];
+                if (!row || (cur && cur !== '' && cur !== params['sp_sid'])) {
+                    const idx = /"i":(\d+)/.exec(lines[i + 1] ?? '');
+                    return { result: [{ value: { failed: 'supersede', i: Number(idx![1]) } }] }; // rolled back: nothing applied
+                }
+                apply.push(() => { row['supersededBy'] = params['sp_sid']; row['supersededAt'] = params['sp_at']; row['supersededReason'] = params['sp_reason']; });
+                continue;
+            }
+            if (l === 'COMMIT;') break;
+        }
+        for (const f of apply) f();
+        return { result: [{ value: { ok: true } }] };
+    }
     async commandScript(_db: string, script: string, params: Row = {}): Promise<{ result: unknown[] }> {
+        if (script.startsWith('BEGIN;')) return this.runBatchScript(script, params);
         for (const line of script.split('\n')) {
             const m = /^UPDATE LoreNode SET (.+) UPSERT WHERE id = :(n\d+_)id;$/.exec(line);
             if (!m) continue;

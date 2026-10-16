@@ -63,6 +63,7 @@ import {
 import { hashToken, closeTokenDb } from '../engines/arcade/arcadeAuthResolver.js';
 import { preflightKmsSelfTest } from '../engines/arcade/arcadeSecretStore.js';
 import { createArcadeReadinessFromEnv, type ArcadeReadiness } from './arcadeReadiness.js';
+import { writeReadyResponse } from './readyResponse.js';
 import { buildArcadeHostPolicy, type ArcadeHostPolicy } from '../security/arcadeHostPolicy.js';
 import { HOST_NOT_ALLOWED } from './http/errorCodes.js';
 import type { LoreInstance } from './server.js';
@@ -220,14 +221,7 @@ export async function arcadeDispatch(
     // caller gets only the status; the failure reason/detail is operator-only.
     if ((pathname === '/ready' || pathname === '/api/ready') && (method === 'GET' || method === 'HEAD')) {
         const r = await deps.readiness.check();
-        const base = { status: r.ready ? 'ready' : 'not_ready', version: VERSION, mode: 'arcade' };
-        const operator = isOperatorBearer(req, deps.authToken, deps.sharedSecret);
-        const body = operator
-            ? { ...base, ...(r.reason ? { reason: r.reason, detail: r.detail } : {}), latencyMs: r.latencyMs, checkedAgeMs: Math.max(0, Date.now() - r.checkedAt) }
-            : base;
-        if (!r.ready) res.setHeader('Retry-After', '2');
-        res.setHeader('Cache-Control', 'no-store');
-        writeJson(res, r.ready ? 200 : 503, body);
+        writeReadyResponse(res, r, 'arcade', isOperatorBearer(req, deps.authToken, deps.sharedSecret));
         return;
     }
 

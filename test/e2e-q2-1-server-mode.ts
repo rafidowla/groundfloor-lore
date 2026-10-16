@@ -96,6 +96,18 @@ async function spawnDaemon(opts: {
     dataplaneUrl?: string;
 }): Promise<DaemonHandle> {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-q2-1-'));
+
+    // Since 3.26.0 (cloud parity C items 6/7, CHANGELOG "Cloud data is keyed by a permanent workspace id") a
+    // cloud-mode host refuses a Lore workspace that is not in its own workspaces.json
+    // (cloud_scope_workspace_not_allowed), so seed the workspaces this suite writes to.
+    {
+        const gfHome = path.join(home, '.groundfloor');
+        fs.mkdirSync(gfHome, { recursive: true });
+        fs.writeFileSync(path.join(gfHome, 'workspaces.json'), JSON.stringify({
+            active: 'default',
+            workspaces: ['default', 'tenant-alpha', 'tenant-beta'].map((name) => ({ name, path: path.join(gfHome, name), createdAt: new Date().toISOString() })),
+        }, null, 2));
+    }
     const port = await findFreePort();
     const env: NodeJS.ProcessEnv = {
         PATH: process.env.PATH,

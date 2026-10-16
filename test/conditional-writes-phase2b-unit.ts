@@ -181,7 +181,52 @@ class FakeArcade {
         if (/^DELETE VERTEX FROM LoreNode WHERE id = :id$/.test(sql)) { this.nodes.delete(String(params['id'])); return { result: [] }; }
         return { result: [] }; // DDL
     }
-    async commandScript(): Promise<{ result: unknown[] }> { return { result: [] }; }
+    /**
+     * Minimal interpreter for the commitNodeBatch sqlscript (engines/arcade/arcadeNodeBatch.ts): touches and
+     * cas writes are guarded by the stored revision, inserts fail on a taken id, any failure rolls back everything.
+     */
+    async commandScript(_db: string, script: string, params: Row = {}): Promise<{ result: unknown[] }> {
+        if (!script.startsWith('BEGIN;')) return { result: [] }; // schema DDL
+        const staged = new Map<string, Row>();
+        const get = (id: string): Row | undefined => staged.get(id) ?? this.nodes.get(id);
+        const revOf = (id: string): number => Number(get(id)?.['revision'] ?? 0) || 0;
+        const lines = script.split('\n');
+        const fail = (next: string): { result: unknown[] } => ({ result: [{ value: JSON.parse(/RETURN (\{.*\});/.exec(next)![1]!) }] });
+        for (let n = 0; n < lines.length; n++) {
+            const line = lines[n]!;
+            const touch = /^LET t(\d+) = UPDATE LoreNode SET txTouch/.exec(line);
+            if (touch) {
+                const id = String(params[`t${touch[1]}_id`]);
+                if (!get(id) || revOf(id) !== params[`t${touch[1]}_rev`]) return fail(lines[n + 1]!);
+                staged.set(id, { ...get(id)!, txTouch: Number(get(id)!['txTouch'] ?? 0) + 1 });
+                continue;
+            }
+            const cas = /^LET w(\d+) = UPDATE LoreNode SET /.exec(line);
+            if (cas) {
+                const p = `w${cas[1]}_`;
+                const id = String(params[`${p}id`]);
+                this.conditionalUpdates++;
+                this.beforeConditional?.(id, this);
+                if (revOf(id) !== params[`${p}exp`]) return fail(lines[n + 1]!);
+                const rest: Row = {};
+                for (const [k, v] of Object.entries(params)) if (k.startsWith(p) && k !== `${p}exp`) rest[k.slice(p.length)] = v;
+                staged.set(id, { ...(get(id) ?? { id }), ...rest, revision: revOf(id) + 1 });
+                continue;
+            }
+            const ins = /^INSERT INTO LoreNode SET /.exec(line);
+            if (ins) {
+                const m = /:(w\d+_)id\b/.exec(line)!;
+                const p = m[1]!;
+                const id = String(params[`${p}id`]);
+                if (get(id)) throw new ArcadeHttpError(409, '{"exception":"com.arcadedb.exception.DuplicatedKeyException"}');
+                const rest: Row = {};
+                for (const [k, v] of Object.entries(params)) if (k.startsWith(p)) rest[k.slice(p.length)] = v;
+                staged.set(id, { ...rest, revision: 1 });
+            }
+        }
+        for (const [id, r] of staged) this.nodes.set(id, r);
+        return { result: [{ value: { ok: true } }] };
+    }
     async query(_db: string, sql: string, params: Row = {}): Promise<{ result: Row[] }> {
         if (/FROM LoreNode WHERE id = :id LIMIT 1$/.test(sql)) { const r = this.nodes.get(String(params['id'])); return { result: r ? [{ ...r }] : [] }; }
         if (/FROM LoreNode WHERE id IN :ids$/.test(sql)) { return { result: (params['ids'] as string[]).filter((i) => this.nodes.has(i)).map((i) => ({ ...this.nodes.get(i)! })) }; }

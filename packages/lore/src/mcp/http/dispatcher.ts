@@ -470,6 +470,7 @@ async function dispatchAfterGates(
         dataplane: deps.dataplane,
         getOutboxStats: deps.getOutboxStats,
         outboxLagCache: deps.outboxLagCache,
+        outboxStore: deps.outboxStore,
     })) return;
 
     // Sprint C1 — /metrics endpoint (Prometheus text format).

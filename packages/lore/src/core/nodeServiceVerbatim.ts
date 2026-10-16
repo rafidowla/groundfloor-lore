@@ -63,12 +63,27 @@ export type PriorNode = LoreNode | null | undefined;
  * is written: without the prior state a failed write could not be undone, and
  * the stored `security_scopes` could not be carried onto the new write.
  */
+/**
+ * (B) The read before a write failed, so nothing was written. Still an `Error` with the same message and
+ * `cause` as before; the class only lets the HTTP route tell "the database did not answer the pre-write
+ * read" (a retryable 503) from any other failure (500 as ever).
+ */
+export class PriorReadError extends Error {
+    constructor(message: string, options: { cause: unknown }) {
+        super(message, options);
+        this.name = 'PriorReadError';
+    }
+}
+
+export const isPriorReadError = (e: unknown): e is PriorReadError =>
+    e instanceof PriorReadError || (e as { name?: unknown } | null)?.name === 'PriorReadError';
+
 export async function readPriorNode(targetGraph: NodeWriteGraph, id: string): Promise<PriorNode> {
     if (typeof targetGraph.getNode !== 'function') return undefined;
     try {
         return await targetGraph.getNode(id);
     } catch (readErr) {
-        throw new Error(
+        throw new PriorReadError(
             `nodeUpsert could not read the current state of ${redactId(id)} before writing (${redactError(readErr)}); nothing was written`,
             { cause: readErr },
         );

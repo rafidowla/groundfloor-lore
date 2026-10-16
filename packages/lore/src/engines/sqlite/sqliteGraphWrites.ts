@@ -101,7 +101,7 @@ export async function replayNodeAtRevision(db: SqliteDb, node: LoreNode): Promis
     }
 }
 
-type NodeWriteMode =
+export type NodeWriteMode =
     | { mode: 'bump'; updatedAt: string }
     | { mode: 'keep'; updatedAt: string }
     | { mode: 'conditional'; updatedAt: string; expectedRevision: number; mustExist?: boolean }
@@ -122,6 +122,19 @@ async function writeNode(
     node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
     m: NodeWriteMode,
 ): Promise<LoreNode> {
+    return writeNodeSync(db, node, m);
+}
+
+/**
+ * The synchronous body of {@link writeNode} (3.35.0, R7): `commitNodeBatch` runs several writes inside one
+ * `db.transaction(...).immediate()`, which cannot await, so it calls this directly. Same statements, same
+ * errors (RevisionConflictError / LoreGraphError), thrown synchronously.
+ */
+export function writeNodeSync(
+    db: SqliteDb,
+    node: Omit<LoreNode, 'createdAt' | 'updatedAt' | 'syncedAt'>,
+    m: NodeWriteMode,
+): LoreNode {
     try {
         const now = m.updatedAt;
         const existing = readRawNode(db, node.id);

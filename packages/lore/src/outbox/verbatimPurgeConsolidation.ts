@@ -25,7 +25,8 @@
  * 'verbatim.purge' (every id absent) is unchanged.
  */
 
-import { dispatch, purgeIdsOf, UnwiredOperationKindError, MissingPayloadError } from './dispatcher.js';
+import { dispatch, purgeIdsOf } from './dispatcher.js';
+import { settleReplayFailure } from './failureDisposition.js';
 import type { OutboxEntry } from './types.js';
 import { SUPERSEDED_DEAD_ERROR } from './supersession.js';
 import { claimEntry } from './replicatorClaim.js';
@@ -57,16 +58,9 @@ export function collectVerbatimPurgeRun(batch: readonly OutboxEntry[], start: nu
 /** Record one row's failure exactly as replicateOne does (minus the
  *  node.upsert-only half-completion reaper). */
 async function settleFailure(deps: VerbatimConsolidationDeps, e: OutboxEntry, err: unknown): Promise<void> {
-    const msg = (err as Error).message;
-    const attempts = (e.attempts ?? 0) + 1;
-    if (err instanceof UnwiredOperationKindError || err instanceof MissingPayloadError || attempts >= deps.maxAttempts) {
-        await deps.store.markEntryStatus!(e.id, 'dead', { error: msg, bumpAttempt: true });
-        deps.onDead();
-        deps.log(`[outbox replicator] entry ${e.id} (verbatim.purge consolidated) marked dead: ${msg}`);
-    } else {
-        await deps.store.markEntryStatus!(e.id, 'failed', { error: msg, bumpAttempt: true });
-        deps.onFailure();
-    }
+    await settleReplayFailure(deps.store, e, err, deps.disposition, {
+        label: 'verbatim.purge consolidated', onDead: deps.onDead, onFailure: deps.onFailure, log: deps.log,
+    });
 }
 
 const maxSeq = (rows: OutboxEntry[], from: number | null): number | null =>

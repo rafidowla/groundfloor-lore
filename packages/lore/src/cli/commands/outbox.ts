@@ -11,8 +11,9 @@
  * BACKLOG-outbox-replicator-duplicate-retry-artifact.md.
  *
  * Usage:
- *   lore outbox drain-failed [--workspace <ws>] [--check-substrate]
- *                            [--mark-dead] [--dry-run] [--force]
+ *   lore outbox drain-failed [--lore-dir <path>] [--workspace <ws>]
+ *                            [--check-substrate] [--mark-dead] [--dry-run]
+ *                            [--force]
  *
  * The job opens the same SQLite outbox the daemon uses, which is safe to
  * touch concurrently — the underlying markEntryStatus mutation is a single
@@ -39,6 +40,7 @@
  * untouched and does not go anywhere near a graph store.
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
 import type { WorkspaceGraph } from '../../engines/openWorkspaceGraph.js';
 
@@ -52,6 +54,8 @@ import { getActiveWorkspacePath, getActiveWorkspaceName } from '../../config/wor
  * results directly so we don't have to spin a LocalGraph in CI).
  */
 export interface DrainFlags {
+    /** Absolute path to a `.lore/` directory, for embedded hosts (see --lore-dir). */
+    loreDir?: string;
     workspace?: string;
     checkSubstrate: boolean;
     markDead: boolean;
@@ -67,7 +71,7 @@ export interface DrainFlags {
 
 const DRAIN_SPEC: ArgSpec = {
     bool: ['--dry-run', '--check-substrate', '--no-check-substrate', '--mark-dead', '--force'],
-    value: ['--workspace', '--limit'],
+    value: ['--lore-dir', '--workspace', '--limit'],
     aliases: { '-h': '--help' },
     help: true,
 };
@@ -92,6 +96,7 @@ export function parseDrainFlags(args: string[]): DrainFlags {
     if (p.has('--no-check-substrate')) out.checkSubstrate = false;
     if (p.has('--mark-dead')) out.markDead = true;
     if (p.has('--force')) out.force = true;
+    out.loreDir = p.get('--lore-dir');
     out.workspace = p.get('--workspace');
     const lim = p.get('--limit');
     if (lim !== undefined) {
@@ -118,25 +123,36 @@ export interface DrainGraphRegistry<G = WorkspaceGraph> {
  * wireOutbox boot-fallback contract); `getGraphForWorkspace` routes each row's
  * probe to its OWN workspace's graph via the registry.
  */
-export function buildDrainWiringInput<G>(opts: {
+export function buildDrainWiringInput<G, V = never>(opts: {
     loreDir: string;
-    bootGraph: G;
-    registry: DrainGraphRegistry<G>;
+    bootGraph?: G;
+    registry?: DrainGraphRegistry<G>;
+    /** 3.35.0 — verbatim content witness (see outboxDrainVerbatim.ts). */
+    verbatim?: {
+        getVerbatim: () => V;
+        getVerbatimForWorkspace: () => (ws: string) => Promise<V>;
+    };
 }): {
     loreDir: string;
     getSyncEngine: () => never;
-    getGraph: () => G;
-    getGraphForWorkspace: () => (ws: string) => Promise<G>;
+    getGraph?: () => G;
+    getGraphForWorkspace?: () => (ws: string) => Promise<G>;
+    getVerbatim?: () => V;
+    getVerbatimForWorkspace?: () => (ws: string) => Promise<V>;
 } {
+    const { bootGraph, registry, verbatim } = opts;
     return {
         loreDir: opts.loreDir,
         getSyncEngine: () => {
             throw new Error('outbox drain-failed: syncEngine not needed for self-heal path');
         },
-        getGraph: () => opts.bootGraph,
+        ...(bootGraph !== undefined ? { getGraph: () => bootGraph } : {}),
         // SP-F3 resolver convention: route each row's substrate probe to its OWN
         // workspace's graph instead of the boot-bound one.
-        getGraphForWorkspace: () => (ws: string) => opts.registry.getGraphHandle(ws),
+        ...(registry ? { getGraphForWorkspace: () => (ws: string) => registry.getGraphHandle(ws) } : {}),
+        // Without these the dispatcher's verbatim.upsert case returns
+        // 'content-witness-unwired' for EVERY verbatim row (3.35.0 fix).
+        ...(verbatim ? { getVerbatim: verbatim.getVerbatim, getVerbatimForWorkspace: verbatim.getVerbatimForWorkspace } : {}),
     };
 }
 
@@ -147,6 +163,9 @@ Usage:
   lore outbox drain-failed [options]
 
 Options:
+  --lore-dir <path>     Absolute path to the '.lore/' directory holding the
+                        outbox, for embedded hosts (see below). Same
+                        semantics as 'lore outbox requeue-dead --lore-dir'.
   --workspace <ws>      Restrict to one workspace (default: all)
   --check-substrate     Probe substrate per row before deciding (default true)
   --no-check-substrate  Skip substrate probe; pair with --mark-dead to evict
@@ -171,14 +190,34 @@ Behavior:
   rescuing rows the replicator already gave up on before O6 shipped).
 
   For each row:
-    - substrate confirms data is present → mark 'replicated' (recovered)
+    - substrate confirms data is present → mark 'replicated' (recovered).
+      For verbatim.upsert rows "present" means the stored row's content
+      hash equals the hash the payload would persist (the verbatim store
+      is opened read-only for this); a row with different content stays.
     - substrate confirms data is absent  → leave 'failed' (or mark
       'dead' when --mark-dead is set)
     - verifier hook unwired for kind     → leave 'failed' (the kind
       is not self-healable — operator may need manual intervention)
 
+  The summary ends with a "by reason" table: how many rows ended with each
+  verdict (substrate-content-matches, substrate-content-stale,
+  substrate-missing-verbatim, ...) and up to 5 example ids each. It is
+  printed on every run, --dry-run included, so you can see WHY before
+  anything is written.
+
+Embedded hosts (--lore-dir):
+  Without --lore-dir this resolves the outbox the way the DAEMON lays it
+  out: <LORE_HOME>/workspaces/<active>/.lore/. An embedded host (Atlas)
+  keeps one Lore per workspace at its own dataDir, e.g.
+  <ATLAS_HOME>/lore-data/<workspace>/.lore/. Point --lore-dir at one such
+  directory; its verbatim store (and SQLite graph, when present) are
+  opened from the parent directory. Each is an independent outbox, so run
+  once per directory. The daemon/lock preflight does not apply to this
+  layout (there is no daemon home to check).
+
 Examples:
   lore outbox drain-failed --dry-run
+  lore outbox drain-failed --lore-dir ~/.groundfloor/atlas/lore-data/myws/.lore --dry-run
   lore outbox drain-failed --workspace default
   lore outbox drain-failed --workspace alpha --mark-dead
 `.trim();
@@ -243,12 +282,21 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
     const { wireOutbox } = await import('../../outbox/wiring.js');
 
     const home = loreHome();
-    // L-004 — the outbox SQLite lives in the ACTIVE workspace's .lore/
-    // (daemon-wide store) — same loreDir the daemon's wireOutbox gets. This
-    // must NOT change to the requested workspace, or we'd open a different /
-    // spurious outbox.sqlite.
-    const activeBasePath = getActiveWorkspacePath(home);
-    const loreDir = path.join(activeBasePath, '.lore');
+    // --lore-dir addresses an embedded host's outbox directly (mirrors
+    // requeue-dead). Otherwise L-004: the outbox SQLite lives in the ACTIVE
+    // workspace's .lore/ (daemon-wide store) — same loreDir the daemon's
+    // wireOutbox gets. That must NOT follow --workspace, or we'd open a
+    // different / spurious outbox.sqlite.
+    const embedded = !!flags.loreDir;
+    const loreDir = embedded
+        ? path.resolve(flags.loreDir!)
+        : path.join(getActiveWorkspacePath(home), '.lore');
+    if (embedded && !fs.existsSync(path.join(loreDir, 'outbox.sqlite'))) {
+        console.error(`  No outbox.sqlite under ${loreDir}`);
+        console.error('  Check the --lore-dir path points at a .lore/ directory.');
+        process.exitCode = 1;
+        return;
+    }
 
     console.log('');
     console.log(`  lore outbox drain-failed — workspace=${flags.workspace ?? '*'}`
@@ -260,6 +308,10 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
     // Populated only on the --check-substrate path (the only one that opens
     // a graph store) so it can be disposed once we're done with it.
     let registry: import('../../engines/localGraphRegistry.js').LocalGraphRegistry | null = null;
+    // 3.35.0 — read-only verbatim content witness + (embedded layout only) the
+    // host's own SQLite graph; both closed once the sweep is done.
+    let verbatimHandle: import('./outboxDrainVerbatim.js').DrainVerbatimHandle | null = null;
+    let embeddedGraph: WorkspaceGraph | null = null;
     // wiring.store is needed by both branches (--mark-dead below reads it
     // regardless of --check-substrate), so build it in each branch and
     // carry it out rather than duplicating the mark-dead loop.
@@ -285,81 +337,132 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
         const { isDaemonServingHome, daemonRefuseMessage, otherDaemonRefuseMessage, DEFAULT_PORT } =
             await import('./migrateWorkspaceToWorkspaceShared.js');
         const { LoreGraphError } = await import('../../engines/loreGraphError.js');
+        const { openDrainVerbatim } = await import('./outboxDrainVerbatim.js');
 
-        if (flags.force) {
-            console.error('proceeding with --force; daemon/lock checks skipped');
+        if (embedded) {
+            // Embedded layout: there is no daemon home to preflight. Open the
+            // host's own verbatim store (read-only facade) and, when one is on
+            // disk, its SQLite graph, straight from the parent of --lore-dir.
+            const basePath = path.dirname(loreDir);
+            try {
+                verbatimHandle = await openDrainVerbatim({ home, loreDir });
+            } catch (err) {
+                console.error(`  ! verbatim store under ${basePath} could not be opened (${(err as Error).message}); `
+                    + `verbatim rows will report content-witness-unwired.`);
+            }
+            const { graphStoresOnDisk } = await import('../../engines/openWorkspaceGraph.js');
+            const onDisk = graphStoresOnDisk(basePath);
+            if (onDisk.sqlite) {
+                const { SqliteGraph } = await import('../../engines/sqliteGraph.js');
+                const g = new SqliteGraph(basePath);
+                await g.initialize();
+                embeddedGraph = g as unknown as WorkspaceGraph;
+            } else if (onDisk.any) {
+                console.error('  ! graph store under this directory is not SQLite; graph-backed kinds will report unwired.');
+            }
+            const eg = embeddedGraph;
+            const wiring = wireOutbox(buildDrainWiringInput({
+                loreDir,
+                ...(eg ? { bootGraph: eg, registry: { getGraphHandle: async () => eg } } : {}),
+                ...(verbatimHandle ? { verbatim: verbatimHandle } : {}),
+            }));
+            store = wiring.store;
+            report = await wiring.replicator.runSelfHealSweep({
+                force: true,
+                graceMsOverride: 0,
+                dryRun: flags.dryRun,
+                workspace: flags.workspace ?? null,
+                limit: flags.limit,
+                includeDead: true,
+            });
         } else {
-            const probe = await isDaemonServingHome(home);
-            if (probe.servesHome) {
-                console.error(daemonRefuseMessage('lore outbox drain-failed --check-substrate'));
-                process.exit(1);
+            if (flags.force) {
+                console.error('proceeding with --force; daemon/lock checks skipped');
+            } else {
+                const probe = await isDaemonServingHome(home);
+                if (probe.servesHome) {
+                    console.error(daemonRefuseMessage('lore outbox drain-failed --check-substrate'));
+                    process.exit(1);
+                }
+                // servesHome:false covers "no daemon at all" AND "a process on
+                // this port did not confirm it serves this home" (rejected
+                // credential, or a genuinely different home) — only the first
+                // is actually safe to proceed on; treat the rest as "not proven
+                // safe" per the compact.ts/maintain.ts otherDaemonReachable fix.
+                if (probe.otherDaemonReachable) {
+                    console.error(otherDaemonRefuseMessage('lore outbox drain-failed --check-substrate', DEFAULT_PORT));
+                    process.exit(1);
+                }
             }
-            // servesHome:false covers "no daemon at all" AND "a process on
-            // this port did not confirm it serves this home" (rejected
-            // credential, or a genuinely different home) — only the first
-            // is actually safe to proceed on; treat the rest as "not proven
-            // safe" per the compact.ts/maintain.ts otherDaemonReachable fix.
-            if (probe.otherDaemonReachable) {
-                console.error(otherDaemonRefuseMessage('lore outbox drain-failed --check-substrate', DEFAULT_PORT));
-                process.exit(1);
+
+            // Build a registry so per-row workspace resolution probes the CORRECT
+            // declared graph engine, not the boot-bound one. Previously
+            // drain-failed called getOrOpen for both the boot graph and row resolver;
+            // on a Surreal-backed workspace that opened the real but EMPTY graph for
+            // the other engine, producing false negatives and potentially marking
+            // valid rows dead.
+            // The CLI is offline (no daemon), so autoEvict=false — we close() manually.
+            registry = new LocalGraphRegistry({ home, autoEvict: false });
+
+            // Pre-open the boot/active graph the verifier uses for legacy rows that have
+            // no workspace tag. getGraph must return a synchronous WorkspaceGraph (the
+            // wireOutbox boot-fallback contract), so we open it here and hand back the
+            // resolved instance. For an explicit --workspace, the boot fallback short-
+            // circuits to that workspace's own declared graph.
+            const bootWsName = flags.workspace ?? getActiveWorkspaceName(home);
+
+            const prevBudget = process.env['LORE_SURREAL_OPEN_BUDGET_MS'];
+            process.env['LORE_SURREAL_OPEN_BUDGET_MS'] = String(CHECK_SUBSTRATE_OPEN_BUDGET_MS);
+            let bootGraph;
+            try {
+                bootGraph = await registry.getGraphHandle(bootWsName);
+            } catch (err) {
+                if (err instanceof LoreGraphError && err.operation === 'openSurreal') {
+                    console.error(
+                        `lore outbox drain-failed --check-substrate: store is held by a running Lore `
+                        + `process (port ${DEFAULT_PORT}) — set LORE_PORT to reach it, or stop it and `
+                        + `retry. Pass --force if you are CERTAIN nothing else is writing to this workspace.`,
+                    );
+                    process.exit(1);
+                }
+                throw err;
+            } finally {
+                if (prevBudget === undefined) delete process.env['LORE_SURREAL_OPEN_BUDGET_MS'];
+                else process.env['LORE_SURREAL_OPEN_BUDGET_MS'] = prevBudget;
             }
+
+            // wireOutbox returns the store + replicator wired with the self-heal
+            // verifier hooks. We do NOT call replicator.start() — the CLI invokes
+            // runSelfHealSweep directly with `force: true` so the cadence gate is
+            // ignored AND the grace window is set to 0 (operators expect immediate
+            // action). The wiring input is built by the exported helper so the L-004
+            // routing is unit-testable.
+            // 3.35.0 — verbatim content witness through the daemon's own resolver.
+            // A failed open degrades to "unwired" for verbatim rows only; it must
+            // not take the graph-backed kinds down with it.
+            try {
+                verbatimHandle = await openDrainVerbatim({ home, bootWorkspace: bootWsName });
+            } catch (err) {
+                console.error(`  ! verbatim store for ${bootWsName} could not be opened (${(err as Error).message}); `
+                    + `verbatim rows will report content-witness-unwired.`);
+            }
+            const wiring = wireOutbox(buildDrainWiringInput({
+                loreDir, bootGraph, registry,
+                ...(verbatimHandle ? { verbatim: verbatimHandle } : {}),
+            }));
+            store = wiring.store;
+
+            report = await wiring.replicator.runSelfHealSweep({
+                force: true,
+                graceMsOverride: 0,
+                dryRun: flags.dryRun,
+                workspace: flags.workspace ?? null,
+                limit: flags.limit,
+                // Operator drain — dead-letter rows ARE in scope here (audit
+                // cluster 5: the routine self-heal tick must not get them).
+                includeDead: true,
+            });
         }
-
-        // Build a registry so per-row workspace resolution probes the CORRECT
-        // declared graph engine, not the boot-bound one. Previously
-        // drain-failed called getOrOpen for both the boot graph and row resolver;
-        // on a Surreal-backed workspace that opened the real but EMPTY graph for
-        // the other engine, producing false negatives and potentially marking
-        // valid rows dead.
-        // The CLI is offline (no daemon), so autoEvict=false — we close() manually.
-        registry = new LocalGraphRegistry({ home, autoEvict: false });
-
-        // Pre-open the boot/active graph the verifier uses for legacy rows that have
-        // no workspace tag. getGraph must return a synchronous WorkspaceGraph (the
-        // wireOutbox boot-fallback contract), so we open it here and hand back the
-        // resolved instance. For an explicit --workspace, the boot fallback short-
-        // circuits to that workspace's own declared graph.
-        const bootWsName = flags.workspace ?? getActiveWorkspaceName(home);
-
-        const prevBudget = process.env['LORE_SURREAL_OPEN_BUDGET_MS'];
-        process.env['LORE_SURREAL_OPEN_BUDGET_MS'] = String(CHECK_SUBSTRATE_OPEN_BUDGET_MS);
-        let bootGraph;
-        try {
-            bootGraph = await registry.getGraphHandle(bootWsName);
-        } catch (err) {
-            if (err instanceof LoreGraphError && err.operation === 'openSurreal') {
-                console.error(
-                    `lore outbox drain-failed --check-substrate: store is held by a running Lore `
-                    + `process (port ${DEFAULT_PORT}) — set LORE_PORT to reach it, or stop it and `
-                    + `retry. Pass --force if you are CERTAIN nothing else is writing to this workspace.`,
-                );
-                process.exit(1);
-            }
-            throw err;
-        } finally {
-            if (prevBudget === undefined) delete process.env['LORE_SURREAL_OPEN_BUDGET_MS'];
-            else process.env['LORE_SURREAL_OPEN_BUDGET_MS'] = prevBudget;
-        }
-
-        // wireOutbox returns the store + replicator wired with the self-heal
-        // verifier hooks. We do NOT call replicator.start() — the CLI invokes
-        // runSelfHealSweep directly with `force: true` so the cadence gate is
-        // ignored AND the grace window is set to 0 (operators expect immediate
-        // action). The wiring input is built by the exported helper so the L-004
-        // routing is unit-testable.
-        const wiring = wireOutbox(buildDrainWiringInput({ loreDir, bootGraph, registry }));
-        store = wiring.store;
-
-        report = await wiring.replicator.runSelfHealSweep({
-            force: true,
-            graceMsOverride: 0,
-            dryRun: flags.dryRun,
-            workspace: flags.workspace ?? null,
-            limit: flags.limit,
-            // Operator drain — dead-letter rows ARE in scope here (audit
-            // cluster 5: the routine self-heal tick must not get them).
-            includeDead: true,
-        });
     } else {
         // --no-check-substrate: skip the probe entirely. Used with
         // --mark-dead to forcibly evict every failed row from a
@@ -438,6 +541,16 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
         }
     }
 
+    // 3.35.0 — per-row verdicts grouped by reason, ALWAYS (dry-run included):
+    // totals alone hid why a row would not heal (the verbatim witness was
+    // silently unwired for every row).
+    const { formatReasonGroups } = await import('./outboxDrainVerbatim.js');
+    const reasonLines = formatReasonGroups(report.details);
+    if (reasonLines.length > 0) {
+        console.log('');
+        for (const line of reasonLines) console.log(line);
+    }
+
     if (flags.dryRun && report.examined > 0) {
         console.log('');
         console.log('  (dry run — nothing was written. Re-run without --dry-run to commit.)');
@@ -451,4 +564,6 @@ async function drainFailedSubcommand(args: string[]): Promise<void> {
     // pinned, so this releases the boot graph too (there is no daemon drain to
     // close it for us, unlike in the long-lived daemon).
     if (registry) await registry.disposeAll();
+    if (verbatimHandle) await verbatimHandle.close();
+    if (embeddedGraph) { try { await embeddedGraph.close(); } catch { /* best effort */ } }
 }

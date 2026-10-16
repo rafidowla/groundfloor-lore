@@ -488,6 +488,12 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         return sqliteHistory.getExistingIds(this.requireDb(), ids);
     }
 
+    /** 3.35.0 - bulkIngest's pre-embed probe: which prebuilt rows are already stored identically (see sqliteVerbatimWrite.ts). */
+    async findUnchangedRowIds(rows: Array<Record<string, unknown>>): Promise<string[]> {
+        if (!this.initialized || rows.length === 0) return [];
+        return sqliteWrite.findUnchangedRowIds(this.requireDb(), rows);
+    }
+
     /** 3.27.1 - stored embeddings by exact canonical row id (engine-neutral; verbatimGetVectors.ts). */
     async getVectors(ids: string[]): Promise<Map<string, number[]>> {
         const unique = normalizeGetVectorsIds(ids);

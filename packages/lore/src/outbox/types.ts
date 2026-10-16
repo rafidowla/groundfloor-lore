@@ -48,7 +48,12 @@ export type OutboxStatus =
     | 'replicating'  // replicator is mid-fan-out
     | 'replicated'   // all substrate writes acknowledged
     | 'failed'       // last attempt failed; will be retried
-    | 'dead';        // exceeded max attempts; needs operator attention
+    | 'dead'         // exceeded max attempts; needs operator attention
+    // 3.35.0 (R3) - recorded BEFORE its graph commit and not yet confirmed: invisible to the
+    // replicator (claim/list only see 'pending'/'failed'), flipped to 'pending' right after a
+    // successful commit, retracted on a definite failure, settled against the graph's committed
+    // revision after a crash or an outcome-unknown commit (outbox/pendingCommit.ts).
+    | 'pending_commit';
 
 /** Sprint O1 — discriminator the replicator dispatcher switches on.
  *  Backfill rule (per O0 audit): pre-O1 rows carry
@@ -247,6 +252,14 @@ export interface OutboxEntry {
      * failed rows don't re-fill the queue immediately after each tick.
      */
     nextAttemptAt?: string;
+    /** 3.35.0 (a) - ISO time of the row's FIRST transient failure (ArcadeDB
+     *  ConcurrentModification / outage). Persisted so a restart does not reset the
+     *  transient time ceiling. Unset until a transient failure happens. */
+    firstTransientAt?: string;
+    /** 3.35.0 (a) - transient failures so far; NOT counted in `attempts`. */
+    transientRetries?: number;
+    /** 3.35.0 (a) - why a 'dead' row was dead-lettered (failureDisposition.ts DeadReason). */
+    deadReason?: string; // failureDisposition.ts DeadReason
 }
 
 /** Spec used by callers to declare what they're about to do, before
@@ -324,6 +337,11 @@ export interface OutboxStore {
      *  (e.g. record a node.delete) rather than rely on an in-place rollback.
      *  Optional on the interface so legacy stores degrade to remove(). */
     removeIfPending?(entryId: string): Promise<boolean>;
+    /** 3.35.0 (R3) - flip `pending_commit` rows to `pending` (the graph commit they were recorded
+     *  ahead of succeeded). Rows in any other state are left alone. Returns the number flipped. */
+    markCommitted?(entryIds: string[]): Promise<number>;
+    /** 3.35.0 (R3) - every `pending_commit` row, oldest first (restart / outcome-unknown settle). */
+    listPendingCommit?(limit?: number): Promise<OutboxEntry[]>;
     /** 3.26.0 — atomic claim, `pending`/`failed` → `replicating`. Returns
      *  false when the row is not claimable: another replayer already holds
      *  it, it was already applied, it was retracted (`removeIfPending`)
@@ -381,8 +399,24 @@ export interface OutboxStore {
     markEntryStatus?(
         entryId: string,
         status: OutboxStatus,
-        info?: { error?: string; bumpAttempt?: boolean },
+        info?: { error?: string; bumpAttempt?: boolean; deadReason?: string },
     ): Promise<void>;
+    /** 3.35.0 (a) - record a TRANSIENT replay failure (ArcadeDB ConcurrentModification or
+     *  outage): the row goes to 'failed' with `nextAttemptAt`, `attempts` is NOT bumped,
+     *  `transientRetries` is incremented and `firstTransientAt` is set once (first failure
+     *  only) and returned. 'failed' (not 'pending') so the RA-6 supersession guard still
+     *  runs on the retry. Optional: a store without it makes every failure a counted one. */
+    recordTransientFailure?(
+        entryId: string,
+        info: { error: string; nextAttemptAt: string },
+    ): Promise<{ firstTransientAt: string; transientRetries: number } | undefined>;
+    /** 3.35.0 (a) - paged, read-only list of 'dead' rows for one workspace (newest dead first),
+     *  with the stored reason class. `limit` is hard-capped by the implementation. */
+    listDeadPage?(opts: { workspace: string; limit?: number; offset?: number }): Promise<OutboxEntry[]>;
+    /** 3.35.0 (a) - dead-letter counts for one workspace: `deadLettered` (genuinely discarded writes,
+     *  RA-6-superseded rows excluded), `deadSuperseded`, and `deadByReason` (failureDisposition.ts
+     *  reason classes + 'superseded' + 'unclassified' for rows that predate the column). */
+    deadLetterSummary?(workspace: string): Promise<{ deadLettered: number; deadSuperseded: number; deadByReason: Record<string, number> }>;
     /** Per-workspace replicator cursor read/write. */
     readReplicationState?(workspace: string): Promise<OutboxReplicationState>;
     writeReplicationState?(workspace: string, state: OutboxReplicationState): Promise<void>;
@@ -479,6 +513,9 @@ export interface OutboxStore {
 export interface OutboxWorkspaceStats {
     /** Count of entries with status in {pending, replicating, failed}. */
     depth: number;
+    /** 3.35.0 (R3) - rows recorded ahead of a graph commit that has not been confirmed yet. Counted
+     *  here only: never in `depth`, `lagSeconds` or `dead` (they are in-flight writes, not backlog). */
+    pendingCommit?: number;
     /** Seconds since the oldest pending entry's createdAt. 0 if depth=0. */
     lagSeconds: number;
     /** Count of ALL entries with status 'dead' — failed-for-good and superseded alike. */
@@ -488,13 +525,20 @@ export interface OutboxWorkspaceStats {
      *  is missing from the substrate. `dead - deadSuperseded` is the genuine
      *  dead-letter count. Optional so other store implementations stay valid. */
     deadSuperseded?: number;
+    /** 3.35.0 - `dead` split by reason class (permanent / unwired / invalid /
+     *  transient_ceiling / superseded / unclassified). Optional: other stores omit it. */
+    deadByReason?: Record<string, number>;
 }
 
 export interface OutboxAggregateStats {
     depth: number;
+    /** Sum of the per-workspace `pendingCommit` (3.35.0, R3). */
+    pendingCommit?: number;
     lagSeconds: number;
     dead: number;
     /** Subset of `dead` that is RA-6-superseded (see OutboxWorkspaceStats). */
     deadSuperseded?: number;
+    /** Sum of the per-workspace `deadByReason` (3.35.0). */
+    deadByReason?: Record<string, number>;
     perWorkspace: Record<string, OutboxWorkspaceStats>;
 }

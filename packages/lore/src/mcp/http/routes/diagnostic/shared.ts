@@ -10,7 +10,7 @@ import type { StorageBundle } from '../../../services.js';
 import type { ConfigManager } from '../../../../config/configManager.js';
 import type { LocalGraphRegistry } from '../../../../engines/localGraphRegistry.js';
 import type { RateLimiter } from '../../../../security/rateLimit.js';
-import type { OutboxAggregateStats } from '../../../../outbox/types.js';
+import type { OutboxAggregateStats, OutboxStore } from '../../../../outbox/types.js';
 import type { LoreGraphHandle } from '../../../../storage/loreStorageClient.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
@@ -55,6 +55,11 @@ export interface DiagnosticDeps {
      *  which workspace is over its backpressure threshold without
      *  poking outbox.sqlite directly. Optional. */
     outboxLagCache?: import('../../../../outbox/lagCache.js').OutboxLagCache;
+    /** 3.35.0 (a)/(p) - outbox store, for `deadLettered` in /api/stats and GET /api/outbox/dead.
+     *  In arcade mode this is the lane-pinned store (it only ever sees the caller's cell). */
+    outboxStore?: OutboxStore;
+    /** 3.35.0 (e) - readiness override for /ready (tests inject a probe-backed one). Absent: the shared per-store readiness. */
+    readiness?: import('../../../readiness.js').Readiness;
 }
 
 /**

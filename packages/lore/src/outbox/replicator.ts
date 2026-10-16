@@ -43,13 +43,16 @@
 
 import { isSupersededByLaterDelete } from './deleteAwareReplay.js';
 import type { DispatcherSubstrates } from './dispatcher.js';
-import { dispatch, MissingPayloadError, UnwiredOperationKindError, verifyApplied } from './dispatcher.js';
+import { dispatch, verifyApplied } from './dispatcher.js';
+import { settleReplayFailure, makeDispositionEnv, DEFAULT_TRANSIENT_CONFIG, type DispositionEnv } from './failureDisposition.js';
 import { consolidateVerbatimAt } from './verbatimPurgeConsolidation.js';
 import { keyOfEntry, SUPERSEDED_DEAD_ERROR, type EntityFamily } from './supersession.js';
 import type { OutboxLagCache } from './lagCache.js';
 import type { OutboxEntry, OutboxStore } from './types.js';
 import { claimEntry, SerialGate } from './replicatorClaim.js';
 import { DeferredEntities, ReplayDeferredError, releaseDeferred } from './replayDeferred.js';
+import { LogThrottle } from './logThrottle.js';
+import { newPendingCommitSweepState, sweepPendingCommits } from './pendingCommit.js';
 import { DeadLetterWatch } from './deadLetterWatch.js';
 import { interruptibleSleep, makeStopSignal, type StopSignal } from './interruptibleSleep.js';
 
@@ -121,6 +124,11 @@ export interface ReplicatorConfig {
      * short enough to bound the file.
      */
     pruneReplicatedOlderThanMs: number;
+    /** 3.35.0 (a): transient-failure (ArcadeDB conflict/outage) ceiling before dead-letter, default 24 h
+     *  (env LORE_OUTBOX_TRANSIENT_CEILING_MS), and full-jitter backoff base/cap (500 ms / 60 s). */
+    transientCeilingMs: number;
+    transientBaseMs: number;
+    transientCapMs: number;
 }
 
 export const DEFAULT_REPLICATOR_CONFIG: ReplicatorConfig = {
@@ -132,6 +140,7 @@ export const DEFAULT_REPLICATOR_CONFIG: ReplicatorConfig = {
     selfHealGraceMs: 5_000,
     selfHealBatchSize: 256,
     pruneReplicatedOlderThanMs: 7 * 24 * 60 * 60 * 1000,
+    ...DEFAULT_TRANSIENT_CONFIG,
 };
 
 /**
@@ -197,6 +206,11 @@ export interface ReplicatorWiring {
      *  routes that consult an unwired cache fail-open (no backpressure). */
     lagCache?: OutboxLagCache;
     onTickStart?: () => void; // 3.34.0: called at the start of every tick that has work
+    /** 3.35.0 (a): "nothing applied, replay later" test (failureDisposition.ts); only the ArcadeDB wiring
+     *  supplies one. Search-worker timeouts are deliberately not transient yet: follow-up. */
+    transientClassifier?: (err: unknown) => boolean;
+    /** Test seams for the transient ceiling and jitter. */
+    clock?: { now?: () => number; random?: () => number };
 }
 
 export interface ReplicatorStats {
@@ -225,6 +239,8 @@ export interface ReplicatorStats {
     /** SP-F2 — total 'replicated' rows deleted by the retention sweep
      *  since start. Surfaces in operator logs / health output. */
     pruned: number;
+    /** 3.35.0 (a) - transient replay failures rescheduled without counting an attempt. */
+    transientRetries: number;
 }
 
 export class OutboxReplicator {
@@ -232,6 +248,7 @@ export class OutboxReplicator {
     private readonly substrates: DispatcherSubstrates;
     private readonly cfg: ReplicatorConfig;
     private readonly log: (msg: string) => void;
+    private readonly flushLog: () => void;
     private readonly lagCache?: OutboxLagCache;
     private running = false;
     private loopPromise: Promise<void> | null = null;
@@ -242,17 +259,21 @@ export class OutboxReplicator {
     private readonly deferred = new DeferredEntities(); // 3.34.0: entities with a row deferred this tick
     private readonly stats: ReplicatorStats = {
         replicated: 0, failures: 0, dead: 0, ticks: 0, lastTickMs: 0,
-        selfHealed: 0, selfHealSweeps: 0, selfHealExamined: 0, pruned: 0,
+        selfHealed: 0, selfHealSweeps: 0, selfHealExamined: 0, pruned: 0, transientRetries: 0,
     };
+    private readonly disposition: DispositionEnv;
     private lastSelfHealAt = 0;
     private lastPruneAt = 0;
+    private readonly pcSweep = newPendingCommitSweepState();
 
     constructor(wiring: ReplicatorWiring) {
         this.store = wiring.store;
         this.substrates = wiring.substrates;
         this.cfg = { ...DEFAULT_REPLICATOR_CONFIG, ...(wiring.config ?? {}) };
-        this.log = wiring.log ?? ((m: string) => console.error(m));
+        const throttle = new LogThrottle(wiring.log ?? ((m: string) => console.error(m)));
+        this.log = (m) => throttle.log(m); this.flushLog = () => throttle.flush();
         this.lagCache = wiring.lagCache; this.deferred.onTickStart = wiring.onTickStart;
+        this.disposition = makeDispositionEnv(this.cfg, wiring.transientClassifier, wiring.clock);
     }
 
     /** Idempotent. No-op if already running. */
@@ -341,10 +362,9 @@ export class OutboxReplicator {
         }
     }
 
-    /** Internal: cadence-gated prune (piggybacks on the self-heal
-     *  interval so steady state costs one cheap indexed DELETE per
-     *  selfHealIntervalMs). */
+    /** Cadence-gated prune (rides the self-heal interval) + the pending_commit settle sweep (3.35.0 R3, idle ticks too). */
     private async maybePruneReplicated(): Promise<void> {
+        await sweepPendingCommits(this.pcSweep, { store: this.store, getNode: this.substrates.getNode, log: this.log });
         await this.runPruneSweep({ force: false });
     }
 
@@ -463,7 +483,7 @@ export class OutboxReplicator {
         try {
             const stats = await fn.call(this.store);
             this.lagCache?.refresh(stats);
-            this.deadLetterWatch.observe(stats.dead, this.log, stats.deadSuperseded);
+            this.deadLetterWatch.observe(stats.dead, this.log, stats.deadSuperseded, stats.deadByReason);
         } catch (err) {
             this.log(`[outbox replicator] lag-cache refresh failed: ${(err as Error).message}`);
         }
@@ -489,11 +509,8 @@ export class OutboxReplicator {
             } catch (err) {
                 this.log(`[outbox replicator] tick error: ${(err as Error).message}`);
             }
-            // Sprint O6 — self-heal sweep gated by selfHealIntervalMs.
-            // Runs after the main fan-out so the cadence is "1 sweep
-            // per N seconds of wall clock" rather than "1 sweep per N
-            // ticks" (idle ticks tick fast, busy ticks tick slow —
-            // tying to wall clock keeps cadence predictable).
+            this.flushLog(); // 3.35.0 (b): suppressed-count summaries of rate-limited lines
+            // Sprint O6 — self-heal sweep gated by selfHealIntervalMs, after the main fan-out: 1 sweep per N seconds of wall clock.
             await this.maybeSelfHeal();
             // SP-F2 — replicated-row retention, same wall-clock cadence.
             await this.maybePruneReplicated();
@@ -688,20 +705,7 @@ export class OutboxReplicator {
             }
             return true;
         } catch (err) {
-            const msg = (err as Error).message;
-            const isUnwired = err instanceof UnwiredOperationKindError;
-            const isInvalid = err instanceof MissingPayloadError;
-            for (const e of entries) {
-                const attempts = (e.attempts ?? 0) + 1;
-                if (isUnwired || isInvalid || attempts >= this.cfg.maxAttempts) {
-                    await this.store.markEntryStatus!(e.id, 'dead', { error: msg, bumpAttempt: true });
-                    this.stats.dead++;
-                    this.log(`[outbox replicator] entry ${e.id} (embed.batch consolidated) marked dead: ${msg}`);
-                } else {
-                    await this.store.markEntryStatus!(e.id, 'failed', { error: msg, bumpAttempt: true });
-                    this.stats.failures++;
-                }
-            }
+            for (const e of entries) await this.settleFailure(e, err, 'embed.batch consolidated');
             return false;
         }
     }
@@ -709,7 +713,7 @@ export class OutboxReplicator {
     /** Handles threaded into the verbatim upsert/purge consolidations. */
     private verbatimConsolidationDeps(): Parameters<typeof consolidateVerbatimAt>[0] {
         return {
-            store: this.store, substrates: this.substrates, maxAttempts: this.cfg.maxAttempts,
+            store: this.store, substrates: this.substrates, disposition: this.disposition,
             onReplicated: () => { this.stats.replicated++; },
             onFailure: () => { this.stats.failures++; },
             onDead: () => { this.stats.dead++; },
@@ -740,17 +744,10 @@ export class OutboxReplicator {
             return true;
         } catch (err) {
             if (err instanceof ReplayDeferredError) return releaseDeferred(this.store, entry, err, this.deferred, (m) => this.log(m));
-            const msg = (err as Error).message;
-            const attempts = (entry.attempts ?? 0) + 1;
-            const isUnwired = err instanceof UnwiredOperationKindError;
-            const isInvalid = err instanceof MissingPayloadError;
-            // Invalid payloads + unwired kinds will never succeed on
-            // retry — mark them dead immediately rather than burning
-            // attempts.
-            if (isUnwired || isInvalid || attempts >= this.cfg.maxAttempts) {
-                await this.store.markEntryStatus!(entry.id, 'dead', { error: msg, bumpAttempt: true });
-                this.stats.dead++;
-                this.log(`[outbox replicator] entry ${entry.id} (${entry.operationKind}) marked dead: ${msg}`);
+            // Invalid payloads + unwired kinds will never succeed on retry: dead at once. A transient
+            // ArcadeDB error is rescheduled without burning an attempt (failureDisposition.ts).
+            const out = await this.settleFailure(entry, err, entry.operationKind ?? 'unknown');
+            if (out.kind === 'dead') {
                 // 2026-06-09 — half-completion reaper. Hot-lane writes
                 // verbatim before the durable graph-upsert attempt; if the
                 // graph upsert exhausts retries the verbatim row becomes a
@@ -760,12 +757,16 @@ export class OutboxReplicator {
                 await this.reapHalfCompletion(entry).catch((reapErr) => {
                     this.log(`[outbox replicator] reap-after-dead failed for ${entry.id} (non-fatal): ${(reapErr as Error).message}`);
                 });
-            } else {
-                await this.store.markEntryStatus!(entry.id, 'failed', { error: msg, bumpAttempt: true });
-                this.stats.failures++;
             }
             return false;
         }
+    }
+
+    /** Record a failed replay (dead / transient / counted) and bump the matching stats. */
+    private settleFailure(entry: OutboxEntry, err: unknown, label: string) {
+        return settleReplayFailure(this.store, entry, err, this.disposition, {
+            label, onDead: () => { this.stats.dead++; }, onFailure: () => { this.stats.failures++; }, log: (m) => this.log(m),
+        }).then((out) => { if (out.kind === 'transient') this.stats.transientRetries++; return out; });
     }
 
     /** True when replaying `entry` would corrupt newer state. RA-6 (+ cross-kind, supersession.ts): a

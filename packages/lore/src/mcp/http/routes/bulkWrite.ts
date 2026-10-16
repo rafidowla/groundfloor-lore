@@ -55,13 +55,14 @@ import { recordHotWriteBatch } from '../../../outbox/hotLane.js';
 import { entryRevision, readInlinePriors, retractBulkNodeUpsert, undoBulkGraphWrite } from './bulkWriteRollback.js';
 import { supersedesVisibilityFromDeps } from '../../../security/nodeWriteGate.js';
 import { resolveGraph, writeWorkspaceNotFound } from './bulkWriteWorkspace.js';
-import { bulkLockIds, bulkOutboxPayload, checkChunkConditions, checkSpecConditions, chunkSpecsForLocking, freshRevision, guardBulkChunk, writeStamped, type ConditionalSpec, type RevisionStamp, stampBulkRevisions, writeBulkChunk, undoLostClaim, reconcileOutboxRevision } from './bulkWriteConditional.js';
+import { attachSupersedeIntents, landedForRow, repairedField, bulkOutboxPayload, checkChunkConditions, checkSpecConditions, chunkSpecsForLocking, freshRevision, guardBulkChunk, writeUpsertOneNode, type ConditionalSpec, type RevisionStamp, stampBulkRevisions, writeBulkChunk, undoLostClaim, reconcileOutboxRevision } from './bulkWriteConditional.js';
 import { ItemConditionError, parseConditionalFields, type FailedPrecondition, type Precondition } from '../../../core/conditionalChecks.js';
 import { classifyItemWriteError, isOutcomeUnknownResult } from './bulkWriteErrors.js';
 import { bulkScopeDeps, blockedBulkUpsertIds, ID_UNAVAILABLE_ITEM_ERROR, storedScopesResolver } from './bulkWriteScope.js';
 import type { ItemScopeDeps } from '../../../security/itemScopes.js';
-import { withNodeLocks } from '../../../core/nodeWriteLock.js';
+import { withBulkChunkLocks } from './bulkWriteLocks.js';
 import { flushBulkQueuedEmbeds, buildVerbatimSpec, type VerbatimSpec } from './bulkEmbedFlush.js';
+import { atomicRefusal, atomicGraphOf, runAtomicBulk, writeAtomicRefusal, writeAtomicNotSupported } from './bulkWriteAtomic.js';
 import { validateQuestionsMeta, mergeQuestionsMetaIntoMetadataJson } from '../../../core/questionAliases.js';
 import { applyBulkQuestionAliases } from '../../../core/bulkQuestionAliases.js';
 import { handleBulkRecall } from './bulkRecall.js';
@@ -139,6 +140,8 @@ export interface BulkResult {
     unapplied?: Array<{ id: string; reason: string }>;
     /** Conditional writes R2 — a pure retry of a supersede item: nothing was written. */
     unchanged?: boolean;
+    /** 3.35.0 (q) - targets whose half-done supersede (mark xor edge) this write completed. */
+    supersedesRepaired?: string[];
     /** Conditional writes phase 2a — the node's revision after the write (absent on engines without revisions). */
     revision?: number;
     /** Phase 2b — `revision_mismatch`: the revision found (null = the node is absent). */
@@ -229,7 +232,7 @@ export async function tryBulkWriteRoutes(
         return true;
     }
 
-    if (isBulkNodes) return handleBulkNodes(res, parsed as { nodes?: unknown; workspace?: unknown; embed?: unknown; force?: unknown }, deps);
+    if (isBulkNodes) return handleBulkNodes(res, parsed as { nodes?: unknown; workspace?: unknown; embed?: unknown; force?: unknown; atomic?: unknown }, deps);
     if (isBulkEdges) return handleBulkEdges(res, parsed as { edges?: unknown; workspace?: unknown }, deps);
     if (isBulkDelete) return handleBulkDelete(res, parsed as { ids?: unknown; workspace?: unknown }, deps);
     if (isBulkRecall) return handleBulkRecall(res, parsed as { topics?: unknown; workspace?: unknown }, deps);
@@ -257,7 +260,7 @@ function parseBulkEmbedMode(raw: unknown, fallback: BulkEmbedMode): BulkEmbedMod
 
 async function handleBulkNodes(
     res: ServerResponse,
-    parsed: { nodes?: unknown; workspace?: unknown; embed?: unknown; force?: unknown },
+    parsed: { nodes?: unknown; workspace?: unknown; embed?: unknown; force?: unknown; atomic?: unknown },
     deps: BulkWriteDeps,
 ): Promise<boolean> {
     if (!Array.isArray(parsed.nodes)) {
@@ -274,6 +277,10 @@ async function handleBulkNodes(
     }
     const requestedWorkspace = typeof parsed.workspace === 'string' ? parsed.workspace : undefined;
     if (bindRouteTarget(res, { requested: requestedWorkspace, intent: 'write' }) === null) return true;
+    if (parsed.atomic !== undefined) { // 3.35.0 (S2): body-level refusals (cap, inline embed, supersedes, edges, duplicate ids)
+        const refusal = atomicRefusal({ atomic: parsed.atomic, nodes: parsed.nodes, embed: parsed.embed, edges: (parsed as { edges?: unknown }).edges });
+        if (refusal) return writeAtomicRefusal(res, refusal);
+    }
     // F-COL4 — per-workspace quota gate (mirrors POST /api/node hot path).
     // Project the whole batch (N nodes + UTF-8 byte estimate of label+content)
     // and refuse 429 before any substrate/outbox write. No-op when unwired.
@@ -293,6 +300,8 @@ async function handleBulkNodes(
     // no-workspace path and silently stop contending with nodeUpsert.
     const lockWorkspace = requestedWorkspace ?? deps.graphRegistry?.activeName() ?? '';
     if ('error' in targetGraph) { writeWorkspaceNotFound(res, targetGraph); return true; }
+    const atomicGraph = parsed.atomic === true ? atomicGraphOf(targetGraph) : null;
+    if (parsed.atomic === true && !atomicGraph) return writeAtomicNotSupported(res); // D11: Dataplane / Surreal
     // L-012 — resolve the REQUESTED workspace's verbatim (LanceDB) store so the
     // inline embed path seeds into the same ws the graph node landed in (else a
     // cross-ws bulk write splits row from embedding). Falls back to boot-bound
@@ -338,7 +347,7 @@ async function handleBulkNodes(
     // their slot in `results` via an index map so the final result
     // array matches the request order 1:1.
     const items = parsed.nodes as NodeInput[];
-    const validSpecs: Array<{ idx: number; raw: NodeInput; embedMode: BulkEmbedMode; questions: string[] | undefined; supersedes: string[] | undefined; supersessionWarning: string | undefined; ifAbsent: boolean; ifRevision?: number; preconditions?: Precondition[] }> = [];
+    const validSpecs: Array<{ idx: number; raw: NodeInput; embedMode: BulkEmbedMode; questions: string[] | undefined; supersedes: string[] | undefined; supersessionWarning: string | undefined; ifAbsent: boolean; ifRevision?: number; preconditions?: Precondition[]; intent?: ConditionalSpec['intent'] }> = [];
     const results: Array<BulkResult & { id?: string }> = new Array(items.length);
     // D5 — batch-level `force` (request body `force: true`) applies to every
     // item that doesn't set its own `force`; an item-level `force` wins.
@@ -529,32 +538,19 @@ async function handleBulkNodes(
     // RA2-reaudit2 (bulk wall-time) — one write-lane trip instead of N×
     // upsertNode (~1.9x) on a local engine; isWorkspaceGraph probes capability.
     const batchGraph = isWorkspaceGraph(targetGraph) ? targetGraph : null;
-    // QA A2 round-3 finding (2026-09-03) — the O3 outbox-batch commit for
-    // this request's node.upsert rows used to run BEFORE either branch below
-    // took its lock(s). A concurrent delete on one of these ids records its
-    // own node.delete row inside ITS lock and can finish (and release the
-    // lock) before this batch's lock request for that id is even granted, so
-    // the real substrate order (delete, then this upsert re-creating the
-    // node) came out backwards from the outbox commit order (this upsert's
-    // row already durable first) — a replay contradicted the real end state.
-    // Fix: move the `recordHotWriteBatch` call to be the first thing done
-    // INSIDE the lock region, so nothing touching an id can land between the
-    // commit and the substrate write for that id.
-    //
-    // QA A2 round-4 finding 1 (2026-09-03) — the round-3 fix then held ALL
-    // of a large batch's locks for the WHOLE substrate loop (`withNodeLocks`
-    // never releases a key until its whole callback returns), so a
-    // concurrent single-key writer on ANY one of 1000 ids waited for nearly
-    // the entire batch (~865-960x amplification measured). Fix: run
-    // `withNodeLocks` per CHUNK of at most `BULK_LOCK_CHUNK_SIZE` ids
-    // instead of once over the whole batch — see nodeWriteLock.ts for why
-    // this bounds the worst-case hold without reopening the round-3 race
-    // (the outbox commit and substrate writes for a given id are still
-    // atomic under that id's own chunk lock; only OTHER ids' turns release
-    // sooner). Each chunk's outbox commit failure only fails that chunk's
-    // items — a batch spanning multiple chunks can partially succeed, which
-    // `results`/`succeeded` already report per-item.
-    if (batchGraph) {
+    // QA A2 round-3/4 (2026-09-03): the O3 outbox-batch commit runs FIRST INSIDE the lock region (a concurrent delete can no
+    // longer interleave between the commit and the substrate write), and locks are taken per CHUNK of at most
+    // BULK_LOCK_CHUNK_SIZE ids (nodeWriteLock.ts) so one 1000-id batch does not block a single-key writer for its whole run.
+    // A multi-chunk batch can partially succeed; `results`/`succeeded` report per-item.
+    // 3.35.0 (S2) `atomic:true`: ONE commitNodeBatch for the whole batch under ALL its locks (bulkWriteAtomic.ts); no chunks.
+    if (atomicGraph) {
+        const done = await runAtomicBulk({
+            res, outboxStore: deps.outboxStore, workspace: requestedWorkspace!, lockWorkspace, graph: atomicGraph, specs: validSpecs, results, scopeDeps,
+            embeds: { isLocalTarget: batchGraph !== null, embedTexts, embedTargetIds, verbatimSpecs },
+        });
+        if (done === null) return true;
+        succeeded = done;
+    } else if (batchGraph) {
         // The outbox commit + graph write + per-node verbatim seed all run
         // under the SAME per-(workspace,id) locks `nodeUpsert` holds
         // (core/nodeWriteLock.ts). Unlocked, a concurrent single-write or
@@ -565,13 +561,14 @@ async function handleBulkNodes(
         // chunk — `withNodeLocks` holds all of a chunk's ids, acquired in
         // sorted order (deadlock-free; see nodeWriteLock.ts rule 3).
         for (const lockedChunk of chunkSpecsForLocking(validSpecs)) {
-            await withNodeLocks(lockWorkspace, bulkLockIds(lockedChunk), async () => {
+            await withBulkChunkLocks(lockWorkspace, lockedChunk, results, async () => {
                 // Conditional writes: refuse `ifAbsent` / already-superseded items, skip pure retries, then judge ifRevision / preconditions (phase 2b) — all BEFORE any outbox row or side effect, so a refused item records nothing.
                 const guarded = await checkChunkConditions(batchGraph, await guardBulkChunk(batchGraph, lockedChunk, outcome), (s, f) => { results[s.idx] = { ok: false, id: s.raw.id as string, ...f }; });
                 // 3.26.0 — the nodes as they are now, so a failed inline seed (or a lost supersede claim) restores an existing node (bulkWriteRollback.ts).
                 const { chunk: priored, priors } = await readInlinePriors(batchGraph, guarded, (s, error) => { results[s.idx] = { ok: false, id: s.raw.id as string, error }; });
                 // Phase 2a — the revision each item is written on top of (read under the chunk locks), recorded in its outbox row.
                 const { chunk, stamps } = await stampBulkRevisions(batchGraph, priored, (s, error) => { results[s.idx] = { ok: false, id: s.raw.id as string, error }; });
+                attachSupersedeIntents(chunk, batchGraph, { workspace: requestedWorkspace!, initiator: 'http:POST /api/nodes/bulk', store: deps.outboxStore }); // 3.35.0 (q)
                 let chunkEntries: OutboxEntry[] | null = null;
                 if (deps.outboxStore && chunk.length > 0) {
                     try {
@@ -580,7 +577,7 @@ async function handleBulkNodes(
                             operationKind: 'node.upsert',
                             payload: bulkOutboxPayload(spec, stamps.get(spec.idx)),
                             initiator: 'http:POST /api/nodes/bulk',
-                            operation: 'graph.upsert',
+                            operation: 'graph.upsert', pendingCommit: true, // R3: flipped ready by reconcileOutboxRevision once the item's write committed
                         })));
                     } catch (err) {
                         const msg = `outbox commit failed: ${(err as Error).message}`;
@@ -615,20 +612,13 @@ async function handleBulkNodes(
                         continue;
                     }
                     // The row was recorded with a PREDICTED revision; make it the one this write landed (see reconcileOutboxRevision).
-                    if (chunkEntries) chunkEntries[k] = await reconcileOutboxRevision({ store: deps.outboxStore, entry: chunkEntries[k], stamp: stamps.get(idx), landed: br.revision, workspace: requestedWorkspace!, id: raw.id as string }) as OutboxEntry;
+                    if (chunkEntries) chunkEntries[k] = await reconcileOutboxRevision({ store: deps.outboxStore, entry: chunkEntries[k], stamp: stamps.get(idx), landed: landedForRow(chunk[k], br.revision), workspace: requestedWorkspace!, id: raw.id as string }) as OutboxEntry;
                     succeeded++;
-                    results[idx] = { ok: true, id: raw.id as string, ...(supersessionWarning ? { supersessionWarning } : {}), ...(br.revision !== undefined ? { revision: br.revision } : {}) };
-                    // D5 — apply this item's `supersedes` list now that its
-                    // own graph write has durably succeeded (same ordering
-                    // nodeService.nodeUpsert uses: new node first, then
-                    // supersede the old ones). Best-effort per id (matches
-                    // applyWriteTimeSupersedes' own edge-write posture) but a
-                    // FIELD-mutation failure downgrades this item's result to
-                    // ok:false with the applied/unapplied ids named, since the
-                    // caller explicitly asked for that link and it silently
-                    // not happening must not be reported as success.
+                    results[idx] = { ok: true, id: raw.id as string, ...(supersessionWarning ? { supersessionWarning } : {}), ...(br.revision !== undefined ? { revision: br.revision } : {}), ...(br.supersedesRepaired ? { supersedesRepaired: br.supersedesRepaired } : {}) };
+                    // D5 - apply this item's `supersedes` after its own write succeeded (non-atomic engines; 3.35.0 (q): atomic ones did it in the write).
+                    // A FIELD-mutation failure downgrades the item to ok:false with the applied/unapplied ids named.
                     const itemSupersedes = chunk[k]!.supersedes;
-                    if (itemSupersedes && itemSupersedes.length > 0) {
+                    if (itemSupersedes && itemSupersedes.length > 0 && !chunk[k]!.intent?.applied) { // (q): atomic engines applied it in the write
                         const applyResult = await applyWriteTimeSupersedes({
                             targetGraph: batchGraph, supersedes: itemSupersedes, newId: raw.id as string,
                             workspace: requestedWorkspace!, initiator: 'http:POST /api/nodes/bulk',
@@ -756,10 +746,11 @@ async function handleBulkNodes(
         // of racing a concurrent same-id delete the way the pre-lock commit
         // used to.
         for (const lockedSpecs of chunkSpecsForLocking(validSpecs)) {
-            await withNodeLocks(lockWorkspace, bulkLockIds(lockedSpecs), async () => {
+            await withBulkChunkLocks(lockWorkspace, lockedSpecs, results, async () => {
                 const guardedSpecs = await checkChunkConditions(targetGraph, await guardBulkChunk(targetGraph, lockedSpecs, outcome), (s, f) => { results[s.idx] = { ok: false, id: s.raw.id as string, ...f }; }); // phase 2b: conditions judged before any row is recorded
                 // Phase 2a — the revision each item is written on top of (read under the chunk locks), recorded in its outbox row.
                 const { chunk, stamps } = await stampBulkRevisions(targetGraph, guardedSpecs, (s, error) => { results[s.idx] = { ok: false, id: s.raw.id as string, error }; });
+                attachSupersedeIntents(chunk, target.rawGraph(), { workspace: requestedWorkspace!, initiator: 'http:POST /api/nodes/bulk', store: deps.outboxStore }); // 3.35.0 (q)
                 // A lost supersede claim must restore an existing node: read the priors of the items that have a list.
                 const claimPriors = new Map<string, LoreNode | null>();
                 if (typeof targetGraph.getNode === 'function') {
@@ -775,7 +766,7 @@ async function handleBulkNodes(
                             operationKind: 'node.upsert',
                             payload: bulkOutboxPayload(spec, stamps.get(spec.idx)),
                             initiator: 'http:POST /api/nodes/bulk',
-                            operation: 'graph.upsert',
+                            operation: 'graph.upsert', pendingCommit: true, // R3: flipped ready by reconcileOutboxRevision once the item's write committed
                         })));
                     } catch (err) {
                         const msg = `outbox commit failed: ${(err as Error).message}`;
@@ -788,7 +779,7 @@ async function handleBulkNodes(
                     let r: BulkResult & { id?: string } = await upsertOne(target, raw, deps, embedMode, chunk[k]!.ifAbsent, stamps.get(idx), chunk[k]);
                     if (r.ok) {
                         // The row was recorded with a PREDICTED revision; make it the one this write landed (see reconcileOutboxRevision).
-                        if (chunkEntries) chunkEntries[k] = await reconcileOutboxRevision({ store: deps.outboxStore, entry: chunkEntries[k], stamp: stamps.get(idx), landed: r.revision, workspace: requestedWorkspace!, id: raw.id as string }) as OutboxEntry;
+                        if (chunkEntries) chunkEntries[k] = await reconcileOutboxRevision({ store: deps.outboxStore, entry: chunkEntries[k], stamp: stamps.get(idx), landed: landedForRow(chunk[k], r.revision), workspace: requestedWorkspace!, id: raw.id as string }) as OutboxEntry;
                         succeeded++;
                         if (supersessionWarning) r = { ...r, supersessionWarning };
                         // D5 — same apply-after-success as the batchGraph
@@ -797,7 +788,7 @@ async function handleBulkNodes(
                         // (the resolved workspace graph, not `target` the
                         // LoreStorageClient facade) is the SupersessionWriteGraph.
                         const itemSupersedes = chunk[k]!.supersedes;
-                        if (itemSupersedes && itemSupersedes.length > 0) {
+                        if (itemSupersedes && itemSupersedes.length > 0 && !chunk[k]!.intent?.applied) {
                             const applyResult = await applyWriteTimeSupersedes({
                                 targetGraph, supersedes: itemSupersedes, newId: raw.id as string,
                                 workspace: requestedWorkspace!, initiator: 'http:POST /api/nodes/bulk',
@@ -912,7 +903,7 @@ async function handleBulkNodes(
         durationMs: 0,
     });
     const okCount = succeeded + unchangedCount;
-    writeJson(res, 200, { ok: okCount === parsed.nodes.length, count: parsed.nodes.length, succeeded: okCount, results });
+    writeJson(res, 200, { ok: okCount === parsed.nodes.length, ...(atomicGraph ? { atomic: true } : {}), count: parsed.nodes.length, succeeded: okCount, results });
     return true;
 }
 
@@ -940,9 +931,7 @@ async function upsertOne(
         if (refused) return { ok: false, id: raw.id, ...refused };
         const prior = embedMode === 'inline' && typeof readGraph.getNode === 'function' ? await readGraph.getNode(raw.id) : undefined;
         // Phase 2a — a stamped item (its outbox row predicted `stamp.expected + 1`) is written conditionally on that revision, retrying in place on a cross-process conflict.
-        const node = ifAbsent ? await storageClient.insertNodeIfAbsent(raw as never)
-            : stamp ? await writeStamped(readGraph, spec ?? { idx: -1, raw }, stamp, (expected) => storageClient.upsertNodeAtRevision(raw as never, expected, stamp.updatedAt, spec?.ifRevision !== undefined))
-            : await storageClient.upsertNode(raw as never);
+        const node = await writeUpsertOneNode(storageClient, readGraph, raw, ifAbsent, stamp, spec);
         // Sprint E2 — only legacy 'inline' invokes the synchronous per-item
         // verbatim store. 'queued' rolls up into ONE embed.batch row by the
         // caller after this loop; 'skip' never embeds (caller re-embeds later).
@@ -990,7 +979,7 @@ async function upsertOne(
                 return { ok: false, id: raw.id, error: `verbatim seed failed: ${redactError(err)}` };
             }
         }
-        return { ok: true, id: raw.id, ...(node.revision !== undefined ? { revision: node.revision } : {}) };
+        return { ok: true, id: raw.id, ...(node.revision !== undefined ? { revision: node.revision } : {}), ...repairedField(spec) };
     } catch (err) {
         if (err instanceof ItemConditionError) return { ok: false, id: raw.id, ...err.payload };
         return { ...classifyItemWriteError(err), id: raw.id };

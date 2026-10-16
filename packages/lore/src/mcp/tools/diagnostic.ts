@@ -19,7 +19,9 @@ import path from 'path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { tagsToArray } from '../../engines/normalizeTags.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../engines/localGraphRegistry.js';
-import { listWorkspaceNames } from '../../config/workspaces.js';
+import { listWorkspaceNames, getWorkspacePath } from '../../config/workspaces.js';
+import { surrealDataPath } from '../../engines/surreal/surrealConnection.js';
+import { sqliteGraphDataPath } from '../../engines/sqlite/sqliteGraphSchema.js';
 import { assertMcpScope } from './mcpScope.js';
 import { ecosystemMatches } from '../../core/ecosystemMatch.js';
 import { filterNodesByActorScope } from '../../security/scopeFilter.js';
@@ -29,6 +31,7 @@ import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolv
 import { hasLanguageBreakdown } from './search/helpers.js';
 import type { StorageBundle } from '../services.js';
 import { log } from '../../logger.js';
+import { engineReport } from './engineLabels.js';
 import { mcpToolError } from './mcpToolError.js';
 import { maintenanceForbiddenToolResult } from '../../security/exportGate.js';
 import { countAudience } from '../../security/visibleCounts.js';
@@ -45,6 +48,31 @@ export interface DiagnosticToolsDeps {
      *  `stats` and `admin_stats` tools route per-workspace lookups
      *  through it. Optional so older test wiring still types. */
     graphRegistry?: LocalGraphRegistry;
+}
+
+/**
+ * statsGraphPath — the graph store path `stats` reports: the REAL on-disk
+ * location for the engine this workspace declares (sqlite → `.lore/graph.sqlite`,
+ * surreal → `surrealDataPath()`, which URL-escapes reserved characters such as
+ * spaces), resolved against the workspace's OWN directory when a registry is
+ * present. It used to be the legacy `.lore/graph` of the boot-time base path
+ * for every workspace and engine. With no registry (cloud/tests) there is no
+ * workspace-declared local engine, so the legacy value is kept unchanged.
+ */
+function statsGraphPath(deps: DiagnosticToolsDeps, workspace: string): string {
+    const legacy = path.join(deps.graphBasePath, '.lore', 'graph');
+    const registry = deps.graphRegistry;
+    if (!registry) return legacy;
+    let base = deps.graphBasePath;
+    try {
+        base = getWorkspacePath(workspace, registry.homeDir());
+    } catch {
+        // Unknown name can't reach here (getGraphHandle threw first); keep the boot path.
+    }
+    const engine = registry.graphEngineFor(workspace);
+    if (engine === 'sqlite') return sqliteGraphDataPath(base);
+    if (engine === 'surreal') return surrealDataPath(base);
+    return path.join(base, '.lore', 'graph');
 }
 
 export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticToolsDeps): void {
@@ -99,12 +127,8 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                                 typeBreakdown: v.typeBreakdown,
                                 languageBreakdown: v.languageBreakdown,
                                 ...visibleCountLabel(v.lowerBound),
-                                graphPath: path.join(deps.graphBasePath, '.lore', 'graph'),
-                                engine: !deps.graphRegistry
-                                    ? 'dataplane (cloud)'
-                                    : deps.graphRegistry.graphEngineFor(workspace) === 'surreal'
-                                        ? 'surrealdb (local)'
-                                        : 'legacy graph engine + lancedb (local)',
+                                graphPath: statsGraphPath(deps, workspace),
+                                ...engineReport(deps.graphRegistry, workspace),
                             }, null, 2),
                         }],
                     };
@@ -127,15 +151,11 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                             ...graphStats,
                             verbatimDocuments_global: await deps.store.storageClient.verbatimCount(),
                             languageBreakdown,
-                            graphPath: path.join(deps.graphBasePath, '.lore', 'graph'),
+                            graphPath: statsGraphPath(deps, workspace),
                             // Sprint-8/commit-8 — report the engine this WORKSPACE
                             // actually declares, not a hardcoded local-mode string.
                             // No registry (cloud/tests) → the boot-bound dataplane.
-                            engine: !deps.graphRegistry
-                                ? 'dataplane (cloud)'
-                                : deps.graphRegistry.graphEngineFor(workspace) === 'surreal'
-                                    ? 'surrealdb (local)'
-                                    : 'legacy graph engine + lancedb (local)',
+                            ...engineReport(deps.graphRegistry, workspace),
                         }, null, 2),
                     }],
                 };
@@ -272,11 +292,7 @@ export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticTo
                                 // local engine. No registry (cloud/tests) → the
                                 // boot-bound dataplane; that path never reaches
                                 // a workspace-declared engine at all.
-                                engine: !deps.graphRegistry
-                                    ? 'dataplane (cloud)'
-                                    : deps.graphRegistry.graphEngineFor(callerWs) === 'surreal'
-                                        ? 'surrealdb (local)'
-                                        : 'legacy graph engine + lancedb (local)',
+                                ...engineReport(deps.graphRegistry, callerWs),
                             },
                             capabilities: {
                                 compactRecall: true,

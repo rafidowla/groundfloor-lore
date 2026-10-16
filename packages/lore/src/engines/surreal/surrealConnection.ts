@@ -34,6 +34,7 @@ import { Surreal } from 'surrealdb';
 import { createNodeEngines } from '@surrealdb/node';
 
 import { surrealError } from './surrealError.js';
+import { currentLogLevel } from '../../logger.js';
 import {
     EDGE_TABLE,
     FTS_CONTENT_INDEX,
@@ -140,6 +141,42 @@ export function surrealDataPath(basePath: string): string {
     // rather than threading `resolveSurrealBackend()` through, since both
     // supported backends parse identically as a URL authority+path.
     return new URL(`surrealkv://${escaped}`).pathname;
+}
+
+/**
+ * relocatedSurrealPath — the literal `<basePath>/.lore/surreal` path when the
+ * engine's real store location ({@link surrealDataPath}) differs from it
+ * (a reserved URL character such as a space somewhere in `basePath`), else
+ * `null`. Behaviour is deliberately NOT changed for such homes — moving an
+ * existing store would strand its data — so the divergence is made visible.
+ */
+export function relocatedSurrealPath(basePath: string): { literal: string; actual: string } | null {
+    const literal = path.join(basePath, '.lore', 'surreal');
+    const actual = surrealDataPath(basePath);
+    return literal === actual ? null : { literal, actual };
+}
+
+/**
+ * warnIfSurrealPathRelocated — one `warn` line per open when the real store
+ * path differs from the literal `.lore/surreal` sibling. Silent when equal.
+ * Called once from {@link openSurreal} (never from a per-query path).
+ */
+export function warnIfSurrealPathRelocated(basePath: string): void {
+    const moved = relocatedSurrealPath(basePath);
+    if (!moved) return;
+    if (currentLogLevel() === 'error') return;
+    // Written to stderr in the logger's `<ISO> WARN <msg>` shape but NOT through
+    // `log.warn`: logger.ts redacts absolute paths (`/Users/…`, `/var/…`, …) to
+    // `id#<hash>` — and cuts at the first space — so the one fact this line
+    // exists to convey, the two paths, would come out unreadable. These are the
+    // operator's own workspace paths on their own stderr; same precedent as the
+    // unredacted console.error in resolveSurrealBackend above.
+    process.stderr.write(
+        `${new Date().toISOString()} WARN [SurrealGraph] this workspace's SurrealDB store is at ${moved.actual}, `
+        + `NOT the literal ${moved.literal} — the embedded engine URL-escapes reserved characters (e.g. spaces) `
+        + 'in the path. Back up BOTH trees, or run `lore migrate-graph <workspace> --to sqlite` to move to a '
+        + 'store with no URL step. See docs/BACKUP_RESTORE.md.\n',
+    );
 }
 
 /**
@@ -255,6 +292,7 @@ export async function openSurreal(
     const backend = opts.backend ?? resolveSurrealBackend();
     const features: SurrealFeatures = { ...resolveSurrealFeatures(), ...opts.features };
     const dataPath = surrealDataPath(basePath);
+    warnIfSurrealPathRelocated(basePath);
     try {
         fs.mkdirSync(path.dirname(dataPath), { recursive: true });
     } catch (error) {

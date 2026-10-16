@@ -9,6 +9,10 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
+import { NodeLockTimeoutError } from '../../core/nodeWriteLock.js';
+import { isNodeBatchContention } from '../../engines/graphShared/nodeBatchRetry.js';
+import { isPriorReadError } from '../../core/nodeServiceVerbatim.js';
+import { isArcadeUnreachable } from '../../engines/arcade/arcadeTransientErrors.js';
 
 /** Hard cap on inbound request body size. 10 MB. */
 export const MAX_BODY_BYTES = 10 * 1024 * 1024;
@@ -204,6 +208,55 @@ export function writeError(
 ): void {
     res.writeHead(status, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ code, message, ...(extras ?? {}) }));
+}
+
+/** Retry-After (seconds) sent with a node_busy 503. */
+export const NODE_BUSY_RETRY_AFTER_S = 5;
+
+/**
+ * writeNodeBusy (3.35.0 b) - answer a node write that could not take the per-node lock within the
+ * bounded wait (core/nodeWriteLock.ts) because the holder is stuck, typically on a hung ArcadeDB.
+ * 503 + Retry-After + code `node_busy`; the write never started, so nothing was written and a retry
+ * is safe. Returns false (and writes nothing) for any other error.
+ */
+export function writeNodeBusy(res: ServerResponse, err: unknown): boolean {
+    if (!(err instanceof NodeLockTimeoutError)) return false;
+    res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': String(NODE_BUSY_RETRY_AFTER_S) });
+    res.end(JSON.stringify({ code: 'node_busy', message: `another write to this node has not finished (waited ${err.waitedMs} ms); nothing was written, retry after ${NODE_BUSY_RETRY_AFTER_S}s`, retryAfterSeconds: NODE_BUSY_RETRY_AFTER_S }));
+    return true;
+}
+
+/**
+ * writeContention (3.35.0) - answer a node write whose atomic batch lost every retry to concurrent writers
+ * (engines/graphShared/nodeBatchRetry.ts). 503 + `{code:'contention', retryable:true}`, never a 500; nothing
+ * was written, so a retry is safe. Returns false (and writes nothing) for any other error.
+ */
+export function writeContention(res: ServerResponse, err: unknown): boolean {
+    if (!isNodeBatchContention(err)) return false;
+    res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': '1' });
+    res.end(JSON.stringify({ code: 'contention', retryable: true, message: err.message, retryAfterSeconds: 1 }));
+    return true;
+}
+
+/**
+ * writePriorReadUnavailable (3.35.0, B) - answer a single-node write whose READ BEFORE THE WRITE got no answer
+ * from the database (a request timeout, an abort, a 502/503/504, a refused connection). Nothing was written, so it
+ * is the same retryable 503 the bulk route's items already use for that failure: `timeout` or `arcade_unavailable`
+ * (bulkWriteErrors.ts), `retryable:true`, Retry-After like `node_busy`. Any other failure of the read, and every
+ * other error, returns false (writes nothing) and stays the caller's 500.
+ */
+export function writePriorReadUnavailable(res: ServerResponse, err: unknown): boolean {
+    if (!isPriorReadError(err)) return false;
+    const cause = (err as { cause?: unknown }).cause as { name?: string; message?: string } | undefined;
+    const text = `${cause?.name ?? ''} ${cause?.message ?? ''}`;
+    const timedOut = cause?.name === 'TimeoutError' || cause?.name === 'AbortError' || /\btimed? ?out\b|ETIMEDOUT/i.test(text);
+    if (!timedOut && !isArcadeUnreachable(cause)) return false;
+    res.writeHead(503, { 'Content-Type': 'application/json', 'Retry-After': String(NODE_BUSY_RETRY_AFTER_S) });
+    res.end(JSON.stringify({
+        code: timedOut ? 'timeout' : 'arcade_unavailable', retryable: true,
+        message: `${err.message}; retry after ${NODE_BUSY_RETRY_AFTER_S}s`, retryAfterSeconds: NODE_BUSY_RETRY_AFTER_S,
+    }));
+    return true;
 }
 
 /**

@@ -9,7 +9,8 @@
  * amplification — 5,334 fragments / ~5k rows observed in the field).
  */
 
-import { dispatch, UnwiredOperationKindError, MissingPayloadError } from './dispatcher.js';
+import { dispatch } from './dispatcher.js';
+import { settleReplayFailure, type DispositionEnv } from './failureDisposition.js';
 import type { DispatcherSubstrates } from './dispatcher.js';
 import type { OutboxEntry, OutboxStore } from './types.js';
 import { SUPERSEDED_DEAD_ERROR } from './supersession.js';
@@ -50,7 +51,8 @@ export function collectVerbatimUpsertRun(
 export interface VerbatimConsolidationDeps {
     store: OutboxStore;
     substrates: DispatcherSubstrates;
-    maxAttempts: number;
+    /** Dead-letter / transient-retry policy (failureDisposition.ts). */
+    disposition: DispositionEnv;
     onReplicated: () => void;
     onFailure: () => void;
     onDead: () => void;
@@ -85,19 +87,10 @@ export async function replicateConsolidatedVerbatim(
         }
         return true;
     } catch (err) {
-        const msg = (err as Error).message;
-        const isUnwired = err instanceof UnwiredOperationKindError;
-        const isInvalid = err instanceof MissingPayloadError;
         for (const e of entries) {
-            const attempts = (e.attempts ?? 0) + 1;
-            if (isUnwired || isInvalid || attempts >= deps.maxAttempts) {
-                await deps.store.markEntryStatus!(e.id, 'dead', { error: msg, bumpAttempt: true });
-                deps.onDead();
-                deps.log(`[outbox replicator] entry ${e.id} (verbatim.upsert consolidated) marked dead: ${msg}`);
-            } else {
-                await deps.store.markEntryStatus!(e.id, 'failed', { error: msg, bumpAttempt: true });
-                deps.onFailure();
-            }
+            await settleReplayFailure(deps.store, e, err, deps.disposition, {
+                label: 'verbatim.upsert consolidated', onDead: deps.onDead, onFailure: deps.onFailure, log: deps.log,
+            });
         }
         return false;
     }

@@ -40,6 +40,10 @@
 | `bulk-list-route-unit.ts` | bulkList, rateLimit |
 | `recallable-engine-contract-unit.ts` | 3.34 N5 shared contract: awaitRecallable on real SQLite + arcade fake + Dataplane (not_supported); pending/recallable/timeout-as-status, workspace binding, all-before-now high-water mark, bounded index checks, no tight polling |
 | `recallable-route-unit.ts` | POST /api/nodes/recallable: arcade allowlist + auth, own rate bucket, over-cap 400, validation, workspace binding, timeout clamp, 501 |
+| `arcade-transient-errors-unit.ts` | 3.35 shared ArcadeDB classifier on the real 500/503 CME bodies, DuplicatedKey, plain 500, ECONNREFUSED, timeout/Abort; `retryIdempotentArcadeWrite` retries a 500 CME with a bounded budget |
+| `outbox-transient-disposition-unit.ts` | 3.35 replicator: CME x10 then success, unreachable, 24 h ceiling (injected clock, survives restart), permanent still dies, no classifier = old behaviour, requeueDead reset |
+| `outbox-dead-letters-unit.ts` | 3.35 dead-letter visibility: additive migration, `/api/stats` `deadLettered`, `GET /api/outbox/dead` workspace isolation + pagination cap, arcade lane pinning, DATA LOSS reason text |
+| `outbox-no-dataloss-arcade-e2e.ts` | 3.35 live check (container-backed, NOT on the gate): concurrent bulk+single writers with overlapping ids, then an ArcadeDB stop/start mid-load; asserts 0 dead-lettered rows, outbox drains, every acknowledged node present |
 | `recallable-arcade-sql-unit.ts` | ArcadeDB index self-check statement (`(subquery)[0].embedding`, projected, `:id`/`:k` only), fallback, transport failures surface, query-count bound |
 | `recall-embedded-flag-unit.ts` | additive `embedded:false` on keyword-only recall hits (projection, summary, full, compact) |
 | `bulk-write-w9-unit.ts` | bulkWrite, rateLimit |

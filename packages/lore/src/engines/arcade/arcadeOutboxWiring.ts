@@ -34,6 +34,8 @@ import type { OutboxStore } from '../../outbox/types.js';
 import type { DispatcherSubstrates } from '../../outbox/dispatcher.js';
 import type { OutboxLagCache } from '../../outbox/lagCache.js';
 import { OutboxReplicator, wireReplicator } from '../../outbox/replicator.js';
+import { readEnvTransientConfig } from '../../outbox/retryConfig.js';
+import { isArcadeTransientReplayError } from './arcadeTransientErrors.js';
 import type { EmbeddingProvider } from '../../providers/types.js';
 import type { LoreNode, LoreEdge } from '../../providers/types.js';
 import { ArcadeHttp } from './arcadeHttp.js';
@@ -261,6 +263,12 @@ export function wireArcadeReplicator(input: {
       const { graph } = await resolveCell(workspace);
       return (await graph.getNode(id)) !== null;
     },
+    // 3.35.0 (R3): the committed node, for settling `pending_commit` rows (outbox/pendingCommit.ts).
+    // Errors propagate: an unreachable graph must leave the row pending, never read as "absent".
+    getNode: async (id, workspace) => {
+      const { graph } = await resolveCell(workspace);
+      return (await graph.getNode(id)) as unknown as Record<string, unknown> | null;
+    },
     hasEdge: async (payload, workspace) => {
       const { graph } = await resolveCell(workspace);
       const edges = await graph.getEdges(payload.sourceId);
@@ -291,6 +299,10 @@ export function wireArcadeReplicator(input: {
     lagCache: input.lagCache,
     log: input.log,
     onTickStart: () => { lockBudget.remainingMs = nodeLockWaitMs; },
+    // 3.35.0 (a): a ConcurrentModification or an unreachable server did not apply the write; replay
+    // it later without counting an attempt (24 h ceiling, LORE_OUTBOX_TRANSIENT_CEILING_MS).
+    transientClassifier: isArcadeTransientReplayError,
+    config: readEnvTransientConfig(),
   });
 
   return {

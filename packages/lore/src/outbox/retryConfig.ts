@@ -23,6 +23,8 @@
  * them to retryable, so a workspace that reappears can still be replayed.
  */
 
+import { DEFAULT_TRANSIENT_CEILING_MS } from './failureDisposition.js';
+
 export const DEFAULT_OUTBOX_MAX_ATTEMPTS = 5;
 export const DEFAULT_OUTBOX_RETRY_BASE_MS = 500;
 
@@ -42,4 +44,17 @@ export function readEnvRetryConfig(env: NodeJS.ProcessEnv = process.env): Outbox
         maxAttempts: parsePositiveInt(env.LORE_OUTBOX_MAX_ATTEMPTS, DEFAULT_OUTBOX_MAX_ATTEMPTS),
         retryBaseMs: parsePositiveInt(env.LORE_OUTBOX_RETRY_BASE_MS, DEFAULT_OUTBOX_RETRY_BASE_MS),
     };
+}
+
+/**
+ * 3.35.0 (a): how long a row may keep failing TRANSIENTLY (ArcadeDB ConcurrentModification or
+ * outage; attempts are not counted, see failureDisposition.ts) before it is dead-lettered.
+ *
+ *   LORE_OUTBOX_TRANSIENT_CEILING_MS   default 86400000 (24 h)
+ *
+ * Measured from the row's persisted first transient failure, so a restart does not reset it.
+ * Invalid values fall back to the default silently.
+ */
+export function readEnvTransientConfig(env: NodeJS.ProcessEnv = process.env): { transientCeilingMs: number } {
+    return { transientCeilingMs: parsePositiveInt(env.LORE_OUTBOX_TRANSIENT_CEILING_MS, DEFAULT_TRANSIENT_CEILING_MS) };
 }

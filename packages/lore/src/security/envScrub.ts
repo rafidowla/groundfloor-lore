@@ -61,6 +61,7 @@ const ALLOWED_VARS: readonly string[] = [
     // operator's override is dropped before the consumer ever sees
     // it and the consumer falls back to its default — which the
     // operator has no way to detect without inspecting daemon logs.
+    'LORE_NODE_BATCH_TRACE',                    // '1' prints one stderr line per commitNodeBatch attempt (engines/graphShared/nodeBatch.ts) - a diagnostic flag, no secret; allowlisted so it works on the daemon
     'LORE_CALL_TALLY',                          // per-instance graph operation counter — default ON, '0'/'false' disables (engines/callTally.ts). Allowlisted so an operator can turn it off on the daemon; without this entry the scrub would drop it and the knob would be a silent no-op (rc3-env-scrub-allowlist-bug)
     'LORE_BULK_INGEST_CONCURRENCY',             // max in-flight upserts during bulkIngest — default 16; bounds pool borrows so a large reindex can't overflow the waiter cap — mcp/bulkIngest.ts
     'LORE_LANCE_POOL_SIZE',                     // LanceDB read-table-handle pool size — default 16, clamped [1,32]; perf
@@ -298,6 +299,11 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_OUTBOX_BUSY_MS',                   // outbox replicator busy-tick sleep (default 10 ms)
     'LORE_OUTBOX_MAX_ATTEMPTS',              // outbox: failed attempts before dead-letter (default 5)
     'LORE_OUTBOX_RETRY_BASE_MS',             // outbox: first retry-backoff step (default 500 ms)
+    'LORE_OUTBOX_TRANSIENT_CEILING_MS',      // outbox: how long a row may retry transient (ArcadeDB CME/outage) errors before dead-letter (default 24 h)
+    'LORE_ARCADE_REQUEST_TIMEOUT_MS',        // arcade transport: whole-request timeout; also bounds a node-lock hold on a hung engine (default 30000)
+    'LORE_NODE_LOCK_WAIT_MS',                // node write lock: max wait for a held lock before 503 node_busy (default request timeout + 5000)
+    'LORE_PENDING_COMMIT_GRACE_MS',          // outbox: age before a never-committed pending_commit row is retracted (default 60000)
+    'LORE_PENDING_COMMIT_SWEEP_MS',          // outbox: pending_commit settle sweep interval (default 1000)
     'LORE_OUTBOX_CONSOLIDATION_CAP',         // embed.batch consolidation cap (default 1024 texts)
     'LORE_REPLICATOR_CONSOLIDATION_MAX',     // verbatim.upsert consolidation cap (default 256 rows)
     'LORE_SEARCH_CACHE_TTL_MS',              // verbatim search-cache entry TTL (default 1500 ms)
@@ -361,6 +367,8 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_ARCADE_MAX_CONNECTIONS',           // arcade transport: keep-alive connection cap per baseUrl (default 16)
     'LORE_ARCADE_ALLOWED_HOSTS',             // arcade listener: extra accepted Host header values (DNS-rebinding allowlist) — hostnames, not secrets
     'LORE_ARCADE_HOST_CHECK',                // arcade listener: `strict` narrows the Host policy
+    'LORE_READY_CACHE_MS',                   // /ready (every mode): probe result cache interval (default 2000); LORE_ARCADE_READY_* wins in arcade mode
+    'LORE_READY_TIMEOUT_MS',                 // /ready (every mode): probe deadline (default 2000)
     'LORE_ARCADE_READY_CACHE_MS',            // arcade /ready: probe result cache interval (default 2000)
     'LORE_ARCADE_READY_TIMEOUT_MS',          // arcade /ready: probe socket deadline (default 2000)
     'LORE_ARCADE_RECALL_PROJECTION',         // arcade recall: scalar-column projection, default on; off|0|false disables

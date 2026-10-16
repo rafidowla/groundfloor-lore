@@ -161,10 +161,80 @@ function replaceCanonical(
     );
 }
 
+interface CanonicalSkipRow {
+    id: string; content_hash: string | null; vector: Buffer | null;
+    type: string | null; label: string | null; tags: string | null; project: string | null;
+    ecosystem: string | null; updatedAt: string | null; security_scopes: string | null;
+}
+
+/** Canonical rows for `ids` (chunked `id IN (...)`), keyed by id — the columns the skip-identical rule compares. */
+function readCanonicalForSkip(db: DatabaseType, ids: readonly string[]): Map<string, CanonicalSkipRow> {
+    const out = new Map<string, CanonicalSkipRow>();
+    for (let i = 0; i < ids.length; i += VERBATIM_CHUNK_SIZE) {
+        const chunk = ids.slice(i, i + VERBATIM_CHUNK_SIZE);
+        const rows = db.prepare(
+            `SELECT id, content_hash, vector, type, label, tags, project, ecosystem, updatedAt, security_scopes
+             FROM verbatim WHERE id IN (${chunk.map(() => '?').join(',')}) AND is_canonical = 1 AND is_tombstone = 0`,
+        ).all(...chunk) as CanonicalSkipRow[];
+        for (const r of rows) out.set(r.id, r);
+    }
+    return out;
+}
+
+/** Skip-identical predicate (3.35.0): the existing canonical row already holds exactly what `doc` would write — same
+ *  content hash, an embedded vector, and every persisted metadata column EXCEPT `updatedAt`. `updatedAt` is excluded
+ *  because the graph layer re-stamps it on every re-store, so comparing it made an unchanged re-store (an Atlas
+ *  `git pull`) look "changed" and write a new row + re-embed each time. The caller redacted-text case never gets here.
+ *  A text-only row (null vector) is deliberately NOT identical: re-resolving lets a later store pick up a real embedding. */
+function isIdenticalIgnoringUpdatedAt(existing: CanonicalSkipRow, doc: VerbatimDocument, contentHash: string): boolean {
+    if (existing.content_hash !== contentHash || !existing.vector) return false;
+    const existingScopes = existing.security_scopes ? JSON.parse(existing.security_scopes) as string[] : [];
+    // Undefined scopes mean "keep the row's labels" (upsertCanonical), so they never differ.
+    const sameScopes = doc.metadata?.security_scopes === undefined
+        || JSON.stringify([...existingScopes].sort())
+        === JSON.stringify([...doc.metadata.security_scopes].sort());
+    return (existing.type ?? '') === (doc.metadata?.type ?? '') &&
+        (existing.label ?? '') === (doc.metadata?.label ?? '') &&
+        (existing.tags ?? '') === (doc.metadata?.tags ?? '') &&
+        (existing.project ?? '') === (doc.metadata?.project ?? '') &&
+        (existing.ecosystem ?? '') === (doc.metadata?.ecosystem ?? '') &&
+        sameScopes;
+}
+
+/** Pre-embed probe for `bulkIngest` (3.35.0): the ids of prebuilt rows whose canonical row is already identical under
+ *  the skip-identical rule above (same content hash, an embedded vector, same persisted metadata; `updatedAt` ignored).
+ *  ONE chunked SELECT for the whole list. Read-only: nothing is written or re-stamped, so a caller that skips these rows
+ *  leaves them byte-flat. Rows are in `bulkUpsertPrebuiltRows` shape (`text`/`contentHash`/metadata at the top level). */
+export function findUnchangedRowIds(db: DatabaseType, rows: Array<Record<string, unknown>>): string[] {
+    if (rows.length === 0) return [];
+    const existing = readCanonicalForSkip(db, rows.map((r) => String(r.id)));
+    const out: string[] = [];
+    for (const r of rows) {
+        const cur = existing.get(String(r.id));
+        if (!cur) continue;
+        const text = String(r.text ?? '');
+        const doc = { id: String(r.id), text, metadata: {
+            type: String(r.type ?? ''), label: String(r.label ?? ''), tags: String(r.tags ?? ''),
+            project: String(r.project ?? ''), ecosystem: String(r.ecosystem ?? ''),
+            security_scopes: Array.isArray(r.security_scopes) ? (r.security_scopes as string[]) : undefined,
+        } } as unknown as VerbatimDocument;
+        if (isIdenticalIgnoringUpdatedAt(cur, doc, r.contentHash ? String(r.contentHash) : computeContentHash(text))) out.push(String(r.id));
+    }
+    return out;
+}
+
+/** Carry a changed, non-empty `updatedAt` onto the canonical row in place. Returns true when a row was changed. */
+function syncUpdatedAt(db: DatabaseType, id: string, current: string | null, next: string | undefined): boolean {
+    if (!next || (current ?? '') === next) return false;
+    return db.prepare(`UPDATE verbatim SET updatedAt = ? WHERE id = ? AND is_canonical = 1`).run(next, id).changes > 0;
+}
+
 /** store() — single-document upsert. Skip-identical: when the doc's
  *  content hash matches the existing canonical row's, a vector already
- *  exists there, AND every persisted metadata column also matches, no new
- *  embed/write happens (mirrors VerbatimStore.store's short-circuit). A row
+ *  exists there, AND every persisted metadata column EXCEPT `updatedAt`
+ *  also matches, no new row/embed happens (mirrors VerbatimStore.store's
+ *  short-circuit); the canonical row's `updatedAt` is synced in place (3.35.0:
+ *  the graph re-stamps it on every re-store, so comparing it never skipped). A row
  *  that is currently TEXT-ONLY (null vector — the embedder was disabled
  *  when it was last written) is deliberately NOT skipped even on a
  *  content-hash match: re-resolving the vector lets a later re-store pick
@@ -202,29 +272,14 @@ export async function store(deps: SqliteWriteDeps, doc: VerbatimDocument): Promi
     // on the new default (sqlite) engine — a real production regression, not
     // just a test gap.
     const contentHash = doc.metadata?.contentHash ?? computeContentHash(redactedText);
-    const existing = deps.db.prepare(
-        `SELECT content_hash, vector, type, label, tags, project, ecosystem, updatedAt, security_scopes
-         FROM verbatim WHERE id = ? AND is_canonical = 1`,
-    ).get(doc.id) as {
-        content_hash: string | null; vector: Buffer | null;
-        type: string | null; label: string | null; tags: string | null; project: string | null;
-        ecosystem: string | null; updatedAt: string | null; security_scopes: string | null;
-    } | undefined;
-    if (!wasRedacted && existing && existing.content_hash === contentHash && existing.vector) {
-        const existingScopes = existing.security_scopes ? JSON.parse(existing.security_scopes) as string[] : [];
-        // Undefined scopes mean "keep the row's labels" (upsertCanonical), so they never differ.
-        const sameScopes = doc.metadata?.security_scopes === undefined
-            || JSON.stringify([...existingScopes].sort())
-            === JSON.stringify([...doc.metadata.security_scopes].sort());
-        const sameMetadata =
-            (existing.type ?? '') === (doc.metadata?.type ?? '') &&
-            (existing.label ?? '') === (doc.metadata?.label ?? '') &&
-            (existing.tags ?? '') === (doc.metadata?.tags ?? '') &&
-            (existing.project ?? '') === (doc.metadata?.project ?? '') &&
-            (existing.ecosystem ?? '') === (doc.metadata?.ecosystem ?? '') &&
-            (existing.updatedAt ?? '') === (doc.metadata?.updatedAt ?? '') &&
-            sameScopes;
-        if (sameMetadata) return; // identical content + metadata, already embedded — no-op
+    if (!wasRedacted) {
+        const existing = readCanonicalForSkip(deps.db, [doc.id]).get(doc.id);
+        if (existing && isIdenticalIgnoringUpdatedAt(existing, doc, contentHash)) {
+            // Identical content + metadata, already embedded: no embed, no new row, no supersede. Only a newer
+            // `updatedAt` (the graph re-stamps it on every re-store) is carried onto the canonical row in place.
+            if (syncUpdatedAt(deps.db, doc.id, existing.updatedAt, doc.metadata?.updatedAt)) deps.onMutate();
+            return;
+        }
     }
     const vector = await resolveVector(deps, doc, redactedText);
     upsertCanonical(deps.db, {
@@ -244,18 +299,39 @@ export async function store(deps: SqliteWriteDeps, doc: VerbatimDocument): Promi
  *  split VerbatimStore's storeBatch already uses. */
 export async function storeBatch(deps: SqliteWriteDeps, docs: VerbatimDocument[]): Promise<void> {
     const deduped = dedupeByIdKeepLast(docs, (d) => d.id);
-    const prepared: Array<{
+    type Prepared = {
         id: string; text: string; vector: Float32Array | null; contentHash: string;
         type?: string; label?: string; tags?: string; project?: string; ecosystem?: string;
         updatedAt?: string; security_scopes?: string[];
-    }> = [];
-    for (const doc of deduped) {
-        const redactedText = redactSecrets(doc.text);
-        // Same optional-metadata tolerance as store() above — see its comment.
-        const contentHash = doc.metadata?.contentHash ?? computeContentHash(redactedText);
+    };
+    // Skip-identical (3.35.0, same rule as store()): ONE chunked canonical-row SELECT, then drop the docs that are
+    // already stored verbatim BEFORE any embed, so a re-imported unchanged corpus costs reads, not model calls.
+    // Redacted docs never skip (two different secrets can redact to one placeholder, see store()).
+    // The read is a hint only; the write transaction below re-checks authoritatively.
+    const todo: Array<{ doc: VerbatimDocument; redactedText: string; contentHash: string; wasRedacted: boolean }> = [];
+    let touched = false;
+    // The hint read and the in-place updatedAt syncs share one transaction, so a skipped doc is never decided on a
+    // snapshot another connection has since moved past.
+    deps.db.transaction(() => {
+        const hint = readCanonicalForSkip(deps.db, deduped.map((d) => d.id));
+        for (const doc of deduped) {
+            const redactedText = redactSecrets(doc.text);
+            // Same optional-metadata tolerance as store() above — see its comment.
+            const contentHash = doc.metadata?.contentHash ?? computeContentHash(redactedText);
+            const wasRedacted = redactedText !== doc.text;
+            const existing = hint.get(doc.id);
+            if (!wasRedacted && existing && isIdenticalIgnoringUpdatedAt(existing, doc, contentHash)) {
+                if (syncUpdatedAt(deps.db, doc.id, existing.updatedAt, doc.metadata?.updatedAt)) touched = true;
+                continue;
+            }
+            todo.push({ doc, redactedText, contentHash, wasRedacted });
+        }
+    })();
+    const prepared: Array<Prepared & { wasRedacted: boolean }> = [];
+    for (const { doc, redactedText, contentHash, wasRedacted } of todo) {
         const vector = await resolveVector(deps, doc, redactedText);
         prepared.push({
-            id: doc.id, text: redactedText, vector, contentHash,
+            id: doc.id, text: redactedText, vector, contentHash, wasRedacted,
             type: doc.metadata?.type, label: doc.metadata?.label, tags: doc.metadata?.tags,
             project: doc.metadata?.project, ecosystem: doc.metadata?.ecosystem, updatedAt: doc.metadata?.updatedAt,
             security_scopes: doc.metadata?.security_scopes,
@@ -264,11 +340,26 @@ export async function storeBatch(deps: SqliteWriteDeps, docs: VerbatimDocument[]
     for (let i = 0; i < prepared.length; i += VERBATIM_CHUNK_SIZE) {
         const chunk = prepared.slice(i, i + VERBATIM_CHUNK_SIZE);
         const run = deps.db.transaction(() => {
-            for (const row of chunk) upsertCanonical(deps.db, row);
+            // Authoritative re-check inside the write transaction: a concurrent writer may have changed (or
+            // already stored) a row since the hint read. Only a row that is STILL identical is skipped.
+            const fresh = readCanonicalForSkip(deps.db, chunk.map((r) => r.id));
+            for (const row of chunk) {
+                const existing = fresh.get(row.id);
+                const asDoc = { id: row.id, text: row.text, metadata: {
+                    type: row.type, label: row.label, tags: row.tags, project: row.project, ecosystem: row.ecosystem,
+                    security_scopes: row.security_scopes,
+                } } as unknown as VerbatimDocument;
+                if (!row.wasRedacted && existing && isIdenticalIgnoringUpdatedAt(existing, asDoc, row.contentHash)) {
+                    if (syncUpdatedAt(deps.db, row.id, existing.updatedAt, row.updatedAt)) touched = true;
+                    continue;
+                }
+                upsertCanonical(deps.db, row);
+                touched = true;
+            }
         });
         run();
     }
-    if (prepared.length > 0) deps.onMutate();
+    if (touched) deps.onMutate();
 }
 
 /** bulkAddPrebuiltRows — substrate-native bulk append, no embed (caller

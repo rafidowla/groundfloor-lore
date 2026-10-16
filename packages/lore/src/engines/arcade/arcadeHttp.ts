@@ -31,6 +31,9 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
 import { URL } from 'node:url';
+import { isArcadeConcurrentModification, isArcadeConnectRefused } from './arcadeTransientErrors.js';
+import { currentHold, requestTimeoutMs } from '../holdContext.js';
+import { TRANSIENT_MAX_RETRIES, transientBackoffCeilMs } from '../graphShared/transientRetry.js';
 
 export interface ArcadeAuth {
   user: string;
@@ -69,11 +72,12 @@ function isLocalhostHost(host: string): boolean {
 const agentPool = new Map<string, http.Agent | https.Agent>();
 
 const DEFAULT_MAX_CONNECTIONS = 16;
-const DEFAULT_TIMEOUT_MS = 30_000;
-const QUERY_MAX_RETRIES = 2;
-const QUERY_RETRY_BASE_MS = 100;
-const QUERY_RETRY_CAP_MS = 400;
+const QUERY_MAX_RETRIES = TRANSIENT_MAX_RETRIES; // shared with the node-batch retry (graphShared/transientRetry.ts)
 const RETRYABLE_STATUS = new Set([502, 503, 504]);
+// 3.35.0 (a): concurrent-modification retries (see retryIdempotentArcadeWrite). Full jitter over [0, min(cap, base*2^n)).
+const CME_MAX_RETRIES = 6;
+const CME_RETRY_BASE_MS = 50;
+const CME_RETRY_CAP_MS = 1_000;
 
 function maxConnections(): number {
   const raw = process.env['LORE_ARCADE_MAX_CONNECTIONS'];
@@ -136,7 +140,7 @@ export class ArcadeHttp {
       throw new Error(`[ArcadeHttp] unsupported protocol "${url.protocol}" in base URL ${baseUrl}`);
     }
     this.base = url;
-    this.timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.timeoutMs = opts?.timeoutMs ?? requestTimeoutMs();
   }
 
   /**
@@ -149,6 +153,11 @@ export class ArcadeHttp {
   }
 
   private request(path: string, body: unknown): Promise<ArcadeCommandResult> {
+    // 3.35.0 (b): inside a node-lock hold that already saw a request time out, the engine is hung -
+    // fail at once with the SAME timeout error rather than waiting out another full timeout while
+    // holding the lock (see engines/holdContext.ts).
+    const hold = currentHold();
+    if (hold?.timedOut) return Promise.reject(new Error(`[ArcadeHttp] request timeout after ${this.timeoutMs}ms`));
     const url = new URL(path, this.base);
     const agent = agentFor(url);
     const payload = JSON.stringify(body);
@@ -185,6 +194,7 @@ export class ArcadeHttp {
         },
       );
       req.setTimeout(this.timeoutMs, () => {
+        if (hold) hold.timedOut = true;
         req.destroy(new Error(`[ArcadeHttp] request timeout after ${this.timeoutMs}ms`));
       });
       req.on('error', reject);
@@ -212,9 +222,10 @@ export class ArcadeHttp {
         const retryable =
           (e instanceof ArcadeHttpError && RETRYABLE_STATUS.has(e.status)) ||
           !(e instanceof ArcadeHttpError); // network/timeout error
-        if (!retryable || attempt === QUERY_MAX_RETRIES) throw e;
+        // A timeout inside a node-lock hold is not retried: the hold is already spent (holdContext.ts).
+        if (!retryable || attempt === QUERY_MAX_RETRIES || currentHold()?.timedOut) throw e;
         // Full-jitter backoff, capped.
-        const ceil = Math.min(QUERY_RETRY_CAP_MS, QUERY_RETRY_BASE_MS * 2 ** attempt);
+        const ceil = transientBackoffCeilMs(attempt);
         await sleep(Math.floor(Math.random() * ceil));
       }
     }
@@ -267,7 +278,10 @@ export class ArcadeHttp {
 
 /**
  * retryIdempotentArcadeWrite — bounded retry, SAME policy as query()'s
- * (502/503/504, full-jitter backoff, capped), for a mutation the CALLER has
+ * (502/503/504 or a refused connection, full-jitter backoff, capped) PLUS, since 3.35.0, a
+ * ConcurrentModificationException in ANY status (HTTP 500 from a sqlscript
+ * commit, 503 from a session commit; see arcadeTransientErrors.ts) with its own
+ * larger bounded budget, for a mutation the CALLER has
  * independently established is idempotent (e.g. a full-column
  * `UPDATE ... UPSERT WHERE id = :id`, safe to replay with the same params).
  *
@@ -289,16 +303,41 @@ export class ArcadeHttp {
  */
 export async function retryIdempotentArcadeWrite<T>(fn: () => Promise<T>): Promise<T> {
   let lastErr: unknown;
-  for (let attempt = 0; attempt <= QUERY_MAX_RETRIES; attempt++) {
+  let cmeRetries = 0;
+  let otherRetries = 0;
+  for (;;) {
     try {
       return await fn();
     } catch (e) {
       lastErr = e;
-      const retryable = e instanceof ArcadeHttpError && RETRYABLE_STATUS.has(e.status);
-      if (!retryable || attempt === QUERY_MAX_RETRIES) throw e;
-      const ceil = Math.min(QUERY_RETRY_CAP_MS, QUERY_RETRY_BASE_MS * 2 ** attempt);
+      // 3.35.0 (a): a ConcurrentModificationException is HTTP 500 from a sqlscript commit (503 from a
+      // session commit); the commit did NOT happen, so replaying the whole attempt is safe. It gets its
+      // own, larger bounded budget and a wider jitter window than a 502/503/504 blip, because under N
+      // concurrent writers two retries on a 100-400 ms window collide again.
+      if (isArcadeConcurrentModification(e)) {
+        if (cmeRetries >= CME_MAX_RETRIES) throw e;
+        const ceil = Math.min(CME_RETRY_CAP_MS, CME_RETRY_BASE_MS * 2 ** cmeRetries);
+        cmeRetries++;
+        traceArcadeRetry('cme', cmeRetries);
+        await sleep(Math.floor(Math.random() * ceil));
+        continue;
+      }
+      // 3.35.0 (r): a REFUSED connection is retried on the same transient budget as 502/503/504. ECONNREFUSED is
+      // raised by connect() itself, so nothing was sent and nothing was applied. This holds with the keep-alive pool
+      // in agentFor(): a reused socket never connects, so a dead server surfaces on it as ECONNRESET/EPIPE/hang-up
+      // (the request may have been sent), and only a fresh connect can be refused. Those, and any timeout/abort,
+      // stay un-retried (outcome unknown).
+      const retryable = (e instanceof ArcadeHttpError && RETRYABLE_STATUS.has(e.status)) || isArcadeConnectRefused(e);
+      if (!retryable || otherRetries >= QUERY_MAX_RETRIES) throw lastErr;
+      const ceil = transientBackoffCeilMs(otherRetries);
+      otherRetries++;
+      traceArcadeRetry('transient', otherRetries);
       await sleep(Math.floor(Math.random() * ceil));
     }
   }
-  throw lastErr;
+}
+
+/** LORE_NODE_BATCH_TRACE=1: one line per store-level retry, so a load check can count the retries a run used. */
+function traceArcadeRetry(kind: 'cme' | 'transient', attempt: number): void {
+  if (process.env['LORE_NODE_BATCH_TRACE'] === '1') console.error(`[arcade-retry] kind=${kind} attempt=${attempt}`);
 }

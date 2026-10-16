@@ -384,6 +384,17 @@ export async function doctorCommand(args: string[]): Promise<void> {
                 } else {
                     console.log(`  ⚠ /api/health status=${healthStatus ?? 'unreachable'} — daemon may not be running`);
                 }
+                // 3.35.0 (e): readiness ("can it serve writes right now?") is a different
+                // question from liveness above. Advisory only - a not-ready backend is
+                // often transient, so it never counts as a doctor issue. An older daemon
+                // without /api/ready (404) is skipped silently.
+                const readyProbe = await probeJson('/api/ready', token);
+                if (readyProbe.status === 200) {
+                    console.log('  ✓ Daemon /api/ready: ready to serve writes');
+                } else if (readyProbe.status === 503) {
+                    const rb = readyProbe.body as { reason?: string; detail?: string } | null;
+                    console.log(`  ⚠ Daemon /api/ready: NOT ready${rb?.reason ? ` (${rb.reason}${rb.detail ? `: ${rb.detail}` : ''})` : ''} - liveness is fine, writes may fail`);
+                }
                 const configUnauth = await probeHttp('/api/config', null);
                 if (configUnauth === 401) {
                     console.log('  ✓ /api/config rejects unauthenticated requests (401)');

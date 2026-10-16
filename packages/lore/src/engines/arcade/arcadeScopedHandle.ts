@@ -105,6 +105,8 @@ export class ScopedArcadeGraphHandle implements LoreGraphHandle {
   upsertNodeAtRevision?: LoreGraphHandle['upsertNodeAtRevision'];
   replayNodeAtRevision?: LoreGraphHandle['replayNodeAtRevision'];
   upsertNodeKeepRevision?: LoreGraphHandle['upsertNodeKeepRevision'];
+  /** 3.35.0: atomic node batch, write-gated; present only when the wrapped graph has it. */
+  commitNodeBatch?: LoreGraphHandle['commitNodeBatch'];
   /** 3.34.0 (M3a): forwarded so the delete routes' retry classifier survives the wrapper. */
   isTransientDeleteError?: (err: unknown) => boolean;
   constructor(
@@ -117,6 +119,9 @@ export class ScopedArcadeGraphHandle implements LoreGraphHandle {
       this.replayNodeAtRevision = (node) => { this.requireWrite(); return inner.replayNodeAtRevision!(node); };
     }
     if (typeof inner.isTransientDeleteError === 'function') this.isTransientDeleteError = (e) => inner.isTransientDeleteError!(e);
+    if (typeof inner.commitNodeBatch === 'function') {
+      this.commitNodeBatch = (checks, writes, supersedes) => { this.requireWrite(); return inner.commitNodeBatch!(checks, writes, supersedes); };
+    }
     if (typeof inner.upsertNodeKeepRevision === 'function') {
       this.upsertNodeKeepRevision = (node) => { this.requireWrite(); return inner.upsertNodeKeepRevision!(node); };
     }

@@ -50,6 +50,8 @@ export interface CollectionFirstSdk {
     search?<T = unknown>(collection: string, query: string, opts?: SearchOpts): Promise<Array<T & { _score?: number }>>;
     /** `POST /v1/transaction`: every op commits or none does. Present only in newer SDK builds. */
     transaction?(operations: TransactionOp[], options?: TransactionOptions): Promise<TransactionResult>;
+    /** `GET /connectors` (authenticated, not workspace-scoped). Used by the `/ready` probe (3.35.0 (e)). */
+    listConnectors?(): Promise<unknown>;
     vector?: unknown;
     graph?: unknown;
 }
@@ -72,6 +74,8 @@ export interface TenantFirstSdk {
     search?<T = unknown>(collection: string, query: string, opts?: SearchOpts): Promise<Array<T & { _score?: number }>>;
     /** Tenant-first like the rest of the façade (the tenant is discarded). Absent when the SDK build has no `transaction`. */
     transaction?(tenantId: string, operations: TransactionOp[], options?: TransactionOptions): Promise<TransactionResult>;
+    /** Forwarded only when the SDK build has it (the `/ready` probe, 3.35.0 (e)). */
+    listConnectors?(): Promise<unknown>;
     vector?: unknown;
     graph?: unknown;
 }
@@ -132,6 +136,7 @@ export function asLoreDataplaneSdk(raw: CollectionFirstSdk): TenantFirstSdk {
             }
             return raw.search<T>(collection, query, opts);
         },
+        ...(typeof raw.listConnectors === 'function' ? { listConnectors: () => raw.listConnectors!() } : {}),
         vector: raw.vector,
         graph: raw.graph,
     };

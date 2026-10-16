@@ -257,10 +257,28 @@ export class FileOutboxStore implements IOutboxStore {
         const map = this.readAll();
         const entry = map[entryId];
         if (!entry) return true;                                       // nothing to replay
-        if (entry.status && entry.status !== 'pending') return false;  // already claimed → compensate
+        if (entry.status && entry.status !== 'pending' && entry.status !== 'pending_commit') return false;  // already claimed → compensate
         delete map[entryId];
         this.writeAll(map);
         return true;
+    }
+
+    /** 3.35.0 (R3) - see OutboxStore.markCommitted. */
+    async markCommitted(entryIds: string[]): Promise<number> {
+        const map = this.readAll();
+        let n = 0;
+        for (const id of entryIds) {
+            const e = map[id];
+            if (e && e.status === 'pending_commit') { e.status = 'pending'; e.updatedAt = new Date().toISOString(); n++; }
+        }
+        if (n > 0) this.writeAll(map);
+        return n;
+    }
+
+    /** 3.35.0 (R3) - see OutboxStore.listPendingCommit. */
+    async listPendingCommit(limit = 500): Promise<OutboxEntry[]> {
+        return Object.values(this.readAll()).filter((e) => e.status === 'pending_commit')
+            .sort((a, b) => a.createdAt.localeCompare(b.createdAt)).slice(0, Math.max(0, limit));
     }
 
     async listUnfinished(): Promise<OutboxEntry[]> {
@@ -423,7 +441,9 @@ export class FileOutboxStore implements IOutboxStore {
         for (const e of Object.values(map)) {
             const ws = e.workspace ?? DEFAULT_WORKSPACE_BACKFILL;
             const s = stats[ws] ??= { depth: 0, lagSeconds: 0, dead: 0 };
-            if (e.status === 'dead') {
+            if (e.status === 'pending_commit') {
+                s.pendingCommit = (s.pendingCommit ?? 0) + 1; // in-flight write, not backlog (3.35.0 R3)
+            } else if (e.status === 'dead') {
                 s.dead += 1;
                 if (isSupersededDeadError(e.lastError)) s.deadSuperseded = (s.deadSuperseded ?? 0) + 1;
             } else if (e.status === 'pending' || e.status === 'replicating' || e.status === 'failed') {
@@ -440,13 +460,14 @@ export class FileOutboxStore implements IOutboxStore {
 
     async aggregateStats(): Promise<OutboxAggregateStats> {
         const perWorkspace = await this.statsByWorkspace();
-        let depth = 0, dead = 0, deadSuperseded = 0, lagSeconds = 0;
+        let depth = 0, dead = 0, deadSuperseded = 0, lagSeconds = 0, pendingCommit = 0;
         for (const s of Object.values(perWorkspace)) {
             depth += s.depth;
+            pendingCommit += s.pendingCommit ?? 0;
             dead += s.dead;
             deadSuperseded += s.deadSuperseded ?? 0;
             if (s.lagSeconds > lagSeconds) lagSeconds = s.lagSeconds;
         }
-        return { depth, dead, deadSuperseded, lagSeconds, perWorkspace };
+        return { depth, pendingCommit, dead, deadSuperseded, lagSeconds, perWorkspace };
     }
 }

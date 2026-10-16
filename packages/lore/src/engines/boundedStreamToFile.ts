@@ -59,10 +59,20 @@ export async function boundedStreamToFile(
             settled = true;
             source.removeAllListeners();
             source.destroy();
-            dest.destroy();
-            unlink(destPath)
-                .catch(() => { /* best-effort cleanup — nothing more useful to do if this fails */ })
-                .finally(() => reject(err));
+            const removePartial = (): void => {
+                unlink(destPath)
+                    .catch(() => { /* best-effort cleanup — nothing more useful to do if this fails */ })
+                    .finally(() => reject(err));
+            };
+            // createWriteStream opens the file lazily. Unlinking before the stream has closed races that open: the
+            // unlink can land first and the open then recreates the file, leaving a partial file on disk. destroy()
+            // waits for a pending open before closing the fd, so unlink only once 'close' has fired.
+            if (dest.closed) {
+                removePartial();
+            } else {
+                dest.once('close', removePartial);
+                dest.destroy();
+            }
         };
 
         source.on('error', cleanupAndReject);

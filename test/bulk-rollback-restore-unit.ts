@@ -246,7 +246,12 @@ async function bulk(r: Rig, nodes: Array<Record<string, unknown>>, embed: 'inlin
     );
     return (JSON.parse(res._body) as { results: Item[] }).results;
 }
-const pendingRows = (r: Rig) => r.outbox.listPendingForWorkspace(r.ws, 10_000);
+// R3: this suite fakes "the replicator already claimed the row" by stubbing removeIfPending, so a row of a failed item may
+// still read `pending_commit` (really, a pending_commit row is never claimable). List those rows too, in commit order.
+const pendingRows = async (r: Rig): Promise<OutboxEntry[]> => {
+    const rows = (await r.outbox.listUnfinished!()).filter((e) => e.workspace === r.ws && ['pending', 'failed', 'pending_commit'].includes(String(e.status)));
+    return rows.sort((a, b) => (a.sequenceId ?? 0) - (b.sequenceId ?? 0));
+};
 /** Replay every row the call under test left behind, in commit order. */
 async function replayNew(r: Rig, seen: Set<string>): Promise<OutboxEntry[]> {
     const rows = (await pendingRows(r)).filter((e) => !seen.has(e.id));

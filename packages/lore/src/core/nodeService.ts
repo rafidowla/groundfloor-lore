@@ -40,9 +40,10 @@ import { defaultAutolinkTracker, PendingAutolinkTracker } from '../engines/pendi
 import { redactId, redactError } from '../security/logRedact.js';
 import { CAPPED_NODE_TEXT_FIELDS, MAX_NODE_FIELD_BYTES, SUPERSEDE_LIFECYCLE_FIELDS, exceedsNodeFieldCap } from '../engines/nodeFieldLimits.js';
 import { log } from '../logger.js';
-import { recordHotWrite } from '../outbox/hotLane.js';
+import { commitHotRows, recordHotWrite } from '../outbox/hotLane.js';
 import { withNodeLocks } from './nodeWriteLock.js';
-import { guardNodeWrite, retractNodeUpsertRow, writeNodeAtRevision, canWriteAtRevision, type NodeGuardFailure } from './nodeServiceConditional.js';
+import { guardNodeWrite, retractNodeUpsertRow, writeNodeAtRevision, canWriteAtRevision, conditionalGraphWrite, createIfAbsentWrite, batchWriteRefusal, type NodeGuardFailure } from './nodeServiceConditional.js';
+import { newSupersedeIntent } from './atomicSupersede.js';
 import { isRevisionConflict, revisionOf } from '../engines/graphShared/revision.js';
 import { isOutcomeUnknown } from '../engines/graphShared/writeOutcome.js';
 import { parseConditionalFields, revisionMismatchMessage, type FailedPrecondition, type Precondition } from './conditionalChecks.js';
@@ -249,6 +250,8 @@ export type NodeWriteResult =
            *  the caller can see the check was skipped rather than silently
            *  reading "no duplicate found". Omitted on the ordinary path. */
           supersessionWarning?: string;
+          /** 3.35.0 (q): targets whose half-done supersede (mark xor edge) this write completed. Omitted when none. */
+          supersedesRepaired?: string[];
       }
     | {
           ok: false;
@@ -641,6 +644,7 @@ export async function nodeUpsert(
     //      The lock set is the id PLUS its `supersedes` targets (R2): two writers
     //      claiming the same old node serialise, and the claim (step 3.5) runs
     //      inside the same critical section as the guard that checked it.
+    let supersedesRepaired: string[] | undefined;
     const writeOutcome = await withNodeLocks(workspace, [id, ...(args.supersedes ?? []), ...(conditions.preconditions ?? []).map((p) => p.id)], async (): Promise<{ node: LoreNode; embedPending: boolean; superseded: Awaited<ReturnType<typeof runSupersessionApply>> } | { verbatimError: Error } | NodeGuardFailure> => {
         // 1. Outbox-first node.upsert (durability + replay + per-workspace replication).
         //    TW-4a — capture the recorded entry so the verbatim-failure rollback
@@ -664,37 +668,23 @@ export async function nodeUpsert(
         // Phase 2a: on a revision-aware graph the row is recorded INSIDE writeNodeAtRevision (it needs the
         // predicted revision and, on a cross-daemon conflict, re-records); `ifAbsent` keeps its insert-only row.
         const atRevision = args.ifAbsent !== true && canWriteAtRevision(targetGraph, priorNode);
+        const intent = newSupersedeIntent(targetGraph, id, args.supersedes, { workspace, initiator, store: hooks.outboxStore }); // 3.35.0 (q): atomic supersede
         if (hooks.outboxStore && !atRevision) {
-            const nodeUpsertEntry = await recordHotWrite(hooks.outboxStore, {
-                workspace,
-                operationKind: 'node.upsert',
-                payload: nodeData,
-                initiator,
-                operation: 'graph.upsert',
-            });
+            // R3: recorded pending_commit (invisible to the replicator) until the graph commit below settles.
+            const nodeUpsertEntry = await recordHotWrite(hooks.outboxStore, { workspace, operationKind: 'node.upsert', payload: nodeData, initiator, operation: 'graph.upsert', pendingCommit: true });
             nodeUpsertOutboxEntryId = nodeUpsertEntry.id;
         }
 
-        // 2. Substrate graph upsert.
-        //    2.1 (2026-08-17 functional-correctness) — this call previously had
-        //    NO failure handling: when it threw (e.g. a SurrealDB transaction
-        //    conflict under concurrent writes), the caller was told the write
-        //    FAILED, step 3 never ran, and the step-1 node.upsert outbox row was
-        //    never retracted — the replicator later replayed it, creating the
-        //    node anyway with NO verbatim row (permanently invisible to semantic
-        //    recall). Route the failure through the SAME retraction mechanism
-        //    the step-3 verbatim-failure path uses (rollbackPartialWrite), so
-        //    both failure paths behave identically: graph back to its
-        //    pre-write state (a node this write created is deleted, an
-        //    existing one restored) + outbox row retracted (or a compensating
-        //    row recorded when the replicator already claimed it, C-R2-03).
+        // 2. Substrate graph upsert. A failure takes the SAME path as a step-3 verbatim failure (rollbackPartialWrite):
+        //    graph back to its pre-write state + the step-1 outbox row retracted (or compensated once the replicator
+        //    claimed it, C-R2-03), so a replay cannot resurrect a write the caller was told failed (2.1, 2026-08-17).
         const versionIntent = { principal: hooks.versionPrincipal ?? 'mcp', policy: hooks.versionHistoryPolicy, recorded: [] as string[] };
         let node: LoreNode;
         try {
             if (atRevision) {
                 const written = await writeNodeAtRevision({
                     graph: targetGraph, id, nodeData, priorNode, store: hooks.outboxStore, workspace, initiator,
-                    write: (expected, at) => withVersionIntent(hooks.versionStore, versionIntent, () => targetGraph.upsertNodeAtRevision!(nodeData as NodeInput, expected, at, conditions.ifRevision !== undefined)),
+                    write: (expected, at) => withVersionIntent(hooks.versionStore, versionIntent, () => conditionalGraphWrite(targetGraph, nodeData, conditions, expected, at, intent)),
                     onEntry: (entryId) => { nodeUpsertOutboxEntryId = entryId; },
                     noRetry: conditions.ifRevision !== undefined,
                 });
@@ -702,10 +692,13 @@ export async function nodeUpsert(
                 priorNode = written.priorNode;
             } else {
                 node = await withVersionIntent(hooks.versionStore, versionIntent, () => args.ifAbsent === true
-                    ? createNodeIfAbsent(targetGraph as Parameters<typeof createNodeIfAbsent>[0], nodeData as NodeInput)
+                    ? createIfAbsentWrite(targetGraph, nodeData, conditions, intent)
                     : targetGraph.upsertNode(nodeData)); // cloud: version in the same transaction (item 8)
+                await commitHotRows(hooks.outboxStore, [nodeUpsertOutboxEntryId]); // R3: committed -> replicable
             }
         } catch (graphErr) {
+            const batchRefused = await batchWriteRefusal(graphErr, { store: hooks.outboxStore, entryId: nodeUpsertOutboxEntryId, workspace, graph: targetGraph, id, written: nodeData, initiator }); // 3.35.0 S1
+            if (batchRefused) return batchRefused;
             if (isRevisionConflict(graphErr) && conditions.ifRevision !== undefined) {
                 // ifRevision: another daemon moved the node between our check and the conditional write — that IS the answer.
                 const now = await targetGraph.getNode!(id).catch(() => null);
@@ -770,11 +763,13 @@ export async function nodeUpsert(
         }
         // 3.5 D5 — apply `supersedes` (if any), independent of enforcement, AFTER
         // the new node's own write succeeded. See supersessionPolicy.ts.
-        const superseded = await runSupersessionApply({
+        // (q) atomic path: the marks and edges already landed with the node, in its one commit.
+        const superseded = intent?.applied ? { ok: true as const } : await runSupersessionApply({
             targetGraph, supersedes: args.supersedes, newId: id, workspace, initiator, outboxStore: hooks.outboxStore, logPrefix,
         });
+        if (intent?.applied && intent.repaired.length > 0) supersedesRepaired = intent.repaired;
         // Write-time `supersedes` bumps the new node once per claimed node: report what is stored now.
-        if (args.supersedes && args.supersedes.length > 0 && superseded.ok && atRevision) {
+        if (args.supersedes && args.supersedes.length > 0 && superseded.ok && atRevision && !intent?.applied) {
             const fresh = await targetGraph.getNode!(id).catch(() => null);
             if (fresh && fresh.revision !== undefined) node = { ...node, revision: fresh.revision };
         }
@@ -885,5 +880,5 @@ export async function nodeUpsert(
         }
     }
 
-    return { ok: true, node, ...(embedPending ? { embedPending: true } : {}), ...(supersessionWarning ? { supersessionWarning } : {}) };
+    return { ok: true, node, ...(embedPending ? { embedPending: true } : {}), ...(supersessionWarning ? { supersessionWarning } : {}), ...(supersedesRepaired ? { supersedesRepaired } : {}) };
 }

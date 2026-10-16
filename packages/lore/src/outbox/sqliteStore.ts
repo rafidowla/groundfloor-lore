@@ -45,6 +45,9 @@ import { embedStatesForNodesOf, embedBacklogOf } from './recallableQueries.js';
 import { supersessionFamilySql, queuedVerbatimUpsertIdsOf, ensureNodeUpsertIdIndex, newestNodeUpsertRow, SUPERSEDED_DEAD_ERROR, type EntityFamily } from './supersession.js';
 import { migrateJsonOutbox, DEFAULT_WORKSPACE_BACKFILL, type MigrationReport } from './sqliteJsonMigration.js';
 import * as reclaimOps from './reclaimOps.js';
+import { rowToEntry, type Row } from './sqliteRows.js';
+import { markCommittedOf, listPendingCommitOf, pendingCommitCounts } from './sqlitePendingCommit.js';
+import { ensureTransientColumns, recordTransientFailureOf, listDeadOf, listDeadPageOf, requeueDeadOf, deadReasonCounts, deadSummaryOf } from './sqliteDeadLetters.js';
 import { sqliteHasNewerDeleteForKey } from './deleteAwareReplay.js';
 
 // Re-exported so existing importers of MigrationReport from this module
@@ -85,49 +88,6 @@ CREATE TABLE IF NOT EXISTS outbox_replication_state (
   updatedAt          TEXT NOT NULL
 );
 `;
-
-interface Row {
-    id: string;
-    workspace: string;
-    sequenceId: number;
-    operationKind: string;
-    payload: string | null;
-    status: string;
-    attempts: number;
-    lastError: string | null;
-    createdAt: string;
-    updatedAt: string;
-    replicatedAt: string | null;
-    failedAt: string | null;
-    /** SP-21: ISO timestamp before which a failed row should not be retried. */
-    nextAttemptAt: string | null;
-    steps: string | null;
-    operation: string;
-    initiator: string;
-    completed: number;
-}
-
-function rowToEntry(r: Row): OutboxEntry {
-    return {
-        id: r.id,
-        operation: r.operation,
-        initiator: r.initiator,
-        createdAt: r.createdAt,
-        updatedAt: r.updatedAt,
-        steps: r.steps ? JSON.parse(r.steps) : [],
-        completed: !!r.completed,
-        workspace: r.workspace,
-        operationKind: r.operationKind as OutboxEntry['operationKind'],
-        payload: r.payload ? JSON.parse(r.payload) : undefined,
-        status: r.status as OutboxStatus,
-        attempts: r.attempts,
-        lastError: r.lastError ?? undefined,
-        replicatedAt: r.replicatedAt ?? undefined,
-        failedAt: r.failedAt ?? undefined,
-        nextAttemptAt: r.nextAttemptAt ?? undefined,
-        sequenceId: r.sequenceId,
-    };
-}
 
 export class SqliteOutboxStore implements IOutboxStore {
     private readonly db: DatabaseType;
@@ -171,6 +131,7 @@ export class SqliteOutboxStore implements IOutboxStore {
             if (!/duplicate column/i.test((err as Error).message)) throw err;
             /* column already exists — no-op */
         }
+        ensureTransientColumns(this.db); // 3.35.0 (a): firstTransientAt / transientRetries / deadReason
     }
 
     get path(): string { return this.dbPath; }
@@ -409,7 +370,7 @@ export class SqliteOutboxStore implements IOutboxStore {
     // (records a node.delete/edge.delete) instead of leaving an orphan the
     // in-flight replay resurrects. A missing row means nothing to replay.
     async removeIfPending(entryId: string): Promise<boolean> {
-        const r = this.db.prepare(`DELETE FROM outbox_entries WHERE id = ? AND status = 'pending'`).run(entryId);
+        const r = this.db.prepare(`DELETE FROM outbox_entries WHERE id = ? AND status IN ('pending', 'pending_commit')`).run(entryId);
         if (r.changes > 0) return true;
         const row = this.db.prepare(`SELECT status FROM outbox_entries WHERE id = ?`).get(entryId) as { status: string } | undefined;
         // Row gone (never existed / already pruned) → nothing to replay.
@@ -417,6 +378,9 @@ export class SqliteOutboxStore implements IOutboxStore {
         // the replicator owns it; the caller must compensate.
         return row === undefined;
     }
+
+    async markCommitted(entryIds: string[]): Promise<number> { return markCommittedOf(this.db, entryIds); }
+    async listPendingCommit(limit?: number): Promise<OutboxEntry[]> { return listPendingCommitOf(this.db, limit); }
 
     /** 3.26.0 — atomic claim (OutboxStore.claimForReplication): the conditional
      *  UPDATE serializes against a second replayer and removeIfPending. */
@@ -489,7 +453,7 @@ export class SqliteOutboxStore implements IOutboxStore {
     async markEntryStatus(
         entryId: string,
         status: OutboxStatus,
-        info?: { error?: string; bumpAttempt?: boolean },
+        info?: { error?: string; bumpAttempt?: boolean; deadReason?: string },
     ): Promise<void> {
         // SW-06 (B7) — wrap the read-modify-write in a synchronous better-sqlite3
         // transaction, mirroring the SP-18 fix on markStep. Pre-SW-06 the
@@ -503,7 +467,7 @@ export class SqliteOutboxStore implements IOutboxStore {
         const txn = this.db.transaction((
             id: string,
             st: OutboxStatus,
-            inf?: { error?: string; bumpAttempt?: boolean },
+            inf?: { error?: string; bumpAttempt?: boolean; deadReason?: string },
         ) => {
             const row = this.db.prepare(`SELECT attempts FROM outbox_entries WHERE id = ?`).get(id) as
                 { attempts: number } | undefined;
@@ -533,9 +497,10 @@ export class SqliteOutboxStore implements IOutboxStore {
                   replicatedAt = COALESCE(?, replicatedAt),
                   failedAt = COALESCE(?, failedAt),
                   nextAttemptAt = ?,
-                  completed = CASE WHEN ? = 1 THEN 1 ELSE completed END
+                  completed = CASE WHEN ? = 1 THEN 1 ELSE completed END,
+                  deadReason = CASE WHEN ? = 'dead' THEN COALESCE(?, deadReason) ELSE deadReason END
                  WHERE id = ?`,
-            ).run(st, bump, now, lastError, replicatedAt, failedAt, nextAttemptAt, completed, id);
+            ).run(st, bump, now, lastError, replicatedAt, failedAt, nextAttemptAt, completed, st, inf?.deadReason ?? null, id);
         });
         txn(entryId, status, info);
     }
@@ -580,58 +545,33 @@ export class SqliteOutboxStore implements IOutboxStore {
         return rows.map(rowToEntry);
     }
 
-    /** See the OutboxStore.requeueDead contract in types.ts — in particular
-     *  WHY this requeues to 'failed' rather than 'pending' (the RA-6
-     *  supersession guard only runs on 'failed', and stale rows are exactly
-     *  what it protects against). */
+    /** See the OutboxStore.requeueDead contract in types.ts (body in sqliteDeadLetters.ts). */
     async requeueDead(opts?: {
         workspace?: string | null;
         operationKind?: string;
         errorContains?: string;
         limit?: number;
     }): Promise<number> {
-        const limit = Math.max(0, opts?.limit ?? 500);
-        if (limit === 0) return 0;
-        const where: string[] = [`status = 'dead'`];
-        const params: unknown[] = [];
-        if (opts?.workspace) { where.push(`workspace = ?`); params.push(opts.workspace); }
-        if (opts?.operationKind) { where.push(`operationKind = ?`); params.push(opts.operationKind); }
-        if (opts?.errorContains) {
-            // LIKE with the operand escaped: the caller's string is matched
-            // literally, so an error text containing % or _ selects only itself.
-            where.push(`lastError LIKE ? ESCAPE '\\'`);
-            params.push(`%${opts.errorContains.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
-        }
-        const now = new Date().toISOString();
-        // Subselect + LIMIT rather than `UPDATE ... LIMIT`: better-sqlite3 builds
-        // don't guarantee SQLITE_ENABLE_UPDATE_DELETE_LIMIT (same reason
-        // pruneReplicated is written this way).
-        const info = this.db.prepare(
-            `UPDATE outbox_entries
-                SET status = 'failed', attempts = 0, lastError = NULL,
-                    failedAt = NULL, nextAttemptAt = NULL, completed = 0,
-                    updatedAt = ?
-              WHERE id IN (
-                    SELECT id FROM outbox_entries
-                     WHERE ${where.join(' AND ')}
-                     ORDER BY workspace ASC, sequenceId ASC
-                     LIMIT ?)`,
-        ).run(now, ...params, limit);
-        return info.changes;
+        return requeueDeadOf(this.db, opts);
     }
 
     async listDead(opts?: { workspace?: string | null; limit?: number }): Promise<OutboxEntry[]> {
-        const limit = Math.max(0, opts?.limit ?? 500);
-        const ws = opts?.workspace ?? null;
-        const sql = ws === null
-            ? `SELECT * FROM outbox_entries WHERE status = 'dead'
-                 ORDER BY workspace ASC, sequenceId ASC LIMIT ?`
-            : `SELECT * FROM outbox_entries WHERE status = 'dead' AND workspace = ?
-                 ORDER BY sequenceId ASC LIMIT ?`;
-        const rows = ws === null
-            ? this.db.prepare(sql).all(limit) as Row[]
-            : this.db.prepare(sql).all(ws, limit) as Row[];
-        return rows.map(rowToEntry);
+        return listDeadOf(this.db, opts).map(rowToEntry);
+    }
+
+    /** 3.35.0 (a) - paged dead-letter list for the dead-rows route (hard-capped). */
+    async listDeadPage(opts: { workspace: string; limit?: number; offset?: number }): Promise<OutboxEntry[]> {
+        return listDeadPageOf(this.db, opts).map(rowToEntry);
+    }
+
+    /** 3.35.0 (a) - per-workspace dead-letter counts for /api/stats. */
+    async deadLetterSummary(workspace: string) {
+        return deadSummaryOf(this.db, workspace);
+    }
+
+    /** 3.35.0 (a) - transient replay failure: no attempt counted; see OutboxStore.recordTransientFailure. */
+    async recordTransientFailure(entryId: string, info: { error: string; nextAttemptAt: string }) {
+        return recordTransientFailureOf(this.db, entryId, info, MAX_ERROR_LEN);
     }
 
     /** SP-F2 (2026-06-10) — retention sweep for replicated rows. See the
@@ -764,19 +704,26 @@ export class SqliteOutboxStore implements IOutboxStore {
             s.dead = r.dead;
             s.deadSuperseded = r.superseded;
         }
+        for (const r of deadReasonCounts(this.db)) {
+            ((stats[r.workspace] ??= { depth: 0, lagSeconds: 0, dead: 0 }).deadByReason ??= {})[r.reason] = r.n;
+        }
+        for (const r of pendingCommitCounts(this.db)) (stats[r.workspace] ??= { depth: 0, lagSeconds: 0, dead: 0 }).pendingCommit = r.n;
         return stats;
     }
 
     async aggregateStats(): Promise<OutboxAggregateStats> {
         const perWorkspace = await this.statsByWorkspace();
-        let depth = 0, dead = 0, deadSuperseded = 0, lagSeconds = 0;
+        let depth = 0, dead = 0, deadSuperseded = 0, lagSeconds = 0, pendingCommit = 0;
+        const deadByReason: Record<string, number> = {};
         for (const s of Object.values(perWorkspace)) {
+            for (const [k, n] of Object.entries(s.deadByReason ?? {})) deadByReason[k] = (deadByReason[k] ?? 0) + n;
             depth += s.depth;
+            pendingCommit += s.pendingCommit ?? 0;
             dead += s.dead;
             deadSuperseded += s.deadSuperseded ?? 0;
             if (s.lagSeconds > lagSeconds) lagSeconds = s.lagSeconds;
         }
-        return { depth, dead, deadSuperseded, lagSeconds, perWorkspace };
+        return { depth, pendingCommit, dead, deadSuperseded, deadByReason, lagSeconds, perWorkspace };
     }
 
     /** Idempotent migration from outbox.json + outbox-replication.json

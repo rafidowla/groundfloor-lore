@@ -10,7 +10,10 @@
  * updates inline, so they see the latest ACCEPTED state, including writes still
  * waiting in the outbox. `ifRevision` additionally lands as a conditional
  * `WHERE revision = n` write, so another daemon moving the node loses cleanly.
- * `preconditions` are NOT enforced across daemons (phase 3).
+ * `preconditions` (3.35.0): on engines with `commitNodeBatch` (ArcadeDB, SQLite) the write goes through
+ * that primitive, which re-checks every precondition atomically with the write, so they hold ACROSS
+ * daemons sharing one database. Two limits stay single-daemon: a `revision: 0` / absent-node precondition
+ * on ArcadeDB (no record exists to guard) and any engine without a per-node revision (Dataplane, Surreal).
  */
 import type { LoreNode } from '../providers/types.js';
 import { assertSafeLanceId } from '../engines/verbatimHistory.js';

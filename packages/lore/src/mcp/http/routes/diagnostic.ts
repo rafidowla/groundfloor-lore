@@ -6,11 +6,13 @@
  *   POST /api/daemon/restart       — self-exit; launchd relaunches  (diagnostic/daemonControl.ts)
  *   GET  /api/daemon/logs?tail=N   — last N lines of daemon stderr   (diagnostic/daemonControl.ts)
  *   GET  /health                   — minimal liveness probe          (diagnostic/health.ts)
+ *   GET  /ready, /api/ready        — readiness probe (503 = not ready) (diagnostic/ready.ts)
  *   GET  /api/diagnose/consistency — tri-substrate consistency       (diagnostic/health.ts)
  *   GET  /api/health               — full daemon health snapshot     (diagnostic/health.ts)
  *   POST /api/admin/stats          — cross-workspace global view      (diagnostic/stats.ts)
  *   GET  /api/stats                — workspace-scoped counts          (diagnostic/stats.ts)
  *   GET  /api/capabilities         — machine capability probe         (diagnostic/stats.ts)
+ *   GET  /api/outbox/dead          — paginated dead-lettered outbox rows (diagnostic/outboxDead.ts)
  *   GET  /api/report               — markdown digest of active graph  (diagnostic/storage.ts)
  *   GET  /api/storage              — per-workspace disk + quota state  (diagnostic/storage.ts)
  *   GET  /api/diagnostic/hardware  — hardware probe + tier rec         (diagnostic/storage.ts)
@@ -28,6 +30,8 @@ import type { DiagnosticDeps } from './diagnostic/shared.js';
 import { handleDaemonRestart, handleDaemonLogs } from './diagnostic/daemonControl.js';
 import { handleHealthLite, handleConsistency, handleConsistencyCleanup, handleHealth } from './diagnostic/health.js';
 import { handleAdminStats, handleStats, handleCapabilities } from './diagnostic/stats.js';
+import { handleReady } from './diagnostic/ready.js';
+import { handleOutboxDead } from './diagnostic/outboxDead.js';
 import { handleReport, handleStorage, handleHardware, handleCacheStats } from './diagnostic/storage.js';
 
 export type { DiagnosticDeps } from './diagnostic/shared.js';
@@ -56,6 +60,10 @@ export async function tryDiagnosticRoutes(
         handleHealthLite(res, deps);
         return true;
     }
+    if ((pathname === '/ready' || pathname === '/api/ready') && (req.method === 'GET' || req.method === 'HEAD')) {
+        await handleReady(req, res, deps);
+        return true;
+    }
     if (pathname === '/api/diagnose/consistency' && req.method === 'GET') {
         await handleConsistency(res, url, deps);
         return true;
@@ -70,6 +78,10 @@ export async function tryDiagnosticRoutes(
     }
     if (pathname === '/api/stats' && req.method === 'GET') {
         await handleStats(res, url, deps);
+        return true;
+    }
+    if (pathname === '/api/outbox/dead' && req.method === 'GET') {
+        await handleOutboxDead(res, url, deps);
         return true;
     }
     if (pathname === '/api/capabilities' && req.method === 'GET') {

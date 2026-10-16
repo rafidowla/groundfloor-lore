@@ -77,6 +77,8 @@ export interface AuthConfig {
 const PUBLIC_API_PATHS = new Set<string>([
     '/health',
     '/api/health',
+    // 3.35.0 (e): readiness, same public/Host+Origin-checked treatment as /health.
+    '/api/ready',
     '/api/auth/bootstrap',
     // SP-04 (2026-06-10): /api/node-full was REMOVED from this set — it
     // dumps a node's full body (content/metadata, which can carry
@@ -105,6 +107,7 @@ const PUBLIC_API_PATHS = new Set<string>([
  */
 const NON_API_LOCAL_PATHS = [
     '/health',
+    '/ready', // 3.35.0 (e): readiness probe (see PUBLIC_API_PATHS)
     // Sprint C1 — Prometheus scrape endpoint. Bearer-less so a local
     // Prometheus / OTel collector can poll without provisioning a
     // token. Gated upstream by LORE_METRICS=on env (default off) +

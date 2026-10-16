@@ -76,6 +76,21 @@ await test('a stream exceeding the limit rejects with StreamTooLargeError and de
     assert.equal(fs.existsSync(dest), false, 'the partial file must be cleaned up, not left on disk');
 });
 
+await test('an over-limit first chunk never leaves the partial file behind (open/unlink race, 200 runs)', async () => {
+    // Regression: cleanup used to unlink while createWriteStream's lazy open was still pending, so the open could
+    // recreate the file after the unlink (~13% of single runs). Cleanup now waits for the stream's 'close'.
+    const leftovers: string[] = [];
+    for (let i = 0; i < 200; i++) {
+        const dest = destPath();
+        await assert.rejects(
+            () => boundedStreamToFile(fixedChunksStream([Buffer.alloc(200, 'r')]), dest, 100),
+            StreamTooLargeError,
+        );
+        if (fs.existsSync(dest)) leftovers.push(dest);
+    }
+    assert.deepEqual(leftovers, [], `${leftovers.length}/200 runs left the partial file on disk`);
+});
+
 await test('multiple small chunks summing over the limit still reject correctly', async () => {
     const chunks = [Buffer.alloc(40, 'c'), Buffer.alloc(40, 'c'), Buffer.alloc(40, 'c')]; // 120 > 100
     const dest = destPath();

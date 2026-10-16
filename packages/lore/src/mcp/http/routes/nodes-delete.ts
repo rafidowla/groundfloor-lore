@@ -31,7 +31,7 @@ import { writePermissionDenied } from '../../../security/rebacGate.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { bindRouteTarget } from '../../../security/routeWorkspaceBinding.js';
 import { nodeMutateVisible } from '../../../security/nodeWriteGate.js';
-import { writeWorkspaceRequired, checkOutboxBackpressure, writeJson, writeError } from '../helpers.js';
+import { writeWorkspaceRequired, checkOutboxBackpressure, writeJson, writeError, writeNodeBusy } from '../helpers.js';
 import type { OutboxStore } from '../../../outbox/types.js';
 import { recordHotWrite } from '../../../outbox/hotLane.js';
 import { deleteNodeAndText, deleteIncompleteMessage, DELETE_INCOMPLETE_CODE, type DeleteTextStore } from '../../../engines/graphShared/deleteOutcome.js';
@@ -303,6 +303,7 @@ export async function tryNodeDeleteRoute(
             resultDetail: (err as Error).message,
             durationMs: Date.now() - startedAt,
         });
+        if (writeNodeBusy(res, err)) return true;
         writeError(res, 500, 'internal_error', redactError(err)); // F-COL5
     }
     return true;

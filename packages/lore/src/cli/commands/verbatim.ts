@@ -369,6 +369,11 @@ export async function verbatimCommand(args: string[]): Promise<void> {
         await verbatimRepairScopesCommand(args.slice(1));
         return;
     }
+    if (sub === 'reclaim') {
+        const { verbatimReclaimCommand } = await import('./verbatimReclaim.js');
+        await verbatimReclaimCommand(args.slice(1));
+        return;
+    }
     if (sub !== 'reap') {
         console.error('usage: lore verbatim reap [--apply] [--prefix <prefix>]');
         console.error('       Default prefix: lore: (reap orphaned LoreNode embeddings)');
@@ -378,6 +383,8 @@ export async function verbatimCommand(args: string[]): Promise<void> {
         console.error('       Read-only report of rows whose security_scopes were damaged as [\'undefined\', ...] (Lance or SQLite)');
         console.error('       lore verbatim repair-scopes <workspace> [--data-dir <path>] [--apply] [--json]');
         console.error('       Restore those scopes where the node version log proves the original (dry run by default; --apply is offline, backed up)');
+        console.error('       lore verbatim reclaim [<workspace>] [--lore-dir <.lore dir> | --data-dir <path>] [--apply] [--vacuum] [--force] [--json]');
+        console.error('       Collapse duplicate verbatim rows in SQLite stores (dry run by default; --apply needs the host stopped; --vacuum shrinks the file)');
         process.exit(1);
     }
     const parsed = parseOrExit('verbatim reap', args.slice(1), {

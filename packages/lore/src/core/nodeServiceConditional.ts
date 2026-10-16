@@ -13,14 +13,18 @@
  */
 import type { LoreNode } from '../providers/types.js';
 import type { OutboxStore } from '../outbox/types.js';
-import { recordHotWrite } from '../outbox/hotLane.js';
+import { commitHotRows, recordHotWrite } from '../outbox/hotLane.js';
 import { NodeAlreadyExistsError } from '../engines/graphShared/conditionalInsert.js';
 import { restorePayload, withLandedRevision } from './nodeServiceVerbatim.js';
 import type { PriorNode } from './nodeServiceVerbatim.js';
 import { validateSupersedesIds } from './supersessionPolicy.js';
 import { MAX_REVISION_ATTEMPTS, hasRevisionSupport, isRevisionConflict, revisionOf } from '../engines/graphShared/revision.js';
 import type { NodeWriteGraph } from './nodeServiceTypes.js';
-import { REVISION_UNSUPPORTED, checkItemConditions, type FailedPrecondition, type ItemConditions } from './conditionalChecks.js';
+import { REVISION_UNSUPPORTED, ItemConditionError, checkItemConditions, type FailedPrecondition, type ItemConditions } from './conditionalChecks.js';
+import { shouldBatchWrite, writePreconditioned } from './preconditionedWrite.js';
+import { isSupersedeRefused, type SupersedeIntent, type SupersedeRefusedError } from './atomicSupersede.js';
+import { createNodeIfAbsent, type NodeInput } from '../engines/graphShared/conditionalInsert.js';
+import { isNodeBatchContention } from '../engines/graphShared/nodeBatchRetry.js';
 
 export type NodeGuardFailure =
     | { ok: false; code: 'already_exists' | 'already_superseded' | 'supersedes_apply_failed' | 'write_failed'; error: Error }
@@ -144,12 +148,15 @@ export async function writeNodeAtRevision(input: {
             const entry = await recordHotWrite(store, {
                 workspace, operationKind: 'node.upsert', initiator, operation: 'graph.upsert',
                 payload: { ...nodeData, updatedAt, revision: expected + 1 },
+                pendingCommit: true, // R3: not replayable until the graph commit settles (flipped below)
             });
             entryId = entry.id;
         }
         input.onEntry(entryId);
         try {
-            return { node: await input.write(expected, updatedAt), priorNode };
+            const node = await input.write(expected, updatedAt);
+            await commitHotRows(store, entryId ? [entryId] : []); // R3: committed -> replicable
+            return { node, priorNode };
         } catch (err) {
             if (!isRevisionConflict(err)) throw err;
             // Another daemon moved the node: take our row back whatever happens next.
@@ -161,6 +168,48 @@ export async function writeNodeAtRevision(input: {
             priorNode = await graph.getNode!(id);
         }
     }
+}
+
+/**
+ * 3.35.0 (S1) - the conditional graph write of `nodeUpsert`. With `preconditions` on a graph that has the
+ * atomic node-batch primitive (arcade, sqlite) the write goes through it, so the preconditions hold across
+ * daemons; otherwise it is the plain revision-guarded write (single-daemon preconditions, as before).
+ */
+export function conditionalGraphWrite(graph: NodeWriteGraph, nodeData: Record<string, unknown>, conditions: ItemConditions, expected: number, updatedAt: string, intent?: SupersedeIntent): Promise<LoreNode> {
+    return shouldBatchWrite(graph, conditions.preconditions, intent)
+        ? writePreconditioned(graph, nodeData as NodeInput, conditions.preconditions ?? [], { kind: 'cas', expected, updatedAt, mustExist: conditions.ifRevision !== undefined }, intent)
+        : graph.upsertNodeAtRevision!(nodeData as NodeInput, expected, updatedAt, conditions.ifRevision !== undefined);
+}
+
+/** `ifAbsent` create: insert-only, through the node-batch primitive when the write also carries `preconditions`. */
+export function createIfAbsentWrite(graph: NodeWriteGraph, nodeData: Record<string, unknown>, conditions: ItemConditions, intent?: SupersedeIntent): Promise<LoreNode> {
+    return shouldBatchWrite(graph, conditions.preconditions, intent)
+        ? writePreconditioned(graph, nodeData as NodeInput, conditions.preconditions ?? [], { kind: 'insert' }, intent)
+        : createNodeIfAbsent(graph as Parameters<typeof createNodeIfAbsent>[0], nodeData as NodeInput);
+}
+
+/**
+ * 3.35.0 (S1, q) - the refusals the node-batch write adds. All mean NOTHING of ours was written, so the
+ * `node.upsert` outbox row is taken back and the graph is left alone (a rollback would overwrite the winner):
+ *   - a precondition did not hold  -> the `precondition_failed` result;
+ *   - a `supersedes` target is held by another successor / gone -> `already_superseded` / `supersedes_apply_failed`;
+ *   - every contention retry lost  -> re-thrown as the retryable NodeBatchContentionError (HTTP 503 `contention`).
+ * Any other error: null (the caller's own handling applies).
+ */
+export async function batchWriteRefusal(err: unknown, row: {
+    store: OutboxStore | undefined; entryId: string | null; workspace: string; graph: { getNode?(id: string): Promise<LoreNode | null> };
+    id: string; written: Record<string, unknown>; initiator: string;
+}): Promise<NodeGuardFailure | null> {
+    const refused = err instanceof ItemConditionError;
+    const superseding = isSupersedeRefused(err);
+    if (!refused && !superseding && !isNodeBatchContention(err)) return null;
+    if (row.store && row.entryId) {
+        await retractNodeUpsertRow({ store: row.store, entryId: row.entryId, workspace: row.workspace, graph: row.graph, id: row.id, written: row.written, initiator: row.initiator });
+    }
+    if (superseding) return { ok: false, code: (err as SupersedeRefusedError).code, error: err as Error };
+    if (!refused) throw err;
+    const p = (err as ItemConditionError).payload;
+    return { ok: false, code: 'precondition_failed', error: err as Error, ...(p.failedPreconditions ? { failedPreconditions: p.failedPreconditions } : {}) };
 }
 
 /** True when the node write can run through {@link writeNodeAtRevision}: a revision-aware graph that can read the node back. */

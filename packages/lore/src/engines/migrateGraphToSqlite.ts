@@ -40,7 +40,10 @@ import * as path from 'node:path';
 import { getWorkspacePath, setWorkspaceGraphEngine } from '../config/workspaces.js';
 import { loreHome } from '../config/loreHome.js';
 import { resolveWorkspaceGraphEngine, legacyGraphEngineRemovedError } from './graphEngineSelector.js';
-import { isDaemonServingHome, daemonRefuseMessage } from '../cli/commands/migrateWorkspaceToWorkspaceShared.js';
+import {
+    isDaemonServingHome, daemonRefuseMessage, findLiveSurrealStoreHolder, surrealStoreHolderRefuseMessage,
+} from '../cli/commands/migrateWorkspaceToWorkspaceShared.js';
+import { surrealDataPath } from './surreal/surrealConnection.js';
 import { backupWorkspace, type BackupResult } from './backup.js';
 import { SurrealGraph } from './surrealGraph.js';
 import { SqliteGraph } from './sqliteGraph.js';
@@ -203,6 +206,14 @@ export async function migrateGraphToSqlite(opts: MigrateGraphToSqliteOptions): P
         const probe = await isDaemonServingHome(home);
         if (probe.servesHome) {
             throw new Error(daemonRefuseMessage('lore migrate-graph'));
+        }
+        // The HTTP probe cannot see an embedded host or a daemon on another
+        // port. The surrealkv LOCK file's pid can — checked BEFORE the backup
+        // so a live holder is refused fast instead of after backing up a live
+        // store and burning the ~15 s open budget on a driver error.
+        const holder = findLiveSurrealStoreHolder(surrealDataPath(workspaceDir));
+        if (holder) {
+            throw new Error(surrealStoreHolderRefuseMessage('lore migrate-graph', holder));
         }
     }
 

@@ -518,7 +518,9 @@ function bulkRig(tag: string) {
             { store: { loreGraph: graph, loreVerbatim: {} } as never, auditLog: { log: () => undefined } as never, deploymentMode: 'local', dataplane: null, outboxStore: outbox });
         return (JSON.parse(res._body) as { results: Item[] }).results;
     };
-    const rows = async () => outbox.listPendingForWorkspace(ws, 1000);
+    // R3: an outcome-unknown item's row is kept as pending_commit (not claimable until settled against the graph), so list
+    // every unfinished row of the workspace, not only the claimable ones.
+    const rows = async () => (await outbox.listUnfinished!()).filter((e) => e.workspace === ws && (e.status === 'pending' || e.status === 'pending_commit'));
     return { fake, graph, outbox, bulk, rows };
 }
 const bnode = (id: string, label = id) => ({ id, type: 'decision', label, content: `content ${label}` });
@@ -533,6 +535,7 @@ await test('timeout on a new node, nothing committed: outcome_unknown + currentR
     const rows = await r.rows();
     assert.deepEqual(rows.map((e) => [e.operationKind, (e.payload as { id: string }).id, (e.payload as { revision?: number }).revision]), [['node.upsert', 'c1', 1]],
         'one pending node.upsert row, the original, no node.delete / compensating row');
+    assert.equal(rows[0]!.status, 'pending_commit', 'R3: kept NOT claimable - the replicator must not replay a predicted revision whose commit is unknown');
 });
 
 await test('timeout on an existing node, nothing committed: outcome_unknown carries the revision found; the original row stays', async () => {
@@ -544,7 +547,8 @@ await test('timeout on an existing node, nothing committed: outcome_unknown carr
     assert.equal(item!.currentRevision, 1);
     assert.equal(r.fake.nodes.get('c2')!['label'], 'v1', 'the graph is untouched');
     const labels = (await r.rows()).map((e) => (e.payload as { label?: string }).label);
-    assert.ok(labels.includes('v2'), 'the v2 row was NOT retracted: it stays pending and replays');
+    assert.ok(labels.includes('v2'), 'the v2 row was NOT retracted: it stays recorded and is settled against the graph');
+    assert.equal((await r.rows()).find((e) => (e.payload as { label?: string }).label === 'v2')!.status, 'pending_commit', 'R3: the unknown-outcome row is held pending_commit until settled');
     assert.equal((await r.rows()).filter((e) => e.operationKind !== 'node.upsert').length, 0, 'no compensating row of another kind');
 });
 
@@ -587,7 +591,8 @@ await test('a failed read BEFORE the write is coded too (plain and ifRevision it
 
 await test('preReadFailureMessage: same code contract as a write failure', () => {
     assert.equal(preReadFailureMessage(new ArcadeHttpError(503, 'down')).split(': ')[0], 'arcade_unavailable');
-    assert.equal(preReadFailureMessage(new Error('connect ECONNREFUSED 127.0.0.1:1')), 'write_failed: could not read the node before writing: connect ECONNREFUSED 127.0.0.1:1; nothing was written');
+    assert.equal(preReadFailureMessage(Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), { code: 'ECONNREFUSED' })), 'arcade_unavailable: could not read the node before writing: connect ECONNREFUSED 127.0.0.1:1; nothing was written');
+    assert.equal(preReadFailureMessage(new Error('connect ECONNREFUSED 127.0.0.1:1')), 'write_failed: could not read the node before writing: connect ECONNREFUSED 127.0.0.1:1; nothing was written', 'a bare message without the errno code is not a proven refusal');
     assert.match(preReadFailureMessage(timeoutErr()), /^timeout: could not read the node before writing: /);
 });
 
@@ -600,6 +605,8 @@ await test('classifyItemWriteError: every code, and existing prefixes are not do
     assert.equal('currentRevision' in classifyItemWriteError(new OutcomeUnknownError('x', undefined, new Error('boom'))), false, 'unknown revision is omitted, not null');
     assert.match(c(new ArcadeHttpError(502, 'bad gateway')), /^arcade_unavailable: /);
     assert.match(c(new ArcadeHttpError(500, 'boom')), /^arcade_error: /);
+    assert.match(c(Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:2480'), { code: 'ECONNREFUSED' })), /^arcade_unavailable: /);
+    assert.match(c(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })), /^write_failed: /, 'a reset may follow a sent request');
     assert.match(c(timeoutErr()), /^timeout: /);
     assert.match(c(Object.assign(new Error('socket hang up'), { name: 'TimeoutError' })), /^timeout: /);
     assert.equal(c(new Error('boom')), 'write_failed: boom');

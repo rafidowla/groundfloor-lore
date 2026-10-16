@@ -12,10 +12,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { WorkspaceNotFoundError } from '../../../../engines/localGraphRegistry.js';
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
-import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, checkOutboxBackpressure, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
+import { readBoundedBody, isPayloadTooLarge, writeOversizeError, writeWorkspaceRequired, checkOutboxBackpressure, writeError, writeNodeBusy, writeContention, writePriorReadUnavailable, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { enforceStrictFields, enforceVocabPolicy } from '../storeNodeGates.js';
 import { bindRouteTarget, isLegacyBypass } from '../../../../security/routeWorkspaceBinding.js';
 import { nodeUpsert, resolveAutolinkHandles } from '../../../../core/nodeService.js';
+import { newHold, runWithHold } from '../../../../engines/holdContext.js';
+import type { Precondition } from '../../../../core/conditionalChecks.js';
 import { parseConditionalFields } from '../../../../core/conditionalChecks.js';
 import { resolveSupersessionContext } from '../../../../core/supersessionPolicy.js';
 // 1.1 (2026-08-17 audit) — retry SurrealDB transaction-conflict write drops
@@ -92,12 +94,16 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
         }
         // Conditional writes phase 2b — `ifRevision` is a write-time directive: validated and stripped
         // BEFORE the strict-field gate (it is never stored, and the shared field list stays untouched).
+        // D8 (3.35.0): `preconditions` is accepted here too, with the bulk route's validation and errors.
         let ifRevision: number | undefined;
-        if ('ifRevision' in nodeData) {
-            const parsed = parseConditionalFields({ id: nodeData.id, ifRevision: nodeData.ifRevision, preconditions: undefined });
+        let preconditions: Precondition[] | undefined;
+        if ('ifRevision' in nodeData || 'preconditions' in nodeData) {
+            const parsed = parseConditionalFields({ id: nodeData.id, ifRevision: nodeData.ifRevision, preconditions: nodeData.preconditions });
             if (!parsed.ok) { writeError(res, 400, parsed.code, parsed.error); return; }
             ifRevision = parsed.conditions.ifRevision;
+            preconditions = parsed.conditions.preconditions;
             delete nodeData.ifRevision;
+            delete nodeData.preconditions;
         }
         // Phase 6 P2 — strict additionalProperties:false gate.
         if (enforceStrictFields(nodeData, res).handled) return;
@@ -217,9 +223,13 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
         // or a transient read fault), fall back to "treat as update" —
         // a 200 with isNew:false is the conservative legacy answer
         // rather than mis-signaling a create.
+        // 3.35.0 (b): the advisory pre-read and the write share ONE hold, so against a hung ArcadeDB the
+        // pre-read's timeout is the request's only timeout - the write then fails at once with the same
+        // error (it used to cost a further full retry chain, after the pre-read's own).
+        const requestHold = newHold();
         let __isNew = false;
         try {
-            const existing = await targetGraph.getNode(nodeData.id);
+            const existing = await runWithHold(requestHold, () => targetGraph.getNode(nodeData.id as string));
             __isNew = !existing;
         } catch { /* fixture / transient — fall through as update */ }
 
@@ -267,7 +277,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
             isVisible: supersedesVisibilityFor(writeGate),
         });
 
-        const writeResult = await withTransactionConflictRetry(() => nodeUpsert(
+        const writeResult = await runWithHold(requestHold, () => withTransactionConflictRetry(() => nodeUpsert(
             {
                 // nodeData.id is validated as a string above (line ~73); the
                 // Record<string, unknown> typing from parseJsonBody doesn't
@@ -289,6 +299,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
                 supersedes: Array.isArray(nodeData.supersedes) ? nodeData.supersedes as string[] : undefined,
                 force: nodeData.force === true,
                 ifRevision,
+                ...(preconditions ? { preconditions } : {}),
             },
             {
                 outboxStore: deps.outboxStore,
@@ -299,7 +310,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
                 findSupersessionDuplicate,
                 supersedesVisible: supersedesVisibilityFor(writeGate),
             },
-        ));
+        ))).finally(() => { requestHold.active = false; });
         if (!writeResult.ok) {
             // 3.21 step 3(e) — a questions/summary/entities/topics cap
             // violation is a caller input error (400), not a substrate
@@ -336,6 +347,10 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
                 writeError(res, 409, 'revision_mismatch', writeResult.error.message, { currentRevision: writeResult.currentRevision ?? null });
                 return;
             }
+            if (writeResult.code === 'precondition_failed') {
+                writeError(res, 409, 'precondition_failed', writeResult.error.message, { failedPreconditions: writeResult.failedPreconditions ?? [] });
+                return;
+            }
             if (writeResult.code === 'revision_unsupported') {
                 writeError(res, 400, 'revision_unsupported', writeResult.error.message);
                 return;
@@ -359,9 +374,12 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
         // 3.21 step 3(d) — true only when the embed/verbatim write failed
         // but the node was KEPT (a durable or best-effort retry is queued)
         // rather than rolled back. Absent on the ordinary success path.
-        res.end(JSON.stringify({ ok: true, id: nodeData.id, isNew: __isNew, ...(writeResult.embedPending ? { embedPending: true } : {}), ...(typeWarning ? { warning: typeWarning } : {}), ...(writeResult.supersessionWarning ? { supersessionWarning: writeResult.supersessionWarning } : {}) }));
+        res.end(JSON.stringify({ ok: true, id: nodeData.id, isNew: __isNew, ...(writeResult.embedPending ? { embedPending: true } : {}), ...(typeWarning ? { warning: typeWarning } : {}), ...(writeResult.supersessionWarning ? { supersessionWarning: writeResult.supersessionWarning } : {}), ...(writeResult.supersedesRepaired ? { supersedesRepaired: writeResult.supersedesRepaired } : {}) }));
     } catch (saveErr) {
         if (isInvalidJsonBody(saveErr)) { writeInvalidJson(res, saveErr); return; }
+        if (writeNodeBusy(res, saveErr)) return;
+        if (writeContention(res, saveErr)) return;
+        if (writePriorReadUnavailable(res, saveErr)) return;
         writeError(res, 500, 'internal_error', redactError(saveErr));
     }
     } catch (outerErr) {

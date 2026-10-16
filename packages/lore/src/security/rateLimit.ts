@@ -65,6 +65,9 @@ export interface RateLimitConfigSnapshot {
 export const RATE_LIMIT_EXEMPT_PATHS: ReadonlyArray<string> = [
     '/health',
     '/api/health',
+    // 3.35.0 (e): readiness polling must never 429 (a throttled probe reads as 'down').
+    '/ready',
+    '/api/ready',
     // /api/auth/bootstrap is NOT exempt — it has its own dedicated tight
     // `bootstrap` bucket (see buildDefaultBuckets). The UI calls it once
     // on load; an unauthenticated local process hammering it for the

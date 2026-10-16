@@ -485,6 +485,7 @@ export async function runHttpGates(
         const headerExempt =
             pathname === '/api/auth/bootstrap' ||
             pathname === '/api/health' ||
+            pathname === '/api/ready' ||
             pathname === '/api/orphan' ||
             pathname === '/api/workspaces' ||
             pathname === '/api/workspaces/switch';
@@ -561,6 +562,7 @@ export async function runHttpGates(
         const localHeaderExempt =
             pathname === '/api/auth/bootstrap' ||
             pathname === '/api/health' ||
+            pathname === '/api/ready' ||
             pathname === '/api/orphan' ||
             pathname === '/api/workspaces' ||
             pathname === '/api/workspaces/switch';

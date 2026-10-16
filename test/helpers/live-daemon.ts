@@ -49,10 +49,21 @@ export async function waitForReady(port: number, timeoutMs = 30_000): Promise<bo
  * Spawn a daemon. Pass `home` to REUSE a data dir (e.g. restart after a crash);
  * omit it for a fresh isolated dir. Pass `port` to pin one; omit for a free port.
  */
-export async function spawnDaemon(opts: { home?: string; port?: number } = {}): Promise<DaemonHandle> {
+export async function spawnDaemon(opts: {
+    home?: string;
+    port?: number;
+    /** Run a different checkout of Lore (e.g. a v3.34.0 worktree for upgrade tests). Default: this repo. */
+    repoRoot?: string;
+    /** Extra `node` flags after `--import tsx` (e.g. `--import <fault-preload>`). */
+    nodeArgs?: string[];
+    /** Extra daemon env (appended after the fixed PATH/HOME/TMPDIR/LORE_PORT). */
+    env?: Record<string, string>;
+} = {}): Promise<DaemonHandle> {
     const home = opts.home ?? fs.mkdtempSync(path.join(os.tmpdir(), 'lore-live-e2e-'));
     const port = opts.port ?? await findFreePort();
-    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, TMPDIR: os.tmpdir(), LORE_PORT: String(port) };
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: home, TMPDIR: os.tmpdir(), LORE_PORT: String(port), ...(opts.env ?? {}) };
+    const root = opts.repoRoot ?? REPO_ROOT;
+    const entry = opts.repoRoot ? path.join(root, 'packages/lore/src/mcp/server.ts') : SERVER_ENTRY;
     // Spawn the daemon with THIS test runner's own Node (process.execPath) + the
     // tsx loader (`--import tsx` runs the .ts source directly, no build step). Using
     // the same Node the tests run under keeps the prebuilt native addons (the legacy graph engine /
@@ -61,7 +72,7 @@ export async function spawnDaemon(opts: { home?: string; port?: number } = {}): 
     // NODE_MODULE_VERSION mismatch. detached:true puts the child in its own process
     // GROUP so killDaemon() can signal the whole group (no orphaned daemon holding
     // the legacy engine's on-disk lock across a restart).
-    const proc = spawn(process.execPath, ['--import', 'tsx', SERVER_ENTRY, '--http'], { cwd: REPO_ROOT, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const proc = spawn(process.execPath, ['--import', 'tsx', ...(opts.nodeArgs ?? []), entry, '--http'], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
     const log = { text: '' };
     proc.stdout.on('data', (c) => { log.text += c.toString(); });
     proc.stderr.on('data', (c) => { log.text += c.toString(); });

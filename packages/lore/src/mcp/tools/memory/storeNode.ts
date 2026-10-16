@@ -566,6 +566,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                             // back. Absent on the ordinary success path.
                             ...(writeResult.embedPending ? { embedPending: true } : {}),
                             ...(writeResult.supersessionWarning ? { supersessionWarning: writeResult.supersessionWarning } : {}),
+                            ...(writeResult.supersedesRepaired ? { supersedesRepaired: writeResult.supersedesRepaired } : {}),
                             ...(typeWarning ? { _meta: { warning: typeWarning, header: `X-Lore-Type-Warning: ${typeWarning}` } } : {}),
                         }, null, 2),
                     }],

@@ -1498,6 +1498,38 @@ Source: `src/security/arcadeHostPolicy.ts`
 
 ---
 
+### `LORE_READY_CACHE_MS`
+
+| | |
+|---|---|
+| **Default** | `2000` |
+| **Surface** | daemon (`/ready`, every mode) |
+
+How long the result of the `/ready` probe is reused, in every mode (local,
+cloud, arcade). The probe runs at most once per interval however often `/ready`
+is polled, and concurrent callers share one in-flight probe. In arcade mode
+`LORE_ARCADE_READY_CACHE_MS` wins when set.
+
+Source: `src/mcp/readiness.ts`
+
+---
+
+### `LORE_READY_TIMEOUT_MS`
+
+| | |
+|---|---|
+| **Default** | `2000` |
+| **Surface** | daemon (`/ready`, every mode) |
+
+Deadline for the `/ready` probe, in every mode. A probe that exceeds it answers
+not ready (`reason: "timeout"`) immediately, and no second probe starts until
+the first settles. In arcade mode `LORE_ARCADE_READY_TIMEOUT_MS` wins when set.
+Non-numeric or non-positive values fall back to the default.
+
+Source: `src/mcp/readiness.ts`
+
+---
+
 ### `LORE_ARCADE_READY_CACHE_MS`
 
 | | |
@@ -1505,7 +1537,7 @@ Source: `src/security/arcadeHostPolicy.ts`
 | **Default** | `2000` |
 | **Surface** | daemon (arcade readiness route) |
 
-How long the result of the `/ready` ArcadeDB probe is reused. The probe runs
+Arcade-specific override of `LORE_READY_CACHE_MS` (wins when set). How long the result of the `/ready` ArcadeDB probe is reused. The probe runs
 at most once per interval however often `/ready` is polled, and concurrent
 callers share one in-flight probe.
 
@@ -1520,7 +1552,7 @@ Source: `src/mcp/arcadeReadiness.ts`
 | **Default** | `2000` |
 | **Surface** | daemon (arcade readiness route) |
 
-Socket deadline for the `/ready` probe. A probe that exceeds it answers not
+Arcade-specific override of `LORE_READY_TIMEOUT_MS` (wins when set). Socket deadline for the `/ready` probe. A probe that exceeds it answers not
 ready (`reason: "timeout"`), and no second probe starts until the first
 settles, so a hung ArcadeDB cannot accumulate connections.
 
@@ -1555,20 +1587,42 @@ Source: `src/engines/arcade/arcadeRecallProjection.ts`
 
 ### 3a.1 Readiness: `/ready` vs `/health`
 
-- `GET /health` is liveness. It answers `200` whenever the process serves and
-  never calls ArcadeDB, so a database blip cannot turn into a restart loop on a
-  platform that uses `/health` for liveness.
-- `GET /ready` (alias `/api/ready`; `HEAD` allowed) is readiness. It answers
-  `200 {"status":"ready"}` when the daemon can reach ArcadeDB and the root
-  credential still authenticates (`list databases`, a server-level command that
-  touches no tenant database), otherwise `503 {"status":"not_ready"}` with
-  `Retry-After: 2`. It is unauthenticated, exempt from the rate limiter like
-  `/health`, and sends `Cache-Control: no-store`. An operator bearer
-  additionally sees `reason` (`timeout`, `unreachable`, `auth_failed`,
-  `unavailable`), a truncated `detail`, `latencyMs` and `checkedAgeMs`.
-  Recovery needs no restart: the next probe after the cache interval re-checks.
-- One tenant's missing database is a per-tenant failure on that tenant's own
-  calls. It does not take the whole daemon out of rotation.
+`/health` is liveness; `/ready` is readiness. Both exist in every mode (local,
+cloud, arcade) with the same response shape.
+
+- `GET /health` answers `200` whenever the process serves and never calls a
+  backend, so a database blip cannot turn into a restart loop on a platform that
+  uses `/health` for liveness.
+- `GET /ready` (alias `/api/ready`; `HEAD` allowed) answers "can this daemon
+  serve writes right now?": `200 {"status":"ready","version":...,"mode":...}`
+  or `503 {"status":"not_ready",...}` with `Retry-After: 2`. It is
+  unauthenticated, exempt from the rate limiter and treated like `/health` by
+  the Host/Origin policy, and sends `Cache-Control: no-store`. An operator
+  bearer (daemon token or shared secret) additionally sees `reason` (`timeout`,
+  `unreachable`, `auth_failed`, `unavailable`), a truncated `detail`,
+  `latencyMs` and `checkedAgeMs`. Recovery needs no restart: the next probe
+  after the cache interval re-checks.
+- What is probed, per mode:
+  - **local** (SQLite, Lance, Surreal): one indexed point read on the default
+    graph store. No scan, no write. The embedding model is deliberately NOT part
+    of readiness: a write with the model unavailable is accepted and queued in
+    the outbox, so a cold or missing model must not take the daemon out of
+    rotation.
+  - **cloud** (Dataplane): an authenticated `GET /connectors` through the
+    Dataplane client the graph uses (the keychain credential). It proves the
+    Dataplane is reachable and the API key still authenticates (`auth_failed`
+    on 401/403). It is not workspace-scoped and never writes tenant data.
+  - **arcade**: ArcadeDB `list databases` with the root credential (a
+    server-level command that touches no tenant database). One tenant's missing
+    database is a per-tenant failure on that tenant's own calls and does not
+    take the daemon out of rotation.
+- Platform watchdogs: restart on `/health` failing; take the instance out of
+  rotation on `/ready` answering `503`; never restart because of `/ready`
+  (a backend outage is not fixed by killing the process, and restarting it
+  would only add a cold start to the outage).
+- Timing knobs: `LORE_READY_CACHE_MS`, `LORE_READY_TIMEOUT_MS` (every mode);
+  arcade also honours `LORE_ARCADE_READY_CACHE_MS` / `LORE_ARCADE_READY_TIMEOUT_MS`,
+  which win when set.
 
 ### 3a.2 ArcadeDB heap sizing (ESTIMATES, not measurements)
 
@@ -2116,6 +2170,26 @@ Source: `src/outbox/replicator.ts`
 
 ---
 
+### `LORE_OUTBOX_TRANSIENT_CEILING_MS`
+
+| | |
+|---|---|
+| **Default** | `86400000` (24 hours) |
+| **Values** | positive integer milliseconds |
+| **Surface** | daemon (outbox replicator, ArcadeDB lanes) |
+
+How long an outbox row may keep retrying **transient** ArcadeDB failures
+(ConcurrentModificationException, server unreachable) before it is
+dead-lettered with reason `transient_ceiling`. Transient failures do not count
+toward the max-attempts limit; this ceiling, measured from the row's first
+transient failure (persisted, so a restart does not reset it), is the only way
+such a row dies. Dead rows are listed by `GET /api/outbox/dead` and counted in
+`GET /api/stats` as `deadLettered`.
+
+Source: `src/outbox/retryConfig.ts`
+
+---
+
 ### `LORE_OUTBOX_POLL_MS`
 
 | | |
@@ -2179,6 +2253,73 @@ capped at 30 s: 1 s, 2 s, 4 s, 8 s with the default. The legacy
 Must be a positive integer; anything else falls back to the default.
 
 Source: `src/outbox/retryConfig.ts`, `src/outbox/sqliteStore.ts`
+
+---
+
+### `LORE_ARCADE_REQUEST_TIMEOUT_MS`
+
+| | |
+|---|---|
+| **Default** | `30000` |
+| **Values** | positive integer milliseconds |
+| **Surface** | daemon (ArcadeDB HTTP transport) |
+
+Whole-request timeout for one ArcadeDB HTTP request. Inside one per-node write
+lock hold, the first request that times out fails every later request of that
+hold at once with the same timeout error (and a timed-out query is not retried),
+so a hung ArcadeDB (accepts connections, never answers) pins a node lock for
+about one request timeout instead of a whole retry chain.
+
+Source: `src/engines/holdContext.ts`, `src/engines/arcade/arcadeHttp.ts`
+
+---
+
+### `LORE_NODE_LOCK_WAIT_MS`
+
+| | |
+|---|---|
+| **Default** | request timeout + 5000 (35000 with the default timeout) |
+| **Values** | positive integer milliseconds |
+| **Surface** | daemon (node write path, outbox replay) |
+
+How long a writer waits for a per-node write lock that is already held. After
+that the write fails with HTTP 503 `node_busy` + `Retry-After` (bulk items
+report `node_busy: ...`; an outbox replay defers instead). Nothing was written.
+
+Source: `src/engines/holdContext.ts`, `src/core/nodeWriteLock.ts`
+
+---
+
+### `LORE_PENDING_COMMIT_GRACE_MS`
+
+| | |
+|---|---|
+| **Default** | `60000` |
+| **Values** | non-negative integer milliseconds |
+| **Surface** | daemon (outbox replicator) |
+
+An outbox row recorded `pending_commit` (ahead of its graph commit) whose node
+shows no matching committed revision is retracted only once it is older than
+this, so a write still in flight (or applied late by a hung engine) is not
+retracted from under its writer. A row whose commit is visible in the graph is
+flipped ready immediately.
+
+Source: `src/outbox/pendingCommit.ts`
+
+---
+
+### `LORE_PENDING_COMMIT_SWEEP_MS`
+
+| | |
+|---|---|
+| **Default** | `1000` |
+| **Values** | non-negative integer milliseconds |
+| **Surface** | daemon (outbox replicator) |
+
+Minimum interval between the replicator's `pending_commit` settle sweeps. An
+unreachable graph backs the sweep off with the transient backoff.
+
+Source: `src/outbox/pendingCommit.ts`
 
 ---
 
@@ -2501,6 +2642,18 @@ Source: `src/recall/ranking.ts`
 ---
 
 ## 9. Database Internals
+
+### `LORE_NODE_BATCH_TRACE`
+
+| | |
+|---|---|
+| **Default** | off |
+| **Surface** | daemon + embedded |
+
+Set to `1` to log one stderr line per `commitNodeBatch` attempt
+(`[node-batch] engine=<arcade|sqlite> checks=<n> writes=<n> outcome=<...>`), including retries on
+contention. Used to prove that preconditioned writes take the cross-daemon path. It is on the daemon
+env-scrub allowlist.
 
 ### `LORE_CALL_TALLY`
 
@@ -4042,10 +4195,15 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_OUTBOX_SELFHEAL_BATCH` | `256` | Outbox |
 | `LORE_OUTBOX_PRUNE_REPLICATED_MS` | `604800000` (7 days) | Outbox |
 | `LORE_OUTBOX_POLL_MS` | `250` | Outbox |
+| `LORE_OUTBOX_TRANSIENT_CEILING_MS` | `86400000` (24 hours) | Outbox |
 | `LORE_OUTBOX_BUSY_MS` | `10` | Outbox |
 | `LORE_OUTBOX_MAX_ATTEMPTS` | `5` | Outbox |
 | `LORE_OUTBOX_RETRY_BASE_MS` | `500` | Outbox |
 | `LORE_OUTBOX_CONSOLIDATION_CAP` | `1024` | Outbox |
+| `LORE_ARCADE_REQUEST_TIMEOUT_MS` | `30000` | Outbox |
+| `LORE_NODE_LOCK_WAIT_MS` | request timeout + 5000 | Outbox |
+| `LORE_PENDING_COMMIT_GRACE_MS` | `60000` | Outbox |
+| `LORE_PENDING_COMMIT_SWEEP_MS` | `1000` | Outbox |
 | `LORE_REPLICATOR_CONSOLIDATION_MAX` | `256` | Outbox |
 | `LORE_LOAD_MAX_BYTES` | `10737418240` (10 GiB) | Load |
 | `LORE_LOAD_MAX_CONCURRENT_PER_WORKSPACE` | `3` | Load |

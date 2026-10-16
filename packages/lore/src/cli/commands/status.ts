@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { openWorkspaceGraph, resolveGraphEngineForPath } from '../../engines/openWorkspaceGraph.js';
+import { openWorkspaceGraph, resolveGraphEngineForPath, bannerGraphPath } from '../../engines/openWorkspaceGraph.js';
 import { resolveVerbatimEngineForPath } from '../../engines/openWorkspaceVerbatim.js';
 import { SyncEngine } from '../../engines/syncEngine.js';
 import { ConfigManager } from '../../config/configManager.js';
@@ -107,9 +107,10 @@ export async function statusCommand(_args: string[]): Promise<void> {
     // running an engine it does not run, with a path that does not exist.
     const engine = resolveGraphEngineForPath(basePath).engine;
     const engineLabel = engine === 'surreal' ? 'SurrealDB' : engine === 'sqlite' ? 'SQLite' : 'legacy graph engine';
-    const graphSubpath = engine === 'surreal' ? 'surreal' : engine === 'sqlite' ? 'graph.sqlite' : 'graph';
     console.log(`  Engine:     ${engineLabel} (local graph)`);
-    console.log(`  Graph:      ${path.join(loreDir, graphSubpath)}`);
+    // The path the engine ACTUALLY uses (surrealDataPath() URL-escapes reserved
+    // characters such as spaces) — same resolver as the startup banner.
+    console.log(`  Graph:      ${bannerGraphPath(basePath)}`);
     // 3.21 step 2 part 2 — same "reported, not assumed" reasoning as the
     // graph engine line above, for the vector substrate.
     const vectorEngine = resolveVerbatimEngineForPath(basePath).engine;

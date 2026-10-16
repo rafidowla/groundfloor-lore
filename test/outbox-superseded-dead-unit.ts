@@ -263,7 +263,7 @@ async function main(): Promise<void> {
         assert.equal(await statusOf(store, 'bad'), 'dead');
         const loss = logs.filter((l) => /DATA LOSS/.test(l));
         assert.equal(loss.length, 1);
-        assert.match(loss[0], /DATA LOSS: 1 write\(s\) permanently discarded since the last check \(1 dead-lettered in total\)/);
+        assert.match(loss[0], /DATA LOSS: 1 write\(s\) permanently discarded since the last check \(reason: permanent=1\) \(1 dead-lettered in total\)/);
     });
 
     await test('D: supersessions alongside one genuine failure: the delta counts only the genuine write', async () => {
