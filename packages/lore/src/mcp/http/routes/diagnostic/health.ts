@@ -401,7 +401,7 @@ export async function handleHealth(res: ServerResponse, url: string, deps: Diagn
             for (const name of scannedNames) {
                 try {
                     const g = await deps.graphRegistry.getGraphHandle(name);
-                    const s = await readWorkspaceStats(g, name);
+                    const s = await readWorkspaceStats(g, name, deps.graphRegistry);
                     // Per-workspace write queue depth + head-of-line wait.
                     // Surfaces single-writer backpressure so operators can
                     // see which workspace is queueing without grepping logs.

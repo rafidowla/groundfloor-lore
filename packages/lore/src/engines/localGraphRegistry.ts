@@ -45,6 +45,7 @@ import {
     getWorkspacePath,
     listWorkspaceNames,
     getActiveWorkspaceName,
+    loadWorkspaces,
 } from '../config/workspaces.js';
 import { loreHome } from '../config/loreHome.js';
 import { assertWorkspaceOpenAllowed } from '../security/routeWorkspaceBinding.js';
@@ -486,6 +487,27 @@ export class LocalGraphRegistry {
      */
     graphEngineFor(workspace: string): GraphEngineKind {
         return resolveWorkspaceGraphEngine(workspace, this.home);
+    }
+
+    /**
+     * 3.35.2 — true when at least one OTHER registered workspace resolves to
+     * the same on-disk path as `workspace`: the alias case
+     * (`registerWorkspaceAlias`) that `getGraphHandle`'s path dedup serves
+     * from one graph handle. Inside such a shared store the rows of each
+     * name are told apart only by their `project` tag, so per-workspace
+     * counts must filter on it; a workspace with a store of its own owns
+     * every row in it whatever `project` the writer chose (Atlas writes
+     * project='v3' inside 'default'). Reads workspaces.json fresh, so an
+     * alias that has never been opened still counts. Same path identity as
+     * the dedup above, normalised with `path.resolve` so a trailing slash
+     * cannot hide a shared store. Unknown `workspace` → false.
+     */
+    sharesGraphStore(workspace: string): boolean {
+        const entries = loadWorkspaces(this.home).workspaces;
+        const own = entries.find((w) => w.name === workspace);
+        if (!own) return false;
+        const ownPath = path.resolve(own.path);
+        return entries.some((w) => w.name !== workspace && path.resolve(w.path) === ownPath);
     }
 
     /** True if `workspace` is registered in workspaces.json. */

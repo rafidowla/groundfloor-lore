@@ -15,7 +15,7 @@ import { getActiveWorkspaceName, listWorkspaceNames } from '../../../../config/w
 import { gateRoute } from '../../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
 import { writeWorkspaceRequired, extractWorkspace, writeError, writeGraphEngineError } from '../../helpers.js';
-import { type DiagnosticDeps, type LoreGraph, readWorkspaceStats } from './shared.js';
+import { type DiagnosticDeps, type LoreGraph, readWorkspaceStats, workspaceStatsProjectFilter } from './shared.js';
 import { redactError } from '../../../../security/logRedact.js';
 import { hasLanguageBreakdown } from '../../../tools/search/helpers.js';
 import { countAudience } from '../../../../security/visibleCounts.js';
@@ -128,7 +128,7 @@ export async function handleAdminStats(res: ServerResponse, deps: DiagnosticDeps
             for (const name of names) {
                 try {
                     const g = await deps.graphRegistry.getGraphHandle(name);
-                    const s = await readWorkspaceStats(g, name);
+                    const s = await readWorkspaceStats(g, name, deps.graphRegistry);
                     byWorkspace[name] = { nodeCount: s.nodeCount, edgeCount: s.edgeCount };
                     totalNodes += s.nodeCount;
                     totalEdges += s.edgeCount;
@@ -222,8 +222,14 @@ export async function handleStats(res: ServerResponse, url: string, deps: Diagno
         // (not 0) when the outbox store cannot answer, so "none" is never claimed without knowing.
         const dead = await deps.outboxStore?.deadLetterSummary?.(requested);
         const location = localGraphLocation(deps, requested);
+        // 3.35.2 — `project` filter only where the store is shared (alias);
+        // see workspaceStatsProjectFilter. Same rule for both branches below.
+        const projectFilter = workspaceStatsProjectFilter(deps.graphRegistry, requested);
         if (countAudience() === 'visible') {
-            const v = await visibleGraphStats(targetGraph, { project: requested, withLanguage: true });
+            const v = await visibleGraphStats(targetGraph, {
+                ...(projectFilter !== undefined ? { project: projectFilter } : {}),
+                withLanguage: true,
+            });
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
                 workspace: requested,
@@ -244,13 +250,16 @@ export async function handleStats(res: ServerResponse, url: string, deps: Diagno
             }));
             return;
         }
-        // Sprint L5b-final — pass the requested workspace as a
-        // project filter so alias workspaces sharing an on-disk
-        // path with another workspace see only their tagged rows.
-        // (Arcade: the cell shim in arcadeData.ts treats this filter as
-        // "the whole cell" — one database IS the workspace there, and rows
-        // keep the caller's own `project`; see cellGraphForStats.)
-        const graphStats = await (targetGraph as { getStats: (p?: string) => ReturnType<typeof targetGraph.getStats> }).getStats(requested);
+        // Sprint L5b-final / 3.35.2 — alias workspaces sharing an on-disk
+        // path with another workspace see only their tagged rows; a workspace
+        // with its own store gets whole-store counts (workspaceStatsProjectFilter).
+        // (Arcade: the filter stays the workspace name and the cell shim in
+        // arcadeData.ts treats it as "the whole cell" — one database IS the
+        // workspace there, and rows keep the caller's own `project`; see
+        // cellGraphForStats.)
+        const graphStats = projectFilter !== undefined
+            ? await (targetGraph as { getStats: (p?: string) => ReturnType<typeof targetGraph.getStats> }).getStats(projectFilter)
+            : await targetGraph.getStats();
         let languageBreakdown: Record<string, number>;
         try {
             languageBreakdown = await readLanguageBreakdown(targetGraph, 'stats_language_breakdown');

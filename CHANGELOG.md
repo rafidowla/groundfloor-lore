@@ -6,6 +6,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+## [3.35.2] — 2026-10-16
+
+### Fixed — local-listener stats counts (3.35.2)
+- **A workspace with its own store now counts the whole store.** The local count surfaces passed
+  the workspace name as a `project` row filter on every read (the Sprint L5b-final alias rule).
+  Rows keep an explicitly supplied `project` (Atlas's `v3` inside `default`, any `project:"p1"`
+  write; `project = <workspace>` is stamped only when it is unset), so a workspace owning its own
+  graph store was undercounted: nodes, `typeBreakdown` and edges all covered only the
+  workspace-tagged rows (live check: 30 / 10 reported for 100 / 50 stored). The filter now applies
+  only when the workspace's resolved store path is shared with another registered workspace
+  (`LocalGraphRegistry.sharesGraphStore`, an alias entry from `registerWorkspaceAlias`); those keep
+  the tagged-rows count, an edge counting when both endpoints are tagged.
+- One helper (`readWorkspaceStats` / `workspaceStatsProjectFilter`, `diagnostic/shared.ts`) now
+  backs `GET /api/stats` (raw and bound-caller `visibleGraphStats` branches),
+  `GET /api/health` `workspaces.perWorkspaceStats`, `POST /api/admin/stats` `byWorkspace` (and its
+  totals) and `/metrics`.
+- **`/metrics` `lore_workspace_nodes` / `lore_workspace_edges` read 0 for every workspace.**
+  `readWorkspaceCounts` called a detached `getStats` (no `this`); the throw was swallowed into a
+  zero. It now goes through the same helper.
+- Arcade and cloud are unchanged: neither registry exposes `sharesGraphStore`, so the existing
+  filter is passed through (arcade maps its own workspace to the whole cell as in 3.35.1).
+  Visibility / permission gating is unchanged. The MCP `stats` tool was already whole-store.
+
 ## [3.35.1] — 2026-10-16
 
 ### Fixed — arcade `GET /api/stats` counts (3.35.1)

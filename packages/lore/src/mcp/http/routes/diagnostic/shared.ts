@@ -1,7 +1,8 @@
 /**
  * shared.ts — types + the cross-handler stats helper for the diagnostic
  * route family. DiagnosticDeps is the bundle every diagnostic handler
- * receives; readWorkspaceStats is used by the stats and health handlers.
+ * receives; readWorkspaceStats / workspaceStatsProjectFilter are used by
+ * the stats, health and metrics handlers.
  */
 
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
@@ -63,18 +64,51 @@ export interface DiagnosticDeps {
 }
 
 /**
- * Sprint L2 / L5b-final — narrow stats helper. Reads counts off the
- * workspace-specific LocalGraph. Pre-L5b, each workspace had its own
- * graph file so graph.getStats() WAS the per-workspace count. After
- * L5b-final, alias workspaces (`atlas`) share an on-disk path with
- * another workspace (`default`); within that shared graph the rows are
- * separated by their `n.project` tag, so we pass `workspaceName` as a
- * project filter. LocalGraph.getStats ignores the filter when called
- * without it (back-compat for callers that still want per-DB totals).
+ * 3.35.2 — the ONE rule for whether a per-workspace count filters on
+ * `project`. Sprint L5b-final added the `project = <workspace>` filter for
+ * ALIAS workspaces (`registerWorkspaceAlias`): several names share one
+ * on-disk graph and their rows are told apart only by the `project` tag. It
+ * was applied to every workspace, so a workspace with a store of its own
+ * reported only the rows whose `project` happened to equal its name — a host
+ * that tags rows per repo (Atlas: project='v3' in 'default') saw a fraction
+ * of its corpus in /api/stats, /api/health, /api/admin/stats and /metrics.
+ *
+ * Returns the filter to pass to `getStats` / `visibleGraphStats`:
+ *   - local registry, store shared with another registered workspace → the
+ *     workspace name (alias semantics, unchanged);
+ *   - local registry, store of its own → `undefined` (whole-store counts);
+ *   - no `sharesGraphStore` on the registry (cloud: no registry; arcade: the
+ *     cell shim in arcadeData.ts, which already maps the workspace filter to
+ *     "the whole cell") → the workspace name, i.e. behaviour unchanged;
+ *   - the registry lookup throws → the workspace name (fail to the old,
+ *     narrower count rather than widen on an unreadable registry).
  */
-export async function readWorkspaceStats(graph: LoreGraph, workspaceName?: string): Promise<{ nodeCount: number; edgeCount: number; typeBreakdown: Record<string, number> }> {
-    const s = workspaceName
-        ? await (graph as { getStats: (p?: string) => ReturnType<typeof graph.getStats> }).getStats(workspaceName)
+export function workspaceStatsProjectFilter(registry: unknown, workspace: string | undefined): string | undefined {
+    if (!workspace) return undefined;
+    const shares = (registry as { sharesGraphStore?: (ws: string) => boolean } | null | undefined)?.sharesGraphStore;
+    if (typeof shares !== 'function') return workspace;
+    try {
+        return shares.call(registry, workspace) ? workspace : undefined;
+    } catch {
+        return workspace;
+    }
+}
+
+/**
+ * Sprint L2 — narrow stats helper: node/edge counts + type breakdown for one
+ * workspace's graph, scoped by workspaceStatsProjectFilter. Nodes, types and
+ * edges share the one filter (an edge counts under a filter when both
+ * endpoints carry it — the engines' getStats rule). Called without a
+ * workspace it returns the graph's whole-store totals.
+ */
+export async function readWorkspaceStats(
+    graph: LoreGraph,
+    workspaceName?: string,
+    registry?: unknown,
+): Promise<{ nodeCount: number; edgeCount: number; typeBreakdown: Record<string, number> }> {
+    const filter = workspaceStatsProjectFilter(registry, workspaceName);
+    const s = filter !== undefined
+        ? await (graph as { getStats: (p?: string) => ReturnType<typeof graph.getStats> }).getStats(filter)
         : await graph.getStats();
     return {
         nodeCount: s.nodeCount ?? 0,

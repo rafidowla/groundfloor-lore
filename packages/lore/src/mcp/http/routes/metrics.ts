@@ -44,6 +44,7 @@ import { writeError } from '../helpers.js';
 import { getCurrentPrincipal } from '../../../auth/principal.js';
 import { canPrincipalReadWorkspace } from '../../../security/routeWorkspaceBinding.js';
 import { hideUncountableForCurrentActor } from '../../../security/exportGate.js';
+import { readWorkspaceStats } from './diagnostic/shared.js';
 
 const METRICS_CACHE_MS = 5000;
 const BUILD_VERSION = VERSION;
@@ -95,19 +96,21 @@ async function readWorkspaceCounts(graphRegistry: LocalGraphRegistry | undefined
     if (!graphRegistry) return {};
     const now = Date.now();
     if (!countsCache || (now - countsCache.fetchedAt) >= METRICS_CACHE_MS) {
-        // Compute UNFILTERED counts for every workspace — but (3.3) NEVER open
-        // a graph here: only read counts from a workspace whose handle is
-        // already open (the SP-11 idle LRU exists to keep native memory
-        // bounded, and a scrape must not defeat it). Not-yet-open → 0.
+        // Per-workspace counts under the same scoping rule as /api/stats
+        // (3.35.2, workspaceStatsProjectFilter: whole store unless the store
+        // is shared with an alias) — but (3.3) NEVER open a graph here: only
+        // read counts from a workspace whose handle is already open (the SP-11
+        // idle LRU exists to keep native memory bounded, and a scrape must not
+        // defeat it). Not-yet-open → 0. (3.35.2: this used to call a DETACHED
+        // `g.getStats`, so SqliteGraph lost `this` and every series read 0.)
         const counts: Record<string, { nodeCount: number; edgeCount: number }> = {};
         try {
             for (const name of listWorkspaceNames()) {
                 const g = graphRegistry.getOpenGraphHandle(name);
                 if (!g) { counts[name] = { nodeCount: 0, edgeCount: 0 }; continue; }
                 try {
-                    const getStats = g.getStats as (p?: string) => Promise<{ nodeCount?: number; edgeCount?: number }>;
-                    const s = await getStats(name);
-                    counts[name] = { nodeCount: s.nodeCount ?? 0, edgeCount: s.edgeCount ?? 0 };
+                    const s = await readWorkspaceStats(g, name, graphRegistry);
+                    counts[name] = { nodeCount: s.nodeCount, edgeCount: s.edgeCount };
                 } catch {
                     counts[name] = { nodeCount: 0, edgeCount: 0 };
                 }
