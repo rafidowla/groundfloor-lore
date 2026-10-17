@@ -36,9 +36,13 @@ export const VERBATIM_TYPE = 'LoreVerbatim';
 
 /**
  * Current per-cell schema version. Bumped whenever a new additive column lands
- * here so tenant_apps.schema_version can gate a stale cell (a request against a
- * cell provisioned before this version 503s cell_schema_stale rather than
- * tripping over a missing column silently). v1 = slice-1 baseline; v2 = slice-2
+ * here; provisionApp stamps it into tenant_apps.schema_version once a
+ * provision/upgrade fully succeeds. Nothing gates requests on the stamp: a cell
+ * provisioned at an older version is upgraded IN PLACE on first use, because
+ * ArcadeGraphStore.initialize() re-applies this additive DDL and runs the data
+ * steps (upgradeNodeScopes) before it marks the schema ready -- if that fails,
+ * every call on that store fails rather than serving a half-upgraded cell.
+ * There is no `cell_schema_stale` 503. v1 = slice-1 baseline; v2 = slice-2
  * lifecycle columns (supersededBy/…, stale/staleAt, ephemeral/ttl_ms); v3 =
  * slice-3 wire-parity outcome counters (success/failure/partial_count,
  * confirmation_score); v4 = LoreNode.security_scopes (row-level scopes on the

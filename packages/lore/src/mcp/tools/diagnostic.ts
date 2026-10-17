@@ -19,9 +19,7 @@ import path from 'path';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { tagsToArray } from '../../engines/normalizeTags.js';
 import { LocalGraphRegistry, WorkspaceNotFoundError } from '../../engines/localGraphRegistry.js';
-import { listWorkspaceNames, getWorkspacePath } from '../../config/workspaces.js';
-import { surrealDataPath } from '../../engines/surreal/surrealConnection.js';
-import { sqliteGraphDataPath } from '../../engines/sqlite/sqliteGraphSchema.js';
+import { listWorkspaceNames } from '../../config/workspaces.js';
 import { assertMcpScope } from './mcpScope.js';
 import { ecosystemMatches } from '../../core/ecosystemMatch.js';
 import { filterNodesByActorScope } from '../../security/scopeFilter.js';
@@ -31,7 +29,7 @@ import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolv
 import { hasLanguageBreakdown } from './search/helpers.js';
 import type { StorageBundle } from '../services.js';
 import { log } from '../../logger.js';
-import { engineReport } from './engineLabels.js';
+import { engineReport, workspaceGraphPath } from './engineLabels.js';
 import { mcpToolError } from './mcpToolError.js';
 import { maintenanceForbiddenToolResult } from '../../security/exportGate.js';
 import { countAudience } from '../../security/visibleCounts.js';
@@ -58,21 +56,13 @@ export interface DiagnosticToolsDeps {
  * present. It used to be the legacy `.lore/graph` of the boot-time base path
  * for every workspace and engine. With no registry (cloud/tests) there is no
  * workspace-declared local engine, so the legacy value is kept unchanged.
+ * The registry path is `workspaceGraphPath` (engineLabels.ts), shared with
+ * HTTP `GET /api/stats` since 3.35.1.
  */
 function statsGraphPath(deps: DiagnosticToolsDeps, workspace: string): string {
-    const legacy = path.join(deps.graphBasePath, '.lore', 'graph');
     const registry = deps.graphRegistry;
-    if (!registry) return legacy;
-    let base = deps.graphBasePath;
-    try {
-        base = getWorkspacePath(workspace, registry.homeDir());
-    } catch {
-        // Unknown name can't reach here (getGraphHandle threw first); keep the boot path.
-    }
-    const engine = registry.graphEngineFor(workspace);
-    if (engine === 'sqlite') return sqliteGraphDataPath(base);
-    if (engine === 'surreal') return surrealDataPath(base);
-    return path.join(base, '.lore', 'graph');
+    if (!registry) return path.join(deps.graphBasePath, '.lore', 'graph');
+    return workspaceGraphPath(registry, workspace, deps.graphBasePath);
 }
 
 export function registerDiagnosticTools(mcpServer: McpServer, deps: DiagnosticToolsDeps): void {

@@ -596,8 +596,9 @@ export class ArcadeGraphStore {
 
   /**
    * getStats — node/edge counts + per-type breakdown, honoring an optional
-   * project filter on the node-side counts (matches LocalGraph.getStats'
-   * `projectFilter` extension). Delegates to arcadeGraphReads.ts.
+   * project filter: nodes by project; edges with both endpoints in the
+   * project (3.35.1). Matches LocalGraph.getStats' `projectFilter`
+   * extension. Delegates to arcadeGraphReads.ts.
    */
   async getStats(projectFilter?: string): Promise<GraphStats> {
     await this.initialize();

@@ -68,6 +68,8 @@ import {
   type ArcadeCellBundle,
 } from '../../../engines/arcade/arcadeCellPool.js';
 import { NODE_TYPE } from '../../../engines/arcade/arcadeSchema.js';
+import { ArcadeStatsCountError } from '../../../engines/arcade/arcadeGraphReads.js';
+import type { GraphStats } from '../../../providers/types.js';
 import { getCellVocabPolicy } from '../../../engines/arcade/arcadeCellPolicy.js';
 import {
   arcadeCellKey,
@@ -238,7 +240,36 @@ function cellGraphForStats(cell: BoundArcadeCell): StorageBundle['loreGraph'] {
     getLanguageBreakdown(): Promise<Record<string, number>>;
   };
   augmented.getLanguageBreakdown = () => cellLanguageBreakdown(cell);
+  augmented.getStats = (projectFilter?: string) => cellStats(cell, projectFilter);
   return augmented as StorageBundle['loreGraph'];
+}
+
+/**
+ * 3.35.1 — `/api/stats` counts for a cell. The shared handler passes the
+ * requested WORKSPACE as a `project` row filter (local alias-workspace rule,
+ * Sprint L5b-final). In arcade the workspace is the cell (cellWorkspace = the
+ * appId) and the cell database IS the whole workspace, while rows keep the
+ * caller's own `project` (it defaults to the appId only when unset --
+ * DEC-SCOPE-HONESTY). Filtering by the workspace name therefore counted only
+ * the unset-project rows (Nokshi: nodeCount 0 with 10,101 stored). A filter
+ * equal to the cell's workspace -- or none -- now counts the whole cell; any
+ * other filter is a genuine project filter and passes through.
+ *
+ * A count ArcadeDB answers without a number is reported as `null` + `error`
+ * (the `/api/admin/stats` per-workspace shape), never as a guessed 0.
+ */
+async function cellStats(cell: BoundArcadeCell, projectFilter?: string): Promise<GraphStats> {
+  const filter = projectFilter === undefined || projectFilter === cellWorkspace(cell) ? undefined : projectFilter;
+  try {
+    return await cell.graph.getStats(filter);
+  } catch (err) {
+    if (err instanceof ArcadeStatsCountError) {
+      // Deliberately outside GraphStats: handleStats spreads this into the
+      // response, and null-with-a-reason beats a number we cannot vouch for.
+      return { nodeCount: null, edgeCount: null, typeBreakdown: null, error: { code: err.code, message: err.message } } as unknown as GraphStats;
+    }
+    throw err;
+  }
 }
 
 /**

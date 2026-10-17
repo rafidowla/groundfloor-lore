@@ -6,6 +6,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+## [3.35.1] — 2026-10-16
+
+### Fixed — arcade `GET /api/stats` counts (3.35.1)
+- **Arcade `/api/stats` now counts the whole cell.** The shared stats handler passes the
+  requested workspace as a `project` row filter (the local alias-workspace rule). In arcade the
+  workspace is the appId while rows keep the caller's own `project` (it defaults to the appId only
+  when unset), so `nodeCount` / `typeBreakdown` counted only unset-project rows (Nokshi saw 0 with
+  10,101 nodes stored), and the arcade edge count ignored the filter entirely. The arcade data
+  plane now answers the cell's own workspace with whole-cell counts; any other explicit project
+  filter narrows nodes, types and edges (an edge counts when both endpoints are in the project).
+- **An unreadable count is never guessed.** When ArcadeDB answers a count query without a
+  numeric count, arcade `/api/stats` returns `nodeCount`, `edgeCount` and `typeBreakdown` as
+  `null` plus `error: { code: "stats_count_unavailable", message }` (HTTP 200) instead of `0`.
+  The same cell read backs `GET /api/topology` on the arcade listener, so there an unreadable
+  count makes `totalCoreNodes` `null` (it was `0`). An empty cell, a cell with no edges and a
+  project filter matching nothing still read as `0` (ArcadeDB answers `count(*)` with `{n: 0}`).
+- `deadLettered`, `deadSuperseded` and `deadByReason` are unchanged: they still come from the
+  answering daemon's own local outbox (the cell's lane on the arcade listener).
+
+### Added — graph location on HTTP `GET /api/stats` (local listener)
+- Local-mode `GET /api/stats` now carries `engine` (e.g. `"sqlite (local)"`), `graphEngine` and
+  `verbatimEngine` for every caller, and `graphPath` (the resolved graph file / store path) for
+  operator and unbound callers only, gated like `deadByReason`. On SurrealDB `graphPath` is the
+  URL-escaped path the store actually opens (a space shows as `%20`). Same helpers as the MCP
+  `stats` tool (`engineReport`, `workspaceGraphPath`). Additive; never on the arcade listener or in
+  cloud mode.
+
+### Changed
+- `package.json` description now names SQLite as the default engine.
+- `arcadeSchema.ts`: corrected the `ARCADE_SCHEMA_VERSION` comment (no `cell_schema_stale` gate
+  exists; old cells upgrade in place on first use). Comment only.
+
 ## [3.35.0] — 2026-10-16
 
 Atomic node batches and supersedes, no silent outbox data loss, `GET /ready` on every mode, and the

@@ -164,9 +164,34 @@ export async function listNodes(
 }
 
 /**
+ * ArcadeStatsCountError — a count query answered without a numeric count
+ * (no row, or a non-numeric `n`). getStats refuses rather than reporting 0,
+ * so `/api/stats` can say "unknown" instead of a wrong number (3.35.1).
+ */
+export class ArcadeStatsCountError extends Error {
+  readonly code = 'stats_count_unavailable';
+  constructor(what: string) {
+    super(`ArcadeDB ${what} query returned no numeric count`);
+    this.name = 'ArcadeStatsCountError';
+  }
+}
+
+function readCount(rows: unknown[] | undefined, what: string): number {
+  const raw = (rows?.[0] as { n?: unknown } | undefined)?.n;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' && raw.trim() !== '' ? Number(raw) : NaN;
+  if (!Number.isFinite(n) || n < 0) throw new ArcadeStatsCountError(what);
+  return n;
+}
+
+/**
  * getStats — node/edge counts + per-type breakdown, honoring an optional
- * project filter on the node-side counts (matches LocalGraph.getStats'
- * `projectFilter` extension).
+ * project filter (matches LocalGraph.getStats' `projectFilter` extension):
+ * nodes tagged with the project, edges with BOTH endpoints tagged with it.
+ *
+ * 3.35.1: the edge count used to ignore the filter, so a filtered call paired
+ * a project-only node count with the whole database's edge count. The
+ * endpoint form is `outV().project` / `inV().project` (the dotted `out.x`
+ * form is trap T1 -- see queryEdgesArcade). No filter = the whole database.
  */
 export async function getStats(
   tenantDb: string,
@@ -175,28 +200,19 @@ export async function getStats(
   edgeType: string,
   projectFilter?: string,
 ): Promise<GraphStats> {
-  const nodeParams: Record<string, unknown> = {};
-  let nodeSql = `SELECT count(*) AS n FROM ${nodeType}`;
-  if (projectFilter) {
-    nodeSql += ` WHERE project = :project`;
-    nodeParams['project'] = projectFilter;
-  }
+  const params: Record<string, unknown> = projectFilter ? { project: projectFilter } : {};
+  const nodeWhere = projectFilter ? ' WHERE project = :project' : '';
+  const edgeWhere = projectFilter ? ' WHERE outV().project = :project AND inV().project = :project' : '';
   const [nodeRes, edgeRes, typeRes] = await Promise.all([
-    http.query(tenantDb, nodeSql, nodeParams),
-    http.query(tenantDb, `SELECT count(*) AS n FROM ${edgeType}`),
-    http.query(
-      tenantDb,
-      projectFilter
-        ? `SELECT type, count(*) AS n FROM ${nodeType} WHERE project = :project GROUP BY type`
-        : `SELECT type, count(*) AS n FROM ${nodeType} GROUP BY type`,
-      projectFilter ? { project: projectFilter } : {},
-    ),
+    http.query(tenantDb, `SELECT count(*) AS n FROM ${nodeType}${nodeWhere}`, params),
+    http.query(tenantDb, `SELECT count(*) AS n FROM ${edgeType}${edgeWhere}`, params),
+    http.query(tenantDb, `SELECT type, count(*) AS n FROM ${nodeType}${nodeWhere} GROUP BY type`, params),
   ]);
-  const nodeCount = Number((nodeRes.result?.[0] as { n?: number } | undefined)?.n ?? 0);
-  const edgeCount = Number((edgeRes.result?.[0] as { n?: number } | undefined)?.n ?? 0);
+  const nodeCount = readCount(nodeRes.result, 'node count');
+  const edgeCount = readCount(edgeRes.result, 'edge count');
   const typeBreakdown: Record<string, number> = {};
-  for (const row of (typeRes.result ?? []) as Array<{ type?: string; n?: number }>) {
-    if (row.type) typeBreakdown[row.type] = Number(row.n ?? 0);
+  for (const row of (typeRes.result ?? []) as Array<{ type?: string; n?: unknown }>) {
+    if (row.type) typeBreakdown[row.type] = readCount([row], 'type breakdown');
   }
   return { nodeCount, edgeCount, typeBreakdown };
 }

@@ -8,8 +8,12 @@
  * the engine each substrate actually uses: the graph engine from the registry, the
  * verbatim (vector) engine from the workspace's declared `vectorEngine`.
  */
+import path from 'node:path';
 import type { LocalGraphRegistry } from '../../engines/localGraphRegistry.js';
 import { resolveWorkspaceVectorEngine } from '../../engines/vectorEngineSelector.js';
+import { getWorkspacePath } from '../../config/workspaces.js';
+import { surrealDataPath } from '../../engines/surreal/surrealConnection.js';
+import { sqliteGraphDataPath } from '../../engines/sqlite/sqliteGraphSchema.js';
 
 export interface EngineReport {
     /** Human label, e.g. `sqlite (local)`, `surrealdb + lancedb (local)`, `dataplane (cloud)`. */
@@ -28,4 +32,29 @@ export function engineReport(registry: LocalGraphRegistry | undefined, workspace
     // Surreal + Lance keeps its historical label so existing consumers see no change.
     if (graph === 'surreal' && verbatim === 'lancedb') return { engine: 'surrealdb (local)', verbatimEngine: verbatim };
     return { engine: `${graphLabel} + ${verbatim} (local)`, verbatimEngine: verbatim };
+}
+
+/**
+ * workspaceGraphPath — the REAL on-disk graph store location for the engine a
+ * local workspace declares: sqlite -> `<ws>/.lore/graph.sqlite`, surreal ->
+ * `surrealDataPath(<ws>)` (the resolved path `openSurreal` actually opens, with
+ * reserved characters such as spaces URL-escaped), anything else -> the legacy
+ * `<ws>/.lore/graph`. Resolved against the workspace's OWN directory; falls back
+ * to `fallbackBase` when the name has no workspaces.json entry.
+ *
+ * Shared by the MCP `stats` tool and HTTP `GET /api/stats` (3.35.1) so both
+ * surfaces report the same path from one implementation.
+ */
+export function workspaceGraphPath(registry: LocalGraphRegistry, workspace: string, fallbackBase: string): string {
+    let base = fallbackBase;
+    try {
+        base = getWorkspacePath(workspace, registry.homeDir());
+    } catch {
+        // Unknown name: callers resolve the graph handle first, so this is only
+        // reachable from partial registries in tests; keep the fallback base.
+    }
+    const engine = registry.graphEngineFor(workspace);
+    if (engine === 'sqlite') return sqliteGraphDataPath(base);
+    if (engine === 'surreal') return surrealDataPath(base);
+    return path.join(base, '.lore', 'graph');
 }

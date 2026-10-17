@@ -21,6 +21,35 @@ import { hasLanguageBreakdown } from '../../../tools/search/helpers.js';
 import { countAudience } from '../../../../security/visibleCounts.js';
 import { visibleGraphStats, visibleCountLabel } from '../../../../security/visibleStats.js';
 import { CloudModeUnsupportedError } from '../../../../engines/cloudModeUnsupportedError.js';
+import { getArcadeCell } from '../../../../engines/arcade/arcadeRequestContext.js';
+import { engineReport, workspaceGraphPath } from '../../../tools/engineLabels.js';
+
+/**
+ * 3.35.1 — where a LOCAL workspace's graph lives, for `GET /api/stats`.
+ * Same helpers as the MCP `stats` tool (engineReport / workspaceGraphPath), so
+ * the two surfaces cannot drift. Returned only on the local listener: cloud has
+ * no workspace-declared local engine, and the arcade listener (which reuses this
+ * handler through a one-cell registry shim) must never report a filesystem
+ * path. `graphPath` is added by the caller on the unbound/operator branch only.
+ * Any resolution failure omits the fields rather than reporting a guess.
+ */
+function localGraphLocation(
+    deps: DiagnosticDeps,
+    workspace: string,
+): { engine: string; graphEngine: string; verbatimEngine?: string; graphPath: string } | null {
+    if (deps.deploymentMode !== 'local' || getArcadeCell() !== null) return null;
+    const registry = deps.graphRegistry;
+    if (!registry || typeof registry.graphEngineFor !== 'function' || typeof registry.homeDir !== 'function') return null;
+    try {
+        return {
+            ...engineReport(registry, workspace),
+            graphEngine: registry.graphEngineFor(workspace),
+            graphPath: workspaceGraphPath(registry, workspace, registry.homeDir()),
+        };
+    } catch {
+        return null;
+    }
+}
 
 /**
  * One workspace's entry in `/api/admin/stats`'s `byWorkspace` map. Healthy
@@ -192,6 +221,7 @@ export async function handleStats(res: ServerResponse, url: string, deps: Diagno
         // 3.35.0 (a)/(p): acknowledged-but-lost writes. A bounded COUNT over one workspace; absent
         // (not 0) when the outbox store cannot answer, so "none" is never claimed without knowing.
         const dead = await deps.outboxStore?.deadLetterSummary?.(requested);
+        const location = localGraphLocation(deps, requested);
         if (countAudience() === 'visible') {
             const v = await visibleGraphStats(targetGraph, { project: requested, withLanguage: true });
             res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -204,12 +234,22 @@ export async function handleStats(res: ServerResponse, url: string, deps: Diagno
                 languageBreakdown: v.languageBreakdown,
                 ...(dead ? { deadLettered: dead.deadLettered } : {}),
                 ...visibleCountLabel(v.lowerBound),
+                // Engine labels only: graphPath (a host filesystem path) is
+                // operator/unbound-only, gated like deadByReason.
+                ...(location ? {
+                    engine: location.engine,
+                    graphEngine: location.graphEngine,
+                    ...(location.verbatimEngine ? { verbatimEngine: location.verbatimEngine } : {}),
+                } : {}),
             }));
             return;
         }
         // Sprint L5b-final — pass the requested workspace as a
         // project filter so alias workspaces sharing an on-disk
         // path with another workspace see only their tagged rows.
+        // (Arcade: the cell shim in arcadeData.ts treats this filter as
+        // "the whole cell" — one database IS the workspace there, and rows
+        // keep the caller's own `project`; see cellGraphForStats.)
         const graphStats = await (targetGraph as { getStats: (p?: string) => ReturnType<typeof targetGraph.getStats> }).getStats(requested);
         let languageBreakdown: Record<string, number>;
         try {
@@ -233,6 +273,7 @@ export async function handleStats(res: ServerResponse, url: string, deps: Diagno
             verbatimDocuments_global: await deps.store.storageClient.verbatimCount(),
             languageBreakdown,
             ...(dead ? { deadLettered: dead.deadLettered, deadSuperseded: dead.deadSuperseded, deadByReason: dead.deadByReason } : {}),
+            ...(location ?? {}),
         }));
     } catch (statsErr) {
         writeError(res, 500, 'internal_error', redactError(statsErr));
