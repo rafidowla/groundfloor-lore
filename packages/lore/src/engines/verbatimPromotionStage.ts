@@ -32,6 +32,7 @@ import type { Database as DatabaseType } from 'better-sqlite3';
 
 import { buildVerbatimSchema } from './verbatimSchema.js';
 import { decodeVector } from './sqliteVerbatimVector.js';
+import { deleteEntityRows } from './verbatimPromotionEntityRows.js';
 
 export interface SourceRow {
     rowid: number;
@@ -105,6 +106,19 @@ export function toLanceRow(row: SourceRow, dim: number): LanceRow {
 const SELECT_COLUMNS = `rowid, id, text, vector, content_hash, type, label, tags, project, ecosystem, updatedAt,
                          security_scopes, is_canonical, is_tombstone, superseded_at, created_at`;
 
+/** SQLITE-STALL fix item 1 — changes-log rows read per SQLite window in
+ *  copyTail. Each window is one synchronous read (no `await`), sized so a
+ *  window stays millisecond-scale. */
+const TAIL_CHUNK_ROWS = 200;
+
+/** Distinct entities buffered before one Lance delete+add flush. Bounds both
+ *  memory (rows held) and the number of full-table delete scans a long
+ *  backlog costs (one per flush, not one per window). */
+const TAIL_FLUSH_ENTITIES = 1000;
+
+/** Cap on the distinct entity ids copyTail reports back for the gate's content check. */
+export const MAX_TOUCHED_REPORTED = 20_000;
+
 /**
  * Create the staging Lance table at `stagingDir` and stream every row from
  * `db` in rowid order, chunked. Returns the high-water rowid recorded
@@ -152,71 +166,120 @@ export async function streamStage(
     return { highWaterRowid, rowsStaged };
 }
 
+export interface CopyTailOptions {
+    /** Resume after this changes-log `seq` (exclusive). Default 0. */
+    fromSeq?: number;
+    /** Stop at this `seq` (inclusive). Default: no upper bound. */
+    toSeq?: number;
+}
+
 /**
- * Apply the tail: every row the changes-log recorded with rowid >
- * `highWaterRowid`, replayed against the staging table. `op:'upsert'`
- * re-reads the CURRENT row from `verbatim` (it may have been written,
- * then overwritten again, multiple times since staging started — only the
- * latest state matters) and mergeInsert-upserts it by Lance id;
- * `op:'delete'` removes the corresponding Lance row(s) — a canonical
- * delete removes exactly one row; nothing here removes history-snapshot
- * rows, since SQLite never hard-deletes a snapshot on its own (only
- * physicalDeleteMany against the canonical row's id could, and that also
- * hard-deletes on SQLite's side, which the changes-log records as
- * `op:'delete'` for that specific rowid — including snapshot rowids, since
- * physicalDelete/physicalDeleteMany operate on `id`, not
- * `is_canonical`-scoped, matching Lance's own physicalDelete semantics of
- * removing whatever row(s) match the predicate).
+ * Apply the tail: replay every changes-log entry with `fromSeq < seq <=
+ * toSeq` against the staging table, in bounded chunks (SQLITE-STALL fix
+ * item 1).
  *
- * Caller is responsible for the write-gate (see verbatimPromotion.ts) —
- * this function assumes no further writes land on `db` while it runs.
+ * LOCKING. No SQLite lock is ever held across an `await`. Each chunk is one
+ * synchronous window: `BEGIN` (a deferred READ transaction, so the chunk
+ * sees one consistent snapshot while writers in other connections/processes
+ * proceed untouched under WAL), read at most `TAIL_CHUNK_ROWS` changes-log
+ * rows plus the current SQLite rows of every entity they touch, `COMMIT`.
+ * The LanceDB writes happen after the window closes. A caller that already
+ * holds a transaction (the final catch-up snapshot in verbatimPromotion.ts,
+ * or a unit harness's crash simulation) keeps its own: the windows then read
+ * inside that snapshot and copyTail neither begins nor commits.
+ *
+ * SEMANTICS - resync by entity. A changes-log entry only says "something
+ * about entity `row_id` changed". SQLite keeps an entity's canonical row and
+ * its history rows under the SAME `id` (store() demotes the old canonical row
+ * to history in place and inserts a new one; replaceCanonical deletes and
+ * re-inserts; physicalDelete / reclaim remove rows), while Lance keeps them
+ * as separate rows (`<id>` and `<id>#rev<ts>`). Replaying individual rowids
+ * therefore cannot express the demotion or a partial delete, so for every
+ * entity touched in a chunk the staging table is made to equal SQLite's
+ * CURRENT rows for that id: delete every Lance row of the entity
+ * (`deleteEntityRows`: an exact per-entity decision, so `foo` never takes
+ * `foo#revbar` with it; see verbatimPromotionEntityRows.ts), then add the
+ * current SQLite rows mapped through `toLanceRow`. The rows are added
+ * ROW FOR ROW: two history snapshots that share a `superseded_at`
+ * millisecond map to the same `<id>#rev<ISO>` Lance id and both are kept,
+ * exactly as the native Lance engine keeps them (plain `table.add`), so a
+ * promoted store is row-for-row equal to a natively-Lance one and
+ * streamStage, copyTail and the verifier's physical row count agree. Entities are applied in log order and a later read of the
+ * same entity replaces an earlier buffered one, so the end state converges on
+ * SQLite however writes interleave between chunks. Changes to rows whose
+ * rowid is at or below the stream's high-water mark (history demotions,
+ * deletes of streamed rows) are NOT skipped; filtering on rowid, as the first
+ * cut of this fix did, silently lost exactly those.
+ *
+ * Crash-safety is unchanged: nothing is deleted from `verbatim_changes_log`
+ * here (it is dropped only at the commit point, verbatimPromotion.ts), and the
+ * cursor lives in memory, so an interrupted run leaves the log for
+ * `recoverOnOpen` to discard with the staging dir (SQLite stays
+ * authoritative).
+ *
+ * `_highWaterRowid` is kept for call compatibility; the cursor is `seq`.
+ * Returns `tailRowsApplied` (changes-log entries consumed), `lastSeq`
+ * (the highest `seq` consumed, or `fromSeq` if none) and `touchedEntities`
+ * (distinct entity ids resynced, capped at MAX_TOUCHED_REPORTED; `touchedOverflow`
+ * says the cap was hit) so the gate can content-check exactly those rows.
  */
 export async function copyTail(
     db: DatabaseType,
     stagingDir: string,
     dim: number,
-    highWaterRowid: number,
-): Promise<{ tailRowsApplied: number }> {
+    _highWaterRowid: number,
+    opts: CopyTailOptions = {},
+): Promise<{ tailRowsApplied: number; lastSeq: number; touchedEntities: string[]; touchedOverflow: boolean }> {
+    const touchedAll = new Set<string>();
+    let touchedOverflow = false;
     const connection = await lancedb.connect(stagingDir);
     const table = await connection.openTable('lore_verbatim');
 
-    const changes = db.prepare(
-        `SELECT row_rowid, row_id, op FROM verbatim_changes_log WHERE row_rowid > ? ORDER BY seq`,
-    ).all(highWaterRowid) as Array<{ row_rowid: number; row_id: string; op: 'upsert' | 'delete' }>;
-    if (changes.length === 0) return { tailRowsApplied: 0 };
+    type ChangesRow = { seq: number; row_id: string };
+    const changesStmt = db.prepare(
+        `SELECT seq, row_id FROM verbatim_changes_log WHERE seq > ? AND seq <= ? ORDER BY seq LIMIT ?`,
+    );
+    const entityStmt = db.prepare(`SELECT ${SELECT_COLUMNS} FROM verbatim WHERE id = ? ORDER BY rowid`);
+    const toSeq = opts.toSeq ?? Number.MAX_SAFE_INTEGER;
 
-    // Dedupe to the LATEST op per rowid (a row can be upserted multiple
-    // times, or upserted-then-deleted, within the tail window). rowid, not
-    // row_id, is the dedupe key — physicalDelete removes every row sharing
-    // an id (canonical + all its history snapshots) in one statement, so
-    // several DISTINCT rowids can share the same row_id; each is its own
-    // physical row and needs its own resolution.
-    const latestOpByRowid = new Map<number, { op: 'upsert' | 'delete'; rowId: string }>();
-    for (const c of changes) latestOpByRowid.set(c.row_rowid, { op: c.op, rowId: c.row_id });
+    // entity id -> the Lance rows it must have after this flush (possibly none).
+    let pending = new Map<string, LanceRow[]>();
+    const flush = async (): Promise<void> => {
+        if (pending.size === 0) return;
+        const ids = [...pending.keys()];
+        const rows: LanceRow[] = [];
+        for (const r of pending.values()) rows.push(...r);
+        pending = new Map();
+        await deleteEntityRows(table, ids);
+        if (rows.length > 0) await table.add(rows as unknown as Record<string, unknown>[]);
+    };
 
-    const upsertStmt = db.prepare(`SELECT ${SELECT_COLUMNS} FROM verbatim WHERE rowid = ?`);
-    // Ids already deleted from Lance this pass — physicalDelete's `DELETE
-    // FROM verbatim WHERE id = ?` removes every physical row sharing an id
-    // (canonical + history) in one statement, so ONE delete of the
-    // canonical row implies every history-snapshot row for that id is
-    // ALSO gone; deleting by id-prefix once covers all of them instead of
-    // once per stale changes-log entry.
-    const deletedIds = new Set<string>();
     let applied = 0;
-    for (const [rowid, { op, rowId }] of latestOpByRowid) {
-        if (op === 'delete') {
-            if (deletedIds.has(rowId)) { applied++; continue; }
-            deletedIds.add(rowId);
-            const safe = rowId.replace(/'/g, "''");
-            await table.delete(`id = '${safe}' OR id LIKE '${safe.replace(/[\\%_]/g, (ch) => `\\${ch}`)}#rev%' ESCAPE '\\'`);
-            applied++;
-            continue;
+    let cursor = opts.fromSeq ?? 0;
+    for (;;) {
+        const ownTxn = !db.inTransaction;
+        if (ownTxn) db.exec('BEGIN');
+        let changes: ChangesRow[];
+        const touched = new Map<string, LanceRow[]>();
+        try {
+            changes = changesStmt.all(cursor, toSeq, TAIL_CHUNK_ROWS) as ChangesRow[];
+            for (const c of changes) {
+                if (touched.has(c.row_id)) continue;
+                touched.set(c.row_id, (entityStmt.all(c.row_id) as SourceRow[]).map((raw) => toLanceRow(raw, dim)));
+            }
+        } finally {
+            if (ownTxn) db.exec('COMMIT');
         }
-        const row = upsertStmt.get(rowid) as SourceRow | undefined;
-        if (!row) continue; // deleted again since — nothing to apply
-        const lanceRow = toLanceRow(row, dim);
-        await table.mergeInsert('id').whenMatchedUpdateAll().whenNotMatchedInsertAll().execute([lanceRow as unknown as Record<string, unknown>]);
-        applied++;
+        if (changes.length === 0) break;
+        cursor = changes[changes.length - 1]!.seq;
+        applied += changes.length;
+        for (const [id, rows] of touched) {
+            if (touchedAll.size < MAX_TOUCHED_REPORTED) touchedAll.add(id); else if (!touchedAll.has(id)) touchedOverflow = true;
+            pending.delete(id); // a newer read replaces an older buffered one
+            pending.set(id, rows);
+        }
+        if (pending.size >= TAIL_FLUSH_ENTITIES) await flush();
     }
-    return { tailRowsApplied: applied };
+    await flush();
+    return { tailRowsApplied: applied, lastSeq: cursor, touchedEntities: [...touchedAll], touchedOverflow };
 }

@@ -6,6 +6,72 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+## [3.35.3] — 2026-10-24
+
+### Fixed — SQLite writes silently lost to "database is locked" (3.35.3)
+- **Data-loss fix.** On the SQLite verbatim engine, vector promotion held `BEGIN EXCLUSIVE` on
+  `verbatim.sqlite` across the whole tail copy (an `await` loop), so every other writer in the
+  process got `SQLITE_BUSY`. The outbox had no SQLite lock classifier, so each lock error burned
+  an attempt and the entry was dead-lettered as `permanent` after 5 tries: replication writes were
+  silently lost. Exposure: any workspace past the auto-promotion threshold (250k vectors,
+  `LORE_VECTOR_PROMOTE_ROWS`) and any manual `lore vectors promote`.
+- **Outbox.** `isSqliteLockedError` (`engines/graphShared/deleteOutcome.ts`, also now the base of
+  `isSqliteTransientDeleteError`) is wired as the replicator's transient classifier in
+  `wireOutbox`: SQLITE_BUSY / SQLITE_LOCKED (code or message) retry with backoff, do not count toward
+  `maxAttempts`, and only die at the existing 24 h transient ceiling. Genuine permanent errors
+  (constraint violations etc.) still dead-letter.
+- **Promotion no longer holds a lock across an await.** `copyTail` now reads the changes log in
+  bounded synchronous windows (one deferred read transaction each, no `await` inside) and resyncs
+  each touched entity (delete its Lance rows, re-add its current SQLite rows). The old rowid filter
+  silently dropped history demotions and deletes of already-streamed rows, duplicated keys within a
+  merge batch and over-deleted history. The commit is now: snapshot catch-up rounds (full
+  verification once, count check after), then a short fully synchronous `BEGIN EXCLUSIVE` gate that
+  re-checks `max(seq)` and performs the rename/commit with no `await`. If the gate cannot converge the
+  promotion aborts cleanly (SQLite stays authoritative) and retries after a cooldown (see below).
+- **Promotion verification no longer aborts at small scale.** The bm25 sample probe (first three
+  words of a row's text) fails for rows sharing a text prefix because they tie and fall outside the
+  top 10, so promotion aborted and re-triggered roughly every 1.7 s. A top-10 miss now counts as a
+  failure only if the same query restricted to that row's id also misses.
+- **Review follow-ups (same release).**
+  - *Gate converges under steady writes (F1).* When the unseen tail is small (<= 1000 log rows,
+    `LORE_PROMOTION_SMALL_TAIL_ROWS`) the in-process writers of that workspace are parked behind an
+    application-level write barrier (`engines/verbatimWriteBarrier.ts`; every `SqliteVerbatimStore`
+    write method goes through it, writers queue and never fail), the tail is copied, and the gate
+    commits. The hold is bounded (2 s) and in-flight writes get 1 s to drain, otherwise it backs off.
+    Writes parked at the instant of commit are rejected with `VerbatimStoreRetiredError` (nothing is
+    applied; retry against the promoted store) rather than resuming onto the renamed-away file. A write
+    from another process cannot be parked and only makes the gate retry (3 barrier attempts).
+  - *Writes parked at the commit are replayed, not lost (F1c).* `SqliteVerbatimStore` catches that
+    rejection and replays the same call on the store its resolver now returns
+    (`engines/verbatimRetiredRetry.ts`: doubling backoff 25-500 ms, total budget 5 s, then the original
+    `VerbatimStoreRetiredError` surfaces). Safe to repeat: the error is thrown before the write runs
+    (`applied === false`), and the replay never targets the retired instance itself. The outbox treats the
+    error as transient like a lock error (`isSqliteOrRetiredTransient`): no attempt is charged and it is never
+    dead-lettered. Known gap: the boot store built in `mcp/services.ts` is never swapped and has no resolver,
+    so a write parked there still surfaces the error.
+  - *Retry cooldown (F1b).* An aborted promotion records a persisted cooldown
+    (`.lore/promotion-cooldown.json`, 1 min doubling to a 1 h cap, `LORE_PROMOTION_COOLDOWN_MS` /
+    `LORE_PROMOTION_COOLDOWN_MAX_MS`) that the automatic trigger respects; a commit clears it. Manual
+    `lore vectors promote` ignores it but still records aborts. The staged copy is deleted on every
+    abort: the catch-up cursor lives only in memory and the log is dropped, so it could not be proven
+    consistent later.
+  - *Same-millisecond history (F2).* Two history snapshots with the same `superseded_at` share a Lance
+    id; `copyTail` no longer dedupes them, so the promoted table is row-for-row equal to SQLite (as a
+    natively-Lance store would hold it) and verification passes instead of aborting on the row count.
+  - *Exact entity deletes (F3).* The `split_part(id, '#rev', 1)` resync conflated `foo` with
+    `foo#revbar`. Resync now selects a coarse candidate set and decides in code
+    (`verbatimPromotionEntityRows.ts`), then deletes by exact id. Residual ambiguity, inherent to the
+    `<id>#rev<ts>` naming: an entity whose id literally ends in `#rev<24-char ISO timestamp>` is
+    indistinguishable from the history row of the entity before it.
+  - *No event-loop stall on a foreign lock (F4).* Every promotion lock acquisition runs with
+    `busy_timeout = 0` and retries on a timer (restored in a `finally`); previously a write lock held
+    by another process froze the whole process in 5 s slices (measured 5.2 s stalls).
+  - *Outbox batch halt (F5).* The first lock-classified error stops the batch: remaining entries stay
+    pending and are not charged an attempt or a log line each.
+  - *Classifier (F7).* `isSqliteLockedError` decides by the SQLite error code alone when one is present.
+  - *Content check at the gate (F6).* Each catch-up round compares id, content hash and `updatedAt` of
+    the entities it touched (up to 20,000; beyond that only counts are checked).
+
 ## [3.35.2] — 2026-10-16
 
 ### Fixed — local-listener stats counts (3.35.2)

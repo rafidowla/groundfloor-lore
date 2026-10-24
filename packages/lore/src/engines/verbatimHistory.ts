@@ -57,7 +57,7 @@ export function escapeSqlLiteral(value: string): string {
  * permanently flagged as a missing embedding by the consistency sweep.
  * Anchor to the real suffix shape at the END of the id instead.
  */
-const HISTORY_SUFFIX_RE = /#rev\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+export const HISTORY_SUFFIX_RE = /#rev\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 
 /** True iff `id` carries the internally-generated revision-snapshot suffix. */
 export function isRevisionHistoryId(id: string): boolean {

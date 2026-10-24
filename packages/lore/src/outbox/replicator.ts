@@ -206,11 +206,11 @@ export interface ReplicatorWiring {
      *  routes that consult an unwired cache fail-open (no backpressure). */
     lagCache?: OutboxLagCache;
     onTickStart?: () => void; // 3.34.0: called at the start of every tick that has work
-    /** 3.35.0 (a): "nothing applied, replay later" test (failureDisposition.ts); only the ArcadeDB wiring
-     *  supplies one. Search-worker timeouts are deliberately not transient yet: follow-up. */
+    /** 3.35.0 (a): "nothing applied, replay later" test (failureDisposition.ts). Search-worker timeouts are not transient yet. */
     transientClassifier?: (err: unknown) => boolean;
-    /** Test seams for the transient ceiling and jitter. */
-    clock?: { now?: () => number; random?: () => number };
+    /** 3.35.3: a transient error for which the rest of the batch is skipped (SQLite lock): retried next tick. */
+    haltBatchClassifier?: (err: unknown) => boolean;
+    clock?: { now?: () => number; random?: () => number }; // test seams for the transient ceiling and jitter
 }
 
 export interface ReplicatorStats {
@@ -273,7 +273,7 @@ export class OutboxReplicator {
         const throttle = new LogThrottle(wiring.log ?? ((m: string) => console.error(m)));
         this.log = (m) => throttle.log(m); this.flushLog = () => throttle.flush();
         this.lagCache = wiring.lagCache; this.deferred.onTickStart = wiring.onTickStart;
-        this.disposition = makeDispositionEnv(this.cfg, wiring.transientClassifier, wiring.clock);
+        this.disposition = makeDispositionEnv(this.cfg, wiring.transientClassifier, wiring.clock, wiring.haltBatchClassifier);
     }
 
     /** Idempotent. No-op if already running. */
@@ -553,8 +553,8 @@ export class OutboxReplicator {
             // one-at-a-time (preserves Sprint O ordering for node /
             // edge writes and avoids cross-kind interleaving).
             const vdeps = this.verbatimConsolidationDeps();
-            let i = 0;
-            while (i < fresh.length) {
+            let i = 0; this.disposition.batchHalted = false;
+            while (i < fresh.length && !this.disposition.batchHalted) {
                 const entry = fresh[i];
                 if (this.deferred.has(entry)) { i++; continue; } // order: wait for the deferred row
                 if (entry.operationKind === 'embed.batch' && EMBED_BATCH_CONSOLIDATION_CAP > 0) {

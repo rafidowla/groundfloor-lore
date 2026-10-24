@@ -31,14 +31,18 @@ import {
     readPromotionState, writePromotionState, clearPromotionState,
     stagingDirPath, lancedbDirPath, verbatimSqlitePath, promotedSqliteBackupPath,
     installChangesLogTriggers, dropChangesLogTriggers,
+    promotionCooldownRemainingMs, recordPromotionAbort, clearPromotionCooldown,
     type PromotionState,
 } from './verbatimPromotionState.js';
 import { ensureChangesLogTable, dropChangesLogTable } from './sqliteVerbatimSchema.js';
 import { streamStage, copyTail } from './verbatimPromotionStage.js';
-import { verifyPromotion, type VerifyResult } from './verbatimPromotionVerify.js';
+import type { VerifyResult } from './verbatimPromotionVerify.js';
+import { catchUpAndCommit, runWithoutBlocking, lockWaitBudgetMs } from './verbatimPromotionGate.js';
 import { readPieceSidecar } from './pieces/pieceLayout.js';
 
 const DEFAULT_PROMOTE_ROWS = 250_000;
+/** How long an abort waits (without blocking the loop) for a foreign write lock so it can drop the triggers. */
+const ABORT_DROP_BUDGET_MS = 10_000;
 
 /** 3.27.1: exported so `lore migrate-vectors --to sqlite` refuses a store
  *  that would promote straight back to Lance on its first write. */
@@ -62,6 +66,9 @@ export function shouldTriggerPromotion(basePath: string, rowCountEstimate: numbe
     const threshold = promoteRowsThreshold();
     if (threshold === 0) return false;
     if (inFlight.has(path.resolve(basePath))) return false;
+    // F1b: after an aborted attempt, back off (1 min doubling to 1 h, persisted) instead of
+    // re-streaming the whole table on the very next write.
+    if (promotionCooldownRemainingMs(basePath) > 0) return false;
     return rowCountEstimate >= threshold;
 }
 
@@ -200,10 +207,10 @@ export async function promoteWorkspace(basePath: string, dim: number, opts: Prom
             // Step 1: record intent.
             const startedAt = new Date().toISOString();
             writePromotionState(resolved, { state: 'staging', startedAt, sourceRows: sourceCount });
-            ensureChangesLogTable(db);
-            installChangesLogTriggers(db);
 
             try {
+                // F4: the DDL needs the write lock; never sleep inside SQLite waiting for another process's.
+                await runWithoutBlocking(db, () => { ensureChangesLogTable(db); installChangesLogTriggers(db); }, lockWaitBudgetMs());
                 // Step 2/3: stream-stage. Writes landing from here on are
                 // captured by the changes-log triggers just installed.
                 const staging = stagingDirPath(resolved);
@@ -211,24 +218,17 @@ export async function promoteWorkspace(basePath: string, dim: number, opts: Prom
                 const { highWaterRowid, rowsStaged } = await streamStage(db, staging, dim);
                 writePromotionState(resolved, { state: 'staging', startedAt, sourceRows: sourceCount, highWaterRowid });
 
-                // Step 4: tail copy. SQLite's own EXCLUSIVE-transaction file
-                // lock is the "write gate" — better-sqlite3 is synchronous
-                // and single-connection-per-handle, so briefly holding an
-                // EXCLUSIVE transaction on THIS connection blocks any other
-                // connection's write (via SQLITE_BUSY + busy_timeout retry,
-                // set above) for exactly as long as the tail-copy takes,
-                // with zero application-level coordination needed on the
-                // live SqliteVerbatimStore's write path. Writes are
-                // delayed, never lost or rejected (design: "writes continue
-                // during staging").
-                let tailRowsApplied = 0;
-                db.exec('BEGIN EXCLUSIVE');
-                try {
-                    const tail = await copyTail(db, staging, dim, highWaterRowid);
-                    tailRowsApplied = tail.tailRowsApplied;
-                } finally {
-                    db.exec('COMMIT');
-                }
+                // Step 4: drain the tail while writes continue. SQLITE-STALL
+                // fix item 1: copyTail holds no SQLite lock across an await
+                // (it reads the changes-log in bounded synchronous windows
+                // and applies each chunk to LanceDB outside any
+                // transaction), so the live store's writes are never blocked
+                // for the duration of the copy. They are captured by the
+                // changes-log triggers and picked up here or in the final
+                // catch-up below.
+                const drained = await copyTail(db, staging, dim, highWaterRowid);
+                let lastSeq = drained.lastSeq;
+                let tailRowsApplied = drained.tailRowsApplied;
 
                 // Step 5: build indexes on the staged table (FTS — the IVF
                 // vector index is Lance-native and VerbatimStore's own
@@ -238,68 +238,46 @@ export async function promoteWorkspace(basePath: string, dim: number, opts: Prom
                 // independent of a live VerbatimStore instance).
                 await buildStagedIndexes(staging, dim);
 
-                // Step 6: verify.
-                const verify = await verifyPromotion(db, staging, opts.sampleSize ?? 200);
-                if (!verify.ok) {
-                    log.error(`[verbatimPromotion] verification FAILED for ${resolved} — aborting, SQLite remains authoritative: ${verify.reasons.join(' | ')}`);
-                    try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* best-effort */ }
-                    dropChangesLogTriggers(db);
-                    dropChangesLogTable(db);
-                    clearPromotionState(resolved);
-                    return { committed: false, dryRun: false, verify, rowsStaged, tailRowsApplied };
+                // Steps 6+7: verify, then commit behind the gate (verbatimPromotionGate.ts):
+                // free catch-up rounds while writers run, then a short write-barrier window in which
+                // the small remaining tail is copied and the commit is made with no await between the
+                // final `max(seq)` re-check and the renames.
+                let committedAt = '';
+                const outcome = await catchUpAndCommit({
+                    db, resolved, staging, dim, highWaterRowid, sourceCount,
+                    sampleSize: opts.sampleSize ?? 200, lastSeq, tailRowsApplied,
+                    commitSync: () => {
+                        committedAt = startedAt.replace(/[:.]/g, '-');
+                        const committedState: PromotionState = { state: 'committed', startedAt, sourceRows: sourceCount, highWaterRowid, committedAt };
+                        writePromotionState(resolved, committedState);
+                        dropChangesLogTriggers(db);
+                        dropChangesLogTable(db);
+                        db.exec('COMMIT');
+                        db.close(); // release the handle before renaming verbatim.sqlite out from under it
+                        finishCommitRenames(resolved, committedState);
+                        clearPromotionState(resolved);
+                    },
+                });
+                if (outcome.kind === 'failed') {
+                    const msg = outcome.verify.reasons.join(' | ');
+                    if (outcome.reason === 'verify') log.error(`[verbatimPromotion] verification FAILED for ${resolved} - aborting, SQLite remains authoritative: ${msg}`);
+                    else log.warn(`[verbatimPromotion] ${resolved}: ${msg}`);
+                    // The staged copy is DELETED on every abort (F1c): the changes-log triggers are dropped
+                    // here and the catch-up cursor lives only in memory, so a later attempt could not prove
+                    // the staged table still equals SQLite and would have to re-verify everything anyway.
+                    await abortStaging(db, resolved);
+                    recordPromotionAbort(resolved, msg);
+                    return { committed: false, dryRun: false, verify: outcome.verify, rowsStaged, tailRowsApplied: outcome.tailRowsApplied };
                 }
-
-                // Step 7: commit. The single durable commit point.
-                const committedAt = startedAt.replace(/[:.]/g, '-');
-                writePromotionState(resolved, { state: 'committed', startedAt, sourceRows: sourceCount, highWaterRowid, committedAt });
-                dropChangesLogTriggers(db);
-                dropChangesLogTable(db);
-                db.close(); // release the handle before renaming verbatim.sqlite out from under it
-                finishCommitRenames(resolved, { state: 'committed', startedAt, sourceRows: sourceCount, highWaterRowid, committedAt });
-                clearPromotionState(resolved);
-
-                // D7c (3.23), revised per final review (B2): promotion used
-                // to rebuild the piece index inline here, re-embedding every
-                // node's pieces with the DEFAULT embedder before returning.
-                // That widened the promotion lost-write window from minutes
-                // to hours (SqliteVerbatimStore keeps serving reads/writes
-                // against the just-renamed-away backup file for the whole
-                // rebuild, with no promotion-state write gate of its own),
-                // and used createEmbeddingProvider()'s default args rather
-                // than the workspace's own/host-injected provider, so a
-                // rebuilt sidecar could come out fingerprint-mismatched
-                // (immediately `stale`) on a host with a non-default
-                // embedder. The old sidecar (and, on the Lance engine, the
-                // old piece table) were already swept into the
-                // `.stale-<ts>` aside directory by finishCommitRenames step
-                // 1 above, so the freshly-promoted Lance store simply has no
-                // piece index at all — `pieceIndexStatus` reports
-                // `not_built` and `pieceAwareSearch` falls back to the
-                // canonical vector leg until an operator explicitly rebuilds
-                // it. This keeps the promotion's own commit point exactly
-                // where it always was (finishCommitRenames, above) with
-                // nothing awaited afterward.
-                if (pieceSidecarBefore?.complete) {
-                    // Deliberately no quote marks around not_built / the CLI
-                    // command name below — logger.ts's redactError() hashes
-                    // ANY quoted substring as a possible node-id (S9), which
-                    // would turn this operator-facing hint into unreadable
-                    // id# tags. The workspace path itself still gets scrubbed
-                    // by the same function (it is a /private|/Users|... path),
-                    // consistent with every other log line in this module.
-                    log.warn(`[verbatimPromotion] ${resolved} promoted from SQLite to Lance with a complete piece index in place — the piece index was NOT carried over (pieceIndexStatus is now not_built; recall falls back to canonical vectors until it is rebuilt). Run lore migrate piece-vectors on this workspace to rebuild it.`);
-                }
-
-                return {
-                    committed: true, dryRun: false, verify, rowsStaged, tailRowsApplied,
-                    newLanceDbPath: lancedbDirPath(resolved),
-                    sqliteBackupPath: promotedSqliteBackupPath(resolved, committedAt),
-                };
+                clearPromotionCooldown(resolved);
+                return await finishCommitted(resolved, committedAt, outcome.verify, rowsStaged, outcome.tailRowsApplied, pieceSidecarBefore);
             } catch (err) {
                 // Any failure before commit: abort cleanly, SQLite intact.
+                try { if (db.open && db.inTransaction) db.exec('ROLLBACK'); } catch { /* best-effort */ }
                 try { fs.rmSync(stagingDirPath(resolved), { recursive: true, force: true }); } catch { /* best-effort */ }
-                try { dropChangesLogTriggers(db); dropChangesLogTable(db); } catch { /* best-effort */ }
+                try { if (db.open) await runWithoutBlocking(db, () => { dropChangesLogTriggers(db); dropChangesLogTable(db); }, 10_000); } catch { /* best-effort */ }
                 clearPromotionState(resolved);
+                recordPromotionAbort(resolved, `error: ${(err as Error).message}`);
                 throw err;
             }
         } finally {
@@ -310,6 +288,64 @@ export async function promoteWorkspace(basePath: string, dim: number, opts: Prom
     } finally {
         inFlight.delete(resolved);
     }
+}
+
+/** Abort path shared by verification failure and a non-converging gate: discard staging,
+ *  drop the log (without sleeping on a foreign lock), clear state. SQLite stays authoritative.
+ *  Dropping the triggers needs the write lock. If a foreign process still holds it after the budget,
+ *  the abort is still reported (the caller records the cooldown) and promotion.json is LEFT in place:
+ *  recoverOnOpen (next open, or the next promoteWorkspace) drops the triggers and log then. */
+async function abortStaging(db: DatabaseType, resolved: string): Promise<void> {
+    try { fs.rmSync(stagingDirPath(resolved), { recursive: true, force: true }); } catch { /* best-effort */ }
+    try {
+        await runWithoutBlocking(db, () => { dropChangesLogTriggers(db); dropChangesLogTable(db); }, ABORT_DROP_BUDGET_MS);
+        clearPromotionState(resolved);
+    } catch (err) {
+        log.warn(`[verbatimPromotion] ${resolved}: could not drop the changes-log triggers after an abort (${(err as Error).message}); they will be removed on the next open`);
+    }
+}
+
+async function finishCommitted(
+    resolved: string, committedAt: string, verify: VerifyResult, rowsStaged: number, tailRowsApplied: number,
+    pieceSidecarBefore: ReturnType<typeof readPieceSidecar>,
+): Promise<PromoteResult> {
+    // D7c (3.23), revised per final review (B2): promotion used
+    // to rebuild the piece index inline here, re-embedding every
+    // node's pieces with the DEFAULT embedder before returning.
+    // That widened the promotion lost-write window from minutes
+    // to hours (SqliteVerbatimStore keeps serving reads/writes
+    // against the just-renamed-away backup file for the whole
+    // rebuild, with no promotion-state write gate of its own),
+    // and used createEmbeddingProvider()'s default args rather
+    // than the workspace's own/host-injected provider, so a
+    // rebuilt sidecar could come out fingerprint-mismatched
+    // (immediately `stale`) on a host with a non-default
+    // embedder. The old sidecar (and, on the Lance engine, the
+    // old piece table) were already swept into the
+    // `.stale-<ts>` aside directory by finishCommitRenames step
+    // 1 above, so the freshly-promoted Lance store simply has no
+    // piece index at all — `pieceIndexStatus` reports
+    // `not_built` and `pieceAwareSearch` falls back to the
+    // canonical vector leg until an operator explicitly rebuilds
+    // it. This keeps the promotion's own commit point exactly
+    // where it always was (finishCommitRenames, above) with
+    // nothing awaited afterward.
+    if (pieceSidecarBefore?.complete) {
+        // Deliberately no quote marks around not_built / the CLI
+        // command name below — logger.ts's redactError() hashes
+        // ANY quoted substring as a possible node-id (S9), which
+        // would turn this operator-facing hint into unreadable
+        // id# tags. The workspace path itself still gets scrubbed
+        // by the same function (it is a /private|/Users|... path),
+        // consistent with every other log line in this module.
+        log.warn(`[verbatimPromotion] ${resolved} promoted from SQLite to Lance with a complete piece index in place — the piece index was NOT carried over (pieceIndexStatus is now not_built; recall falls back to canonical vectors until it is rebuilt). Run lore migrate piece-vectors on this workspace to rebuild it.`);
+    }
+
+    return {
+        committed: true, dryRun: false, verify, rowsStaged, tailRowsApplied,
+        newLanceDbPath: lancedbDirPath(resolved),
+        sqliteBackupPath: promotedSqliteBackupPath(resolved, committedAt),
+    };
 }
 
 export async function buildStagedIndexes(stagingDir: string, _dim: number): Promise<void> {

@@ -16,6 +16,8 @@
  * the request may have been applied, so they stay counted attempts (deliberate follow-up).
  */
 import { MissingPayloadError, UnwiredOperationKindError } from './dispatcher.js';
+import { isSqliteLockedError } from '../engines/graphShared/deleteOutcome.js';
+import { isVerbatimStoreRetiredError } from '../engines/verbatimWriteBarrier.js';
 import type { OutboxEntry, OutboxStore } from './types.js';
 
 export const DEFAULT_TRANSIENT_CEILING_MS = 24 * 60 * 60 * 1000;
@@ -28,6 +30,14 @@ export const DEFAULT_TRANSIENT_CONFIG = {
     transientCapMs: DEFAULT_TRANSIENT_CAP_MS,
 };
 
+/**
+ * The SQLite wiring's transient classifier (also its batch-halt classifier): lock contention, or a
+ * write rejected with VerbatimStoreRetiredError (the promotion committed while it was parked and the
+ * promoted store was not resolvable within SqliteVerbatimStore's own bounded retry). Both mean
+ * "nothing was applied, replay later" - never a counted attempt, never a dead-letter.
+ */
+export const isSqliteOrRetiredTransient = (err: unknown): boolean => isSqliteLockedError(err) || isVerbatimStoreRetiredError(err);
+
 /** Why a row was dead-lettered; stored in `deadReason`, shown by /api/stats and the dead-rows route. */
 export type DeadReason = 'unwired' | 'invalid' | 'permanent' | 'transient_ceiling';
 
@@ -38,6 +48,11 @@ export interface DispositionEnv {
     transientCapMs: number;
     /** True when `err` means "nothing was applied, replay later". Absent: nothing is transient. */
     classify?: (err: unknown) => boolean;
+    /** True when a transient `err` means the whole store is unavailable (a SQLite lock), so the rest of
+     *  the batch would fail the same way: set {@link batchHalted} and let the caller stop. */
+    haltBatch?: (err: unknown) => boolean;
+    /** Set by {@link recordReplayFailure} on a halting transient failure; the replicator resets it per batch. */
+    batchHalted: boolean;
     now: () => number;
     random: () => number;
 }
@@ -52,8 +67,9 @@ export function makeDispositionEnv(
     cfg: Pick<DispositionEnv, 'maxAttempts' | 'transientCeilingMs' | 'transientBaseMs' | 'transientCapMs'>,
     classify?: (err: unknown) => boolean,
     clock?: { now?: () => number; random?: () => number },
+    haltBatch?: (err: unknown) => boolean,
 ): DispositionEnv {
-    return { ...cfg, classify, now: clock?.now ?? Date.now, random: clock?.random ?? Math.random };
+    return { ...cfg, classify, haltBatch, batchHalted: false, now: clock?.now ?? Date.now, random: clock?.random ?? Math.random };
 }
 
 /** Full-jitter exponential backoff: uniform in [0, min(cap, base * 2^n)). */
@@ -79,6 +95,7 @@ export async function recordReplayFailure(
         return { kind: 'dead', reason, message: msg };
     }
     if (env.classify?.(err) && typeof store.recordTransientFailure === 'function') {
+        if (env.haltBatch?.(err)) env.batchHalted = true; // 3.35.3: stop after this row, retry the rest next tick
         const retries = entry.transientRetries ?? 0;
         const firstMs = entry.firstTransientAt ? Date.parse(entry.firstTransientAt) : NaN;
         if (Number.isFinite(firstMs) && env.now() - firstMs >= env.transientCeilingMs) {

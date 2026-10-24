@@ -12,6 +12,8 @@ import type { Database as DatabaseType } from 'better-sqlite3';
 import * as lancedb from '@lancedb/lancedb';
 
 import { computeContentHash } from './contentHash.js';
+import { lanceRowId, type SourceRow } from './verbatimPromotionStage.js';
+import { readEntityRows } from './verbatimPromotionEntityRows.js';
 
 export interface VerifyResult {
     ok: boolean;
@@ -60,6 +62,24 @@ async function contentHashMultisetsMatch(db: DatabaseType, table: lancedb.Table)
         }
     }
     return { ok: true, detail: '' };
+}
+
+/**
+ * A top-10 miss only proves a broken FTS index when the row is not matched at
+ * all. A 3-word probe taken from the START of a row's text is not
+ * discriminating when many rows share that prefix ("repro load node ..." x
+ * 500: every row ties on score, so any given row is outside the top 10 by
+ * construction). That made verification abort and re-trigger forever at small
+ * scale, with the staged table perfectly healthy. So on a miss, re-run the
+ * same query restricted to this row's id: if the FTS index still returns the
+ * row, it finds it and is merely outranked by equal or better matches, which
+ * is not a promotion defect. A row the index cannot return even when it is
+ * the only candidate (missing/corrupt index, row absent) still fails.
+ */
+async function ftsStillMatchesRow(table: lancedb.Table, phrase: string, id: string): Promise<boolean> {
+    const hits = await table.query().fullTextSearch(phrase, { columns: 'text' })
+        .where(`id = '${id.replace(/'/g, "''")}'`).limit(1).toArray();
+    return hits.some((r: { id?: string }) => r.id === id);
 }
 
 /**
@@ -122,7 +142,7 @@ async function sampleRecall(
         try {
             const bm25Results = await table.query().fullTextSearch(phrase, { columns: 'text' }).limit(10).toArray();
             const found = bm25Results.some((r: { id?: string }) => r.id === row.id);
-            if (!found) {
+            if (!found && !(await ftsStillMatchesRow(table, phrase, row.id))) {
                 failures++;
                 if (reasons.length < 10) reasons.push(`bm25 recall miss: id=${row.id} phrase="${phrase}"`);
             }
@@ -135,6 +155,56 @@ async function sampleRecall(
         }
     }
     return { sampled: rows.length, failures, reasons };
+}
+
+/** Cheap consistency check used by the final catch-up rounds in
+ *  verbatimPromotion.ts: SQLite's physical row count (read inside the caller's
+ *  snapshot) equals the staged table's. The full verification already ran once;
+ *  this guards the small delta applied after it. */
+export async function stagedRowCountsMatch(db: DatabaseType, stagingDir: string): Promise<{ ok: boolean; source: number; target: number }> {
+    const connection = await lancedb.connect(stagingDir);
+    const table = await connection.openTable('lore_verbatim');
+    const counts = await countRows(db, table);
+    return { ok: counts.source === counts.target, source: counts.source, target: counts.target };
+}
+
+/**
+ * 3.35.3 review finding F6: the gate's row-count check alone cannot see a row that was REWRITTEN
+ * (same count, different content) by the later catch-up rounds. For the entities those rounds
+ * touched, compare the multiset of (Lance row id, content hash, updatedAt) on both sides. Run
+ * inside the caller's read snapshot, after the delta was applied. Cheap: one indexed SQLite lookup
+ * and one filtered Lance scan per chunk of entities, only for the touched set.
+ */
+export async function stagedEntitiesMatch(
+    db: DatabaseType, stagingDir: string, entities: readonly string[],
+): Promise<{ ok: boolean; checked: number; detail: string }> {
+    if (entities.length === 0) return { ok: true, checked: 0, detail: '' };
+    const connection = await lancedb.connect(stagingDir);
+    const table = await connection.openTable('lore_verbatim');
+    const key = (id: string, hash: string | null, updatedAt: string | null): string => `${id}\u0000${hash ?? ''}\u0000${updatedAt ?? ''}`;
+    const want = new Map<string, number>();
+    for (let i = 0; i < entities.length; i += 500) {
+        const chunk = entities.slice(i, i + 500);
+        const rows = db.prepare(
+            `SELECT id, is_canonical, superseded_at, created_at, content_hash, updatedAt FROM verbatim WHERE id IN (${chunk.map(() => '?').join(',')})`,
+        ).all(...chunk) as unknown as SourceRow[];
+        for (const r of rows) {
+            const k = key(lanceRowId(r), r.content_hash, r.updatedAt);
+            want.set(k, (want.get(k) ?? 0) + 1);
+        }
+    }
+    const have = new Map<string, number>();
+    for (const r of await readEntityRows(table, entities)) {
+        const k = key(r.id, r.contentHash, r.updatedAt);
+        have.set(k, (have.get(k) ?? 0) + 1);
+    }
+    for (const [k, n] of want) {
+        if (have.get(k) !== n) return { ok: false, checked: entities.length, detail: `entity row differs: id=${k.split('\u0000')[0]} source=${n} target=${have.get(k) ?? 0}` };
+    }
+    for (const [k, n] of have) {
+        if (!want.has(k)) return { ok: false, checked: entities.length, detail: `staged row not in source: id=${k.split('\u0000')[0]} target=${n}` };
+    }
+    return { ok: true, checked: entities.length, detail: '' };
 }
 
 export async function verifyPromotion(

@@ -53,6 +53,8 @@ import { normalizeGetVectorsIds } from './verbatimGetVectors.js';
 import * as sqliteWrite from './sqliteVerbatimWrite.js';
 import { maybeTriggerPromotion } from './verbatimPromotionTrigger.js';
 import { openVerbatimRawImport, type VerbatimRawImport } from './sqliteVerbatimImport.js';
+import { withWriteBarrier } from './verbatimWriteBarrier.js';
+import { forwardToSuccessor, type ResolveSuccessor } from './verbatimRetiredRetry.js';
 
 export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     private initialized = false;
@@ -105,6 +107,9 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     private readonly workspaceName?: string;
     private readonly home?: string;
     private readonly onLancePromoted?: (info: { newLanceDbPath: string }) => void | Promise<void>;
+    /** Re-resolves this workspace's CURRENT store (the resolver). Used to replay a write that was
+     *  rejected at promotion commit; absent for stores that have no resolver (the boot store). */
+    private readonly resolveSuccessor?: ResolveSuccessor;
 
     /** 3.27.1 — internal raw-import handle (like SqliteGraph.importRaw) for
      *  `lore migrate-vectors --to sqlite`: verbatim ids/timestamps/history,
@@ -132,6 +137,10 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
              *  (e.g. the boot store) that have nowhere to swap a live
              *  reference to. */
             onLancePromoted?: (info: { newLanceDbPath: string }) => void | Promise<void>;
+            /** Returns the workspace's current store (via the resolver) so a write rejected with
+             *  VerbatimStoreRetiredError at promotion commit is replayed on the promoted store.
+             *  Omitted by callers with nowhere to re-resolve (the boot store): the error then surfaces. */
+            resolveSuccessor?: ResolveSuccessor;
             /** D7 (3.23) — whether piece-level vectors are on for this store.
              *  Already-resolved (host default + workspace override applied
              *  upstream, see openWorkspaceVerbatim.ts); this class only
@@ -146,6 +155,7 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         this.workspaceName = opts?.workspaceName;
         this.home = opts?.home;
         this.onLancePromoted = opts?.onLancePromoted;
+        this.resolveSuccessor = opts?.resolveSuccessor;
         this.pieceVectorsIntent = opts?.pieceVectors ?? false;
         const rawMax = process.env.LORE_SEARCH_CACHE_MAX_ENTRIES;
         const maxEntries = (rawMax && rawMax.trim() !== '' && Number.isFinite(Number(rawMax)) && Number(rawMax) > 0)
@@ -260,10 +270,24 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     // ---- writes ----------------------------------------------------------
 
+    /** Run a write; if it was parked behind the promotion barrier when the promotion committed
+     *  (VerbatimStoreRetiredError, nothing applied), replay it on the promoted store. See verbatimRetiredRetry.ts. */
+    private async retiredAware<T>(method: string, args: unknown[], run: () => Promise<T>): Promise<T> {
+        try {
+            return await run();
+        } catch (err) {
+            return forwardToSuccessor<T>(this, this.resolveSuccessor, err, method, args);
+        }
+    }
+
     async store(doc: VerbatimDocument): Promise<void> {
+        return this.retiredAware<void>('store', [doc], () => this.storeHere(doc));
+    }
+
+    private async storeHere(doc: VerbatimDocument): Promise<void> {
         assertWritableRole(this.role, 'store');
         if (!this.initialized) return;
-        await sqliteWrite.store(this.writeDeps(), doc);
+        await withWriteBarrier(this.basePath, () => sqliteWrite.store(this.writeDeps(), doc));
         this.checkPromotion(1);
         // D7 (3.23) — best-effort piece maintenance. sqliteVerbatimWrite.ts
         // redacts doc.text into a LOCAL variable only (never writes it back
@@ -278,9 +302,13 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     }
 
     async storeBatch(docs: VerbatimDocument[]): Promise<void> {
+        return this.retiredAware<void>('storeBatch', [docs], () => this.storeBatchHere(docs));
+    }
+
+    private async storeBatchHere(docs: VerbatimDocument[]): Promise<void> {
         assertWritableRole(this.role, 'storeBatch');
         if (!this.initialized || docs.length === 0) return;
-        await sqliteWrite.storeBatch(this.writeDeps(), docs);
+        await withWriteBarrier(this.basePath, () => sqliteWrite.storeBatch(this.writeDeps(), docs));
         this.checkPromotion(docs.length);
         // D7 (3.23) — same independent-redaction rationale as store() above.
         await this.pieceIndex?.upsertForRows(docs.map((doc) => ({
@@ -290,12 +318,16 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     }
 
     async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<BulkAddResult> {
+        return this.retiredAware<BulkAddResult>('bulkAddPrebuiltRows', [rows], () => this.bulkAddPrebuiltRowsHere(rows));
+    }
+
+    private async bulkAddPrebuiltRowsHere(rows: Array<Record<string, unknown>>): Promise<BulkAddResult> {
         assertWritableRole(this.role, 'bulkAddPrebuiltRows');
         // J4 — SQLite binds ids as parameters (no Lance WHERE-predicate
         // injection surface), so no id is rejected here; the result shape
         // matches the Lance store's.
         if (!this.initialized) return { rejectedCount: 0, rejectedIds: [] };
-        sqliteWrite.bulkAddPrebuiltRows(this.writeDeps(), rows);
+        await withWriteBarrier(this.basePath, () => sqliteWrite.bulkAddPrebuiltRows(this.writeDeps(), rows));
         this.checkPromotion(rows.length);
         // D7 (3.23) — bulk-loaded rows carry no redaction step upstream
         // (matches sqliteVerbatimWrite.ts's bulkAddPrebuiltRows, which does
@@ -305,9 +337,13 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     }
 
     async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
+        return this.retiredAware<void>('bulkUpsertPrebuiltRows', [rows], () => this.bulkUpsertPrebuiltRowsHere(rows));
+    }
+
+    private async bulkUpsertPrebuiltRowsHere(rows: Array<Record<string, unknown>>): Promise<void> {
         assertWritableRole(this.role, 'bulkUpsertPrebuiltRows');
         if (!this.initialized) return;
-        sqliteWrite.bulkUpsertPrebuiltRows(this.writeDeps(), rows);
+        await withWriteBarrier(this.basePath, () => sqliteWrite.bulkUpsertPrebuiltRows(this.writeDeps(), rows));
         this.checkPromotion(rows.length);
         await this.pieceIndex?.upsertForRows(rows as unknown as PieceSourceRow[]);
     }
@@ -317,16 +353,24 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     }
 
     async physicalDelete(id: string): Promise<void> {
+        return this.retiredAware<void>('physicalDelete', [id], () => this.physicalDeleteHere(id));
+    }
+
+    private async physicalDeleteHere(id: string): Promise<void> {
         assertWritableRole(this.role, 'physicalDelete');
         if (!this.initialized) return;
-        sqliteWrite.physicalDelete(this.writeDeps(), id);
+        await withWriteBarrier(this.basePath, () => sqliteWrite.physicalDelete(this.writeDeps(), id));
         await this.pieceIndex?.deleteForIds([id]);
     }
 
     async physicalDeleteMany(ids: string[]): Promise<number> {
+        return this.retiredAware<number>('physicalDeleteMany', [ids], () => this.physicalDeleteManyHere(ids));
+    }
+
+    private async physicalDeleteManyHere(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'physicalDeleteMany');
         if (!this.initialized) return 0;
-        const processed = sqliteWrite.physicalDeleteMany(this.writeDeps(), ids);
+        const processed = await withWriteBarrier(this.basePath, () => sqliteWrite.physicalDeleteMany(this.writeDeps(), ids));
         await this.pieceIndex?.deleteForIds(ids);
         return processed;
     }
@@ -338,17 +382,25 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
      *  nothing dirties no page, and it clears pieces orphaned by a crash
      *  between the verbatim and piece deletes (see verbatimPurgeRows.ts). */
     async purgeWithHistory(ids: string[]): Promise<number> {
+        return this.retiredAware<number>('purgeWithHistory', [ids], () => this.purgeWithHistoryHere(ids));
+    }
+
+    private async purgeWithHistoryHere(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'purgeWithHistory');
         if (!this.initialized) return 0;
-        const removed = sqliteWrite.purgeRows(this.writeDeps(), ids);
+        const removed = await withWriteBarrier(this.basePath, () => sqliteWrite.purgeRows(this.writeDeps(), ids));
         await this.pieceIndex?.deleteForIds(ids);
         return removed;
     }
 
     async tombstone(id: string, reason: string): Promise<void> {
+        return this.retiredAware<void>('tombstone', [id, reason], () => this.tombstoneHere(id, reason));
+    }
+
+    private async tombstoneHere(id: string, reason: string): Promise<void> {
         assertWritableRole(this.role, 'tombstone');
         if (!this.initialized) return;
-        await sqliteWrite.tombstone(this.writeDeps(), id, reason);
+        await withWriteBarrier(this.basePath, () => sqliteWrite.tombstone(this.writeDeps(), id, reason));
         // D7 (3.23) — tombstoned content is excluded from search/bm25Search,
         // so its pieces must also drop out of piece search.
         await this.pieceIndex?.deleteForIds([id]);

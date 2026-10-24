@@ -19,6 +19,7 @@
 
 import { replayIfAbsentUpsert, type ConditionalInsertGraph } from '../engines/graphShared/conditionalInsert.js';
 import { replayNodePayload } from '../engines/graphShared/revision.js';
+import { isSqliteOrRetiredTransient } from './failureDisposition.js';
 import { purgeVerbatimRows, type PurgeCapableStore } from '../core/verbatimPurge.js';
 import type { LoreNode, LoreEdge } from '../providers/types.js';
 import type { SyncEngine } from '../engines/syncEngine.js';
@@ -635,6 +636,15 @@ export function wireOutbox(input: {
     const { maxAttempts } = readEnvRetryConfig();
     const replicator = wireReplicator({
         store, substrates, lagCache,
+        // SQLITE-STALL fix item 2 — SQLITE_BUSY/SQLITE_LOCKED on verbatim
+        // replay is transient: the holder's transaction ends, so back off and
+        // replay instead of burning attempts toward 'dead (permanent)'. This
+        // silently discarded vector writes in the 2026-10-19 stall (4,142
+        // embed rows). Mirrors engines/arcade/arcadeOutboxWiring.ts.
+        // 3.35.3: a write still rejected with VerbatimStoreRetiredError after SqliteVerbatimStore's own
+        // bounded retry (promoted store not resolvable yet) was NOT applied: replay later, never dead-letter.
+        transientClassifier: isSqliteOrRetiredTransient,
+        haltBatchClassifier: isSqliteOrRetiredTransient,
         config: { ...selfHealCfg, ...pollCfg, maxAttempts, ...readEnvTransientConfig() },
     });
 

@@ -300,6 +300,9 @@ export class WorkspaceVerbatimResolver {
                     // The live swap on a committed background promotion —
                     // see swapToLance() below.
                     onLancePromoted: () => this.swapToLance(workspace),
+                    // A write parked at the promotion commit is replayed on whatever this resolver
+                    // holds for the workspace AFTER the swap (never the retired instance itself).
+                    resolveSuccessor: () => this.getOrOpen(workspace, { touch: false }),
                 });
             await store.initialize();
             // Background open (touch:false): stale sentinel, not `this.now()`

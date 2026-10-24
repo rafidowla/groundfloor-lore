@@ -121,13 +121,28 @@ export const isDeleteIncompleteResult = (r: { ok?: boolean; error?: string }): b
     r.ok === false && typeof r.error === 'string' && r.error.startsWith(`${DELETE_INCOMPLETE_CODE}:`);
 
 /**
- * SQLite's classifier. better-sqlite3 surfaces lock contention as code SQLITE_BUSY / SQLITE_LOCKED
- * ("database is locked"; the stores set busy_timeout=5000 so this is rare and worth one more try),
- * and the historical `transaction conflict` wording the delete routes always retried.
+ * SQLite lock contention only: better-sqlite3 surfaces another connection's (or process's) held
+ * write lock as code SQLITE_BUSY / SQLITE_LOCKED[_*] with the message "database is locked" /
+ * "database table is locked". The condition ends when the holder's transaction commits, so it is
+ * transient. Shared by the delete retry (below) and the outbox replicator's transientClassifier
+ * (outbox/wiring.ts): a lock error must be retried with backoff, never counted toward the
+ * `dead (permanent)` bin. Deliberately narrow: constraint/corruption/readonly errors stay permanent.
+ */
+export function isSqliteLockedError(err: unknown): boolean {
+    const e = err as { code?: unknown; message?: unknown } | null | undefined;
+    // A SQLite error code is authoritative: SQLITE_CONSTRAINT / SQLITE_CORRUPT etc. must stay
+    // permanent even if their message happens to mention a lock. The message regex is only a
+    // fallback for errors that carry no SQLite code (wrapped or re-thrown errors).
+    if (typeof e?.code === 'string' && /^SQLITE_/.test(e.code)) return /^SQLITE_(BUSY|LOCKED)/.test(e.code);
+    const msg = typeof e?.message === 'string' ? e.message : '';
+    return /database (table )?is locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(msg);
+}
+
+/**
+ * SQLite's delete classifier: lock contention (the stores set busy_timeout=5000 so this is rare and
+ * worth one more try) plus the historical `transaction conflict` wording the delete routes always
+ * retried.
  */
 export function isSqliteTransientDeleteError(err: unknown): boolean {
-    const e = err as { code?: unknown; message?: unknown } | null | undefined;
-    if (typeof e?.code === 'string' && /^SQLITE_(BUSY|LOCKED)/.test(e.code)) return true;
-    const msg = typeof e?.message === 'string' ? e.message : '';
-    return /database is locked|SQLITE_BUSY|SQLITE_LOCKED/i.test(msg) || isTransactionConflictError(err);
+    return isSqliteLockedError(err) || isTransactionConflictError(err);
 }
