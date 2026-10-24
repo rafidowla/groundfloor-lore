@@ -67,6 +67,7 @@ import { withVersionIntent, type VersionStoreApi } from '../outbox/versionStoreA
 import { shouldRecordVersion } from '../outbox/versionPolicy.js';
 import type { VersionHistoryPolicy } from '../outbox/versionPolicy.js';
 import type { WriteAheadLog } from '../engines/syncEngine.js';
+import { applyLinkIntent } from '../link/signalCommitted.js';
 
 /* ─── Minimal substrate contracts (local | cloud) ──────────────────── */
 // Split into nodeServiceTypes.ts (2026-09-23, D5) to keep this file under
@@ -96,6 +97,8 @@ export async function resolveAutolinkHandles(opts: {
     /** The caller's already-resolved target-workspace graph. */
     targetGraph: AutolinkHandles['graph'];
     tracker: PendingAutolinkTracker;
+    /** Link-on-arrival service (flag on); makes the returned hook link from the stored vector. */
+    link?: AutolinkHandles['link'];
 }): Promise<AutolinkHandles> {
     let graph = opts.bootGraph;
     let verbatim = opts.bootVerbatim;
@@ -105,7 +108,7 @@ export async function resolveAutolinkHandles(opts: {
             graph = opts.targetGraph;
         } catch { /* fall back to boot stores */ }
     }
-    return { graph, verbatim, tracker: opts.tracker };
+    return { graph, verbatim, tracker: opts.tracker, ...(opts.link ? { link: opts.link } : {}) };
 }
 
 /* ─── Inputs / outputs ─────────────────────────────────────────────── */
@@ -136,6 +139,8 @@ export interface NodeUpsertArgs {
     /** `async_embed: true` → enqueue verbatim instead of synchronous write
      *  (only honoured when `embedQueue` is supplied). */
     asyncEmbed?: boolean;
+    /** Explicit `false` => do not link this node (link-on-arrival queue AND legacy autolink). Absent => the flag decides. */
+    autolink?: boolean;
 
     /** Whether the write landed in the active workspace — gates WAL append
      *  + autolink, exactly as the MCP tool did (P1.C scope). */
@@ -409,6 +414,7 @@ export async function nodeUpsert(
     const { id, workspace, ecosystem, nodeData, targetGraph, initiator } = args;
     const skipEmbed = args.skipEmbed === true;
     const logPrefix = `[Lore] ${initiator}`;
+    await applyLinkIntent(hooks.autolink?.link, workspace, [id], args.autolink); // explicit autolink:false => not queued for linking
 
     // 0. Validate the node id at the SHARED chokepoint. The verbatim row is
     //    keyed `lore:<id>` and assertSafeLanceId-guarded on every write/replay;
@@ -754,6 +760,7 @@ export async function nodeUpsert(
             targetGraph,
             hooks,
             nodeUpsertOutboxEntryId,
+            link: hooks.autolink?.link,
             questions: args.questions,
             versionIds: versionIntent.recorded,
             priorNode,
@@ -855,7 +862,7 @@ export async function nodeUpsert(
     // there is no interleaving in which it is neither. The node's own graph +
     // verbatim writes above are untouched — only the best-effort edge
     // inference is skipped. See engines/pendingAutolink.ts for the rationale.
-    if (hooks.autolink) {
+    if (hooks.autolink && !hooks.autolink.link && args.autolink !== false) {
         const tracker = hooks.autolink.tracker ?? defaultAutolinkTracker;
         if (!tracker.isSealed()) {
             const label = String(nodeData.label ?? '');

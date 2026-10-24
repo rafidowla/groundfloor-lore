@@ -42,6 +42,11 @@ export interface LoadJobSpec {
     workspace: string;
     format: LoadJobFormat;
     embedMode: LoadJobEmbedMode;
+    /**
+     * Call-level `autolink` from `/api/load?autolink=`. `false` opts EVERY row of the job out of link-on-arrival
+     * (a per-row `autolink` can only agree with it, never override it). Absent / `true` => rows decide, as before.
+     */
+    autolink?: boolean;
     tempFilePath: string;
     createdAt: string;
 }
@@ -51,6 +56,8 @@ export interface LoadJob {
     workspace: string;
     format: LoadJobFormat;
     embedMode: LoadJobEmbedMode;
+    /** Call-level autolink; `false` = every row of this job is opted out of link-on-arrival (persisted, survives restart). */
+    autolink: boolean;
     status: LoadJobStatus;
     rowsReceived: number;
     rowsProcessed: number;
@@ -72,6 +79,7 @@ interface Row {
     workspace: string;
     format: string;
     embed_mode: string;
+    autolink: number | null;
     status: string;
     rows_received: number;
     rows_processed: number;
@@ -102,6 +110,7 @@ function rowToJob(r: Row): LoadJob {
         workspace: r.workspace,
         format: r.format as LoadJobFormat,
         embedMode: r.embed_mode as LoadJobEmbedMode,
+        autolink: r.autolink !== 0,
         status: r.status as LoadJobStatus,
         rowsReceived: r.rows_received,
         rowsProcessed: r.rows_processed,
@@ -132,12 +141,12 @@ export class LoadJobsStore {
     async create(spec: LoadJobSpec): Promise<LoadJob> {
         this.db.prepare(
             `INSERT INTO load_jobs
-             (job_id, workspace, format, embed_mode, status,
+             (job_id, workspace, format, embed_mode, autolink, status,
               rows_received, rows_processed, rows_failed,
               errors_json, temp_file_path,
               created_at, started_at, completed_at, bytes_received)
              VALUES
-             (@job_id, @workspace, @format, @embed_mode, 'received',
+             (@job_id, @workspace, @format, @embed_mode, @autolink, 'received',
               0, 0, 0,
               NULL, @temp_file_path,
               @created_at, NULL, NULL, 0)`,
@@ -146,6 +155,7 @@ export class LoadJobsStore {
             workspace: spec.workspace,
             format: spec.format,
             embed_mode: spec.embedMode,
+            autolink: spec.autolink === false ? 0 : 1,
             temp_file_path: spec.tempFilePath,
             created_at: spec.createdAt,
         });

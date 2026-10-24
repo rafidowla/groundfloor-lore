@@ -170,6 +170,10 @@ export interface LoreNode {
  */
 export type EdgeConfidence = 'extracted' | 'inferred' | 'ambiguous';
 
+export type { EdgeOrigin, EdgeProvenance, EdgeKey } from './edgeProvenance.js';
+export { EDGE_ORIGINS } from './edgeProvenance.js';
+import type { EdgeProvenance } from './edgeProvenance.js';
+
 /**
  * Edge definition for graph relationships.
  */
@@ -188,6 +192,12 @@ export interface LoreEdge {
      * record the cosine similarity here; user-asserted edges default to 1.0.
      */
     confidenceScore?: number;
+    /**
+     * Optional provenance (SQLite + Postgres engines). Written when supplied;
+     * returned by reads only when the caller passes `includeProvenance` (the
+     * default edge shape is unchanged so cross-engine parity holds).
+     */
+    provenance?: EdgeProvenance;
 }
 
 /**
@@ -251,6 +261,10 @@ export interface EdgeQuery {
     relation?: string;
     limit: number;
     offset: number;
+    /** SQLite + Postgres: attach `provenance` to each returned edge. Default false. */
+    includeProvenance?: boolean;
+    /** SQLite + Postgres: also return soft-invalidated edges (`valid_to` set). Default false: reads see live edges only. */
+    includeInvalidated?: boolean;
 }
 
 /**

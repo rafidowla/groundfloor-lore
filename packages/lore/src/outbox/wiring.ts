@@ -45,6 +45,8 @@ import { readEnvRetryConfig, readEnvTransientConfig } from './retryConfig.js';
 import { logResolveFailure } from './resolveFailureLog.js';
 import { OutboxLagCache, readEnvLagCacheConfig } from './lagCache.js';
 import { loadWorkspacesIfPresent } from '../config/workspaces.js';
+import { signalCommitted } from '../link/signalCommitted.js';
+import type { LinkSignaler } from '../link/linkTypes.js';
 
 export interface OutboxWiring {
     /** Active store — SqliteOutboxStore by default (O3c+) or
@@ -117,6 +119,11 @@ export function wireOutbox(input: {
      *  so cloud mode / no-registry callers keep resolving against the
      *  process-wide home exactly as before. */
     getRegistryHome?: () => string | undefined;
+    /** Link-on-arrival: "vector committed" signal for the three verbatim commit sites below
+     *  (verbatim.upsert, its merged batch, embed.batch). Lazy; null/absent = flag off. */
+    getLinkSignaler?: () => LinkSignaler | null;
+    /** Workspace to signal for a row that carries none (pre-Sprint-L rows). */
+    defaultWorkspace?: () => string | undefined;
 }): OutboxWiring {
     // SP-F3 — resolve the TARGET workspace's graph for a replayed row.
     // Falls back to the boot-bound graph when: no resolver wired (cloud /
@@ -337,6 +344,7 @@ export function wireOutbox(input: {
                 if (!id) return;
                 const v = await resolveVerbatim(workspace);
                 await v.store({ id, text, metadata });
+                signalCommitted(input.getLinkSignaler?.(), workspace ?? input.defaultWorkspace?.(), [{ id, ecosystem: typeof metadata['ecosystem'] === 'string' ? metadata['ecosystem'] : undefined }]);
             },
             // 2026-09-03 (A2 finding 2 fix) — verbatim tombstone fan-out for
             // every node-delete path's `verbatim.tombstone` outbox row (see
@@ -370,6 +378,7 @@ export function wireOutbox(input: {
                 if (docs.length === 0) return;
                 const v = await resolveVerbatim(workspace);
                 await v.storeBatch(docs);
+                signalCommitted(input.getLinkSignaler?.(), workspace ?? input.defaultWorkspace?.(), docs.map((d) => ({ id: d.id, ecosystem: typeof d.metadata['ecosystem'] === 'string' ? d.metadata['ecosystem'] : undefined })));
             },
             // 2026-06-09 half-completion reaper. When the outbox marks a
             // node.upsert entry dead, the hot-lane verbatim row that was
@@ -499,6 +508,7 @@ export function wireOutbox(input: {
                 // SW-03 (B4) — atomic replace: no window where the old
                 // vectors are deleted but the new ones not yet re-added.
                 await verbatim.bulkUpsertPrebuiltRows(rows);
+                signalCommitted(input.getLinkSignaler?.(), workspace ?? input.defaultWorkspace?.(), rows.map((r) => ({ id: String(r['id']), ecosystem: typeof r['ecosystem'] === 'string' ? r['ecosystem'] : undefined })));
             },
         } : {}),
         // Sprint O6 (2026-05-24) — verifier hooks for self-heal +

@@ -64,6 +64,12 @@ export interface DeferredMatch {
  */
 export interface DeferredGraph extends GraphProvider {
     bulkListProjected?: NodePager;
+    /**
+     * Optional indexed id-prefix lookup (SqliteGraph, PostgresGraph). When present the scan costs the size of the
+     * matching set instead of walking every node in the workspace. Rows carry `id` plus the requested columns,
+     * ordered `updatedAt DESC, id ASC` like the corpus pager. Engines without it take the paged walk below.
+     */
+    listNodesByIdPrefix?: (prefix: string, columns: readonly string[]) => Promise<Array<Record<string, unknown>>>;
 }
 
 function parseMetadata(raw: string | null | undefined): Record<string, unknown> {
@@ -157,9 +163,61 @@ const DEFERRED_SCAN_CACHE_TTL_MS: number = (() => {
  */
 const scanCache = new WeakMap<DeferredGraph, { expiresAt: number; deferred: LoreNode[] }>();
 
-async function scanDeferredNodes(graph: DeferredGraph): Promise<LoreNode[]> {
+/** Single flight: concurrent recalls on a cold (or disabled) cache share one scan instead of each starting their own. */
+const scanInFlight = new WeakMap<DeferredGraph, Promise<LoreNode[]>>();
+/** Bumped by stampResolved; a scan that started before a bump must not repopulate the cache with pre-resolve data. */
+const scanGeneration = new WeakMap<DeferredGraph, number>();
+
+function invalidateScan(graph: DeferredGraph): void {
+    scanCache.delete(graph);
+    scanInFlight.delete(graph);
+    scanGeneration.set(graph, (scanGeneration.get(graph) ?? 0) + 1);
+}
+
+function scanDeferredNodes(graph: DeferredGraph): Promise<LoreNode[]> {
     const cached = scanCache.get(graph);
-    if (cached && cached.expiresAt > Date.now()) return cached.deferred;
+    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.deferred);
+    const running = scanInFlight.get(graph);
+    if (running) return running;
+    const generation = scanGeneration.get(graph) ?? 0;
+    const p: Promise<LoreNode[]> = scanDeferredNodesUncached(graph).then((deferred) => {
+        if (DEFERRED_SCAN_CACHE_TTL_MS > 0 && (scanGeneration.get(graph) ?? 0) === generation) {
+            scanCache.set(graph, { expiresAt: Date.now() + DEFERRED_SCAN_CACHE_TTL_MS, deferred });
+        }
+        return deferred;
+    }).finally(() => {
+        // Only clear our own registration: invalidateScan may already have replaced it.
+        if (scanInFlight.get(graph) === p) scanInFlight.delete(graph);
+    });
+    scanInFlight.set(graph, p);
+    return p;
+}
+
+const DEFERRED_COLUMNS = ['label', 'content', 'tags', 'metadata', 'createdAt'] as const;
+
+function toDeferredNode(r: Record<string, unknown>): LoreNode {
+    return {
+        id: String(r['id'] ?? ''),
+        label: (r['label'] as string) ?? '',
+        content: (r['content'] as string) ?? '',
+        tags: tagsToArray(r['tags']),
+        metadata: (r['metadata'] as string) ?? '{}',
+        createdAt: (r['createdAt'] as string) ?? '',
+    } as LoreNode;
+}
+
+async function scanDeferredNodesUncached(graph: DeferredGraph): Promise<LoreNode[]> {
+    // Indexed prefix lookup first: cost is the deferred set, not the corpus (the paged walk below read every
+    // node's content on every cold recall — seconds at 1M nodes).
+    const byPrefix = graph.listNodesByIdPrefix?.bind(graph);
+    if (byPrefix) {
+        try {
+            const rows = await byPrefix('deferred-', DEFERRED_COLUMNS);
+            return rows.map(toDeferredNode).filter((n) => n.id.startsWith('deferred-') && !isResolved(n));
+        } catch {
+            // best-effort enrichment: fall through to the portable walk
+        }
+    }
 
     // `deferred-*` as a naming convention — listNodes can't prefix-match
     // ids, so we widen to all notes + plain filter. Cached above so repeated
@@ -187,19 +245,11 @@ async function scanDeferredNodes(graph: DeferredGraph): Promise<LoreNode[]> {
             await forEachNodePage(
                 pager,
                 '*',
-                ['label', 'content', 'tags', 'metadata', 'createdAt'],
+                DEFERRED_COLUMNS,
                 (rows) => {
                     for (const r of rows) {
-                        const id = String(r['id'] ?? '');
-                        if (!id.startsWith('deferred-')) continue;
-                        const node = {
-                            id,
-                            label: (r['label'] as string) ?? '',
-                            content: (r['content'] as string) ?? '',
-                            tags: tagsToArray(r['tags']),
-                            metadata: (r['metadata'] as string) ?? '{}',
-                            createdAt: (r['createdAt'] as string) ?? '',
-                        } as LoreNode;
+                        if (!String(r['id'] ?? '').startsWith('deferred-')) continue;
+                        const node = toDeferredNode(r);
                         if (!isResolved(node)) deferred.push(node);
                     }
                 },
@@ -216,9 +266,6 @@ async function scanDeferredNodes(graph: DeferredGraph): Promise<LoreNode[]> {
         for (const n of all) {
             if (n.id.startsWith('deferred-') && !isResolved(n)) deferred.push(n);
         }
-    }
-    if (DEFERRED_SCAN_CACHE_TTL_MS > 0) {
-        scanCache.set(graph, { expiresAt: Date.now() + DEFERRED_SCAN_CACHE_TTL_MS, deferred });
     }
     return deferred;
 }
@@ -305,7 +352,7 @@ export async function stampResolved(
     // immediately instead of lingering for up to DEFERRED_SCAN_CACHE_TTL_MS.
     // (A brand-new deferred-* node created elsewhere still waits out the TTL —
     // best-effort enrichment, same trade-off the old listNodes()-cache path had.)
-    scanCache.delete(graph as DeferredGraph);
+    invalidateScan(graph as DeferredGraph);
     const updated = await graph.upsertNode({
         id: node.id,
         type: node.type,

@@ -685,7 +685,7 @@ async function retrieveInner(
     // 4.5 Graph traversal (D4) — a SEPARATE collection, never merged into
     //     `results`; superseded hops are replaced by live successors (D5).
     const relatedCollected = await collectRelated(collected, graph, {
-        depth, filterByActorScope: filterNodesByActorScope, admit: admitD5, replaceSuperseded: !includeSuperseded,
+        depth, filterByActorScope: filterNodesByActorScope, admit: admitD5, replaceSuperseded: !includeSuperseded, linkOrdering: ctx.linkOrdering,
         // Ecosystem confinement on every HOP (traverse() has no ecosystem
         // predicate; same '*' escape hatch as seeds) + archived hidden.
         hopAllowed: (n) => (ecosystemScope === '*' || ecosystemMatches(n.ecosystem, ecosystemScope)) && (includeArchived || (n as HiddenFlags).status !== 'archived'),

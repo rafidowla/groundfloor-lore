@@ -22,6 +22,7 @@
 import Database from 'better-sqlite3';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { LINK_OPTOUT_DDL } from './sqliteGraphLinkOptOut.js';
 
 export type SqliteDb = InstanceType<typeof Database>;
 
@@ -145,6 +146,8 @@ export function openSqliteGraph(basePath: string): SqliteGraphConnection {
     db.exec(NODES_DDL);
     ensureRevisionColumn(db);
     db.exec(EDGES_DDL);
+    ensureEdgeProvenanceColumns(db);
+    db.exec(LINK_OPTOUT_DDL);
     return { db, dataPath };
 }
 
@@ -171,6 +174,30 @@ export function ensureRevisionColumn(db: SqliteDb): void {
         db.exec('ALTER TABLE nodes ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
     } catch (error) {
         if (!/duplicate column name/i.test((error as Error).message)) throw error;
+    }
+}
+
+/** Edge provenance columns (design D3). All nullable: a pre-existing row has origin NULL (legacy) and valid_to NULL (live). */
+const EDGE_PROVENANCE_COLUMNS = ['origin', 'policy_version', 'model_fingerprint', 'created_at', 'valid_to'] as const;
+
+/**
+ * ensureEdgeProvenanceColumns - edge provenance (design D3). Same
+ * probe-then-ALTER pattern as `ensureRevisionColumn`: each missing column is
+ * added with `ADD COLUMN <name> TEXT` (nullable, no default, so existing rows
+ * are untouched and read as legacy + live); a racing process's "duplicate
+ * column name" is the migration already done. Idempotent. An older Lore
+ * opening the migrated file keeps working - its edge INSERTs name their
+ * columns and every new one is nullable.
+ */
+export function ensureEdgeProvenanceColumns(db: SqliteDb): void {
+    const cols = new Set((db.prepare('PRAGMA table_info(edges)').all() as Array<{ name: string }>).map((c) => c.name));
+    for (const name of EDGE_PROVENANCE_COLUMNS) {
+        if (cols.has(name)) continue;
+        try {
+            db.exec(`ALTER TABLE edges ADD COLUMN ${name} TEXT`);
+        } catch (error) {
+            if (!/duplicate column name/i.test((error as Error).message)) throw error;
+        }
     }
 }
 

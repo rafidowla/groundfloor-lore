@@ -54,6 +54,7 @@ import { loadWorkspaces, getActiveWorkspaceName } from '../../config/workspaces.
 import { loreHome } from '../../config/loreHome.js';
 import { parseOrExit } from '../args.js';
 import { isDaemonServingHome, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
+import { backupPostgresWorkspace, describeMixedEngines, postgresBackupMode } from './backupPostgres.js';
 
 interface Flags {
     workspace?: string;
@@ -87,6 +88,9 @@ function parseFlags(args: string[]): Flags {
             `  health port); --force bypasses both.\n` +
             `  A backup whose graph could not be verified exits non-zero unless\n` +
             `  --allow-unverified accepts that risk explicitly.\n` +
+            `  A workspace whose graph and vectors are on postgres is written as a\n` +
+            `  verified logical bundle (lore-pgbackup-<workspace>-<iso>.ndjson.gz) of\n` +
+            `  its own rows only; it needs LORE_PG_URL and refuses an un-drained outbox.\n` +
             `  Defaults: --workspace=active, --out=./backups, --keep=$LORE_BACKUP_KEEP||7\n`,
         );
         process.exit(0);
@@ -163,6 +167,24 @@ async function backupOne(
         process.exit(1);
     }
 
+    // postgres engine — a file archive CANNOT contain a postgres-backed store
+    // (its rows live in the shared database, not under .lore/), so a workspace
+    // whose graph AND vectors are on postgres takes the logical per-workspace
+    // path instead. Mixed engines are refused: a tarball half plus a logical
+    // half could not be restored as one unit.
+    const pgMode = postgresBackupMode(wsName);
+    if (pgMode === 'logical') {
+        await backupPostgresWorkspace(wsName, entry.path, outDir, keep);
+        return;
+    }
+    if (pgMode === 'mixed') {
+        console.error(`lore backup: workspace '${wsName}' is registered with ${describeMixedEngines(wsName)}.`);
+        console.error('  Only one of its two stores is on postgres. A file archive cannot hold the postgres half,');
+        console.error('  and the logical backup needs both on postgres. Move the other store with');
+        console.error('  `lore migrate-graph` / `lore migrate-vectors`, or back the postgres half up with pg_dump.');
+        process.exit(1);
+    }
+
     // Direct, port-independent fallback to the daemon-health preflight above:
     // see this file's header. Probes the workspace's OWN graph store lock
     // rather than an HTTP endpoint, so a daemon on a non-default port with
@@ -228,7 +250,11 @@ export async function backupCommand(args: string[]): Promise<void> {
     // process answered 200 on the port, never checking it served THIS
     // home; isDaemonServingHome() only reports true when the daemon's own
     // Bearer-authenticated /api/health confirms it.
-    if (!flags.force && (await isDaemonServingHome(loreHome())).servesHome) {
+    // A postgres-only run reads a REPEATABLE READ snapshot and needs no store lock, so a
+    // running daemon is no obstacle; any file-archive workspace in the run keeps the gate.
+    const targets = flags.all ? loadWorkspaces().workspaces.map((w) => w.name) : [flags.workspace ?? getActiveWorkspaceName()];
+    const allLogical = targets.length > 0 && targets.every((n) => postgresBackupMode(n) === 'logical');
+    if (!flags.force && !allLogical && (await isDaemonServingHome(loreHome())).servesHome) {
         console.error(daemonRefuseMessage('lore backup'));
         console.error('While the daemon holds the graph store, backup cannot read the copy back');
         console.error('to prove it captured the graph — it would only prove bytes were copied.');

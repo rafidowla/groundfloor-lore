@@ -423,6 +423,38 @@ write.
 
 ---
 
+## Postgres rollback copies (`lore postgres rollback-copies`)
+
+Two in-place Postgres migrations keep the old table as a rollback copy: the verbatim partitioning migration leaves
+`verbatim_pre_partition`, and the edge layout 2 migration leaves `edges_pre_pk`. Nothing reads them once the migration has
+committed; they only cost disk. This command lists them and removes them when you are ready. It needs `LORE_PG_URL`; on a
+SQLite or LanceDB setup it says there is nothing to do and exits 0.
+
+```
+lore postgres rollback-copies                              # read-only report
+lore postgres rollback-copies --drop edges_pre_pk --yes    # drop one
+lore postgres rollback-copies --drop all --yes             # drop both
+```
+
+- **Report.** For each copy: row count, size on disk, the live table's row count, and a verification result.
+  Verification asks whether anything in the copy has been lost from the live table: every `(workspace_id, row_id)` of
+  `verbatim_pre_partition` must exist in `verbatim`, and every `edges_pre_pk` edge whose endpoints still exist must be in
+  `edges` (edges the migration quarantined count as accounted for, as do edges whose node was deleted since). Live inserts do
+  not matter. A row deleted on purpose after the migration also shows as missing, so a failure is a signal to look at (a
+  sample is printed), not proof of loss.
+- **Drop.** `--drop <name|all>` drops only after verification passes, and only with `--yes`; without `--yes` it prints what it
+  would drop and exits 2. If any selected copy fails verification nothing is dropped (exit 3), including a healthy sibling
+  when you ask for `all`. `--force --yes` drops anyway, with a loud warning. The drop re-verifies inside the transaction that
+  holds the lock on the copy. Take a backup (`lore backup`) first: a dropped copy cannot be recovered.
+- **Allowlist.** Only `verbatim_pre_partition` and `edges_pre_pk` can be dropped; any other name is a usage error.
+  `edges_dangling` (edges the migration quarantined) is shown in the report but is never dropped by this command. The shared
+  sequence `verbatim_row_seq` is not owned by the copy and is untouched.
+- **Scripts.** `--json` prints one JSON document on stdout (human text goes to stderr). Exit codes: `0` listed, dropped or
+  nothing to do; `1` usage error, cannot connect or unexpected failure; `2` drop needs `--yes`; `3` verification failed and
+  `--force` was not given.
+
+Background: `docs/POSTGRES_EDGE_LAYOUT.md` (rollback section) and `docs/CONFIGURATION.md` (vector storage, upgrade steps).
+
 ## Related ops commands
 
 | Command | Purpose |

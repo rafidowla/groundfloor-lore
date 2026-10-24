@@ -96,6 +96,10 @@ export interface DispatcherDeps {
      *  this; non-gated routes ignore it. */
     dataplane: GroundfloorClient | null;
 
+    /** The running ingestion host (null when ingestion is off). Optional: the daemon leaves it unset and the
+     *  dispatcher falls back to the boot registry (mcp/ingestionBoot.ts getActiveIngestionHost); tests inject one. */
+    getIngestionHost?: () => import('../../ingestion/ingestionHost.js').IngestionHost | null;
+
     /** Mutable singletons (let-reassigned in main()). */
     getAuthToken: () => string;
     /**

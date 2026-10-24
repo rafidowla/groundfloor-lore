@@ -12,6 +12,7 @@
  */
 
 import type { LoreEdge, LoreNode } from '../../providers/types.js';
+import { resolveEdgeProvenance } from '../../providers/edgeProvenance.js';
 import { LoreGraphError } from '../loreGraphError.js';
 import { tagsToArray, normalizeTag } from '../normalizeTags.js';
 import { wouldCreateSupersedeCycle } from '../graphShared/supersedeCycle.js';
@@ -243,10 +244,13 @@ export async function importRaw(
              revision = excluded.revision`,
     );
     const insertEdge = db.prepare(
-        `INSERT INTO edges (source_id, target_id, relation, confidence, confidenceScore)
-         VALUES (@source_id, @target_id, @relation, @confidence, @confidenceScore)
+        `INSERT INTO edges (source_id, target_id, relation, confidence, confidenceScore, origin, policy_version, model_fingerprint, created_at, valid_to)
+         VALUES (@source_id, @target_id, @relation, @confidence, @confidenceScore, @origin, @policy_version, @model_fingerprint, @created_at, @valid_to)
          ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
-             confidence = excluded.confidence, confidenceScore = excluded.confidenceScore`,
+             confidence = excluded.confidence, confidenceScore = excluded.confidenceScore,
+             origin = excluded.origin, policy_version = excluded.policy_version,
+             model_fingerprint = excluded.model_fingerprint, created_at = excluded.created_at,
+             valid_to = excluded.valid_to`,
     );
     const run = db.transaction((ns: LoreNode[], es: LoreEdge[]) => {
         for (const n of ns) {
@@ -264,12 +268,19 @@ export async function importRaw(
             });
         }
         for (const e of es) {
+            // Verbatim import: keep supplied provenance (incl. validTo); an edge with none is stamped 'import'.
+            const pv = resolveEdgeProvenance(e.provenance, 'import');
             insertEdge.run({
                 source_id: e.sourceId,
                 target_id: e.targetId,
                 relation: e.relation,
                 confidence: e.confidence ?? 'extracted',
                 confidenceScore: e.confidenceScore ?? 1.0,
+                origin: pv.origin,
+                policy_version: pv.policyVersion,
+                model_fingerprint: pv.modelFingerprint,
+                created_at: pv.createdAt,
+                valid_to: e.provenance?.validTo ?? null,
             });
         }
     });
@@ -281,6 +292,9 @@ export async function importRaw(
 export async function deleteNode(db: SqliteDb, id: string): Promise<boolean> {
     try {
         const run = db.transaction((nodeId: string): boolean => {
+            // The durable link opt-out dies with the node. Cleared before the existence check so a flag recorded for
+            // a node that never got written (or whose row is already gone) cannot outlive its id.
+            db.prepare('DELETE FROM link_optout WHERE node_id = ?').run(nodeId);
             const exists = db.prepare('SELECT 1 FROM nodes WHERE id = ?').get(nodeId);
             if (!exists) return false;
             db.prepare('DELETE FROM edges WHERE source_id = ? OR target_id = ?').run(nodeId, nodeId);
@@ -319,12 +333,18 @@ export async function addEdge(db: SqliteDb, edge: LoreEdge): Promise<void> {
                 'addEdge',
             );
         }
+        // Re-asserting an edge re-validates it (valid_to cleared) and restamps who asserted it; created_at stays the first write.
+        const pv = resolveEdgeProvenance(edge.provenance, 'caller');
         db.prepare(
-            `INSERT INTO edges (source_id, target_id, relation, confidence, confidenceScore)
-             VALUES (?, ?, ?, ?, ?)
+            `INSERT INTO edges (source_id, target_id, relation, confidence, confidenceScore, origin, policy_version, model_fingerprint, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(source_id, target_id, relation) DO UPDATE SET
-                 confidence = excluded.confidence, confidenceScore = excluded.confidenceScore`,
-        ).run(edge.sourceId, edge.targetId, edge.relation, edge.confidence ?? 'extracted', edge.confidenceScore ?? 1.0);
+                 confidence = excluded.confidence, confidenceScore = excluded.confidenceScore,
+                 origin = excluded.origin, policy_version = excluded.policy_version,
+                 model_fingerprint = excluded.model_fingerprint,
+                 created_at = COALESCE(edges.created_at, excluded.created_at), valid_to = NULL`,
+        ).run(edge.sourceId, edge.targetId, edge.relation, edge.confidence ?? 'extracted', edge.confidenceScore ?? 1.0,
+            pv.origin, pv.policyVersion, pv.modelFingerprint, pv.createdAt);
     } catch (error) {
         if (error instanceof LoreGraphError) throw error;
         throw sqliteError(`Failed to add edge ${edge.sourceId} → ${edge.targetId}`, 'addEdge', error);

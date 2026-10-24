@@ -200,7 +200,7 @@ function classifyPrefix(id: string): 'lore' | 'other' {
  * stored graph clean for the case that CAN be decided locally (both endpoints
  * name a real, different ecosystem).
  */
-function ecosystemConfinement(rawEcosystem: string | undefined): {
+export function ecosystemConfinement(rawEcosystem: string | undefined): {
     scope: string;
     scoped: boolean;
     filter: { ecosystem: string } | undefined;
@@ -284,8 +284,8 @@ async function searchWithEcosystemUnion(
  * Only the `unknown` verdict costs a graph lookup, so a corpus written after
  * the write-side fix pays nothing.
  */
-type EcosystemVerdict = 'inside' | 'outside' | 'unknown';
-function hitEcosystemVerdict(hit: unknown, scope: string): EcosystemVerdict {
+export type EcosystemVerdict = 'inside' | 'outside' | 'unknown';
+export function hitEcosystemVerdict(hit: unknown, scope: string): EcosystemVerdict {
     const raw = (hit as { metadata?: { ecosystem?: string } }).metadata?.ecosystem;
     if (raw === scope) return 'inside';
     if (raw === undefined || raw === '' || raw === '*') return 'unknown';
@@ -294,7 +294,7 @@ function hitEcosystemVerdict(hit: unknown, scope: string): EcosystemVerdict {
 
 /** Minimal graph surface the ambiguous-hit resolver needs. Probed, not
  *  required: `reconnect` is called with hand-built graphs in places. */
-type NodeReader = { getNode?: (id: string) => Promise<{ ecosystem?: string } | null> };
+export type NodeReader = { getNode?: (id: string) => Promise<{ ecosystem?: string } | null> };
 
 /**
  * Decide an `unknown` hit against the GRAPH node, which is authoritative.
@@ -311,7 +311,7 @@ type NodeReader = { getNode?: (id: string) => Promise<{ ecosystem?: string } | n
  *
  * `resolved` memoises within one sweep so a hot candidate is read once.
  */
-async function ambiguousHitAllowed(
+export async function ambiguousHitAllowed(
     graph: NodeReader,
     hitId: string,
     scope: string,

@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { openWorkspaceGraph, resolveGraphEngineForPath, bannerGraphPath } from '../../engines/openWorkspaceGraph.js';
 import { resolveVerbatimEngineForPath } from '../../engines/openWorkspaceVerbatim.js';
+import { redactedPostgresLocation } from '../../engines/postgres/postgresPoolOwner.js';
 import { SyncEngine } from '../../engines/syncEngine.js';
 import { ConfigManager } from '../../config/configManager.js';
 import { loreHomePath } from '../../config/loreHome.js';
@@ -106,18 +107,20 @@ export async function statusCommand(_args: string[]): Promise<void> {
     // unconditionally, so a Surreal-backed workspace was described as
     // running an engine it does not run, with a path that does not exist.
     const engine = resolveGraphEngineForPath(basePath).engine;
-    const engineLabel = engine === 'surreal' ? 'SurrealDB' : engine === 'sqlite' ? 'SQLite' : 'legacy graph engine';
+    const engineLabel = engine === 'surreal' ? 'SurrealDB' : engine === 'sqlite' ? 'SQLite' : engine === 'postgres' ? 'Postgres' : 'legacy graph engine';
     console.log(`  Engine:     ${engineLabel} (local graph)`);
     // The path the engine ACTUALLY uses (surrealDataPath() URL-escapes reserved
-    // characters such as spaces) — same resolver as the startup banner.
-    console.log(`  Graph:      ${bannerGraphPath(basePath)}`);
+    // characters such as spaces) — same resolver as the startup banner. For a
+    // postgres-backed workspace there is no store file: the redacted
+    // connection location (postgres://host:port/db, no credentials) instead.
+    console.log(`  Graph:      ${engine === 'postgres' ? redactedPostgresLocation() : bannerGraphPath(basePath)}`);
     // 3.21 step 2 part 2 — same "reported, not assumed" reasoning as the
     // graph engine line above, for the vector substrate.
     const vectorEngine = resolveVerbatimEngineForPath(basePath).engine;
-    const vectorEngineLabel = vectorEngine === 'sqlite' ? 'SQLite' : 'LanceDB';
+    const vectorEngineLabel = vectorEngine === 'sqlite' ? 'SQLite' : vectorEngine === 'postgres' ? 'Postgres' : 'LanceDB';
     const vectorSubpath = vectorEngine === 'sqlite' ? 'verbatim.sqlite' : 'lancedb';
     console.log(`  Vectors:    ${vectorEngineLabel} (local verbatim)`);
-    console.log(`  Verbatim:   ${path.join(loreDir, vectorSubpath)}`);
+    console.log(`  Verbatim:   ${vectorEngine === 'postgres' ? redactedPostgresLocation() : path.join(loreDir, vectorSubpath)}`);
     console.log(`  Project:    ${projectName}`);
     console.log(`  Ecosystem:  ${ecosystem}`);
     console.log('');

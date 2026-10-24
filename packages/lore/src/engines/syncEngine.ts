@@ -37,6 +37,8 @@ import type { VerbatimStoreApi } from './verbatimStoreApi.js';
 import type { DataplaneVectorStore } from './dataplaneVectorStore.js';
 import { sweepFreshness, type IFreshnessGraph } from './freshnessEngine.js';
 import { upsertVectorMirror, recoverVectorMirrors, type VectorMirrorResult } from './syncVectorMirror.js';
+import { signalCommitted } from '../link/signalCommitted.js';
+import type { LinkSignaler } from '../link/linkTypes.js';
 import { LoreStorageClient } from '../storage/loreStorageClient.js';
 import { WriteAheadLog, type WalOperation, type WalEntry } from './writeAheadLog.js';
 import { CURRENT_DATA_VERSION } from '../migration/coordinator.js';
@@ -387,6 +389,8 @@ export class SyncEngine {
     private lastPullPath: string;
     private autoSyncTimer: ReturnType<typeof setInterval> | null = null;
     private isSyncing: boolean = false;
+    /** Link-on-arrival signaler (host sets it when the flag is on): pulled/recovered vector mirrors are linked like any arrival. */
+    linkSignaler: LinkSignaler | null = null;
     // SW-02 review (F1): serializes pushPending() — see the public wrapper below.
     private pushChain: Promise<unknown> = Promise.resolve();
 
@@ -1106,15 +1110,20 @@ export class SyncEngine {
      * Delegates to syncVectorMirror.recoverVectorMirrors (extracted for size).
      */
     async recoverVectorMirror(nodeIds: string[]): Promise<{ recovered: number; skipped: number }> {
-        return recoverVectorMirrors(
-            this.vectorStore,
-            this.localGraph,
-            nodeIds,
-        );
+        const r = await recoverVectorMirrors(this.vectorStore, this.localGraph, nodeIds);
+        if (this.vectorStore) signalCommitted(this.linkSignaler, this.mirrorWorkspace(), nodeIds.map((id) => ({ id: `lore:${id}` }))); // link-on-arrival; the linker skips ids that are gone
+        return r;
+    }
+
+    private mirrorWorkspace(): string | undefined {
+        const w = this.lockWorkspace;
+        return (typeof w === 'function' ? w() : w) || undefined;
     }
 
     private async upsertVectorMirror(remoteNode: LoreNode): Promise<VectorMirrorResult> {
-        return upsertVectorMirror(this.vectorStore, remoteNode);
+        const r = await upsertVectorMirror(this.vectorStore, remoteNode);
+        if (r.ok && this.vectorStore) signalCommitted(this.linkSignaler, this.mirrorWorkspace(), [{ id: `lore:${remoteNode.id}`, ecosystem: remoteNode.ecosystem }]);
+        return r;
     }
 
     /**

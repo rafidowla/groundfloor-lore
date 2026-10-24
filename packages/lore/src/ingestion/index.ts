@@ -1,0 +1,28 @@
+/** Public surface of the ingestion coordinator (slice 1). */
+export * from './contracts.js';
+export * from './policy.js';
+export * from './endpointAllowlist.js';
+export * from './store.js';
+export { SqliteIngestionStore } from './sqliteStore.js';
+export { createIngestionStore, type IngestionStoreOptions } from './storeFactory.js';
+export * from './callbackAuth.js';
+export { FsBlobStore, sha256Hex, type IBlobStore } from './blobStore.js';
+export { ProcessorRegistry, NoProcessorError } from './registry.js';
+export { IngestionCoordinator, type CoordinatorDeps, type EnqueueFileArgs, type StructureSpec, type RunSummary } from './coordinator.js';
+export { handleCallback, type CallbackResponse } from './callbackHandler.js';
+export { routeCallback, routeCallbackWith, createCallbackServer, type CoordinatorResolver } from './callbackServer.js';
+export { LocalExtractProcessor } from './processors/localExtractor.js';
+export { AiApiExtractProcessor, StructuringV2Processor } from './processors/hosted.js';
+export { LocalStructureProcessor } from './processors/localStructurer.js';
+export { loreMemoryPort, type MemoryWritePort } from './memoryWriter.js';
+export type { TablePort } from './tableWriter.js';
+export * from './hostConfig.js';
+export * from './tickLoop.js';
+export { startCallbackListener, CallbackListenerConfigError, RateWindow, type CallbackListener, type CallbackListenerOptions } from './callbackListener.js';
+export { IngestionHost, HOSTED_STRUCTURER_ID, LOCAL_STRUCTURER_ID, type IngestionHostDeps, type ListenerState } from './ingestionHost.js';
+export { WorkerExtractProcessor } from './processors/workerExtractor.js';
+export { OpenAiVisionEngine, type VisionEngine } from './processors/localVision.js';
+export { buildSovereignExtractor } from './localExtractorFactory.js';
+export { ExtractWorkerClient } from './worker/extractWorkerClient.js';
+export { HttpExtractWorkerClient } from './worker/httpExtractWorkerClient.js';
+export { startExtractWorkerServer, type ExtractWorkerServer } from './worker/extractWorkerServer.js';

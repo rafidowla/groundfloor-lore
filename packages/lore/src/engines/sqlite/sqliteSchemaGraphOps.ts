@@ -46,7 +46,7 @@ export class SqliteSchemaGraphOps implements SchemaGraphOps {
 
     async countEdgesByRelation(relation: string): Promise<number> {
         try {
-            const row = this.db.prepare('SELECT COUNT(*) AS c FROM edges WHERE relation = ?').get(relation) as { c: number };
+            const row = this.db.prepare('SELECT COUNT(*) AS c FROM edges WHERE valid_to IS NULL AND relation = ?').get(relation) as { c: number };
             return Number(row?.c ?? 0);
         } catch (error) { throw sqliteError(`countEdgesByRelation('${relation}')`, error); }
     }
@@ -54,7 +54,7 @@ export class SqliteSchemaGraphOps implements SchemaGraphOps {
     async countInboundEdgesToType(type: string): Promise<number> {
         try {
             const row = this.db.prepare(
-                `SELECT COUNT(*) AS c FROM edges e JOIN nodes n ON n.id = e.target_id WHERE n.type = ?`,
+                `SELECT COUNT(*) AS c FROM edges e JOIN nodes n ON n.id = e.target_id WHERE e.valid_to IS NULL AND n.type = ?`,
             ).get(type) as { c: number };
             return Number(row?.c ?? 0);
         } catch (error) { throw sqliteError(`countInboundEdgesToType('${type}')`, error); }
@@ -69,7 +69,7 @@ export class SqliteSchemaGraphOps implements SchemaGraphOps {
     async listEdgesByRelation(relation: string): Promise<SchemaRow[]> {
         try {
             const rows = this.db.prepare(
-                'SELECT source_id, target_id, relation, confidence, confidenceScore FROM edges WHERE relation = ?',
+                'SELECT source_id, target_id, relation, confidence, confidenceScore FROM edges WHERE valid_to IS NULL AND relation = ?',
             ).all(relation) as Array<{ source_id: string; target_id: string }>;
             return rows.map((r) => ({ ...r, sourceId: r.source_id, targetId: r.target_id }));
         } catch (error) { throw sqliteError(`listEdgesByRelation('${relation}')`, error); }
@@ -92,7 +92,7 @@ export class SqliteSchemaGraphOps implements SchemaGraphOps {
 
     async sampleEdgesByRelation(relation: string, sampleN: number): Promise<SchemaRow[]> {
         try {
-            const rows = this.db.prepare('SELECT source_id, target_id, relation FROM edges WHERE relation = ? LIMIT ?')
+            const rows = this.db.prepare('SELECT source_id, target_id, relation FROM edges WHERE valid_to IS NULL AND relation = ? LIMIT ?')
                 .all(relation, sampleN) as Array<{ source_id: string; target_id: string; relation: string }>;
             return rows.map((r) => ({ sourceId: r.source_id, targetId: r.target_id, relation: r.relation }));
         } catch (error) { throw sqliteError(`sampleEdgesByRelation('${relation}')`, error); }

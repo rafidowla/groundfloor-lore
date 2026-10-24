@@ -289,6 +289,20 @@ export async function checkVerbatimScopes(opts: CheckScopesOptions): Promise<Che
         throw new VerbatimCheckScopesError(`workspace_not_found: "${ws}" (known: ${registry.workspaces.map((w) => w.name).join(', ')})`);
     }
     const workspaceDir = entry.path;
+    // Postgres-backed verbatim store: this command SCANS THE STORE FILE
+    // DIRECTLY (verbatim.sqlite / the Lance table) — a file that does not
+    // exist on the postgres engine (rows live in the shared `verbatim`
+    // table). Falling through would hit the 'lance' branch, find no table,
+    // and report a SILENTLY WRONG "nothing-to-check" for a workspace whose
+    // scopes were never examined — loud refusal instead.
+    if (entry.vectorEngine === 'postgres') {
+        throw new VerbatimCheckScopesError(
+            `not_supported: workspace '${ws}' declares vectorEngine 'postgres' — scope checking reads the `
+            + "store file directly (verbatim.sqlite / LanceDB table), which does not exist for a Postgres-backed "
+            + 'verbatim store. No postgres scanner is wired on this branch; refusing rather than reporting '
+            + 'nothing-to-check.',
+        );
+    }
     const engine: 'lance' | 'sqlite' = entry.vectorEngine === 'sqlite' ? 'sqlite' : 'lance';
     const tally = new Tally();
     const finish = (status: CheckScopesReport['status'], message?: string): CheckScopesReport => ({

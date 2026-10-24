@@ -1,0 +1,167 @@
+/**
+ * postgresVerbatimFts.ts — keyword (BM25) search for PostgresVerbatimStore.
+ *
+ * Postgres engine  Port of
+ * `engines/sqliteVerbatimFts.ts`'s NATIVE path against the frozen schema's
+ * `text_tsv tsvector` column (GIN-indexed, maintained by the
+ * `to_tsvector('simple', text)` trigger — see the TOKENIZER NOTE in
+ * postgresVerbatimSchema.ts for the porter/unicode61-vs-'simple'
+ * normalization trade-off; ranked full-text ORDER may differ from FTS5's
+ * bm25(), the result SET is what parity keeps).
+ *
+ * QUERY SHAPE — built the way sqliteVerbatimFts.escapeFts5Query builds the
+ * FTS5 MATCH string: split the query on whitespace, one literal per token,
+ * tokens combined with OR (FTS5's implicit-AND was explicitly rejected there
+ * as a recall gap vs Lance's MatchQuery). The pg transcription:
+ *   - each token becomes `phraseto_tsquery('simple', $n)` — a BOUND
+ *     parameter, so user text is NEVER parsed as tsquery syntax. This is
+ *     strictly safer than FTS5's quote-every-token trick: `AND`/`OR`/`NOT`,
+ *     a trailing `*`, `col:term`, an unbalanced `"` are all just literal
+ *     phrase text here; no operator in the input can change parse semantics.
+ *   - tokens are joined with the tsquery `||` (OR) operator, matching the
+ *     FTS5 port's ` OR ` join and Lance's OR-shaped default.
+ *   - phraseto (not plainto/to) keeps a multi-word token as a phrase — the
+ *     exact analogue of an FTS5 quoted string literal.
+ *
+ * NOT ported, deliberately:
+ *   - the trigram short-token fallback (sqliteVerbatimFts's
+ *     SHORT_TOKEN_MIN_LEN path). FTS5's trigram tokenizer cannot express a
+ *     <3-char query, which is why that fallback exists; the 'simple'
+ *     parser emits each CJK character as its own token and phraseto
+ *     re-joins them with `<->`, so a 1-2 char CJK query matches natively —
+ *     no equivalent blind spot, hence no fallback.
+ *   - the LIKE-scan catch-all for FTS5 parse errors: phraseto_tsquery
+ *     cannot reject any input, so the only residual failure class is the
+ *     connection itself, which must SURFACE (an unranked LIKE result set
+ *     would mask a dead pool; the sqlite catch existed for the FTS5 parser,
+ *     not for connectivity).
+ *
+ * RANKING: ts_rank(text_tsv, query), normalized like the FTS5 port —
+ * divided by the best raw score in the result set (guard 1e-9) so every
+ * engine speaks "higher = more relevant" on a comparable [0,1] scale.
+ * Tie-break score desc, then id asc — same as every other ranked result set
+ * in this codebase.
+ */
+
+import type { Pool } from 'pg';
+
+import { makeBm25Envelope, type Bm25Envelope } from '../../verbatimBm25Result.js';
+import type { VerbatimSearchResult, VerbatimQueryFilter } from '../../../providers/types.js';
+import { buildSqlFilterEntries } from '../../verbatimHistory.js';
+import { applyActorScopeFilter } from '../../../security/scopeFilter.js';
+import { getCurrentActorScopes } from '../../../security/actorContext.js';
+
+/**
+ * The metadata-filter allowlist is shared (VERBATIM_FILTERABLE_COLUMNS via
+ * buildSqlFilterEntries); the COLUMN NAMES are not — SQLite emits the raw
+ * filter key as the column (so a `contentHash` filter errors there and
+ * trips that engine's LIKE fallback), while Postgres identifiers are exact.
+ * The mapping below is the frozen schema's physical names: camel-case
+ * `"updatedAt"` is quoted, `contentHash` maps to `content_hash`. Same
+ * allowlist, same `= ?` / `IN (...)` entry shapes, mapped columns.
+ */
+export const PG_FILTER_COLUMNS: Record<string, string> = {
+    id: 'id',
+    type: 'type',
+    label: 'label',
+    tags: 'tags',
+    project: 'project',
+    ecosystem: 'ecosystem',
+    updatedAt: '"updatedAt"',
+    contentHash: 'content_hash',
+};
+
+/**
+ * Render buildSqlFilterEntries' entries as a pg WHERE fragment: the `?`
+ * placeholders the shared helper emits (SQLite convention) are renumbered to
+ * `$n` starting at `startParam`, column names are mapped to their physical
+ * pg names, and the flattened params returned IN ORDER so callers splice
+ * them into their own parameter list. One implementation for both pushdown
+ * sites (bm25Search + searchByVector) so the two read paths can never drift.
+ */
+export function pgFilterSql(
+    filter: Record<string, unknown> | undefined | null,
+    startParam: number,
+): { sql: string; params: string[] } {
+    const entries = buildSqlFilterEntries(filter);
+    const params: string[] = [];
+    let next = startParam;
+    const fragments = entries.map((e) => {
+        let i = 0;
+        const placeholders = e.params.map(() => `$${next++}`);
+        params.push(...e.params);
+        return `AND ${PG_FILTER_COLUMNS[e.column] ?? e.column} ${e.op.replace(/\?/g, () => placeholders[i++])}`;
+    });
+    return { sql: fragments.join(' '), params };
+}
+
+function rowToResult(r: Record<string, unknown>): VerbatimSearchResult & { score: number } {
+    let scopes: string[] = [];
+    if (typeof r.security_scopes === 'string' && r.security_scopes) {
+        try { scopes = JSON.parse(r.security_scopes); } catch { scopes = []; }
+    }
+    return {
+        id: String(r.id),
+        score: Number(r.score ?? 0),
+        text: String(r.text ?? ''),
+        metadata: {
+            type: (r.type as string) ?? undefined,
+            label: (r.label as string) ?? undefined,
+            tags: (r.tags as string) ?? undefined,
+            project: (r.project as string) ?? undefined,
+            ecosystem: (r.ecosystem as string) ?? undefined,
+            updatedAt: (r.updatedAt as string) ?? undefined,
+            security_scopes: scopes,
+        },
+    } as VerbatimSearchResult & { score: number };
+}
+
+/**
+ * bm25Search — `text_tsv @@ (phraseto || phraseto || …)` + ts_rank ranking,
+ * canonical/non-tombstone filtering and the metadata-filter allowlist
+ * applied exactly like the FTS5 path. One statement, all user text bound.
+ */
+export async function bm25Search(
+    pool: Pool,
+    workspaceId: string,
+    query: string,
+    limit: number,
+    rawFilter: VerbatimQueryFilter | undefined,
+    actorScopes: ReadonlyArray<string> | undefined,
+): Promise<Bm25Envelope<VerbatimSearchResult>> {
+    // D2: array-valued filter fields (e.g. `types: string[]`) become an
+    // IN (...) pushdown instead of being silently dropped. Placeholders are
+    // renumbered to follow the token params ($2..$k+1); the LIMIT param
+    // follows the filter params.
+    const tokens = query.split(/\s+/).filter((t) => t.length > 0);
+    if (tokens.length === 0) return makeBm25Envelope([], true);
+    const filter = pgFilterSql(rawFilter, tokens.length + 2);
+    const limitParam = `$${tokens.length + 2 + filter.params.length}`;
+
+    // The OR-joined per-token phraseto tsquery is wrapped in one sub-SELECT
+    // so the expression is written once and reused for both @@ and ts_rank.
+    const tokenParams = tokens.map((_, i) => `$${i + 2}`);
+    const tsqueryExpr = tokenParams.map((p) => `phraseto_tsquery('simple', ${p})`).join(' || ');
+    const sql = `
+        SELECT v.id, v.text, v.type, v.label, v.tags, v.project, v.ecosystem, v."updatedAt", v.security_scopes,
+               ts_rank(v.text_tsv, q.query) AS raw_score
+        FROM verbatim v, (SELECT ${tsqueryExpr} AS query) q
+        WHERE v.workspace_id = $1 AND v.is_canonical = 1 AND v.is_tombstone = 0 AND v.text_tsv @@ q.query
+        ${filter.sql}
+        ORDER BY raw_score DESC, v.id ASC
+        LIMIT ${limitParam}
+    `;
+    const rows = await pool.query(sql, [workspaceId, ...tokens, ...filter.params, limit]);
+    // ts_rank returns 0..~1 where higher is more relevant; normalize by the
+    // result set's own maximum, the SAME normalization shape the FTS5 path
+    // uses (divide by the best score present), so callers see the uniform
+    // "higher score = more relevant" scale across engines.
+    const magnitudes = rows.rows.map((r) => Number((r as Record<string, unknown>).raw_score ?? 0));
+    const maxMag = Math.max(...magnitudes, 1e-9);
+    const mapped = rows.rows.map((r) => {
+        const raw = Number((r as Record<string, unknown>).raw_score ?? 0);
+        return rowToResult({ ...r, score: raw / maxMag });
+    });
+    const filtered = applyActorScopeFilter(mapped, actorScopes ?? getCurrentActorScopes());
+    return makeBm25Envelope(filtered, true);
+}

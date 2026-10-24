@@ -3,6 +3,7 @@ import path from 'path';
 import { bannerEngineName } from '../../engines/openWorkspaceGraph.js';
 import { loreHome, loreHomePath } from '../../config/loreHome.js';
 import { migrateV1Sqlite } from '../../engines/v1Migration.js';
+import { appendLinkSpool, daemonLoreDir, workspaceNameForPath } from '../../link/linkSpool.js';
 import { migrateEmbeddingModelCommand } from './migrateEmbedding.js';
 import { migrateWorkspaceToWorkspaceCli } from './migrateWorkspaceToWorkspace.js';
 import { migratePieceVectorsCommand } from './migratePieceVectors.js';
@@ -103,12 +104,19 @@ export async function migrateCommand(args: string[]): Promise<void> {
     }
     console.log('');
 
+    let spooledForLinking = 0;
     const report = await migrateV1Sqlite(graph, {
         sqlitePath,
         apply,
         archive,
         verbatimStore: apply ? verbatim : undefined,
-
+        // This process has no LinkService: leave the imported ids in the daemon's link spool so link-on-arrival
+        // links them (opt-outs applied) the next time the daemon starts. Best-effort; never fails the migration.
+        onNodesEmbedded: (ids) => {
+            const ws = workspaceNameForPath(basePath, basePath);
+            if (!ws) return;
+            spooledForLinking = appendLinkSpool(daemonLoreDir(basePath), ws, ids);
+        },
     });
 
     console.log('─── Summary ─────────────────────────────────');
@@ -123,6 +131,7 @@ export async function migrateCommand(args: string[]): Promise<void> {
     console.log(`  Edges skipped (duplicate):  ${report.edgesSkippedAlreadyExists}`);
     console.log(`  Edges skipped (dangling):   ${report.edgesSkippedMissingEndpoint.length}`);
     console.log('');
+    if (spooledForLinking > 0) console.log(`  Queued for linking:         ${spooledForLinking} (linked when the daemon next starts, if link-on-arrival is on)`);
     console.log(`  Duration:                   ${report.durationMs}ms`);
     if (report.archivedTo) {
         console.log(`  Archived to:                ${report.archivedTo}`);

@@ -8,6 +8,7 @@
 import type { LoreNode } from '../providers/types.js';
 import type { reconnectOneNode } from '../engines/reconnect.js';
 import type { PendingAutolinkTracker } from '../engines/pendingAutolink.js';
+import type { LinkSignaler } from '../link/linkTypes.js';
 import type { SupersedeResult } from '../engines/graphShared/supersedeGuard.js';
 import type { RevisionedGraph } from '../engines/graphShared/revision.js';
 
@@ -57,4 +58,11 @@ export interface AutolinkHandles {
     /** D6 (2026-09-23) — true lets reconnectOneNode store a skipEmbed node's
      *  row anyway (only bulkIngest sets this; see nodeService.ts call site). */
     allowSkipEmbedStore?: boolean;
+    /**
+     * Link-on-arrival signaler (the owning instance's LinkService; absent when
+     * LORE_LINK_ON_ARRIVAL is off). When set it REPLACES the fire-and-forget
+     * reconnectOneNode below: linking is driven by the committed vector instead
+     * of a second embed, via a durable queue the caller never waits on.
+     */
+    link?: LinkSignaler | null;
 }

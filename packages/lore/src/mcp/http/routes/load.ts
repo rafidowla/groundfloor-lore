@@ -19,6 +19,18 @@
  *   - Sprint E: embed mode is one of 'inline' | 'queued' | 'skip',
  *               default 'skip' at bulk-load scale (Z principle clause 8).
  *
+ * Link-on-arrival `autolink` (query param, default true):
+ *   - `autolink=false` opts EVERY row of the job out of link-on-arrival, for embed=inline|queued|skip alike.
+ *     It is stored on the job (load_jobs.autolink), so it survives a daemon restart mid-job.
+ *   - DURABLE: an opt-out is a per-node flag in the workspace's own store (sqlite graph / Postgres `link_optout`),
+ *     in force until a later write sets `autolink:true` on that node or the node is deleted. A write that omits
+ *     `autolink` keeps the flag. The node gets no automatic edges in either direction (as source or as neighbour
+ *     candidate), also in rebuild; manual/explicit edges are unaffected.
+ *   - PRECEDENCE within one write: a per-row `autolink:false` always wins (that row is never linked); a per-row
+ *     `autolink:true` does NOT override a job-level `false` (the stricter, opted-out side always wins). With the
+ *     job at true/absent, each row's own `autolink` decides: false sets the flag, true clears it.
+ *   - Any other value is a 400 `invalid_autolink` - never silently treated as "link".
+ *
  * Z1 SCOPE LIMIT: rows are NOT parsed or written to any substrate. The
  * temp file is staged on disk and a `load.received` outbox row is
  * committed; status stays 'received' forever in Z1. Z2 promotes
@@ -152,6 +164,19 @@ function parseEmbedMode(raw: string | null): LoadJobEmbedMode {
     const lower = raw.toLowerCase();
     if (ALLOWED_EMBED.has(lower as LoadJobEmbedMode)) return lower as LoadJobEmbedMode;
     return DEFAULT_EMBED_MODE;
+}
+
+/**
+ * Call-level `autolink` query param. STRICT on purpose: `false`/`0` opts the whole job out of link-on-arrival,
+ * `true`/`1` (or absent) leaves linking to the flag. Anything else is a 400 - an unparseable value must never
+ * silently degrade to "link", because an explicit opt-out is always honoured.
+ */
+function parseAutolink(raw: string | null): { ok: true; autolink: boolean } | { ok: false } {
+    if (raw === null || raw === '') return { ok: true, autolink: true };
+    const lower = raw.toLowerCase();
+    if (lower === 'false' || lower === '0') return { ok: true, autolink: false };
+    if (lower === 'true' || lower === '1') return { ok: true, autolink: true };
+    return { ok: false };
 }
 
 function tempFileExt(format: LoadJobFormat): string {
@@ -339,6 +364,13 @@ async function handlePostLoad(
         return true;
     }
     const embedMode = parseEmbedMode(search.get('embed'));
+    const autolinkParsed = parseAutolink(search.get('autolink'));
+    if (!autolinkParsed.ok) {
+        releaseSlot();
+        writeError(res, 400, 'invalid_autolink', `autolink must be true|false (got ${search.get('autolink')})`);
+        return true;
+    }
+    const autolink = autolinkParsed.autolink;
 
     // 4. Create the job row + temp file BEFORE streaming so the client
     //    receives a job_id even if their connection drops mid-upload
@@ -355,6 +387,7 @@ async function handlePostLoad(
             workspace,
             format,
             embedMode,
+            autolink,
             tempFilePath,
             createdAt,
         });
@@ -451,6 +484,7 @@ async function handlePostLoad(
                     workspace,
                     format,
                     embedMode,
+                    autolink,
                     tempFilePath,
                     bytesReceived: streamResult.bytesReceived,
                 },
@@ -473,6 +507,7 @@ async function handlePostLoad(
         workspace,
         format,
         embed: embedMode,
+        autolink,
         status: 'received',
         bytesReceived: streamResult.bytesReceived,
         createdAt,
@@ -553,6 +588,7 @@ async function handleGetJob(
         workspace: job.workspace,
         format: job.format,
         embed: job.embedMode,
+        autolink: job.autolink,
         status: job.status,
         // Per Sprint Z principle clause 5 — rowsProcessed + rowsFailed
         // + errors[] are part of the polling contract. Z1 surfaces
@@ -596,6 +632,7 @@ async function handleListJobs(
             workspace: j.workspace,
             format: j.format,
             embed: j.embedMode,
+            autolink: j.autolink,
             status: j.status,
             rowsReceived: j.rowsReceived,
             rowsProcessed: j.rowsProcessed,

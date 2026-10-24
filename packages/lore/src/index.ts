@@ -131,11 +131,20 @@ export {
 import { createLore as createLoreBase, type CreateLoreOptions as CreateLoreOpts, type LoreInstance as BaseLoreInstance } from './mcp/server.js';
 import { attachNodeDeleteMany, type NodeDeleteManyApi } from './mcp/embeddedNodeDeleteMany.js';
 import { attachGetVectors, type GetVectorsApi } from './mcp/embeddedGetVectors.js';
+import { attachIngestion } from './mcp/embeddedIngestion.js';
+import type { IngestionApi } from './mcp/embeddedIngestionTypes.js';
 /** The in-process handle returned by {@link createLore}. */
-export type LoreInstance = BaseLoreInstance & NodeDeleteManyApi & GetVectorsApi;
+export type LoreInstance = BaseLoreInstance & NodeDeleteManyApi & GetVectorsApi & IngestionApi;
 export async function createLore(opts?: CreateLoreOpts): Promise<LoreInstance> {
-    return attachGetVectors(attachNodeDeleteMany(await createLoreBase(opts)));
+    return attachIngestion(attachGetVectors(attachNodeDeleteMany(await createLoreBase(opts))), opts?.ingestion);
 }
+// Embedded ingestion + link-on-arrival options and handle types (createLore({ ingestion, linkOnArrival, recallLinkOrdering })).
+export type {
+    EmbeddedIngestionOption, EmbeddedIngestionOptions, EmbeddedIngestionScheduler, EmbeddedIngestionCallback, IngestionHandle, IngestionApi,
+} from './mcp/embeddedIngestionTypes.js';
+export type { LinkOnArrivalOption } from './link/createLinkService.js';
+export type { IngestionCoordinator, EnqueueFileArgs, StructureSpec, RunSummary } from './ingestion/coordinator.js';
+export type { IngestionJob, SourceRecord, JobState } from './ingestion/store.js';
 // getVectors (3.27.1) - engine-neutral stored-embedding read; throws GetVectorsUnsupportedError on a cloud workspace.
 export { GetVectorsUnsupportedError, GET_VECTORS_MAX_IDS, type GetVectorsApi } from './mcp/embeddedGetVectors.js';
 // NodeDeleteManyResult / NodeDeleteManyItem — returned by LoreInstance.nodeDeleteMany() (3.27.0).

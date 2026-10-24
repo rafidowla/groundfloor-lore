@@ -27,6 +27,13 @@ import {
     hasNodeBatchSupport, MAX_NODE_BATCH_WRITES, MAX_NODE_BATCH_CHECKS, NodeBatchInvalidError,
     type NodeBatchWrite, type NodeBatchNodeInput,
 } from '../packages/lore/src/engines/graphShared/nodeBatch.js';
+import { PostgresGraph } from '../packages/lore/src/engines/postgres/postgresGraph.js';
+import {
+    commitNodeBatchWithRetry, isNodeBatchContention, NodeBatchContentionError,
+} from '../packages/lore/src/engines/graphShared/nodeBatchRetry.js';
+import { OutcomeUnknownError } from '../packages/lore/src/engines/graphShared/writeOutcome.js';
+import { createGatePool, cleanupGateWorkspaces, closeGatePool, gateDbUrl } from './helpers/testPostgres.js';
+import { Client as PgClient, Pool as PgPoolClass } from 'pg';
 
 let passed = 0, failed = 0;
 async function test(name: string, fn: () => Promise<void> | void): Promise<void> {
@@ -163,6 +170,285 @@ await test('two connections on one file: the second BEGIN IMMEDIATE waits for th
     assert.deepEqual(out, { ok: false, code: 'precondition', index: 0, id: 'x', actual: 2 });
     assert.equal(await g2.getNode('w'), null, 'nothing was written by the loser');
 });
+
+// ───────────────────────── postgres (real a real Postgres container) ─────────────────────────
+// Brief §3 gate: the FULL sqlite case list re-run against a real PostgresGraph,
+// plus the concurrent-clients case (FOR UPDATE serialization) and the forced
+// failure mapping checks (40001 -> contention -> shared bounded retry; statement
+// timeout -> unknown). Skips cleanly (printed reason, exit 0) without LORE_PG_URL.
+console.log('\npostgres (real a real Postgres container; skips cleanly without LORE_PG_URL)');
+
+const sleep = (ms: number): Promise<void> => new Promise<void>((r) => setTimeout(r, ms));
+/** Rows right now parked on a lock acquisition (the batch's FOR UPDATE waiting). */
+const lockWaiters = async (probe: PgPoolClass): Promise<number> => {
+    const r = await probe.query(`SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND state = 'active'`);
+    return Number(r.rows[0]?.n ?? 0);
+};
+/** Wait until at least one session is lock-waiting (bounded), so a mid-flight rival COMMIT is deterministic. */
+const waitLockWaiter = async (probe: PgPoolClass): Promise<void> => {
+    for (let i = 0; i < 100 && (await lockWaiters(probe)) === 0; i++) await sleep(50);
+};
+
+const pgGatePool = await createGatePool('node-batch/postgres');
+if (pgGatePool) {
+    // A previous run may have crashed before its cleanup: start clean.
+    await cleanupGateWorkspaces(pgGatePool);
+    // Fresh workspace per case — the exact analogue of the sqlite rig's fresh
+    // temp dir per case. A shared workspace would leak revisions/rows between
+    // cases (an sqlite rig would never see that state); the pid suffix keeps
+    // reruns after a crashed run (whose cleanup never ran) collision-free.
+    let wsCounter = 0;
+    async function pgGraph(ws?: string): Promise<PostgresGraph> {
+        const g = new PostgresGraph(ws ?? `pg-gate-batch-${process.pid}-${++wsCounter}`, pgGatePool as PgPoolClass);
+        await g.initialize();
+        return g;
+    }
+    async function pgSeed(g: PostgresGraph, id: string, n = 1): Promise<void> {
+        for (let i = 0; i < n; i++) await g.upsertNode({ ...input(id, `${id}-v${i}`) } as never);
+    }
+
+    await test('all pass: every write lands at expected + 1 (insert at 1) and the outcome reports them', async () => {
+        const g = await pgGraph();
+        assert.equal(hasNodeBatchSupport(g), true);
+        await pgSeed(g, 'x', 2); await pgSeed(g, 'a', 1);
+        const out = await g.commitNodeBatch([{ id: 'x', revision: 2 }], [cas('a', 1), ins('b')]);
+        assert.deepEqual(out, { ok: true, revisions: { a: 2, b: 1 } });
+        assert.equal((await g.getNode('a'))!.revision, 2);
+        assert.equal((await g.getNode('b'))!.revision, 1);
+    });
+
+    await test('precondition false: nothing is written; the failing index and actual revision are reported', async () => {
+        const g = await pgGraph();
+        await pgSeed(g, 'x', 3); await pgSeed(g, 'a', 1);
+        const out = await g.commitNodeBatch([{ id: 'x', revision: 3 }, { id: 'a', revision: 5 }], [cas('a', 1, 'changed'), ins('b')]);
+        assert.deepEqual(out, { ok: false, code: 'precondition', index: 1, id: 'a', actual: 1 });
+        assert.equal((await g.getNode('a'))!.label, 'a-v0', 'untouched');
+        assert.equal(await g.getNode('b'), null, 'the insert did not land');
+    });
+
+    await test('ifRevision miss (cas with the wrong expected revision): nothing is written', async () => {
+        const g = await pgGraph();
+        await pgSeed(g, 'a', 2);
+        const out = await g.commitNodeBatch([], [ins('b'), cas('a', 1)]);
+        assert.deepEqual(out, { ok: false, code: 'revision', index: 1, id: 'a', actual: 2 });
+        assert.equal(await g.getNode('b'), null);
+    });
+
+    await test('mustExist cas on an absent node is a revision miss, not a create', async () => {
+        const g = await pgGraph();
+        const out = await g.commitNodeBatch([], [cas('ghost', 0, 'ghost', true)]);
+        assert.equal(out.ok, false);
+        assert.equal((out as { code: string }).code, 'revision');
+        assert.equal(await g.getNode('ghost'), null);
+    });
+
+    await test('ifAbsent duplicate: `exists`, nothing else written', async () => {
+        const g = await pgGraph();
+        await pgSeed(g, 'taken', 1);
+        const out = await g.commitNodeBatch([], [ins('fresh'), ins('taken')]);
+        assert.deepEqual(out, { ok: false, code: 'exists', index: 1, id: 'taken' });
+        assert.equal(await g.getNode('fresh'), null);
+    });
+
+    await test('mixed batch: checks + cas + insert commit together', async () => {
+        const g = await pgGraph();
+        await pgSeed(g, 'x', 1); await pgSeed(g, 'y', 4); await pgSeed(g, 'a', 1);
+        const out = await g.commitNodeBatch([{ id: 'x', revision: 1 }, { id: 'y', revision: 4 }], [cas('a', 1), ins('n1'), ins('n2')]);
+        assert.equal(out.ok, true);
+        assert.deepEqual((out as { revisions: unknown }).revisions, { a: 2, n1: 1, n2: 1 });
+    });
+
+    await test('an empty batch, an over-cap batch and a repeated write id are rejected up front', async () => {
+        const g = await pgGraph();
+        await assert.rejects(g.commitNodeBatch([], []), NodeBatchInvalidError);
+        const many = Array.from({ length: MAX_NODE_BATCH_WRITES + 1 }, (_, i) => ins(`n${i}`));
+        await assert.rejects(g.commitNodeBatch([], many), /at most 100 writes/);
+        const checks = Array.from({ length: MAX_NODE_BATCH_CHECKS + 1 }, (_, i) => ({ id: `c${i}`, revision: 0 }));
+        await assert.rejects(g.commitNodeBatch(checks, [ins('z')]), /at most 400 checks/);
+        await assert.rejects(g.commitNodeBatch([], [ins('dup'), ins('dup')]), /appears twice/);
+        assert.equal(await g.getNode('n0'), null);
+        // exactly at the cap is fine
+        const ok = await g.commitNodeBatch([], Array.from({ length: MAX_NODE_BATCH_WRITES }, (_, i) => ins(`m${i}`)));
+        assert.equal(ok.ok, true);
+    });
+
+    await test('a precondition check never bumps the checked node (revision and updatedAt unchanged)', async () => {
+        const g = await pgGraph();
+        await pgSeed(g, 'x', 2);
+        const before = await g.getNode('x');
+        await g.commitNodeBatch([{ id: 'x', revision: 2 }], [ins('t')]);
+        const after = await g.getNode('x');
+        assert.equal(after!.revision, before!.revision);
+        assert.equal(after!.updatedAt, before!.updatedAt);
+    });
+
+    await test('two pool clients on one batch: FOR UPDATE serializes them; the loser re-judges against the committed state, and nothing partial survives', async () => {
+        const ws = 'pg-gate-batch-race';
+        // Watchdog: if the fresh graph's schema DDL cannot get its locks within
+        // 8s something still holds them — dump WHO before failing fast (a 30s
+        // statement_timeout wait ends the same way, just with no evidence).
+        const watchdog = setInterval(async () => {
+            try {
+                console.error(`  [lock-watchdog] pool total=${pgGatePool.totalCount} idle=${pgGatePool.idleCount} waiting=${pgGatePool.waitingCount}`);
+                const c = await pgGatePool.connect();
+                try {
+                    const r = await c.query(
+                        `SELECT a.pid, a.state, a.wait_event_type, a.wait_event,
+                                now() - a.xact_start AS xact_age, left(a.query, 110) AS q,
+                                array_agg(DISTINCT l.locktype || ':' || coalesce(l.relation::regclass::text, l.virtualtransaction)) FILTER (WHERE l.granted) AS granted
+                           FROM pg_stat_activity a LEFT JOIN pg_locks l ON l.pid = a.pid
+                          WHERE a.datname = current_database() AND a.state <> 'idle'
+                          GROUP BY a.pid, a.state, a.wait_event_type, a.wait_event, a.xact_start, a.query`,
+                    );
+                    console.error('  [lock-watchdog] non-idle sessions:', JSON.stringify(r.rows, null, 1));
+                } finally { c.release(); }
+            } catch { /* diagnostic only */ }
+        }, 2000);
+        let g1: PostgresGraph;
+        try {
+            g1 = await pgGraph(ws);
+        } finally {
+            clearInterval(watchdog);
+        }
+        await pgSeed(g1, 'x', 1);
+        // BOTH handles are opened BEFORE any transaction exists: initialize()
+        // runs schema DDL, and CREATE TABLE IF NOT EXISTS takes an ACCESS
+        // EXCLUSIVE lock on `nodes` even when nothing changes — it must not
+        // race a held row lock (that deadlock was this test's own bug).
+        const g2 = await pgGraph(ws);
+        // Client 1 holds an open transaction that has already bumped X (uncommitted).
+        const clientA = await pgGatePool.connect();
+        await clientA.query('BEGIN');
+        await clientA.query('UPDATE nodes SET revision = revision + 1 WHERE workspace_id = $1 AND id = $2', [ws, 'x']);
+        // Client 2 starts its batch NOW: its sorted FOR UPDATE parks on X until client 1 commits.
+        const pending = g2.commitNodeBatch([{ id: 'x', revision: 1 }], [ins('w')]);
+        await waitLockWaiter(pgGatePool);
+        assert.equal(await lockWaiters(pgGatePool) >= 1, true, 'the second client is parked on the first one’s row lock');
+        await clientA.query('COMMIT');
+        clientA.release();
+        const out = await pending;
+        assert.deepEqual(out, { ok: false, code: 'precondition', index: 0, id: 'x', actual: 2 }, 'the loser re-judges against what actually committed');
+        assert.equal(await g2.getNode('w'), null, 'nothing was written by the loser');
+    });
+
+    // Forced 40001: REPEATABLE READ + a rival commit landing after the batch's
+    // snapshot makes the batch's own FOR UPDATE raise serialization_failure —
+    // the exact server failure the outcome map turns into `contention`.
+    const rrUrl = gateDbUrl();
+    if (!rrUrl) throw new Error('unreachable: gate pool exists but gate URL does not');
+    const rrPool = new PgPoolClass({ connectionString: rrUrl, max: 1, application_name: 'lore-pg-gate-rr' });
+    rrPool.on('error', () => undefined);
+    // Session default isolation (the batch's BEGIN is plain, so the session
+    // default governs). Pool max=1 is the determinism trick: the ONE client is
+    // warmed here — SET awaited — and every later checkout (the batch's) reuses
+    // that same session. A client created later on demand would never have run
+    // the SET, which is exactly the read-committed misfire this rig once hit.
+    {
+        const c = await rrPool.connect();
+        try { await c.query("SET default_transaction_isolation = 'repeatable read'"); } finally { c.release(); }
+    }
+    await test('forced 40001: contention outcome goes through nodeBatchRetry — the re-judged second attempt commits (attempts=2)', async () => {
+        const ws = 'pg-gate-batch-rr';
+        // cacheDisabled: attempt 2's prepare must RE-READ x afresh — a cached
+        // revision-1 read would re-judge against a stale world (and the parity
+        // of interest here is the retry path, not the cache).
+        const g = new PostgresGraph(ws, rrPool, { cacheDisabled: true });
+        await g.initialize();
+        await pgSeed(g, 'x', 1);
+        const rival = new PgClient({ connectionString: rrUrl });
+        await rival.connect();
+        await rival.query('BEGIN');
+        await rival.query('UPDATE nodes SET revision = revision + 1 WHERE workspace_id = $1 AND id = $2', [ws, 'x']);
+        let attempts = 0;
+        const pending = commitNodeBatchWithRetry(g, async (attempt) => {
+            attempts = attempt;
+            const n = await g.getNode('x'); // prepare re-reads afresh EVERY attempt
+            return { checks: [{ id: 'x', revision: n!.revision ?? 0 }], writes: [ins('w')] };
+        });
+        pending.catch(() => undefined); // handled below; never an unhandled rejection while we wait
+        // Probe on the GATE pool, not rrPool: rrPool's only clients are the
+        // rival's transaction and the parked batch, so a probe there queues
+        // forever behind them (this rig self-deadlocked exactly that way).
+        await waitLockWaiter(pgGatePool);
+        await rival.query('COMMIT'); // lands after the batch's RR snapshot -> 40001 on attempt 1
+        await rival.end();
+        const result = await pending;
+        assert.equal(result.ok, true, `the retry re-judged and committed: ${JSON.stringify(result)} attempts=${attempts}`);
+        assert.equal(attempts, 2, 'attempt 1 hit the forced serialization failure, attempt 2 committed');
+        assert.equal((await g.getNode('w'))!.revision, 1);
+        assert.equal((await g.getNode('x'))!.revision, 2);
+    });
+
+    await test('forced 40001 outlasting the attempt budget throws the 503-shaped NodeBatchContentionError; nothing was written', async () => {
+        const ws = 'pg-gate-batch-rr2';
+        const g = new PostgresGraph(ws, rrPool, { cacheDisabled: true });
+        await g.initialize();
+        await pgSeed(g, 'x', 1);
+        const rival = new PgClient({ connectionString: rrUrl });
+        await rival.connect();
+        await rival.query('BEGIN');
+        await rival.query('UPDATE nodes SET revision = revision + 1 WHERE workspace_id = $1 AND id = $2', [ws, 'x']);
+        const pending = commitNodeBatchWithRetry(
+            g,
+            async () => ({ checks: [{ id: 'x', revision: 1 }], writes: [ins('w')] }),
+            { maxAttempts: 1, sleep: async () => undefined },
+        );
+        // Attach the rejection handler NOW: with maxAttempts=1 the throw can
+        // land while we are still waiting for the lock waiter, and a floating
+        // rejection would crash the process as unhandled.
+        const asserted = assert.rejects(pending, (e: unknown) => {
+            assert.ok(isNodeBatchContention(e), `expected NodeBatchContentionError, got ${String(e)}`);
+            assert.equal((e as NodeBatchContentionError).status, 503, 'contention exhaustion maps to the retryable 503 shape, never a 500');
+            assert.equal((e as NodeBatchContentionError).retryable, true);
+            assert.equal((e as NodeBatchContentionError).attempts, 1);
+            return true;
+        });
+        await waitLockWaiter(pgGatePool); // gate pool: rrPool's only client is the parked batch
+        await rival.query('COMMIT');
+        await rival.end();
+        await asserted;
+        assert.equal(await g.getNode('w'), null, 'a refused batch leaves nothing behind');
+    });
+
+    await rrPool.end();
+
+    // Forced statement timeout: a held row lock + a 300ms statement_timeout
+    // makes the batch's FOR UPDATE abort with 57014 — mapped to `unknown`
+    // (the transaction MAY have committed), never blindly replayed.
+    const toUrl = gateDbUrl();
+    if (!toUrl) throw new Error('unreachable: gate pool exists but gate URL does not');
+    const toPool = new PgPoolClass({ connectionString: toUrl, max: 2, statement_timeout: 300, application_name: 'lore-pg-gate-to' });
+    toPool.on('error', () => undefined);
+    await test('forced statement timeout: the outcome is `unknown`; the retry helper settles it by re-reading (OutcomeUnknownError), and nothing is replayed blindly', async () => {
+        const ws = 'pg-gate-batch-to';
+        const g = new PostgresGraph(ws, toPool);
+        await g.initialize();
+        await pgSeed(g, 'tx1', 1);
+        const holder = await toPool.connect();
+        await holder.query('BEGIN');
+        await holder.query('UPDATE nodes SET revision = revision + 1 WHERE workspace_id = $1 AND id = $2', [ws, 'tx1']);
+        const direct = await g.commitNodeBatch([{ id: 'tx1', revision: 1 }], [ins('tw')]);
+        assert.deepEqual(direct, { ok: false, code: 'unknown' }, 'statement timeout maps to unknown, not contention');
+        assert.equal(await g.getNode('tw'), null, 'nothing landed');
+        // Through the retry helper an `unknown` is SETTLED by re-reading the
+        // plan's own stamps: 'tw' is absent, so the honest answer is the
+        // OutcomeUnknownError (the caller's outbox row stays pending_commit).
+        await assert.rejects(
+            commitNodeBatchWithRetry(
+                g,
+                async () => ({ checks: [{ id: 'tx1', revision: 1 }], writes: [{ kind: 'insert', node: input('tw'), updatedAt: '2026-10-01T00:00:00.000Z' }] }),
+                { sleep: async () => undefined },
+            ),
+            OutcomeUnknownError,
+        );
+        await holder.query('ROLLBACK');
+        holder.release();
+    });
+    await toPool.end();
+
+    await cleanupGateWorkspaces(pgGatePool);
+    await closeGatePool(pgGatePool);
+}
 
 // ───────────────────────── arcade (fake http) ─────────────────────────
 console.log('\narcade (fake ArcadeHttp, generated script)');

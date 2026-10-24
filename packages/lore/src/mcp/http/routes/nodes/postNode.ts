@@ -105,6 +105,13 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
             delete nodeData.ifRevision;
             delete nodeData.preconditions;
         }
+        // Link-on-arrival: `autolink:false` is a write-time directive (never stored): stripped before the strict gate.
+        let autolinkIntent: boolean | undefined;
+        if ('autolink' in nodeData) {
+            if (typeof nodeData.autolink !== 'boolean') { writeError(res, 400, 'invalid_autolink', 'autolink must be a boolean'); return; }
+            autolinkIntent = nodeData.autolink;
+            delete nodeData.autolink;
+        }
         // Phase 6 P2 — strict additionalProperties:false gate.
         if (enforceStrictFields(nodeData, res).handled) return;
 
@@ -259,6 +266,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
             workspace: requestedWorkspace,
             targetGraph,
             tracker: deps.store.autolinkTracker,
+            link: deps.store.linkService,
         });
         // D5 — resolve the workspace's supersession policy + a near-
         // duplicate finder bound to this write's workspace, mirroring
@@ -298,6 +306,7 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
                 topics: Array.isArray(nodeData.topics) ? nodeData.topics as string[] : undefined,
                 supersedes: Array.isArray(nodeData.supersedes) ? nodeData.supersedes as string[] : undefined,
                 force: nodeData.force === true,
+                ...(autolinkIntent !== undefined ? { autolink: autolinkIntent } : {}),
                 ifRevision,
                 ...(preconditions ? { preconditions } : {}),
             },

@@ -20,6 +20,8 @@
  * nodeUpsert / nodeUpsertBatch are unchanged.
  */
 
+import { applyLinkIntentToNodes, signalCommitted } from '../link/signalCommitted.js';
+import type { LinkSignaler } from '../link/linkTypes.js';
 import { nodeUpsert as nodeServiceUpsert } from '../core/nodeService.js';
 import { applyBulkQuestionAliases } from '../core/bulkQuestionAliases.js';
 import { isVerbatimStore } from '../engines/verbatimStoreApi.js';
@@ -174,6 +176,8 @@ export interface BulkIngestDeps {
      * the call site instead of hiding it in a `??`.
      */
     autolinkTracker: PendingAutolinkTracker;
+    /** Link-on-arrival service (flag on): signalled per committed vector batch; replaces the legacy autolink hook. */
+    linkService?: LinkSignaler | null;
 }
 
 /**
@@ -289,6 +293,8 @@ export async function writePrebuiltRowsPerWorkspace(
                     },
                 })));
             }
+            // Link-on-arrival: these vectors are committed. Alias rows (#qN) are filtered inside signalCommitted.
+            signalCommitted(deps.linkService, ws, group.map((g) => ({ id: String(g.row.id), ecosystem: String(g.row.ecosystem ?? '') })));
         } catch (writeErr) {
             reportGroupError(group, writeErr as Error);
         }
@@ -365,6 +371,8 @@ export async function runBulkIngest(
         winnerIdx = [...lastIdxById.values()].sort((a, b) => a - b);
         nodes = winnerIdx.map((i) => origNodes[i]!);
     }
+    // Link-on-arrival: an explicit `autolink:false` durably opts these nodes out; `true` clears it; absent keeps the existing choice.
+    await applyLinkIntentToNodes(deps.linkService, nodes, opts.autolink);
     /** Pipeline index → resultSlots index (identity when no duplicates). */
     const slotOf = (i: number): number => (winnerIdx ? winnerIdx[i]! : i);
     /** Backfill superseded duplicates' slots from their winner, then build. */
@@ -524,7 +532,7 @@ export async function runBulkIngest(
                     // batch embed runs later. Every non-bulkIngest caller leaves
                     // this unset, so skipEmbed there still means no vector row.
                     autolink: autolinkGraph
-                        ? { graph: autolinkGraph, verbatim: autolinkVerbatim, tracker: deps.autolinkTracker, allowSkipEmbedStore: true }
+                        ? { graph: autolinkGraph, verbatim: autolinkVerbatim, tracker: deps.autolinkTracker, allowSkipEmbedStore: true, link: deps.linkService }
                         : undefined,
                     supersessionPolicy,
                     findSupersessionDuplicate,

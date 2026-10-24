@@ -57,6 +57,8 @@ export type ParsedRow =
               text: string;
               workspace: string;
               metadata?: Record<string, unknown>;
+              /** link-on-arrival: explicit false => the row is never queued for linking. */
+              autolink?: boolean;
           };
       }
     | {
@@ -66,6 +68,8 @@ export type ParsedRow =
               text: string;
               workspace: string;
               metadata?: Record<string, unknown>;
+              /** link-on-arrival: explicit false => the row is never queued for linking. */
+              autolink?: boolean;
           };
       };
 

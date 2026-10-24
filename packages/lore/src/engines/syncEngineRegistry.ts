@@ -61,6 +61,7 @@ import type { LocalGraphRegistry } from './localGraphRegistry.js';
 import type { TsSdkAdapter } from './tsSdkAdapter.js';
 import type { WorkspaceVerbatimResolver } from '../outbox/workspaceVerbatimResolver.js';
 import type { OutboxStore } from '../outbox/types.js';
+import type { LinkSignaler } from '../link/linkTypes.js';
 import { getWorkspacePath } from '../config/workspaces.js';
 import { loreHome } from '../config/loreHome.js';
 
@@ -96,6 +97,8 @@ export interface SyncEngineRegistryDeps {
      *  disjoint per-workspace loreDirs instead of colliding on the
      *  process-global LORE_HOME. */
     home?: string;
+    /** link-on-arrival: handed to every lazily-built engine so a pulled vector mirror in ANY workspace is linked. */
+    linkSignaler?: LinkSignaler | null;
 }
 
 export class SyncEngineRegistry {
@@ -177,6 +180,7 @@ export class SyncEngineRegistry {
                 null,
                 workspace, // pulled edges hold the per-edge lock (3.26.0)
             );
+            engine.linkSignaler = this.deps.linkSignaler ?? null;
             // Never call startAutoSync on a lazily-opened engine — only the
             // boot engine auto-syncs (unchanged daemon behavior).
             this.cache.set(workspace, { engine, path: resolvedPath, pinned: false });

@@ -28,6 +28,7 @@ import type { RetrievalResult, RelatedResult } from './retrieveTypes.js';
 import type { CalibrationResult } from './calibration.js';
 import { zScore } from './abstention.js';
 import { resolveLiveNodes, type AdmitNode } from './supersessionRecall.js';
+import { orderHopsByLinkStrength, linkOrderingEnabled, type StrengthEdge } from './linkOrdering.js';
 
 const TRAVERSE_CONCURRENCY = 4;
 
@@ -36,6 +37,7 @@ type HiddenFlags = LoreNode & { status?: string; supersededBy?: string | null };
 interface RelatedGraph {
     traverse(id: string, depth: number): Promise<Array<{ node: LoreNode; depth: number; relation: string }>>;
     getNodesByIds(ids: string[]): Promise<Map<string, LoreNode>>;
+    queryEdges?(q: { source?: string; target?: string; relation?: string; limit: number; offset: number }): Promise<StrengthEdge[]>;
 }
 
 /** D1 — attach each direct result's OWN similarity / calibrated relevance
@@ -70,6 +72,8 @@ export interface CollectRelatedOptions {
     replaceSuperseded: boolean;
     /** D5 visibility gate for successors fetched outside the hop list. */
     admit: AdmitNode;
+    /** D4 (LORE_RECALL_LINK_ORDERING, default off): order each seed's hops by live link strength, then label, then id. Unset: read from the env flag. */
+    linkOrdering?: boolean;
 }
 
 /**
@@ -88,6 +92,9 @@ export async function collectRelated(
     for (let i = 0; i < seeds.length; i += TRAVERSE_CONCURRENCY) {
         const batch = seeds.slice(i, i + TRAVERSE_CONCURRENCY);
         const hops = await Promise.all(batch.map((sn) => graph.traverse(sn.id, opts.depth)));
+        if (opts.linkOrdering ?? linkOrderingEnabled()) {
+            for (let idx = 0; idx < batch.length; idx++) hops[idx] = await orderHopsByLinkStrength(graph, batch[idx]!.id, hops[idx]!);
+        }
         for (let idx = 0; idx < batch.length; idx++) {
             const sn = batch[idx]!;
             // D2-recall-2: traverse() does no scope filtering — filter every

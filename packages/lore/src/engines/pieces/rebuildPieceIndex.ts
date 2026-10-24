@@ -110,6 +110,19 @@ export async function rebuildPieceIndexAt(
     const { buildPieceIndex } = await import('./pieceIndexBuild.js');
 
     const engine = resolveVerbatimEngineForPath(target.basePath, { home: target.home }).engine;
+    // postgres engine — the D7 piece index is a SQLite-sidecar subsystem
+    // (its own tables in verbatim.sqlite); the frozen Postgres schema has no
+    // piece table and PostgresVerbatimStore does not implement the
+    // PieceBuildableStore surface buildPieceIndex consumes. Constructing the
+    // store anyway would crash three frames deep on a missing method — loud
+    // not_supported instead.
+    if (engine === 'postgres') {
+        throw new Error(
+            `not_supported: the D7 piece index is not available on a postgres-backed verbatim store `
+            + `('${target.basePath}' resolves to vectorEngine 'postgres'; the piece index is a SQLite-sidecar `
+            + 'subsystem with no Postgres schema on this branch).',
+        );
+    }
     // pieceVectors: true — the rebuild is independent of the workspace's
     // current retrieval intent (design 2.8); it only affects the
     // constructor's fast-path for a fresh/empty store.

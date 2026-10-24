@@ -343,9 +343,15 @@ GET /api/nodes/as-of?workspace=default&at=2026-03-15T00:00:00.000Z&type=decision
 | `workspace` | yes | Target workspace (same read-gate as `GET /api/node`). |
 | `at` | yes | ISO 8601 instant to query as-of. 400 `bad_request` if unparsable. |
 | `type`, `tag`, `project`, `ecosystem` | no | Same filters as `GET /api/nodes` (`project`/`ecosystem` default to `*` — no filter). |
-| `limit`, `unbounded` | no | Same paging semantics as `listNodes` (SW-18 default cap applies unless `unbounded=true`). |
+| `limit`, `unbounded` | no | Page size: `limit` is the number of nodes that MATCH `at` (SW-18 default cap applies unless `unbounded=true`). A page is full whenever enough matches exist. |
+| `cursor` | no | The `nextCursor` of the previous page. Pages are ordered `updatedAt DESC, id ASC`. 400 `bad_request` if malformed. |
 
-Response: `{ at, count, nodes: LoreNode[] }`. Embeddable-surface equivalent:
+"As of" means VALID time: the node's `validFrom`/`validUntil` window. There is no recorded-time mode. A window is
+inclusive at both ends; an empty/absent bound is open (empty `validUntil` = still valid); an unparseable bound is
+treated as absent. On the Postgres engine the filter is a SQL predicate over real `valid_from_at`/`valid_until_at`
+TIMESTAMPTZ columns (backfilled at startup); other engines widen their read window until the page is full.
+
+Response: `{ at, count, nodes: LoreNode[], nextCursor }` (`nextCursor` is set when the page is full; absent/null at the end). Embeddable-surface equivalent:
 `lore.store.storageClient.listNodesAsOf(at, opts?)` (see below).
 
 ### Recall, search & query
@@ -507,6 +513,8 @@ Response: `{ at, count, nodes: LoreNode[] }`. Embeddable-surface equivalent:
 | `GET /ready` · `GET /api/ready` | Readiness ("can I serve writes right now?"), every mode. Unauthenticated, rate-limit exempt. `200 {status:"ready",version,mode}` or `503 {status:"not_ready",...}` + `Retry-After: 2`; always `Cache-Control: no-store`. Operator bearer also gets `reason` (`timeout`/`unreachable`/`auth_failed`/`unavailable`), `detail`, `latencyMs`, `checkedAgeMs`. local = graph point read (embedding model not included), cloud = authenticated Dataplane `GET /connectors`, arcade = ArcadeDB root credential. `/health` never depends on a backend; see CONFIGURATION 3a.1 |
 | `GET /api/lore-status` | Daemon / workspace status |
 | `GET /api/admin/stats` | Admin statistics |
+| `POST /api/admin/link-rebuild` · `GET /api/admin/link-rebuild[?workspace=]` | Link-on-arrival rebuild as a diff (operator only; 404 `link_rebuild_unavailable` when link-on-arrival is off). `POST {workspace, action?: "start"\|"cancel"}` starts or resumes a throttled, checkpointed background pass that recomputes every memory's link set from stored vectors (no re-embedding), inserts new `link_on_arrival` edges, soft-invalidates dropped ones (`valid_to`; nothing is deleted) and leaves unchanged edges alone. Edges with another origin or no origin are never touched. 202 started, 200 already running, 404 `workspace_unavailable`, 501 `rebuild_unsupported`. `GET` returns the checkpoint(s): `status`, `total`, `done`, `inserted`, `refreshed`, `invalidated`, `unchanged`, `keptForeign`, `skippedNoVector`, `skippedOptOut`. Nodes opted out of linking (`autolink:false`, a durable per-node flag; see CHANGELOG) are neither sources nor targets: no edge is added to or from them, and their existing edges are left as they are (counted in `skippedOptOut`). Also on `/api/admin/stats` as `link.rebuild` and on `/metrics` as `lore_link_rebuild_nodes` / `lore_link_rebuild_running`. The rebuild is crash-safe: the cursor is checkpointed after every batch and a restart resumes after it (an interrupted batch is simply judged again, writes are idempotent). Link freshness (no new routes): `link.health` (`live`, `invalidated`, `meanStrength`, `maxDegree`, `stale`, `workspaces`), `link.prune`, `link.refreshedTotal` / `link.invalidatedTotal` on `/api/admin/stats`, and the matching `lore_link_*` series on `/metrics`. Edit refresh is on by default (`LORE_LINK_REFRESH_ON_CHANGE=0` turns it off); the soft cap is opt-in via `LORE_LINK_MAX_PER_NODE`; see CONFIGURATION §11b. Tuning: `LORE_LINK_REBUILD_BATCH_SIZE`, `LORE_LINK_REBUILD_YIELD_MS`, `LORE_LINK_REBUILD_MAX_WAIT_MS`. Recall: `LORE_RECALL_LINK_ORDERING=1` (default off) orders each seed's one-step `related` hops by live link strength (`confidenceScore`), then label, then id; it only reorders, never adds or drops a hop. |
+| `POST /api/admin/ingest/enqueue` · `GET /api/admin/ingest/jobs/<jobId>?workspace=` | Submit a file to the ingestion host and read a job back (operator only, same lane as link-rebuild; needs `LORE_INGEST_ENABLED`, see CONFIGURATION §11a). `POST` takes JSON: `workspace` (required, explicit; a registered workspace that the host ingests), `fileName` (bare name: no `/` `\`, control characters or bidi overrides, at most 255 bytes), `mimeType` (`type/subtype`), `contentBase64` (standard base64 of the bytes, at most `LORE_INGEST_ENQUEUE_MAX_BYTES`, default 25 MiB), and optional `structure` (`processorId` plus `profile`, `outputSchema`, `itemPath`, `itemKey`, `sourceRefs`, `reviewThreshold`, `instructions`, `tableName`; unknown keys refused) and `extractorId`. 202 `{jobId, sourceId, created:true, state}` for a new job, 200 with `created:false` for a duplicate (same bytes and options). Errors are fixed `{code, message}`: 400 `workspace_required` / `invalid_workspace` / `invalid_json_body` / `invalid_file_name` / `invalid_mime_type` / `invalid_file_content` / `invalid_structure`; 403 operator-only; 404 `ingestion_unavailable` (host off) / `workspace_not_found`; 409 `ingestion_workspace_not_enabled`; 413 `payload_too_large` (declared or actual); 422 `ingest_policy_violation` / `ingest_no_processor`; 503 `ingest_busy` (4 uploads already in memory; `Retry-After`) or `ingestion_unavailable` (host stopping). `GET` returns `{job:{jobId, workspace, sourceId, stage, processorId, state, attempts, maxAttempts, nextAttemptAt, hasError, parentJobId, createdAt, updatedAt, completedAt}}`; processor error text is never returned (`hasError` only); 400 `invalid_job_id`, 404 `job_not_found` (also for a job of another workspace). |
 | `GET /api/stats` | Graph statistics |
 | `GET /api/outbox/dead` | Dead-lettered outbox rows (see above) |
 | `GET /api/storage` | Storage inspection |
@@ -563,6 +571,9 @@ const lore = await createLore({
 | `dataDir` | `string` | `LORE_HOME` / `~/.groundfloor` | Per-instance Lore data root. Set to a unique path when running multiple instances in one process; they will be fully isolated on disk. |
 | `pieceVectors` | `boolean` | `LORE_RECALL_PIECE_VECTORS` env / off | D7 (3.23) host-level default for piece-level vector seed search (title row + overlapping token-window rows, beside the canonical per-node vector). A per-workspace override in `workspaces.json` always wins over this option. See `docs/CONFIGURATION.md`'s `LORE_RECALL_PIECE_VECTORS` for full precedence, and `lore migrate piece-vectors` (CLI) for backfilling an already-populated workspace — a fresh workspace opened with this `true` builds its piece index incrementally as nodes are written, no separate backfill needed. |
 | `versionHistory` | `{ skipTypes?: string[]; retentionDaysByType?: Record<string, number>; pruning?: { enabled: boolean; retentionDays?: number } }` | absent (every upsert with detectable content change is recorded; no type skipped; **version history is kept forever**) | Per-type `node_versions` history policy. **Age-based deletion of version history is opt-in (owner decision 2026-09-29).** Unless `pruning.enabled: true` is passed (or the daemon env `LORE_VERSION_PRUNE_ENABLED=1` / an explicit `LORE_VERSION_RETENTION_DAYS` is set), no `node_versions` row is ever deleted by age, for embedded hosts and the daemon alike. `pruning.retentionDays` is the retention window once enabled; default **2557 days (7 years)**. `skipTypes`: node types for which no version row is recorded going forward, regardless of content change. It is an opt-in for hosts that genuinely do not want history for a type; it is not a recommendation (Atlas keeps code history). Existing rows of a skipped type are deleted only when pruning is enabled or when an operator explicitly runs `lore maintain storage --skip-types`. `retentionDaysByType`: per-type retention window in days, overriding the retention window for that type; **applies only when pruning is enabled**, inert otherwise. Independent of all of this, every upsert skips recording a version row when the node's content is unchanged from its prior state (ignoring `createdAt`, `updatedAt`, `syncedAt`, `lastAccessedAt`, `last_retrieved_at`); the no-op skip is always on and cannot be disabled. The outbox prune of `replicated` rows is also always on. **Daemon/MCP mode** has no per-call options surface: `skipTypes` comes from the comma-separated `LORE_VERSION_SKIP_TYPES` env var (an explicit option wins); pruning comes from `LORE_VERSION_PRUNE_ENABLED` / `LORE_VERSION_RETENTION_DAYS` (see `docs/CONFIGURATION.md`). Read the effective, resolved policy with `lore.getVersionHistoryPolicy()`, the `get_version_history_policy` MCP tool, or `GET /api/version-history/policy`; all three are read-only and there is no setter. |
+| `linkOnArrival` | `boolean \| ({ enabled?: boolean } & Partial<LinkRuntimeConfig>)` | `LORE_LINK_ON_ARRIVAL` env / off | Link-on-arrival for this instance (see CONFIGURATION §11b). `true` turns it on with defaults; an object also overrides settings (`k`, `minSim`, `dupSim`, `quietMs`, `yieldMs`, `batchSize`, `maxAttempts`, `rebuildBatchSize`, `policyVersion`, `refreshOnChange`, `maxLinksPerNode`, `pruneIntervalMs`, `pruneBatchSize`, `healthTtlMs`, ...). `false` forces it off even when the env flag is set. Option values win over `LORE_LINK_*` env; an unknown, non-finite or out-of-range value throws `RangeError` from `createLore`. `autolink:false` and the durable per-node opt-out are respected exactly as in the daemon. Nothing is read from or written to `process.env`. |
+| `recallLinkOrdering` | `boolean` | `LORE_RECALL_LINK_ORDERING` env / off | Order each seed's one-step `related` hops by live link strength for `lore.recall()`. `false` forces it off over the env flag. Single-workspace recall only; cross-workspace recall keeps following the env flag. |
+| `ingestion` | `boolean \| EmbeddedIngestionOptions` | `LORE_INGEST_ENABLED` env / off | File-ingestion pipeline for this instance (see CONFIGURATION §11a and `lore.ingestion` below). `true` / an object turns it on, `false` (or `{ enabled:false }`) forces it off over `LORE_INGEST_ENABLED=1`. Options: `workspaces`, `hostedWorkspaces`, `localLlm`, `hostedStructuring`, `callback`, `scheduler`, `enqueueMaxBytes`. Options win over `LORE_INGEST_*` env; bad values throw `RangeError`. |
 
 ### `LoreInstance` members
 
@@ -854,6 +865,36 @@ const vectors = await lore.getVectors({ ids: nodeIds, workspace: 'default' });
 - Embedded only; attached by the package entry point (`createLore` from
   `src/index.ts`). Store level, both local stores also expose
   `getVectors(rowIds)` taking exact verbatim row ids (`lore:<id>`).
+
+#### `lore.ingestion` — `IngestionHandle | null`
+
+`null` unless `createLore({ ingestion })` (or `LORE_INGEST_ENABLED=1` with no option) turned ingestion on; with it off,
+no ingestion code is loaded and no `ingestion.sqlite` is created. Attached by the package entry point, like
+`nodeDeleteMany`. When on, the host is the same one the daemon runs (one shared construction path), with these embedded
+differences: no signal or process-wide handlers, no `process.env` mutation, no socket unless `ingestion.callback` is
+passed, and `dispose()` stops the scheduler, listener and stores before the instance's own drain (ingestion writes
+through `lore.nodeUpsert`).
+
+```ts
+const lore = await createLore({ dataDir, ingestion: { scheduler: { autoRun: false } } });
+const co = await lore.ingestion!.coordinatorFor('notes');                  // opens the workspace's store on first use
+const { job, created } = await co.enqueueFile({ workspace: 'notes', fileName: 'lease.pdf', mimeType: 'application/pdf', bytes });
+await lore.ingestion!.runDue('notes');                                       // or leave autoRun on and poll getJob
+const state = (await lore.ingestion!.getJob('notes', job.jobId))?.state;     // 'succeeded' => document_chunk memories exist
+```
+
+| Member | Description |
+|---|---|
+| `coordinatorFor(ws)` | The workspace's `IngestionCoordinator` (`enqueueFile`, `runDue`, `deps.store`). Rejects for a workspace not enabled for ingestion. `enqueueFile` returns `{source, job, created}`; `created:false` for a duplicate (same bytes and options). Throws `PolicyViolationError` for a hosted processor on a local-only workspace (nothing is recorded). |
+| `getJob(ws, jobId)` | The job (`state`: `queued` \| `running` \| `awaiting_callback` \| `succeeded` \| `failed` \| `dead_letter`), or `undefined` for an unknown id, another workspace's job or a workspace that is not enabled. |
+| `runDue(ws, limit?)` | Claim and process due jobs now; returns `{claimed, succeeded, awaiting, retried, deadLettered}`. |
+| `status()` | `{workspaces, listener: {state: 'off' \| 'refused' \| 'listening', ...}, hostedProcessor}`. |
+
+Results are written through the normal write path as `document_chunk` memories whose `metadata.ingestion` carries the
+provenance (source id, file name, hash, page or time range, processor, job id). Types exported from the package entry:
+`EmbeddedIngestionOption`, `EmbeddedIngestionOptions`, `EmbeddedIngestionScheduler`, `EmbeddedIngestionCallback`,
+`IngestionHandle`, `IngestionCoordinator`, `EnqueueFileArgs`, `StructureSpec`, `RunSummary`, `IngestionJob`,
+`SourceRecord`, `JobState`, `LinkOnArrivalOption`.
 
 #### `lore.createMcpServer()` → `McpServer`
 

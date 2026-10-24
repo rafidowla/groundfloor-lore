@@ -94,7 +94,7 @@ export interface DedupeScan {
     differingExtraRows: number;
 }
 
-export type DedupeStatus = 'not-applicable-sqlite' | 'nothing-to-check' | 'checked' | 'applied';
+export type DedupeStatus = 'not-applicable-sqlite' | 'not-applicable-postgres' | 'nothing-to-check' | 'checked' | 'applied';
 
 export interface DedupeReport {
     status: DedupeStatus;
@@ -329,6 +329,13 @@ export async function dedupeVerbatimIdentical(opts: DedupeVerbatimOptions): Prom
 
     if (entry.vectorEngine === 'sqlite') {
         return done({ status: 'not-applicable-sqlite', message: `not applicable: SQLite enforces unique ids ('${ws}' is registered with vectorEngine 'sqlite')` });
+    }
+    // Postgres-backed store: ids are the PRIMARY KEY of the shared
+    // `verbatim` table (workspace_id, id) — the same uniqueness property
+    // that makes dedupe a no-op on SQLite. Reported as its own honest
+    // status (named, not lumped into 'sqlite') rather than a silent skip.
+    if (entry.vectorEngine === 'postgres') {
+        return done({ status: 'not-applicable-postgres', message: `not applicable: Postgres enforces unique ids (('workspace_id', id) is the primary key — '${ws}' is registered with vectorEngine 'postgres')` });
     }
     if (!lanceTableExists(workspaceDir)) {
         return done({ status: 'nothing-to-check', message: `nothing to check: '${ws}' has no LanceDB ${VERBATIM_TABLE} table` });

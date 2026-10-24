@@ -41,6 +41,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { SurrealGraph } from './surrealGraph.js';
 import { SqliteGraph } from './sqliteGraph.js';
+import { PostgresGraph } from './postgres/postgresGraph.js';
+import { redactedPostgresLocation, sharedPostgresPool } from './postgres/postgresPoolOwner.js';
 import { surrealDataPath } from './surreal/surrealConnection.js';
 import { sqliteGraphDataPath } from './sqlite/sqliteGraphSchema.js';
 import {
@@ -182,6 +184,30 @@ export function openWorkspaceGraph(
     if (engine === 'sqlite') {
         return new SqliteGraph(basePath, cacheOpts) satisfies WorkspaceGraph;
     }
+    if (engine === 'postgres') {
+        // LOUD, never a substitution: the postgres engine needs BOTH a
+        // registered workspace (its name is the `workspace_id` every row is
+        // sliced by) and a pool, whose URL comes from LORE_PG_URL —
+        // sharedPostgresPool()/createPostgresPool throw naming that env var
+        // when it is unset. No fallback to SQLite/Surreal, ever.
+        const pgWorkspaceId = workspaceId ?? workspace ?? undefined;
+        if (!pgWorkspaceId) {
+            throw new Error(
+                `openWorkspaceGraph: engine 'postgres' requires a REGISTERED workspace (the workspace name is the `
+                + `postgres workspace_id), but '${basePath}' matched no workspaces.json entry. Register the workspace `
+                + '(name it in workspaces.json with graphEngine "postgres") and open it by name.',
+            );
+        }
+        return new PostgresGraph(
+            pgWorkspaceId,
+            sharedPostgresPool(),
+            {
+                ...(opts.cacheTtlMs !== undefined ? { cacheTtlMs: opts.cacheTtlMs } : {}),
+                ...(opts.cacheMaxSize !== undefined ? { cacheMaxSize: opts.cacheMaxSize } : {}),
+                ...(opts.cacheDisabled !== undefined ? { cacheDisabled: opts.cacheDisabled } : {}),
+            },
+        ) satisfies WorkspaceGraph;
+    }
     return new SurrealGraph(basePath, cacheOpts) satisfies WorkspaceGraph;
 }
 
@@ -218,6 +244,7 @@ export function bannerEngineName(basePath: string): string {
     const engine = resolveGraphEngineForPath(basePath).engine;
     if (engine === 'surreal') return 'SurrealDB';
     if (engine === 'sqlite') return 'SQLite';
+    if (engine === 'postgres') return 'Postgres';
     return 'legacy graph engine (removed)';
 }
 
@@ -226,5 +253,7 @@ export function bannerGraphPath(basePath: string): string {
     const engine = resolveGraphEngineForPath(basePath).engine;
     if (engine === 'surreal') return surrealDataPath(basePath);
     if (engine === 'sqlite') return sqliteGraphDataPath(basePath);
+    // No on-disk store: the redacted connection location (credentials dropped).
+    if (engine === 'postgres') return redactedPostgresLocation();
     return path.join(basePath, '.lore', 'graph');
 }

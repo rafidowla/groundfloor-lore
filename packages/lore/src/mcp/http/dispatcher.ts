@@ -28,6 +28,9 @@ import { tryWorkspacesRoutes } from './routes/workspaces.js';
 import { tryWorkspaceExportRoutes } from './routes/workspaceExport.js';
 import { tryAuditRoutes } from './routes/audit.js';
 import { tryAdminRoutes } from './routes/admin.js';
+import { tryLinkRebuildRoutes } from './routes/linkRebuild.js';
+import { tryIngestEnqueueRoutes } from './routes/ingestEnqueue.js';
+import { getActiveIngestionHost } from '../ingestionBoot.js';
 import { tryConfigRoutes } from './routes/config.js';
 import { tryStaticRoutes } from './routes/static.js';
 import { tryIngestionRoutes } from './routes/ingestion.js';
@@ -410,6 +413,18 @@ async function dispatchAfterGates(
         dataplane: deps.dataplane,
     })) return;
 
+    if (await tryLinkRebuildRoutes(req, res, url, pathname, {
+        linkService: deps.store.linkService ?? null,
+        deploymentMode: deps.deploymentMode,
+        dataplane: deps.dataplane,
+    })) return;
+
+    if (await tryIngestEnqueueRoutes(req, res, url, pathname, {
+        getIngestionHost: deps.getIngestionHost ?? getActiveIngestionHost,
+        deploymentMode: deps.deploymentMode,
+        dataplane: deps.dataplane,
+    })) return;
+
     if (await tryAuditRoutes(req, res, url, pathname, {
         auditLog: deps.auditLog,
         feedbackStore: deps.feedbackStore,
@@ -481,6 +496,7 @@ async function dispatchAfterGates(
         getOutboxStats: deps.getOutboxStats,
         graphRegistry: deps.graphRegistry,
         loadJobsStore: deps.loadJobsStore,
+        linkStats: async () => { const svc = deps.store.linkService; if (!svc) return null; await svc.refreshHealth(); return svc.stats(); },
     })) return;
 
     // Sprint C5 — analytical REST siblings for the MCP `time_series`

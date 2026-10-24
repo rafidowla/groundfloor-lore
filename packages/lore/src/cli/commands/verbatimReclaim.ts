@@ -45,7 +45,7 @@ export function reclaimUsage(): void {
     console.error('  LanceDB stores are reported as not_supported (use `lore verbatim dedupe` for duplicate ids).');
 }
 
-interface Target { workspace: string; dbPath: string; basePath: string; engine: 'sqlite' | 'lance'; hasFile: boolean }
+interface Target { workspace: string; dbPath: string; basePath: string; engine: 'sqlite' | 'lance' | 'postgres'; hasFile: boolean }
 
 interface TargetReport {
     workspace: string;
@@ -123,7 +123,7 @@ function resolveTargets(opts: { loreDir?: string; home: string; workspace?: stri
     }
     return entries.map((w) => {
         const dbPath = path.join(w.path, '.lore', 'verbatim.sqlite');
-        return { workspace: w.name, dbPath, basePath: w.path, engine: w.vectorEngine === 'sqlite' ? 'sqlite' as const : 'lance' as const, hasFile: fs.existsSync(dbPath) };
+        return { workspace: w.name, dbPath, basePath: w.path, engine: w.vectorEngine === 'sqlite' ? 'sqlite' as const : w.vectorEngine === 'postgres' ? 'postgres' as const : 'lance' as const, hasFile: fs.existsSync(dbPath) };
     });
 }
 
@@ -194,6 +194,10 @@ export async function verbatimReclaimCommand(args: string[]): Promise<void> {
         const base = { workspace: t.workspace, dbPath: t.dbPath };
         if (t.engine === 'lance') {
             reports.push({ ...base, status: 'not_supported', message: 'not_supported: this workspace uses the LanceDB verbatim engine; reclaim covers SQLite stores only (use `lore verbatim dedupe` for duplicate ids)' });
+            continue;
+        }
+        if (t.engine === 'postgres') {
+            reports.push({ ...base, status: 'not_supported', message: 'not_supported: this workspace uses the Postgres verbatim engine (ids are the (workspace_id, id) primary key, so duplicate rows cannot exist, and the store is not a local file)' });
             continue;
         }
         if (!t.hasFile) { reports.push({ ...base, status: 'no-store', message: `no SQLite verbatim store at ${t.dbPath}` }); continue; }

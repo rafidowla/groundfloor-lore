@@ -14,7 +14,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { StorageBundle } from '../../services.js';
 import type { LocalGraphRegistry } from '../../../engines/localGraphRegistry.js';
-import { resolveWorkspaceGraphEngine } from '../../../engines/graphEngineSelector.js';
+import { engineReport } from '../../tools/engineLabels.js';
+import { getActiveWorkspaceName } from '../../../config/workspaces.js';
 import type { BulkListQuery } from '../../../providers/types.js';
 import { gateRoute } from '../../../security/routeGate.js';
 import { writePermissionDenied } from '../../../security/rebacGate.js';
@@ -93,10 +94,21 @@ export async function tryInspectRoutes(
                         // registry present this uses its home-scoped lookup;
                         // without it (legacy single-workspace boot) the
                         // global selector resolves the same declaration.
-                        const kind = deps.graphRegistry
-                            ? deps.graphRegistry.graphEngineFor(deps.detectedScope.workspace)
-                            : resolveWorkspaceGraphEngine(deps.detectedScope.workspace);
-                        return kind === 'surreal' ? 'surrealdb + lancedb (local)' : 'legacy graph engine + lancedb (local)';
+                        // Routed through engineReport() (the shared
+                        // stats/lore_status-tool implementation) so the
+                        // postgres engine — and the graph+vector pairing —
+                        // label identically on every surface. An unresolved
+                        // CWD scope ('*' — fresh home with no
+                        // workspace-paths.json mapping) labels the ACTIVE
+                        // workspace instead: the counts in this very response
+                        // come from the boot graph, which IS the active
+                        // workspace's graph, so '*' must not fall through to
+                        // DEFAULT_GRAPH_ENGINE and name an engine this
+                        // daemon is not running.
+                        const labelWorkspace = deps.detectedScope.workspace !== '*'
+                            ? deps.detectedScope.workspace
+                            : getActiveWorkspaceName(deps.graphRegistry?.homeDir?.());
+                        return engineReport(deps.graphRegistry ?? undefined, labelWorkspace).engine;
                     })(),
                 },
                 capabilities: {

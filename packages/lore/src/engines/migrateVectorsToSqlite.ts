@@ -234,6 +234,21 @@ export async function migrateVectorsToSqlite(opts: MigrateVectorsToSqliteOptions
     if (entry.vectorEngine === 'sqlite') {
         throw new Error(`migrate-vectors: workspace '${ws}' is already registered as 'sqlite'. Nothing to migrate.`);
     }
+    // postgres engine — migration OUT of postgres is explicitly out of
+    // scope: this tool copies rows out of the on-disk Lance table and flips
+    // vectorEngine via setWorkspaceVectorEngine at the end. A postgres
+    // workspace has no Lance table, so the empty-source path would "migrate"
+    // zero rows and silently re-register the workspace as 'sqlite' while its
+    // vectors live in Postgres — loud refusal instead.
+    if (entry.vectorEngine === 'postgres') {
+        throw new Error(
+            `migrate-vectors: workspace '${ws}' is registered as 'postgres'. Migration from a Postgres verbatim `
+            + 'store is not supported (loud refusal, postgres engine scope). `lore backup` writes a logical bundle '
+            + 'of the workspace that `lore restore` loads back into Postgres, but that bundle cannot be loaded into '
+            + 'a SQLite store; to move the data to another engine, export the `verbatim` rows with the '
+            + 'engine-neutral API and flip vectorEngine in workspaces.json deliberately.',
+        );
+    }
 
     // ── 1. Daemon preflight ─────────────────────────────────────────────
     if (!opts.skipDaemonCheck) {

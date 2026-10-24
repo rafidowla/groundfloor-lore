@@ -14,9 +14,19 @@
  * every backend (SurrealGraph, DataplaneGraph) already
  * implements identically, so this file needs no engine-specific query code
  * and inherits `listNodes`' existing filters, caps, and cross-engine parity
- * for free. The filter itself runs in JS over the candidate page rather than
- * pushed into engine-specific query syntax — the right trade for a first
- * version of a primitive that has to behave identically everywhere.
+ * for free. The filter itself runs in JS over the candidate rows by default; a
+ * graph that offers `listNodesValidAt` (PostgresGraph: real TIMESTAMPTZ columns +
+ * one SQL predicate) is used instead, and gives the SAME answers.
+ *
+ * "AS OF" MEANS VALID TIME. `at` is matched against each node's
+ * `validFrom`/`validUntil` ("how things were then"). It is NOT recorded time
+ * ("what we knew on date D"); there is no recorded-time mode here, and none is
+ * implied by the name. BOUNDARIES ARE INCLUSIVE on both ends (see isValidAsOf).
+ *
+ * PAGING. `limit` caps the RETURNED page (after the valid-time filter), so a
+ * page is full whenever enough matches exist. Order is the listNodes order
+ * (`updatedAt` desc, `id` asc); pass the last row's `{updatedAt, id}` as
+ * `after` to get the next page.
  */
 
 import type { GraphProvider, LoreNode } from '../providers/types.js';
@@ -52,10 +62,29 @@ export function isValidAsOf(
     return true;
 }
 
-/** The minimal graph surface `listNodesAsOf` needs — one method, satisfied
- *  by LocalGraph, SurrealGraph, DataplaneGraph, and LoreStorageClient alike. */
+/** Resume point for keyset paging: the last row of the previous page. */
+export interface AsOfCursor {
+    updatedAt: string;
+    id: string;
+}
+
+/** What an engine-side as-of implementation receives (`at` already parsed to epoch ms). */
+export interface AsOfEngineOptions {
+    type?: string;
+    tag?: string;
+    project?: string;
+    ecosystem?: string;
+    limit?: number;
+    unbounded?: boolean;
+    after?: AsOfCursor;
+}
+
+/** The minimal graph surface `listNodesAsOf` needs. `listNodesValidAt` is optional
+ *  engine acceleration (a SQL predicate); without it the JS fallback runs over
+ *  `listNodes`. Satisfied by LocalGraph, SurrealGraph, DataplaneGraph, PostgresGraph, LoreStorageClient. */
 export interface AsOfListable {
     listNodes: GraphProvider['listNodes'];
+    listNodesValidAt?: (atMs: number, opts: AsOfEngineOptions) => Promise<LoreNode[]>;
 }
 
 /** Filters mirror `GraphProvider.listNodes`' own params so this composes
@@ -65,15 +94,21 @@ export interface ListNodesAsOfOptions {
     tag?: string;
     project?: string;
     ecosystem?: string;
-    /** Candidate-page limit BEFORE the valid-time filter (same semantics as
-     *  listNodes' own `limit` — SW-18 default cap applies when omitted).
-     *  Because filtering happens after the page is fetched, a narrow
-     *  `limit` combined with a sparse-matching window can under-return;
-     *  pass `unbounded: true` for a batch/reporting caller that needs the
-     *  true full set. */
+    /** Maximum rows RETURNED (after the valid-time filter; SW-18 default cap
+     *  applies when omitted). Pages are full whenever enough matches exist. */
     limit?: number;
     unbounded?: boolean;
+    /** Keyset cursor: return only rows strictly after this (updatedAt, id). */
+    after?: AsOfCursor;
 }
+
+/** True when `node` sorts strictly after `c` in the (updatedAt desc, id asc) list order. */
+function isAfterCursor(node: Pick<LoreNode, 'updatedAt' | 'id'>, c: AsOfCursor): boolean {
+    const u = node.updatedAt ?? '';
+    return u < c.updatedAt || (u === c.updatedAt && node.id > c.id);
+}
+
+const LIST_CAP = 10_000;
 
 /**
  * listNodesAsOf — nodes valid at a given instant.
@@ -91,14 +126,30 @@ export async function listNodesAsOf(
     if (Number.isNaN(atMs)) {
         throw new RangeError(`listNodesAsOf: 'at' must be a valid ISO 8601 timestamp, got ${JSON.stringify(at)}`);
     }
-    const { type, tag, project = '*', ecosystem = '*', limit, unbounded } = opts;
-    const candidates = await graph.listNodes(
-        type,
-        tag,
-        project,
-        ecosystem,
-        limit,
-        unbounded !== undefined ? { unbounded } : undefined,
-    );
-    return candidates.filter((node) => isValidAsOf(node, atMs));
+    const { type, tag, project = '*', ecosystem = '*', limit, unbounded, after } = opts;
+    if (typeof graph.listNodesValidAt === 'function') {
+        return graph.listNodesValidAt(atMs, { type, tag, project, ecosystem, limit, unbounded, after });
+    }
+    // Fallback: widen the candidate window until the filtered page is full or
+    // the list is exhausted, then slice. (Filtering a fixed-size page instead
+    // returned short pages whenever matches were sparse.)
+    const want = unbounded
+        ? Infinity
+        : (typeof limit === 'number' && Number.isFinite(limit) && limit > 0 ? Math.min(Math.floor(limit), LIST_CAP) : LIST_CAP);
+    const keep = (n: LoreNode): boolean => isValidAsOf(n, atMs) && (!after || isAfterCursor(n, after));
+    const take = (rows: LoreNode[]): LoreNode[] => (Number.isFinite(want) ? rows.slice(0, want) : rows);
+    if (!Number.isFinite(want)) {
+        return (await graph.listNodes(type, tag, project, ecosystem, undefined, { unbounded: true })).filter(keep);
+    }
+    let fetchLimit = Math.min(Math.max(want * 4, 200), LIST_CAP);
+    for (;;) {
+        const candidates = await graph.listNodes(type, tag, project, ecosystem, fetchLimit);
+        const matches = candidates.filter(keep);
+        if (matches.length >= want || candidates.length < fetchLimit) return take(matches);
+        if (fetchLimit >= LIST_CAP) {
+            // The capped window was full and still short: only an unbounded scan can find the rest.
+            return take((await graph.listNodes(type, tag, project, ecosystem, undefined, { unbounded: true })).filter(keep));
+        }
+        fetchLimit = Math.min(fetchLimit * 4, LIST_CAP);
+    }
 }

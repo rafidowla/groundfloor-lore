@@ -113,6 +113,12 @@ export interface MigrationOptions {
      * still registers somewhere rather than nowhere.
      */
     autolinkTracker?: PendingAutolinkTracker;
+    /**
+     * Called once (apply only, after the ingest hooks settle) with the ids of the imported nodes whose vectors
+     * were just written. The CLI uses it to hand them to the daemon's link queue (see link/linkSpool.ts); this
+     * process has no LinkService. Best-effort: a throw is swallowed so it can never fail the migration.
+     */
+    onNodesEmbedded?: (ids: string[]) => void | Promise<void>;
 }
 
 /**
@@ -279,6 +285,9 @@ export async function migrateV1Sqlite(
     // can't race ahead of in-flight reconnect writes). Dry-run never sets
     // verbatimStore, so reconnectPromises is empty and this is a no-op.
     await Promise.allSettled(reconnectPromises);
+    if (apply && opts.verbatimStore && opts.onNodesEmbedded && toImport.length > 0) {
+        try { await opts.onNodesEmbedded(toImport.map((n) => n.id)); } catch { /* link hand-off is best-effort */ }
+    }
 
     // Index nodes that exist AFTER the import for edge-endpoint checks.
     // In dry-run, this is "what would exist"; in apply, "what exists now".

@@ -132,6 +132,8 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                 .describe('Ids this write supersedes. Pass [] to explicitly assert "supersedes nothing". Required under an enforcing workspace supersession policy for decision/convention/architecture nodes — see the supersession_candidates tool for near-duplicate discovery.'),
             force: z.boolean().optional()
                 .describe('Bypasses the near-duplicate check for this one write (does not bypass the missing-field or prose-mismatch checks).'),
+            autolink: z.boolean().optional()
+                .describe('Pass false to opt this node out of automatic linking (no semantic_neighbor edges from it or to it). The opt-out is durable: it stays in force across later writes that omit autolink, until a write passes autolink:true or the node is deleted. Omit to keep the current setting of the node (default: linked).'),
         },
         async (args) => {
             // NW-5b — audit-coverage. Pre-fix, store_node — the primary
@@ -447,6 +449,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                     workspace: scopedWorkspace,
                     targetGraph,
                     tracker: deps.store.autolinkTracker,
+                    link: deps.store.linkService,
                 });
                 // D5 — resolve the workspace's supersession policy against
                 // THIS instance's own registry, same pattern as the vocab
@@ -482,6 +485,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                         topics: args.topics as string[] | undefined,
                         supersedes: args.supersedes as string[] | undefined,
                         force: args.force as boolean | undefined,
+                        ...(typeof args.autolink === 'boolean' ? { autolink: args.autolink } : {}),
                     },
                     {
                         outboxStore: deps.outboxStore,

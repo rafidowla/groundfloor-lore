@@ -23,8 +23,10 @@ import path from 'node:path';
 
 import { SqliteVerbatimStore } from '../packages/lore/src/engines/sqliteVerbatimStore.js';
 import { DataplaneVectorStore } from '../packages/lore/src/engines/dataplaneVectorStore.js';
+import { PostgresVerbatimStore } from '../packages/lore/src/engines/postgres/postgresVerbatimStore.js';
 import { SqliteOutboxStore } from '../packages/lore/src/outbox/sqliteStore.js';
 import { FileOutboxStore } from '../packages/lore/src/outbox/store.js';
+import { createGatePool, cleanupGateWorkspaces, closeGatePool, stampGateManifest } from './helpers/testPostgres.js';
 import { recordHotWrite } from '../packages/lore/src/outbox/hotLane.js';
 import { OutboxLagCache } from '../packages/lore/src/outbox/lagCache.js';
 import { awaitRecallable, recallableSupport, type RecallableDeps } from '../packages/lore/src/core/recallableWaiter.js';
@@ -145,10 +147,53 @@ async function arcadeFakeHarness(lagMs = 150): Promise<Harness> {
     };
 }
 
+// ── postgres (real PostgresVerbatimStore; skips cleanly without LORE_PG_URL).
+// Same outbox lane as the sqlite harness (SqliteOutboxStore); the presence
+// read is the store's own getVectors, and a SECOND workspace in the same
+// database plays the foreign-workspace role.
+const pgPoolRecall = await createGatePool('recallable/postgres');
+if (pgPoolRecall) {
+    // A previous crashed run may have skipped its cleanup: start clean.
+    await cleanupGateWorkspaces(pgPoolRecall);
+}
+
+async function postgresHarness(): Promise<Harness> {
+    const base = tmp('rc-pg-verb-');
+    stampGateManifest(base, 'recallable-contract-fixed', 4);
+    const store = new PostgresVerbatimStore(base, pgPoolRecall!, 'pg-gate-recall', new FixedEmbedder());
+    await store.initialize();
+    const otherBase = tmp('rc-pg-verb-other-');
+    stampGateManifest(otherBase, 'recallable-contract-fixed', 4);
+    const other = new PostgresVerbatimStore(otherBase, pgPoolRecall!, 'pg-gate-recall-other', new FixedEmbedder());
+    await other.initialize();
+    const outbox = new SqliteOutboxStore(tmp('rc-pg-outbox-'));
+    const graph = graphStub();
+    const rows = new Map<string, string>();
+    const calls: string[][] = [];
+    const vector = {
+        getVectors: async (ids: string[]) => { calls.push(ids); return store.getVectors(ids); },
+    };
+    return {
+        label: 'postgres',
+        deps: () => ({ vector, graph, outbox, workspace: WS }),
+        async queue(id) { graph.nodes.add(id); rows.set(id, await queueRow(outbox, WS, id)); },
+        async embed(id) {
+            await store.store({ id: `lore:${id}`, text: `text ${id}`, metadata: { type: 'note' } });
+            const row = rows.get(id);
+            if (row) await outbox.markEntryStatus!(row, 'replicated');
+        },
+        async kill(id) { await outbox.markEntryStatus!(rows.get(id)!, 'dead'); },
+        probeCalls: () => calls,
+        async foreign(id) { await other.store({ id: `lore:${id}`, text: 'foreign', metadata: { type: 'note' } }); },
+        close() { outbox.close(); },
+    };
+}
+
 const engines: Array<[string, () => Promise<Harness>]> = [
     ['sqlite', sqliteHarness],
     ['arcade-fake', () => arcadeFakeHarness(150)],
 ];
+if (pgPoolRecall) engines.push(['postgres', postgresHarness]);
 
 for (const [name, make] of engines) {
     console.log(`\n${name}`);
@@ -368,6 +413,10 @@ await test('awaitRecallable sleeps on waitForRefresh (replicator progress) inste
     h.close();
 });
 
+if (pgPoolRecall) {
+    await cleanupGateWorkspaces(pgPoolRecall);
+    await closeGatePool(pgPoolRecall);
+}
 for (const d of dirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
 clearInterval(keepAlive);
 console.log(`\n${passed} passed, ${failed} failed`);

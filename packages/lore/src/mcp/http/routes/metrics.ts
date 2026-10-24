@@ -36,6 +36,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { LocalGraphRegistry } from '../../../engines/localGraphRegistry.js';
 import type { OutboxAggregateStats } from '../../../outbox/types.js';
 import type { LoadJobsStore } from '../../../storage/loadJobsStore.js';
+import type { LinkStats } from '../../../link/linkService.js';
 import { listWorkspaceNames } from '../../../config/workspaces.js';
 import { getOtelReadiness } from '../../../observability/otelHooks.js';
 import { VERSION } from '../../../version.js';
@@ -60,6 +61,8 @@ export interface MetricsDeps {
     embedQueue?: { depth?: () => number };
     /** Replicator tick counter. Optional; defaults to 0. */
     getReplicatorTicks?: () => number;
+    /** Link-on-arrival stats; null/absent when LORE_LINK_ON_ARRIVAL is off. Sync or async: an async provider refreshes the (cached) link-health snapshot first. */
+    linkStats?: () => LinkStats | null | Promise<LinkStats | null>;
 }
 
 interface CachedWorkspaceCounts {
@@ -199,6 +202,87 @@ export async function renderMetrics(deps: MetricsDeps): Promise<string> {
         lines.push('# HELP lore_outbox_lag_seconds_max Worst lagSeconds across workspaces');
         lines.push('# TYPE lore_outbox_lag_seconds_max gauge');
         lines.push(fmtLine('lore_outbox_lag_seconds_max', null, maxLag));
+    }
+
+    // ── link-on-arrival (flag-gated; absent when the flag is off) ──
+    if (!hideCounts && deps.linkStats) {
+        const ls = await deps.linkStats();
+        if (ls) {
+            lines.push('# HELP lore_link_lag_seconds Age of the oldest node whose vector is committed but not yet linked');
+            lines.push('# TYPE lore_link_lag_seconds gauge');
+            lines.push(fmtLine('lore_link_lag_seconds', null, ls.lagMs / 1000));
+            lines.push('# HELP lore_link_queue_nodes Link queue rows by state');
+            lines.push('# TYPE lore_link_queue_nodes gauge');
+            for (const state of ['ready', 'claimed', 'failed'] as const) {
+                lines.push(fmtLine('lore_link_queue_nodes', { state }, ls.queue[state]));
+            }
+            lines.push('# HELP lore_link_linked_total Nodes linked since the queue file was created');
+            lines.push('# TYPE lore_link_linked_total counter');
+            lines.push(fmtLine('lore_link_linked_total', null, ls.linkedTotal));
+            lines.push('# HELP lore_link_edges_written_total Inferred edges written by this process');
+            lines.push('# TYPE lore_link_edges_written_total counter');
+            lines.push(fmtLine('lore_link_edges_written_total', null, ls.edgesWrittenTotal));
+            lines.push('# HELP lore_link_refreshed_total Links re-stamped in place by refresh-on-change since this process started');
+            lines.push('# TYPE lore_link_refreshed_total counter');
+            lines.push(fmtLine('lore_link_refreshed_total', null, ls.refreshedTotal));
+            lines.push('# HELP lore_link_invalidations_total Links soft-invalidated (valid_to set) by refresh-on-change since this process started');
+            lines.push('# TYPE lore_link_invalidations_total counter');
+            lines.push(fmtLine('lore_link_invalidations_total', null, ls.invalidatedTotal));
+            if (ls.prune) {
+                lines.push('# HELP lore_link_prune_evicted_total Links soft-invalidated by the per-node cap prune, all time');
+                lines.push('# TYPE lore_link_prune_evicted_total counter');
+                lines.push(fmtLine('lore_link_prune_evicted_total', null, ls.prune.evictedTotal));
+                lines.push('# HELP lore_link_prune_dirty_workspaces Workspaces with link writes not yet checked against the cap');
+                lines.push('# TYPE lore_link_prune_dirty_workspaces gauge');
+                lines.push(fmtLine('lore_link_prune_dirty_workspaces', null, ls.prune.dirtyWorkspaces));
+            }
+            if (ls.health) {
+                lines.push('# HELP lore_link_edges Link-on-arrival edges across workspaces by state');
+                lines.push('# TYPE lore_link_edges gauge');
+                lines.push(fmtLine('lore_link_edges', { state: 'live' }, ls.health.live));
+                lines.push(fmtLine('lore_link_edges', { state: 'invalidated' }, ls.health.invalidated));
+                lines.push(fmtLine('lore_link_edges', { state: 'stale' }, ls.health.stale));
+                lines.push('# HELP lore_link_mean_strength Mean confidence score of live link edges');
+                lines.push('# TYPE lore_link_mean_strength gauge');
+                if (ls.health.meanStrength !== null) lines.push(fmtLine('lore_link_mean_strength', null, ls.health.meanStrength));
+                lines.push('# HELP lore_link_max_degree Highest live link degree of any node');
+                lines.push('# TYPE lore_link_max_degree gauge');
+                lines.push(fmtLine('lore_link_max_degree', null, ls.health.maxDegree));
+            }
+            if (ls.rebuild && ls.rebuild.runs.length > 0) {
+                lines.push('# HELP lore_link_rebuild_nodes Link rebuild progress per workspace: nodes walked (done) and to walk (total)');
+                lines.push('# TYPE lore_link_rebuild_nodes gauge');
+                lines.push('# HELP lore_link_rebuild_running 1 while a link rebuild is checkpointed as running for the workspace');
+                lines.push('# TYPE lore_link_rebuild_running gauge');
+                for (const r of ls.rebuild.runs) {
+                    lines.push(fmtLine('lore_link_rebuild_nodes', { workspace: r.workspace, state: 'done' }, r.done));
+                    lines.push(fmtLine('lore_link_rebuild_nodes', { workspace: r.workspace, state: 'total' }, r.total));
+                    lines.push(fmtLine('lore_link_rebuild_running', { workspace: r.workspace }, r.status === 'running' ? 1 : 0));
+                }
+            }
+            if (ls.recentLagMs) {
+                lines.push('# HELP lore_link_recent_lag_seconds Commit-to-linked latency over the last linked nodes');
+                lines.push('# TYPE lore_link_recent_lag_seconds gauge');
+                lines.push(fmtLine('lore_link_recent_lag_seconds', { quantile: '0.5' }, ls.recentLagMs.p50 / 1000));
+                lines.push(fmtLine('lore_link_recent_lag_seconds', { quantile: '0.95' }, ls.recentLagMs.p95 / 1000));
+            }
+            if (ls.rebuild) {
+                lines.push('# HELP lore_link_rebuild_active Link rebuilds running now');
+                lines.push('# TYPE lore_link_rebuild_active gauge');
+                lines.push(fmtLine('lore_link_rebuild_active', null, ls.rebuild.active));
+                lines.push('# HELP lore_link_rebuild_nodes Nodes in the latest link rebuild of a workspace (total / done)');
+                lines.push('# TYPE lore_link_rebuild_nodes gauge');
+                lines.push('# HELP lore_link_rebuild_edges Link edges by outcome in the latest rebuild of a workspace');
+                lines.push('# TYPE lore_link_rebuild_edges gauge');
+                for (const r of ls.rebuild.runs) {
+                    lines.push(fmtLine('lore_link_rebuild_nodes', { workspace: r.workspace, kind: 'total' }, r.total));
+                    lines.push(fmtLine('lore_link_rebuild_nodes', { workspace: r.workspace, kind: 'done' }, r.done));
+                    for (const result of ['inserted', 'refreshed', 'invalidated', 'unchanged'] as const) {
+                        lines.push(fmtLine('lore_link_rebuild_edges', { workspace: r.workspace, result }, r[result]));
+                    }
+                }
+            }
+        }
     }
 
     // ── workspace counts ───────────────────────────────────────

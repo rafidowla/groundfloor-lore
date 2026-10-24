@@ -8,6 +8,7 @@
 
 import { normalizeTag } from '../normalizeTags.js';
 import type { BulkListPage, BulkListQuery, EdgeQuery, GraphStats, LoreEdge } from '../../providers/types.js';
+import { edgeProvenanceFromRow, type EdgeProvenanceRow } from '../../providers/edgeProvenance.js';
 import { LoreGraphError } from '../loreGraphError.js';
 import { clampLimit } from '../topologyOverviewFold.js';
 import { assertIdent } from '../whereClause.js';
@@ -17,6 +18,22 @@ import { fromSqliteNodeRow } from './sqliteGraphRow.js';
 
 function sqliteError(message: string, operation: string, error: unknown): LoreGraphError {
     return new LoreGraphError(message, operation, error);
+}
+
+type EdgeRow = EdgeProvenanceRow & {
+    source_id: string; target_id: string; relation: string; confidence: string; confidenceScore: number;
+};
+
+function edgeFromRow(row: EdgeRow, withProvenance: boolean): LoreEdge {
+    const edge: LoreEdge = {
+        sourceId: row.source_id,
+        targetId: row.target_id,
+        relation: row.relation,
+        confidence: (row.confidence as LoreEdge['confidence']) ?? 'extracted',
+        confidenceScore: typeof row.confidenceScore === 'number' ? row.confidenceScore : 1.0,
+    };
+    if (withProvenance) edge.provenance = edgeProvenanceFromRow(row);
+    return edge;
 }
 
 /**
@@ -35,21 +52,16 @@ export async function queryEdges(db: SqliteDb, q: EdgeQuery): Promise<LoreEdge[]
     if (q.source) { filters.push('source_id = ?'); params.push(q.source); }
     if (q.target) { filters.push('target_id = ?'); params.push(q.target); }
     if (q.relation) { filters.push('relation = ?'); params.push(q.relation); }
+    // Default reads see live edges only; soft-invalidated rows are opt-in (design D3).
+    if (!q.includeInvalidated) filters.push('valid_to IS NULL');
     const where = filters.length > 0 ? ` WHERE ${filters.join(' AND ')}` : '';
+    const provCols = q.includeProvenance ? ', origin, policy_version, model_fingerprint, created_at, valid_to' : '';
     try {
         const rows = db.prepare(
-            `SELECT source_id, target_id, relation, confidence, confidenceScore FROM edges${where}`
+            `SELECT source_id, target_id, relation, confidence, confidenceScore${provCols} FROM edges${where}`
             + ' ORDER BY source_id, target_id, relation LIMIT ? OFFSET ?',
-        ).all(...params, q.limit, q.offset) as Array<{
-            source_id: string; target_id: string; relation: string; confidence: string; confidenceScore: number;
-        }>;
-        return rows.map((row) => ({
-            sourceId: row.source_id,
-            targetId: row.target_id,
-            relation: row.relation,
-            confidence: (row.confidence as LoreEdge['confidence']) ?? 'extracted',
-            confidenceScore: typeof row.confidenceScore === 'number' ? row.confidenceScore : 1.0,
-        }));
+        ).all(...params, q.limit, q.offset) as Array<EdgeRow>;
+        return rows.map((row) => edgeFromRow(row, q.includeProvenance === true));
     } catch (error) {
         throw sqliteError('Failed to query edges', 'queryEdges', error);
     }
@@ -62,17 +74,18 @@ export async function queryEdges(db: SqliteDb, q: EdgeQuery): Promise<LoreEdge[]
  * the Surreal twin of this read must not scan the table, so both engines
  * expose the keyed form).
  */
-export async function getEdge(db: SqliteDb, sourceId: string, targetId: string, relation: string): Promise<LoreEdge | null> {
+export async function getEdge(
+    db: SqliteDb, sourceId: string, targetId: string, relation: string,
+    opts: Pick<EdgeQuery, 'includeProvenance' | 'includeInvalidated'> = {},
+): Promise<LoreEdge | null> {
     try {
+        const provCols = opts.includeProvenance ? ', origin, policy_version, model_fingerprint, created_at, valid_to' : '';
         const row = db.prepare(
-            'SELECT confidence, confidenceScore FROM edges WHERE source_id = ? AND target_id = ? AND relation = ?',
-        ).get(sourceId, targetId, relation) as { confidence: string; confidenceScore: number } | undefined;
+            `SELECT source_id, target_id, relation, confidence, confidenceScore${provCols} FROM edges`
+            + ` WHERE source_id = ? AND target_id = ? AND relation = ?${opts.includeInvalidated ? '' : ' AND valid_to IS NULL'}`,
+        ).get(sourceId, targetId, relation) as EdgeRow | undefined;
         if (!row) return null;
-        return {
-            sourceId, targetId, relation,
-            confidence: (row.confidence as LoreEdge['confidence']) ?? 'extracted',
-            confidenceScore: typeof row.confidenceScore === 'number' ? row.confidenceScore : 1.0,
-        };
+        return edgeFromRow(row, opts.includeProvenance === true);
     } catch (error) {
         throw sqliteError('Failed to read edge', 'getEdge', error);
     }
@@ -97,9 +110,9 @@ export async function getStats(db: SqliteDb, projectFilter?: string): Promise<Gr
                 `SELECT COUNT(*) AS c FROM edges e
                  JOIN nodes ns ON ns.id = e.source_id
                  JOIN nodes nt ON nt.id = e.target_id
-                 WHERE ns.project = ? AND nt.project = ?`,
+                 WHERE e.valid_to IS NULL AND ns.project = ? AND nt.project = ?`,
             ).get(projectFilter, projectFilter) as { c: number }
-            : db.prepare('SELECT COUNT(*) AS c FROM edges').get() as { c: number };
+            : db.prepare('SELECT COUNT(*) AS c FROM edges WHERE valid_to IS NULL').get() as { c: number };
         return { nodeCount, edgeCount: Number(edgeRow?.c ?? 0), typeBreakdown };
     } catch (error) {
         throw sqliteError('Failed to compute graph stats', 'getStats', error);
@@ -146,7 +159,7 @@ export async function getTopology(
 
         const visible = new Set(nodes.map((n) => String(n.id)));
         const edgeRows = db.prepare(
-            'SELECT source_id, target_id, relation, confidence, confidenceScore FROM edges'
+            'SELECT source_id, target_id, relation, confidence, confidenceScore FROM edges WHERE valid_to IS NULL'
             + ' ORDER BY source_id, target_id, relation LIMIT ?',
         ).all(eLimit) as Array<{ source_id: string; target_id: string; relation: string; confidence: string; confidenceScore: number }>;
         const edges: Array<Record<string, unknown>> = [];
@@ -263,5 +276,62 @@ export async function bulkListProjected(
         return { rows: page, nextCursor };
     } catch (error) {
         throw sqliteError('Failed to page nodes', 'bulkListProjected', error);
+    }
+}
+
+/**
+ * Smallest string greater than every string that starts with `prefix`, or null when none can be computed (empty
+ * prefix, or the last code point cannot be incremented). `nodes.id` is a BINARY-collated TEXT PRIMARY KEY, so
+ * `id >= prefix AND id < upper` is a range SEARCH on the primary-key index. (`LIKE` is case-insensitive in
+ * SQLite and cannot use that index; `GLOB` can, but needs its own metacharacter escaping.)
+ */
+function prefixUpperBound(prefix: string): string | null {
+    const cps = Array.from(prefix);
+    const last = cps.pop();
+    if (last === undefined) return null;
+    const next = last.codePointAt(0)! + 1;
+    if (next > 0x10ffff || (next >= 0xd800 && next <= 0xdfff)) return null;
+    return cps.join('') + String.fromCodePoint(next);
+}
+
+/**
+ * The prefix query, exposed so a test can run EXPLAIN QUERY PLAN on the exact statement. `select` is the already
+ * validated column list. Two shapes: a closed range when an upper bound exists, otherwise an open range with an
+ * exact `substr` guard. `ORDER BY +updatedAt` (unary plus) stops the planner choosing the updatedAt index to
+ * avoid a sort, which would turn the lookup back into a full index scan; the matching set is small to sort.
+ */
+export function sqliteIdPrefixSql(
+    select: readonly string[],
+    prefix: string,
+): { sql: string; params: unknown[] } {
+    const upper = prefixUpperBound(prefix);
+    const head = `SELECT ${select.join(', ')} FROM nodes WHERE `;
+    const order = ' ORDER BY +updatedAt DESC, id ASC';
+    return upper !== null
+        ? { sql: `${head}id >= ? AND id < ?${order}`, params: [prefix, upper] }
+        : { sql: `${head}id >= ? AND substr(id, 1, ?) = ?${order}`, params: [prefix, Array.from(prefix).length, prefix] };
+}
+
+/**
+ * listNodesByIdPrefix — rows whose id starts with `prefix` (exact, case-sensitive, no wildcard characters),
+ * requested columns only, ordered like bulkListProjected. Answered from the primary-key index, so the cost is the
+ * size of the matching set, not the corpus.
+ */
+export function listNodesByIdPrefix(
+    db: SqliteDb,
+    prefix: string,
+    columns: readonly string[],
+): Array<Record<string, unknown>> {
+    const wanted = Array.from(new Set<string>(['id', 'updatedAt', ...columns]));
+    for (const c of wanted) assertIdent(c);
+    try {
+        const have = nodeColumns(db);
+        const q = sqliteIdPrefixSql(wanted.map((c) => (have.has(c) ? c : `NULL AS ${c}`)), prefix);
+        const rows = db.prepare(q.sql).all(...q.params) as Array<Record<string, unknown>>;
+        return rows.map((row) => (
+            wanted.includes('tags') || wanted.includes('security_scopes') ? fromSqliteNodeRow(row) : row
+        ));
+    } catch (error) {
+        throw sqliteError('Failed to list nodes by id prefix', 'listNodesByIdPrefix', error);
     }
 }

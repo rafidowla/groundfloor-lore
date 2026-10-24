@@ -20,6 +20,7 @@ import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import type { DataplaneVectorStore } from '../engines/dataplaneVectorStore.js';
 import { computeContentHash } from '../engines/contentHash.js';
 import type { LoreGraphHandle } from '../storage/loreStorageClient.js';
+import type { LinkSignaler } from '../link/linkTypes.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
 // classes silently excluded SurrealGraph (see engines/htmlExport.ts). Need
@@ -49,6 +50,10 @@ export function wireEmbedQueue(input: {
      * mode, where the consistency-sweep recovery never runs.
      */
     onOverflow?: (dropped: { nodeId: string; text: string; workspace?: string }) => void;
+    /** Link-on-arrival: the "vector committed" signal for a job with no explicit workspace goes to
+     *  `defaultWorkspace`. Both are lazy because the link service is built after this queue. */
+    getLinkSignaler?: () => LinkSignaler | null;
+    defaultWorkspace?: () => string | undefined;
 }): EmbedQueue {
     const queue = new EmbedQueue({
         concurrency: input.concurrency ?? 4,
@@ -93,6 +98,9 @@ export function wireEmbedQueue(input: {
                 contentHash: computeContentHash(text),
             },
         });
+        // Link-on-arrival: the vector is committed.
+        const linkWs = workspace || input.defaultWorkspace?.();
+        if (linkWs) input.getLinkSignaler?.()?.signal(linkWs, [{ id: nodeId, ecosystem: node.ecosystem ?? '' }]);
     });
     return queue;
 }

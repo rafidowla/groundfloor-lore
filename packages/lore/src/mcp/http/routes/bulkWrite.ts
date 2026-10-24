@@ -80,6 +80,7 @@ import type { WorkspaceVerbatimResolver } from '../../../outbox/workspaceVerbati
 import type { VerbatimStoreApi } from '../../../engines/verbatimStoreApi.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { LoreNode } from '../../../providers/types.js';
+import { applyLinkIntent, signalCommitted } from '../../../link/signalCommitted.js';
 
 // Widened when the local graph engine changed: naming CONCRETE classes excluded SurrealGraph.
 type LoreGraph = LoreGraphHandle;
@@ -352,6 +353,7 @@ async function handleBulkNodes(
     // D5 — batch-level `force` (request body `force: true`) applies to every
     // item that doesn't set its own `force`; an item-level `force` wins.
     const batchForce = (parsed as { force?: unknown }).force === true;
+    const batchAutolink = typeof (parsed as { autolink?: unknown }).autolink === 'boolean' ? (parsed as { autolink: boolean }).autolink : undefined; // link-on-arrival
     // Resolved once for the whole batch (one workspace per bulk request) —
     // same resolver storeNode.ts/postNode.ts/the embedded paths use.
     // Row-scope deps for the workspace this batch writes to; `supersedesVisible` is
@@ -489,6 +491,7 @@ async function handleBulkNodes(
         const itemForce = rawRec.force === true || batchForce;
         delete rawRec.supersedes;
         delete rawRec.force;
+        const itemAutolink = typeof rawRec.autolink === 'boolean' ? rawRec.autolink : batchAutolink; delete rawRec.autolink;
         // D5 round 4 (#4) — same shared all-or-nothing pre-write validator
         // (exists / not archived / no cycle) the single-write chokepoint
         // (nodeService.ts) uses, instead of this route's own existence-only
@@ -519,6 +522,7 @@ async function handleBulkNodes(
             itemSupersessionWarning = verdict.supersessionWarning;
         }
         const embedMode = parseBulkEmbedMode(raw.embed, callEmbedMode);
+        await applyLinkIntent(deps.store.linkService, requestedWorkspace, [raw.id as string], itemAutolink); // explicit autolink:false => not queued
         validSpecs.push({ idx: i, raw, embedMode, questions: itemQuestions, supersedes: itemSupersedes, supersessionWarning: itemSupersessionWarning, ifAbsent: ifAbsentRaw === true, ...parsedConditions.conditions });
     }
     let succeeded = 0;
@@ -703,6 +707,7 @@ async function handleBulkNodes(
                                     security_scopes: priors.get(raw.id as string)?.security_scopes,
                                 }),
                             });
+                            signalCommitted(deps.store.linkService, requestedWorkspace, [{ id: `lore:${raw.id as string}`, ecosystem: rec.ecosystem as string | undefined }]); // link-on-arrival: inline vector committed
                         } catch (err) {
                             results[idx] = { ok: false, id: raw.id as string, error: `verbatim seed failed: ${redactError(err)}` };
                             succeeded--;
@@ -777,6 +782,7 @@ async function handleBulkNodes(
                 for (let k = 0; k < chunk.length; k++) {
                     const { idx, raw, embedMode, questions, supersessionWarning } = chunk[k]!;
                     let r: BulkResult & { id?: string } = await upsertOne(target, raw, deps, embedMode, chunk[k]!.ifAbsent, stamps.get(idx), chunk[k]);
+                    if (r.ok && embedMode === 'inline') signalCommitted(deps.store.linkService, requestedWorkspace, [{ id: `lore:${raw.id as string}`, ecosystem: (raw as { ecosystem?: string }).ecosystem }]);
                     if (r.ok) {
                         // The row was recorded with a PREDICTED revision; make it the one this write landed (see reconcileOutboxRevision).
                         if (chunkEntries) chunkEntries[k] = await reconcileOutboxRevision({ store: deps.outboxStore, entry: chunkEntries[k], stamp: stamps.get(idx), landed: landedForRow(chunk[k], r.revision), workspace: requestedWorkspace!, id: raw.id as string }) as OutboxEntry;

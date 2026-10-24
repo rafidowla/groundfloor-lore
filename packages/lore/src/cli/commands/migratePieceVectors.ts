@@ -111,7 +111,7 @@ export async function migratePieceVectorsCommand(args: string[]): Promise<void> 
     console.log('');
     console.log('Piece-vector migration');
     if (dataDir !== undefined) console.log(`  Data dir: ${basePath}`);
-    console.log(`  Engine:   ${engine === 'sqlite' ? 'SQLite' : 'LanceDB'}`);
+    console.log(`  Engine:   ${engine === 'sqlite' ? 'SQLite' : engine === 'postgres' ? 'Postgres' : 'LanceDB'}`);
     console.log(`  Provider: ${provider.constructor.name} (${provider.modelId})`);
     console.log(`  Mode:     ${drop ? 'DROP (remove index + sidecar, disable)' : dryRun ? 'DRY-RUN (count only, writes nothing)' : 'BUILD (idempotent — no-op if already current)'}`);
     if (force && !drop) console.log('  Force:    YES (rebuild even if already valid+complete)');

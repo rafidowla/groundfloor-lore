@@ -503,6 +503,22 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         return applyActorScopeFilter(mapped, opts?.actorScopes ?? getCurrentActorScopes());
     }
 
+    /**
+     * Link-on-arrival: many stored-vector queries in one call (exact brute force,
+     * fine at local scale). Same filtering / scoping / tie-break as `searchByVector`;
+     * the vector cache is built once and shared by every query in the batch.
+     */
+    async searchByVectors(
+        queries: Array<{ key: string; vector: number[] }>,
+        opts: { topK: number; filter?: VerbatimQueryFilter; actorScopes?: ReadonlyArray<string> },
+    ): Promise<Map<string, VerbatimSearchResult[]>> {
+        const out = new Map<string, VerbatimSearchResult[]>();
+        for (const q of queries) {
+            out.set(q.key, await this.searchByVector(q.vector, { topK: opts.topK, filter: opts.filter, actorScopes: opts.actorScopes }));
+        }
+        return out;
+    }
+
     async bm25Search(
         query: string,
         limit: number = 10,

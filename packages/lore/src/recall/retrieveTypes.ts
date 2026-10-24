@@ -397,4 +397,6 @@ export interface RetrieveContext {
      * future `shared` model-server backend).
      */
     rerankBackend?: RerankBackend;
+    /** Per-instance link ordering (`CreateLoreOptions.recallLinkOrdering`). Undefined => `LORE_RECALL_LINK_ORDERING` decides. */
+    linkOrdering?: boolean;
 }

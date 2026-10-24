@@ -26,9 +26,10 @@
  */
 
 import { loadWorkspaces } from '../config/workspaces.js';
+import { newWorkspaceGraphEngineFromEnv } from '../config/newWorkspaceEngineDefaults.js';
 
 /** The engines that can back the graph substrate of a local workspace. */
-export type GraphEngineKind = 'kuzu' | 'surreal' | 'sqlite';
+export type GraphEngineKind = 'kuzu' | 'surreal' | 'sqlite' | 'postgres';
 
 /**
  * The default, and what an absent selector means — for a workspace that has
@@ -138,6 +139,7 @@ export function resolveWorkspaceGraphEngine(workspace: string, home?: string): G
         // sat untouched and invisible. Same reasoning covers 'sqlite' now.
         if (entry?.graphEngine === 'surreal') return 'surreal';
         if (entry?.graphEngine === 'sqlite') return 'sqlite';
+        if (entry?.graphEngine === 'postgres') return 'postgres';
         if (entry?.graphEngine === 'kuzu') return 'kuzu';
         return DEFAULT_GRAPH_ENGINE;
     } catch {
@@ -158,11 +160,12 @@ export function resolveWorkspaceGraphEngine(workspace: string, home?: string): G
  * indexed, leak-free engine). `LORE_DEFAULT_GRAPH_ENGINE=surreal` is the
  * documented operator escape hatch (docs/CONFIGURATION.md,
  * security/envScrub.ts allowlist) for a host that isn't ready to switch —
- * any other value, or an absent/unset var, is 'sqlite'. Cloud mode never
+ * `postgres` selects the Postgres engine (requires LORE_PG_URL at open). Any
+ * other value, or an absent/unset var, is 'sqlite'. Cloud mode never
  * calls this (D-022: SurrealGraph is local/embedded only, and SqliteGraph
  * has no cloud counterpart either — this function is local-workspace-only).
  */
-export function resolveNewWorkspaceGraphEngine(): 'sqlite' | 'surreal' {
-    return process.env['LORE_DEFAULT_GRAPH_ENGINE'] === 'surreal' ? 'surreal' : 'sqlite';
+export function resolveNewWorkspaceGraphEngine(): 'sqlite' | 'surreal' | 'postgres' {
+    return newWorkspaceGraphEngineFromEnv();
 }
 

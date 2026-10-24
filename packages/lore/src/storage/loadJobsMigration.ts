@@ -80,6 +80,11 @@ function applyZ3AdditiveColumns(db: DatabaseType): void {
     if (!names.has('checkpoint_at')) {
         db.exec(`ALTER TABLE load_jobs ADD COLUMN checkpoint_at TEXT`);
     }
+    // Call-level `autolink` (link-on-arrival): 1 = link (the default and what every pre-existing job means),
+    // 0 = the caller passed `autolink=false` on /api/load, so EVERY row the job writes is opted out of linking.
+    if (!names.has('autolink')) {
+        db.exec(`ALTER TABLE load_jobs ADD COLUMN autolink INTEGER NOT NULL DEFAULT 1`);
+    }
 }
 
 /**

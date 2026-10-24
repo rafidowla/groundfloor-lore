@@ -77,13 +77,17 @@ function* walkSrc(root: string): IterableIterator<string> {
  *  GROUNDFLOOR_. Returns the set of NAMEs found. */
 function envReadsIn(text: string): Set<string> {
     const found = new Set<string>();
-    // process.env.LORE_FOO
-    const dot = /process\.env\.(LORE_[A-Z0-9_]+|GROUNDFLOOR_[A-Z0-9_]+)\b/g;
-    // process.env['LORE_FOO']
-    const sq = /process\.env\[\s*'(LORE_[A-Z0-9_]+|GROUNDFLOOR_[A-Z0-9_]+)'\s*\]/g;
-    // process.env["LORE_FOO"]
-    const dq = /process\.env\[\s*"(LORE_[A-Z0-9_]+|GROUNDFLOOR_[A-Z0-9_]+)"\s*\]/g;
-    for (const re of [dot, sq, dq]) {
+    // process.env.LORE_FOO, and env.LORE_FOO / env?.LORE_FOO where `env` is an injected
+    // ProcessEnv (default process.env). The injected form slipped past this guard once:
+    // the LORE_LINK_* settings were read as `env.LORE_LINK_K` and silently scrubbed.
+    const dot = /(?:process\.env|\benv)\??\.(LORE_[A-Z0-9_]+|GROUNDFLOOR_[A-Z0-9_]+)\b/g;
+    // process.env['LORE_FOO'] / env['LORE_FOO']
+    const sq = /(?:process\.env|\benv)\[\s*'(LORE_[A-Z0-9_]+|GROUNDFLOOR_[A-Z0-9_]+)'\s*\]/g;
+    // process.env["LORE_FOO"] / env["LORE_FOO"]
+    const dq = /(?:process\.env|\benv)\[\s*"(LORE_[A-Z0-9_]+|GROUNDFLOOR_[A-Z0-9_]+)"\s*\]/g;
+    // `export const X_ENV = 'LORE_FOO'` — a flag name held in a constant and read as env[X_ENV].
+    const flagConst = /\bconst\s+[A-Z0-9_]*_ENV\s*=\s*'(LORE_[A-Z0-9_]+)'/g;
+    for (const re of [dot, sq, dq, flagConst]) {
         let m: RegExpExecArray | null;
         while ((m = re.exec(text)) !== null) found.add(m[1]);
     }

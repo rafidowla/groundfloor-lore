@@ -30,10 +30,12 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 
 import { SessionCacheManager } from './sessionCacheManager.js';
-import { createTableStorage } from './tableStorageFactory.js';
+import { createWorkspaceTableStorage } from './tableStorageFactory.js';
 import type { ITableStorage } from '../contracts/tables.js';
 import { SurrealGraph } from './surrealGraph.js';
 import { SqliteGraph } from './sqliteGraph.js';
+import { PostgresGraph } from './postgres/postgresGraph.js';
+import { sharedPostgresPool } from './postgres/postgresPoolOwner.js';
 import { disposeAccessTracker } from './accessTracker.js';
 import type { WorkspaceGraph } from './openWorkspaceGraph.js';
 import {
@@ -444,8 +446,9 @@ export class LocalGraphRegistry {
         const open = async (): Promise<WorkspaceGraph> => {
             const fresh = this.cache.get(workspace);
             if (fresh?.surreal) return fresh.surreal;
-            const surreal: WorkspaceGraph = engineKind === 'sqlite'
-                ? new SqliteGraph(entry.path, { workspaceId: workspace })
+            const surreal: WorkspaceGraph =
+                engineKind === 'sqlite' ? new SqliteGraph(entry.path, { workspaceId: workspace })
+                : engineKind === 'postgres' ? new PostgresGraph(workspace, sharedPostgresPool())
                 : new SurrealGraph(entry.path, { workspaceId: workspace });
             await surreal.initialize();
             // Re-read: the entry may have been replaced while we awaited.
@@ -456,7 +459,7 @@ export class LocalGraphRegistry {
                 await surreal.close().catch(() => undefined);
                 throw new Error(
                     `[LocalGraphRegistry] workspace '${workspace}' moved while opening its `
-                    + `${engineKind === 'sqlite' ? 'SQLite' : 'SurrealDB'} graph — retry the operation`,
+                    + `${engineKind === 'sqlite' ? 'SQLite' : engineKind === 'postgres' ? 'Postgres' : 'SurrealDB'} graph — retry the operation`,
                 );
             }
             target.surreal = surreal;
@@ -540,14 +543,15 @@ export class LocalGraphRegistry {
         // Recognising the concrete class is correct here and nowhere else:
         // this is the one seam that accepts an already-constructed engine
         // from outside and has to file it into the engine-specific slot.
-        // SurrealGraph and SqliteGraph are the only two local engines left.
-        if (!(graph instanceof SurrealGraph) && !(graph instanceof SqliteGraph)) {
+        // SurrealGraph, SqliteGraph and PostgresGraph are the three local
+        // engines.
+        if (!(graph instanceof SurrealGraph) && !(graph instanceof SqliteGraph) && !(graph instanceof PostgresGraph)) {
             // Loudly, not silently: a no-op prime leaves the registry to open
             // its OWN handle on the same directory, which is a lock fight on
             // surrealkv (or a redundant SQLite open).
             throw new Error(
                 `[LocalGraphRegistry] prime('${workspace}'): unrecognised graph implementation `
-                + `'${graph.constructor?.name ?? 'anonymous'}'. Only SurrealGraph/SqliteGraph `
+                + `'${graph.constructor?.name ?? 'anonymous'}'. Only SurrealGraph/SqliteGraph/PostgresGraph `
                 + 'can be primed — the cache files it in the engine-specific slot.',
             );
         }
@@ -606,7 +610,11 @@ export class LocalGraphRegistry {
         // A SQLite file keyed on the workspace PATH, not a graph substrate —
         // only needs the entry (gate + path), never an engine open.
         const entry = await this.ensureEntry(workspace, opts);
-        entry.tableStorage ??= createTableStorage(entry.path);
+        if (!entry.tableStorage) {
+            // Backend choice (SQLite file vs the shared Postgres database) is made in one place.
+            const made = await createWorkspaceTableStorage(workspace, entry.path, this.home);
+            entry.tableStorage ??= made;
+        }
         return entry.tableStorage;
     }
 

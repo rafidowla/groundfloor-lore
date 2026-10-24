@@ -28,11 +28,11 @@ async function fetchDirectedFrontier(
         const chunk = frontier.slice(i, i + CHUNK_SIZE);
         const placeholders = chunk.map(() => '?').join(', ');
         const outRows = db.prepare(
-            `SELECT source_id AS from_id, target_id AS to_id, relation FROM edges WHERE source_id IN (${placeholders}) ORDER BY source_id, target_id, relation`,
+            `SELECT source_id AS from_id, target_id AS to_id, relation FROM edges WHERE valid_to IS NULL AND source_id IN (${placeholders}) ORDER BY source_id, target_id, relation`,
         ).all(...chunk) as Array<{ from_id: string; to_id: string; relation: string }>;
         for (const r of outRows) merged.get(r.from_id)!.push({ to: r.to_id, relation: r.relation, direction: 'out' });
         const inRows = db.prepare(
-            `SELECT target_id AS from_id, source_id AS to_id, relation FROM edges WHERE target_id IN (${placeholders}) ORDER BY target_id, source_id, relation`,
+            `SELECT target_id AS from_id, source_id AS to_id, relation FROM edges WHERE valid_to IS NULL AND target_id IN (${placeholders}) ORDER BY target_id, source_id, relation`,
         ).all(...chunk) as Array<{ from_id: string; to_id: string; relation: string }>;
         for (const r of inRows) merged.get(r.from_id)!.push({ to: r.to_id, relation: r.relation, direction: 'in' });
     }

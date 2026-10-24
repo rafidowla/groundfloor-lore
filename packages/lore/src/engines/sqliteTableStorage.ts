@@ -35,6 +35,7 @@ import * as path from 'node:path';
 import type { Database as DatabaseType } from 'better-sqlite3';
 import Database from 'better-sqlite3';
 import { buildSqliteWhere, quoteSqliteIdent as quoteIdent } from './whereClause.js';
+import { parseTableBoolean } from './tableBoolean.js';
 import type { FilterNode, FindOptions } from './collectionStorage.js';
 import {
     deleteSqliteTableRows,
@@ -86,54 +87,9 @@ function pickPrimary(cols: ColumnDecl[]): ColumnDecl {
     return pks[0];
 }
 
-/** Case-insensitive string forms accepted for boolean columns. */
-const BOOLEAN_TRUE_STRINGS: Record<string, true> = {
-    true: true, '1': true, yes: true, y: true, on: true,
-};
-const BOOLEAN_FALSE_STRINGS: Record<string, true> = {
-    false: true, '0': true, no: true, n: true, off: true,
-};
-
-/**
- * Parse a boolean column value into SQLite's 0/1 integer form. Real booleans
- * pass through; numbers coerce (0 → false, non-zero → true); strings match
- * the canonical sets above case-insensitively.
- *
- * Audit 5.5 (2026-08-17): the previous implementation used plain JS
- * truthiness (`v ? 1 : 0`), so EVERY non-empty string — 'false', '0', 'no' —
- * was stored as TRUE, and the same wrong coercion was applied to filter
- * values, so `query({eq:{active:'false'}})` returned the TRUE rows.
- *
- * An unparseable value THROWS rather than being stored. Rationale: unlike
- * integer/float (where SQLite affinity preserves a verbatim string) there is
- * no lossless "verbatim" representation for a boolean column — the value
- * must become 0 or 1 — so silently guessing corrupts the data with no
- * signal (exactly the tabularImport.ts contract says must not happen),
- * while throwing surfaces the bad row to the caller.
- */
+/** Parse a boolean column value into SQLite's 0/1 integer form (parsing is shared: see tableBoolean.ts). */
 function encodeBoolean(v: unknown): number {
-    if (typeof v === 'boolean') return v ? 1 : 0;
-    if (typeof v === 'number') {
-        if (Number.isNaN(v)) {
-            throw new Error('SqliteTableStorage: cannot store NaN in a boolean column');
-        }
-        return v === 0 ? 0 : 1;
-    }
-    if (typeof v === 'string') {
-        const s = v.trim().toLowerCase();
-        // Object.hasOwn, not a bare lookup: a plain Record lookup would treat
-        // prototype keys ('constructor' etc.) as TRUE.
-        if (Object.hasOwn(BOOLEAN_TRUE_STRINGS, s)) return 1;
-        if (Object.hasOwn(BOOLEAN_FALSE_STRINGS, s)) return 0;
-        throw new Error(
-            `SqliteTableStorage: unparseable boolean value ${JSON.stringify(v)} ` +
-            `(expected a boolean, a number, or one of ` +
-            `${[...Object.keys(BOOLEAN_TRUE_STRINGS), ...Object.keys(BOOLEAN_FALSE_STRINGS)].join('/')})`,
-        );
-    }
-    throw new Error(
-        `SqliteTableStorage: unparseable boolean value of type ${typeof v}`,
-    );
+    return parseTableBoolean(v, 'SqliteTableStorage') ? 1 : 0;
 }
 
 /** Encode a value for SQLite. Booleans → 0/1 (parsed — see encodeBoolean),

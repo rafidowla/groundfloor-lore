@@ -60,6 +60,15 @@ const FORBIDDEN_CLOUD_DRIVERS = [
     'redis',               // Redis (legacy)
 ];
 
+/**
+ * D-017 amendment (Rafi, 2026-10-23): Postgres is Lore's own server engine
+ * (a peer of SQLite, behind the same engine-neutral graph/vector contracts),
+ * not a cloud data path that bypasses Dataplane. ONLY the `pg` driver, and
+ * ONLY inside the engine's own directory, is exempt. Every other forbidden
+ * driver, and `pg` anywhere else, still fails.
+ */
+const D017_PG_ENGINE_DIR = 'packages/lore/src/engines/postgres/';
+
 function walk(dir, out = []) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
         const abs = path.join(dir, entry.name);
@@ -91,6 +100,7 @@ function scanAll() {
                 ? spec.split('/').slice(0, 2).join('/')
                 : spec.split('/')[0];
             if (FORBIDDEN_CLOUD_DRIVERS.includes(firstSeg)) {
+                if (firstSeg === 'pg' && relPath.startsWith(D017_PG_ENGINE_DIR)) continue;
                 violations.push({ rule: 'no-direct-cloud-driver', file: relPath, token: firstSeg });
             }
         }

@@ -55,14 +55,15 @@ export interface RestoreSpec {
      * (tests, ad-hoc recovery) where there is no registry to consult; absent
      * simply skips the mismatch check rather than inventing an answer.
      */
-    expectedEngine?: 'kuzu' | 'surreal' | 'sqlite';
+    expectedEngine?: 'kuzu' | 'surreal' | 'sqlite' | 'postgres';
     /**
      * The VECTOR engine the DESTINATION workspace is registered as (3.21
      * step 2 part 2) — same contract as `expectedEngine`, for
      * `WorkspaceEntry.vectorEngine` instead of `graphEngine`. Optional for
-     * the same reason.
+     * the same reason. `'postgres'` is refused loudly below: a file archive
+     * cannot rebuild a Postgres-backed store.
      */
-    expectedVectorEngine?: 'lance' | 'sqlite';
+    expectedVectorEngine?: 'lance' | 'sqlite' | 'postgres';
     /**
      * Restore an archive whose manifest says its source graph was NEVER
      * confirmed readable at backup time (`graphNodeCountReason: 'unreadable'`
@@ -152,6 +153,28 @@ export async function restoreWorkspace(spec: RestoreSpec): Promise<RestoreResult
     }
     if (!fs.existsSync(spec.workspaceDir)) {
         throw new Error(`workspace dir not found: ${spec.workspaceDir}`);
+    }
+    // postgres engine — a file archive CANNOT rebuild a postgres-backed
+    // store (its rows live in the shared database, not under .lore/), and an
+    // archive's manifest records 'none' for stores it does not contain, so
+    // the engine-mismatch guard below would happily "restore" an empty
+    // directory over a workspace whose real data is in Postgres and report
+    // success. Refuse up front, naming the engine.
+    if (spec.expectedEngine === 'postgres') {
+        throw new Error(
+            `refusing to restore: destination workspace is registered as graphEngine 'postgres' — a file-level `
+            + 'archive cannot rebuild a Postgres-backed graph (its rows live in the shared database, not under '
+            + '.lore/). Restore from a logical bundle instead: `lore restore <lore-pgbackup-*.ndjson.gz>` '
+            + '(written by `lore backup` for postgres workspaces).',
+        );
+    }
+    if (spec.expectedVectorEngine === 'postgres') {
+        throw new Error(
+            `refusing to restore: destination workspace is registered as vectorEngine 'postgres' — a file-level `
+            + 'archive cannot rebuild a Postgres-backed verbatim store (its rows live in the shared database, not '
+            + 'under .lore/). Restore from a logical bundle instead: `lore restore <lore-pgbackup-*.ndjson.gz>` '
+            + '(written by `lore backup` for postgres workspaces).',
+        );
     }
 
     // Stage-extract into a tmp dir.

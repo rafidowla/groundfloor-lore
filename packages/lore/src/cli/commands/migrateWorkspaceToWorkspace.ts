@@ -42,6 +42,7 @@ import { assertWorkspaceTarget, requireExistingDir } from '../targetGuard.js';
 import * as path from 'node:path';
 import { isDaemonServingHome, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
 import { withTransactionConflictRetry } from '../../engines/transactionConflictRetry.js';
+import { appendLinkSpool, daemonLoreDir } from '../../link/linkSpool.js';
 
 export type OnConflict = 'skip' | 'overwrite' | 'fail';
 
@@ -95,6 +96,8 @@ export interface MigrateReport {
     edgesFailed: number;
     vectorsCopied: number;
     vectorsMissing: number;
+    /** Ids left in the daemon's link spool for link-on-arrival (apply + --include-vectors; see link/linkSpool.ts). */
+    linkSpooled?: number;
     sourceDeleted: number;
     /**
      * True when --delete-source was requested but refused because the
@@ -363,6 +366,7 @@ export async function migrateWorkspaceToWorkspace(opts: MigrateOptions): Promise
 
     // ── 5. Vectors (optional) ────────────────────────────────────
     if (opts.includeVectors && srcVerb && dstVerb) {
+        const copiedVectorIds: string[] = [];
         for (const node of moved) {
             if (!movedIds.has(node.id)) continue;
             const vbId = `lore:${node.id}`;
@@ -391,6 +395,12 @@ export async function migrateWorkspaceToWorkspace(opts: MigrateOptions): Promise
                 }
             }
             report.vectorsCopied += 1;
+            if (apply) copiedVectorIds.push(node.id);
+        }
+        // This process has no LinkService: leave the destination ids in the daemon's link spool so link-on-arrival
+        // links them (opt-outs applied) when the daemon next starts. Best-effort; never fails the migration.
+        if (copiedVectorIds.length > 0) {
+            report.linkSpooled = appendLinkSpool(daemonLoreDir(home), opts.to, copiedVectorIds);
         }
     }
 

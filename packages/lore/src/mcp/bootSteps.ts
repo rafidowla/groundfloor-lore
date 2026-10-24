@@ -119,6 +119,8 @@ export function resolveGraphPath(home: string = loreHome()): string {
         return home;
     }
 }
+import type { LinkSignaler } from '../link/linkTypes.js';
+import { signalCommitted } from '../link/signalCommitted.js';
 import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import type { McpClientRuntime } from '../engines/mcpClient/runtime.js';
 import { scrubEnv } from '../security/envScrub.js';
@@ -238,6 +240,8 @@ export interface FileWatcherStartupDeps {
      * (graph write still happens; embedding can be backfilled later).
      */
     verbatimStore?: VerbatimStoreApi | null;
+    /** Link-on-arrival signaler (null when the flag is off / cloud): the file's vector is signalled once it commits. */
+    linkSignaler?: LinkSignaler | null;
 }
 
 /**
@@ -256,7 +260,7 @@ export async function startFileWatcher(deps: FileWatcherStartupDeps): Promise<vo
     if (isWorkspaceGraph(deps.graph)) {
         const workspace = getActiveWorkspaceName();
         await startLocalSourceWatcher(
-            makeFileIngestCallback(deps.graph, workspace, deps.verbatimStore ?? null),
+            makeFileIngestCallback(deps.graph, workspace, deps.verbatimStore ?? null, undefined, deps.linkSignaler ?? null),
         );
     }
 }
@@ -336,6 +340,8 @@ export function makeFileIngestCallback(
     // testable; defaults to the same production loader the other ingestion
     // paths use (active workspace root + ingestion.json / LORE_WATCH_PATHS).
     allowlist?: AllowlistConfig,
+    // Link-on-arrival: a file's vector is a real memory write, so signal it once stored.
+    linkSignaler?: LinkSignaler | null,
 ): (filePath: string) => void {
     return (filePath: string): void => {
         void (async () => {
@@ -391,6 +397,7 @@ export function makeFileIngestCallback(
                             text: buildVerbatimText(label, content, 'local-file,auto-ingested'),
                             metadata: { type: 'note', label, tags: 'local-file,auto-ingested', project: workspace, ecosystem: '*' },
                         });
+                        signalCommitted(linkSignaler, workspace, [{ id: `lore:${nodeId}`, ecosystem: '*' }]);
                     } catch (embedErr) {
                         log.warn(`[Lore Source Watcher] embedding failed for ${filePath}: ${(embedErr as Error).message}`);
                     }
@@ -555,6 +562,7 @@ export function buildSyncEngineRegistryForLocalMode(opts: {
         outboxStore: opts.outboxStore,
         deploymentMode: opts.deploymentMode,
         home: opts.home,
+        linkSignaler: opts.bootSyncEngine.linkSignaler,
     });
     const activeName = opts.graphRegistry.activeName();
     reg.prime(activeName, opts.bootSyncEngine);

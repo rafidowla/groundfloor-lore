@@ -2,9 +2,8 @@
 /**
  * temporal-valid-time-unit.ts — bi-temporal valid-time storage/query primitive.
  *
- * Covers the SurrealDB engine (the default backend new workspaces get —
- * the legacy graph engine is legacy and intentionally NOT exercised here, per the 2026-08
- * migration off it). Proves:
+ * Engine-parameterised via LORE_TEST_GRAPH_ENGINE (surreal default, sqlite,
+ * postgres; postgres needs LORE_PG_URL and uses a per-case pg-gate- workspace). Proves:
  *   - validFrom/validUntil round-trip through upsertNode -> getNode.
  *   - A node written WITHOUT a valid-time window is always "as-of" valid
  *     (backward compatibility — the ~100% case for existing data).
@@ -24,7 +23,9 @@ import * as path from 'node:path';
 
 import type { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
 import type { SqliteGraph } from '../packages/lore/src/engines/sqliteGraph.js';
-import { createTestGraphEngine } from './helpers/testGraphEngine.js';
+import type { PostgresGraph } from '../packages/lore/src/engines/postgres/postgresGraph.js';
+import { createTestGraphEngine, disposeTestGraphEngine, testGraphEngineName } from './helpers/testGraphEngine.js';
+import { gateDbUrl } from './helpers/testPostgres.js';
 import { isValidAsOf, listNodesAsOf } from '../packages/lore/src/core/temporalQuery.js';
 import type { LoreNode } from '../packages/lore/src/providers/types.js';
 
@@ -42,10 +43,20 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
     }
 }
 
-/** Fresh SurrealGraph on a throwaway directory; always closed and removed. */
-async function withGraph(fn: (g: SurrealGraph | SqliteGraph) => Promise<void>): Promise<void> {
+if (testGraphEngineName() === 'postgres' && !gateDbUrl()) {
+    console.log('SKIP postgres: LORE_TEST_GRAPH_ENGINE=postgres but LORE_PG_URL is not set - temporal-valid-time skipped cleanly');
+    process.exit(0);
+}
+
+let caseSeq = 0;
+
+/** Fresh graph on a throwaway directory; always closed and removed. On postgres every case gets its OWN
+ *  `pg-gate-` workspace: the shared database keeps rows, so a fixed workspace leaked nodes between cases
+ *  and across runs (the old 2 listNodesAsOf failures). */
+async function withGraph(fn: (g: SurrealGraph | SqliteGraph | PostgresGraph) => Promise<void>): Promise<void> {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-temporal-'));
-    const graph = createTestGraphEngine(dir, { workspaceId: 'test-ws' });
+    const workspaceId = testGraphEngineName() === 'postgres' ? `pg-gate-temporal-${process.pid}-${caseSeq++}` : 'test-ws';
+    const graph = createTestGraphEngine(dir, { workspaceId });
     try {
         await graph.initialize();
         await fn(graph);
@@ -70,7 +81,7 @@ function node(id: string, over: Partial<LoreNode> = {}): Omit<LoreNode, 'created
     };
 }
 
-console.log('Bi-temporal valid-time — storage + as-of query primitive (SurrealDB)');
+console.log(`Bi-temporal valid-time - storage + as-of query primitive (${testGraphEngineName()})`);
 
 /* ─── storage round-trip ─────────────────────────────────────────── */
 
@@ -238,5 +249,6 @@ await test('unsupersedeNode clears validUntil back to null alongside the other s
 
 /* ─── summary ─────────────────────────────────────────────────────── */
 
+await disposeTestGraphEngine();
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

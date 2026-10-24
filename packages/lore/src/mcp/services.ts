@@ -16,7 +16,6 @@
 // the cloud branches only.
 import * as path from 'node:path';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
-import { createTableStorage } from '../engines/tableStorageFactory.js';
 import type { ISessionCache } from '../engines/sessionCache.js';
 import { openWorkspaceGraph } from '../engines/openWorkspaceGraph.js';
 import { requireWorkspaceGraph, isWorkspaceGraph } from '../engines/requireWorkspaceGraph.js';
@@ -424,7 +423,8 @@ export interface StorageBundle {
     /**
      * Phase 2 item 4 — universal tabular CRUD surface used by the
      * `collection_*` MCP tools and `/v1/{collection}` REST routes.
-     * Local mode = SqliteTableStorage, built from the workspace path.
+     * Local mode = the workspace's table backend (SqliteTableStorage from the workspace path, or
+     * PostgresTableStorage for a Postgres-engine workspace; see createWorkspaceTableStorage).
      * Cloud mode = stub that throws "not yet implemented" until
      * `DataplaneTableStorage` lands. See docs/architecture/SCHEMA_CHANGE_SAFETY_MEMO.md
      * + project_phase2_investigation_2026_05_15 for the rationale.
@@ -488,6 +488,8 @@ export interface StorageBundle {
      * DEFAULT_SWEEP_DRAIN_TIMEOUT_MS.
      */
     sweepTracker: PendingAutolinkTracker;
+    /** Link-on-arrival worker; set by the host only when LORE_LINK_ON_ARRIVAL is on (local mode). */
+    linkService?: import('../link/linkService.js').LinkService | null;
     deploymentMode: 'local' | 'cloud';
 }
 

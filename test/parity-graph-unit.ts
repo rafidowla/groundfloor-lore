@@ -53,7 +53,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { createTestGraphEngine, testGraphEngineName } from './helpers/testGraphEngine.js';
+import { createTestGraphEngine, disposeTestGraphEngine, testGraphEngineName } from './helpers/testGraphEngine.js';
+import { gateDbUrl } from './helpers/testPostgres.js';
 import { DataplaneGraph } from '../packages/lore/src/engines/dataplaneGraph.js';
 import { registryAcceptingAny } from './helpers/workspace-registry.js';
 import { evalEngineFilter, parseEngineFilter } from './helpers/mock-dataplane.js';
@@ -381,13 +382,23 @@ function assertSameSet(a: Set<string>, b: Set<string>, msg: string): void {
 }
 
 async function main(): Promise<void> {
-    console.log(`W5-PARITY-HARNESS — cross-backend parity (${testGraphEngineName()} local engine vs DataplaneGraph)`);
+    const engine = testGraphEngineName();
+    // Brief §3 gate skip path: postgres selected but no LORE_PG_URL — print the
+    // reason and exit 0; the suite itself never constructs a postgres engine.
+    if (engine === 'postgres' && !gateDbUrl()) {
+        console.log('SKIP postgres: LORE_TEST_GRAPH_ENGINE=postgres but LORE_PG_URL is not set — postgres parity skipped cleanly');
+        process.exit(0);
+    }
+    console.log(`W5-PARITY-HARNESS — cross-backend parity (${engine} local engine vs DataplaneGraph)`);
     console.log('SEARCH_CONTRACT_VERSION = 1');
     console.log('='.repeat(72));
 
     // ── build both backends over the SAME fixture ──
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-parity-'));
-    const local = createTestGraphEngine(tmpDir, { workspaceId: 'parity', cacheDisabled: true });
+    // Postgres rows live in the shared gate database: namespace the workspace
+    // (and let disposeTestGraphEngine clean every pg-gate-* row at the end).
+    const localWorkspace = engine === 'postgres' ? `pg-gate-paritygraph-${process.pid}` : 'parity';
+    const local = createTestGraphEngine(tmpDir, { workspaceId: localWorkspace, cacheDisabled: true });
     await local.initialize();
 
     const sdk = new StatefulSdkClient();
@@ -577,8 +588,10 @@ async function main(): Promise<void> {
         });
     } finally {
         // Close the local engine so its SurrealDB handle releases and the
-        // process can exit deterministically.
+        // process can exit deterministically. The postgres factory's shared
+        // pool + gate rows are torn down here too (no-op for other engines).
         try { await local.close(); } catch { /* best effort */ }
+        try { await disposeTestGraphEngine(); } catch { /* best effort */ }
         try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* noop */ }
     }
 

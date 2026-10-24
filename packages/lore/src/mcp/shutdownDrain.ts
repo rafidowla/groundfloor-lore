@@ -18,6 +18,7 @@ import { awaitBackgroundReconnect } from '../engines/backgroundReconnect.js';
 import { drainBackgroundCalibrations } from '../recall/calibration.js';
 import { stopAllAccessTrackers } from '../engines/accessTracker.js';
 import { stopAllRetentionSweeps } from './retentionScheduler.js';
+import { closeSharedPostgresPool } from '../engines/postgres/postgresPoolOwner.js';
 import { stopIdleSweeper } from '../providers/llmDispatch.js';
 import { flushAllAuditLogs } from '../security/auditFlush.js';
 import { stopEmbedIdleSweeper } from '../providers/localEmbeddingProvider.js';
@@ -53,6 +54,10 @@ export interface ShutdownDrainDeps {
          *  tracker, so the step is a no-op rather than accidentally draining
          *  the ingest queue twice. */
         sweepTracker?: PendingAutolinkTracker;
+        /** Link-on-arrival worker (absent when the flag is off). Sealed and drained at
+         *  step 8.7, AFTER the embed queue and outbox drains, so every vector committed
+         *  during shutdown has already been signalled into the durable queue. */
+        linkService?: { drain(timeoutMs: number): Promise<{ timedOut: boolean }>; close(): void } | null;
     };
     verbatimStore: unknown;
     syncPoller: { stop(): Promise<void> | void };
@@ -363,6 +368,17 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
             }
         } catch (e) { logStepError('sweep.await', e); }
 
+        // 8.65 Link-on-arrival worker: seal (no new signals), await the in-flight
+        //     batch (bounded), close its queue file. Rows still queued stay
+        //     durable and resume at the next start.
+        try {
+            const link = deps.store?.linkService;
+            if (link) {
+                await link.drain(autolinkTimeoutMs);
+                link.close();
+            }
+        } catch (e) { logStepError('link.drain', e); }
+
         // 7.7 Cancel the daily retention sweep. Its timer is unref'd, so it never
         //     held a process open — but it re-opens graph + verbatim handles
         //     through getGraphHandle/getOrOpen, and the drain is not only run at
@@ -474,6 +490,14 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
         if (closableVerbatim && typeof closableVerbatim.close === 'function') {
             try { await closableVerbatim.close(); } catch (e) { logStepError('verbatimStore.close', e); }
         }
+
+        // 10.postgres — the shared `pg` pool outlives both substrates'
+        // handles by design (PostgresGraph/PostgresVerbatimStore close()
+        // release only their claim; the pool is process-wide, see
+        // postgresPoolOwner.ts). Drain it here, after the graph and verbatim
+        // closes above stopped every writer. No-op (and safe on a
+        // double-drain) when this process never opened a postgres engine.
+        try { await closeSharedPostgresPool(); } catch (e) { logStepError('postgresPool.end', e); }
 
         // 11. Close the SQLite sidecars, after the substrates above. Last
         //     because the steps before this one can still write to them (a

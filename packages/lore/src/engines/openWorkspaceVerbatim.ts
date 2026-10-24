@@ -21,6 +21,8 @@
 
 import { VerbatimStore } from './verbatimStore.js';
 import { SqliteVerbatimStore } from './sqliteVerbatimStore.js';
+import { PostgresVerbatimStore } from './postgres/postgresVerbatimStore.js';
+import { sharedPostgresPool } from './postgres/postgresPoolOwner.js';
 import type { VerbatimStoreApi } from './verbatimStoreApi.js';
 import type { VerbatimStoreRole } from './verbatimStoreRole.js';
 import type { EmbeddingProvider } from '../providers/types.js';
@@ -87,6 +89,28 @@ export function openWorkspaceVerbatim(
             ...(opts.home ? { home: opts.home } : {}),
             ...(opts.onLancePromoted ? { onLancePromoted: opts.onLancePromoted } : {}),
             ...(opts.resolveSuccessor ? { resolveSuccessor: opts.resolveSuccessor } : {}),
+        });
+    }
+    if (engine === 'postgres') {
+        // LOUD, never a substitution (same rule as openWorkspaceGraph's
+        // postgres branch): the postgres verbatim store needs a REGISTERED
+        // workspace (its name is the `workspace_id` every row is sliced by)
+        // and a pool whose URL comes from LORE_PG_URL — sharedPostgresPool()
+        // throws naming that env var when it is unset. `pieceVectors` and the
+        // promotion opts are accepted for constructor parity and unused (no
+        // SQLite piece sidecar, terminal engine — see the store's header).
+        if (!workspaceId) {
+            throw new Error(
+                `openWorkspaceVerbatim: engine 'postgres' requires a REGISTERED workspace (the workspace name is the `
+                + `postgres workspace_id), but '${basePath}' matched no workspaces.json entry. Register the workspace `
+                + '(name it in workspaces.json with vectorEngine "postgres") and open it by name.',
+            );
+        }
+        return new PostgresVerbatimStore(basePath, sharedPostgresPool(), workspaceId, embeddingProvider, {
+            role: opts.role,
+            strictFingerprintCheck: opts.strictFingerprintCheck,
+            pieceVectors: pieceVectorsIntent,
+            ...(opts.home ? { home: opts.home } : {}),
         });
     }
     return new VerbatimStore(basePath, embeddingProvider, {

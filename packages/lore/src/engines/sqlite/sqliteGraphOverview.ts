@@ -56,7 +56,7 @@ function edgePairsBy(db: SqliteDb, column: string): Array<{ f: string; t: string
     const col = assertIdent(column);
     return db.prepare(
         `SELECT ns.${col} AS f, nt.${col} AS t FROM edges e
-         JOIN nodes ns ON ns.id = e.source_id JOIN nodes nt ON nt.id = e.target_id LIMIT ?`,
+         JOIN nodes ns ON ns.id = e.source_id JOIN nodes nt ON nt.id = e.target_id WHERE e.valid_to IS NULL LIMIT ?`,
     ).all(TOPOLOGY_OVERVIEW_EDGE_CAP) as Array<{ f: string; t: string }>;
 }
 
@@ -111,8 +111,8 @@ export async function lintGraph(db: SqliteDb): Promise<string[]> {
         const rows = db.prepare(
             `SELECT id, type FROM nodes
              WHERE type != 'note'
-               AND NOT EXISTS (SELECT 1 FROM edges WHERE source_id = nodes.id)
-               AND NOT EXISTS (SELECT 1 FROM edges WHERE target_id = nodes.id)
+               AND NOT EXISTS (SELECT 1 FROM edges WHERE valid_to IS NULL AND source_id = nodes.id)
+               AND NOT EXISTS (SELECT 1 FROM edges WHERE valid_to IS NULL AND target_id = nodes.id)
              ORDER BY id ASC`, // 3.27.1: deterministic message order
         ).all() as Array<{ id: string; type: string }>;
         return rows.map((r) => formatOrphanMessage(r.type, r.id));

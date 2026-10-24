@@ -75,6 +75,8 @@ export const STORE_NODE_KNOWN_FIELDS: ReadonlyArray<string> = Object.freeze([
     // the near-duplicate check for one write. See core/supersessionPolicy.ts.
     'supersedes',
     'force',
+    // Link-on-arrival: explicit `autolink:false` keeps this write out of the link queue. Never stored on the node.
+    'autolink',
 ]);
 
 // store_edge / recall strict-field arrays land in a follow-up slice

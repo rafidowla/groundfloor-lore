@@ -94,8 +94,9 @@ function applySupersedes(db: SqliteDb, s: NodeBatchSupersedes): void {
     const marks = supersedeMarkCount(s);
     if (marks > 0) db.prepare('UPDATE nodes SET revision = revision + ? WHERE id = ?').run(marks, s.successorId);
     const edge = db.prepare(
-        `INSERT INTO edges (source_id, target_id, relation, confidence, confidenceScore) VALUES (?, ?, 'supersedes', 'extracted', 1.0)
-         ON CONFLICT(source_id, target_id, relation) DO NOTHING`,
+        `INSERT INTO edges (source_id, target_id, relation, confidence, confidenceScore, origin, created_at) VALUES (?, ?, 'supersedes', 'extracted', 1.0, 'caller', ?)
+         ON CONFLICT(source_id, target_id, relation) DO UPDATE SET valid_to = NULL`,
     );
-    for (const l of s.links) if (l.edge) edge.run(s.successorId, l.targetId);
+    const at = new Date().toISOString();
+    for (const l of s.links) if (l.edge) edge.run(s.successorId, l.targetId, at);
 }

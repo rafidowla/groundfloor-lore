@@ -174,6 +174,9 @@ export async function handleAdminStats(res: ServerResponse, deps: DiagnosticDeps
             byWorkspace,
             errors: errorCount,
             globalTotals: { nodeCount: totalNodes, edgeCount: totalEdges },
+            // Link-on-arrival (LORE_LINK_ON_ARRIVAL): queue depth + vector-committed -> linked lag.
+            // Process-wide counts, so they live only on this operator-lane view.
+            ...(deps.store.linkService ? { link: await deps.store.linkService.refreshHealth().then(() => deps.store.linkService!.stats()) } : {}),
         }));
     } catch (statsErr) {
         writeError(res, 500, 'internal_error', redactError(statsErr));

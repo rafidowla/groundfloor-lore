@@ -20,7 +20,7 @@
  * Error Behavior: Prints error to stderr and exits with code 1.
  */
 
-import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, setupCommand, lintCommand, authCommand, retentionCommand, compactCommand, maintainCommand, backupCommand, restoreCommand, diagnoseCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, migrateGraphCommand, migrateVectorsCommand, vectorsCommand, verbatimCommand, modelsCommand, seedWorkspacesCommand, workspacesCommand, operatorCommand, resolveDeferredCommand, recallCommand, getFullCommand, supersedeCommand, markStaleCommand, embedCommand, outboxCommand } from './commands.js';
+import { initCommand, serveCommand, syncCommand, statusCommand, doctorCommand, setupCommand, lintCommand, authCommand, retentionCommand, compactCommand, maintainCommand, backupCommand, restoreCommand, diagnoseCommand, reconnectCommand, reconsumeCommand, storageCommand, reportCommand, exportCommand, snapshotCommand, migrateCommand, migrateGraphCommand, migrateVectorsCommand, vectorsCommand, verbatimCommand, modelsCommand, seedWorkspacesCommand, workspacesCommand, operatorCommand, resolveDeferredCommand, recallCommand, getFullCommand, supersedeCommand, markStaleCommand, embedCommand, outboxCommand, postgresCommand } from './commands.js';
 import { embedderCommand } from './embedderCommands.js';
 /* ─── Parse Arguments ─────────────────────────────────────────── */
 
@@ -82,6 +82,7 @@ Core commands:
   mark-stale       Mark nodes stale by tag (Gap #3 — run after large commits)
   embed            Embedding pipeline tools (today: reembed an existing workspace)
   outbox           Outbox operator tools (drain-failed self-heal sweep)
+  postgres         Postgres operator tools (rollback-copies: list / verify / drop migration leftovers)
 
 
 Options:
@@ -227,6 +228,9 @@ async function main(): Promise<void> {
             break;
         case 'outbox':
             await outboxCommand(commandArgs);
+            break;
+        case 'postgres':
+            await postgresCommand(commandArgs);
             break;
         default: {
             console.error(`Unknown command: '${command}'`);

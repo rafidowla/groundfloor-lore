@@ -6,6 +6,224 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+## [3.36.0] — 2026-10-24
+
+The Postgres engine (graph, vector, full-text, tables) for server deployments, link-on-arrival with link freshness,
+and the ingestion pipeline (daemon host, admin enqueue route, extractor worker, local vision), all reachable from
+embedded hosts through `createLore()` options. Includes the 3.35.3 SQLite "database is locked" fix.
+
+Upgrade notes:
+
+- Embedded / SQLite hosts (Atlas, MIRA, PM Helper): no data migration. Link-on-arrival, ingestion, the extractor worker
+  and vision are all **off by default**; nothing changes until a host turns them on. Additive schema only (the durable
+  link opt-out table). When link-on-arrival is turned on, refresh-on-edit (`LORE_LINK_REFRESH_ON_CHANGE`) is on with it.
+- Postgres: edges convert to layout 2 in place on first start (batched, resumable); upgrade every Lore process sharing
+  the database together. New indexes are built on first open: small tables inline, large ones in the background.
+  Background index builds and VACUUM run without a statement timeout by default
+  (`LORE_PG_BACKGROUND_STATEMENT_TIMEOUT_MS` sets one).
+- Switching an existing workspace's graph engine to `postgres` does not copy its tables (a copy tool is a follow-up).
+
+### Added
+
+- Postgres engine: keyword search (`PostgresGraph.search()`) is index-served. Terms of 3+ characters now match with
+  `LIKE '%term%'` on `lower(label)` / `lower(content)` and JSONB containment on `tags`, backed by three additive
+  indexes (`idx_nodes_label_trgm`, `idx_nodes_content_trgm` GIN `gin_trgm_ops`; `idx_nodes_tags_gin` GIN
+  `jsonb_path_ops` over `(tags::jsonb)`), so a 1M-node workspace answers in tens of ms instead of ~3 s. Result set is
+  unchanged: same case-insensitive substring semantics (LIKE metacharacters are escaped), and the shared ranker still
+  re-checks every candidate. Terms shorter than 3 characters keep the previous predicate (a trigram index cannot serve
+  them, and the planner then keeps the cheap ordered scan). Indexes are created with `CREATE INDEX CONCURRENTLY`,
+  idempotently, invalid leftovers are rebuilt, and a table over 50,000 rows is NOT built inline: `initialize()` returns
+  at once and one background build per pool finishes it (search keeps working on the old scan meanwhile; a manual
+  ANALYZE/VACUUM that deadlocks the build is retried). `pg_trgm` is created if the role may; without it the same
+  predicate still runs, just unindexed (as slow as before). New `PostgresGraph.waitForKeywordIndexes()`; new option `keywordIndexInlineRowLimit`.
+- Postgres pool guard (`engines/postgres/postgresPoolGuard.ts`): background and expensive work now takes a slot
+  before checking a connection out of the pool, so foreground queries always keep a floor of connections. Slots =
+  `max(0, poolMax - reserve)` capped by a concurrency limit (default reserve `min(4, max(1, floor(poolMax/2)))`,
+  default concurrency 2). A job with no free slot waits holding no connection. Guarded: the keyword-index build,
+  the verbatim store's `compact()` (VACUUM ANALYZE) and its HNSW / GIN index builds. On a pool too small to spare a
+  connection (`LORE_PG_POOL_MAX=1`) the job is skipped with one warning rather than run (keyword search stays correct,
+  unindexed). Closing the pool or the owning store cancels in-flight background statements with
+  `pg_cancel_backend`. Background jobs run with no `statement_timeout` by default (the 30 s foreground timeout would
+  cancel large index builds and VACUUM); `LORE_PG_BACKGROUND_STATEMENT_TIMEOUT_MS` / `backgroundStatementTimeoutMs`
+  sets one. New env `LORE_PG_BACKGROUND_RESERVE`, `LORE_PG_BACKGROUND_CONCURRENCY`,
+  `LORE_PG_BACKGROUND_STATEMENT_TIMEOUT_MS` (also `createPostgresPool` options). Foreground
+  behaviour and results are unchanged. Schema-bootstrap migrations (awaited, under the schema advisory lock) and
+  operator CLI backup / restore are deliberately not guarded.
+- Postgres verbatim store: `count()` is cached for 5 s and invalidated by every write through this process (keyed by
+  pool + workspace, single-flight, a write during an in-flight count is never cached). It serves the two per-recall
+  `count(*)` call sites (`recall/retrieve.ts`, `recall/calibration.ts`). Writes by OTHER processes are seen within the
+  TTL. `countCacheTtlMs: 0` or `LORE_CACHE_DISABLED=1` turns it off.
+
+- Postgres tables (Tables P1, slice 1). A workspace on the Postgres engine now keeps its tables in the same database as
+  its nodes (`PostgresTableStorage`, wired through `createPostgresTableStorage` and `LocalGraphRegistry.tableStorageFor`).
+  Storage is the narrow model: `lore_entity_type`, `lore_field_def`, `lore_entity`, `lore_entity_value` (workspace id
+  leads every key and query; value changes are kept as superseded rows), with a generated read view per table
+  (`lore_tv_<id>`, workspace baked in). The reserved columns `_memory_node_id`, `_source_id`, `_valid_from`,
+  `_valid_to` live on the entity header: a typed row joins to its node in one SQL statement
+  (`queryWithNodes`, or `readView()` in raw SQL), and "as of D" (`queryAsOf`, valid time, half-open `[from, to)`,
+  NULL = unbounded) is a SQL predicate applied before `LIMIT`. The ingestion `tableWriter` now writes real rows on
+  Postgres workspaces instead of recording PENDING. Same `ITableStorage` surface and guards as SQLite (empty-filter and
+  tautology refusals, 100-op transactions, joins up to 4 hops, additive `evolveSchema`); Postgres also accepts a new
+  UNIQUE column on evolve. All DDL is additive and idempotent. No new environment variables. SQLite table storage is
+  unchanged (its boolean parsing moved to a shared helper, behaviour identical). Not in this slice: link types/links,
+  provenance and money columns, recorded-time as-of, SQLite logical tables. See `docs/CONFIGURATION.md` 3b.
+- Postgres tables wiring (Tables P1, slice 1b). The choice between SQLite and Postgres table storage for a workspace is
+  now made in one place, `createWorkspaceTableStorage` (`engines/tableStorageFactory.ts`), used by
+  `LocalGraphRegistry.tableStorageFor`, the MCP storage bundle (`createStorageClient`, behind `store.tableStorage` and so
+  the `collection_*` tools, `/v1/{collection}` routes, ingestion and import for the active workspace) and `lore diagnose`.
+  Before this, a Postgres-engine workspace's tables written through the MCP/bundle path or checked by `lore diagnose`
+  went to / were read from `tables.sqlite`, while registry-routed writes went to Postgres. SQLite workspaces are
+  unchanged. Switching a workspace's graph engine to `postgres` does NOT copy existing tables: its old `tables.sqlite`
+  is left untouched on disk and never read, and the workspace starts with no tables in Postgres (a table copy tool is a
+  follow-up). `createStorageClient` takes an optional `{ workspace, home }`; without it the bundle still builds the SQLite
+  file.
+- Sovereign File Content Extractor as its own worker (ingestion step 2, contract A), plus a local vision engine. Both off
+  by default. Lore's extractors (PDF, Office, email, HTML, OCR, audio/video) can run in a child process owned by the
+  instance (`createLore({ ingestion: { extractWorker: true } })` or `LORE_INGEST_EXTRACT_WORKER=1`) or in a separately
+  run loopback worker (`extractWorker: { url }`, `startExtractWorkerServer`). A crash, hang or memory blow-up costs one
+  attempt of one job: the child is killed on the deadline, the job is retried with the same id and dead-lettered after
+  the max attempts, and `dispose()` / `stop()` leaves no process behind. `vision: { url, model }` (or
+  `LORE_INGEST_VISION_URL`/`_MODEL`) reads images and PDFs with no text layer through a host-owned loopback
+  OpenAI-compatible model, with `Page_Number` references; hosted engines stay refused for local-only workspaces and
+  vision/worker URLs must be loopback. New env: `LORE_INGEST_EXTRACT_WORKER`, `_WORKER_URL`, `_TIMEOUT_MS`, `_MAX_BYTES`,
+  `_MAX_MEMORY_MB`, `LORE_INGEST_VISION_URL`, `_MODEL`, `_MAX_PAGES`. `status()` now reports `extractor: {mode, vision}`.
+- Link freshness (phase P1; SQLite and Postgres). Loop B, `LORE_LINK_REFRESH_ON_CHANGE` (**on by default** whenever
+  link-on-arrival is on; `0` / `linkOnArrival: { refreshOnChange: false }` turns it off): when an edited item's vector is re-committed, its links are refreshed
+  as a diff through the same queue; links that no longer qualify get `valid_to` (soft, never deleted), new neighbours
+  are linked, an edge the other endpoint still wants is kept, only `link_on_arrival` edges are judged and opted-out
+  (`autolink:false`) nodes are untouched. Loop C: the rebuild and Loop B now share one diff (`link/linkDiff.ts`); the
+  rebuild stays checkpointed per batch and is proven to resume after a crash to the same edges as an uninterrupted
+  run. Soft cap, `LORE_LINK_MAX_PER_NODE`: a background, resumable sweep keeps each node's strongest linker edges and
+  soft-invalidates the rest (off by default; never an edge that is the peer's strongest link, never an edge to an opted-out node, never
+  a non-linker edge); eventual, because a later link can re-assert a pruned pair. Link-health metrics on
+  `/api/admin/stats` (`link.health`, `link.prune`) and `/metrics` (`lore_link_edges{state}`, `lore_link_mean_strength`,
+  `lore_link_max_degree`, `lore_link_invalidations_total`, `lore_link_refreshed_total`, `lore_link_prune_*`,
+  `lore_link_rebuild_*`). New settings: `LORE_LINK_REFRESH_ON_CHANGE`, `LORE_LINK_MAX_PER_NODE`,
+  `LORE_LINK_PRUNE_INTERVAL_MS`, `LORE_LINK_PRUNE_BATCH_SIZE`, `LORE_LINK_HEALTH_TTL_MS` (env-scrub allowlisted, also
+  `createLore({ linkOnArrival })` options). No new HTTP routes. Graph engines gain `linkEdgeStats` / `linkNodesOverCap`.
+- Embedded hosts (`createLore()`: Atlas, MIRA, PM Helper) can now use link-on-arrival and the ingestion pipeline,
+  both off by default. `createLore({ linkOnArrival, recallLinkOrdering, ingestion })` take a boolean or a settings
+  object, fall back to the existing `LORE_LINK_*` / `LORE_RECALL_LINK_ORDERING` / `LORE_INGEST_*` env when omitted, and
+  an option always wins over env (`false` forces a feature off). The handle gains `lore.ingestion` (null when off):
+  `coordinatorFor(ws).enqueueFile(...)`, `getJob(ws, id)`, `runDue(ws)`, `status()`. The daemon and the embedded path
+  build the ingestion host through one shared helper (`startIngestionHostWith`), daemon behaviour unchanged. An
+  embedded host adds no process-wide handlers, never mutates `process.env`, opens no socket unless
+  `ingestion.callback` is given (callback env is ignored; a local-only workspace never opens one), starts timers only
+  when enabled (`scheduler.autoRun:false` leaves the loop off), and `dispose()` stops them. `autolink:false` and the
+  durable opt-out are respected. Limitation: `recallLinkOrdering` covers single-workspace `lore.recall()` only.
+  New exported types: `EmbeddedIngestionOption`, `EmbeddedIngestionOptions`, `IngestionHandle`, `LinkOnArrivalOption`,
+  and the ingestion coordinator/job types. Documented in `docs/CONFIGURATION.md` (11a, 11b) and `docs/API_REFERENCE.md`.
+- Ingestion host wired into the daemon (off by default, `LORE_INGEST_ENABLED`; HTTP daemon mode). One store and
+  coordinator per workspace (SQLite locally, Postgres in server mode), a scheduler (`runDue`, `reapStale`, stuck-job
+  reclaim, delivery purge; unref'd, non-overlapping, errors logged by class) and a clean shutdown (scheduler drain,
+  listener close, store close). Hosted-processor callbacks use a SEPARATE hardened listener, not the main dispatcher:
+  its own port (`LORE_INGEST_CALLBACK_PORT`, default bind 127.0.0.1, refuses the main port), only
+  `POST /api/ingest/callback/<jobId>` (404/405 otherwise), signed job reports only, per-source-IP rate limit and
+  concurrency cap, header/request timeouts, fixed error bodies, no secrets or bodies in logs. It opens only when a
+  hosted processor is configured for a hosted-allowed workspace and the master secret is at least 32 bytes; otherwise
+  hosted processing stays off and local ingestion continues. Claimed jobs now carry a lease that a heartbeat extends;
+  jobs stuck `running` after a crash are reclaimed at boot and periodically (atomic, safe with two daemons on one
+  Postgres; at-least-once). New `LORE_INGEST_*` variables are documented in `docs/CONFIGURATION.md` section 11a and
+  allowlisted in the env scrub.
+- Admin HTTP route to feed the ingestion host: `POST /api/admin/ingest/enqueue` (JSON body: explicit `workspace`,
+  `fileName`, `mimeType`, base64 `contentBase64`, optional `structure` / `extractorId`; replies
+  `{jobId, sourceId, created, state}`, `created:false` for a duplicate) and `GET /api/admin/ingest/jobs/<jobId>?workspace=`.
+  Operator-only, same auth lane as the link rebuild; 404 `ingestion_unavailable` when ingestion is off, 409 when the
+  workspace is not enabled for ingestion, 413 above `LORE_INGEST_ENQUEUE_MAX_BYTES` (new, default 25 MiB), 422 for a
+  policy violation or no matching processor. File names and mime types are validated, at most 4 uploads are held in
+  memory at once, and every error body is a fixed `{code, message}`. Without it a standalone daemon had no way to
+  submit a file.
+
+### Changed
+
+- Link-on-arrival opt-out (`autolink:false`) is now a durable per-node flag stored in the workspace's own database
+  (local SQLite graph: `link_optout(node_id)`; Postgres: `link_optout(workspace_id, node_id)`, keyed by the text node id,
+  exported and restored by the generic workspace backup). Additive schema only. It stays in force until a later write
+  passes `autolink:true` for that node or the node is deleted (delete removes the flag); a write that omits `autolink`
+  keeps the existing "no", and sync, re-embed, reconnect, migrate and plain re-saves never re-enable linking. The check
+  now happens at link time inside the linker, so it covers arrival, the migrate spool, re-embed and rebuild uniformly.
+  It works in both directions: an opted-out node gets no automatic edges as a source, and is never chosen as a
+  neighbour of another node. Neighbour search oversamples and widens (bounded: 3 rounds, cap 400) so a source with
+  enough eligible neighbours still gets its top-k; the common case adds one primary-key lookup per batch and no extra
+  kNN. `LinkRebuilder` / `/api/admin/link-rebuild` skip opted-out nodes as sources and targets (new `skippedOptOut`
+  counter) and leave their existing edges untouched. Manual and explicit edges are unaffected. Within one write a
+  per-row `false` wins, and a job-level `false` wins over a per-row `true`. Existing `link_optout` rows in the link
+  queue file are moved into the workspace store on first use (idempotent, then dropped from the queue file); the
+  consumed-on-signal behaviour, the 7-day purge and the `sticky` distinction for opt-outs are gone. Engines without the
+  optional capability (SurrealDB, LanceDB, Arcade) log one warning and link as before.
+- Postgres edges are now keyed by integer surrogate keys (edge layout 2, see `docs/POSTGRES_EDGE_LAYOUT.md`):
+  `PRIMARY KEY (workspace_id, src_sk, dst_sk, relation)`, text endpoint columns removed, reads join `nodes` on `sk`.
+  Edge storage on a 200k-edge sample fell from 385 to 183 bytes per edge (-52%). A legacy database is converted in place
+  at startup: batched, resumable, idempotent, behind the schema-bootstrap lock. The old table is kept as `edges_pre_pk`
+  until `dropPrePkEdges` (or `DROP TABLE edges_pre_pk`); edges whose endpoint node no longer exists are moved to
+  `edges_dangling` (counted in the log, never deleted). The layout is stamped on the table comment and an engine refuses
+  a database with a newer layout. Backup/restore remaps `src_sk` / `dst_sk` and includes `edges_dangling`. Upgrade every
+  Lore process sharing the database together: an older engine fails on its first edge write after the conversion.
+  `queryEdges` is unchanged (text order, limit/offset, existing HTTP cursors stay valid); new engine-only
+  `queryEdgesPage` pages on the physical key with an opaque cursor.
+
+### Fixed
+
+- Daemon env scrub: `LORE_PROMOTION_SMALL_TAIL_ROWS`, `LORE_PROMOTION_LOCK_WAIT_MS`, `LORE_PROMOTION_COOLDOWN_MS`
+  and `LORE_PROMOTION_COOLDOWN_MAX_MS` (SQLite→LanceDB promotion, 3.35.3) were missing from `ALLOWED_VARS`, so a
+  daemon stripped them at startup and the documented knobs had no effect. Added to the allowlist.
+
+- Recall no longer walks the whole workspace to find `deferred-*` nodes. `findDeferredMatches` paged every node
+  (content included) on each cold scan to keep the handful with a `deferred-` id; measured at 200k nodes with 800-byte
+  content that was 6.8 s on Postgres and 1.0 s on SQLite per scan, and at about 1M nodes on Postgres recalls timed out
+  under load (found in the 2026-10 1M run). `SqliteGraph` and `PostgresGraph` now expose `listNodesByIdPrefix`
+  (SQLite: primary-key range search; Postgres: new index `idx_nodes_id_prefix (workspace_id, id text_pattern_ops)`),
+  so the scan costs the size of the deferred set (1 ms in the same measurement). Concurrent cold recalls also share
+  one scan instead of each starting their own, and `resolve_deferred` can no longer be undone by a scan that began
+  before it. Results are unchanged. Engines without the lookup (Surreal, Dataplane) keep the old paged walk.
+  Upgrade note (Postgres): the index is created by `CREATE INDEX IF NOT EXISTS` on the first open after upgrade; on a
+  very large existing `nodes` table that build holds a write lock for its duration (seconds per million rows).
+
+- The daemon (HTTP and stdio) no longer silently drops the link settings at startup. `LORE_LINK_ON_ARRIVAL`,
+  the other `LORE_LINK_*` tuning variables and `LORE_RECALL_LINK_ORDERING` were read through an injected `env`
+  after the env scrub but were missing from its allowlist, so link-on-arrival and link-ordered recall could not be
+  switched on in a daemon (embedded hosts were unaffected). The allowlist guard test now also scans injected-`env`
+  reads and `*_ENV` flag constants. The variables are documented in `docs/CONFIGURATION.md` §11b.
+
+- "As of" queries (`GET /api/nodes/as-of`, `listNodesAsOf`) no longer under-return: the page used to be read first and
+  filtered afterwards, so sparse matches produced short or empty pages. `limit` now counts matching nodes and the route
+  accepts `cursor` / returns `nextCursor`. On Postgres, `nodes` gains additive `valid_from_at` / `valid_until_at`
+  TIMESTAMPTZ columns (indexed `(workspace_id, valid_from_at, valid_until_at)`, filled by an idempotent batched backfill
+  at startup) so the filter is a SQL predicate. "As of" is valid time, inclusive at both ends, unchanged.
+
+### Added — Postgres engine and tooling
+
+- `lore postgres rollback-copies`: lists the rollback copies the Postgres migrations leave behind
+  (`verbatim_pre_partition`, `edges_pre_pk`) with row count, size and a verification against the live table, and drops
+  them with `--drop <name|all> --yes` only after verification passes (`--force` overrides, with a warning). Fixed allowlist;
+  `edges_dangling` is never dropped. `--json`, exit codes 0 / 1 / 2 (needs `--yes`) / 3 (verification failed). Postgres only;
+  prints "nothing to do" without `LORE_PG_URL`. Docs: `docs/OPERATIONS.md`.
+- `test/postgres-changes-log-pin-unit.ts` pins that `verbatim_changes_log` has no Postgres producer or consumer. The only
+  reader is the SQLite to LanceDB promotion tail copy, which is bound to a SQLite file, so nothing records changes on the
+  Postgres write path (finding in `docs/CONFIGURATION.md`, "verbatim_changes_log is not written on Postgres").
+
+- Postgres engine (`engines/postgres/`): graph, vector (pgvector HNSW) and
+  full-text (tsvector) substrates, selectable per workspace with
+  `graphEngine` / `vectorEngine: "postgres"` or for new workspaces with
+  `LORE_DEFAULT_GRAPH_ENGINE` / `LORE_DEFAULT_VECTOR_ENGINE=postgres`.
+  Configured with `LORE_PG_URL` plus `LORE_PG_POOL_MAX`,
+  `LORE_PG_STATEMENT_TIMEOUT_MS`, `LORE_PG_IDLE_TX_TIMEOUT_MS`,
+  `LORE_PG_CONNECT_TIMEOUT_MS`, `LORE_PG_APPLICATION_NAME` (see
+  `docs/CONFIGURATION.md` section 3b). One shared pool, drained last on
+  shutdown; startup errors for a missing server, bad credentials or missing
+  pgvector are explicit; schema bootstrap is serialized by an advisory lock.
+  `lore backup` writes a workspace whose graph and vectors are both on
+  Postgres as a logical bundle (`lore-pgbackup-*.ndjson[.gz]`, read under a
+  REPEATABLE READ snapshot); `lore restore` recognises the bundle by content
+  and restores it into the database (`--replace` to overwrite a non-empty
+  target). A workspace with only one store on Postgres is refused.
+  `migrate-graph`, `migrate-vectors`, verbatim scope check/repair and the
+  piece rebuild refuse Postgres workspaces for now.
+- Postgres cases in the engine-contract gates (node batch, delete honesty,
+  recallable, graph-engine parity, parity-graph) and `postgres-startup-unit`;
+  they skip with a printed reason when `LORE_PG_URL` is unset.
+- `scripts/test-arch.mjs` D-017 now exempts `pg` imports under
+  `packages/lore/src/engines/postgres/` only.
 ## [3.35.3] — 2026-10-24
 
 ### Fixed — SQLite writes silently lost to "database is locked" (3.35.3)

@@ -584,6 +584,20 @@ export async function repairVerbatimScopes(opts: RepairScopesOptions): Promise<R
     const entry = registry.workspaces.find((w) => w.name === ws);
     if (!entry) throw new VerbatimRepairScopesError(`workspace_not_found: "${ws}" (known: ${registry.workspaces.map((w) => w.name).join(', ')})`);
     const workspaceDir = entry.path;
+    // Postgres-backed verbatim store: the repair scanner reads and rewrites
+    // the store FILE directly (verbatim.sqlite / the Lance table) and the
+    // backup-verification step demands the written store inside a file
+    // backup — none of which exists on the postgres engine. Fall-through
+    // would report a SILENTLY WRONG "nothing-to-check" for a store that was
+    // never examined; loud refusal instead.
+    if (entry.vectorEngine === 'postgres') {
+        throw new VerbatimRepairScopesError(
+            `not_supported: workspace '${ws}' declares vectorEngine 'postgres' — scope repair reads and rewrites `
+            + "the store file directly (verbatim.sqlite / LanceDB table) and verifies against a file backup, none of "
+            + 'which exists for a Postgres-backed verbatim store. No postgres repair is wired on this branch; '
+            + 'refusing rather than reporting nothing-to-check.',
+        );
+    }
     const engine: 'lance' | 'sqlite' = entry.vectorEngine === 'sqlite' ? 'sqlite' : 'lance';
     const sqlitePath = path.join(workspaceDir, '.lore', 'verbatim.sqlite');
 

@@ -50,7 +50,16 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_WORKSPACE',                           // forces a specific active workspace
     'LORE_DEPLOYMENT_MODE',                     // Q2.1 — pin mode to 'local' or 'cloud'
     'LORE_CACHE_DISABLED',                      // Q1.3 operator killswitch for the read cache
-    'LORE_DEFAULT_GRAPH_ENGINE',                 // 3.21 step 1d — operator escape hatch: NEW local workspaces default to 'sqlite'; set to 'surreal' to keep the pre-3.21 default
+    'LORE_DEFAULT_GRAPH_ENGINE',                 // 3.21 step 1d — operator escape hatch: NEW local workspaces default to 'sqlite'; set to 'surreal' to keep the pre-3.21 default, or 'postgres' for the Postgres engine
+    'LORE_PG_URL',                               // postgres engine (engines/postgres/postgresClient.ts) — connection string for the workspace's Postgres database. Contains credentials, so it must never be logged; redactPgUrl() is the only printable shape. Needed in-process: the engine never falls back to another store without it.
+    'LORE_PG_POOL_MAX',                          // postgres engine — pg pool size cap, default 16 (postgresClient.ts intEnv); without this entry the operator's override would be silently dropped by this scrub
+    'LORE_PG_STATEMENT_TIMEOUT_MS',              // postgres engine — per-session statement_timeout, default 30000 (postgresClient.ts)
+    'LORE_PG_IDLE_TX_TIMEOUT_MS',                // postgres engine — per-session idle_in_transaction_session_timeout, default 60000 (postgresClient.ts)
+    'LORE_PG_CONNECT_TIMEOUT_MS',                // postgres engine — pool connect/checkout timeout, default 30000 (postgresClient.ts); bounds a dead host instead of hanging
+    'LORE_PG_APPLICATION_NAME',                  // postgres engine — application_name shown in pg_stat_activity, default 'lore' (postgresClient.ts); lets an operator tell several Lore processes apart
+    'LORE_PG_BACKGROUND_RESERVE',                // postgres engine — connections kept free for foreground queries when background work (index builds, VACUUM) runs; default min(4, max(1, floor(poolMax/2))) (postgresPoolGuard.ts / postgresClient.ts nonNegIntEnv)
+    'LORE_PG_BACKGROUND_CONCURRENCY',            // postgres engine — max concurrent background jobs per pool, default 2; 0 disables background work (postgresPoolGuard.ts / postgresClient.ts nonNegIntEnv)
+    'LORE_PG_BACKGROUND_STATEMENT_TIMEOUT_MS',   // postgres engine — statement_timeout (ms) for background jobs (index builds, VACUUM); default 0 = unbounded (postgresPoolGuard.ts / postgresClient.ts nonNegIntEnv)
     'LORE_OPENAI_BASE_URL',                     // 2026-05-05 OpenAI-compatible gateway override (e.g. OpenRouter)
     'CLERK_ISSUER',                             // RA2-reaudit2 — cloud-mode Clerk JWT issuer; scrubbing it silently disabled cloud auth (read at dispatcher.ts/operator.ts)
 
@@ -316,10 +325,14 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_REGISTRY_SWEEP_MS',               // LocalGraphRegistry background sweep interval (default 600000, 10 min)
     'LORE_VERBATIM_IDLE_TTL_MS',             // WorkspaceVerbatimResolver idle-eviction TTL (default 1800000, 30 min)
     'LORE_VERBATIM_SWEEP_MS',               // WorkspaceVerbatimResolver background sweep interval (default 600000, 10 min)
+    'LORE_PROMOTION_SMALL_TAIL_ROWS',        // SQLite→LanceDB promotion: tail rows copied under the store lock (default 1000; verbatimPromotionGate.ts)
+    'LORE_PROMOTION_LOCK_WAIT_MS',           // SQLite→LanceDB promotion: max wait for the store lock before backing off (default 60000; verbatimPromotionGate.ts)
+    'LORE_PROMOTION_COOLDOWN_MS',            // SQLite→LanceDB promotion: base retry cooldown after a failed attempt (default 60000; verbatimPromotionState.ts)
+    'LORE_PROMOTION_COOLDOWN_MAX_MS',        // SQLite→LanceDB promotion: cooldown ceiling for exponential back-off (default 3600000; verbatimPromotionState.ts)
     'LORE_SQLITE_VECTOR_CACHE_MB',           // SqliteVerbatimStore JS-fallback in-memory vector matrix budget (default 64 MB; 0 = always stream)
     'LORE_SQLITE_VECTOR_DISABLE_NATIVE',     // test/ops escape hatch: force the JS brute-force fallback even when sqlite-vec loads (default off)
     'LORE_VECTOR_PROMOTE_ROWS',              // SqliteVerbatimStore -> LanceDB promotion row threshold (default 250000; 0 disables)
-    'LORE_DEFAULT_VECTOR_ENGINE',            // 3.21 step 2 part 2 — operator escape hatch: NEW local workspaces default to vectorEngine 'sqlite'; set to 'lance' to keep the pre-3.21 default
+    'LORE_DEFAULT_VECTOR_ENGINE',            // 3.21 step 2 part 2 — operator escape hatch: NEW local workspaces default to vectorEngine 'sqlite'; set to 'lance' to keep the pre-3.21 default, or 'postgres' for the Postgres engine
     // TW-7e — concurrency/lifecycle knobs (defaults unchanged).
     'LORE_MAX_OPEN_WORKSPACES',              // LocalGraphRegistry max open workspaces before LRU eviction (default 8)
     'LORE_DATAPLANE_HEALTH_TIMEOUT_MS',      // boot Dataplane /health ping timeout ms (default 2000)
@@ -395,6 +408,74 @@ const ALLOWED_VARS: readonly string[] = [
     // LORE_ARCADE_KMS_KEK_FILE (above) in production so only a 0600 file path,
     // not the key material, sits in the environment.
     'LORE_ARCADE_KMS_KEK',                   // base64-encoded 32-byte KEK (SECRET; prefer LORE_ARCADE_KMS_KEK_FILE in prod)
+
+    // Ingestion host (ingestion/hostConfig.ts, mcp/ingestionBoot.ts). Off unless LORE_INGEST_ENABLED is on.
+    // Three of these carry secrets (CALLBACK_SECRET, CALLBACK_WEBHOOK_SECRET, HOSTED_STRUCTURING_TOKEN): the daemon
+    // reads them AFTER this scrub, so they must be allowlisted. Prefer the *_FILE form in production so only a
+    // path, not the key material, sits in the environment. They are wrapped in a redacting Secret on load.
+    'LORE_INGEST_ENABLED',
+    'LORE_INGEST_WORKSPACES',
+    'LORE_INGEST_HOSTED_WORKSPACES',
+    'LORE_INGEST_LOCAL_LLM_URL',
+    'LORE_INGEST_LOCAL_LLM_MODEL',
+    'LORE_INGEST_HOSTED_STRUCTURING_URL',
+    'LORE_INGEST_HOSTED_STRUCTURING_TOKEN',
+    'LORE_INGEST_HOSTED_STRUCTURING_TOKEN_FILE',
+    'LORE_INGEST_CALLBACK_PORT',
+    'LORE_INGEST_CALLBACK_BIND',
+    'LORE_INGEST_CALLBACK_PUBLIC_URL',
+    'LORE_INGEST_CALLBACK_SECRET',
+    'LORE_INGEST_CALLBACK_SECRET_FILE',
+    'LORE_INGEST_CALLBACK_WEBHOOK_SECRET',
+    'LORE_INGEST_CALLBACK_WEBHOOK_SECRET_FILE',
+    'LORE_INGEST_CALLBACK_SCHEME',
+    'LORE_INGEST_CALLBACK_REPLAY_WINDOW_SEC',
+    'LORE_INGEST_CALLBACK_MAX_CONCURRENT',
+    'LORE_INGEST_CALLBACK_RATE_PER_MIN',
+    'LORE_INGEST_CALLBACK_HEADERS_TIMEOUT_MS',
+    'LORE_INGEST_CALLBACK_REQUEST_TIMEOUT_MS',
+    'LORE_INGEST_RUN_INTERVAL_MS',
+    'LORE_INGEST_REAP_INTERVAL_MS',
+    'LORE_INGEST_REAP_MAX_AGE_MS',
+    'LORE_INGEST_PURGE_INTERVAL_MS',
+    'LORE_INGEST_RECLAIM_INTERVAL_MS',
+    'LORE_INGEST_BATCH',
+    'LORE_INGEST_LEASE_MS',
+    'LORE_INGEST_DRAIN_MS',
+    'LORE_INGEST_DELIVERY_RETENTION_DAYS',
+    'LORE_INGEST_ENQUEUE_MAX_BYTES',          // admin enqueue route: largest decoded file in bytes (default 25 MiB)
+    'LORE_INGEST_EXTRACT_WORKER',             // run the file extractors in a child process owned by this host (1|true|on|child); default off
+    'LORE_INGEST_EXTRACT_WORKER_URL',         // or use a separately run loopback extractor worker at this URL (wins over the flag)
+    'LORE_INGEST_EXTRACT_TIMEOUT_MS',         // per-file deadline; a hung worker is killed and the job retried (default 120000)
+    'LORE_INGEST_EXTRACT_MAX_BYTES',          // largest file the extractor worker takes (default 100 MiB)
+    'LORE_INGEST_EXTRACT_MAX_MEMORY_MB',      // child process heap ceiling (default 2048)
+    'LORE_INGEST_VISION_URL',                 // loopback OpenAI-compatible vision endpoint for scans and images (needs _MODEL too)
+    'LORE_INGEST_VISION_MODEL',               // model name sent to the local vision endpoint
+    'LORE_INGEST_VISION_MAX_PAGES',           // pages of a scanned PDF read by the vision model (default 25)
+
+    // Link-on-arrival (link/linkConfig.ts) and link-strength recall ordering (recall/linkOrdering.ts).
+    // Both are read through an injected `env` (default process.env) AFTER this scrub, so without these
+    // entries the daemon silently deleted them and the features could never be switched on in HTTP/stdio
+    // mode (embedded hosts do not scrub, which is why tests passed). No secrets here.
+    'LORE_LINK_ON_ARRIVAL',
+    'LORE_LINK_MIN_SIM',
+    'LORE_LINK_K',
+    'LORE_LINK_DUP_SIM',
+    'LORE_LINK_POLICY_VERSION',
+    'LORE_LINK_BATCH_SIZE',
+    'LORE_LINK_QUIET_MS',
+    'LORE_LINK_MAX_DELAY_MS',
+    'LORE_LINK_YIELD_MS',
+    'LORE_LINK_MAX_ATTEMPTS',
+    'LORE_LINK_REBUILD_BATCH_SIZE',
+    'LORE_LINK_REBUILD_YIELD_MS',
+    'LORE_LINK_REBUILD_MAX_WAIT_MS',
+    'LORE_LINK_REFRESH_ON_CHANGE',
+    'LORE_LINK_MAX_PER_NODE',
+    'LORE_LINK_PRUNE_INTERVAL_MS',
+    'LORE_LINK_PRUNE_BATCH_SIZE',
+    'LORE_LINK_HEALTH_TTL_MS',
+    'LORE_RECALL_LINK_ORDERING',
 
 ];
 

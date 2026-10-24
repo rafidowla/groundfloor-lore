@@ -92,6 +92,7 @@ import { validateVersionHistoryPolicy, resolveVersionHistoryPolicy } from '../ou
 import { resolveEffectiveVersionHistoryPolicy } from '../outbox/versionPruningPolicy.js';
 import { wireOutbox } from '../outbox/wiring.js';
 import { wireEmbedQueue } from '../embed/wiring.js';
+import { createLinkService, linkServiceOptionFields, type LinkOnArrivalOption } from '../link/createLinkService.js'; import type { EmbeddedIngestionOption } from './embeddedIngestionTypes.js';
 import { dispatchHttpRequest } from './http/dispatcher.js';
 import { writeError } from './http/helpers.js';
 import { LoadJobsStore } from '../storage/loadJobsStore.js';
@@ -141,6 +142,7 @@ import { log } from '../logger.js';
 // attaches no uncaughtException/unhandledRejection handlers to the host.
 import { disposeNativePoolSafetyNet } from '../engines/nativePoolSafetyNet.js';
 import { scrubEnvIfOwned, armNativePoolSafetyNetIfOwned, daemonTimersEnabled } from './processOwnership.js';
+import { startIngestionHost } from './ingestionBoot.js';
 import { selectEmbeddingProvider, type EmbeddingInjectionOptions } from './embeddingProviderSelection.js';
 import {
     createGraph,
@@ -192,7 +194,7 @@ export interface CreateLoreOptions extends EmbeddingInjectionOptions {
      * entry for the full precedence writeup.
      */
     // 3.24: recallRerank (D8d rerank-enabled default), rerankBackend (Part B, omitted ⇒ localRerankBackend, set once), modelServer (Part C — false/env LORE_MODEL_SERVER=0 opts out), onModelStatus (fires on shared/fallback/recovery transitions; exceptions caught+logged).
-    supersessionEnforce?: boolean; recallRerank?: boolean; rerankBackend?: RerankBackend; modelServer?: boolean; onModelStatus?: (status: PublicModelStatus) => void;
+    supersessionEnforce?: boolean; recallRerank?: boolean; rerankBackend?: RerankBackend; modelServer?: boolean; onModelStatus?: (status: PublicModelStatus) => void; linkOnArrival?: LinkOnArrivalOption; recallLinkOrdering?: boolean; ingestion?: EmbeddedIngestionOption; // embedded-ingest-links: all three OFF by default, option > env, see docs/CONFIGURATION.md; `ingestion` is attached by index.ts createLore (mcp/embeddedIngestion.ts).
     /**
      * Local embedding provider overrides. Programmatic alternative to the
      * LORE_LOCAL_EMBEDDING_DEVICE / LORE_LOCAL_EMBEDDING_MODEL env vars.
@@ -306,6 +308,8 @@ export interface LoreInstance {
         /** D5: typed pass-through to nodeServiceUpsert()'s supersession args. See core/supersessionPolicy.ts. */
         supersedes?: string[];
         force?: boolean;
+        /** Explicit `false` => this node is not linked (link-on-arrival / legacy autolink). Absent => the flag decides. */
+        autolink?: boolean;
     }): Promise<NodeWriteResult>;
     /**
      * 3.26.0 — supported hard delete for an in-process host: the MCP
@@ -355,6 +359,8 @@ export interface LoreInstance {
         /** D5: see nodeUpsert() above; enforced per-node, a rejection lands in that node's own result slot. */
         supersedes?: string[];
         force?: boolean;
+        /** Per-node explicit `false` => not linked; see nodeUpsert(). */
+        autolink?: boolean;
     }>): Promise<NodeWriteResult[]>;
     /**
      * Resolves when all pending async embeds have been persisted to LanceDB.
@@ -656,8 +662,18 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     // verbatim store (lazy: graphRegistry is assigned later in boot, but the
     // executor only runs post-boot at drain time). Without it, a non-active
     // workspace's import embedded into the boot store (or silently skipped).
+    // Link-on-arrival (flag-gated; null when off): one durable queue + worker fed by every vector-commit site.
+    const linkService = deploymentMode === 'cloud' ? null : createLinkService({
+        loreDir, onError: (m) => log.warn(m), embeddingProvider, ...linkServiceOptionFields(opts.linkOnArrival), // embedded option wins over LORE_LINK_ON_ARRIVAL; absent => env, as the daemon
+        resolveHandles: async (ws) => {
+            try {
+                return { graph: graphRegistry ? await graphRegistry.getGraphHandle(ws) : graph, verbatim: workspaceVerbatimResolver ? await workspaceVerbatimResolver.getOrOpen(ws) : verbatimStore } as never;
+            } catch { return null; }
+        },
+    });
     const embedQueue = wireEmbedQueue({
         graph, vectorStore: verbatimStore,
+        getLinkSignaler: () => linkService, defaultWorkspace: () => graphRegistry?.activeName() ?? detectedScope.workspace,
         resolveStores: async (ws) => {
             if (!ws || !graphRegistry || !workspaceVerbatimResolver) return null;
             try {
@@ -690,12 +706,13 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     });
 
     // Phase 1 — Unified storage client (Dataplane SDK shape).
-    const store = await createStorageClient(graph, verbatimStore, deploymentMode, graphBasePath);
+    const store = await createStorageClient(graph, verbatimStore, deploymentMode, graphBasePath, { workspace: bootWorkspaceName, home: dataHome });
+    if (linkService) store.linkService = linkService;
 
     // D5 round 2 (#2): host-level default, precedence createLore() option >
     // LORE_SUPERSESSION_ENFORCE env > false. Threaded into every write path
     // below (embedded + MCP + REST) via DaemonWiring.supersessionEnforceDefault.
-    const hostSupersessionDefault = resolveHostSupersessionDefault(opts.supersessionEnforce); if (opts.recallRerank !== undefined) setHostRerankDefault(opts.recallRerank); const rerankBackend: RerankBackend = hostModel.rerankBackend; // D8d/N11 — resolved once in hostWiring.ts.
+    const hostSupersessionDefault = resolveHostSupersessionDefault(opts.supersessionEnforce); if (opts.recallRerank !== undefined) setHostRerankDefault(opts.recallRerank); const rerankBackend: RerankBackend = hostModel.rerankBackend; const hostLinkOrdering = opts.recallLinkOrdering; // D8d/N11 — resolved once in hostWiring.ts.
 
     // D5 round 2 (HIGH #1): shared resolver for the embedded nodeUpsert/nodeUpsertBatch
     // call sites below, so each doesn't repeat the same param block. graphRegistry is
@@ -771,6 +788,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     const outboxGetRegistryHome = isLocal ? () => graphRegistry?.homeDir() : undefined;
     const outboxWiring = wireOutbox({
         loreDir,
+        getLinkSignaler: () => linkService, defaultWorkspace: () => graphRegistry?.activeName() ?? detectedScope.workspace,
         getSyncEngine: () => syncEngine,
         getGraph: outboxGetGraph,
         getVerbatim: outboxGetVerbatim,
@@ -787,6 +805,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     // Sprint S — in-memory streaming-ingest registry.
     const streamRegistry = new StreamRegistry();
     let syncEngine: SyncEngine = new SyncEngine(graph, loreDir, deploymentMode === 'cloud' ? null : (adapter?.forWorkspace(() => graphRegistry?.activeName() ?? detectedScope.workspace) ?? null), verbatimStore, outboxWiring.store, null, bootWorkspaceName);
+    syncEngine.linkSignaler = linkService; // link-on-arrival: pulled vector mirrors (boot workspace's engine)
     let wal = syncEngine.getWal();
 
     // S9 keychain preference. Thin closure injecting the factory-scope
@@ -804,7 +823,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
             // Wave 4.3 — drop stale sibling engines (they hold the pre-upgrade
             // adapter by value); re-prime the boot entry with the new one.
             setSyncEngine: (s) => {
-                syncEngine = s;
+                s.linkSignaler = syncEngine.linkSignaler; syncEngine = s; // keychain rebuild keeps link-on-arrival for pulled vector mirrors
                 syncEngineRegistry?.invalidateUnpinned();
                 syncEngineRegistry?.prime(graphRegistry?.activeName() ?? detectedScope.workspace, syncEngine);
             },
@@ -1217,6 +1236,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                     workspace: args.workspace,
                     targetGraph,
                     tracker: store.autolinkTracker,
+                    link: store.linkService,
                 });
                 // D5 round 2 (HIGH #1): this path never resolved a supersession
                 // policy/near-dup finder, so enforcement silently skipped createLore() hosts.
@@ -1267,6 +1287,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                         workspace: n.workspace,
                         targetGraph,
                         tracker: store.autolinkTracker,
+                        link: store.linkService,
                     });
                     // D5 round 2 (HIGH #1): per-node resolution — a batch spanning
                     // workspaces with different policies is enforced correctly per node.
@@ -1322,7 +1343,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                 getWal: () => wal,
                 versionStore,
                 // R4 #4 — each node's vector → ITS workspace's LanceDB; tracker → ITS dispose().
-                workspaceVerbatimResolver, autolinkTracker: store.autolinkTracker,
+                workspaceVerbatimResolver, autolinkTracker: store.autolinkTracker, linkService: store.linkService,
                 supersessionEnforceDefault: hostSupersessionDefault, // D5 round 2 (#2) host switch.
             });
         },
@@ -1351,7 +1372,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                 await delayMs(25);
             }
         },
-        recall: hostModel.wrapRecall((topic: string, opts: RecallOpts) => inProcessRecall(topic, opts, { store, graphRegistry: graphRegistry ?? undefined, workspaceVerbatimResolver, rerankBackend })), modelStatus: hostModel.modelStatus, // 3.24 B/C: wrapRecall adds _meta.models while degraded.
+        recall: hostModel.wrapRecall((topic: string, opts: RecallOpts) => inProcessRecall(topic, opts, { store, graphRegistry: graphRegistry ?? undefined, workspaceVerbatimResolver, rerankBackend, linkOrdering: hostLinkOrdering })), modelStatus: hostModel.modelStatus, // 3.24 B/C: wrapRecall adds _meta.models while degraded.
         // 1.2 (2026-08-17 audit) — `workspace` now actually ROUTES (via the
         // facade's per-workspace read routers) instead of silently landing
         // in the `project` positional of the boot graph. '*' keeps the
@@ -1528,6 +1549,7 @@ async function main(): Promise<LoreInstance | void> {
         loadJobsRunner = wireLoadJobsRunner({
             store: loadJobsStore,
             outboxStore: outboxWiring.store,
+            linkSignaler: store.linkService ?? null, // per-row autolink:false on /api/load
             concurrencyManager: loadConcurrencyManager,
             sweeper: loadTempFileSweeper,
             buildDispatcherDeps: async (_job) => {
@@ -1644,7 +1666,7 @@ async function main(): Promise<LoreInstance | void> {
         log.info(`[Lore MCP] Tool tier: ${toolTier} (LORE_TOOL_TIER)`);
     }
 
-    await startFileWatcher({ graph: d.getGraph(), verbatimStore: isVerbatimStore(verbatimStore) ? verbatimStore : undefined });
+    await startFileWatcher({ graph: d.getGraph(), verbatimStore: isVerbatimStore(verbatimStore) ? verbatimStore : undefined, linkSignaler: d.store.linkService ?? null });
 
     // v1.1 background first-install reconnect (2026-04-30). Skipped in cloud mode.
     if (deploymentMode === 'local') {
@@ -1779,6 +1801,7 @@ async function main(): Promise<LoreInstance | void> {
             });
         });
 
+        const ingestion = await startIngestionHost({ lore, graphRegistry, deploymentMode, mainPort: LORE_HTTP_PORT });
         startHttpLifecycle({
             httpServer,
             port: LORE_HTTP_PORT,
@@ -1791,9 +1814,7 @@ async function main(): Promise<LoreInstance | void> {
             // are removed once the ordered drain completes, restoring the
             // process listener set on a clean daemon shutdown.
             onShutdown: ((orderedDrain: (reason: string) => Promise<void>) => async (reason: string): Promise<void> => {
-                try {
-                    await orderedDrain(reason);
-                } finally {
+                try { await ingestion.stop(); await orderedDrain(reason); } finally {
                     try { disposeNativePoolSafetyNet(); } catch { /* non-fatal */ }
                 }
             })(buildShutdownDrain({

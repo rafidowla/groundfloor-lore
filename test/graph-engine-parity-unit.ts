@@ -48,6 +48,22 @@
  *    implementation-detail field ordering from failing an otherwise-
  *    identical comparison.
  *
+ * 3. POSTGRES RANKED FULL-TEXT ORDER (engine-contract gate — the ONLY
+ *    normalization allowed for the postgres case, and applied ONLY to
+ *    `search`). SQLite's FTS5 ranks with `bm25(...)`, postgres with
+ *    `ts_rank(...)`; the two scorers are different functions of the same
+ *    text, so the RANKED ORDER of the same match set legitimately differs.
+ *    For every postgres comparison below each engine's `search[q]` list is
+ *    sorted by node `id` (`sortSearchRankOrder`), which compares the result
+ *    SET exactly while ignoring only the rank order the contract allows to
+ *    differ. NOTHING else is normalized for postgres: every other read
+ *    (listNodes, bulkList pages, traverse, queryEdges pages, stats,
+ *    topology, getNodesByIds, …) must be bit-identical to SQLite after the
+ *    two pre-existing normalizations above. The op sequence below touches
+ *    NO intentionally-`not_supported` postgres member (verified against
+ *    PostgresGraph: integrityScan/integrityRemove/backupTo are
+ *    not_supported but none of them appears in `runOpSequence`).
+ *
  * ── ORDERING RULES (enforced in shared/engine code, not here) ────────────
  *
  * `traverse()` / `traverseDirected()`: same-node multi-edge sub-order is now
@@ -80,6 +96,9 @@ import path from 'node:path';
 
 import { SurrealGraph } from '../packages/lore/src/engines/surrealGraph.js';
 import { SqliteGraph } from '../packages/lore/src/engines/sqliteGraph.js';
+import { PostgresGraph } from '../packages/lore/src/engines/postgres/postgresGraph.js';
+import { createGatePool, cleanupGateWorkspaces, closeGatePool, gateDbUrl } from './helpers/testPostgres.js';
+import type { Pool } from 'pg';
 import type { LoreEdge, LoreNode, TraversalResult, DirectedTraversalResult, BulkListPage } from '../packages/lore/src/providers/types.js';
 
 let passed = 0;
@@ -188,7 +207,7 @@ function projectDirected(rs: DirectedTraversalResult[]): unknown[] {
     return rs.map((r) => ({ id: r.node.id, depth: r.depth, relation: r.relation, direction: r.direction, via: r.via }));
 }
 
-type GraphUnderTest = SurrealGraph | SqliteGraph;
+type GraphUnderTest = SurrealGraph | SqliteGraph | PostgresGraph;
 
 async function runOpSequence(g: GraphUnderTest): Promise<CapturedBundle> {
     for (const f of FIXTURE_NODES) {
@@ -359,6 +378,21 @@ function normalizeBundle(bundle: CapturedBundle): unknown {
     return normalizeTimestamps(bundle, ranks);
 }
 
+/**
+ * sortSearchRankOrder — header note 3: the ONLY postgres-specific
+ * normalization. Sorts every `search[q]` hit list by node `id`, comparing the
+ * full-text result SET while ignoring the FTS5-bm25-vs-ts_rank rank order.
+ * Applied to BOTH sides of each postgres comparison so a genuinely different
+ * match set still fails and only rank order is forgiven.
+ */
+function sortSearchRankOrder(bundle: CapturedBundle): CapturedBundle {
+    const search: Record<string, LoreNode[]> = {};
+    for (const [q, rows] of Object.entries(bundle.search)) {
+        search[q] = [...rows].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    }
+    return { ...bundle, search };
+}
+
 /* ─── run ────────────────────────────────────────────────────────────── */
 
 async function main(): Promise<void> {
@@ -375,9 +409,14 @@ async function main(): Promise<void> {
     await surreal.initialize();
     await sqlite.initialize();
 
+    // The search-rank-order-normalized sqlite bundle (header note 3), captured
+    // here as the baseline the postgres comparisons below run against.
+    let sqliteNormalized: CapturedBundle | null = null;
+
     try {
         const surrealBundle = normalizeBundle(await runOpSequence(surreal));
         const sqliteBundle = normalizeBundle(await runOpSequence(sqlite));
+        sqliteNormalized = sortSearchRankOrder(sqliteBundle as CapturedBundle);
 
         const surrealJson = canonicalStringify(surrealBundle);
         const sqliteJson = canonicalStringify(sqliteBundle);
@@ -474,6 +513,81 @@ async function main(): Promise<void> {
         await sqlite.close().catch(() => undefined);
         fs.rmSync(surrealDir, { recursive: true, force: true });
         fs.rmSync(sqliteDir, { recursive: true, force: true });
+    }
+
+    // ── postgres: the third engine, against the real a real Postgres container container.
+    // Skips cleanly (printed reason, exit 0) when LORE_PG_URL is unset.
+    // Baseline is SQLite (the relational sibling both engines port): search is
+    // compared rank-order-normalized (header note 3), every other read must be
+    // bit-identical after the two pre-existing normalizations.
+    const pgUrl = gateDbUrl();
+    if (!pgUrl) {
+        console.log('  SKIP postgres cases: LORE_PG_URL is not set — postgres is excluded from this parity run');
+    } else {
+        const pgPool: Pool | null = await createGatePool('graph-engine-parity/postgres');
+        if (pgPool) {
+            const pg = new PostgresGraph('pg-gate-parity', pgPool, { cacheDisabled: true });
+            await pg.initialize();
+            try {
+                const pgBundle = sortSearchRankOrder(normalizeBundle(await runOpSequence(pg)) as CapturedBundle);
+                // Unreachable-null: the sqlite try block above completed (it would
+                // have thrown out of main otherwise), so the baseline is captured.
+                const pgSqliteBase = sqliteNormalized as CapturedBundle;
+
+                await check('postgres search: SAME result SET as sqlite (rank-order normalized — header note 3)', () => {
+                    assert.equal(
+                        canonicalStringify(pgBundle.search),
+                        canonicalStringify(pgSqliteBase.search),
+                    );
+                });
+                await check('postgres listNodes: bit-identical to sqlite', () => {
+                    assert.equal(canonicalStringify(pgBundle.listNodes), canonicalStringify(pgSqliteBase.listNodes));
+                });
+                await check('postgres listNodeSummaries: bit-identical to sqlite', () => {
+                    assert.equal(canonicalStringify(pgBundle.listNodeSummaries), canonicalStringify(pgSqliteBase.listNodeSummaries));
+                });
+                await check('postgres bulkList pages: bit-identical to sqlite', () => {
+                    assert.equal(canonicalStringify(pgBundle.bulkListPages), canonicalStringify(pgSqliteBase.bulkListPages));
+                });
+                await check('postgres bulkListProjected pages: bit-identical to sqlite', () => {
+                    assert.equal(canonicalStringify(pgBundle.bulkListProjectedPages), canonicalStringify(pgSqliteBase.bulkListProjectedPages));
+                });
+                await check('postgres traverse: bit-identical to sqlite (sortFrontierEdges pins sub-order)', () => {
+                    assert.equal(canonicalStringify(pgBundle.traverse), canonicalStringify(pgSqliteBase.traverse));
+                });
+                await check('postgres traverseDirected: bit-identical to sqlite (sortFrontierEdges pins sub-order)', () => {
+                    assert.equal(canonicalStringify(pgBundle.traverseDirected), canonicalStringify(pgSqliteBase.traverseDirected));
+                });
+                await check('postgres queryEdges: bit-identical PAGES to sqlite (both ORDER BY source/target/relation)', () => {
+                    assert.equal(canonicalStringify(pgBundle.queryEdgesPages), canonicalStringify(pgSqliteBase.queryEdgesPages));
+                });
+                await check('postgres getStats: bit-identical to sqlite', () => {
+                    assert.equal(canonicalStringify(pgBundle.stats), canonicalStringify(pgSqliteBase.stats));
+                });
+                await check('postgres getTopology: bit-identical to sqlite', () => {
+                    assert.equal(canonicalStringify(pgBundle.topology), canonicalStringify(pgSqliteBase.topology));
+                });
+                await check('postgres getTopologyOverview: bit-identical to sqlite', () => {
+                    assert.equal(canonicalStringify(pgBundle.topologyOverview), canonicalStringify(pgSqliteBase.topologyOverview));
+                });
+                await check('postgres getNodesByIds: bit-identical to sqlite', () => {
+                    assert.equal(canonicalStringify(pgBundle.getNodesByIds), canonicalStringify(pgSqliteBase.getNodesByIds));
+                });
+                await check('postgres findSupersededByPredecessors: bit-identical to sqlite', () => {
+                    assert.equal(canonicalStringify(pgBundle.findSupersededByPredecessors), canonicalStringify(pgSqliteBase.findSupersededByPredecessors));
+                });
+                await check('postgres lintGraph: bit-identical to sqlite (sorted — see header)', () => {
+                    assert.equal(canonicalStringify(pgBundle.lintGraph), canonicalStringify(pgSqliteBase.lintGraph));
+                });
+                await check('postgres: the whole normalized bundle is bit-identical to sqlite (search rank-order normalized)', () => {
+                    assert.equal(canonicalStringify(pgBundle), canonicalStringify(sqliteNormalized));
+                });
+            } finally {
+                await pg.close().catch(() => undefined);
+                await cleanupGateWorkspaces(pgPool);
+                await closeGatePool(pgPool);
+            }
+        }
     }
 
     console.log('');

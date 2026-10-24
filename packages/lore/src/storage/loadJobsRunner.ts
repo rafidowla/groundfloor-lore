@@ -52,6 +52,8 @@ import {
     isLoadCancelled,
 } from './loadJobsAbort.js';
 import type { OutboxStore, OutboxEntry } from '../outbox/types.js';
+import type { LinkSignaler } from '../link/linkTypes.js';
+import { LoadLinkIntents } from './loadJobsLinking.js';
 import {
     LoaderDispatcher,
     type LoaderDispatcherDeps,
@@ -61,7 +63,10 @@ import {
     WorkspaceConcurrencyManager,
     TempFileSweeper,
 } from './loadJobsConcurrency.js';
+import { routeJsonlObject, parseCsvLine } from './loadJobsRowParse.js';
 import { recordHotWriteBatch } from '../outbox/hotLane.js';
+import { resolveWorkspaceGraphEngine } from '../engines/graphEngineSelector.js';
+import { redactedPostgresLocation } from '../engines/postgres/postgresPoolOwner.js';
 
 /** How often to flush dispatcher buffers + persist progress. */
 export const PROGRESS_INTERVAL_ROWS = 1_000;
@@ -98,6 +103,8 @@ export interface LoadJobsRunnerWiring {
     store: LoadJobsStore;
     /** Outbox for emitting load.done. Optional in tests. */
     outboxStore?: OutboxStore;
+    /** link-on-arrival: receives per-row `autolink:false` intents for queued-embed rows. */
+    linkSignaler?: LinkSignaler | null;
     /** Factory that builds the dispatcher dependencies (with the
      *  three live substrate adapters bound to the live graph + verbatim
      *  store). The runner calls this PER JOB so adapters can scope
@@ -114,6 +121,7 @@ export interface LoadJobsRunnerWiring {
 export class LoadJobsRunner {
     private readonly store: LoadJobsStore;
     private readonly outboxStore?: OutboxStore;
+    private readonly linkSignaler: LinkSignaler | null;
     private readonly buildDeps: LoadJobsRunnerWiring['buildDispatcherDeps'];
     private readonly idleMs: number;
     private readonly busyMs: number;
@@ -132,6 +140,7 @@ export class LoadJobsRunner {
     constructor(w: LoadJobsRunnerWiring) {
         this.store = w.store;
         this.outboxStore = w.outboxStore;
+        this.linkSignaler = w.linkSignaler ?? null;
         this.buildDeps = w.buildDispatcherDeps;
         this.idleMs = w.config?.idleMs ?? IDLE_MS_DEFAULT;
         this.busyMs = w.config?.busyMs ?? BUSY_MS_DEFAULT;
@@ -350,7 +359,12 @@ export class LoadJobsRunner {
         // the placeholder, so enqueue strictly after flush).
         const queuedEmbedTexts: string[] = [];
         const queuedEmbedIds: string[] = [];
+        // Link-on-arrival intent of every row (job-level autolink + per-row autolink; see loadJobsLinking.ts).
+        const linkIntents = new LoadLinkIntents(this.linkSignaler, job);
         const emitQueuedEmbeds = async (): Promise<void> => {
+            // Opt-outs are durable BEFORE the vector can commit + be signalled (inline: signal below; queued: embed.batch).
+            await linkIntents.flush();
+            linkIntents.signalInline();
             if (queuedEmbedIds.length === 0) return;
             if (!this.outboxStore) {
                 // No outbox wired (test wiring) — nothing can drain an
@@ -433,6 +447,8 @@ export class LoadJobsRunner {
                     queuedEmbedTexts.push(parsed.row.text);
                     queuedEmbedIds.push(parsed.row.id);
                 }
+                // Explicit autolink:false (job-level or per-row) => no link-queue entry when the vector commits.
+                linkIntents.record(parsed);
                 rowIdx++;
                 if (rowIdx - lastFlushIdx >= this.progressInterval) {
                     this.throwIfCancelled(job.jobId);
@@ -617,6 +633,16 @@ export class LoadJobsRunner {
     ): Promise<void> {
         if (!this.outboxStore) return;
         const now = new Date().toISOString();
+        // Engine-neutral graph observability: the DECLARED engine of the
+        // workspace the rows loaded into (the bulk adapter is
+        // capability-selected, so deps.surreal is present for sqlite and
+        // postgres loads too, not just Surreal). load.done is a
+        // notification-only outbox kind (outbox/dispatcher.ts) — no code
+        // reads these keys back — so the label carries no compat surface.
+        const loadGraphEngine = deps.surreal ? resolveWorkspaceGraphEngine(job.workspace) : null;
+        const loadGraphPath = !deps.surreal
+            ? null
+            : loadGraphEngine === 'postgres' ? redactedPostgresLocation() : deps.surreal.activePath ?? null;
         const entry: OutboxEntry = {
             id: `load.done-${job.jobId}`,
             operation: 'load.done',
@@ -636,12 +662,14 @@ export class LoadJobsRunner {
                 // Engine-neutral graph observability: this field was once
                 // named after the legacy engine's own internal write-path
                 // field ('copy'|'merge'); now it names WHICH graph engine
-                // loaded the rows — a local load is Surreal-backed or
-                // graphless. No code reads these keys back — load.done is a
+                // loaded the rows — the workspace's DECLARED engine (the
+                // bulk adapter is capability-selected, so deps.surreal is
+                // present for sqlite and postgres loads too, not just
+                // Surreal). No code reads these keys back — load.done is a
                 // notification-only outbox kind (see outbox/dispatcher.ts)
-                // — so the rename carries no compat surface.
-                graphEngine: deps.surreal ? 'surreal' : null,
-                graphPath: deps.surreal?.activePath ?? null,
+                // — so the label carries no compat surface.
+                graphEngine: loadGraphEngine,
+                graphPath: loadGraphPath,
             },
             status: 'pending',
             attempts: 0,
@@ -654,110 +682,8 @@ export class LoadJobsRunner {
     }
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────
-
-/**
- * Route a parsed JSONL object to its target. Supports three shapes:
- *   - { target: 'graph.node', ... }  — explicit target
- *   - { id, type, label, ...        } — assumed graph.node
- *   - { from, to, relationship      } — assumed graph.edge
- *   - { id, text                    } — assumed verbatim
- * The workspace is force-set from the job (Sprint L invariant —
- * a malicious row can't escape into a different workspace).
- */
-export function routeJsonlObject(obj: unknown, workspace: string): ParsedRow | null {
-    if (!obj || typeof obj !== 'object') return null;
-    const o = obj as Record<string, unknown>;
-    const explicit = typeof o['target'] === 'string' ? (o['target'] as string) : null;
-
-    if (explicit === 'graph.node' || (!explicit && typeof o['id'] === 'string' && typeof o['type'] === 'string' && !o['from'])) {
-        return {
-            target: 'graph.node',
-            row: {
-                id: String(o['id'] ?? ''),
-                type: String(o['type'] ?? ''),
-                label: String(o['label'] ?? ''),
-                content: String(o['content'] ?? ''),
-                tags: o['tags'] as string[] | string | undefined,
-                project: o['project'] as string | undefined,
-                ecosystem: o['ecosystem'] as string | undefined,
-                metadata: typeof o['metadata'] === 'string' ? (o['metadata'] as string) : JSON.stringify(o['metadata'] ?? {}),
-                workspace,
-            },
-        };
-    }
-    if (explicit === 'graph.edge' || (!explicit && typeof o['from'] === 'string' && typeof o['to'] === 'string')) {
-        return {
-            target: 'graph.edge',
-            row: {
-                from: String(o['from'] ?? ''),
-                to: String(o['to'] ?? ''),
-                relationship: String(o['relationship'] ?? o['rel'] ?? ''),
-                workspace,
-                metadata: typeof o['metadata'] === 'string' ? (o['metadata'] as string) : JSON.stringify(o['metadata'] ?? {}),
-            },
-        };
-    }
-    if (explicit === 'vector') {
-        return {
-            target: 'vector',
-            row: {
-                id: String(o['id'] ?? ''),
-                text: String(o['text'] ?? ''),
-                workspace,
-                metadata: o['metadata'] as Record<string, unknown> | undefined,
-            },
-        };
-    }
-    // Fallback: verbatim if there's any text-y content.
-    if (typeof o['id'] === 'string') {
-        return {
-            target: 'verbatim',
-            row: {
-                id: String(o['id']),
-                text: String(o['text'] ?? ''),
-                workspace,
-                metadata: o['metadata'] as Record<string, unknown> | undefined,
-            },
-        };
-    }
-    return null;
-}
-
-/** Minimal CSV-line parser — handles quoted strings + escaped quotes.
- *  Doesn't handle embedded newlines inside quoted cells (Z3 will
- *  swap in a proper streaming CSV reader). */
-function parseCsvLine(line: string): string[] {
-    const cells: string[] = [];
-    let cur = '';
-    let inQ = false;
-    for (let i = 0; i < line.length; i++) {
-        const ch = line[i];
-        if (inQ) {
-            if (ch === '"') {
-                if (line[i + 1] === '"') {
-                    cur += '"';
-                    i++;
-                } else {
-                    inQ = false;
-                }
-            } else {
-                cur += ch;
-            }
-        } else {
-            if (ch === ',') {
-                cells.push(cur);
-                cur = '';
-            } else if (ch === '"' && cur === '') {
-                inQ = true;
-            } else {
-                cur += ch;
-            }
-        }
-    }
-    cells.push(cur);
-    return cells;
-}
+// ─── Helpers: see loadJobsRowParse.ts (routeJsonlObject, parseCsvLine) ───
+export { routeJsonlObject };
 
 /**
  * Factory matching the outbox-replicator pattern. Returns the

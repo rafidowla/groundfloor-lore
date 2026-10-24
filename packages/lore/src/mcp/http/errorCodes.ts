@@ -132,3 +132,24 @@ export const RESTORE_TARGET_NOT_EMPTY = 'restore_target_not_empty';
  *  501 (not 404) so a caller can tell "route exists, gated in this deployment"
  *  from "unknown path". */
 export const STREAM_INGEST_CLOUD_ONLY = 'stream_ingest_cloud_only';
+
+// ── Admin ingestion enqueue (routes/ingestEnqueue.ts) ──
+/** The ingestion host is not running (LORE_INGEST_ENABLED off, or it failed to start / is stopping). HTTP 404 (503 while stopping). */
+export const INGEST_UNAVAILABLE = 'ingestion_unavailable';
+/** The workspace is registered but is not eligible for ingestion on this host (LORE_INGEST_WORKSPACES). HTTP 409. */
+export const INGEST_WORKSPACE_NOT_ENABLED = 'ingestion_workspace_not_enabled';
+/** Workspace policy forbids the requested processor (PolicyViolationError), e.g. hosted structuring on a local-only workspace. HTTP 422. */
+export const INGEST_POLICY_VIOLATION = 'ingest_policy_violation';
+/** No registered processor can handle the mime type or the requested structurer (NoProcessorError). HTTP 422. */
+export const INGEST_NO_PROCESSOR = 'ingest_no_processor';
+/** Too many enqueue requests are already holding file bytes in memory. HTTP 503 + Retry-After. */
+export const INGEST_BUSY = 'ingest_busy';
+/** Status lookup for a job that does not exist in the named workspace. HTTP 404. */
+export const INGEST_JOB_NOT_FOUND = 'job_not_found';
+/** A field of the enqueue body failed validation. HTTP 400. */
+export const INVALID_WORKSPACE = 'invalid_workspace';
+export const INVALID_FILE_NAME = 'invalid_file_name';
+export const INVALID_MIME_TYPE = 'invalid_mime_type';
+export const INVALID_FILE_CONTENT = 'invalid_file_content';
+export const INVALID_STRUCTURE = 'invalid_structure';
+export const INVALID_JOB_ID = 'invalid_job_id';

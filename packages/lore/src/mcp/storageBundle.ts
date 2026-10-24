@@ -8,7 +8,7 @@
  * specific database being present is one such example.
  */
 
-import { createTableStorage } from '../engines/tableStorageFactory.js';
+import { createTableStorage, createWorkspaceTableStorage } from '../engines/tableStorageFactory.js';
 import { SessionCacheManager } from '../engines/sessionCacheManager.js';
 import type { ISessionCache } from '../engines/sessionCache.js';
 import { isVerbatimStore } from '../engines/verbatimStoreApi.js';
@@ -70,6 +70,12 @@ export async function createStorageClient(
     verbatimStore: LoreVectorStore,
     deploymentMode: 'local' | 'cloud',
     graphBasePath: string,
+    /**
+     * The workspace the bundle's table storage is bound to (+ its LORE_HOME). With it, the backend
+     * follows the workspace's engine (SQLite file or the shared Postgres database); without it the
+     * bundle falls back to the SQLite file at `graphBasePath` (callers that have no workspace identity).
+     */
+    tables?: { workspace: string; home?: string },
 ): Promise<StorageBundle> {
     if (deploymentMode === 'cloud') {
         // TW-7e (conc-dual-sessioncache-clobber-and-unflushed-on-dispose):
@@ -150,10 +156,13 @@ export async function createStorageClient(
         loreGraph: graph,
         loreVerbatim: verbatimStore,
         sessionCache,
-        // Built from the path alone via the same factory
-        // LocalGraph.getTableStorage() delegates to — no graph instance is
-        // needed to obtain it.
-        tableStorage: createTableStorage(graphBasePath),
+        // Same factory the registry's tableStorageFor uses, so a Postgres-engine
+        // workspace gets Postgres tables here too (no graph instance needed).
+        // The bundle owns the handle; shutdown closes it (a Postgres handle
+        // only drops its caches, never the shared pool).
+        tableStorage: tables
+            ? await createWorkspaceTableStorage(tables.workspace, graphBasePath, tables.home)
+            : createTableStorage(graphBasePath),
         // Sprint 15 — facade: local mode wraps the LocalGraph +
         // VerbatimStore pair the rest of the bundle exposes. Call
         // sites can now hit `bundle.storageClient.upsertNode(...)`

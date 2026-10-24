@@ -82,6 +82,15 @@ export interface LoreGraphHandle extends GraphProvider, RevisionedGraph, Partial
     unsupersedeNode(id: string): Promise<boolean>;
     /** Conditional writes R1 — create-only; throws NodeAlreadyExistsError when the id is taken. Engines whose store enforces it (sqlite, arcade) implement it as a DB-level INSERT. */
     insertNodeIfAbsent?(node: NodeInput): Promise<LoreNode>;
+    /** Link-on-arrival: many inferred edges in one transaction; never overwrites a caller-supplied edge (see link/linkTypes.ts InferredEdgeBatchCapable). Optional: the Linker falls back to checked single writes. */
+    addInferredEdgesBatch?(edges: import('../link/linkTypes.js').InferredEdge[]): Promise<import('../link/linkTypes.js').BatchEdgeResult>;
+    /** Link-on-arrival durable opt-out (`autolink:false`); see link/linkTypes.ts LinkOptOutCapable. SQLite + Postgres only; other engines leave it absent and the opt-out is not durable there. */
+    getLinkOptOuts?(ids: readonly string[]): Promise<Set<string>>;
+    setLinkOptOuts?(ids: readonly string[], optOut: boolean): Promise<void>;
+    /** Edge provenance (design D3): soft-invalidate edges (sets `valid_to`, never deletes); returns the count newly invalidated. SQLite + Postgres only. */
+    invalidateEdges?(edgeKeys: import('../providers/types.js').EdgeKey[], at: string): Promise<number>;
+    /** Engine-side valid-time list (one SQL predicate, keyset-paged, full pages); PostgresGraph only. core/temporalQuery.ts falls back to a JS filter over listNodes when absent. Not to be confused with LoreStorageClient.listNodesAsOf (string `at`). */
+    listNodesValidAt?(atMs: number, opts: import('../core/temporalQuery.js').AsOfEngineOptions): Promise<LoreNode[]>;
     markStaleByTags(tags: string[]): Promise<number>;
     /**
      * 2026-09-03 (X-markstale audit fix) — the two id-scoped primitives the

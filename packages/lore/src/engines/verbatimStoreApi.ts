@@ -58,6 +58,13 @@ export interface VerbatimStoreApi extends VectorProvider {
         },
     ): Promise<VerbatimSearchResult[]>;
 
+    /** Link-on-arrival: many stored-vector queries in one call (see link/linkTypes.ts BatchKnnCapable). Optional:
+     *  the Linker falls back to one `searchByVector` per query on an engine without it. */
+    searchByVectors?(
+        queries: Array<{ key: string; vector: number[] }>,
+        opts: { topK: number; filter?: Partial<VerbatimDocument['metadata']>; actorScopes?: ReadonlyArray<string> },
+    ): Promise<Map<string, VerbatimSearchResult[]>>;
+
     /** Keyword (BM25) search. See verbatimBm25Result.ts for the
      *  ranked/unranked envelope contract every engine must honor. */
     bm25Search(

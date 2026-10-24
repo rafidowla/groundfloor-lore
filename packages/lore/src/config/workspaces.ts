@@ -41,6 +41,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomUUID } from 'node:crypto';
 import { loreHome } from './loreHome.js';
+import { newWorkspaceGraphEngineFromEnv, newWorkspaceVectorEngineFromEnv } from './newWorkspaceEngineDefaults.js';
 import { recordWorkspaceDeletion } from './deletedWorkspaces.js';
 
 /**
@@ -186,7 +187,7 @@ export interface WorkspaceEntry {
      * `graphEngineSelector.ts`'s `DEFAULT_GRAPH_ENGINE` and
      * `resolveNewWorkspaceGraphEngine`.
      */
-    graphEngine?: 'kuzu' | 'surreal' | 'sqlite';
+    graphEngine?: 'kuzu' | 'surreal' | 'sqlite' | 'postgres';
     /**
      * 3.21 step 2 part 2 (design section 2) — which engine backs this
      * workspace's VECTOR substrate (embeddings + semantic search).
@@ -207,7 +208,7 @@ export interface WorkspaceEntry {
      * workspace: a `'sqlite'`-vector workspace can run either graph engine,
      * independently.
      */
-    vectorEngine?: 'lance' | 'sqlite';
+    vectorEngine?: 'lance' | 'sqlite' | 'postgres';
     retention?: WorkspaceRetentionPolicy;
     recallRerank?: import('../recall/rerankConfig.js').WorkspaceRecallRerank;
     /**
@@ -307,7 +308,6 @@ interface WorkspacePaths {
     workspacesDir: string;
 }
 
-/** Resolve the workspace paths for a given home (defaults to loreHome()). */
 function workspacePaths(home: string = loreHome()): WorkspacePaths {
     return {
         home,
@@ -362,14 +362,14 @@ export function loadWorkspaces(home: string = loreHome()): WorkspacesFile {
                 // engine wrote it (surreal, pre-3.21), and this first-run path
                 // has no way to know which; absent correctly resolves to
                 // 'surreal' via graphEngineSelector.ts's default.
-                ...(hasLegacy ? {} : { graphEngine: process.env['LORE_DEFAULT_GRAPH_ENGINE'] === 'surreal' ? 'surreal' : 'sqlite' as const }),
+                ...(hasLegacy ? {} : { graphEngine: newWorkspaceGraphEngineFromEnv() }),
                 // 3.21 step 2 part 2 — same rule, same reasoning, as the
                 // graphEngine field just above: only a genuinely FRESH home
                 // gets the new default; adopting an existing `.lore` must
                 // leave the field absent (its real vectors are wherever
                 // they already are — 'lance' via vectorEngineSelector.ts's
                 // default).
-                ...(hasLegacy ? {} : { vectorEngine: process.env['LORE_DEFAULT_VECTOR_ENGINE'] === 'lance' ? 'lance' : 'sqlite' as const }),
+                ...(hasLegacy ? {} : { vectorEngine: newWorkspaceVectorEngineFromEnv() }),
             },
         ],
     };
@@ -440,10 +440,10 @@ export function createWorkspace(
         // absent field keeps meaning 'surreal' for pre-3.21 workspaces. Inline rather than imported
         // from graphEngineSelector.ts (circular); see resolveNewWorkspaceGraphEngine for the
         // LORE_DEFAULT_GRAPH_ENGINE escape hatch.
-        graphEngine: process.env['LORE_DEFAULT_GRAPH_ENGINE'] === 'surreal' ? 'surreal' : 'sqlite',
+        graphEngine: newWorkspaceGraphEngineFromEnv(),
         // 3.21 step 2 part 2 — same rule for vectorEngine (absent = 'lance' for pre-3.21
         // workspaces); see resolveNewWorkspaceVectorEngine for LORE_DEFAULT_VECTOR_ENGINE.
-        vectorEngine: process.env['LORE_DEFAULT_VECTOR_ENGINE'] === 'lance' ? 'lance' : 'sqlite',
+        vectorEngine: newWorkspaceVectorEngineFromEnv(),
     };
     file.workspaces.push(entry);
     writeControl(file, home);

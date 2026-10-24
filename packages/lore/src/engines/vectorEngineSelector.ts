@@ -22,9 +22,10 @@
  */
 
 import { loadWorkspaces } from '../config/workspaces.js';
+import { newWorkspaceVectorEngineFromEnv } from '../config/newWorkspaceEngineDefaults.js';
 
 /** The engines that can back the vector substrate of a local workspace. */
-export type VectorEngineKind = 'lance' | 'sqlite';
+export type VectorEngineKind = 'lance' | 'sqlite' | 'postgres';
 
 /**
  * The default, and what an absent selector means — for a workspace that has
@@ -47,6 +48,14 @@ export function resolveWorkspaceVectorEngine(workspace: string, home?: string): 
         const entry = file.workspaces.find((w) => w.name === workspace);
         if (entry?.vectorEngine === 'sqlite') return 'sqlite';
         if (entry?.vectorEngine === 'lance') return 'lance';
+        if (entry?.vectorEngine === 'postgres') return 'postgres';
+        // Substrate pairing (postgres engine): a workspace that declares
+        // `graphEngine: 'postgres'` but leaves `vectorEngine` absent is a
+        // postgres workspace — both substrates live in the same database.
+        // Never a silent substitution: an EXPLICIT vectorEngine always wins,
+        // and absent otherwise still falls through to DEFAULT_VECTOR_ENGINE
+        // ('lance') exactly as before.
+        if (!entry?.vectorEngine && entry?.graphEngine === 'postgres') return 'postgres';
         return DEFAULT_VECTOR_ENGINE;
     } catch {
         // Unreadable/absent workspaces.json — the daemon has bigger
@@ -92,5 +101,5 @@ export function resolveVectorEngineForPath(
  * calls this (there is no cloud counterpart to either local vector engine).
  */
 export function resolveNewWorkspaceVectorEngine(): VectorEngineKind {
-    return process.env['LORE_DEFAULT_VECTOR_ENGINE'] === 'lance' ? 'lance' : 'sqlite';
+    return newWorkspaceVectorEngineFromEnv();
 }

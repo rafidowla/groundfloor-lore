@@ -35,6 +35,7 @@ to at least one `process.env` read in `packages/lore/src/`.
 2b. [Shared Model Server — Client](#2b-shared-model-server--client)
 3. [Sync / Dataplane](#3-sync--dataplane)
    - [Cloud Arcade (ArcadeDB multi-tenant)](#3a-cloud-arcade-arcadedb-multi-tenant)
+   - [Postgres engine](#3b-postgres-engine)
 4. [Maintenance (`lore maintain`)](#4-maintenance-lore-maintain)
    - [Scheduled compaction timer](#scheduled-compaction-timer)
 5. [Security & Auth](#5-security--auth)
@@ -44,6 +45,7 @@ to at least one `process.env` read in `packages/lore/src/`.
 9. [Database Internals](#9-database-internals)
 10. [Observability](#10-observability)
 11. [Ingestion & File Watching](#11-ingestion--file-watching)
+   - 11a. [Ingestion Host (daemon)](#11a-ingestion-host-daemon)
 12. [Tool Surface (MCP)](#12-tool-surface-mcp)
 13. [LLM Dispatch](#13-llm-dispatch)
 14. [Development / Eval](#14-development--eval)
@@ -155,7 +157,7 @@ Source: `src/engines/localGraph.ts`, `src/engines/verbatimStore.ts`
 | | |
 |---|---|
 | **Default** | `sqlite` (3.21 step 1d) |
-| **Values** | `surreal` to opt out; any other value (or unset) is `sqlite` |
+| **Values** | `surreal` to opt out, `postgres` for the Postgres engine; any other value (or unset) is `sqlite` |
 | **Surface** | `lore workspaces create`, fresh-home seeding (first daemon boot with no `workspaces.json`) |
 
 Which graph engine a brand-**new** local workspace's `graphEngine` field is
@@ -165,8 +167,12 @@ is never rewritten by this variable. Set `LORE_DEFAULT_GRAPH_ENGINE=surreal`
 to keep creating pre-3.21-style SurrealDB-backed workspaces on a host that
 is not ready to switch (e.g. relies on a workflow the SQLite engine does not
 support yet, such as `lore migrate-graph`'s upstream direction).
+`LORE_DEFAULT_GRAPH_ENGINE=postgres` makes new workspaces use the Postgres
+engine (see [3b](#3b-postgres-engine)); opening such a workspace then needs
+`LORE_PG_URL` and fails loudly without it — it never falls back.
 
-Source: `src/config/workspaces.ts` (`createWorkspace`, fresh-home seeding),
+Source: `src/config/newWorkspaceEngineDefaults.ts`, `src/config/workspaces.ts`
+(`createWorkspace`, fresh-home seeding),
 `src/engines/graphEngineSelector.ts` (`resolveNewWorkspaceGraphEngine`).
 
 ---
@@ -176,7 +182,7 @@ Source: `src/config/workspaces.ts` (`createWorkspace`, fresh-home seeding),
 | | |
 |---|---|
 | **Default** | `sqlite` (3.21 step 2) |
-| **Values** | `lance` to opt out; any other value (or unset) is `sqlite` |
+| **Values** | `lance` to opt out, `postgres` for the Postgres engine; any other value (or unset) is `sqlite` |
 | **Surface** | `lore workspaces create`, fresh-home seeding (first daemon boot with no `workspaces.json`) |
 
 Which vector engine a brand-**new** local workspace's `vectorEngine` field is
@@ -194,9 +200,12 @@ offline `lore migrate-vectors <workspace> --to sqlite` (3.27.1; see
 Running a workspace with the graph on `sqlite` and the vectors on `lance` (or
 the reverse) is a supported, long-term configuration, not a transitional
 state; each engine is migrated independently by its own command
-(`lore migrate-graph`, `lore migrate-vectors`).
+(`lore migrate-graph`, `lore migrate-vectors`). `postgres` selects the
+Postgres vector engine (pgvector; see [3b](#3b-postgres-engine)); there is no
+migration command into or out of it yet.
 
-Source: `src/config/workspaces.ts` (`createWorkspace`, fresh-home seeding),
+Source: `src/config/newWorkspaceEngineDefaults.ts`, `src/config/workspaces.ts`
+(`createWorkspace`, fresh-home seeding),
 `src/engines/vectorEngineSelector.ts` (`resolveNewWorkspaceVectorEngine`).
 
 ---
@@ -1696,6 +1705,228 @@ read embedding presence (Dataplane) answers `501 recallable_not_supported`.
 - A recall hit that came only from the keyword leg (no `semantic` in
   `matchedBy`, no `similarity`) now carries `embedded: false`; do not treat
   "the hit came back" as proof the node is embedded.
+
+---
+
+## 3b. Postgres engine
+
+Postgres is a server engine for the graph and vector substrates, selected per
+workspace with `graphEngine: "postgres"` / `vectorEngine: "postgres"` in
+`workspaces.json` (or for new workspaces with `LORE_DEFAULT_GRAPH_ENGINE` /
+`LORE_DEFAULT_VECTOR_ENGINE`). SQLite stays the local engine. A workspace that
+declares `graphEngine: "postgres"` and no `vectorEngine` pairs with the
+Postgres vector engine.
+
+- One Postgres database serves every workspace; rows are sliced by
+  `workspace_id`, which leads every primary key. The vector store is
+  additionally partitioned by workspace (see "Vector storage" below).
+- The server needs PostgreSQL 14 or newer. The vector store needs the
+  `pgvector` extension (0.5.0 or newer, for HNSW indexes); the first open
+  runs `CREATE EXTENSION IF NOT EXISTS vector`, so the role must be allowed
+  to do that (or an admin installs it once).
+- Startup failures are explicit: unreachable server, bad credentials, missing
+  database, missing or old pgvector, and missing privileges each produce one
+  message naming the redacted target and the fix. There is never a silent
+  fallback to another engine.
+- Schema creation is serialized across processes with a Postgres advisory
+  lock, so several Lore processes can open a fresh database at once.
+- Not supported yet (each refuses a Postgres workspace loudly): `lore backup`
+  and `lore restore`, `lore migrate-graph`, `lore migrate-vectors`,
+  `lore verbatim check-scopes` / `repair-scopes`, and the piece-index rebuild.
+  Use `pg_dump` for backups. `lore verbatim dedupe` reports
+  `not-applicable-postgres` and `lore verbatim reclaim` reports
+  `not_supported`.
+
+### `LORE_PG_URL`
+
+| | |
+|---|---|
+| **Default** | none (required when any workspace uses the Postgres engine) |
+| **Format** | `postgres://user:password@host:5432/dbname` |
+
+Connection string. It contains credentials, so it is only ever read from the
+environment (never committed, never logged); Lore prints only the redacted
+`postgres://host:port/db` form. A missing value is a loud error at open time.
+
+Source: `src/engines/postgres/postgresClient.ts`, `postgresPoolOwner.ts`.
+
+### `LORE_PG_POOL_MAX`
+
+| | |
+|---|---|
+| **Default** | `16` |
+
+Maximum pooled connections. One process-wide pool serves every Postgres
+workspace in the process; it is drained last on shutdown.
+
+### `LORE_PG_STATEMENT_TIMEOUT_MS`
+
+| | |
+|---|---|
+| **Default** | `30000` |
+
+Per-session `statement_timeout`, applied as a startup parameter on every
+connection. A statement that exceeds it surfaces as an unknown-outcome write
+error, never as a silent success.
+
+### `LORE_PG_IDLE_TX_TIMEOUT_MS`
+
+| | |
+|---|---|
+| **Default** | `60000` |
+
+Per-session `idle_in_transaction_session_timeout`, so a stalled client cannot
+hold row locks indefinitely.
+
+### `LORE_PG_CONNECT_TIMEOUT_MS`
+
+| | |
+|---|---|
+| **Default** | `30000` |
+
+Bounds both dialing a dead host and waiting for a free pooled connection.
+Raise it if a saturated pool legitimately queues longer than 30 s.
+
+### `LORE_PG_APPLICATION_NAME`
+
+| | |
+|---|---|
+| **Default** | `lore` |
+
+`application_name` shown in `pg_stat_activity`; set a distinct value per
+process to tell several Lore processes apart.
+
+### `LORE_PG_BACKGROUND_RESERVE`
+
+| | |
+|---|---|
+| **Default** | `min(4, max(1, floor(LORE_PG_POOL_MAX / 2)))` (4 on the default pool of 16) |
+
+Pool guard. Connections kept free for foreground queries while background or
+expensive Postgres work runs (the keyword-index build, the verbatim store's
+`VACUUM ANALYZE` and HNSW / GIN index builds). Background jobs may use at most
+`LORE_PG_POOL_MAX - LORE_PG_BACKGROUND_RESERVE` connections (further capped by
+`LORE_PG_BACKGROUND_CONCURRENCY`), and a job waits for a slot without holding a
+connection, so it never blocks a foreground query. When the pool leaves no
+spare connection (`LORE_PG_POOL_MAX <= reserve`, e.g. `LORE_PG_POOL_MAX=1`) the
+job is skipped with one warning instead of competing with foreground queries:
+search stays correct (keyword search runs unindexed, VACUUM waits for the next
+pass). Non-negative integer; an invalid value fails pool creation. Programmatic
+equivalent: `createPostgresPool({ backgroundReserve })`.
+
+### `LORE_PG_BACKGROUND_CONCURRENCY`
+
+| | |
+|---|---|
+| **Default** | `2` |
+
+Maximum background jobs running at once per pool. `0` disables guarded
+background work entirely (every such job is skipped with a warning). Programmatic
+equivalent: `createPostgresPool({ backgroundConcurrency })`; a per-job
+`backgroundStatementTimeoutMs` option sets a `statement_timeout` for guarded jobs
+(`0` = unbounded; index builds are always unbounded). Closing the pool
+(`closePostgresPool`) or the owning store cancels in-flight background
+statements with `pg_cancel_backend`.
+
+### `LORE_PG_BACKGROUND_STATEMENT_TIMEOUT_MS`
+
+| | |
+|---|---|
+| **Default** | `0` (no limit) |
+
+Pool guard. `statement_timeout` for background Postgres jobs (the keyword-index
+build, the verbatim store's `VACUUM ANALYZE` and HNSW / GIN index builds). By
+default they run without a time limit: the foreground timeout
+(`LORE_PG_STATEMENT_TIMEOUT_MS`, 30 s) would cancel index builds and VACUUM on
+large tables before they finish. Closing the pool or the owning store still
+cancels them. Foreground queries keep their own timeout. Non-negative integer
+(ms); `0` = unbounded; an invalid value fails pool creation. Programmatic
+equivalent: `createPostgresPool({ backgroundStatementTimeoutMs })`.
+### Vector storage: one partition per workspace
+
+The `verbatim` table (the vector store) is LIST-partitioned by `workspace_id`.
+The first write or open of a workspace creates its partition
+(`verbatim_ws_<24 hex of sha256(workspace id)>`); the vector (HNSW), full-text
+(GIN) and btree indexes are declared once on the partitioned parent and
+Postgres builds them on each partition. Search keeps `workspace_id = $1` as an
+equality filter, so the planner prunes to that single partition and uses that
+partition's own HNSW index. This matters because a single global HNSW index
+applies the workspace filter after the index returns its `ef_search`
+candidates, so a small or mid-size workspace sharing an index with a large one
+gets short or empty results and poor recall.
+
+- Partition creation is idempotent and safe across processes. It runs inside
+  the schema-bootstrap advisory lock, guarded by a `pg_inherits` probe so
+  re-opening an existing workspace takes no DDL lock. The very first creation
+  of a workspace's partition briefly takes an ACCESS EXCLUSIVE lock on the
+  parent table.
+- The primary key is `(workspace_id, row_id)`; `row_id` comes from the shared
+  sequence `verbatim_row_seq`.
+- `searchByVectors(queries, {topK, filter})` runs a whole batch of stored
+  vectors in one round trip (`LATERAL` over `unnest`), with the same result
+  shape and filtering as the SQLite store.
+
+#### Upgrading an existing single-table database (automatic, resumable)
+
+The first open of a database whose `verbatim` table is the old unpartitioned
+shape migrates it in place, under the schema-bootstrap advisory lock (other
+processes wait, then see the finished layout). The migration is additive and
+the old data stays readable until the final swap:
+
+1. **Stage.** Create `verbatim_next` (partitioned), a one-row progress table,
+   and one partition per workspace found in the old table.
+2. **Copy.** Copy in committed batches of 2000 rows ordered by `row_id`,
+   storing a high-water mark after each batch. A crash or `maxBatches` pause
+   resumes from the stored mark; nothing is recopied.
+3. **Swap.** In one transaction (ACCESS EXCLUSIVE on `verbatim`,
+   `lock_timeout` 60 s, `statement_timeout` 900 s): catch up rows written
+   during the copy (deletes, `is_canonical` / `superseded_at` / `updatedAt`
+   changes, inserts past the mark), verify row counts match, advance
+   `verbatim_row_seq` past the maximum `row_id`, attach the tsvector trigger,
+   rename the old table to `verbatim_pre_partition`, rename `verbatim_next`
+   and its indexes to the canonical names. If anything fails the transaction
+   rolls back and the old table is untouched.
+4. **Keep.** The old table is kept as `verbatim_pre_partition` as a rollback
+   copy and costs disk until dropped. It is not dropped automatically; once
+   satisfied, run `lore postgres rollback-copies` to see it with a check
+   against the live table, then `lore postgres rollback-copies --drop
+   verbatim_pre_partition --yes` (see `docs/OPERATIONS.md`). The migration
+   refuses to run while that table exists, rather than overwrite it.
+
+Catch-up relies on the invariant that the engine never rewrites `text`,
+`vector` or `text_tsv` in place; only `is_canonical`, `superseded_at` and
+`updatedAt` change. Writes to the old table during the copy are therefore
+safe, but expect the final swap lock to last as long as the catch-up plus the
+index renames; on a very large table run the first open at a quiet time and
+raise `LORE_PG_STATEMENT_TIMEOUT_MS` (the COPY phase uses the pooled
+connection, so each batch must fit within it).
+
+#### `verbatim_changes_log` is not written on Postgres
+
+The table exists on Postgres (the schema check requires it) but nothing
+populates it and nothing reads it. On SQLite it is a short-lived tail log: triggers fill it only
+while a SQLite to LanceDB promotion is staging, and its single reader is the
+promotion's `copyTail`, which works on a `verbatim.sqlite` file by `rowid` and
+writes LanceDB. That path is tied to a local SQLite file, and a Postgres
+workspace is never promoted, so recording changes on the Postgres write path
+would add a row per write to a table no code reads. The migration catch-up uses
+a locked table diff, re-embedding uses the outbox, and logical backups exclude
+the table. `test/postgres-changes-log-pin-unit.ts` pins this. A future
+Postgres consumer (for example a change feed) must add the producer and a prune
+policy together, then update the pin.
+
+Source: `src/engines/postgres/postgresVerbatimPartitionDdl.ts`,
+`postgresVerbatimPartitionMigration.ts`, `postgresVerbatimSchema.ts`.
+
+### Tables on Postgres
+
+A Postgres-engine workspace keeps its `ITableStorage` tables in the same database as its nodes (no SQLite file, no new
+variable). Rows are stored in `lore_entity` / `lore_entity_value` (workspace id leads every key), and each table gets a
+read view `lore_tv_<entity_type_id>`. The reserved columns `_memory_node_id`, `_source_id`, `_valid_from`, `_valid_to`
+are kept on the entity header and exposed on the view as `_lore_memory_node_id`, `_lore_source_id`,
+`_lore_valid_from`, `_lore_valid_to`. Join a table to its nodes with
+`JOIN nodes n ON n.workspace_id = <ws> AND n.id = v._lore_memory_node_id`. "As of D" uses valid time, half-open
+`[valid_from, valid_to)`, NULL meaning unbounded. All table DDL is additive and idempotent.
 
 ---
 
@@ -3406,6 +3637,73 @@ Source: `src/outbox/workspaceVerbatimResolver.ts`
 
 ---
 
+### `LORE_PROMOTION_SMALL_TAIL_ROWS`
+
+| | |
+|---|---|
+| **Default** | `1000` (change-log rows) |
+| **Surface** | daemon + embedded (SQLite → LanceDB verbatim promotion) |
+
+Automatic SQLite → LanceDB verbatim promotion. The catch-up rounds copy new
+writes without blocking writers until the unseen change-log tail is at or below
+this many rows; only then are in-process writers briefly parked (at most 2 s)
+to copy the last rows and commit. Non-negative integer; an invalid value falls
+back to the default.
+
+Source: `src/engines/verbatimPromotionGate.ts`
+
+---
+
+### `LORE_PROMOTION_LOCK_WAIT_MS`
+
+| | |
+|---|---|
+| **Default** | `60000` (60 s) |
+| **Surface** | daemon + embedded (SQLite → LanceDB verbatim promotion) |
+
+Automatic verbatim promotion. Total time the promotion waits for another
+process's SQLite write lock to free before abandoning the attempt. Waiting is
+asynchronous (the event loop is never stalled) and in-process writers are not
+parked meanwhile. Non-negative integer (ms); an invalid value falls back to
+the default.
+
+Source: `src/engines/verbatimPromotionGate.ts`
+
+---
+
+### `LORE_PROMOTION_COOLDOWN_MS`
+
+| | |
+|---|---|
+| **Default** | `60000` (1 minute) |
+| **Surface** | daemon + embedded (SQLite → LanceDB verbatim promotion) |
+
+Automatic verbatim promotion. Base delay before the automatic trigger retries
+after an aborted promotion. The delay doubles with each consecutive abort
+(1 min, 2, 4 …) up to `LORE_PROMOTION_COOLDOWN_MAX_MS`; a committed promotion
+resets it. Persisted in `.lore/promotion-cooldown.json`, so it survives
+restarts. An explicit `lore vectors promote` ignores it. Non-negative integer
+(ms); an invalid value falls back to the default.
+
+Source: `src/engines/verbatimPromotionState.ts`
+
+---
+
+### `LORE_PROMOTION_COOLDOWN_MAX_MS`
+
+| | |
+|---|---|
+| **Default** | `3600000` (1 hour) |
+| **Surface** | daemon + embedded (SQLite → LanceDB verbatim promotion) |
+
+Automatic verbatim promotion. Upper bound of the doubling retry delay set by
+`LORE_PROMOTION_COOLDOWN_MS`. Non-negative integer (ms); an invalid value falls
+back to the default.
+
+Source: `src/engines/verbatimPromotionState.ts`
+
+---
+
 ### `LORE_MAX_OPEN_WORKSPACES`
 
 | | |
@@ -3623,6 +3921,196 @@ When enabled, the file watcher descends into subdirectories of the paths in
 `LORE_WATCH_PATHS`.
 
 Source: `src/engines/localSourceWatcher.ts`
+
+---
+
+## 11a. Ingestion Host (daemon)
+
+The daemon can host the file-ingestion coordinator: one store and coordinator per workspace (SQLite locally,
+Postgres in server mode), an optional hardened listener for signed hosted-processor callbacks, and a scheduler.
+**Off by default.** HTTP daemon mode only (not stdio). Design: `docs/design/ingestion-coordinator.md`.
+Source: `src/mcp/ingestionBoot.ts`, `src/ingestion/ingestionHost.ts`, `src/ingestion/hostConfig.ts`.
+
+How jobs get enqueued: through the library API (`IngestionHost.coordinatorFor(ws).enqueueFile(...)`) from an
+embedding caller, or over HTTP through the admin enqueue route (below) on a standalone daemon.
+
+### Embedded hosts (`createLore({ ingestion })`)
+
+An app that embeds Lore in-process (Atlas, MIRA, PM Helper) gets the same host through an option, **off by default**:
+`createLore({ ingestion: true | { ... } })`, with `LORE_INGEST_ENABLED=1` as the fallback when no option is given.
+`ingestion: false` forces it off even when the env flag is set. Options win over the ingestion env vars; invalid values
+throw `RangeError` from `createLore`. The handle is `lore.ingestion` (null when off); see `docs/API_REFERENCE.md`.
+Source: `src/mcp/embeddedIngestion.ts` (shares `startIngestionHostWith` in `src/mcp/ingestionBoot.ts` with the daemon).
+
+| Option | Env equivalent | Notes |
+|---|---|---|
+| `enabled` | `LORE_INGEST_ENABLED` | `false` disables. |
+| `workspaces` | `LORE_INGEST_WORKSPACES` | Omitted: every workspace registered at the time of use is eligible (an app creates workspaces after boot). |
+| `hostedWorkspaces` | `LORE_INGEST_HOSTED_WORKSPACES` | Everything else stays `local-only`. |
+| `localLlm` / `hostedStructuring` | `LORE_INGEST_LOCAL_LLM_URL`/`_MODEL` / `LORE_INGEST_HOSTED_STRUCTURING_URL`/`_TOKEN` | `{url, model}` / `{url, token?}`. |
+| `scheduler.runIntervalMs` `reapIntervalMs` `reapMaxAgeMs` `purgeIntervalMs` `reclaimIntervalMs` `batch` `leaseMs` `drainMs` | the matching interval/batch env vars (`LORE_INGEST_RUN_INTERVAL_MS`, `LORE_INGEST_BATCH`, ...) | Same ranges as the env vars. |
+| `scheduler.autoRun` | none | `false` never starts the background loop; call `lore.ingestion.runDue(ws)` yourself. Default `true`. |
+| `callback` | none (callback env is ignored) | `{port, publicBaseUrl, masterSecret, webhookSecret?, scheme?, bind?}`. |
+| `enqueueMaxBytes` | `LORE_INGEST_ENQUEUE_MAX_BYTES` | Carried for parity. |
+| `extractWorker` | `LORE_INGEST_EXTRACT_WORKER` / `_URL` / `_TIMEOUT_MS` / `_MAX_BYTES` / `_MAX_MEMORY_MB` | `false` (default), `true` (child process owned by this instance) or `{url?, timeoutMs?, maxFileBytes?, maxMemoryMb?}`; `url` points at a separately run loopback worker. The option wins over the env. |
+| `vision` | `LORE_INGEST_VISION_URL` / `_MODEL` / `_MAX_PAGES` | `false` or `{url, model, maxPages?, timeoutMs?}`: a loopback OpenAI-compatible vision endpoint for scanned PDFs and images. |
+
+Embedded differences: no signal or crash handlers and no `process.env` writes; timers are unref'd and `dispose()`
+stops them. **The callback listener is explicit only**: the callback env vars (`LORE_INGEST_CALLBACK_PORT`, `_SECRET`, `_PUBLIC_URL` and the rest of that group) are ignored by an embedded host, and the
+socket opens only when `ingestion.callback` is passed AND a hosted structurer, a hosted workspace and a 32+ byte secret
+are configured. A host with only local workspaces never opens a socket. If ingestion was requested only through the env
+flag and fails to start, the instance logs and continues without it; with the option set, `createLore` throws.
+
+### Admin enqueue route
+
+`POST /api/admin/ingest/enqueue` submits one file; `GET /api/admin/ingest/jobs/<jobId>?workspace=<ws>` reads a job
+back. Operator-only (bootstrap or shared-secret token; same lane as `/api/admin/link-rebuild`), behind the main
+dispatcher's normal gates. Absent (404 `ingestion_unavailable`) when `LORE_INGEST_ENABLED` is off. The body is JSON
+with the file base64-encoded (so the file name never appears in a URL): `workspace` (explicit, must be registered and
+ingested by this host: 404 `workspace_not_found`, 409 `ingestion_workspace_not_enabled`), `fileName` (a bare name),
+`mimeType`, `contentBase64`, and optionally `structure` and `extractorId`. The reply is
+`{jobId, sourceId, created, state}`; `created:false` means the same file with the same options was already queued.
+Jobs are then picked up by the scheduler. Details and error codes: `docs/API_REFERENCE.md`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LORE_INGEST_ENQUEUE_MAX_BYTES` | `26214400` (25 MiB) | Largest decoded file the enqueue route accepts (1 KiB to 512 MiB; an out-of-range value falls back to the default). A request declaring a larger body gets `413 payload_too_large` before any bytes are read. Up to 4 uploads are held in memory at once; the next gets `503 ingest_busy` + `Retry-After`. |
+| `LORE_INGEST_EXTRACT_WORKER` | off | `1`/`true`/`on`/`child` runs the file extractors (PDF, Office, email, HTML, OCR, audio/video) in a child process owned by this Lore instance, so a parser crash, hang or memory blow-up costs one attempt of one job and never the host. Default: extraction stays in-process, exactly as before. |
+| `LORE_INGEST_EXTRACT_WORKER_URL` | unset | Use a separately run extractor worker at this loopback URL instead of a child (wins over the flag). Non-loopback URLs are refused (logged, in-process extraction is used). |
+| `LORE_INGEST_EXTRACT_TIMEOUT_MS` | `120000` | Per-file deadline (1 s to 1 h). On expiry the child is SIGKILLed and the job is retried with backoff, same job id, dead-lettered after the max attempts. |
+| `LORE_INGEST_EXTRACT_MAX_BYTES` | `104857600` (100 MiB) | Largest file the worker takes (1 KiB to 1 GiB). Over the cap is a permanent failure, not a retry. |
+| `LORE_INGEST_EXTRACT_MAX_MEMORY_MB` | `2048` | Heap ceiling of the child (128 to 65536). A child whose RSS grows past it is recycled after its current file. |
+| `LORE_INGEST_VISION_URL` | unset | Loopback OpenAI-compatible chat/vision endpoint (for example a local model server) used for images and for PDFs with no text layer. Needs `LORE_INGEST_VISION_MODEL`. The model is a separate process you run; Lore never starts it and it never lives in `lore-models`. A non-loopback URL is refused. |
+| `LORE_INGEST_VISION_MODEL` | unset | Model name sent to the vision endpoint. |
+| `LORE_INGEST_VISION_MAX_PAGES` | `25` | Pages of a scanned PDF read by the vision model (1 to 500). Longer scans are truncated and say so in the result metadata. |
+
+### `LORE_INGEST_ENABLED`
+
+| | |
+|---|---|
+| **Default** | off |
+| **Values** | `1` \| `true` \| `on` |
+| **Surface** | daemon |
+
+Master switch. When off nothing in the ingestion host is imported or started.
+
+### Workspaces and processors
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LORE_INGEST_WORKSPACES` | _(all registered workspaces in `local` mode; none in server mode)_ | Comma-separated workspaces eligible for ingestion. Server mode must list them. |
+| `LORE_INGEST_HOSTED_WORKSPACES` | _(none)_ | Workspaces whose policy is `hosted-allowed`. All others stay `local-only`. |
+| `LORE_INGEST_LOCAL_LLM_URL` / `LORE_INGEST_LOCAL_LLM_MODEL` | _(unset)_ | Optional local structurer (OpenAI-compatible). Loopback URL only; both must be set. |
+| `LORE_INGEST_HOSTED_STRUCTURING_URL` | _(unset)_ | Hosted structuring endpoint. `https` (http only for loopback). The allowlist is this origin only. |
+| `LORE_INGEST_HOSTED_STRUCTURING_TOKEN` / `LORE_INGEST_HOSTED_STRUCTURING_TOKEN_FILE` | _(unset)_ | Service token for that endpoint (value, or path to a file holding it). Never logged. |
+| `LORE_INGEST_DELIVERY_RETENTION_DAYS` | `30` | Callback delivery rows older than this are purged by the scheduler. |
+
+### Callback listener (separate port)
+
+Hosted processors cannot pass the main dispatcher's gates (localhost Host + Lore bearer), and those gates are not
+loosened. Callbacks arrive on their own listener that serves only `POST /api/ingest/callback/<jobId>`,
+authenticated by the callback signature. Unknown route 404, wrong method 405, every error body is a fixed
+`{"code": ...}` (never exception text). The listener opens only when ALL hold: a callback port is set, a hosted
+structurer is configured, at least one workspace is hosted-allowed, the master secret is at least 32 bytes, and the
+public URL is valid. Otherwise it stays closed, the hosted processor is not registered (fail closed), a clear error
+is logged, and the daemon still starts with local ingestion. It also refuses to start on the main daemon port.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LORE_INGEST_CALLBACK_PORT` | _(unset = no listener)_ | Listener port (`0` = ephemeral, tests). Must differ from `LORE_PORT`. |
+| `LORE_INGEST_CALLBACK_BIND` | `127.0.0.1` | Bind address. Non-loopback is allowed only by setting it, and logs a warning; put a TLS-terminating ingress in front. |
+| `LORE_INGEST_CALLBACK_PUBLIC_URL` | _(unset)_ | Base URL the hosted processor is told to call back (scheme + host, no path). Required. |
+| `LORE_INGEST_CALLBACK_SECRET` / `LORE_INGEST_CALLBACK_SECRET_FILE` | _(unset)_ | Master secret (min 32 bytes) deriving per-job bearer tokens and HMAC keys. Required. Never logged or returned. |
+| `LORE_INGEST_CALLBACK_WEBHOOK_SECRET` / `LORE_INGEST_CALLBACK_WEBHOOK_SECRET_FILE` | _(unset)_ | Standard-Webhooks shared secret; required when the scheme is `standard-webhooks`. |
+| `LORE_INGEST_CALLBACK_SCHEME` | `bearer` | `bearer` \| `lore-hmac` \| `standard-webhooks`. |
+| `LORE_INGEST_CALLBACK_REPLAY_WINDOW_SEC` | `300` | Accepted clock skew for signed timestamps (30 to 3600). |
+| `LORE_INGEST_CALLBACK_MAX_CONCURRENT` | `32` | Global in-flight cap (also the socket cap x4). Per source IP the cap is a quarter of it (min 1). Excess gets `503` + `Retry-After`. |
+| `LORE_INGEST_CALLBACK_RATE_PER_MIN` | `120` | Requests per source IP per minute (fixed window). Excess gets `429` + `Retry-After`. |
+| `LORE_INGEST_CALLBACK_HEADERS_TIMEOUT_MS` | `10000` | Slowloris guard: a connection that has not finished its headers is dropped. |
+| `LORE_INGEST_CALLBACK_REQUEST_TIMEOUT_MS` | `30000` | Whole-request deadline. Body cap is 8 MB on the wire (413 early on a declared oversize). |
+
+The source IP is the TCP peer; `X-Forwarded-For` is never trusted, so behind a proxy all callbacks share one
+IP bucket. Rejected callbacks are logged at debug (and warn at most once a minute per status) with status and peer
+only: never bodies, headers, signatures, URLs or secrets.
+
+### Scheduler and reclaim
+
+Timers are unref'd, chained (a task never overlaps itself), jittered 10%, and a failure is logged by error class and
+retried next interval; it never crashes the daemon. One workspace failing does not starve the others.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LORE_INGEST_RUN_INTERVAL_MS` | `5000` | `runDue` (claims up to `LORE_INGEST_BATCH` jobs per pass, repeating while full). |
+| `LORE_INGEST_BATCH` | `10` | Jobs claimed per `runDue` pass. |
+| `LORE_INGEST_REAP_INTERVAL_MS` | `60000` | `reapStale`: turns callbacks that never came into retries / dead-letter. |
+| `LORE_INGEST_REAP_MAX_AGE_MS` | `1800000` | Age after which an `awaiting_callback` job is reaped. |
+| `LORE_INGEST_RECLAIM_INTERVAL_MS` | `60000` | Re-queue `running` jobs whose lease expired (worker died). Also runs once at boot. |
+| `LORE_INGEST_LEASE_MS` | `300000` | Claim lease; a running job heartbeats it. Expired leases are reclaimed (at-least-once). |
+| `LORE_INGEST_PURGE_INTERVAL_MS` | `21600000` | `purgeOldDeliveries` per `LORE_INGEST_DELIVERY_RETENTION_DAYS`. |
+| `LORE_INGEST_DRAIN_MS` | `5000` | Shutdown budget: stop the scheduler (waiting for in-flight work), close the listener, close stores. |
+
+Reclaim is multi-process safe: SQLite takes `BEGIN IMMEDIATE`, Postgres uses `FOR UPDATE SKIP LOCKED`, so two
+daemons on one Postgres never reclaim or claim the same job twice. Rows with no lease (written before leases
+existed) are reclaimed only after twice the lease length.
+
+---
+
+## 11b. Link-on-arrival and link-ordered recall
+
+Builds `semantic_neighbor` links between items as they arrive, from vectors already stored (no extra embedding
+calls). **Off by default**; with the flag off nothing in `src/link/` is constructed and every write path behaves as
+before. Local mode. Design: `_lore-3.25-handoff/LINK-BUILDING-AT-SCALE-DESIGN-2026-10-23.md`.
+Source: `src/link/linkConfig.ts`, `src/link/linkModelPolicy.ts`, `src/recall/linkOrdering.ts`.
+
+The similarity threshold and neighbour count are stored **per embedding model** (`linkModelPolicy.ts`); the default
+model is calibrated at `0.80` / `5`. An uncalibrated model falls back to the same values and logs once. The env
+vars below override the per-model value. Out-of-range or non-numeric values are ignored (the default is used).
+
+Embedded hosts can use `createLore({ linkOnArrival, recallLinkOrdering })` instead of env (both **off by default**;
+the matching env var is the fallback when the option is omitted, `false` forces it off). `linkOnArrival: true` enables with defaults;
+`linkOnArrival: { enabled?, k, minSim, dupSim, quietMs, yieldMs, batchSize, maxAttempts, rebuildBatchSize, policyVersion, refreshOnChange, maxLinksPerNode, pruneIntervalMs, pruneBatchSize, healthTtlMs }`
+overrides the same settings as the link variables below and wins over them (an out-of-range value throws
+`RangeError`). `recallLinkOrdering` applies to single-workspace `lore.recall()`; cross-workspace recall still follows
+`LORE_RECALL_LINK_ORDERING`. `autolink:false` and the durable opt-out behave exactly as in the daemon.
+
+Items opted out with `autolink:false` are never linked in either direction, and a rebuild skips them; the flag is
+stored with the item in the workspace database. Admin surface: `POST/GET /api/admin/link-rebuild` (operator only).
+Counters: `/api/admin/stats` (`link`) and `/metrics`.
+
+Link freshness: `LORE_LINK_REFRESH_ON_CHANGE` (Loop B, **on by default** whenever link-on-arrival is on; `0` turns it
+off: an edit retires links that no longer qualify), the rebuild above (Loop C: resumable after a crash, never delete-then-rebuild), and `LORE_LINK_MAX_PER_NODE`
+(soft cap, background prune; **off by default**). Retired links are never deleted: they keep a `valid_to` and stay readable with
+`includeInvalidated`. Link health on `/api/admin/stats` (`link.health`, `link.prune`, `link.invalidatedTotal`) and
+`/metrics`: `lore_link_edges{state="live|invalidated|stale"}`, `lore_link_mean_strength`, `lore_link_max_degree`,
+`lore_link_invalidations_total`, `lore_link_refreshed_total`, `lore_link_prune_evicted_total`,
+`lore_link_prune_dirty_workspaces`, `lore_link_lag_seconds`, `lore_link_rebuild_nodes{workspace,state="done|total"}`,
+`lore_link_rebuild_running{workspace}`. The embedded option takes the same settings as
+`linkOnArrival: { refreshOnChange, maxLinksPerNode, pruneIntervalMs, pruneBatchSize, healthTtlMs }`.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `LORE_LINK_ON_ARRIVAL` | off | Master switch (`1` \| `true` \| `on`). |
+| `LORE_LINK_MIN_SIM` | per model (`0.80`) | Minimum cosine similarity for a link (0 to 1). |
+| `LORE_LINK_K` | per model (`5`) | Max links written per arriving item (1 to 100). |
+| `LORE_LINK_DUP_SIM` | `0.95` | At or above this a neighbour is a near-duplicate and also goes to the supersession-candidate list. |
+| `LORE_LINK_POLICY_VERSION` | `p0-2` | Stamped on queue rows, edge provenance and metrics, so a rebuild can tell which policy made a link. |
+| `LORE_LINK_BATCH_SIZE` | `32` | Items linked per worker batch (1 to 1000). |
+| `LORE_LINK_QUIET_MS` | `250` | Worker waits this long after the last arrival before running (yields to ingestion). |
+| `LORE_LINK_MAX_DELAY_MS` | `5000` | Longest the oldest queued item waits regardless of new arrivals (starvation guard). |
+| `LORE_LINK_YIELD_MS` | `25` | Pause between batches. |
+| `LORE_LINK_MAX_ATTEMPTS` | `5` | Attempts before an item is parked as `failed` (kept, visible in stats, not retried). |
+| `LORE_LINK_REBUILD_BATCH_SIZE` | `50` | Items recomputed per rebuild batch (1 to 1000). |
+| `LORE_LINK_REBUILD_YIELD_MS` | `200` | Pause between rebuild batches. |
+| `LORE_LINK_REBUILD_MAX_WAIT_MS` | `30000` | Longest a rebuild batch waits for the link queue / ingestion to go quiet before running anyway. |
+| `LORE_LINK_REFRESH_ON_CHANGE` | on | Loop B (`0` \| `false` \| `off` to disable). A node whose vector is re-committed after an edit is refreshed as a diff: links that no longer qualify are soft-invalidated (`valid_to`, never deleted), new neighbours are linked, an edge the other endpoint still wants is kept, only `link_on_arrival` edges are judged, opted-out nodes are left alone. Off = an edit only adds or re-asserts links. |
+| `LORE_LINK_MAX_PER_NODE` | `0` (no cap) | Soft cap (0 to 10000) on live linker edges per node. Never enforced inline: a background sweep keeps each node's strongest edges and soft-invalidates the rest. An edge that is the other endpoint's strongest link, an edge to an opted-out node, and any non-linker edge are never evicted, so a heavily linked hub can stay above the cap. Eventual: a later link or rebuild can re-assert a pruned pair, and the next pass trims it again. |
+| `LORE_LINK_PRUNE_INTERVAL_MS` | `30000` | How often the sweep looks for workspaces whose links changed since the last pass (100 to 86400000). Only runs while the cap is above 0. |
+| `LORE_LINK_PRUNE_BATCH_SIZE` | `50` | Over-cap nodes trimmed per checkpointed step (1 to 1000); a pass that stops (busy, shutdown) resumes from its saved cursor. |
+| `LORE_LINK_HEALTH_TTL_MS` | `30000` | How long the link-health snapshot (live / invalidated edge counts, mean strength, max degree, stale stamps) is reused by `/api/admin/stats` and `/metrics` before the graphs are queried again (0 to 3600000). |
+| `LORE_RECALL_LINK_ORDERING` | off | Recall: order each seed's related hops by live link strength, then label, then id (`1` \| `true` \| `yes` \| `on`). |
+
+All of these are on the env-scrub allowlist, so they reach the HTTP and stdio daemon (before this they were
+silently scrubbed there, and only embedded hosts saw them).
 
 ---
 
@@ -4215,6 +4703,8 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_STREAM_CONSUMER` | built-in | Streaming |
 | `LORE_LANCE_BATCH_ROWS` | `5000` | Load/LanceDB |
 | `LORE_RECALL_RANKING` | enabled | Recall |
+| `LORE_RECALL_LINK_ORDERING` | off | Recall |
+| `LORE_LINK_ON_ARRIVAL` | off | Links |
 | `LORE_RECALL_CANDIDATE_FLOOR` | `0` (opt-in `50`) | Recall |
 | `LORE_RECALL_LEXICAL_BASE` | `rrf` (opt-in `anchored`) | Recall |
 | `LORE_SUPERSESSION_ENFORCE` | off | Write/Supersession |

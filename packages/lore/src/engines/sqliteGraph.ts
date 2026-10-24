@@ -19,6 +19,7 @@
 import type {
     BulkListPage,
     BulkListQuery,
+    EdgeKey,
     EdgeQuery,
     GraphStats,
     LoreEdge,
@@ -49,6 +50,10 @@ import {
 import * as aggregates from './sqlite/sqliteGraphAggregates.js';
 import * as directed from './sqlite/sqliteGraphDirected.js';
 import * as writes from './sqlite/sqliteGraphWrites.js';
+import { addInferredEdgesBatch, invalidateEdges } from './sqlite/sqliteGraphEdgesBatch.js';
+import * as linkOptOut from './sqlite/sqliteGraphLinkOptOut.js';
+import * as linkStats from './sqlite/sqliteGraphLinkStats.js';
+import type { BatchEdgeResult, InferredEdge, LinkEdgeStats } from '../link/linkTypes.js';
 import { commitSqliteNodeBatch } from './sqlite/sqliteNodeBatch.js';
 import type { NodeBatchCheck, NodeBatchOutcome, NodeBatchSupersedes, NodeBatchWrite } from './graphShared/nodeBatch.js';
 import * as overview from './sqlite/sqliteGraphOverview.js';
@@ -365,6 +370,51 @@ export class SqliteGraph implements LoreGraphHandle {
         this.bumpWriteEpoch();
     }
 
+    /**
+     * Link-on-arrival: many inferred edges in ONE transaction. Never overwrites a
+     * caller-supplied edge and skips edges whose endpoint is gone (see
+     * sqlite/sqliteGraphEdgesBatch.ts). better-sqlite3 is synchronous, so the whole
+     * batch is atomic against every other writer in this process.
+     */
+    async addInferredEdgesBatch(edges: InferredEdge[]): Promise<BatchEdgeResult> {
+        await this.initialize();
+        const out = addInferredEdgesBatch(this.db(), edges);
+        if (out.written > 0) this.bumpWriteEpoch();
+        return out;
+    }
+
+    /** Link-on-arrival: which of `ids` carry the durable `autolink:false` opt-out (sqlite/sqliteGraphLinkOptOut.ts). */
+    async getLinkOptOuts(ids: readonly string[]): Promise<Set<string>> {
+        await this.initialize();
+        return linkOptOut.getLinkOptOuts(this.db(), ids);
+    }
+
+    /** Record (`true`) or clear (`false`) the durable link opt-out. Independent of the node row; `deleteNode` clears it. */
+    async setLinkOptOuts(ids: readonly string[], optOut: boolean): Promise<void> {
+        await this.initialize();
+        linkOptOut.setLinkOptOuts(this.db(), ids, optOut);
+    }
+
+    /** Link-health counts over `link_on_arrival` edges (sqlite/sqliteGraphLinkStats.ts). */
+    async linkEdgeStats(current: { policyVersion: string; modelFingerprint: string | null }): Promise<LinkEdgeStats> {
+        await this.initialize();
+        return linkStats.linkEdgeStats(this.db(), current);
+    }
+
+    /** Node ids with more than `cap` live link edges, ascending, after `afterId` (the background cap prune's scan). */
+    async linkNodesOverCap(cap: number, limit: number, afterId?: string | null): Promise<string[]> {
+        await this.initialize();
+        return linkStats.linkNodesOverCap(this.db(), cap, limit, afterId);
+    }
+
+    /** Soft-invalidate edges (sets `valid_to`, never deletes). Returns how many live edges were newly invalidated. */
+    async invalidateEdges(edgeKeys: EdgeKey[], at: string): Promise<number> {
+        await this.initialize();
+        const n = invalidateEdges(this.db(), edgeKeys, at);
+        if (n > 0) this.bumpWriteEpoch();
+        return n;
+    }
+
     async addBidirectionalEdge(edge: LoreEdge): Promise<void> {
         await this.initialize();
         const reverseEdge: LoreEdge = {
@@ -396,9 +446,12 @@ export class SqliteGraph implements LoreGraphHandle {
     }
 
     /** getEdge — one edge by its exact triple, or null (3.26.0, bulk edge rollback). */
-    async getEdge(sourceId: string, targetId: string, relation: string): Promise<LoreEdge | null> {
+    async getEdge(
+        sourceId: string, targetId: string, relation: string,
+        opts?: Pick<EdgeQuery, 'includeProvenance' | 'includeInvalidated'>,
+    ): Promise<LoreEdge | null> {
         await this.initialize();
-        return aggregates.getEdge(this.db(), sourceId, targetId, relation);
+        return aggregates.getEdge(this.db(), sourceId, targetId, relation, opts);
     }
 
     async queryEdges(q: EdgeQuery): Promise<LoreEdge[]> {
@@ -522,6 +575,12 @@ export class SqliteGraph implements LoreGraphHandle {
     ): Promise<{ rows: Array<Record<string, unknown>>; nextCursor: { updatedAt: string; id: string } | null }> {
         await this.initialize();
         return aggregates.bulkListProjected(this.db(), project, columns, limit, cursor);
+    }
+
+    /** Rows whose id starts with `prefix` (indexed range scan) — see aggregates.listNodesByIdPrefix. */
+    async listNodesByIdPrefix(prefix: string, columns: readonly string[]): Promise<Array<Record<string, unknown>>> {
+        await this.initialize();
+        return aggregates.listNodesByIdPrefix(this.db(), prefix, columns);
     }
 
     /* ── typed neighbour surfaces ────────────────────────────────── */

@@ -116,17 +116,17 @@ const policyFailureWarned = new Set<string>();
  * store has no such native crash surface (better-sqlite3 calls are
  * synchronous, in-process, and any error is a catchable JS exception), so
  * spawning a worker for it would only add IPC latency for zero safety
- * benefit. Selection wiring (which engine a workspace actually uses) is
- * out of scope here — this only guarantees the answer is correct once a
- * caller has an engine kind to pass. Omitted or 'lance' preserves the
- * existing behaviour exactly.
+ * benefit. 'postgres' (pure-JS `pg`, catchable errors) does too. Selection
+ * wiring is out of scope here — this only guarantees the answer is correct
+ * once a caller has an engine kind to pass. Omitted or 'lance' preserves
+ * the existing behaviour exactly.
  */
 export function resolveSearchWorkerIsolation(
     basePath: string,
     policy?: boolean | SearchWorkerPolicy,
-    engineKind?: 'lance' | 'sqlite',
+    engineKind?: 'lance' | 'sqlite' | 'postgres',
 ): boolean {
-    if (engineKind === 'sqlite') return false;
+    if (engineKind === 'sqlite' || engineKind === 'postgres') return false;
     if (process.env[WORKER_ENV.IS_WORKER] === '1') return false;
     if (typeof policy === 'boolean') return policy;
     if (typeof policy === 'function') {

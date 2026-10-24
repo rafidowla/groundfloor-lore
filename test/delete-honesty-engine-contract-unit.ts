@@ -39,6 +39,11 @@ import {
 import { FileOutboxStore } from '../packages/lore/src/outbox/store.js';
 import { tryNodeDeleteRoute } from '../packages/lore/src/mcp/http/routes/nodes-delete.js';
 import { handleBulkDelete } from '../packages/lore/src/mcp/http/routes/bulkWriteEdgesDelete.js';
+import { PostgresGraph } from '../packages/lore/src/engines/postgres/postgresGraph.js';
+import { PostgresVerbatimStore } from '../packages/lore/src/engines/postgres/postgresVerbatimStore.js';
+import type { Pool as PgPool } from 'pg';
+import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
+import { createGatePool, cleanupGateWorkspaces, closeGatePool, stampGateManifest } from './helpers/testPostgres.js';
 import { startCloudFixture, type CloudFixture } from './helpers/cloud-stores-fixture.js';
 
 let passed = 0, failed = 0;
@@ -147,6 +152,47 @@ function dataplaneRig(fx: CloudFixture): EngineRig {
 
 const fx = await startCloudFixture();
 
+// ── postgres (real a real Postgres container; skips cleanly without LORE_PG_URL) ──
+// The same contract() cases plus a direct-SQL honesty check: deleted means the
+// text is gone from BOTH the nodes table and verbatim/fts — verified in the
+// rig with raw SQL against the exact visibility filter the engine's own
+// bm25Search uses (`is_canonical = 1 AND is_tombstone = 0`), not just the API.
+console.log('\nM3a. postgres (real a real Postgres container; skips cleanly without LORE_PG_URL)\n');
+const PG_WS = 'pg-gate-delete';
+const pgPool = await createGatePool('delete-honesty/postgres');
+if (pgPool) {
+    // A previous crashed run may have skipped its cleanup: start clean.
+    await cleanupGateWorkspaces(pgPool);
+}
+
+/** 4-dimension fixed embedder for the gate verbatim store (dimension comes from the stamped manifest). */
+class GateEmbedder implements EmbeddingProvider {
+    readonly dimension = 4;
+    readonly modelId = 'pg-gate-fixed';
+    readonly dtype = 'fp32';
+    async initialize(): Promise<void> {}
+    async embedQuery(): Promise<number[]> { return [1, 0, 0, 0]; }
+    async embed(t: string): Promise<number[]> { return this.embedDocument(t); }
+    async embedDocument(_t?: string): Promise<number[]> { return [0.5, 0.5, 0.5, 0.5]; }
+}
+
+const pgTransient = (): Error => Object.assign(new Error('could not serialize access due to concurrent update'), { code: '40001' });
+
+function pgRig(): EngineRig {
+    const g = new PostgresGraph(PG_WS, pgPool as PgPool);
+    return {
+        name: 'postgres', graph: g,
+        seed: async (id) => { await g.upsertNode(seedNode(id)); },
+        exists: async (id) => {
+            // DIRECT SQL on the nodes table — the rig verifies deletion in the
+            // database, not through the same API that performed it.
+            const r = await (pgPool as PgPool).query('SELECT 1 FROM nodes WHERE workspace_id = $1 AND id = $2', [PG_WS, id]);
+            return (r.rowCount ?? 0) > 0;
+        },
+        transientError: pgTransient,
+    };
+}
+
 function contract(make: () => EngineRig): void {
     const name = make().name;
     const tag = (s: string) => `[${name}] ${s}`;
@@ -235,9 +281,37 @@ console.log('\nM3a. honest delete: one contract over SQLite, ArcadeDB (fake tran
 contract(sqliteRig);
 contract(arcadeRig);
 contract(() => dataplaneRig(fx));
+if (pgPool) contract(pgRig);
 await new Promise((r) => setTimeout(r, 0));
 // The contract cases above were scheduled with `void test(...)`; make sure they all finished before moving on.
 await test('contract cases drained', async () => { await new Promise((r) => setTimeout(r, 1500)); });
+
+if (pgPool) {
+    await test('[postgres] deleted means the text is gone from BOTH the nodes table and verbatim/fts (direct SQL, not just the API)', async () => {
+        const base = mkTmp('dh-pg-verb-');
+        stampGateManifest(base, 'pg-gate-fixed', 4);
+        const store = new PostgresVerbatimStore(base, pgPool, PG_WS, new GateEmbedder());
+        await store.initialize();
+        const g = new PostgresGraph(PG_WS, pgPool);
+        await g.initialize();
+        await g.upsertNode(seedNode('t1'));
+        await store.store({ id: 'lore:t1', text: 'quantum marmalade syndrome honesty probe', metadata: { type: 'note' } });
+        // What the engine's own bm25Search can see: `is_canonical = 1 AND is_tombstone = 0`.
+        const visible = 'is_canonical = 1 AND is_tombstone = 0';
+        const count = async (sql: string, params: string[]): Promise<number> =>
+            Number((await pgPool.query(`SELECT count(*)::int AS c FROM ${sql}`, params)).rows[0]?.c ?? 0);
+        assert.equal(await count(`nodes WHERE workspace_id = $1 AND id = $2`, [PG_WS, 't1']), 1, 'pre: node row present');
+        assert.equal(await count(`verbatim WHERE workspace_id = $1 AND id = $2 AND ${visible}`, [PG_WS, 'lore:t1']), 1, 'pre: canonical verbatim row present');
+        assert.equal(await count(`verbatim WHERE workspace_id = $1 AND text_tsv @@ phraseto_tsquery('simple', 'marmalade') AND ${visible}`, [PG_WS]), 1, 'pre: the text is fts-searchable');
+
+        const o = await deleteNodeAndText({ graph: g, text: store, nodeId: 't1', textId: 'lore:t1', reason: 'r', retry: noWait });
+        assert.deepEqual(o, { status: 'deleted', tombstoned: true });
+
+        assert.equal(await count(`nodes WHERE workspace_id = $1 AND id = $2`, [PG_WS, 't1']), 0, 'node row GONE from the nodes table (direct SQL)');
+        assert.equal(await count(`verbatim WHERE workspace_id = $1 AND id = $2 AND ${visible}`, [PG_WS, 'lore:t1']), 0, 'no canonical, non-tombstone verbatim row remains (direct SQL)');
+        assert.equal(await count(`verbatim WHERE workspace_id = $1 AND text_tsv @@ phraseto_tsquery('simple', 'marmalade') AND ${visible}`, [PG_WS]), 0, 'the text is GONE from fts (direct SQL)');
+    });
+}
 
 console.log('\nM3a. engine classifiers and the shared retry helper\n');
 
@@ -310,7 +384,12 @@ const WS = 'dh-routes';
 const audit = { log: () => undefined } as never;
 
 interface RouteRig { exists(id: string): Promise<boolean>; graph: DeleteGraphLike; seed(id: string): Promise<void>; text: FakeText; outbox: FileOutboxStore }
-function routeRig(engine: 'arcade' | 'sqlite'): RouteRig {
+type RouteEngine = 'arcade' | 'sqlite' | 'postgres';
+function routeRig(engine: RouteEngine): RouteRig {
+    if (engine === 'postgres') {
+        const r = pgRig();
+        return { exists: r.exists, graph: r.graph, seed: r.seed, text: new FakeText(), outbox: new FileOutboxStore(mkTmp('dh-outbox-')) };
+    }
     const r = engine === 'arcade' ? arcadeRig() : sqliteRig();
     return { exists: r.exists, graph: r.graph, seed: r.seed, text: new FakeText(), outbox: new FileOutboxStore(mkTmp('dh-outbox-')) };
 }
@@ -328,7 +407,8 @@ async function bulk(rig: RouteRig, ids: string[]) {
     return { status: res._status, body: JSON.parse(res._body) as { ok: boolean; deleted: number; notFound: number; deleteIncomplete?: number; results: Array<Record<string, unknown>> } };
 }
 
-for (const engine of ['arcade', 'sqlite'] as const) {
+const routeEngines: RouteEngine[] = pgPool ? ['arcade', 'sqlite', 'postgres'] : ['arcade', 'sqlite'];
+for (const engine of routeEngines) {
     console.log(`\nM3a. HTTP delete routes over ${engine}\n`);
 
     await test(`[${engine}] single DELETE: success shape unchanged (200 {ok,id,tombstoned})`, async () => {
@@ -364,10 +444,12 @@ for (const engine of ['arcade', 'sqlite'] as const) {
     });
     await test(`[${engine}] single DELETE: transient text failures are absorbed by the retry (200)`, async () => {
         const rig = routeRig(engine); await rig.seed('s3');
-        rig.text.failures = 2; rig.text.failWith = Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
-        const wrapped = engine === 'sqlite' ? 200 : null; // arcade's classifier does not retry a plain SQLITE_BUSY text error
+        // sqlite retries SQLITE_BUSY; postgres retries its own serialization-failure shape; the arcade classifier does not retry a plain SQLITE_BUSY text error
+        rig.text.failures = 2;
+        rig.text.failWith = engine === 'postgres' ? pgTransient() : Object.assign(new Error('database is locked'), { code: 'SQLITE_BUSY' });
+        const wrapped = engine !== 'arcade';
         const { status } = await single(rig, 's3');
-        if (wrapped !== null) assert.equal(status, 200);
+        if (wrapped) assert.equal(status, 200);
         else assert.equal(status, 500);
     });
     await test(`[${engine}] bulk delete: success shape unchanged; not-found stays ok:true deleted:false`, async () => {
@@ -404,6 +486,10 @@ for (const engine of ['arcade', 'sqlite'] as const) {
 }
 
 await fx.close();
+if (pgPool) {
+    await cleanupGateWorkspaces(pgPool);
+    await closeGatePool(pgPool);
+}
 for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
 fs.rmSync(LORE_HOME, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed\n`);

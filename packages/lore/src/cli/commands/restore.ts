@@ -52,6 +52,8 @@ import { loadWorkspaces, getActiveWorkspaceName } from '../../config/workspaces.
 import { loreHome } from '../../config/loreHome.js';
 import { parseOrExit } from '../args.js';
 import { isDaemonServingHome, daemonRefuseMessage } from './migrateWorkspaceToWorkspaceShared.js';
+import { peekLogicalBundle } from '../../engines/workspaceLogicalBackup.js';
+import { restoreLogicalBundleCli } from './backupPostgres.js';
 
 interface Flags {
     workspace?: string;
@@ -59,12 +61,13 @@ interface Flags {
     force?: boolean;
     allowUnverified?: boolean;
     allowNameMismatch?: boolean;
+    replace?: boolean;
     all?: string;
 }
 
 function parseFlags(args: string[]): Flags {
     const p = parseOrExit('restore', args, {
-        bool: ['--force', '--allow-unverified', '--allow-name-mismatch'],
+        bool: ['--force', '--allow-unverified', '--allow-name-mismatch', '--replace'],
         value: ['--workspace', '--all'],
         positionals: { max: 1 },
         aliases: { '-h': '--help' },
@@ -85,6 +88,11 @@ function parseFlags(args: string[]): Flags {
             `  Refuses an archive whose manifest names a DIFFERENT workspace\n` +
             `  than the one you are restoring into; --allow-name-mismatch\n` +
             `  accepts that risk.\n` +
+            `  A logical bundle (lore-pgbackup-*.ndjson[.gz], from a postgres workspace) is\n` +
+            `  recognised by content and restored into the postgres database: verified\n` +
+            `  first, refused if the target workspace already holds rows unless\n` +
+            `  --replace (which clears it inside the same transaction), and re-counted\n` +
+            `  afterwards. --all does not scan for these bundles.\n` +
             `  --all <dir> restores every lore-backup-*.tar.gz found in <dir>,\n` +
             `  each into the workspace named in ITS OWN manifest (archives with\n` +
             `  no recorded workspace name are skipped and reported).\n`,
@@ -95,6 +103,7 @@ function parseFlags(args: string[]): Flags {
     if (p.has('--force')) out.force = true;
     if (p.has('--allow-unverified')) out.allowUnverified = true;
     if (p.has('--allow-name-mismatch')) out.allowNameMismatch = true;
+    if (p.has('--replace')) out.replace = true;
     out.all = p.get('--all');
     out.tarball = p.positionals[0];
     return out;
@@ -112,6 +121,18 @@ export async function restoreCommand(args: string[]): Promise<void> {
         return;
     }
     const wsName = flags.workspace ?? getActiveWorkspaceName();
+    // A postgres logical bundle is told apart by content, not file name; anything
+    // else (a SQLite .tar.gz) continues down the unchanged file-archive path.
+    const bundle = await peekLogicalBundle(path.resolve(flags.tarball));
+    if (bundle) {
+        const logicalOk = await restoreLogicalBundleCli(path.resolve(flags.tarball), bundle.sourceWorkspaceId, wsName, flags, {
+            workspaceDir: (n) => loadWorkspaces().workspaces.find((w) => w.name === n)?.path ?? null,
+            daemonServesHome: async () => (await isDaemonServingHome(loreHome())).servesHome,
+            daemonMessage: daemonRefuseMessage('lore restore'),
+        });
+        if (!logicalOk) process.exit(1);
+        return;
+    }
     const ok = await restoreOneWorkspace(path.resolve(flags.tarball), wsName, flags);
     if (!ok) {
         process.exit(1);

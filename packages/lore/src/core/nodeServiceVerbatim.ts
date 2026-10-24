@@ -46,6 +46,7 @@ import type { OutboxStore } from '../outbox/types.js';
 import type { VersionStoreApi } from '../outbox/versionStoreApi.js';
 import type { NodeUpsertHooks, NodeWriteGraph, VerbatimWriter } from './nodeService.js';
 import { aliasRowId, MAX_QUESTIONS } from './questionAliases.js';
+import type { LinkSignaler } from '../link/linkTypes.js';
 
 /**
  * What the graph held for a node id BEFORE this write, read under the node
@@ -456,10 +457,12 @@ export async function applyVerbatimFanout(input: {
     priorNode?: PriorNode;
     /** 3.21 step 3(e) — optional question phrasings. See questionAliases.ts. */
     questions?: string[];
+    /** Link-on-arrival: signalled when THIS call commits the vector inline (the other branches commit later, at their own sites). */
+    link?: LinkSignaler | null;
 }): Promise<VerbatimFanoutOutcome> {
     const {
         skipEmbed, asyncEmbed, id, workspace, initiator, logPrefix,
-        node, nodeData, targetGraph, hooks, nodeUpsertOutboxEntryId, questions, versionIds, priorNode,
+        node, nodeData, targetGraph, hooks, nodeUpsertOutboxEntryId, questions, versionIds, priorNode, link,
     } = input;
 
     const label = String(nodeData.label ?? '');
@@ -545,6 +548,7 @@ export async function applyVerbatimFanout(input: {
         try {
             const verbatimText = buildVerbatimText(label, content, tagsArr);
             await writeInline(hooks.verbatim, node, id, tagsStr, verbatimText);
+            link?.signal(workspace, [{ id, ecosystem: node.ecosystem ?? '' }]);
         } catch (err) {
             // 3.21 step 3(d) — NOT fatal. No outbox is wired for this caller
             // at all, so there is no durable row to fall back on; best

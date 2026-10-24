@@ -14,7 +14,7 @@
  *   lore diagnose --json                    # only the JSON, no summary line
  */
 
-import { createTableStorage } from '../../engines/tableStorageFactory.js';
+import { createWorkspaceTableStorage } from '../../engines/tableStorageFactory.js';
 import type { RelationalProvider } from '../../providers/relationalTypes.js';
 import { VerbatimStore } from '../../engines/verbatimStore.js';
 import {
@@ -36,7 +36,7 @@ export async function diagnoseCommand(args: string[]): Promise<void> {
     const graph = await openGraphForCli(basePath, { workspaceId: workspace });
     const verbatim = new VerbatimStore(basePath);
     await verbatim.initialize();
-    const tableStorage = createTableStorage(basePath);
+    const tableStorage = await createWorkspaceTableStorage(workspace, basePath);
 
     try {
         const report = await diagnoseConsistency(

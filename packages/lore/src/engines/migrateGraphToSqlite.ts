@@ -200,6 +200,22 @@ export async function migrateGraphToSqlite(opts: MigrateGraphToSqliteOptions): P
             + 'Nothing to migrate.',
         );
     }
+    // postgres engine — migration OUT of postgres is explicitly out of
+    // scope: this tool streams nodes/edges by opening a SurrealGraph SOURCE
+    // and file-copying a backup, and a postgres-backed workspace has neither
+    // (rows live in the shared database). Falling through would open a fresh
+    // empty Surreal store at the workspace path and "migrate" zero nodes
+    // while flipping the registry — the silent-wrong-store failure class.
+    if (currentEngine === 'postgres') {
+        throw new Error(
+            `migrate-graph: workspace '${opts.workspaceName}' is registered as 'postgres'. Migration out of a `
+            + 'Postgres graph store is not supported (loud refusal, postgres engine scope): this tool copies '
+            + 'a local graph store and a postgres workspace has none. `lore backup` writes a logical bundle of '
+            + 'the workspace (all its tables) that `lore restore` loads back into Postgres, but it cannot be '
+            + 'loaded into a SQLite store; to move the data to another engine, export it with the engine-neutral '
+            + 'API and flip graphEngine in workspaces.json deliberately.',
+        );
+    }
 
     // ── 1. Daemon preflight ─────────────────────────────────────────────
     if (!opts.force) {

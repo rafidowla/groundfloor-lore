@@ -14,21 +14,24 @@ import { resolveWorkspaceVectorEngine } from '../../engines/vectorEngineSelector
 import { getWorkspacePath } from '../../config/workspaces.js';
 import { surrealDataPath } from '../../engines/surreal/surrealConnection.js';
 import { sqliteGraphDataPath } from '../../engines/sqlite/sqliteGraphSchema.js';
+import { redactedPostgresLocation } from '../../engines/postgres/postgresPoolOwner.js';
 
 export interface EngineReport {
-    /** Human label, e.g. `sqlite (local)`, `surrealdb + lancedb (local)`, `dataplane (cloud)`. */
+    /** Human label, e.g. `sqlite (local)`, `surrealdb + lancedb (local)`, `postgres (local)`, `dataplane (cloud)`. */
     engine: string;
     /** Verbatim (vector) store engine; omitted in cloud mode. */
-    verbatimEngine?: 'sqlite' | 'lancedb';
+    verbatimEngine?: 'sqlite' | 'lancedb' | 'postgres';
 }
 
 /** `registry.homeDir?.()`: partial registries (tests, adapters) may not expose it; the selector then uses the ambient LORE_HOME. */
 export function engineReport(registry: LocalGraphRegistry | undefined, workspace: string): EngineReport {
     if (!registry) return { engine: 'dataplane (cloud)' };
     const graph = registry.graphEngineFor(workspace);
-    const verbatim = resolveWorkspaceVectorEngine(workspace, registry.homeDir?.()) === 'sqlite' ? 'sqlite' : 'lancedb';
+    const resolvedVector = resolveWorkspaceVectorEngine(workspace, registry.homeDir?.());
+    const verbatim: EngineReport['verbatimEngine'] = resolvedVector === 'sqlite' ? 'sqlite' : resolvedVector === 'postgres' ? 'postgres' : 'lancedb';
     if (graph === 'sqlite' && verbatim === 'sqlite') return { engine: 'sqlite (local)', verbatimEngine: verbatim };
-    const graphLabel = graph === 'sqlite' ? 'sqlite' : graph === 'surreal' ? 'surrealdb' : 'legacy graph engine';
+    if (graph === 'postgres' && verbatim === 'postgres') return { engine: 'postgres (local)', verbatimEngine: verbatim };
+    const graphLabel = graph === 'sqlite' ? 'sqlite' : graph === 'postgres' ? 'postgres' : graph === 'surreal' ? 'surrealdb' : 'legacy graph engine';
     // Surreal + Lance keeps its historical label so existing consumers see no change.
     if (graph === 'surreal' && verbatim === 'lancedb') return { engine: 'surrealdb (local)', verbatimEngine: verbatim };
     return { engine: `${graphLabel} + ${verbatim} (local)`, verbatimEngine: verbatim };
@@ -56,5 +59,9 @@ export function workspaceGraphPath(registry: LocalGraphRegistry, workspace: stri
     const engine = registry.graphEngineFor(workspace);
     if (engine === 'sqlite') return sqliteGraphDataPath(base);
     if (engine === 'surreal') return surrealDataPath(base);
+    // Postgres has no on-disk store: report the redacted connection
+    // location (postgres://host:port/db, credentials dropped — the ONLY
+    // loggable shape of the URL, see redactPgUrl).
+    if (engine === 'postgres') return redactedPostgresLocation();
     return path.join(base, '.lore', 'graph');
 }
