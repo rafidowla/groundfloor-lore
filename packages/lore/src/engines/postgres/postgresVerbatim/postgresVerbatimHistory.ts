@@ -82,6 +82,38 @@ export async function getById(pool: Pool, workspaceId: string, id: string): Prom
     }
 }
 
+/**
+ * `getById` for many ids in one round trip per VERBATIM_CHUNK_SIZE ids: Map of id -> row for every id with a canonical row
+ * (same predicate and field mapping as `getById`; an id with no row is absent). `columns: 'link'` selects only `ecosystem`
+ * and `security_scopes` - what link-on-arrival confinement reads - and leaves the heavy `text` column alone. Unlike `getById`
+ * this does NOT swallow a query error: the caller decides (the linker falls back to per-id reads).
+ */
+export async function getByIds(
+    pool: Pool, workspaceId: string, ids: string[], opts?: { columns?: 'full' | 'link' },
+): Promise<Map<string, NonNullable<Awaited<ReturnType<typeof getById>>>>> {
+    const out = new Map<string, NonNullable<Awaited<ReturnType<typeof getById>>>>();
+    const narrow = opts?.columns === 'link';
+    for (let i = 0; i < ids.length; i += VERBATIM_CHUNK_SIZE) {
+        const chunk = ids.slice(i, i + VERBATIM_CHUNK_SIZE);
+        const placeholders = chunk.map((_, j) => `$${j + 2}`).join(', ');
+        const cols = narrow ? 'id, ecosystem, security_scopes' : 'id, content_hash, text, type, label, tags, project, ecosystem, "updatedAt", security_scopes';
+        const res = await pool.query<GetByIdRow & { id: string }>(
+            `SELECT ${cols} FROM verbatim WHERE workspace_id = $1 AND is_canonical = 1 AND id IN (${placeholders})`,
+            [workspaceId, ...chunk],
+        );
+        for (const r of res.rows) {
+            if (out.has(r.id)) continue; // getById takes LIMIT 1
+            out.set(r.id, narrow
+                ? { ecosystem: r.ecosystem ?? '', security_scopes: parseScopes(r.security_scopes) }
+                : {
+                    contentHash: r.content_hash ?? '', text: r.text ?? '', type: r.type ?? '', label: r.label ?? '', tags: r.tags ?? '',
+                    project: r.project ?? '', ecosystem: r.ecosystem ?? '', updatedAt: r.updatedAt ?? '', security_scopes: parseScopes(r.security_scopes),
+                });
+        }
+    }
+    return out;
+}
+
 /** 3.27.0 — ids (of `ids`) with a canonical row; one query per 500 ids. Same
  *  predicate as getById. */
 export async function getExistingIds(pool: Pool, workspaceId: string, ids: string[]): Promise<string[]> {

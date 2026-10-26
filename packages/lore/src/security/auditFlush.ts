@@ -20,18 +20,42 @@
  * AuditLogs never leaks them through this registry.
  */
 
+import { realpathSync } from 'node:fs';
+import { resolve as pathResolve } from 'node:path';
+
+const canon = (p: string): string => { try { return realpathSync(p); } catch { return pathResolve(p); } };
+
 /** Upper bound on how long shutdown waits for queued audit appends. A wedged
  *  filesystem (hung NFS, stalled disk) must never hang dispose()/SIGTERM — on
  *  timeout we warn once and carry on, accepting the lost tail over a hang. */
 export const AUDIT_FLUSH_TIMEOUT_MS = 5_000;
 
-interface Flushable { flush(): Promise<void> }
+interface Flushable {
+    flush(): Promise<void>;
+    /** The audit file this instance appends to (AuditLog sets it; test doubles may omit it). */
+    readonly filePath?: string;
+}
 
 const live = new Set<WeakRef<Flushable>>();
 
 /** Called from the AuditLog constructor. */
 export function registerAuditLog(log: Flushable): void {
     live.add(new WeakRef(log));
+}
+
+/**
+ * Live AuditLog instances writing to `filePath` (resolved comparison). The workspace-erase audit step uses this to
+ * quiesce in-process writers (`AuditLog.runExclusive`) before it rewrites the file. Dead references are pruned.
+ */
+export function liveAuditLogsAt<T extends Flushable = Flushable>(filePath: string): T[] {
+    const want = canon(filePath);
+    const out: T[] = [];
+    for (const ref of live) {
+        const log = ref.deref();
+        if (!log) { live.delete(ref); continue; }
+        if (log.filePath !== undefined && canon(log.filePath) === want) out.push(log as T);
+    }
+    return out;
 }
 
 /**

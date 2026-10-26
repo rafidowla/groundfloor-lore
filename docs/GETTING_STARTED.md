@@ -138,9 +138,10 @@ lore auth issue --workspace <name> --label "<app-name>" --scopes read,write
   for long-lived tokens; optional (defaults to `ephemeral:<workspace>`) if
   you also pass `--ephemeral` / `--ttl`.
 - `--scopes <csv>` — defaults to `read,write` if omitted. Available scopes:
-  `read`, `write`, `cross-workspace-read`, `cross-workspace-write`. Grant
+  `read`, `write`, `review`, `cross-workspace-read`, `cross-workspace-write`. Grant
   the minimum an integration needs — most single-workspace apps need only
-  the default `read,write`. Only add `cross-workspace-read` /
+  the default `read,write`. `review` (approve/reject table-review items and
+  link proposals) is separate from `write` and must be requested explicitly. Only add `cross-workspace-read` /
   `cross-workspace-write` if the app genuinely has to aggregate or mutate
   across multiple workspaces; those scopes must be requested explicitly and
   are never granted implicitly.

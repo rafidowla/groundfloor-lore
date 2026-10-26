@@ -20,12 +20,13 @@
  *     can never lose a link it just earned. An endpoint with no stored vector is "unknown", never "empty".
  *   - Old links keep serving reads until replaced: nothing is cleared up front.
  *   - Durable: the cursor is checkpointed after every batch, so a restart resumes where it stopped.
- *   - Throttled: one batch, then `yieldMs`; while the link queue / ingestion is busy it waits (bounded by
- *     `maxWaitMs`, so a never-quiet system still makes progress).
+ *   - Throttled: one batch, then `yieldMs` (`idleYieldMs` when the host was idle); while the host is busy (link queue backlog, or the
+ *     host's `isBusy(workspace)`: embed queue / outbox work) it waits (bounded by `maxWaitMs`, so a never-quiet system still makes progress).
  */
 import type { LoreEdge } from '../providers/types.js';
 import { nodeIdOfRow, sortedPair } from './selectLinks.js';
-import { reconcileLinks } from './linkDiff.js';
+import { ComputedWindow, reconcileLinks } from './linkDiff.js';
+import { resolveTuning, type RebuildTuning } from './linkTuning.js';
 import type { BatchEdgeResult, InferredEdge } from './linkTypes.js';
 import type { ComputedLinks, LinkGraph, LinkHandles } from './storedVectorLinker.js';
 import type { RebuildState, RebuildStateStore } from './linkRebuildStore.js';
@@ -42,29 +43,42 @@ export interface RebuilderOptions {
     substrate: RebuildSubstrate;
     /** Nodes per batch. */
     batchSize: number;
-    /** Pause between batches. */
+    /** Pause between batches while the host is busy. */
     yieldMs: number;
+    /** Pause between batches while the host is idle (capped at `yieldMs`; default = `yieldMs`, i.e. no idle shortcut). A function picks it per workspace (SQLite vs Postgres). */
+    idleYieldMs?: number | ((workspace: string) => number);
     /** Longest a batch waits for `isBusy()` to clear before running anyway. */
     maxWaitMs: number;
-    /** True while the link queue has a backlog or ingestion is in flight. */
-    isBusy: () => boolean;
+    /**
+     * True while the host should not be competed with for this workspace: the link queue has a backlog, or the host reports embed /
+     * outbox work. May be async. A throw or rejection counts as busy (never as idle).
+     */
+    isBusy: (workspace: string) => boolean | Promise<boolean>;
     now?: () => number;
     onError?: (message: string) => void;
     /** Called after a batch inserted, refreshed or invalidated links (the cap-prune sweep re-checks the workspace). */
     onWrote?: (workspace: string) => void;
     sleep?: (ms: number) => Promise<void>;
+    /** Result-neutral speed-ups (all on by default); the parity test and benches turn them off to run the old behaviour. */
+    tuning?: Partial<RebuildTuning>;
 }
 
 export interface RebuildStats {
     active: number;
+    /** Outside endpoints whose link set was reused instead of recomputed (this process). */
+    reusedComputes: number;
     /** Times a batch waited because the link queue / ingestion was busy. */
     busyWaits: number;
     runs: RebuildState[];
 }
 
 interface Control { stop: false | 'cancel' | 'seal' }
+type PrefetchResult = { ok: true; computed: ComputedLinks | null } | { ok: false; err: unknown };
+interface Prefetch { from: number; discarded: boolean; /** Its set went into the reuse window already (so the loop must not add it again). */ added: boolean; promise: Promise<PrefetchResult> }
 
 const BUSY_POLL_MS = 50;
+/** Batches of computed link sets kept for reuse: the previous one, the current one and the prefetched next one (each added exactly once). */
+const REUSE_WINDOW_BATCHES = 3;
 
 export class LinkRebuilder {
     private readonly o: RebuilderOptions;
@@ -72,12 +86,15 @@ export class LinkRebuilder {
     private readonly sleep: (ms: number) => Promise<void>;
     private readonly active = new Map<string, { ctl: Control; done: Promise<void> }>();
     private busyWaits = 0;
+    private reusedComputes = 0;
+    private readonly tuning: RebuildTuning;
     private sealed = false;
     private seq = 0;
 
     constructor(o: RebuilderOptions) {
         this.o = o;
         this.now = o.now ?? Date.now;
+        this.tuning = resolveTuning(o.tuning);
         // Short pauses only (<= BUSY_POLL_MS / yieldMs): left ref'd so a run in flight is never silently abandoned by an idle event loop.
         this.sleep = o.sleep ?? ((ms) => new Promise((r) => { setTimeout(r, ms); }));
     }
@@ -129,7 +146,7 @@ export class LinkRebuilder {
     status(workspace: string): RebuildState | null { return this.o.store.get(workspace); }
 
     stats(): RebuildStats {
-        return { active: this.active.size, busyWaits: this.busyWaits, runs: this.o.store.list() };
+        return { active: this.active.size, reusedComputes: this.reusedComputes, busyWaits: this.busyWaits, runs: this.o.store.list() };
     }
 
     /** Shutdown: stop batching but leave the checkpoint `running` so the next start resumes. */
@@ -184,43 +201,101 @@ export class LinkRebuilder {
         if (st.cursor !== null) { while (i < ids.length && ids[i]! <= st.cursor) i++; }
         st.total = st.done + (ids.length - i);
         this.o.store.put(st);
+        const window = this.tuning.reuseComputed ? new ComputedWindow(REUSE_WINDOW_BATCHES) : null;
 
-        while (i < ids.length && !ctl.stop) {
-            await this.waitWhileBusy(ctl);
-            if (ctl.stop) break;
-            const batch = ids.slice(i, i + this.o.batchSize);
-            await this.processBatch(workspace, handles, batch, idSet, st);
-            i += batch.length;
-            st.cursor = batch[batch.length - 1]!;
-            st.done += batch.length;
-            this.o.store.put(st);
-            if (i < ids.length && this.o.yieldMs > 0) await this.sleep(this.o.yieldMs);
+        let pending: Prefetch | null = null;
+        // Prefetches dropped because the host turned busy: still running until they settle, so they are awaited, never abandoned.
+        const dropped: Prefetch[] = [];
+        const settleDropped = async (): Promise<void> => { if (dropped.length > 0) await Promise.all(dropped.splice(0).map((d) => d.promise)); };
+        try {
+            while (i < ids.length && !ctl.stop) {
+                const waited = await this.waitWhileBusy(workspace, ctl);
+                if (ctl.stop) break;
+                const batch = ids.slice(i, i + this.o.batchSize);
+                // A prefetch is used only if the host stayed quiet: after a busy wait its sets could predate new arrivals.
+                let computed: ComputedLinks | null;
+                let inWindow = false;
+                if (pending && pending.from === i && !waited) {
+                    const r = await pending.promise;
+                    if (!r.ok) throw r.err;
+                    computed = r.computed;
+                    inWindow = pending.added;
+                } else {
+                    if (pending) { pending.discarded = true; dropped.push(pending); }
+                    await settleDropped();
+                    computed = await sub.computeLinks(workspace, batch);
+                }
+                pending = null;
+                if (!computed) throw new Error('workspace_unavailable');
+                if (!inWindow) window?.add(computed, batch);
+                // Overlap the NEXT batch's read-only compute with this batch's edge reads and writes. It never reads edges:
+                // reconcileLinks re-reads them itself, and the cursor below is saved only after this batch's writes.
+                if (this.tuning.prefetch && !ctl.stop) pending = this.startPrefetch(workspace, ids, i + batch.length, window);
+                await this.processBatch(workspace, handles, batch, idSet, st, window, computed);
+                i += batch.length;
+                st.cursor = batch[batch.length - 1]!;
+                st.done += batch.length;
+                this.o.store.put(st);
+                const pause = waited || (await this.hostBusy(workspace)) ? this.o.yieldMs : Math.min(this.idleYield(workspace), this.o.yieldMs);
+                if (i < ids.length && pause > 0) await this.sleep(pause);
+            }
+        } finally {
+            // Stop, pause or error: drop the prefetch but let every read settle (the live one and any dropped earlier), so nothing is
+            // left running or unhandled when run() returns (drain() and close() rely on it).
+            if (pending) { pending.discarded = true; dropped.push(pending); pending = null; }
+            await settleDropped();
         }
         if (ctl.stop === 'seal') { this.o.store.put({ ...st, status: 'running' }); return; }
         this.o.store.put({ ...st, status: ctl.stop === 'cancel' ? 'cancelled' : 'done', finishedAt: this.now() });
     }
 
-    private async waitWhileBusy(ctl: Control): Promise<void> {
+    /** Start the read-only compute of the batch beginning at `from`. The promise never rejects; the outcome is in the value. */
+    private startPrefetch(workspace: string, ids: string[], from: number, window: ComputedWindow | null): Prefetch | null {
+        const next = ids.slice(from, from + this.o.batchSize);
+        if (next.length === 0) return null;
+        const p: Prefetch = { from, discarded: false, added: false, promise: Promise.resolve(null as never) };
+        p.promise = this.o.substrate.computeLinks(workspace, next).then(
+            (computed): PrefetchResult => {
+                if (computed && !p.discarded && window) { window.add(computed, next); p.added = true; }
+                return { ok: true, computed };
+            },
+            (err: unknown): PrefetchResult => ({ ok: false, err }),
+        );
+        return p;
+    }
+
+    /** Resolves true when it had to wait because the host was busy. */
+    private async hostBusy(workspace: string): Promise<boolean> {
+        try { return (await this.o.isBusy(workspace)) === true; } catch { return true; }
+    }
+
+    private async waitWhileBusy(workspace: string, ctl: Control): Promise<boolean> {
         let waited = 0;
         let counted = false;
-        while (!ctl.stop && waited < this.o.maxWaitMs && this.o.isBusy()) {
+        while (!ctl.stop && waited < this.o.maxWaitMs && await this.hostBusy(workspace)) {
             if (!counted) { this.busyWaits++; counted = true; }
             await this.sleep(BUSY_POLL_MS);
             waited += BUSY_POLL_MS;
         }
+        return counted;
     }
 
-    private async processBatch(workspace: string, handles: LinkHandles, batch: string[], idSet: Set<string>, st: RebuildState): Promise<void> {
+    private idleYield(workspace: string): number {
+        const v = this.o.idleYieldMs;
+        if (typeof v !== 'function') return v ?? this.o.yieldMs;
+        try { const n = v(workspace); return Number.isFinite(n) && n >= 0 ? n : this.o.yieldMs; } catch { return this.o.yieldMs; }
+    }
+
+    private async processBatch(workspace: string, handles: LinkHandles, batch: string[], idSet: Set<string>, st: RebuildState, window: ComputedWindow | null, computed: ComputedLinks): Promise<void> {
         const sub = this.o.substrate;
-        const computed = await sub.computeLinks(workspace, batch);
-        if (!computed) throw new Error('workspace_unavailable');
         const batchSet = new Set(batch);
         // Each edge is judged by ONE batch: the one holding its owner (its lower endpoint, or the higher one when the lower is not a node).
         const owns = (e: LoreEdge): boolean => {
             const [lo, hi] = sortedPair(e.sourceId, e.targetId);
             return batchSet.has(idSet.has(lo) ? lo : hi);
         };
-        const res = await reconcileLinks({ workspace, graph: handles.graph, sub, batch, computed, owns, now: this.now, counters: st });
+        const res = await reconcileLinks({ workspace, graph: handles.graph, sub, batch, computed, owns, now: this.now, counters: st, reuse: window ?? undefined });
+        this.reusedComputes += res.reused;
         if (res.written > 0 || res.invalidated > 0) this.o.onWrote?.(workspace);
     }
 }

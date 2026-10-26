@@ -7,7 +7,7 @@
 import type { PoolClient } from 'pg';
 import type { ColumnDecl, ColumnType, TableSchema } from '../../contracts/tables.js';
 import { assertIdent } from '../whereClause.js';
-import { HEADER_COLUMN_PREFIX, TABLE_TABLES, TABLE_VIEW_PREFIX } from './postgresTableSchema.js';
+import { CURRENCY_SUFFIX, HEADER_COLUMN_PREFIX, TABLE_TABLES, TABLE_VIEW_PREFIX } from './postgresTableSchema.js';
 
 const LABEL = 'PostgresTableStorage';
 
@@ -37,6 +37,16 @@ export interface TableMeta {
 
 export const viewName = (entityTypeId: number): string => `${TABLE_VIEW_PREFIX}${entityTypeId}`;
 
+/** Declared type per readable view column, including the `<money>__currency` sidecars (drives filters and ordering). */
+export function columnTypes(schema: TableSchema): Map<string, ColumnType> {
+    const out = new Map<string, ColumnType>();
+    for (const c of schema.columns) {
+        out.set(c.name, c.type);
+        if (c.type === 'money') out.set(`${c.name}${CURRENCY_SUFFIX}`, 'string');
+    }
+    return out;
+}
+
 export function pickPrimary(cols: ColumnDecl[]): ColumnDecl {
     const pks = cols.filter(c => c.primary);
     if (pks.length !== 1) throw new Error(`${LABEL}: schema requires exactly one primary column, got ${pks.length}`);
@@ -60,6 +70,16 @@ export function validateSchema(schema: TableSchema): void {
             throw new Error(`${LABEL}: reserved column '${c.name}' must be of type ${reserved.types.join(' or ')}`);
         }
         for (const ef of c.extractedFields ?? []) assertIdent(ef.key);
+        if (c.type === 'money') {
+            if (c.primary || c.unique) throw new Error(`${LABEL}: money column '${c.name}' cannot be primary or unique`);
+            if (RESERVED[c.name]) throw new Error(`${LABEL}: reserved column '${c.name}' cannot be money`);
+        }
+    }
+    // A money column `p` is exposed on the read view as `p` and `p__currency`; no other column may take that name.
+    for (const c of schema.columns) {
+        if (c.type === 'money' && seen.has(`${c.name}${CURRENCY_SUFFIX}`)) {
+            throw new Error(`${LABEL}: column '${c.name}${CURRENCY_SUFFIX}' clashes with the currency half of money column '${c.name}'`);
+        }
     }
     if (RESERVED[pk.name]) throw new Error(`${LABEL}: the primary key cannot be the reserved column '${pk.name}'`);
 }

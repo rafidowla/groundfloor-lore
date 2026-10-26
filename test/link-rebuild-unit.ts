@@ -111,7 +111,7 @@ async function build(eng: Eng, spec = SPEC) {
     const storeFile = path.join(mkTmp('lr-st-'), 'q.sqlite');
     const calls: string[][] = [];
     let writes = 0;
-    const rebuilder = (linker: StoredVectorLinker, opts: { batchSize?: number; isBusy?: () => boolean; maxWaitMs?: number; wrap?: (s: RebuildSubstrate) => RebuildSubstrate; file?: string } = {}) => {
+    const rebuilder = (linker: StoredVectorLinker, opts: { batchSize?: number; isBusy?: () => boolean; maxWaitMs?: number; wrap?: (s: RebuildSubstrate) => RebuildSubstrate; file?: string; tuning?: { prefetch?: boolean } } = {}) => {
         const base: RebuildSubstrate = {
             openHandles: (w) => linker.openHandles(w),
             computeLinks: (w, ids): Promise<ComputedLinks | null> => { calls.push([...ids]); return linker.computeLinks(w, ids); },
@@ -120,7 +120,7 @@ async function build(eng: Eng, spec = SPEC) {
         };
         return new LinkRebuilder({
             store: new SqliteRebuildStore(opts.file ?? storeFile), substrate: opts.wrap ? opts.wrap(base) : base,
-            batchSize: opts.batchSize ?? 3, yieldMs: 0, maxWaitMs: opts.maxWaitMs ?? 1000, isBusy: opts.isBusy ?? (() => false),
+            batchSize: opts.batchSize ?? 3, yieldMs: 0, maxWaitMs: opts.maxWaitMs ?? 1000, isBusy: opts.isBusy ?? (() => false), tuning: opts.tuning,
         });
     };
     const live = async (): Promise<Map<string, { origin?: string; policy?: string | null; at?: string }>> => {
@@ -245,7 +245,7 @@ for (const eng of engines) {
         let release!: () => void; const gate = new Promise<void>((r) => { release = r; });
         let n = 0; let paused!: () => void; const reachedPause = new Promise<void>((r) => { paused = r; });
         const rb = w.rebuilder(w.mk(P_NEW), {
-            batchSize: 2,
+            batchSize: 2, tuning: { prefetch: false }, // the gate counts computeLinks calls: this test pins the sequential order
             wrap: (s) => ({ ...s, computeLinks: async (ws, ids) => { if (++n === 3) { paused(); await gate; } return s.computeLinks(ws, ids); } }),
         });
         await rb.start(WS);
@@ -300,7 +300,7 @@ for (const eng of engines) {
         const w = await build(eng);
         await w.mk(P_OLD).linkBatch(WS, SPEC.map(([id]) => ({ id })));
         let n = 0;
-        const rb = w.rebuilder(w.mk(P_NEW), { batchSize: 2, wrap: (s) => ({ ...s, computeLinks: async (ws, ids) => { if (++n === 3) throw new Error('boom'); return s.computeLinks(ws, ids); } }) });
+        const rb = w.rebuilder(w.mk(P_NEW), { batchSize: 2, tuning: { prefetch: false }, wrap: (s) => ({ ...s, computeLinks: async (ws, ids) => { if (++n === 3) throw new Error('boom'); return s.computeLinks(ws, ids); } }) });
         const failed1 = await w.run(rb);
         assert.equal(failed1.status, 'failed');
         assert.match(failed1.lastError ?? '', /boom/);

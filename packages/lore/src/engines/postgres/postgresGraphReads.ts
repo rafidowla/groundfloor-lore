@@ -22,6 +22,7 @@ import { cacheKey } from '../cache.js';
 import { LoreGraphError } from '../loreGraphError.js';
 import { DEFAULT_LIST_NODES_CAP, rowToLoreNode } from '../loreNodeRow.js';
 import { keywordMatchClause } from './postgresKeywordMatch.js';
+import { candidateCteSql, chooseKeywordPlan, orderedWalkSql } from './postgresKeywordPlan.js';
 import { rankSearchResults, SEARCH_SCAN_CAP, keywordSearchTerms } from '../searchRanking.js';
 import { metaArraysContainAll } from '../metaArrayFilter.js';
 import { runTraverseBfs, type FrontierEdgeCandidate } from '../graphShared/traverseBfs.js';
@@ -201,6 +202,36 @@ async function traverseUncached(ctx: PostgresReadCtx, nodeId: string, maxDepth: 
     }
 }
 
+export interface SearchScope {
+    project?: string; ecosystem?: string; excludeHidden?: boolean;
+    types?: string[]; entities?: string[]; topics?: string[];
+}
+
+/**
+ * searchWhere - the WHERE body (everything after `workspace_id = $1`) of the keyword candidate query: the
+ * index-served match predicate (postgresKeywordMatch.ts: LIKE + tag containment, CNF) AND the scope filters.
+ * Placeholders are minted on `params` in order (match clause first, then the scope filters).
+ */
+export function searchWhere(params: PgParams, query: string, scope: SearchScope): string {
+    const { project = '*', ecosystem = '*', excludeHidden = false, types, entities, topics } = scope;
+    const matchClause = keywordMatchClause(params, keywordSearchTerms(query), query.toLowerCase());
+    const filters: string[] = [];
+    if (project !== '*') { filters.push(`project = ${params.add(project)}`); }
+    if (ecosystem !== '*') {
+        filters.push(`(ecosystem = ${params.add(ecosystem)} OR ecosystem = '*' OR ecosystem = '')`);
+    }
+    if (excludeHidden) {
+        filters.push(`(status != 'archived')`);
+        filters.push(`(supersededat = '')`);
+    }
+    if (types && types.length > 0) {
+        filters.push(`type = ANY(${params.add(types)})`);
+    }
+    for (const e of entities ?? []) filters.push(metadataStringArrayContains(params, 'entities', e));
+    for (const t of topics ?? []) filters.push(metadataStringArrayContains(params, 'topics', t));
+    return [matchClause, ...filters].join(' AND ');
+}
+
 /**
  * search — keyword search, same contract as the sqlite reads: candidate
  * predicate is `lower(label|content)` substring OR exact tag membership,
@@ -209,6 +240,10 @@ async function traverseUncached(ctx: PostgresReadCtx, nodeId: string, maxDepth: 
  * the SHARED `rankSearchResults` (which re-checks the whole predicate in JS
  * with `String.toLowerCase()`, the same case-fold the sqlite engine registers
  * as `lore_lower` — the SQL pushdown only narrows the candidate scan).
+ *
+ * Statement choice (postgresKeywordPlan.ts): the pre-order statement is run as written unless the planner would answer it by
+ * walking idx_nodes_updatedat for a mid-frequency term, in which case the same rows come from a MATERIALIZED match set
+ * (bitmap over the trigram / tag GIN indexes) joined back by primary key. Identical rows and order either way.
  */
 export async function search(
     ctx: PostgresReadCtx,
@@ -229,9 +264,6 @@ export async function search(
     });
     const cached = await ctx.readCache.memoize<{ nodes: LoreNode[]; scanCapHit: boolean }>(key, async () => {
         try {
-            const q = query.toLowerCase();
-            const terms = keywordSearchTerms(query);
-
             // ONE PgParams for the whole statement: placeholder numbers are
             // minted in add() order (workspace slice first, then the match
             // clause, then the scope filters, then the limit), so the SQL
@@ -239,28 +271,12 @@ export async function search(
             // sqlite two-arrays comment guards against with positional `?`).
             const params = new PgParams();
             params.add(ctx.workspaceId);
-
-            // Index-served candidate predicate (postgresKeywordMatch.ts: LIKE + tag containment, CNF).
-            const matchClause = keywordMatchClause(params, terms, q);
-
-            const filters: string[] = [];
-            if (project !== '*') { filters.push(`project = ${params.add(project)}`); }
-            if (ecosystem !== '*') {
-                filters.push(`(ecosystem = ${params.add(ecosystem)} OR ecosystem = '*' OR ecosystem = '')`);
-            }
-            if (excludeHidden) {
-                filters.push(`(status != 'archived')`);
-                filters.push(`(supersededat = '')`);
-            }
-            if (types && types.length > 0) {
-                filters.push(`type = ANY(${params.add(types)})`);
-            }
-            for (const e of entities ?? []) filters.push(metadataStringArrayContains(params, 'entities', e));
-            for (const t of topics ?? []) filters.push(metadataStringArrayContains(params, 'topics', t));
-
-            const scoped = filters.length > 0 ? ` AND ${filters.join(' AND ')}` : '';
-            const sql = `SELECT * FROM nodes WHERE workspace_id = $1`
-                + ` AND ${matchClause}${scoped} ORDER BY "updatedAt" DESC, id ASC LIMIT ${params.add(SEARCH_SCAN_CAP)}::int`;
+            // `where` = everything after `workspace_id = $1`. The keyword-plan probe runs BEFORE the limit
+            // placeholder is minted so it binds exactly the parameters it references.
+            const where = searchWhere(params, query, { project, ecosystem, excludeHidden, types, entities, topics });
+            const decision = await chooseKeywordPlan(ctx.pool, ctx.workspaceId, where, params.values, SEARCH_SCAN_CAP);
+            const limitParam = params.add(SEARCH_SCAN_CAP);
+            const sql = decision.plan === 'cte' ? candidateCteSql(where, limitParam) : orderedWalkSql(where, limitParam);
             const rows = await ctx.pool.query(sql, params.values);
 
             const fetched = rows.rows.map((row) => rowToLoreNode(fromPgNodeRow(row as PgRow)));

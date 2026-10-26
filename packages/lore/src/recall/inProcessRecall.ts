@@ -187,8 +187,10 @@ export interface InProcessRecallDeps {
      *  (`CreateLoreOptions.rerankBackend`). Omitted ⇒ the default
      *  (`localRerankBackend`), matching pre-3.24 behavior. */
     rerankBackend?: RerankBackend;
-    /** `CreateLoreOptions.recallLinkOrdering`: order each seed's related hops by live link strength. Omitted => the `LORE_RECALL_LINK_ORDERING` env flag decides (daemon behaviour). */
+    /** `CreateLoreOptions.recallLinkOrdering`: order each seed's related hops by live link strength. Omitted => the `LORE_RECALL_LINK_ORDERING` env flag decides (daemon behaviour; default on). */
     linkOrdering?: boolean;
+    /** `CreateLoreOptions.recallRelated`: per-hit cap and hub-degree drop for `related[]`. Omitted => the `LORE_RECALL_RELATED_*` env decides (default off). */
+    relatedLimits?: import('./relatedLimits.js').RecallRelatedOption;
 }
 
 /* ─── Implementation ───────────────────────────────────────────── */
@@ -271,7 +273,7 @@ async function inProcessRecallCore(
     // Single-workspace path — shared retrieve() core + buildRecallResult preset.
     // P2: thread the per-workspace verbatim resolver so a non-active workspace
     // recall seeds semantic + BM25 against its OWN verbatim store.
-    const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver, rerankBackend: deps.rerankBackend, linkOrdering: deps.linkOrdering };
+    const ctx: RetrieveContext = { store: deps.store, graphRegistry: deps.graphRegistry, workspaceVerbatimResolver: deps.workspaceVerbatimResolver, rerankBackend: deps.rerankBackend, linkOrdering: deps.linkOrdering, relatedLimits: deps.relatedLimits };
     let outcome;
     try {
         outcome = await retrieve(ctx, topic, {

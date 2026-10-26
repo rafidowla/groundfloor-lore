@@ -17,10 +17,11 @@ export const MIN_SECRET_BYTES = 32;
 
 /** A string that refuses to be printed. Use `.reveal()` at the single point of use. */
 export class Secret {
-    readonly #v: string;
-    constructor(v: string) { this.#v = v; }
-    reveal(): string { return this.#v; }
-    get byteLength(): number { return Buffer.byteLength(this.#v, 'utf8'); }
+    readonly #read: () => string;
+    /** A fixed value, or a reader (see {@link refreshingFileSecret}) consulted on every reveal. */
+    constructor(v: string | (() => string)) { this.#read = typeof v === 'string' ? () => v : v; }
+    reveal(): string { return this.#read(); }
+    get byteLength(): number { return Buffer.byteLength(this.#read(), 'utf8'); }
     toString(): string { return '[redacted]'; }
     toJSON(): string { return '[redacted]'; }
     [inspect.custom](): string { return '[redacted]'; }
@@ -84,6 +85,37 @@ export interface IngestHostConfig {
      * operator runs. null = off (no vision; scans and images behave as today).
      */
     vision: { url: string; model: string; maxPages: number; timeoutMs: number } | null;
+    /**
+     * Where uploaded source files are kept, and how long they are kept. Defaults: local disk, kept forever.
+     * `store: 'invalid'` records an unrecognised LORE_INGEST_BLOB_STORE so the host can refuse to start rather than guess.
+     */
+    blobs: {
+        store: 'fs' | 'groundfloor' | 'invalid';
+        /** null = retention off (nothing is ever deleted). */
+        retentionDays: number | null;
+        /** LORE_INGEST_BLOB_RETENTION_DAYS was set to something unusable; retention stays off and the host says so. */
+        retentionInvalid: boolean;
+        groundfloor: {
+            baseUrl: string | null;
+            /** Groundfloor workspace that owns the files. */
+            workspaceId: string | null;
+            token: Secret | null;
+            /** LORE_INGEST_GF_TOKEN or _TOKEN_FILE is set (even if unreadable): used to refuse a static token together with m2m. */
+            tokenDeclared: boolean;
+            /** Machine login (OAuth-style client id + secret exchanged at the platform's m2m token endpoint). */
+            m2m: {
+                clientId: string | null;
+                clientSecret: Secret | null;
+                /** LORE_INGEST_GF_M2M_CLIENT_SECRET or _FILE is set (even if unreadable). */
+                secretDeclared: boolean;
+                /** The secret file is readable by group or other (mode & 077). Never true for a secret given by value. */
+                secretFileLoose: boolean;
+            };
+            timeoutMs: number;
+            maxRetries: number;
+            maxBytes: number;
+        };
+    };
 }
 
 /** Default cap on one file submitted through the admin enqueue route (25 MiB). */
@@ -126,14 +158,49 @@ export function isIngestionEnabled(env: NodeJS.ProcessEnv = process.env): boolea
 }
 
 /** `NAME` (value) or `NAME_FILE` (path to a file holding the value). A file that cannot be read yields null. */
-function secret(env: NodeJS.ProcessEnv, name: string): Secret | null {
+function secret(env: NodeJS.ProcessEnv, name: string, opts: { refreshFile?: boolean } = {}): Secret | null {
     const direct = env[name];
     if (direct !== undefined && direct !== '') return new Secret(direct);
     const file = env[`${name}_FILE`];
     if (file !== undefined && file !== '') {
-        try { return new Secret(fs.readFileSync(file, 'utf8').replace(/[\r\n]+$/, '')); } catch { return null; }
+        if (opts.refreshFile) return refreshingFileSecret(file);
+        try { return new Secret(readSecretFile(file)); } catch { return null; }
     }
     return null;
+}
+
+/** True when the setting is given by value or by `_FILE`, whether or not it can be read. */
+function declared(env: NodeJS.ProcessEnv, name: string): boolean {
+    return (env[name] ?? '') !== '' || (env[`${name}_FILE`] ?? '') !== '';
+}
+
+/** A secret read from a file that group or other can read (POSIX only). A value given directly never counts. */
+function looseSecretFile(env: NodeJS.ProcessEnv, name: string): boolean {
+    if ((env[name] ?? '') !== '' || process.platform === 'win32') return false;
+    const file = env[`${name}_FILE`];
+    if (!file) return false;
+    try { return (fs.statSync(file).mode & 0o077) !== 0; } catch { return false; }
+}
+
+function readSecretFile(file: string): string { return fs.readFileSync(file, 'utf8').replace(/[\r\n]+$/, ''); }
+
+/**
+ * A secret file that is re-read whenever it changes (mtime or size), so a short-lived token can be rotated by an
+ * outside refresher without a restart. Null if the file cannot be read at start. If a later read fails or yields an
+ * empty value, the last good value is kept (the next request then fails on auth, which is visible, not silent).
+ */
+export function refreshingFileSecret(file: string): Secret | null {
+    let value: string, stamp: string;
+    const stampOf = (): string => { const st = fs.statSync(file); return `${st.mtimeMs}:${st.size}`; };
+    try { stamp = stampOf(); value = readSecretFile(file); } catch { return null; }
+    if (value === '') return null;
+    return new Secret(() => {
+        try {
+            const now = stampOf();
+            if (now !== stamp) { const next = readSecretFile(file); if (next !== '') value = next; stamp = now; }
+        } catch { /* keep the last good value */ }
+        return value;
+    });
 }
 
 const SCHEMES: readonly CallbackScheme[] = ['bearer', 'lore-hmac', 'standard-webhooks'];
@@ -179,6 +246,44 @@ export function loadIngestHostConfig(env: NodeJS.ProcessEnv = process.env): Inge
         },
         extract: loadExtract(env),
         vision: loadVision(env),
+        blobs: loadBlobs(env),
+    };
+}
+
+/** Upper bound for retention: 100 years. A value past it is treated as a typo, not as "forever". */
+export const MAX_BLOB_RETENTION_DAYS = 36_500;
+export const BLOB_BOUNDS = { gfTimeoutMs: [1_000, 600_000], gfMaxRetries: [0, 10], gfMaxBytes: [1_024, 4 * 1024 * 1024 * 1024] } as const;
+
+function loadBlobs(env: NodeJS.ProcessEnv): IngestHostConfig['blobs'] {
+    const rawStore = env['LORE_INGEST_BLOB_STORE']?.trim().toLowerCase();
+    const store: IngestHostConfig['blobs']['store'] = !rawStore || rawStore === 'fs' ? 'fs' : rawStore === 'groundfloor' ? 'groundfloor' : 'invalid';
+    const rawDays = env['LORE_INGEST_BLOB_RETENTION_DAYS']?.trim();
+    let retentionDays: number | null = null;
+    let retentionInvalid = false;
+    if (rawDays) {
+        const n = Number(rawDays);
+        if (n === 0) retentionDays = null;
+        else if (Number.isFinite(n) && n > 0 && n <= MAX_BLOB_RETENTION_DAYS) retentionDays = n;
+        else retentionInvalid = true;
+    }
+    return {
+        store, retentionDays, retentionInvalid,
+        groundfloor: {
+            baseUrl: env['LORE_INGEST_GF_API_URL']?.trim() || null,
+            workspaceId: env['LORE_INGEST_GF_WORKSPACE_ID']?.trim() || null,
+            // Re-read on change: Groundfloor access tokens are short-lived (stage user tokens: 5 minutes).
+            token: secret(env, 'LORE_INGEST_GF_TOKEN', { refreshFile: true }),
+            tokenDeclared: declared(env, 'LORE_INGEST_GF_TOKEN'),
+            m2m: {
+                clientId: env['LORE_INGEST_GF_M2M_CLIENT_ID']?.trim() || null,
+                clientSecret: secret(env, 'LORE_INGEST_GF_M2M_CLIENT_SECRET', { refreshFile: true }),
+                secretDeclared: declared(env, 'LORE_INGEST_GF_M2M_CLIENT_SECRET'),
+                secretFileLoose: looseSecretFile(env, 'LORE_INGEST_GF_M2M_CLIENT_SECRET'),
+            },
+            timeoutMs: num(env['LORE_INGEST_GF_TIMEOUT_MS'], 30_000, ...BLOB_BOUNDS.gfTimeoutMs),
+            maxRetries: num(env['LORE_INGEST_GF_MAX_RETRIES'], 3, ...BLOB_BOUNDS.gfMaxRetries),
+            maxBytes: num(env['LORE_INGEST_GF_MAX_BYTES'], 512 * 1024 * 1024, ...BLOB_BOUNDS.gfMaxBytes),
+        },
     };
 }
 

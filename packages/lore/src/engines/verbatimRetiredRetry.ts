@@ -20,8 +20,10 @@
  * The replay only ever runs on a store that is NOT the retired instance - a still-stale resolver
  * (swap not done yet, swap failed, or the boot store, which never swaps) is waited out and then the
  * original error is surfaced, because writing to the retired instance would silently lose the write.
+ * A resolver SEALED at shutdown (VerbatimResolverSealedError) is the exception: it fails fast with that error.
  */
 import { VerbatimStoreRetiredError } from './verbatimWriteBarrier.js';
+import { isVerbatimResolverSealedError } from './verbatimStoreClosedError.js';
 
 /** Test seam; production uses the defaults. */
 export const retiredRetryConfig = {
@@ -52,7 +54,12 @@ export async function forwardToSuccessor<T>(
     let backoff = retiredRetryConfig.initialBackoffMs;
     for (;;) {
         let successor: object | undefined;
-        try { successor = await resolveSuccessor(); } catch { successor = undefined; } // not resolvable yet: keep waiting
+        try { successor = await resolveSuccessor(); } catch (e) {
+            // The resolver was sealed at shutdown: no successor will ever appear, and waiting out the budget would
+            // only hold shutdown up. Fail now with the typed error (nothing was applied; the outbox replays later).
+            if (isVerbatimResolverSealedError(e)) throw e;
+            successor = undefined; // not resolvable yet: keep waiting
+        }
         if (successor && successor !== self) {
             const fn = (successor as Record<string, unknown>)[method];
             if (typeof fn !== 'function') throw err; // the promoted store cannot take this write

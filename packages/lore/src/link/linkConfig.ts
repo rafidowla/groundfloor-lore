@@ -41,8 +41,16 @@ export interface LinkRuntimeConfig extends LinkPolicy {
     maxAttempts: number;
     /** Rebuild (Loop C): nodes recomputed per batch. */
     rebuildBatchSize: number;
-    /** Rebuild: pause between batches. */
+    /** Rebuild: pause between batches while the host is busy (link queue / ingestion). */
     rebuildYieldMs: number;
+    /** Rebuild: pause between batches while the host is idle (Postgres and any non-SQLite engine). Capped at `rebuildYieldMs`. */
+    rebuildIdleYieldMs: number;
+    /**
+     * Rebuild: the same idle pause for a workspace on the SQLite graph engine. There the rebuild is compute-bound (a 10 vs 200 ms
+     * pause moves throughput ~5%) and each batch stalls the event loop for seconds, so a short pause gives other work no room.
+     * An explicit `LORE_LINK_REBUILD_IDLE_YIELD_MS` (or a programmatic `rebuildIdleYieldMs`) sets BOTH engines.
+     */
+    rebuildIdleYieldMsSqlite: number;
     /** Rebuild: longest a batch waits for the link queue / ingestion to go quiet before running anyway. */
     rebuildMaxWaitMs: number;
     /**
@@ -78,6 +86,8 @@ export const LINK_DEFAULTS: LinkRuntimeConfig = {
     maxAttempts: 5,
     rebuildBatchSize: 50,
     rebuildYieldMs: 200,
+    rebuildIdleYieldMs: 10,
+    rebuildIdleYieldMsSqlite: 200,
     rebuildMaxWaitMs: 30_000,
     refreshOnChange: true,
     maxLinksPerNode: 0,
@@ -95,7 +105,7 @@ function num(raw: string | undefined, fallback: number, min: number, max: number
 /** Documented ranges for every tunable; the env loader falls back silently, programmatic overrides throw. */
 const LINK_RANGES: { [K in keyof LinkRuntimeConfig]?: [number, number] } = {
     minSim: [0, 1], k: [1, 100], dupSim: [0, 1], batchSize: [1, 1000], quietMs: [0, 60_000], maxDelayMs: [0, 600_000],
-    yieldMs: [0, 10_000], maxAttempts: [1, 100], rebuildBatchSize: [1, 1000], rebuildYieldMs: [0, 60_000], rebuildMaxWaitMs: [0, 3_600_000],
+    yieldMs: [0, 10_000], maxAttempts: [1, 100], rebuildBatchSize: [1, 1000], rebuildYieldMs: [0, 60_000], rebuildIdleYieldMs: [0, 60_000], rebuildIdleYieldMsSqlite: [0, 60_000], rebuildMaxWaitMs: [0, 3_600_000],
     maxLinksPerNode: [0, 10_000], pruneIntervalMs: [100, 86_400_000], pruneBatchSize: [1, 1000], healthTtlMs: [0, 3_600_000],
 };
 
@@ -115,6 +125,7 @@ export function applyLinkOverrides(base: LinkRuntimeConfig, overrides: Partial<L
         const range = LINK_RANGES[key];
         if (!range) throw new RangeError(`linkOnArrival: unknown setting '${String(key)}'`);
         if (typeof v !== 'number' || !Number.isFinite(v) || v < range[0] || v > range[1]) throw new RangeError(`linkOnArrival.${key} must be a number in [${range[0]}, ${range[1]}]`);
+        if (key === 'rebuildIdleYieldMs' && overrides.rebuildIdleYieldMsSqlite === undefined) out.rebuildIdleYieldMsSqlite = v; // an explicit idle pause wins for both engines
         (out as unknown as Record<string, number>)[key] = ['k', 'batchSize', 'maxAttempts', 'rebuildBatchSize', 'maxLinksPerNode', 'pruneBatchSize'].includes(key) ? Math.floor(v) : v;
     }
     return out;
@@ -150,6 +161,9 @@ export function loadLinkConfig(env: NodeJS.ProcessEnv = process.env, modelFinger
         maxAttempts: Math.floor(num(env.LORE_LINK_MAX_ATTEMPTS, d.maxAttempts, 1, 100)),
         rebuildBatchSize: Math.floor(num(env.LORE_LINK_REBUILD_BATCH_SIZE, d.rebuildBatchSize, 1, 1000)),
         rebuildYieldMs: num(env.LORE_LINK_REBUILD_YIELD_MS, d.rebuildYieldMs, 0, 60_000),
+        rebuildIdleYieldMs: num(env.LORE_LINK_REBUILD_IDLE_YIELD_MS, d.rebuildIdleYieldMs, 0, 60_000),
+        // An explicit (valid) env value wins for both engines; otherwise SQLite gets its own default.
+        rebuildIdleYieldMsSqlite: num(env.LORE_LINK_REBUILD_IDLE_YIELD_MS, d.rebuildIdleYieldMsSqlite, 0, 60_000),
         rebuildMaxWaitMs: num(env.LORE_LINK_REBUILD_MAX_WAIT_MS, d.rebuildMaxWaitMs, 0, 3_600_000),
         refreshOnChange: flag(env.LORE_LINK_REFRESH_ON_CHANGE, d.refreshOnChange),
         maxLinksPerNode: Math.floor(num(env.LORE_LINK_MAX_PER_NODE, d.maxLinksPerNode, 0, 10_000)),
@@ -157,4 +171,9 @@ export function loadLinkConfig(env: NodeJS.ProcessEnv = process.env, modelFinger
         pruneBatchSize: Math.floor(num(env.LORE_LINK_PRUNE_BATCH_SIZE, d.pruneBatchSize, 1, 1000)),
         healthTtlMs: num(env.LORE_LINK_HEALTH_TTL_MS, d.healthTtlMs, 0, 3_600_000),
     };
+}
+
+/** Idle rebuild pause for a workspace on `engine` (the graph engine name; SQLite gets its own default, everything else the base one). */
+export function rebuildIdleYieldFor(config: Pick<LinkRuntimeConfig, 'rebuildIdleYieldMs' | 'rebuildIdleYieldMsSqlite'>, engine: string | null | undefined): number {
+    return engine === 'sqlite' ? config.rebuildIdleYieldMsSqlite : config.rebuildIdleYieldMs;
 }

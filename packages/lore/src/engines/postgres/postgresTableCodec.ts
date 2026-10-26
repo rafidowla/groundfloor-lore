@@ -28,6 +28,32 @@ function validDate(s: string): boolean {
     return d.getUTCFullYear() === Number(m[1]) && d.getUTCMonth() === Number(m[2]) - 1 && d.getUTCDate() === Number(m[3]);
 }
 
+const DECIMAL_RE = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+const CURRENCY_RE = /^[A-Za-z]{3}$/;
+
+/** Exact decimal as text (never via a JS float); accepts a decimal string, a finite number or a bigint. */
+export function encodeDecimal(v: unknown, ctx: string): string {
+    if (typeof v === 'bigint') return v.toString();
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+    if (typeof v === 'string' && DECIMAL_RE.test(v.trim())) return v.trim().replace(/^\+/, '');
+    throw new Error(`${LABEL}: ${ctx} expects a decimal amount, got ${JSON.stringify(v)}`);
+}
+
+/** Split an encoded money value (the JSON text `encodePgValue` returns for `money`) into its two stored halves. */
+export function splitMoney(enc: Encoded): { amount: string; currency: string } {
+    return JSON.parse(String(enc)) as { amount: string; currency: string };
+}
+
+function encodeMoney(v: unknown, ctx: string): string {
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+        const o = v as { amount?: unknown; currency?: unknown };
+        if (typeof o.currency === 'string' && CURRENCY_RE.test(o.currency) && o.amount !== undefined && o.amount !== null) {
+            return JSON.stringify({ amount: encodeDecimal(o.amount, `${ctx} amount`), currency: o.currency.toUpperCase() });
+        }
+    }
+    throw new Error(`${LABEL}: ${ctx} expects { amount, currency } with a decimal amount and a 3-letter currency, got ${JSON.stringify(v)}`);
+}
+
 /** Encode one value for column type `t`. `ctx` names the column in errors. */
 export function encodePgValue(v: unknown, t: ColumnType, ctx: string): Encoded {
     if (v === null || v === undefined) return null;
@@ -75,11 +101,17 @@ export function encodePgValue(v: unknown, t: ColumnType, ctx: string): Encoded {
             }
             return JSON.stringify(v);
         }
+        case 'money':
+            return encodeMoney(v, ctx);
     }
 }
 
 /** SQL expression turning view column `expr` into the text/number shape the decoder expects. */
-export function selectExpr(expr: string, t: ColumnType): string {
+export function selectExpr(expr: string, t: ColumnType, currencyExpr?: string): string {
+    if (t === 'money') {
+        if (!currencyExpr) throw new Error(`${LABEL}: money select needs its currency column`);
+        return `CASE WHEN ${expr} IS NULL THEN NULL ELSE jsonb_build_object('amount', ${expr}::text, 'currency', ${currencyExpr}::text) END`;
+    }
     if (t === 'date') return `to_char(${expr}, 'YYYY-MM-DD')`;
     if (t === 'datetime') return `to_char(${expr} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
     return expr;
@@ -92,6 +124,10 @@ export function decodePgValue(v: unknown, t: ColumnType): unknown {
         if (typeof v === 'number') return v;
         const n = Number(v);
         return Number.isSafeInteger(n) ? n : String(v);
+    }
+    if (t === 'money') {
+        const o = (typeof v === 'string' ? JSON.parse(v) : v) as { amount: unknown; currency: unknown };
+        return { amount: String(o.amount), currency: String(o.currency) };
     }
     return v;
 }

@@ -79,6 +79,8 @@ export interface ShutdownDrainDeps {
      *  pending zero-delay timer if it hasn't fired yet, so process.exit
      *  can never race a write against an already-closed outbox store. */
     outboxOpenPruneSweep?: { stop(): Promise<void> };
+    /** Lane f6b — the scheduled workspace-erase tick (workspaceErase/wiring.ts). Optional like the sweepers above; the drain awaits an in-flight erase pass. */
+    workspaceEraseTick?: { stop(): Promise<void> };
     /** May be null until the load-jobs runner is wired (Sprint Z2). */
     getLoadJobsRunner: () => { stop(): Promise<void> } | null;
     /** May be undefined when migrations aren't wired. */
@@ -287,6 +289,9 @@ export function buildShutdownDrain(deps: ShutdownDrainDeps): (reason: string) =>
         }
         if (deps.versionPruneSweeper) {
             try { await deps.versionPruneSweeper.stop(); } catch (e) { logStepError('versionPruneSweep.stop', e); }
+        }
+        if (deps.workspaceEraseTick) {
+            try { await deps.workspaceEraseTick.stop(); } catch (e) { logStepError('workspaceEraseTick.stop', e); }
         }
 
         // 7.8 D1 (calibrated abstention) — wait briefly for any background

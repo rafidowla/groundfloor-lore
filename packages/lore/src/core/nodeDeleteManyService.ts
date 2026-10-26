@@ -103,10 +103,16 @@ async function deleteChunk(input: NodeDeleteManyInput, ids: string[]): Promise<N
     }
 
     // 2. graph deletes (raw), telling the replay guard about each inline delete.
-    for (const w of work) {
-        if (w.item.error) continue;
+    //    A graph with a batched delete (Postgres) removes the whole chunk in one transaction; if that throws nothing was
+    //    removed (all-or-nothing), so the per-node loop below runs exactly as it always did.
+    const todoGraph = work.filter((w) => !w.item.error);
+    let batchedGone: Set<string> | null = null;
+    if (typeof input.graph.deleteNodes === 'function' && todoGraph.length > 1) {
+        try { batchedGone = await input.graph.deleteNodes(todoGraph.map((w) => w.id)); } catch { batchedGone = null; }
+    }
+    for (const w of todoGraph) {
         try {
-            w.deleted = await input.graph.deleteNode(w.id);
+            w.deleted = batchedGone ? batchedGone.has(w.id) : await input.graph.deleteNode(w.id);
             if (w.entry) input.onInlineDeleteApplied?.(w.entry);
             w.item.deleted = w.deleted;
         } catch (err) { fail(w, err); }
@@ -178,10 +184,16 @@ async function tombstoneChunk(
     input: NodeDeleteManyInput, store: unknown, live: Work[], aliasMap: Map<string, string[] | null>,
 ): Promise<void> {
     const { workspace, initiator, outboxStore } = input;
-    const tomb = store as { tombstone?: (id: string, reason: string) => Promise<void> };
-    // Tombstones re-embed, so they stay one store call per node (sequential).
+    const tomb = store as { tombstone?: (id: string, reason: string) => Promise<void>; tombstoneMany?: (ids: string[], reason: string) => Promise<void> };
     const done: Work[] = [];
-    for (const w of live) {
+    // A store with a batched tombstone (Postgres) takes the whole chunk in O(1) round trips and one batched embed.
+    // If it throws, nothing from that call is committed to be trusted, so fall through to the per-node path (idempotent).
+    let batched = false;
+    if (typeof tomb.tombstoneMany === 'function' && live.length > 1) {
+        try { await tomb.tombstoneMany(live.map((w) => `lore:${w.id}`), input.reason); done.push(...live); batched = true; } catch { /* per-node retry below */ }
+    }
+    // Per-node tombstones re-embed, so on the generic path they stay one store call per node (sequential).
+    for (const w of batched ? [] : live) {
         try {
             if (typeof tomb.tombstone === 'function') await tomb.tombstone(`lore:${w.id}`, input.reason);
             else await input.verbatimDelete(`lore:${w.id}`);

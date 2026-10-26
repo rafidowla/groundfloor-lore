@@ -172,6 +172,19 @@ export interface CreateVectorStoreOpts {
      *  respects the same shared-model-server opt-out the host's own
      *  in-process `attachModelServer` call already gets. */
     modelServer?: boolean;
+    /**
+     * Late-bound handle on the per-workspace verbatim resolver (constructed AFTER this store in server.ts, so
+     * a getter). Lets the boot SqliteVerbatimStore (a) swap the resolver's primed entry to the promoted store on a
+     * committed background promotion and (b) replay a write rejected with VerbatimStoreRetiredError on that promoted
+     * store, exactly like resolver-opened stores do. Absent/undefined result = the old behaviour (error surfaces).
+     */
+    getBootResolver?: () => BootVerbatimResolver | undefined;
+}
+
+/** The slice of WorkspaceVerbatimResolver the boot store needs (structural, to avoid a services -> outbox import cycle). */
+export interface BootVerbatimResolver {
+    swapToLance(workspace: string): Promise<void>;
+    getOrOpen(workspace: string, opts?: { touch?: boolean }): Promise<object>;
 }
 
 /**
@@ -222,15 +235,18 @@ export async function createVectorStore(opts: CreateVectorStoreOpts): Promise<Lo
         role: opts.vectorStoreRole,
         strictFingerprintCheck: opts.injectedEmbeddingProvider ?? false,
         pieceVectors: opts.pieceVectors,
-        // The boot store has no cached-reference of its own to swap on a
-        // background promotion commit — see openWorkspaceVerbatim.ts's
-        // header and this file's `createVectorStore` doc comment. The
-        // resolver (workspaceVerbatimResolver.ts) passes a real callback;
-        // this call site logs instead, matching `lore vectors promote`'s
-        // own "restart the daemon to pick up the promoted store" guidance.
-        onLancePromoted: () => {
-            log.info(`[Lore MCP] workspace at ${opts.graphBasePath} was auto-promoted SQLite → LanceDB; the boot vector store still references the old SQLite path until the daemon restarts.`);
+        // D7 - the boot store is primed into the workspace resolver (pinned), so a committed background promotion
+        // swaps the RESOLVER's entry to the promoted store (swapToLance never closes the boot-owned instance), and
+        // a write that reaches this instance after the swap is replayed on the promoted store (resolveSuccessor).
+        // Holders of the boot reference itself keep a retired instance that rejects writes, never writes the old file.
+        onLancePromoted: async () => {
+            log.info(`[Lore MCP] workspace at ${opts.graphBasePath} was auto-promoted SQLite -> LanceDB; swapping the resolver's boot entry to the promoted store.`);
+            const resolver = opts.getBootResolver?.();
+            if (resolver && opts.workspaceId) await resolver.swapToLance(opts.workspaceId);
         },
+        ...(opts.getBootResolver && opts.workspaceId ? {
+            resolveSuccessor: async () => opts.getBootResolver?.()?.getOrOpen(opts.workspaceId!, { touch: false }),
+        } : {}),
     });
 }
 

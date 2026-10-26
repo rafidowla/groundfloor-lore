@@ -36,6 +36,7 @@ import { SurrealGraph } from './surrealGraph.js';
 import { SqliteGraph } from './sqliteGraph.js';
 import { PostgresGraph } from './postgres/postgresGraph.js';
 import { sharedPostgresPool } from './postgres/postgresPoolOwner.js';
+import { resolvePostgresWorkspaceKey } from './postgres/postgresWorkspaceKey.js';
 import { disposeAccessTracker } from './accessTracker.js';
 import type { WorkspaceGraph } from './openWorkspaceGraph.js';
 import {
@@ -242,8 +243,18 @@ export class LocalGraphRegistry {
         // dir out from under the open store. (closeEntry alone returns false
         // for the not-cached case too, which would wrongly block normal
         // deletes.)
-        if (!this.cache.get(name)) return true;
-        return this.closeEntry(name);
+        const entry = this.cache.get(name);
+        if (!entry) return true;
+        const outcome = await this.closeEntryDetailed(name);
+        if (outcome === 'pinned' || outcome === 'aliased') return false;
+        // Lane f6b — a workspace delete also needs the entry's OTHER path-backed handles (the table-storage
+        // SQLite file and the hot-session cache) released, or the erase would unlink files still held open.
+        // Idle eviction (`closeEntry`) keeps its previous behaviour and does not reach this.
+        if (entry.sessionCache) { try { entry.sessionCache.flushNow(); } catch { /* best-effort */ } }
+        if (entry.tableStorage) {
+            try { (entry.tableStorage as unknown as { close?: () => void }).close?.(); } catch { /* best-effort */ }
+        }
+        return true;
     }
 
     /** SP-11 — close + drop a cached entry, but ONLY close the underlying
@@ -252,15 +263,22 @@ export class LocalGraphRegistry {
      *  graph; closing it while an alias still references it would break
      *  the alias). Returns true when a handle was physically closed. */
     private async closeEntry(name: string): Promise<boolean> {
+        const outcome = await this.closeEntryDetailed(name);
+        return outcome === 'closed';
+    }
+
+    /** What `closeEntry` did: 'closed' = a graph handle was physically closed; 'bare' = the entry held no graph
+     *  handle (dropped from the cache); 'pinned' / 'aliased' = a handle remains; 'none' = no such entry. */
+    private async closeEntryDetailed(name: string): Promise<'none' | 'pinned' | 'aliased' | 'closed' | 'bare'> {
         const entry = this.cache.get(name);
-        if (!entry) return false;
-        if (entry.pinned) return false; // SP-11 — never close the boot graph.
+        if (!entry) return 'none';
+        if (entry.pinned) return 'pinned'; // SP-11 — never close the boot graph.
         this.cache.delete(name);
         let aliased = false;
         for (const other of this.cache.values()) {
             if (entry.surreal && other.surreal === entry.surreal) { aliased = true; break; }
         }
-        if (aliased) return false;
+        if (aliased) return 'aliased';
         // Flush and drop THIS graph's access tracker before closing it. Its
         // pending stamps can only be written while the store is open, and a
         // tracker left armed on a closed graph is a leak (pre-3.18.2 it was
@@ -272,7 +290,7 @@ export class LocalGraphRegistry {
         // The Surreal handle's directory lock is released asynchronously by
         // the driver — best-effort close is all we can do here.
         if (entry.surreal) { try { await entry.surreal.close(); } catch { /* best-effort */ } }
-        return !!entry.surreal;
+        return entry.surreal ? 'closed' : 'bare';
     }
 
     /** SP-11 — evict cached workspaces idle longer than `idleMs` relative
@@ -448,7 +466,7 @@ export class LocalGraphRegistry {
             if (fresh?.surreal) return fresh.surreal;
             const surreal: WorkspaceGraph =
                 engineKind === 'sqlite' ? new SqliteGraph(entry.path, { workspaceId: workspace })
-                : engineKind === 'postgres' ? new PostgresGraph(workspace, sharedPostgresPool())
+                : engineKind === 'postgres' ? new PostgresGraph(resolvePostgresWorkspaceKey(workspace, this.home), sharedPostgresPool())
                 : new SurrealGraph(entry.path, { workspaceId: workspace });
             await surreal.initialize();
             // Re-read: the entry may have been replaced while we awaited.

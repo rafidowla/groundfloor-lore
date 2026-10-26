@@ -18,6 +18,7 @@
 import { MissingPayloadError, UnwiredOperationKindError } from './dispatcher.js';
 import { isSqliteLockedError } from '../engines/graphShared/deleteOutcome.js';
 import { isVerbatimStoreRetiredError } from '../engines/verbatimWriteBarrier.js';
+import { isVerbatimStoreClosedError, isVerbatimStoreNotInitializedError, isVerbatimResolverSealedError } from '../engines/verbatimStoreClosedError.js';
 import type { OutboxEntry, OutboxStore } from './types.js';
 
 export const DEFAULT_TRANSIENT_CEILING_MS = 24 * 60 * 60 * 1000;
@@ -34,9 +35,15 @@ export const DEFAULT_TRANSIENT_CONFIG = {
  * The SQLite wiring's transient classifier (also its batch-halt classifier): lock contention, or a
  * write rejected with VerbatimStoreRetiredError (the promotion committed while it was parked and the
  * promoted store was not resolvable within SqliteVerbatimStore's own bounded retry). Both mean
- * "nothing was applied, replay later" - never a counted attempt, never a dead-letter.
+ * "nothing was applied, replay later" - never a counted attempt, never a dead-letter. A write on a CLOSED
+ * store (VerbatimStoreClosedError: shutdown drain, idle eviction, a stale pre-swap instance) is the same
+ * shape: it threw before running, and the row is replayed against whatever store the resolver hands out next.
+ * It used to resolve silently and the row was marked replicated with nothing written.
+ * VerbatimStoreNotInitializedError (a write before the store was opened) is the same shape, and so is
+ * VerbatimResolverSealedError (the resolver was sealed at shutdown: the row replays on the next lifecycle).
  */
-export const isSqliteOrRetiredTransient = (err: unknown): boolean => isSqliteLockedError(err) || isVerbatimStoreRetiredError(err);
+export const isSqliteOrRetiredTransient = (err: unknown): boolean =>
+    isSqliteLockedError(err) || isVerbatimStoreRetiredError(err) || isVerbatimStoreClosedError(err) || isVerbatimStoreNotInitializedError(err) || isVerbatimResolverSealedError(err);
 
 /** Why a row was dead-lettered; stored in `deadReason`, shown by /api/stats and the dead-rows route. */
 export type DeadReason = 'unwired' | 'invalid' | 'permanent' | 'transient_ceiling';

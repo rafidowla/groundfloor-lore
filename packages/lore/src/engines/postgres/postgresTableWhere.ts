@@ -15,7 +15,7 @@ import {
 } from '../collectionStorage.js';
 import { assertIdent } from '../whereClause.js';
 import type { ColumnType } from '../../contracts/tables.js';
-import { encodePgValue, type Encoded } from './postgresTableCodec.js';
+import { encodeDecimal, encodePgValue, type Encoded } from './postgresTableCodec.js';
 
 export interface PgWhereOptions {
     /** Column reference SQL for a validated column name (default: quoted, unqualified). */
@@ -66,7 +66,9 @@ function compileLeaf(filter: Filter, opts: PgWhereOptions, params: Encoded[]): s
     };
     const bind = (k: string, v: unknown): string => {
         const t = opts.typeOf?.(k);
-        params.push(t !== undefined ? encodePgValue(v, t, `filter value for '${k}'`) : (v as Encoded) ?? null);
+        // A money column filters on its AMOUNT (the sibling `<col>__currency` column carries the currency).
+        const ctx = `filter value for '${k}'`;
+        params.push(t === 'money' ? encodeDecimal(v, ctx) : t !== undefined ? encodePgValue(v, t, ctx) : (v as Encoded) ?? null);
         return `$${base + params.length}`;
     };
     // String range compares are byte-ordered, matching SQLite's default BINARY collation.

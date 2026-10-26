@@ -331,13 +331,14 @@ async function main(): Promise<void> {
             } finally { await w.close(); }
         });
 
-        await test(`[${mode}] probeCheck throwing: zero lore_node deletes (earlier collections may already be gone); a passing hook runs once`, async () => {
+        await test(`[${mode}] probeCheck throwing: refused by the read-only pre-flight, nothing deleted anywhere; a passing hook runs at the pre-flight and the lore_node pass`, async () => {
             const w = await world(mode);
             try {
                 await seedAll(w, S_A_T, 1);
                 await seedAll(w, S_A_O, 1);
                 const others = snapshot(w, notScope(S_A_T));
                 const nodesBefore = rowsIn(w, 'lore_node', inScope(S_A_T));
+                const allBefore = JSON.parse(JSON.stringify(snapshot(w))) as Record<string, Row[]>;
                 const seen: WriteProbe[] = [];
                 const { res } = await run(w, S_A_T, { probeCheck: (p) => { seen.push(p); throw new Error('a write landed after deletion'); } });
                 assert.equal(res.outcome, 'aborted-probe');
@@ -347,8 +348,10 @@ async function main(): Promise<void> {
                 assert.equal(seen[0]!.rowsSeen, 2);
                 assert.equal(by(res, 'lore_node').deleted, 0);
                 assert.deepEqual(rowsIn(w, 'lore_node', inScope(S_A_T)), nodesBefore, 'lore_node untouched');
+                assert.equal(res.deleteRequests, 0, 'lane f6d: the pre-flight refuses before ANY delete');
+                assert.deepEqual(snapshot(w), allBefore, 'lane f6d: every row of every collection is untouched');
                 assert.deepEqual(snapshot(w, notScope(S_A_T)), others);
-                // a hook that passes: called once even over several passes, run completes
+                // a hook that passes: called at the pre-flight and once at the lore_node pass (not per pass), run completes
                 const w2 = await world(mode);
                 try {
                     await seed(w2, 'lore_node', S_A_T, ids('n', 5));
@@ -357,7 +360,7 @@ async function main(): Promise<void> {
                     let calls = 0;
                     const r2 = await run(w2, S_A_T, { collections: ['lore_node'], probeCheck: () => { calls++; } });
                     assert.equal(r2.res.exitCode, 0);
-                    assert.equal(calls, 1);
+                    assert.equal(calls, 2, 'pre-flight + the first lore_node walk; not once per pass');
                     assert.ok(by(r2.res, 'lore_node').passes >= 2);
                 } finally { await w2.close(); }
             } finally { await w.close(); }

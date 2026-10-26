@@ -170,9 +170,12 @@ tokens**:
   stores **SHA-256 hashes** of token plaintext, never the plaintext
   (`tokens.ts:121`, `writeRegistry`/`sha256Hex`). A stolen registry does
   not equal stolen tokens.
-- **Scopes** (`TokenScope`, `tokens.ts:37`): `read`, `write`,
+- **Scopes** (`TokenScope`, `tokens.ts:37`): `read`, `write`, `review`,
   `cross-workspace-read`, `cross-workspace-write`. An operator mints the
-  minimum scope an integration needs.
+  minimum scope an integration needs. `review` gates approving/rejecting on
+  the table-review queue and link proposals (`/api/table-review/*`,
+  `/api/link-proposals/*`); it is not implied by `write` and is never part of
+  the default `read,write` set. Viewing those queues needs only `read`.
 - **Ephemeral / TTL tokens:** `expiresAt` can be set at issue time
   (`ttlMs`); expired tokens fail auth with `token_expired` and are dropped
   by a periodic sweeper (`sweepExpiredTokens`, `startTokenSweeper`,

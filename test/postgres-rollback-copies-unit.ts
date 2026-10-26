@@ -12,12 +12,17 @@
  *   no-postgres  no LORE_PG_URL -> explanation, exit 0, JSON status not_postgres
  *
  * Throwaway database lore_rbc_<pid> on the LORE_PG_URL server (skips cleanly with a printed reason when unset).
+ * The CLI under test connects as a throwaway SUPERUSER role (lore_rbc_<pid>_role) with a long random password,
+ * so the "the URL password never prints" check cannot be fooled by the harness password (commonly the word
+ * `lore`, which appears in paths and names of perfectly normal output). Every CLI call's output is collected and
+ * checked for that password at the end, and the role is dropped in the finally block.
  * Run: LORE_PG_URL=postgres://... npx tsx test/postgres-rollback-copies-unit.ts
  */
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Client, type Pool } from 'pg';
@@ -56,6 +61,13 @@ await admin.connect();
 await admin.query(`DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`);
 await admin.query(`CREATE DATABASE ${DB}`);
 const dbUrl = withDb(DB);
+// A role of our own with a long random password for the CLI under test (see the header). Never printed here.
+const ROLE = `${DB}_role`;
+const ROLE_PASSWORD = randomBytes(24).toString('hex'); // 48 hex chars; cannot collide with ordinary output
+await admin.query(`DROP ROLE IF EXISTS ${ROLE}`);
+await admin.query(`CREATE ROLE ${ROLE} LOGIN SUPERUSER PASSWORD '${ROLE_PASSWORD}'`);
+const cliUrl = ((): string => { const u = new URL(dbUrl); u.username = ROLE; u.password = ROLE_PASSWORD; return u.toString(); })();
+const cliOutputs: string[] = [];
 const pool: Pool = createPostgresPool({ url: dbUrl, max: 4 });
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'rbc-home-'));
 
@@ -66,10 +78,11 @@ const exists = async (t: string): Promise<boolean> => (await q<{ t: string | nul
 const vec = (...x: number[]): string => `[${x.join(',')}]`;
 
 /** Run the real CLI against the throwaway database. */
-function cli(args: string[], env: Record<string, string | undefined> = { LORE_PG_URL: dbUrl }): { code: number | null; out: string; err: string } {
+function cli(args: string[], env: Record<string, string | undefined> = { LORE_PG_URL: cliUrl }): { code: number | null; out: string; err: string } {
     const e: Record<string, string | undefined> = { ...process.env, LORE_HOME: home, LORE_PG_URL: undefined, ...env };
     for (const k of Object.keys(e)) if (e[k] === undefined) delete e[k];
     const r = spawnSync(tsxBin, [cliEntry, 'postgres', 'rollback-copies', ...args], { env: e as NodeJS.ProcessEnv, encoding: 'utf-8', timeout: 120_000 });
+    cliOutputs.push(r.stdout ?? '', r.stderr ?? '');
     return { code: r.status, out: r.stdout, err: r.stderr };
 }
 const withClient = async <T>(fn: (c: import('pg').PoolClient) => Promise<T>): Promise<T> => {
@@ -171,7 +184,8 @@ try {
         assert.equal(human.code, 0, human.err);
         assert.match(human.out, /verbatim_pre_partition/);
         assert.match(human.out, /verification: PASSED/);
-        assert.ok(!human.out.includes(new URL(dbUrl).password || '\u0000'), 'the URL password must never print');
+        assert.ok(!human.out.includes(ROLE_PASSWORD), 'the URL password must never print');
+        assert.ok(!human.out.includes(`${ROLE}:`), 'the user:password pair of the URL must never print');
         const j = cli(['--json']);
         assert.equal(j.code, 0, j.err);
         const doc = JSON.parse(j.out) as { status: string; exitCode: number; copies: Array<{ name: string; verified: boolean }> };
@@ -299,15 +313,22 @@ try {
         assert.equal(d.code, 0, d.err);
     });
     await test('unreachable server: exit 1 with a redacted explanation, no stack trace', () => {
-        const u = new URL(dbUrl); u.port = '1';
+        const u = new URL(cliUrl); u.port = '1';
         const r = cli([], { LORE_PG_URL: u.toString() });
         assert.equal(r.code, 1);
         assert.match(r.err, /postgres engine/);
-        assert.ok(!r.err.includes(new URL(dbUrl).password || '\u0000'));
+        assert.ok(!r.err.includes(ROLE_PASSWORD));
+    });
+    await test('the URL password appeared in no output of any CLI call in this suite (stdout or stderr)', () => {
+        // two entries (stdout, stderr) per CLI run
+        assert.ok(cliOutputs.length >= 20, `expected the CLI to have run many times, saw ${cliOutputs.length / 2} runs`);
+        const leaked = cliOutputs.filter((o) => o.includes(ROLE_PASSWORD)).length;
+        assert.equal(leaked, 0, `${leaked} CLI output(s) contained the URL password`);
     });
 } finally {
     await closePostgresPool(pool);
     await admin.query(`DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`);
+    await admin.query(`DROP ROLE IF EXISTS ${ROLE}`);
     await admin.end();
     fs.rmSync(home, { recursive: true, force: true });
 }

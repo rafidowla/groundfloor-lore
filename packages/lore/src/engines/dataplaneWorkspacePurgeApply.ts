@@ -22,9 +22,10 @@
  * Hooks (all injected so the CLI owns policy):
  *   - `guard()` runs before EVERY delete pass; a throw aborts the whole run (`aborted-guard`), nothing further is
  *     sent. The CLI makes it re-read the registry and throw if the target id is live again.
- *   - `probeCheck(probe)` runs once, on the first `lore_node` walk, before any `lore_node` delete, so a write that
- *     lands after the caller's pre-apply probe is still caught. A throw aborts (`aborted-probe`); `lore_node` is
- *     purged last, so earlier collections may already be gone (exit 2: partial deletion).
+ *   - `probeCheck(probe)` runs first on a READ-ONLY pre-flight walk of `lore_node` before ANY delete (lane f6d), so a
+ *     refusal leaves every collection untouched (`aborted-probe`, exit 2, nothing deleted). It runs once more on the
+ *     first `lore_node` walk of the purge itself (`lore_node` is purged last), which catches a write that lands
+ *     mid-run; a refusal there is a partial deletion (exit 2). Skipped when `lore_node` is not being purged.
  *   - `onProgress(ev)` is advisory; an exception thrown by it is swallowed so reporting can never break the run.
  *
  * Exit codes (`exitCode`): 0 every collection complete / complete-small; 2 runtime failure, guard/probe abort or
@@ -243,7 +244,29 @@ export async function applyWorkspacePurge(input: ApplyPurgeInput): Promise<Purge
         }
     }
 
-    for (const res of results) {
+    /**
+     * Pre-flight (read-only, before ANY delete): `lore_node` is purged last, so its in-pass probe would refuse only after
+     * edges, versions and verbatim rows were already gone. One read-only walk of `lore_node` first makes a recent-write
+     * refusal leave the workspace untouched. Reported exactly like the in-pass refusal (`aborted-probe`, stoppedIn
+     * `lore_node`); every collection stays `not-reached`. The in-pass check still runs (catches a write landing mid-run).
+     */
+    async function preflight(): Promise<void> {
+        if (!input.probeCheck || !input.collections.includes('lore_node')) return;
+        const w = await walkPurgeCollection(client, scope, 'lore_node', connection, {
+            trackWrites: true, ...(input.limits ? { limits: input.limits } : {}),
+        });
+        if (!w.probe) return;
+        try { await input.probeCheck(w.probe); }
+        catch (e) { throw new PurgeStop('aborted-probe', `recent-write probe refused: ${(e as Error)?.message ?? String(e)}`); }
+    }
+    try { await preflight(); }
+    catch (e) {
+        stoppedIn = 'lore_node';
+        if (e instanceof PurgeStop) { outcome = e.outcome; message = e.message; }
+        else { outcome = 'failed'; message = errText(e); }
+    }
+
+    for (const res of outcome === 'complete' ? results : []) {
         try {
             await purgeCollection(res);
             emit({ phase: 'collection-done', collection: res.collection, endState: res.endState });

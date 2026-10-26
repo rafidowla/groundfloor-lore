@@ -198,6 +198,8 @@ const row = (id: string, deg: number, ecosystem = '*') => ({
 type VerbatimUnderTest = BatchKnnCapable & {
     bulkAddPrebuiltRows(rows: unknown[]): Promise<unknown>;
     searchByVector(v: number[], o?: { topK?: number; filter?: Record<string, unknown> }): Promise<VerbatimSearchResult[]>;
+    getById(id: string): Promise<{ ecosystem?: string; security_scopes?: string[] } | null>;
+    getByIds?(ids: string[], opts?: { columns?: 'full' | 'link' }): Promise<Map<string, { ecosystem?: string; security_scopes?: string[] }>>;
 };
 const verbatimEngines: Array<{ name: string; open: () => Promise<VerbatimUnderTest> }> = [
     { name: 'sqlite', open: async () => { const s = new SqliteVerbatimStore(mkTmp('lb-v-'), new NoEmbed()); await s.initialize(); return s as unknown as VerbatimUnderTest; } },
@@ -255,6 +257,23 @@ for (const eng of verbatimEngines) {
         const out = await s.searchByVectors([{ key: 'x', vector: at(0) }], { topK: 5, filter: { ecosystem: 'eco-x' } });
         assert.ok(ids(out.get('x')!).length > 0);
         assert.ok(ids(out.get('x')!).every((id) => id === 'lore:d' || id === 'lore:e'), `got ${ids(out.get('x')!)}`);
+    });
+
+    await test("getByIds: id -> row for every canonical row, absent for a missing id, same ecosystem/scopes as getById, in both column modes", async () => {
+        const s = await seeded();
+        if (!s.getByIds) { console.log('  (no getByIds on this engine: the linker falls back to per-node getById)'); return; }
+        const getByIds = s.getByIds.bind(s);
+        const want = ['lore:a', 'lore:d', 'lore:e', 'lore:missing', 'lore:a'];
+        for (const columns of ['link', 'full'] as const) {
+            const got = await getByIds(want, { columns });
+            assert.deepEqual([...got.keys()].sort(), ['lore:a', 'lore:d', 'lore:e']);
+            for (const id of got.keys()) {
+                const one = await s.getById(id);
+                assert.equal(got.get(id)!.ecosystem, one!.ecosystem, `${id} ecosystem`);
+                assert.deepEqual(got.get(id)!.security_scopes, one!.security_scopes, `${id} scopes`);
+            }
+        }
+        assert.equal((await getByIds([], { columns: 'link' })).size, 0);
     });
 
     await test('empty query list returns an empty map; the store never calls the embedder', async () => {

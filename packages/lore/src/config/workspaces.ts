@@ -568,12 +568,12 @@ export function setWorkspaceVectorEngine(
 }
 
 /**
- * deleteWorkspace — Remove a workspace from the registry (id logged first, see
- * deletedWorkspaces.ts). Does NOT touch its on-disk data — rm -rf manually.
- * Cannot delete the legacy/bootstrap workspace (the one anchored at
- * HOME_GROUNDFLOOR rather than under workspaces/) or the active one.
+ * deleteWorkspace — Remove a workspace from the registry (id logged first, see deletedWorkspaces.ts). Alone it
+ * does NOT touch the data; `deleteWorkspaceWithLifecycle` (engines/workspaceErase/lifecycle.ts) holds the data
+ * dir, schedules the erase, then calls this with `erase` so the record carries `eraseAfter` / `holdingPath`.
+ * Cannot delete the legacy/bootstrap workspace (anchored at HOME_GROUNDFLOOR) or the active one.
  */
-export function deleteWorkspace(name: string, home: string = loreHome()): WorkspacesFile {
+export function deleteWorkspace(name: string, home: string = loreHome(), erase?: { eraseAfter: string; windowDays: number; holdingPath: string | null; now?: Date }): WorkspacesFile {
     const file = loadWorkspaces(home);
     const entry = file.workspaces.find((w) => w.name === name);
     if (!entry) throw new Error(`Unknown workspace "${name}"`);
@@ -582,7 +582,8 @@ export function deleteWorkspace(name: string, home: string = loreHome()): Worksp
     }
     if (file.active === name) throw new Error('Cannot delete the active workspace');
     const remaining = file.workspaces.filter((w) => w.name !== name);
-    recordWorkspaceDeletion(entry, remaining, home); // durable record first; throws before the registry changes
+    // durable record first; throws before the registry changes
+    recordWorkspaceDeletion(entry, remaining, home, erase?.now ?? new Date(), erase ? { eraseAfter: erase.eraseAfter, windowDays: erase.windowDays, holdingPath: erase.holdingPath } : undefined);
     file.workspaces = remaining;
     writeControl(file, home);
     return file;

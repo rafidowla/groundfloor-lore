@@ -119,6 +119,8 @@ function typeMatches(value: unknown, type: ColumnType): boolean {
             // Arbitrary JSON is the whole point of this column type — only
             // reject values that can never survive JSON.stringify.
             return typeof value !== 'function' && typeof value !== 'symbol';
+        case 'money':
+            return false; // money columns exist on Postgres tables only; SQLite refuses them at createTable
     }
 }
 

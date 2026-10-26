@@ -15,7 +15,8 @@
  * hosted work that was queued earlier.
  */
 import { jobBearerToken, type CallbackAuthConfig } from './callbackAuth.js';
-import { sha256Hex, type IBlobStore } from './blobStore.js';
+import { BlobNotFoundError, sha256Hex, type IBlobStore } from './blobStore.js';
+import { log } from '../logger.js';
 import {
     CONTRACT_A_VERSION, CONTRACT_B_VERSION, ProcessorError, contractMajor,
     type ExtractResult, type StructureRequest, type StructureResult,
@@ -72,8 +73,17 @@ export interface CoordinatorDeps {
      * processed, so only a job whose worker died (or hung past the lease) is reclaimed by `reclaimStuck`.
      */
     leaseMs?: number;
+    /**
+     * Blob retention. When a positive number of days, {@link IngestionCoordinator.purgeTerminalBlobs} deletes the stored
+     * file of every source whose jobs are all terminal and finished that many days ago (the source row is kept).
+     * Absent / 0 => nothing is ever deleted (history deletion is opt-in).
+     */
+    blobRetentionDays?: number;
     now?: () => Date;
 }
+
+/** Counters for the blob retention sweep, since process start. */
+export interface BlobRetentionStats { sweeps: number; purged: number; failed: number; lastSweepAt: string | null }
 
 export const DEFAULT_LEASE_MS = 5 * 60_000;
 
@@ -81,7 +91,19 @@ export interface RunSummary { claimed: number; succeeded: number; awaiting: numb
 
 export class IngestionCoordinator {
     readonly now: () => Date;
+    /** Serialises enqueue and purge batches within this process so a sweep cannot delete a blob an enqueue just reused. */
+    private blobChain: Promise<unknown> = Promise.resolve();
+    private readonly retention: BlobRetentionStats = { sweeps: 0, purged: 0, failed: 0, lastSweepAt: null };
     constructor(readonly deps: CoordinatorDeps) { this.now = deps.now ?? (() => new Date()); }
+
+    private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+        const run = this.blobChain.then(fn, fn);
+        this.blobChain = run.catch(() => undefined);
+        return run;
+    }
+
+    get blobRetentionStats(): Readonly<BlobRetentionStats> { return { ...this.retention }; }
+    get blobRetentionEnabled(): boolean { return (this.deps.blobRetentionDays ?? 0) > 0 && !!this.deps.blobs.delete; }
 
     async enqueueFile(a: EnqueueFileArgs): Promise<{ source: SourceRecord; job: IngestionJob; created: boolean }> {
         const policy = await this.deps.policy.policyFor(a.workspace);
@@ -90,15 +112,58 @@ export class IngestionCoordinator {
         if (a.structure) this.deps.registry.selectStructure(a.workspace, policy, a.structure.processorId);
 
         const sha = sha256Hex(a.bytes);
-        const ref = await this.deps.blobs.put(a.workspace, sha, a.bytes);
-        const source = await this.deps.store.upsertSource({
-            workspace: a.workspace, fileName: a.fileName, mimeType: a.mimeType, sha256: sha, sizeBytes: a.bytes.length, storageRef: ref,
+        const source = await this.exclusive(async () => {
+            // A repeat upload reuses the stored blob when it is still there (a remote store's `put` is not idempotent, so
+            // re-putting would leak a copy). A purged or missing blob is stored again and the record is repaired.
+            const existing = await this.deps.store.getSource(a.workspace, await this.deps.store.resolveSourceId(a.workspace, sha));
+            let ref = existing?.storageRef ?? '';
+            const present = !!existing && !existing.blobPurgedAt && ref !== ''
+                && (this.deps.blobs.has ? await this.deps.blobs.has(ref) : true);
+            if (!present) ref = await this.deps.blobs.put(a.workspace, sha, a.bytes);
+            const rec = await this.deps.store.upsertSource({
+                workspace: a.workspace, fileName: a.fileName, mimeType: a.mimeType, sha256: sha, sizeBytes: a.bytes.length, storageRef: ref,
+            });
+            if (existing && !present) {
+                await this.deps.store.setSourceBlob(a.workspace, rec.sourceId, ref);
+                return { ...rec, storageRef: ref, blobPurgedAt: null };
+            }
+            return rec;
         });
         const { job, created } = await this.deps.store.createJob({
             workspace: a.workspace, sourceId: source.sourceId, stage: 'extract', processorId: extractor.info.id,
             contractVersion: CONTRACT_A_VERSION, params: a.structure ? { structure: a.structure } : {}, maxAttempts: this.deps.maxAttempts,
         }, this.now());
         return { source, job, created };
+    }
+
+    /**
+     * Blob retention sweep: delete the stored file of sources whose jobs are all terminal and older than the configured
+     * number of days. The source row, its jobs and their results are kept (`blobPurgedAt` records when). A blob still
+     * referenced by a source that is not finished is never deleted. Re-uploading the same bytes stores the file again.
+     * A no-op unless `blobRetentionDays` is set and the blob store can delete.
+     */
+    async purgeTerminalBlobs(limit = 100): Promise<{ purged: number; failed: number }> {
+        const days = this.deps.blobRetentionDays ?? 0;
+        const del = this.deps.blobs.delete?.bind(this.deps.blobs);
+        if (!(days > 0) || !del) return { purged: 0, failed: 0 };
+        return this.exclusive(async () => {
+            const now = this.now();
+            const claimed = await this.deps.store.claimBlobPurge(new Date(now.getTime() - days * 86_400_000), now, limit);
+            let purged = 0, failed = 0;
+            for (const c of claimed) {
+                try { await del(c.storageRef); purged++; }
+                catch (e) {
+                    failed++;
+                    // Put the source back in the queue for the next sweep; if even that fails the next claim skips it
+                    // (marked purged) and the blob is orphaned, which is logged, not hidden.
+                    await this.deps.store.releaseBlobPurge(c.workspace, c.sourceId).catch(() => log.warn('[Ingest] could not release a blob purge mark; the blob may be orphaned'));
+                    log.warn(`[Ingest] blob purge failed (${e instanceof Error ? e.name : typeof e}); will retry next sweep`);
+                }
+            }
+            this.retention.sweeps++; this.retention.purged += purged; this.retention.failed += failed; this.retention.lastSweepAt = now.toISOString();
+            if (purged || failed) log.info(`[Ingest] blob retention: purged=${purged} failed=${failed} retentionDays=${days}`);
+            return { purged, failed };
+        });
     }
 
     /** Claim and process due jobs. Sequential: one slow processor must not starve the DB lock. */
@@ -185,6 +250,7 @@ export class IngestionCoordinator {
         if (!source) throw new ProcessorError('source record missing', false);
 
         const hosted = proc.info.locality === 'hosted';
+        const localBytes = hosted ? undefined : await this.readBlob(source);
         const outcome = await proc.extract({
             contractVersion: CONTRACT_A_VERSION, jobId: job.jobId, workspace: job.workspace, sourceId: source.sourceId,
             fileName: source.fileName, mimeType: source.mimeType,
@@ -192,10 +258,20 @@ export class IngestionCoordinator {
                 fileUrl: await this.requireFileUrl(source, job),
                 callbackUrl: this.callbackUrl(job.jobId),
                 callbackBearer: jobBearerToken(this.deps.callbackAuth.masterSecret, job.jobId),
-            } : { bytes: await this.deps.blobs.get(source.storageRef) }),
+            } : { bytes: localBytes! }),
         });
         if (outcome.status === 'accepted') await this.deps.store.markAwaitingCallback(job.jobId, outcome.remoteRequestId ?? null, this.now());
         else await this.completeExtract(job, source, outcome.result);
+    }
+
+    /** A missing blob is permanent (retrying cannot bring it back): say how to fix it. */
+    private async readBlob(source: SourceRecord): Promise<Buffer> {
+        if (source.blobPurgedAt) throw new ProcessorError('the source file was removed by blob retention; upload the file again', false);
+        try { return await this.deps.blobs.get(source.storageRef); }
+        catch (e) {
+            if (e instanceof BlobNotFoundError) throw new ProcessorError('the source file is no longer in blob storage; upload the file again', false);
+            throw e;
+        }
     }
 
     private async requireFileUrl(source: SourceRecord, job: IngestionJob): Promise<string> {

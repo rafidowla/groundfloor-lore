@@ -46,6 +46,12 @@ export interface KnnOptions {
     topK: number;
     filter?: Record<string, unknown>;
     actorScopes?: ReadonlyArray<string>;
+    /**
+     * Which columns each hit carries. `'link'` = only what link selection / confinement reads: `id`, `score`,
+     * `metadata.ecosystem` and `metadata.security_scopes` (`text` is `''`, the other metadata fields are unset).
+     * Default / `'full'` = the whole row. An engine may ignore this and return full rows.
+     */
+    columns?: 'full' | 'link';
 }
 
 /** Optional verbatim capability: one call, many stored-vector queries. */

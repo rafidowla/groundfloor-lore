@@ -6,7 +6,7 @@
  *
  * SQLite is the backend for local-engine workspaces; a workspace on the Postgres
  * engine uses `createPostgresTableStorage` (rows in the shared database, sliced by
- * workspace_id, joinable to nodes in one statement). The legacy `LORE_TABLE_BACKEND` graph-engine path
+ * workspace_id = the workspace's permanent id, joinable to nodes in one statement). The legacy `LORE_TABLE_BACKEND` graph-engine path
  * (a graph-node-table-backed implementation) was removed: a prior operator
  * audit found ZERO `collection-schemas.json` files (that backend's schema
  * cache) and 44/44 empty `tables.sqlite` across every real workspace on
@@ -18,7 +18,9 @@ import * as path from 'node:path';
 import type { ITableStorage } from '../contracts/tables.js';
 import { SqliteTableStorage } from './sqliteTableStorage.js';
 import { PostgresTableStorage } from './postgres/postgresTableStorage.js';
+import { resolvePostgresWorkspaceKey } from './postgres/postgresWorkspaceKey.js';
 import { resolveWorkspaceGraphEngine } from './graphEngineSelector.js';
+import { warnTablesLeftBehind } from './tablesLeftBehind.js';
 
 /**
  * Build the table storage for the workspace rooted at `basePath`.
@@ -32,13 +34,22 @@ export function createTableStorage(basePath: string): ITableStorage {
 }
 
 /**
+ * Open a SQLite table storage at explicit file paths (not a workspace's live storage). Only for tools that work on a
+ * private snapshot of a leftover `tables.sqlite` (`lore tables copy`); keeps every SqliteTableStorage construction here.
+ */
+export function openSqliteTableStorageAt(dbPath: string, schemasPath: string): SqliteTableStorage {
+    return new SqliteTableStorage(dbPath, schemasPath);
+}
+
+/**
  * Build the Postgres-backed table storage bound to `workspace` (needs LORE_PG_URL;
  * bootstraps the schema on first open). Async because the schema cache is loaded
  * from the database. Used by `LocalGraphRegistry.tableStorageFor` for workspaces
  * whose graph engine is `postgres`.
  */
-export function createPostgresTableStorage(workspace: string): Promise<PostgresTableStorage> {
-    return PostgresTableStorage.open(workspace);
+export function createPostgresTableStorage(workspace: string, home?: string): Promise<PostgresTableStorage> {
+    // Rows are keyed by the workspace's permanent id (no name fallback: throws PostgresWorkspaceKeyError).
+    return PostgresTableStorage.open(resolvePostgresWorkspaceKey(workspace, home));
 }
 
 /** Which table backend a workspace uses: its graph engine decides (postgres => the shared database, else the SQLite file). */
@@ -58,7 +69,10 @@ export function tableBackendFor(workspace: string, home?: string): 'postgres' | 
  * picked up on the next unknown-table miss).
  */
 export async function createWorkspaceTableStorage(workspace: string, basePath: string, home?: string): Promise<ITableStorage> {
-    return tableBackendFor(workspace, home) === 'postgres'
-        ? createPostgresTableStorage(workspace)
-        : createTableStorage(basePath);
+    if (tableBackendFor(workspace, home) === 'postgres') {
+        // A workspace switched onto Postgres leaves its tables.sqlite behind, unread: say so once per process.
+        warnTablesLeftBehind(workspace, basePath);
+        return createPostgresTableStorage(workspace, home);
+    }
+    return createTableStorage(basePath);
 }

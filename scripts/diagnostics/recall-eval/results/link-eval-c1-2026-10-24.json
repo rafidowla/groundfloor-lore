@@ -1,0 +1,833 @@
+{
+  "generatedAt": "2026-10-24T23:56:36.213Z",
+  "config": {
+    "codeRows": 10000,
+    "depth": 1,
+    "embedder": "real",
+    "engine": "sqlite",
+    "searchMode": "hybrid",
+    "max": 10,
+    "questionsFiles": "questions.json,questions-heldout.json"
+  },
+  "arms": [
+    {
+      "label": "base",
+      "settings": {
+        "linkOrdering": true,
+        "relatedPerHit": null,
+        "relatedMaxDegree": null
+      },
+      "primaryIdenticalToBaseline": 134,
+      "primaryIdenticalToLinksOff": 134,
+      "lists": 134,
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "latency": {
+          "n": 412,
+          "p50": 53.99845899999855,
+          "p90": 74.40212500000052,
+          "p95": 81.04387499999939,
+          "p99": 92.03541699999914
+        }
+      },
+      "shape": {
+        "meanSize": 40.57462686567164,
+        "hubShare": 0.03126724296487033,
+        "listsWithHub": 111,
+        "maxPerHit": 36,
+        "empty": 0
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 40.57,
+        "seed": {
+          "relevantAt10": 0.6828,
+          "strongAt10": 0.1619,
+          "noiseAt10": 0.3172,
+          "relevantAll": 0.7227,
+          "noiseAll": 0.2773,
+          "ndcgSetAt10": 0.5575,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.2825,
+          "relevantSlotShare": 0.7175,
+          "strongSlotShare": 0.0986,
+          "slots": 5437
+        },
+        "expected": {
+          "relevantAt10": 0.3978,
+          "strongAt10": 0.109,
+          "noiseAt10": 0.6022,
+          "relevantAll": 0.2964,
+          "noiseAll": 0.7036,
+          "ndcgSetAt10": 0.5626,
+          "ndcgPoolAt10": 0.3919,
+          "noiseSlotShare": 0.7361,
+          "relevantSlotShare": 0.2639,
+          "strongSlotShare": 0.0381,
+          "slots": 5437
+        },
+        "perSeed": {
+          "groups": 1241,
+          "groupsWith2plus": 1101,
+          "meanNeighbours": 4.38,
+          "firstNeighbourRelevant": 0.8147,
+          "firstNeighbourStrong": 0.1418,
+          "ndcgWithinSeed": 0.9526,
+          "groupsWithPerfectOrder": 0.7584
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 126,
+          "meanNeighbours": 4.9,
+          "relevantSlotShare": 0.5219,
+          "strongSlotShare": 0.1831,
+          "noiseSlotShare": 0.4781,
+          "noiseHubShare": 0.128,
+          "firstNeighbourRelevant": 0.6508,
+          "firstNeighbourStrong": 0.246,
+          "ndcgWithinSeed": 0.8736,
+          "groupsWithAnyRelevant": 0.7857,
+          "groupsWithAnyStrong": 0.5397
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      }
+    },
+    {
+      "label": "cap2",
+      "settings": {
+        "linkOrdering": true,
+        "relatedPerHit": 2,
+        "relatedMaxDegree": null
+      },
+      "primaryIdenticalToBaseline": 134,
+      "primaryIdenticalToLinksOff": 134,
+      "lists": 134,
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "latency": {
+          "n": 412,
+          "p50": 43.46120900000096,
+          "p90": 137.61220800000046,
+          "p95": 159.4860000000008,
+          "p99": 199.48162500000035
+        }
+      },
+      "shape": {
+        "meanSize": 18.51492537313433,
+        "hubShare": 0.020556227327690448,
+        "listsWithHub": 46,
+        "maxPerHit": 2,
+        "empty": 0
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 18.51,
+        "seed": {
+          "relevantAt10": 0.7776,
+          "strongAt10": 0.1575,
+          "noiseAt10": 0.2224,
+          "relevantAll": 0.8015,
+          "noiseAll": 0.1985,
+          "ndcgSetAt10": 0.6737,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.1951,
+          "relevantSlotShare": 0.8049,
+          "strongSlotShare": 0.1254,
+          "slots": 2481
+        },
+        "expected": {
+          "relevantAt10": 0.3642,
+          "strongAt10": 0.0739,
+          "noiseAt10": 0.6358,
+          "relevantAll": 0.3347,
+          "noiseAll": 0.6653,
+          "ndcgSetAt10": 0.6498,
+          "ndcgPoolAt10": 0.3387,
+          "noiseSlotShare": 0.6755,
+          "relevantSlotShare": 0.3245,
+          "strongSlotShare": 0.0443,
+          "slots": 2481
+        },
+        "perSeed": {
+          "groups": 1286,
+          "groupsWith2plus": 1195,
+          "meanNeighbours": 1.93,
+          "firstNeighbourRelevant": 0.8243,
+          "firstNeighbourStrong": 0.147,
+          "ndcgWithinSeed": 0.98,
+          "groupsWithPerfectOrder": 0.9306
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 126,
+          "meanNeighbours": 2.07,
+          "relevantSlotShare": 0.6398,
+          "strongSlotShare": 0.2261,
+          "noiseSlotShare": 0.3602,
+          "noiseHubShare": 0.0843,
+          "firstNeighbourRelevant": 0.6508,
+          "firstNeighbourStrong": 0.246,
+          "ndcgWithinSeed": 0.9294,
+          "groupsWithAnyRelevant": 0.7143,
+          "groupsWithAnyStrong": 0.4286
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      }
+    },
+    {
+      "label": "cap3",
+      "settings": {
+        "linkOrdering": true,
+        "relatedPerHit": 3,
+        "relatedMaxDegree": null
+      },
+      "primaryIdenticalToBaseline": 134,
+      "primaryIdenticalToLinksOff": 134,
+      "lists": 134,
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "latency": {
+          "n": 412,
+          "p50": 32.32049999999981,
+          "p90": 59.81312500000058,
+          "p95": 67.72412500000019,
+          "p99": 74.50900000000001
+        }
+      },
+      "shape": {
+        "meanSize": 25.71641791044776,
+        "hubShare": 0.019152640742890307,
+        "listsWithHub": 55,
+        "maxPerHit": 3,
+        "empty": 0
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 25.72,
+        "seed": {
+          "relevantAt10": 0.7597,
+          "strongAt10": 0.1672,
+          "noiseAt10": 0.2403,
+          "relevantAll": 0.7854,
+          "noiseAll": 0.2146,
+          "ndcgSetAt10": 0.6303,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.2101,
+          "relevantSlotShare": 0.7899,
+          "strongSlotShare": 0.1158,
+          "slots": 3446
+        },
+        "expected": {
+          "relevantAt10": 0.3821,
+          "strongAt10": 0.091,
+          "noiseAt10": 0.6179,
+          "relevantAll": 0.3296,
+          "noiseAll": 0.6704,
+          "ndcgSetAt10": 0.6031,
+          "ndcgPoolAt10": 0.3681,
+          "noiseSlotShare": 0.6857,
+          "relevantSlotShare": 0.3143,
+          "strongSlotShare": 0.0438,
+          "slots": 3446
+        },
+        "perSeed": {
+          "groups": 1273,
+          "groupsWith2plus": 1148,
+          "meanNeighbours": 2.71,
+          "firstNeighbourRelevant": 0.8154,
+          "firstNeighbourStrong": 0.1414,
+          "ndcgWithinSeed": 0.9634,
+          "groupsWithPerfectOrder": 0.857
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 126,
+          "meanNeighbours": 2.92,
+          "relevantSlotShare": 0.6359,
+          "strongSlotShare": 0.2147,
+          "noiseSlotShare": 0.3641,
+          "noiseHubShare": 0.0842,
+          "firstNeighbourRelevant": 0.6429,
+          "firstNeighbourStrong": 0.2381,
+          "ndcgWithinSeed": 0.8775,
+          "groupsWithAnyRelevant": 0.7857,
+          "groupsWithAnyStrong": 0.5238
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      }
+    },
+    {
+      "label": "hub15",
+      "settings": {
+        "linkOrdering": true,
+        "relatedPerHit": null,
+        "relatedMaxDegree": 15
+      },
+      "primaryIdenticalToBaseline": 134,
+      "primaryIdenticalToLinksOff": 134,
+      "lists": 134,
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "latency": {
+          "n": 412,
+          "p50": 38.62029199999961,
+          "p90": 63.36791600000015,
+          "p95": 70.96016700000018,
+          "p99": 80.59945800000014
+        }
+      },
+      "shape": {
+        "meanSize": 38.007462686567166,
+        "hubShare": 0,
+        "listsWithHub": 0,
+        "maxPerHit": 30,
+        "empty": 0
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 38.01,
+        "seed": {
+          "relevantAt10": 0.7388,
+          "strongAt10": 0.1724,
+          "noiseAt10": 0.2612,
+          "relevantAll": 0.7591,
+          "noiseAll": 0.2409,
+          "ndcgSetAt10": 0.6014,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.2474,
+          "relevantSlotShare": 0.7526,
+          "strongSlotShare": 0.1052,
+          "slots": 5093
+        },
+        "expected": {
+          "relevantAt10": 0.4201,
+          "strongAt10": 0.1127,
+          "noiseAt10": 0.5799,
+          "relevantAll": 0.3125,
+          "noiseAll": 0.6875,
+          "ndcgSetAt10": 0.5938,
+          "ndcgPoolAt10": 0.4128,
+          "noiseSlotShare": 0.7255,
+          "relevantSlotShare": 0.2745,
+          "strongSlotShare": 0.0406,
+          "slots": 5093
+        },
+        "perSeed": {
+          "groups": 1215,
+          "groupsWith2plus": 1073,
+          "meanNeighbours": 4.19,
+          "firstNeighbourRelevant": 0.8305,
+          "firstNeighbourStrong": 0.1473,
+          "ndcgWithinSeed": 0.9543,
+          "groupsWithPerfectOrder": 0.7606
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 123,
+          "meanNeighbours": 4.37,
+          "relevantSlotShare": 0.5985,
+          "strongSlotShare": 0.21,
+          "noiseSlotShare": 0.4015,
+          "noiseHubShare": 0,
+          "firstNeighbourRelevant": 0.6829,
+          "firstNeighbourStrong": 0.2683,
+          "ndcgWithinSeed": 0.8798,
+          "groupsWithAnyRelevant": 0.8049,
+          "groupsWithAnyStrong": 0.5528
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      }
+    },
+    {
+      "label": "hub20",
+      "settings": {
+        "linkOrdering": true,
+        "relatedPerHit": null,
+        "relatedMaxDegree": 20
+      },
+      "primaryIdenticalToBaseline": 134,
+      "primaryIdenticalToLinksOff": 134,
+      "lists": 134,
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "latency": {
+          "n": 412,
+          "p50": 44.843958000000384,
+          "p90": 80.69849999999997,
+          "p95": 87.92975000000024,
+          "p99": 96.6133749999999
+        }
+      },
+      "shape": {
+        "meanSize": 38.5,
+        "hubShare": 0,
+        "listsWithHub": 0,
+        "maxPerHit": 32,
+        "empty": 0
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 38.5,
+        "seed": {
+          "relevantAt10": 0.7373,
+          "strongAt10": 0.1724,
+          "noiseAt10": 0.2627,
+          "relevantAll": 0.7558,
+          "noiseAll": 0.2442,
+          "ndcgSetAt10": 0.601,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.2504,
+          "relevantSlotShare": 0.7496,
+          "strongSlotShare": 0.1039,
+          "slots": 5159
+        },
+        "expected": {
+          "relevantAt10": 0.4216,
+          "strongAt10": 0.1127,
+          "noiseAt10": 0.5784,
+          "relevantAll": 0.3104,
+          "noiseAll": 0.6896,
+          "ndcgSetAt10": 0.5934,
+          "ndcgPoolAt10": 0.4133,
+          "noiseSlotShare": 0.7273,
+          "relevantSlotShare": 0.2727,
+          "strongSlotShare": 0.0401,
+          "slots": 5159
+        },
+        "perSeed": {
+          "groups": 1220,
+          "groupsWith2plus": 1081,
+          "meanNeighbours": 4.23,
+          "firstNeighbourRelevant": 0.8303,
+          "firstNeighbourStrong": 0.1467,
+          "ndcgWithinSeed": 0.9544,
+          "groupsWithPerfectOrder": 0.7606
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 123,
+          "meanNeighbours": 4.37,
+          "relevantSlotShare": 0.5985,
+          "strongSlotShare": 0.21,
+          "noiseSlotShare": 0.4015,
+          "noiseHubShare": 0,
+          "firstNeighbourRelevant": 0.6829,
+          "firstNeighbourStrong": 0.2683,
+          "ndcgWithinSeed": 0.8798,
+          "groupsWithAnyRelevant": 0.8049,
+          "groupsWithAnyStrong": 0.5528
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      }
+    },
+    {
+      "label": "hub30",
+      "settings": {
+        "linkOrdering": true,
+        "relatedPerHit": null,
+        "relatedMaxDegree": 30
+      },
+      "primaryIdenticalToBaseline": 134,
+      "primaryIdenticalToLinksOff": 134,
+      "lists": 134,
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "latency": {
+          "n": 412,
+          "p50": 47.19949999999881,
+          "p90": 91.29062499999964,
+          "p95": 107.847084,
+          "p99": 130.6210000000001
+        }
+      },
+      "shape": {
+        "meanSize": 40.24626865671642,
+        "hubShare": 0.03152234377897274,
+        "listsWithHub": 111,
+        "maxPerHit": 34,
+        "empty": 0
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 40.25,
+        "seed": {
+          "relevantAt10": 0.6828,
+          "strongAt10": 0.1619,
+          "noiseAt10": 0.3172,
+          "relevantAll": 0.7273,
+          "noiseAll": 0.2727,
+          "ndcgSetAt10": 0.5575,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.2778,
+          "relevantSlotShare": 0.7222,
+          "strongSlotShare": 0.0994,
+          "slots": 5393
+        },
+        "expected": {
+          "relevantAt10": 0.3978,
+          "strongAt10": 0.109,
+          "noiseAt10": 0.6022,
+          "relevantAll": 0.298,
+          "noiseAll": 0.702,
+          "ndcgSetAt10": 0.5627,
+          "ndcgPoolAt10": 0.3919,
+          "noiseSlotShare": 0.7358,
+          "relevantSlotShare": 0.2642,
+          "strongSlotShare": 0.0384,
+          "slots": 5393
+        },
+        "perSeed": {
+          "groups": 1239,
+          "groupsWith2plus": 1095,
+          "meanNeighbours": 4.35,
+          "firstNeighbourRelevant": 0.816,
+          "firstNeighbourStrong": 0.1421,
+          "ndcgWithinSeed": 0.9528,
+          "groupsWithPerfectOrder": 0.7598
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 126,
+          "meanNeighbours": 4.9,
+          "relevantSlotShare": 0.5219,
+          "strongSlotShare": 0.1831,
+          "noiseSlotShare": 0.4781,
+          "noiseHubShare": 0.128,
+          "firstNeighbourRelevant": 0.6508,
+          "firstNeighbourStrong": 0.246,
+          "ndcgWithinSeed": 0.8736,
+          "groupsWithAnyRelevant": 0.7857,
+          "groupsWithAnyStrong": 0.5397
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      }
+    },
+    {
+      "label": "cap2+hub20",
+      "settings": {
+        "linkOrdering": true,
+        "relatedPerHit": 2,
+        "relatedMaxDegree": 20
+      },
+      "primaryIdenticalToBaseline": 134,
+      "primaryIdenticalToLinksOff": 134,
+      "lists": 134,
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "latency": {
+          "n": 412,
+          "p50": 51.000833000001876,
+          "p90": 107.16762500000004,
+          "p95": 119.78095799999937,
+          "p99": 156.83179199999995
+        }
+      },
+      "shape": {
+        "meanSize": 18.119402985074625,
+        "hubShare": 0,
+        "listsWithHub": 0,
+        "maxPerHit": 2,
+        "empty": 0
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 18.12,
+        "seed": {
+          "relevantAt10": 0.7955,
+          "strongAt10": 0.1634,
+          "noiseAt10": 0.2045,
+          "relevantAll": 0.8193,
+          "noiseAll": 0.1807,
+          "ndcgSetAt10": 0.69,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.1763,
+          "relevantSlotShare": 0.8237,
+          "strongSlotShare": 0.1318,
+          "slots": 2428
+        },
+        "expected": {
+          "relevantAt10": 0.3776,
+          "strongAt10": 0.0799,
+          "noiseAt10": 0.6224,
+          "relevantAll": 0.3442,
+          "noiseAll": 0.6558,
+          "ndcgSetAt10": 0.6711,
+          "ndcgPoolAt10": 0.3547,
+          "noiseSlotShare": 0.6685,
+          "relevantSlotShare": 0.3315,
+          "strongSlotShare": 0.049,
+          "slots": 2428
+        },
+        "perSeed": {
+          "groups": 1265,
+          "groupsWith2plus": 1163,
+          "meanNeighbours": 1.92,
+          "firstNeighbourRelevant": 0.8379,
+          "firstNeighbourStrong": 0.1518,
+          "ndcgWithinSeed": 0.9774,
+          "groupsWithPerfectOrder": 0.9236
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 123,
+          "meanNeighbours": 2.04,
+          "relevantSlotShare": 0.6813,
+          "strongSlotShare": 0.251,
+          "noiseSlotShare": 0.3187,
+          "noiseHubShare": 0,
+          "firstNeighbourRelevant": 0.6911,
+          "firstNeighbourStrong": 0.2764,
+          "ndcgWithinSeed": 0.9256,
+          "groupsWithAnyRelevant": 0.7642,
+          "groupsWithAnyStrong": 0.4715
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      }
+    },
+    {
+      "label": "cap3+hub20",
+      "settings": {
+        "linkOrdering": true,
+        "relatedPerHit": 3,
+        "relatedMaxDegree": 20
+      },
+      "primaryIdenticalToBaseline": 134,
+      "primaryIdenticalToLinksOff": 134,
+      "lists": 134,
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "latency": {
+          "n": 412,
+          "p50": 51.12937500000044,
+          "p90": 109.09579200000007,
+          "p95": 123.43520900000021,
+          "p99": 145.24225000000115
+        }
+      },
+      "shape": {
+        "meanSize": 25.044776119402986,
+        "hubShare": 0,
+        "listsWithHub": 0,
+        "maxPerHit": 3,
+        "empty": 0
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 25.04,
+        "seed": {
+          "relevantAt10": 0.7843,
+          "strongAt10": 0.1739,
+          "noiseAt10": 0.2157,
+          "relevantAll": 0.8046,
+          "noiseAll": 0.1954,
+          "ndcgSetAt10": 0.6586,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.1898,
+          "relevantSlotShare": 0.8102,
+          "strongSlotShare": 0.1198,
+          "slots": 3356
+        },
+        "expected": {
+          "relevantAt10": 0.4007,
+          "strongAt10": 0.097,
+          "noiseAt10": 0.5993,
+          "relevantAll": 0.3396,
+          "noiseAll": 0.6604,
+          "ndcgSetAt10": 0.6296,
+          "ndcgPoolAt10": 0.3866,
+          "noiseSlotShare": 0.6791,
+          "relevantSlotShare": 0.3209,
+          "strongSlotShare": 0.0468,
+          "slots": 3356
+        },
+        "perSeed": {
+          "groups": 1248,
+          "groupsWith2plus": 1117,
+          "meanNeighbours": 2.69,
+          "firstNeighbourRelevant": 0.8325,
+          "firstNeighbourStrong": 0.1466,
+          "ndcgWithinSeed": 0.9663,
+          "groupsWithPerfectOrder": 0.8591
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 123,
+          "meanNeighbours": 2.85,
+          "relevantSlotShare": 0.6914,
+          "strongSlotShare": 0.2371,
+          "noiseSlotShare": 0.3086,
+          "noiseHubShare": 0,
+          "firstNeighbourRelevant": 0.6829,
+          "firstNeighbourStrong": 0.2683,
+          "ndcgWithinSeed": 0.8895,
+          "groupsWithAnyRelevant": 0.8049,
+          "groupsWithAnyStrong": 0.5366
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      }
+    },
+    {
+      "label": "cap3+hub15",
+      "settings": {
+        "linkOrdering": true,
+        "relatedPerHit": 3,
+        "relatedMaxDegree": 15
+      },
+      "primaryIdenticalToBaseline": 134,
+      "primaryIdenticalToLinksOff": 134,
+      "lists": 134,
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "latency": {
+          "n": 412,
+          "p50": 52.95495800000026,
+          "p90": 97.37833300000057,
+          "p95": 109.63233299999956,
+          "p99": 137.57733299999973
+        }
+      },
+      "shape": {
+        "meanSize": 24.84328358208955,
+        "hubShare": 0,
+        "listsWithHub": 0,
+        "maxPerHit": 3,
+        "empty": 0
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 24.84,
+        "seed": {
+          "relevantAt10": 0.7851,
+          "strongAt10": 0.1739,
+          "noiseAt10": 0.2149,
+          "relevantAll": 0.8078,
+          "noiseAll": 0.1922,
+          "ndcgSetAt10": 0.6591,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.1868,
+          "relevantSlotShare": 0.8132,
+          "strongSlotShare": 0.1208,
+          "slots": 3329
+        },
+        "expected": {
+          "relevantAt10": 0.3993,
+          "strongAt10": 0.097,
+          "noiseAt10": 0.6007,
+          "relevantAll": 0.3416,
+          "noiseAll": 0.6584,
+          "ndcgSetAt10": 0.6301,
+          "ndcgPoolAt10": 0.3861,
+          "noiseSlotShare": 0.6777,
+          "relevantSlotShare": 0.3223,
+          "strongSlotShare": 0.0472,
+          "slots": 3329
+        },
+        "perSeed": {
+          "groups": 1241,
+          "groupsWith2plus": 1109,
+          "meanNeighbours": 2.68,
+          "firstNeighbourRelevant": 0.834,
+          "firstNeighbourStrong": 0.1475,
+          "ndcgWithinSeed": 0.9662,
+          "groupsWithPerfectOrder": 0.8584
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 123,
+          "meanNeighbours": 2.85,
+          "relevantSlotShare": 0.6914,
+          "strongSlotShare": 0.2371,
+          "noiseSlotShare": 0.3086,
+          "noiseHubShare": 0,
+          "firstNeighbourRelevant": 0.6829,
+          "firstNeighbourStrong": 0.2683,
+          "ndcgWithinSeed": 0.8895,
+          "groupsWithAnyRelevant": 0.8049,
+          "groupsWithAnyStrong": 0.5366
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      }
+    }
+  ]
+}

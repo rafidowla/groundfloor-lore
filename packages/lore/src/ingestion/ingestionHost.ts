@@ -17,7 +17,8 @@ import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { log } from '../logger.js';
 import { resolveWorkspaceGraphEngine } from '../engines/graphEngineSelector.js';
-import { FsBlobStore } from './blobStore.js';
+import type { IBlobStore } from './blobStore.js';
+import { makeBlobStoreFactory } from './blobStoreFactory.js';
 import { startCallbackListener, type CallbackListener } from './callbackListener.js';
 import { MIN_SECRET_BYTES, type IngestHostConfig } from './hostConfig.js';
 import { makeAllowlist } from './endpointAllowlist.js';
@@ -86,6 +87,8 @@ export class IngestionHost {
     private masterSecret: Buffer = randomBytes(32); // replaced when the listener plan is valid; a throwaway otherwise (never used: no hosted processor is registered)
     private baseUrl = 'http://127.0.0.1:1';
     private extractor: SovereignExtractor | null = null;
+    /** null when the blob settings are unusable: no workspace opens (fail closed). */
+    private blobFactory: ((workspaceDir: string) => IBlobStore) | null = null;
 
     private constructor(private readonly d: IngestionHostDeps) {
         const c = d.config;
@@ -101,11 +104,17 @@ export class IngestionHost {
         return h;
     }
 
-    status(): { workspaces: string[]; listener: ListenerState; hostedProcessor: boolean; extractor: { mode: 'in-process' | 'child' | 'url'; vision: boolean } } {
+    status(): {
+        workspaces: string[]; listener: ListenerState; hostedProcessor: boolean; extractor: { mode: 'in-process' | 'child' | 'url'; vision: boolean };
+        blobs: { store: 'fs' | 'groundfloor' | 'invalid'; ready: boolean; retentionDays: number | null; purged: number; purgeFailed: number };
+    } {
         const c = this.d.config;
+        let purged = 0, purgeFailed = 0;
+        for (const co of this.coordinators.values()) { const r = co.blobRetentionStats; purged += r.purged; purgeFailed += r.failed; }
         return {
             workspaces: [...this.coordinators.keys()], listener: this.listenerState, hostedProcessor: this.registry.getStructure(HOSTED_STRUCTURER_ID) !== undefined,
             extractor: { mode: c.extract.mode, vision: c.vision !== null },
+            blobs: { store: c.blobs.store, ready: this.blobFactory !== null, retentionDays: c.blobs.retentionDays, purged, purgeFailed },
         };
     }
 
@@ -152,6 +161,19 @@ export class IngestionHost {
 
     private async init(): Promise<void> {
         const c = this.d.config;
+        try {
+            this.blobFactory = makeBlobStoreFactory(c.blobs);
+            if (c.blobs.store === 'groundfloor') {
+                const m = c.blobs.groundfloor.m2m;
+                log.info(`[Ingest] groundfloor blob store login: ${m.clientId !== null ? 'machine login (short-lived tokens, refreshed automatically)' : 'static bearer token'}`);
+                if (m.secretFileLoose) log.warn(`[Ingest] LORE_INGEST_GF_M2M_CLIENT_SECRET_FILE is readable by group or other; restrict it to the daemon user (chmod 600)`);
+            }
+        } catch (e) {
+            // Message holds setting NAMES only, never values. No workspace opens until the operator fixes it.
+            log.error(`[Ingest] blob storage NOT usable, no workspace will open: ${e instanceof Error ? e.message : 'invalid configuration'}`);
+        }
+        if (c.blobs.retentionInvalid) log.warn(`[Ingest] LORE_INGEST_BLOB_RETENTION_DAYS is not a number between 0 and 36500; blob retention stays OFF`);
+        if (c.blobs.retentionDays && this.blobFactory) log.info(`[Ingest] blob retention ON: source files of finished jobs are deleted after ${c.blobs.retentionDays} day(s); source rows are kept`);
         const plan = this.plan();
         const wantsListener = c.callback.port !== null && c.hostedStructuring !== null;
         if (plan.ok) {
@@ -238,6 +260,8 @@ export class IngestionHost {
     }
 
     private async open(ws: string): Promise<IngestionCoordinator> {
+        const blobFactory = this.blobFactory;
+        if (!blobFactory) throw new Error('ingestion blob storage is not configured correctly; see the startup log');
         const dir = this.d.workspacePath(ws);
         const engine = this.engineOf(ws);
         const store: IIngestionStore = await (this.d.createStore ?? createIngestionStore)({
@@ -252,7 +276,8 @@ export class IngestionHost {
         };
         const sch = this.d.config.scheduler;
         const co = new IngestionCoordinator({
-            store, registry: this.registry, policy: this.policy, blobs: new FsBlobStore(path.join(dir, 'ingestion-blobs')),
+            store, registry: this.registry, policy: this.policy, blobs: blobFactory(dir),
+            ...(this.d.config.blobs.retentionDays ? { blobRetentionDays: this.d.config.blobs.retentionDays } : {}),
             memory, tables, callbackBaseUrl: this.baseUrl,
             callbackAuth: { masterSecret: this.masterSecret, ...(this.d.config.callback.webhookSecret ? { webhookSecret: this.d.config.callback.webhookSecret.reveal() } : {}), replayWindowSec: this.d.config.callback.replayWindowSec },
             leaseMs: sch.leaseMs, ...(this.d.now ? { now: this.d.now } : {}),
@@ -300,7 +325,28 @@ export class IngestionHost {
         this.tick.add({ name: 'purge-deliveries', intervalMs: s.purgeIntervalMs, run: () => this.each(async (co) => {
             for (let i = 0; i < 20 && !this.stopping; i++) { if ((await co.deps.store.purgeOldDeliveries(co.now())) < DEFAULT_PURGE_BATCH) break; }
         }) });
+        // Blob retention rides the same scheduler. With retention off (the default) the task is a no-op that does no I/O.
+        if (this.d.config.blobs.retentionDays) {
+            this.tick.add({ name: 'purge-blobs', intervalMs: s.purgeIntervalMs, run: () => this.each(async (co) => {
+                for (let i = 0; i < 20 && !this.stopping; i++) { const r = await co.purgeTerminalBlobs(); if (r.purged + r.failed < 100 || r.failed > 0) break; }
+            }) });
+        }
         if (this.d.autoRun !== false) this.tick.start();
+    }
+
+    /**
+     * Close one workspace's ingestion store and drop its coordinator (workspace delete: the store file lives in the
+     * data dir that is about to be hidden and erased). Waits for an in-flight open first. The workspace stays
+     * eligible, so it opens fresh if it is ever restored. Returns false when the store could not be closed.
+     */
+    async closeWorkspace(ws: string): Promise<boolean> {
+        const opening = this.opening.get(ws);
+        if (opening) { try { await opening; } catch { /* the open failed: nothing to close */ } }
+        const co = this.coordinators.get(ws);
+        if (!co) return true;
+        this.coordinators.delete(ws); // before the await: nothing new can pick up the closing store
+        try { await co.deps.store.close(); return true; }
+        catch (e) { log.warn(`[Ingest] store close failed for '${ws}' (${errClass(e)})`); return false; }
     }
 
     /** Scheduler, then listener, then stores - all bounded by `drainMs`. Never throws. */

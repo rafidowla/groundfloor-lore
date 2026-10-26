@@ -43,7 +43,11 @@ export interface NodeDeleteInput {
     /** WAL append is gated on the active workspace, as for upserts. */
     isActive: boolean;
     /** The workspace's own graph handle (raw, not the replay guard). */
-    graph: { deleteNode(id: string): Promise<boolean> };
+    graph: {
+        deleteNode(id: string): Promise<boolean>;
+        /** Optional batched form (Postgres): one transaction for the set; returns the ids that existed. Throws all-or-nothing. */
+        deleteNodes?(ids: string[]): Promise<Set<string>>;
+    };
     outboxStore?: OutboxStore;
     /** The workspace's verbatim store; resolved only when a node was deleted. */
     resolveVerbatim: () => Promise<unknown>;

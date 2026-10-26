@@ -24,6 +24,7 @@
  */
 import { withEdgeLocks } from '../core/nodeWriteLock.js';
 import type { LoreEdge } from '../providers/types.js';
+import { boundedMap, LINK_READ_CONCURRENCY } from './boundedMap.js';
 import { sortedPair } from './selectLinks.js';
 import { SEMANTIC_RELATION, type BatchEdgeResult, type InferredEdge } from './linkTypes.js';
 import type { ComputedLinks, LinkGraph } from './storedVectorLinker.js';
@@ -55,16 +56,45 @@ export const pairKey = (a: string, b: string): string => { const [lo, hi] = sort
 /** Every LIVE `semantic_neighbor` edge touching any of `ids`, deduplicated by pair, with provenance. */
 export async function edgesTouching(graph: LinkGraph, ids: readonly string[]): Promise<Map<string, LoreEdge>> {
     const out = new Map<string, LoreEdge>();
-    for (const id of ids) {
-        for (const side of ['source', 'target'] as const) {
-            for (let offset = 0; ; offset += EDGE_PAGE) {
-                const page = await graph.queryEdges!({ [side]: id, relation: SEMANTIC_RELATION, limit: EDGE_PAGE, offset, includeProvenance: true });
-                for (const e of page) { const k = pairKey(e.sourceId, e.targetId); if (!out.has(k)) out.set(k, e); }
-                if (page.length < EDGE_PAGE) break;
-            }
+    // One round trip per (node, side) on a networked store: read a few at a time, then merge in the ORIGINAL order so
+    // the first edge seen for a pair still wins exactly as it did when this loop was sequential.
+    const slots = ids.flatMap((id) => (['source', 'target'] as const).map((side) => ({ id, side })));
+    const pages = await boundedMap(slots, LINK_READ_CONCURRENCY, async ({ id, side }) => {
+        const edges: LoreEdge[] = [];
+        for (let offset = 0; ; offset += EDGE_PAGE) {
+            const page = await graph.queryEdges!({ [side]: id, relation: SEMANTIC_RELATION, limit: EDGE_PAGE, offset, includeProvenance: true });
+            edges.push(...page);
+            if (page.length < EDGE_PAGE) break;
         }
-    }
+        return edges;
+    });
+    for (const edges of pages) for (const e of edges) { const k = pairKey(e.sourceId, e.targetId); if (!out.has(k)) out.set(k, e); }
     return out;
+}
+
+/** One node's computed link set, as kept by a `ComputedWindow` so a later reconcile can reuse it. */
+export interface NodeLinks { edges: InferredEdge[]; noVector: boolean; optedOut: boolean }
+
+/**
+ * The link sets computed in THIS rebuild run for the last few batches (current, previous, prefetched next). Lets
+ * `reconcileLinks` skip the second kNN for an outside endpoint whose set was already computed from the same stored
+ * vector and policy. Nothing is persisted and nothing older than `keep` batches is held.
+ */
+export class ComputedWindow {
+    private gens: Map<string, NodeLinks>[] = [];
+    constructor(private readonly keep: number) {}
+    add(c: ComputedLinks, ids: readonly string[]): void {
+        const g = new Map<string, NodeLinks>();
+        const nv = new Set(c.noVector);
+        const oo = new Set(c.optedOut);
+        for (const id of ids) g.set(id, { edges: c.bySource.get(id) ?? [], noVector: nv.has(id), optedOut: oo.has(id) });
+        this.gens.push(g);
+        while (this.gens.length > this.keep) this.gens.shift();
+    }
+    get(id: string): NodeLinks | undefined {
+        for (let i = this.gens.length - 1; i >= 0; i--) { const v = this.gens[i]!.get(id); if (v) return v; }
+        return undefined;
+    }
 }
 
 export interface ReconcileArgs {
@@ -78,6 +108,8 @@ export interface ReconcileArgs {
     owns: (e: LoreEdge) => boolean;
     now: () => number;
     counters: DiffCounters;
+    /** Link sets already computed in this run; an outside endpoint found here is not recomputed. Omit for the old behaviour. */
+    reuse?: { get(id: string): NodeLinks | undefined };
 }
 
 export interface ReconcileResult {
@@ -88,6 +120,8 @@ export interface ReconcileResult {
     /** Of the writes: pairs already held by a non-inferred edge (left alone) and pairs whose endpoint vanished. */
     keptExisting: number;
     skippedMissingEndpoint: number;
+    /** Outside endpoints whose link set was reused instead of recomputed. */
+    reused: number;
 }
 
 export async function reconcileLinks(a: ReconcileArgs): Promise<ReconcileResult> {
@@ -112,12 +146,21 @@ export async function reconcileLinks(a: ReconcileArgs): Promise<ReconcileResult>
     for (const [k, e] of existing) if (!wanted.has(k) && isOurs(e) && a.owns(e)) notWanted.push(e);
     const outside = new Set<string>();
     for (const e of notWanted) for (const n of [e.sourceId, e.targetId]) if (!batchSet.has(n)) outside.add(n);
-    const fresh = outside.size > 0 ? await sub.computeLinks(workspace, [...outside]) : null;
-    if (outside.size > 0 && !fresh) throw new Error('workspace_unavailable');
+    const reusedSets = new Map<string, NodeLinks>();
+    const toCompute: string[] = [];
+    for (const n of outside) { const r = a.reuse?.get(n); if (r) reusedSets.set(n, r); else toCompute.push(n); }
+    const fresh = toCompute.length > 0 ? await sub.computeLinks(workspace, toCompute) : null;
+    if (toCompute.length > 0 && !fresh) throw new Error('workspace_unavailable');
     for (const n of fresh?.noVector ?? []) unknown.add(n);
     for (const n of fresh?.optedOut ?? []) optedOut.add(n);
+    for (const [n, r] of reusedSets) { if (r.noVector) unknown.add(n); if (r.optedOut) optedOut.add(n); }
     const wantedByOutside = new Map<string, InferredEdge>();
-    for (const edges of fresh?.bySource.values() ?? []) for (const e of edges) wantedByOutside.set(pairKey(e.sourceId, e.targetId), e);
+    if (reusedSets.size === 0) {
+        for (const edges of fresh?.bySource.values() ?? []) for (const e of edges) wantedByOutside.set(pairKey(e.sourceId, e.targetId), e);
+    } else {
+        // Keep the later-wins order of the single recompute: walk the outside endpoints in their original order.
+        for (const n of outside) for (const e of (reusedSets.get(n)?.edges ?? fresh?.bySource.get(n) ?? [])) wantedByOutside.set(pairKey(e.sourceId, e.targetId), e);
+    }
 
     const inserts: InferredEdge[] = [];
     const refreshes: InferredEdge[] = [];
@@ -158,5 +201,5 @@ export async function reconcileLinks(a: ReconcileArgs): Promise<ReconcileResult>
         invalidated = await withEdgeLocks(workspace, keys, () => graph.invalidateEdges!(keys, at));
         st.invalidated += invalidated;
     }
-    return { written, invalidated, keptExisting, skippedMissingEndpoint };
+    return { written, invalidated, keptExisting, skippedMissingEndpoint, reused: reusedSets.size };
 }

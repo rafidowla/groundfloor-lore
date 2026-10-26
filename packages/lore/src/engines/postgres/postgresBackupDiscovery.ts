@@ -85,7 +85,10 @@ export interface BackupTable {
  */
 const TRANSIENT_TABLES: Record<string, string> = {
     edges_next: 'edge surrogate-key migration staging table (a partial copy of edges) - not workspace data',
+    verbatim_common_lexemes: 'derived BM25 common-token stop-list (rebuilt from text_tsv) - not workspace data',
+    verbatim_common_lexemes_meta: 'derived BM25 common-token stop-list metadata (rebuilt from text_tsv) - not workspace data',
     edges_pre_pk: 'pre-surrogate-key rollback copy of edges, kept until dropPrePkEdges - superseded by edges',
+    lore_pg_rekey_ledger: 'database-wide record of the one-time name-to-permanent-id row rewrite - not workspace data',
 };
 
 export interface ExcludedTable {

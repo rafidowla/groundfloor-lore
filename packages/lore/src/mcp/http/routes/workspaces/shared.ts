@@ -10,6 +10,7 @@ import type { IncomingMessage } from 'node:http';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { AuditLog } from '../../../../security/audit.js';
 import { readBoundedBody } from '../../helpers.js';
+import type { HandleSources } from '../../../../engines/workspaceErase/closeHandles.js';
 
 export interface WorkspacesDeps {
     auditLog: AuditLog;
@@ -17,6 +18,8 @@ export interface WorkspacesDeps {
     deploymentMode: 'local' | 'cloud';
     /** Dataplane handle used by ReBAC checks. Null in local mode. */
     dataplane: GroundfloorClient | null;
+    /** Open-handle sources the delete must close before it hides a workspace's data (graph registry, verbatim resolver, ingestion host). */
+    eraseHandles?: HandleSources;
 }
 
 /**

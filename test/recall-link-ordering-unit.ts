@@ -1,9 +1,10 @@
 #!/usr/bin/env tsx
 /**
  * test/recall-link-ordering-unit.ts - D4: recall's related expansion ordered by link strength, behind
- * LORE_RECALL_LINK_ORDERING (default off). Same cases on SQLite and, when LORE_PG_URL names a throwaway server, Postgres.
+ * LORE_RECALL_LINK_ORDERING (default ON since C1; 0/false/off/no turn it off). Same cases on SQLite and, when LORE_PG_URL names a throwaway server, Postgres.
  *
- *   parity    flag off (unset / "0" / opts false): collectRelated output is exactly the pre-change algorithm's
+ *   parity    flag off ("0" / "off" / opts false): collectRelated output is exactly the pre-change algorithm's
+ *   default   env unset => ordering is ON; with no link edges at all the output is byte-identical to flag off
  *   order     flag on: strength desc, then label, then id; both edge directions; the strongest of several edges counts
  *   live      a soft-invalidated edge neither ranks nor surfaces a hop
  *   cap       flag on returns the SAME set as flag off (pure reorder; no hop added or dropped)
@@ -74,19 +75,44 @@ const ids = (m: Map<string, { node: { id: string } }>): string[] => [...m.values
 
 for (const eng of engines) {
     console.log(`\n${eng.name}`);
-    await test('flag off (unset, "0", opts false) is exactly the pre-change expansion: traverse order, same scores', async () => {
+    await test('flag off ("0", opts false) is exactly the pre-change expansion: traverse order, same scores', async () => {
         const g = await eng.open(); await fixture(g);
         const d = await direct(g);
         const expected = (await g.traverse('s', 1)).map((h) => ({ id: h.node.id, via: 's', relation: h.relation, depth: h.depth, score: 0.3 / (1 + h.depth) }));
         const norm = (m: Map<string, unknown>) => [...(m as Map<string, { node: { id: string }; via: string; relation: string; depth: number; score: number }>).values()].map((r) => ({ id: r.node.id, via: r.via, relation: r.relation, depth: r.depth, score: r.score }));
         const saved = process.env.LORE_RECALL_LINK_ORDERING;
         try {
-            delete process.env.LORE_RECALL_LINK_ORDERING;
-            assert.deepEqual(norm(await collectRelated(d, g as never, opts(g))), expected);
             process.env.LORE_RECALL_LINK_ORDERING = '0';
             assert.deepEqual(norm(await collectRelated(d, g as never, opts(g))), expected);
             process.env.LORE_RECALL_LINK_ORDERING = '1';
             assert.deepEqual(norm(await collectRelated(d, g as never, opts(g, { linkOrdering: false }))), expected, 'explicit opts wins over env');
+        } finally { if (saved === undefined) delete process.env.LORE_RECALL_LINK_ORDERING; else process.env.LORE_RECALL_LINK_ORDERING = saved; }
+    });
+
+    await test('default (env unset): ordering is ON', async () => {
+        const g = await eng.open(); await fixture(g);
+        const saved = process.env.LORE_RECALL_LINK_ORDERING;
+        try {
+            delete process.env.LORE_RECALL_LINK_ORDERING;
+            assert.deepEqual(ids(await collectRelated(await direct(g), g as never, opts(g)) as never), ['n4', 'n3', 'n2', 'n5', 'n6', 'n1']);
+        } finally { if (saved === undefined) delete process.env.LORE_RECALL_LINK_ORDERING; else process.env.LORE_RECALL_LINK_ORDERING = saved; }
+    });
+
+    await test('no link edges: default-on output is byte-identical to flag off (caller edges keep traversal order)', async () => {
+        const g = await eng.open();
+        await g.upsertNode(node('s'));
+        // Labels disagree with insertion order; edges are caller-made (no semantic_neighbor), with and without scores.
+        for (const [id, label, score] of [['m1', 'zulu', 0.9], ['m2', 'alpha', undefined], ['m3', 'mike', 0.2]] as const) {
+            await g.upsertNode(node(id, label));
+            await g.addEdge({ sourceId: 's', targetId: id, relation: 'related_to', confidence: 'extracted', ...(score !== undefined ? { confidenceScore: score } : {}) } as never);
+        }
+        const d = await direct(g);
+        const saved = process.env.LORE_RECALL_LINK_ORDERING;
+        try {
+            delete process.env.LORE_RECALL_LINK_ORDERING;
+            const dflt = JSON.stringify([...(await collectRelated(d, g as never, opts(g))).values()]);
+            const off = JSON.stringify([...(await collectRelated(d, g as never, opts(g, { linkOrdering: false }))).values()]);
+            assert.equal(dflt, off);
         } finally { if (saved === undefined) delete process.env.LORE_RECALL_LINK_ORDERING; else process.env.LORE_RECALL_LINK_ORDERING = saved; }
     });
 
@@ -132,8 +158,9 @@ for (const eng of engines) {
         assert.deepEqual(on, off);
     });
 }
-assert.equal(linkOrderingEnabled({} as never), false, 'default off');
-assert.equal(linkOrderingEnabled({ LORE_RECALL_LINK_ORDERING: 'off' } as never), false);
+assert.equal(linkOrderingEnabled({} as never), true, 'default on');
+for (const v of ['0', 'false', 'off', 'no', ' OFF ']) assert.equal(linkOrderingEnabled({ LORE_RECALL_LINK_ORDERING: v } as never), false, `"${v}" turns it off`);
+for (const v of ['1', 'true', 'on', 'yes', '']) assert.equal(linkOrderingEnabled({ LORE_RECALL_LINK_ORDERING: v } as never), true, `"${v}" is on`);
 
 if (gatePool) { await cleanupGateWorkspaces(gatePool); await closeGatePool(gatePool); } else console.log('\n(postgres skipped: LORE_PG_URL not set)');
 for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });

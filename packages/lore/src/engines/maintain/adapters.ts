@@ -18,6 +18,8 @@ import { loreHome } from '../../config/loreHome.js';
 import type { LocalGraphRegistry } from '../localGraphRegistry.js';
 import { isDaemonUp } from '../../cli/commands/migrateWorkspaceToWorkspaceShared.js';
 import { probeSurrealLock } from '../surreal/surrealSettle.js';
+import { deleteWorkspaceWithLifecycle } from '../workspaceErase/lifecycle.js';
+import type { HandleSources } from '../workspaceErase/closeHandles.js';
 import type {
     LanceMaintainerPort,
     LanceTableProbe,
@@ -66,10 +68,6 @@ export function dirSizeBytes(p: string): number {
  * deleted.
  */
 const PENDING_DELETE_PREFIX = '.pending-delete-';
-
-function pendingDeleteSidelinePath(workspacesDir: string, name: string): string {
-    return path.join(workspacesDir, `${PENDING_DELETE_PREFIX}${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-}
 
 /**
  * Find ALL sideline directories left behind by previous `delete()` calls
@@ -392,7 +390,7 @@ export class WorkspaceRegistry implements WorkspaceRegistryPort {
     // zero/one-arg call site (CLI, other tests) behaving exactly as before;
     // an embedded host now passes its OWN `dataHome` so a maintenance pass
     // never reads or bootstraps a registry outside the instance it targets.
-    constructor(private readonly graphRegistry?: LocalGraphRegistry, private readonly home: string = loreHome()) {}
+    constructor(private readonly graphRegistry?: LocalGraphRegistry, private readonly home: string = loreHome(), private readonly extraHandles: Omit<HandleSources, 'graphRegistry'> = {}) {}
 
     list(): WorkspaceForSelection[] {
         return loadWorkspaces(this.home).workspaces.map((w) => ({ name: w.name, path: w.path, createdAt: w.createdAt }));
@@ -456,129 +454,38 @@ export class WorkspaceRegistry implements WorkspaceRegistryPort {
             return { bytesFreed };
         }
 
-        // QA round 4, finding 1 — a workspace directory that is ITSELF a
-        // symlink, or a mount point (a separate filesystem grafted onto the
-        // registered path), must never reach the renameSync below.
-        // `fs.renameSync` on a symlink renames the LINK, not its target —
-        // the sideline would then be a symlink pointing at data that is
-        // never touched, verified, or freed, while the workspace is
-        // reported deleted and the real data is silently orphaned. A mount
-        // point renames "fine" on macOS (it moves the mount), after which
-        // the immediately-following `rmSync` destroys the MOUNTED VOLUME'S
-        // CONTENTS wholesale, and the sideline (now itself a mount point)
-        // can never be fully removed — `rmSync`'s final `rmdir` throws
-        // EBUSY forever, leaking a stray un-retryable sideline. Detect both
-        // with `lstatSync` (never follows the link) and a device-id
-        // comparison against the parent (`workspacesDir`) BEFORE ever
-        // calling `renameSync`, and refuse outright rather than attempting
-        // either.
-        if (underManagedDir) {
-            let liveStat: fs.Stats;
-            try {
-                liveStat = fs.lstatSync(resolved);
-            } catch (err) {
-                throw new Error(`refusing to delete workspace "${name}": could not stat its directory (${(err as Error).message})`);
-            }
-            if (liveStat.isSymbolicLink()) {
-                throw new Error(`refusing to delete workspace "${name}": its registered path (${resolved}) is a symlink — refusing to rename or follow it into a sideline (the real target would be silently orphaned); fix the registry entry or remove the symlink by hand`);
-            }
-            if (!liveStat.isDirectory()) {
-                throw new Error(`refusing to delete workspace "${name}": its registered path (${resolved}) is not a directory`);
-            }
-            let parentStat: fs.Stats;
-            try {
-                parentStat = fs.statSync(workspacesDir);
-            } catch (err) {
-                throw new Error(`refusing to delete workspace "${name}": could not stat the workspaces directory (${(err as Error).message})`);
-            }
-            if (liveStat.dev !== parentStat.dev) {
-                throw new Error(`refusing to delete workspace "${name}": its directory (${resolved}) is a mount point — a separate filesystem grafted onto the workspaces dir (device ${liveStat.dev} vs parent device ${parentStat.dev}). Renaming it aside would move the mount itself and a subsequent cleanup pass would destroy the mounted volume's contents. Unmount it first, then retry.`);
-            }
-        }
-
-        const bytesFreed = dirSizeBytes(entry.path);
-        // re-audit 2026-06-25 — close any cached LocalGraph handle for this
-        // workspace BEFORE deleting its data dir, so we don't rmSync the graph store/
-        // LanceDB files out from under an open pool (corruption / errors on the
-        // open handle). No-op when the registry isn't wired or the handle is
-        // pinned/borrowed.
-        // RA2-reaudit2 — refuse the destructive delete when a registry is wired
-        // but the workspace's graph handle could NOT be closed (borrowed/aliased
-        // /pinned). Pre-fix the rmSync below ran regardless, deleting the graph store/
-        // LanceDB files out from under an open pool. closeWorkspace returns true
-        // when there's no open handle or it closed cleanly.
-        if (this.graphRegistry) {
-            const safe = await this.graphRegistry.closeWorkspace(name);
-            if (!safe) {
-                throw new Error(`refusing to delete workspace "${name}": its graph handle is still open (borrowed/aliased) — retry once it drains`);
-            }
-        } else {
-            // CLI path: no live registry to close a cached handle through, and
-            // the daemon preflight in cli/commands/maintain.ts is a single
-            // isDaemonUp() check for the whole command — store-agnostic, and
-            // blind to a daemon on a non-default port with LORE_PORT unset.
-            // Probe THIS workspace's own graph store lock directly before the
-            // destructive rmSync below: a locked store means something else is
-            // still writing to the directory we are about to delete out from
-            // under it.
+        // CLI path (no live registry to close a cached handle through): the daemon preflight in
+        // cli/commands/maintain.ts is a single isDaemonUp() check for the whole command — store-agnostic, and
+        // blind to a daemon on a non-default port with LORE_PORT unset. Probe THIS workspace's own graph store
+        // lock directly before anything is moved: a locked store means something else is still writing to the
+        // directory we are about to delete out from under it. (With a registry wired, the lifecycle closes the
+        // cached handles itself and refuses if they cannot be closed.)
+        if (!this.graphRegistry) {
             const lock = await probeSurrealLock(entry.path);
             if (!lock.free) {
                 throw new Error(`refusing to delete workspace "${name}": its graph store is locked by another process (${lock.detail}) — retry once it is released`);
             }
         }
-        // Remove the on-disk data BEFORE the registry entry — only when the
-        // path is safely under the managed workspaces dir, never the Lore
-        // home itself.
-        //
-        // QA round 2 (2026-09-03): this used to call `deleteWorkspace(name)`
-        // FIRST and `fs.rmSync` after. `rmSync` can throw (e.g. a store
-        // directory made unreadable by a permissions problem, or anything
-        // else under it that resists removal), and when it did, the registry
-        // had already forgotten the workspace while its data — including a
-        // never-verified graph store — was still sitting on disk: orphaned,
-        // untracked, and never cleaned up because nothing points at it
-        // anymore. Physical delete now runs first; the registry entry is
-        // only removed once it actually succeeds, so a failed delete leaves
-        // the workspace exactly as it was (registered, on disk) rather than
-        // half gone.
-        //
-        // QA round 3 (2026-09-03): rmSync-ing `resolved` directly is not
-        // enough — `rmSync({recursive:true, force:true})` is not
-        // transactional, so a permission failure partway through the
-        // recursive walk (some siblings removed, one protected subdirectory
-        // still there and throwing) left the REGISTERED path itself
-        // half-emptied, contradicting "exactly as it was". Rename the whole
-        // directory aside to a sideline path in one atomic step first: if
-        // that rename fails, nothing moved and nothing deleted, so the
-        // registered path is untouched; once it succeeds, the registered
-        // path is unconditionally gone (never half-emptied) and only the
-        // sideline copy can end up partially deleted by the rmSync that
-        // follows.
-        if (underManagedDir) {
-            const sideline = pendingDeleteSidelinePath(workspacesDir, name);
-            try {
-                fs.renameSync(resolved, sideline);
-            } catch (err) {
-                throw new Error(`refusing to delete workspace "${name}": could not stage its directory for removal (${(err as Error).message})`);
-            }
-            try {
-                fs.rmSync(sideline, { recursive: true, force: true });
-            } catch (err) {
-                // The registered path is already gone (the rename above
-                // succeeded and moved it wholesale) but the sideline copy
-                // didn't fully clear — e.g. the same permission-protected
-                // subdirectory that used to corrupt the registered path
-                // directly. Keep the registry entry so a later maintain
-                // pass's delete() call finds this leftover sideline (via
-                // findPendingSidelines above) and retries clearing it,
-                // instead of losing track of the remaining bytes.
-                throw new Error(`workspace "${name}" directory removal is incomplete — partial data remains at ${sideline} for a later maintain pass to retry (${(err as Error).message})`);
-            }
+
+        // Lane f6b — expiry erases at once (window 0) through the SAME path as every other delete: close handles,
+        // atomically move the data aside to the hidden holding folder (symlink / mount-point / not-a-directory
+        // refusals live in workspaceErase/localDir.ts, extracted from this method), write the durable deletion
+        // record, drop the registry entry (refuses active + bootstrap), then run the erasers and write the receipt.
+        // A partial erase no longer keeps the registry entry: the workspace is already hidden and the scheduled
+        // erase retries the remainder (the old `.pending-delete-*` sidelines above are still retried here).
+        const out = await deleteWorkspaceWithLifecycle(name, { eraseNow: true }, {
+            home: this.home,
+            handles: { ...this.extraHandles, graphRegistry: this.graphRegistry ?? null },
+        });
+        if (out.status === 'not-scheduled') return { bytesFreed: 0 };
+        const local = out.erase && 'receipt' in out.erase ? out.erase.receipt.stores.find((s) => s.store === 'local-dir') : undefined;
+        // Lane f6c: other stores (Postgres rows keyed by name, uploaded files) can leave the receipt `partial` while the local
+        // folder is already gone; that is not a directory-removal failure, and the scheduled erase keeps retrying the rest.
+        const localGone = local !== undefined && (local.status === 'complete' || local.status === 'not-applicable');
+        if (out.status !== 'erased' && !localGone) {
+            throw new Error(`workspace "${name}" directory removal is incomplete — it is hidden and its remaining data is held at ${out.holdingPath ?? 'its folder'} for the scheduled erase to retry${out.note ? ` (${out.note})` : ''}`);
         }
-        // Registry removal (refuses active + bootstrap workspaces) — only
-        // reached once the physical delete above did not throw.
-        deleteWorkspace(name, this.home);
-        return { bytesFreed };
+        return { bytesFreed: local?.removed['bytes'] ?? 0 };
     }
 }
 

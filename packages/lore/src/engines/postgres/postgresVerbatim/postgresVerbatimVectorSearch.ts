@@ -28,6 +28,8 @@ import { getCurrentActorScopes } from '../../../security/actorContext.js';
 import { pgFilterSql } from './postgresVerbatimFts.js';
 
 const RESULT_COLUMNS = `id, text, type, label, tags, project, ecosystem, "updatedAt", security_scopes`;
+/** Link-on-arrival / rebuild: the linker reads only the id, score, ecosystem and scopes of a hit; `text` is the heavy column. */
+const LINK_RESULT_COLUMNS = `id, ecosystem, security_scopes`;
 
 /** pgvector text literal for one query vector. */
 function vectorLiteral(v: number[]): string {
@@ -79,18 +81,19 @@ export async function searchOne(
 /** Many query vectors -> a Map keyed by the caller's key, in ONE round trip. */
 export async function searchMany(
     pool: Pool, workspaceId: string, queries: Array<{ key: string; vector: number[] }>,
-    opts: { topK: number; filter?: VerbatimQueryFilter; actorScopes?: ReadonlyArray<string> },
+    opts: { topK: number; filter?: VerbatimQueryFilter; actorScopes?: ReadonlyArray<string>; columns?: 'full' | 'link' },
 ): Promise<Map<string, VerbatimSearchResult[]>> {
     const out = new Map<string, VerbatimSearchResult[]>();
     for (const q of queries) out.set(q.key, []);
     if (queries.length === 0) return out;
+    const columns = opts.columns === 'link' ? LINK_RESULT_COLUMNS : RESULT_COLUMNS;
     // $1 workspace, $2 ordinals, $3 vectors, filter from $4, limit last.
     const f = pgFilterSql(opts.filter as Record<string, unknown> | undefined, 4);
     const res = await pool.query(
         `SELECT q.ord, r.*
            FROM unnest($2::int[], $3::text[]) AS q(ord, vec)
            CROSS JOIN LATERAL (
-               SELECT ${RESULT_COLUMNS}, 1 - (vector <=> q.vec::vector) AS score
+               SELECT ${columns}, 1 - (vector <=> q.vec::vector) AS score
                  FROM verbatim
                 WHERE workspace_id = $1 AND is_canonical = 1 AND is_tombstone = 0
                 ${f.sql}

@@ -13,9 +13,11 @@
  *     it; delete-then-recreate gets a NEW one, so the old rows stay unreachable.
  *   - registerWorkspaceAlias(): copies the id of the entry that owns the same path.
  *   - Entries written before this field existed carry no id. `ensureWorkspaceIds` backfills them, and
- *     is called ONLY when a Dataplane-backed store is built and asks for an id (cloud mode or
- *     local-sync mode — see `createWorkspaceRegistry`). Local and embedded hosts never call it, so
- *     their workspaces.json is never rewritten just because Lore booted.
+ *     is called when a Dataplane-backed store is built and asks for an id (cloud mode or
+ *     local-sync mode — see `createWorkspaceRegistry`) and when a workspace on the Postgres engine is
+ *     opened (`resolvePostgresWorkspaceKey`: Postgres rows are keyed by this id). Hosts with no
+ *     Dataplane and no Postgres workspace never call it, so their workspaces.json is never rewritten
+ *     just because Lore booted.
  *
  * Backfill rules:
  *   - Deterministic: the id is derived from the entry's PATH plus its `createdAt` (not the name).
@@ -34,7 +36,8 @@
  *     `writeControl`'s tmp-file + rename.
  *   - Never creates the file (an absent registry serves nothing) and never replaces an id that is
  *     present, even a malformed one (that fails closed instead of being silently re-keyed).
- *   - There is no data migration: nothing was deployed in cloud under name-keyed rows.
+ *   - There is no data migration for cloud: nothing was deployed there under name-keyed rows. Postgres rows
+ *     that were keyed by NAME before 3.37 are rewritten to the id once, at engine open (postgresRekey.ts).
  */
 
 import { createHash } from 'node:crypto';

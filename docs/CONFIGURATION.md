@@ -210,6 +210,48 @@ Source: `src/config/newWorkspaceEngineDefaults.ts`, `src/config/workspaces.ts`
 
 ---
 
+### `LORE_WORKSPACE_ERASE_AFTER_DAYS`
+
+| | |
+|---|---|
+| **Default** | `7` |
+| **Surface** | daemon, embedded host, CLI (`lore workspaces delete / restore / erase-now`) |
+
+Recovery window for a deleted workspace, in whole days. Deleting a workspace
+hides it at once; Lore then erases everything it controls (local data folder,
+Dataplane rows, keychain key, and the other stores listed in
+[WORKSPACE_DELETE.md](WORKSPACE_DELETE.md)) when the window ends, by a
+scheduled run (first run shortly after boot, then hourly). Until then the
+workspace can be brought back with `lore workspaces restore <id>`.
+
+- Integer `>= 0`. `0` = erase at once (the delete call itself erases).
+- An empty, non-integer, negative or over-large (> 3650) value is ignored and the
+  default `7` is used (the safe direction: data is kept longer, not erased sooner).
+- There is deliberately no switch that turns the scheduled erase off.
+- Changing it affects only deletes made afterwards; each deletion records its own
+  erase date. `DELETE /api/workspaces/:name?erase=now` and
+  `lore workspaces erase-now <id>` skip the window.
+- Copies outside Lore (database backups, operator exports) are not reachable by
+  Lore and expire on the operator's own schedule.
+
+### `LORE_WORKSPACE_ERASE_MAX_UNVERIFIABLE_ATTEMPTS`
+
+| | |
+|---|---|
+| **Default** | `5` |
+| **Surface** | daemon, embedded host, CLI (`lore workspaces deleted / erase-now`) |
+
+How many consecutive erase attempts may end with every incomplete store
+`unverifiable` before the deletion moves to the terminal `needs-operator` state
+and the scheduled run stops retrying it. Integer 1-100; anything else uses `5`.
+A `partial` step or a failed attempt never counts and resets the run.
+`lore workspaces erase-now <id>` still retries it and resets the count. See
+[WORKSPACE_DELETE.md](WORKSPACE_DELETE.md).
+
+Source: `src/engines/workspaceErase/config.ts`
+
+---
+
 ### `LORE_ARCHIVE_DIR`
 
 | | |
@@ -1718,7 +1760,13 @@ declares `graphEngine: "postgres"` and no `vectorEngine` pairs with the
 Postgres vector engine.
 
 - One Postgres database serves every workspace; rows are sliced by
-  `workspace_id`, which leads every primary key. The vector store is
+  `workspace_id`, which leads every primary key. `workspace_id` holds the
+  workspace's permanent id from `workspaces.json` (not its name), so a rename
+  keeps its rows and a reused name never inherits another workspace's rows.
+  Rows written by earlier builds are re-keyed from name to id once, at engine
+  open, recorded in the `lore_pg_rekey_ledger` table; if rows exist under both
+  a workspace's name and its id the open refuses with a clear error and changes
+  nothing. Run every process that shares the database on the same build. The vector store is
   additionally partitioned by workspace (see "Vector storage" below).
 - The server needs PostgreSQL 14 or newer. The vector store needs the
   `pgvector` extension (0.5.0 or newer, for HNSW indexes); the first open
@@ -1842,6 +1890,59 @@ large tables before they finish. Closing the pool or the owning store still
 cancels them. Foreground queries keep their own timeout. Non-negative integer
 (ms); `0` = unbounded; an invalid value fails pool creation. Programmatic
 equivalent: `createPostgresPool({ backgroundStatementTimeoutMs })`.
+
+### `LORE_BM25_COMMON_TOKEN_RATIO`
+
+| | |
+|---|---|
+| **Default** | `0.2` |
+
+Postgres engine only (SQLite FTS5 is unchanged). Document-frequency stop-list for
+the keyword (BM25) leg. A query token that occurs in at least this fraction of a
+workspace's rows (`0.2` = 20%) is "common": `ts_rank` must score every row such a
+token matches, which costs about 170 ms at 1M rows and adds almost no ranking
+signal. When a query has at least one non-common term, the common terms are
+dropped from the tsquery before it runs, so the query ranks as its selective
+terms do. A query made only of common terms returns no keyword hits (the vector
+leg still answers) instead of scanning the table. When a metadata filter (project,
+type, ecosystem, ...) is applied, an all-common query is NOT emptied: the filter
+narrows the rows to rank, so the original query runs unchanged. Multi-word tokens
+such as `foo-bar` or URLs are phrases and are never dropped.
+
+The list lives in two derived tables (`verbatim_common_lexemes`,
+`verbatim_common_lexemes_meta`; created automatically, excluded from backups). It
+is estimated from a sample of at most ~30,000 rows (about 130 ms regardless of
+table size), built at the end of a bulk ingest and by `compact()`, and refreshed
+in the background (never on the recall path) when the row count moves by 20% or
+the list is 6 hours old. A list that cannot be built (a pool with no background
+slot, e.g. `LORE_PG_POOL_MAX=1`, or a failing refresh) is retried at most once a
+minute, and a failure is logged once per minute. Restoring a backup into a
+workspace clears that workspace's list so it is rebuilt. Workspaces under 5,000
+rows keep no list. Each workspace has its own list.
+
+`0` (or any value outside `(0, 1]`) turns the feature off: the query is exactly
+what it was before. An unset or unparsable value uses the default.
+
+### `LORE_PG_KEYWORD_CTE`
+
+| | |
+|---|---|
+| **Default** | on |
+
+Postgres engine only. The graph keyword leg (`search`) usually runs one recency-ordered
+statement. For a mid-frequency term (more matches than the scan cap but far fewer than the
+table) the planner can walk the recency index and filter row by row, which gets slower as the
+table grows; for those terms Lore instead collects the matches first in a materialised set
+built from the trigram/tag GIN indexes and joins back for the full rows. Same rows, same
+order. The choice is made per query from planner estimates (`EXPLAIN`, no execution) and is
+used only when the estimates favour it AND the planner's plan for that set uses the GIN
+indexes rather than a full scan of the table. Any probe that fails or cannot be read falls
+back to the ordinary statement.
+
+`0` (also `false`, `off`, `no`) turns the route off completely: the probes are not issued and
+the ordinary statement always runs, with no extra round trips. Any other value or unset keeps
+it on.
+
 ### Vector storage: one partition per workspace
 
 The `verbatim` table (the vector store) is LIST-partitioned by `workspace_id`.
@@ -1927,6 +2028,80 @@ are kept on the entity header and exposed on the view as `_lore_memory_node_id`,
 `_lore_valid_from`, `_lore_valid_to`. Join a table to its nodes with
 `JOIN nodes n ON n.workspace_id = <ws> AND n.id = v._lore_memory_node_id`. "As of D" uses valid time, half-open
 `[valid_from, valid_to)`, NULL meaning unbounded. All table DDL is additive and idempotent.
+
+Slice 2 (additive; a 3.36.0 database upgrades in place on first open, existing rows and views are untouched):
+
+- **Money column** (`type: 'money'`, Postgres only): stored as `numeric` amount + `char(3)` ISO currency (upper-cased),
+  written and read as `{ amount: '1234.50', currency: 'USD' }` (amount is an exact decimal string; a number is accepted on
+  write). Filter and order on the amount by the column name and on the currency via `<column>__currency` (so that name is
+  reserved). A money column cannot be primary or unique. `aggregateMoney(table, column, 'sum'|'avg'|'min'|'max', filter?)`
+  **refuses mixed currencies** with a `MixedCurrencyError` (`code: 'mixed_currency'`, lists the currencies); narrow with a
+  `<column>__currency` filter. SQLite refuses a money column ("not supported on SQLite yet").
+- **Per-value provenance**: optional `{ provenance: { <column>: { sourceDocumentId, sourcePage, verifiedQuote, confidence,
+  needsReview, extractor, contract, extractedAt, reviewedBy, reviewedAt } } }` on `insert` / `insertBatch` (array, one entry
+  per row) / `update`. Stored on the value row (all nullable). Reads return it only with `{ provenance: true }`, as
+  `_provenance: { <column>: {...} }`; without the flag results are byte-identical to 3.36.0. An update that carries
+  provenance always writes a new version of the value, even if the value is unchanged.
+- **Typed record links**: `defineLinkType({ name, fromTable, toTable, cardinality })` (`one_to_one | one_to_many |
+  many_to_one | many_to_many`; immutable once defined), `addLink`, `closeLink` (soft: sets `valid_to`, never deletes),
+  `listLinks(ref, { direction, linkType, asOf, includeClosed })`. Cardinality is enforced by the database over OPEN links
+  (partial unique indexes), so it holds across processes; a closed link never blocks a new one. Typed errors:
+  `TableLinkError` with `code` in `unknown_link_type | unknown_entity | link_type_conflict | duplicate_link | cardinality |
+  invalid_interval | invalid_argument`. Tables `lore_link_type` / `lore_entity_link` lead every key with the workspace id.
+- **Recorded time**: `queryAsOf(table, asOf, filter?, { time: 'valid' | 'recorded', validAt? })`. Valid time stays the
+  default. `time: 'recorded'` answers "what did we know on D" (each value as it stood then); add `validAt` for the
+  bitemporal read. Header-held reserved columns are overwritten in place, so a recorded read shows their current value.
+
+A read-only query-plan executor (library API, no env var) runs closed-grammar JSON plans over these views; see
+[QUERY_PLANS.md](QUERY_PLANS.md).
+#### Review queue, `reviewConfidenceThreshold` and alias table (Postgres tables only)
+
+Library API, no env var and no HTTP route: `tableReviewFor(store.tableStorage)` (`src/query/tableReview.ts`) returns the
+API for a workspace whose table storage is Postgres, and throws `TableReviewError` with code `not_supported` ("review queue
+and alias tables are not supported on SQLite yet") for SQLite table storage. Every method is scoped to the one workspace
+the storage was opened for.
+
+- **`reviewConfidenceThreshold`** is a per-workspace setting (stored in `lore_table_settings`), read and written with
+  `getSettings()` / `setReviewConfidenceThreshold(0..1, updatedBy?)`. **Default `0.8`.** The design document does not state a
+  default; 0.8 is this implementation's choice and is the one number to change if the product wants a different bar. A
+  value needs review when it is current, not yet reviewed, and either carries `needsReview: true` or has a `confidence`
+  strictly below the threshold (so a value with `needsReview: false` but confidence 0.5 still counts). A value with no
+  provenance never needs review. A reviewed value keeps its original confidence and never re-flags.
+- **Queue**: `listQueue({ table?, field?, sourceDocumentId?, maxConfidence?, limit?, cursor? })` (default page 100, max
+  1000, keyset cursor, stable order by value id) and `countQueue(...)`. Each item carries `valueId`, the row key, the
+  current value, its provenance and a `reason` (`flagged | low_confidence | flagged_and_low_confidence`).
+- **Review**: `confirm({ valueId, reviewer })` and `correct({ valueId, reviewer, value, sourcePage?, verifiedQuote? })`.
+  Both write a NEW value row (`reviewed_by`, `reviewed_at`, `needs_review = false`, `supersedes_value_id` = the extractor
+  row) and close the old one with `superseded_at`; nothing is updated in place or deleted, so `queryAsOf(..., { time:
+  'recorded' })` still shows the extractor value. `valueId` is the compare-and-swap token. Repeating the same review by
+  the same reviewer returns `idempotent: true` and writes nothing; a different reviewer, a different outcome, or a value
+  changed by another write gets `TableReviewError` code `conflict`. Other codes: `not_found`, `invalid_argument`
+  (primary-key values and `null` cannot be corrected here), `too_large`. A correction keeps the source document, uses the
+  given page and quote, and clears the extractor-only fields (`confidence`, `extractor`, `extractedAt`). A plain
+  `update()` racing a review follows the existing last-writer rules and is not blocked by it.
+- **Plan results** (additive, Postgres plans only): every row gains `unreviewed: boolean` (the `label` stays `exact`) and the
+  `ok` result gains `review: { threshold, unreviewedRows, totalRows }`. A plain row is flagged when any current value of
+  the entities behind it needs review; an aggregate row only when a value the plan referenced (filter, join, group or
+  measure column) in that group does.
+- **Alias table** `lore_entity_alias`, scoped per workspace and per (table, string column): `addAlias({ table, field,
+  canonical, alias?, createdBy? })` (idempotent; registers the canonical itself when new), `listAliases({ table?, field?,
+  canonical?, includeRemoved?, limit?, cursor? })`, `removeAlias(aliasId, removedBy?)` (soft: sets `valid_to`; removing a
+  canonical that still has open aliases is a `conflict`), and `listUnresolved({ table, field, limit?, cursor? })` (stored
+  spellings with no alias entry, grouped by normalised form, with row counts). Aliases are single hop. Spellings are
+  compared with `normaliseAliasValue` (`src/query/aliasNormalise.ts`, version 1): Unicode NFKC, lower case, apostrophes
+  removed, other punctuation turned into a space, whitespace collapsed and trimmed. There is no fuzzy matching and no
+  proposal step yet.
+- **Plan filters**: `eq` and `in` on an aliased string column match the canonical, every alias, and every stored spelling
+  that normalises into the same group; the result lists what was added under `aliasesApplied`. `neq`, `contains`,
+  `starts_with` and the range operators are not alias-aware. Matching reads the column's distinct values (capped at
+  100000; a larger column is refused with `too_large`, never truncated).
+- **Upgrade**: all additions are `IF NOT EXISTS` (`lore_table_settings`, `lore_entity_alias`, `lore_entity_value.supersedes_value_id`,
+  two indexes). A 3.36.0 / main database upgrades in place on first open.
+
+Switching an existing workspace to `graphEngine: "postgres"` does **not** carry its tables over: the Postgres table
+storage starts empty and never reads `<workspace>/.lore/tables.sqlite`. Copy them with `lore tables copy --workspace <name>`
+(dry run by default; `--yes` executes; see `docs/OPERATIONS.md`, "Copying tables to Postgres"). While a non-empty
+`tables.sqlite` is left behind, Lore logs one warning per workspace per process naming the file and that command.
 
 ---
 
@@ -4004,6 +4179,16 @@ Master switch. When off nothing in the ingestion host is imported or started.
 | `LORE_INGEST_HOSTED_STRUCTURING_URL` | _(unset)_ | Hosted structuring endpoint. `https` (http only for loopback). The allowlist is this origin only. |
 | `LORE_INGEST_HOSTED_STRUCTURING_TOKEN` / `LORE_INGEST_HOSTED_STRUCTURING_TOKEN_FILE` | _(unset)_ | Service token for that endpoint (value, or path to a file holding it). Never logged. |
 | `LORE_INGEST_DELIVERY_RETENTION_DAYS` | `30` | Callback delivery rows older than this are purged by the scheduler. |
+| `LORE_INGEST_BLOB_STORE` | `fs` | Where uploaded source files are kept: `fs` (`<workspace>/ingestion-blobs`, default) or `groundfloor` (the Groundfloor Files API). Any other value is an error: the host logs it, opens no workspace and does NOT fall back to disk. |
+| `LORE_INGEST_BLOB_RETENTION_DAYS` | _(unset = off)_ | OFF by default (history deletion is opt-in). When set to a number of days, the source file (blob) of a source whose jobs are ALL finished (`succeeded`, `failed` or `dead_letter`, and at least one job) at least that long ago is deleted by the scheduler. The source row, its jobs and the extracted memory are kept; the row gets `blob_purged_at`. A blob still used by an unfinished source is never deleted. Uploading the same bytes again restores the file. `0`/blank is off; a junk, negative or over-36500 value is off and is logged. Fractional days are allowed. Cadence: `LORE_INGEST_PURGE_INTERVAL_MS`. A dead-lettered job requeued after its file was purged fails with "upload the file again". |
+| `LORE_INGEST_GF_API_URL` | _(unset)_ | Groundfloor API base URL (operator config only; never taken from a request). `https`, or `http` only for a loopback host; no credentials in the URL; redirects are refused. Required when the store is `groundfloor`. |
+| `LORE_INGEST_GF_WORKSPACE_ID` | _(unset)_ | The Groundfloor workspace that holds the files. Required when the store is `groundfloor`. |
+| `LORE_INGEST_GF_TOKEN` / `LORE_INGEST_GF_TOKEN_FILE` | _(unset)_ | Bearer token for the Files API control calls (value, or path to a file holding it). Required when the store is `groundfloor`, unless the machine login below is used instead (the two are mutually exclusive). Never logged or put in an error; presigned upload/download URLs are called without it. A token given by value is fixed until restart; a token file is re-read whenever it changes, so an outside refresher can rotate a short-lived token (stage user tokens from `gf token` last 5 minutes) without a restart. If the file later vanishes or is empty, the last good token is kept. |
+| `LORE_INGEST_GF_M2M_CLIENT_ID` | _(unset)_ | Machine (m2m) login for the Files API, instead of a static token. The M2M client id created in the Groundfloor portal (Administer, M2M tokens). Needs `LORE_INGEST_GF_API_URL` and `LORE_INGEST_GF_WORKSPACE_ID`. Lore mints a short-lived token with `POST {api}/v1/workspaces/{workspace}/m2m/token` (JSON body `client_id`, `client_secret`; the URL is derived, there is no separate token URL), caches it, renews it at 80% of its `expires_in` (the platform's `expires_in` is clamped to 30 s to 24 h), and on a 401 from the Files API renews it once and retries the call once (a token the server rejected is never reused). A renewal that fails while the cached token is still valid does not take the store down: the token keeps being served until its real expiry (minus a safety margin of 5 s or 5% of its life, whichever is smaller), and the renewal is retried after the 5 s cooldown (one attempt, no backoff in the caller's path). Only once the token has really expired does a mint failure surface. Mint failures with no usable token (5xx, 429, network) are retried with bounded backoff; a failed mint then fails fast for 5 s so a wrong secret cannot hammer the platform's 20 per minute limit. A client secret that cannot be read (unreadable or empty file) is a configuration fault: no request is made and nothing is retried. There is no scope or audience setting (the platform has none). Setting this together with `LORE_INGEST_GF_TOKEN` or `LORE_INGEST_GF_TOKEN_FILE` is an error: the host logs it, opens no workspace and does NOT fall back to disk. |
+| `LORE_INGEST_GF_M2M_CLIENT_SECRET` / `LORE_INGEST_GF_M2M_CLIENT_SECRET_FILE` | _(unset)_ | The M2M client secret (value, or path to a file holding it). Required with the client id. Prefer the `_FILE` form with mode 0600 over a plain environment variable: a secret file is re-read whenever it changes (mtime or size) and the new secret is used at the next token mint, so a rotated secret takes effect without a restart (a secret given by value is fixed until restart, and environment variables are visible to every process that can read the environment). If the file later vanishes or is empty, the last good secret is kept. A warning is logged at startup if the file is readable by group or others. The secret and the minted tokens are never logged, put in an error, or shown by status output. |
+| `LORE_INGEST_GF_TIMEOUT_MS` | `30000` | Per-request timeout for the Files API and presigned transfers (1 s to 10 min). |
+| `LORE_INGEST_GF_MAX_RETRIES` | `3` | Retries on 5xx, 429 and network errors, exponential backoff capped at 10 s, `Retry-After` honoured (0 to 10). 4xx other than 429 is never retried. |
+| `LORE_INGEST_GF_MAX_BYTES` | `536870912` (512 MiB) | Largest blob read or written through the Files API (1 KiB to 4 GiB); enforced while streaming. |
 
 ### Callback listener (separate port)
 
@@ -4066,12 +4251,13 @@ The similarity threshold and neighbour count are stored **per embedding model** 
 model is calibrated at `0.80` / `5`. An uncalibrated model falls back to the same values and logs once. The env
 vars below override the per-model value. Out-of-range or non-numeric values are ignored (the default is used).
 
-Embedded hosts can use `createLore({ linkOnArrival, recallLinkOrdering })` instead of env (both **off by default**;
+Embedded hosts can use `createLore({ linkOnArrival, recallLinkOrdering, recallRelated })` instead of env (`linkOnArrival` is **off by default**,
+`recallLinkOrdering` is **on by default** since C1, `recallRelated` is off by default;
 the matching env var is the fallback when the option is omitted, `false` forces it off). `linkOnArrival: true` enables with defaults;
 `linkOnArrival: { enabled?, k, minSim, dupSim, quietMs, yieldMs, batchSize, maxAttempts, rebuildBatchSize, policyVersion, refreshOnChange, maxLinksPerNode, pruneIntervalMs, pruneBatchSize, healthTtlMs }`
 overrides the same settings as the link variables below and wins over them (an out-of-range value throws
 `RangeError`). `recallLinkOrdering` applies to single-workspace `lore.recall()`; cross-workspace recall still follows
-`LORE_RECALL_LINK_ORDERING`. `autolink:false` and the durable opt-out behave exactly as in the daemon.
+`LORE_RECALL_LINK_ORDERING`. `recallRelated: { perHit?, maxDegree? }` (positive integers; `null` forces one off over the env) sets the two `related[]` limits below. `autolink:false` and the durable opt-out behave exactly as in the daemon.
 
 Items opted out with `autolink:false` are never linked in either direction, and a rebuild skips them; the flag is
 stored with the item in the workspace database. Admin surface: `POST/GET /api/admin/link-rebuild` (operator only).
@@ -4087,6 +4273,16 @@ off: an edit retires links that no longer qualify), the rebuild above (Loop C: r
 `lore_link_rebuild_running{workspace}`. The embedded option takes the same settings as
 `linkOnArrival: { refreshOnChange, maxLinksPerNode, pruneIntervalMs, pruneBatchSize, healthTtlMs }`.
 
+Links Loop D (discovery + relation typing, **off by default**, `LORE_LINK_DISCOVERY=1`): the typing cascade is rules (always on with discovery), a
+local NLI model (off), then an LLM judge (off, budgeted). `supports` within budget becomes an inferred edge (relation `supports`,
+origin `discovery`). `contradicts` and `supersedes` are never applied automatically: they are stored as proposals in the link queue
+database (unique per pair, so a rejected pair is not raised again) and applied only when a host calls `acceptProposal`, which goes
+through the existing supersede path (accepting a `contradicts` proposal writes a `contradicts` edge and retires nothing). The proposal
+API (`listProposals`, `acceptProposal`, `rejectProposal`, `listTypingLog`) is library-only on the link service; there is no HTTP route
+or scope yet. Caller edges are never touched and `autolink:false` items are excluded in both directions. Counters: `link.discovery` on
+`/api/admin/stats`; `lore_link_discovery_{runs,passes,nodes_scanned,pairs_scanned,links_added,supports_added,proposals_raised,budget_stops}_total`
+and the gauge `lore_link_discovery_pending_proposals` on `/metrics` (emitted only when discovery is on).
+
 | Variable | Default | Meaning |
 |---|---|---|
 | `LORE_LINK_ON_ARRIVAL` | off | Master switch (`1` \| `true` \| `on`). |
@@ -4100,14 +4296,37 @@ off: an edit retires links that no longer qualify), the rebuild above (Loop C: r
 | `LORE_LINK_YIELD_MS` | `25` | Pause between batches. |
 | `LORE_LINK_MAX_ATTEMPTS` | `5` | Attempts before an item is parked as `failed` (kept, visible in stats, not retried). |
 | `LORE_LINK_REBUILD_BATCH_SIZE` | `50` | Items recomputed per rebuild batch (1 to 1000). |
-| `LORE_LINK_REBUILD_YIELD_MS` | `200` | Pause between rebuild batches. |
+| `LORE_LINK_REBUILD_YIELD_MS` | `200` | Pause between rebuild batches while the host is busy. Busy means any of: link-queue items ready or claimed; embedding work waiting or running (the embed queue is non-empty, or has jobs for the workspace being rebuilt); outbox entries pending for that workspace. It does NOT look at recall / read traffic. The host is checked before each batch (a busy host is waited for, up to `LORE_LINK_REBUILD_MAX_WAIT_MS`) and again after it to pick this pause or the idle one. |
+| `LORE_LINK_REBUILD_IDLE_YIELD_MS` | `10` on Postgres, `200` on SQLite | Pause between rebuild batches while the host is idle (0 to 60000; never longer than `LORE_LINK_REBUILD_YIELD_MS`). The default depends on the workspace's graph engine: on SQLite each batch is compute-bound and blocks the event loop for seconds, so a 200 ms gap is the only room left for other requests; Postgres batches wait on the database and keep 10 ms. An explicit value applies to both engines. The pause exists to leave room for ingestion, so a host with none of the busy conditions above does not need the full one (a host serving heavy recall traffic and nothing else counts as idle); with the default a rebuild of 100k nodes on a quiet local Postgres ran about 4.6x faster than before (about 150 to about 700 nodes/s; this setting is the largest single part of that, see CHANGELOG, lane e3). Set it equal to `LORE_LINK_REBUILD_YIELD_MS` to restore the old pacing. Busy behaviour (waiting for quiet, `LORE_LINK_REBUILD_MAX_WAIT_MS`) is unchanged. |
 | `LORE_LINK_REBUILD_MAX_WAIT_MS` | `30000` | Longest a rebuild batch waits for the link queue / ingestion to go quiet before running anyway. |
 | `LORE_LINK_REFRESH_ON_CHANGE` | on | Loop B (`0` \| `false` \| `off` to disable). A node whose vector is re-committed after an edit is refreshed as a diff: links that no longer qualify are soft-invalidated (`valid_to`, never deleted), new neighbours are linked, an edge the other endpoint still wants is kept, only `link_on_arrival` edges are judged, opted-out nodes are left alone. Off = an edit only adds or re-asserts links. |
 | `LORE_LINK_MAX_PER_NODE` | `0` (no cap) | Soft cap (0 to 10000) on live linker edges per node. Never enforced inline: a background sweep keeps each node's strongest edges and soft-invalidates the rest. An edge that is the other endpoint's strongest link, an edge to an opted-out node, and any non-linker edge are never evicted, so a heavily linked hub can stay above the cap. Eventual: a later link or rebuild can re-assert a pruned pair, and the next pass trims it again. |
 | `LORE_LINK_PRUNE_INTERVAL_MS` | `30000` | How often the sweep looks for workspaces whose links changed since the last pass (100 to 86400000). Only runs while the cap is above 0. |
 | `LORE_LINK_PRUNE_BATCH_SIZE` | `50` | Over-cap nodes trimmed per checkpointed step (1 to 1000); a pass that stops (busy, shutdown) resumes from its saved cursor. |
 | `LORE_LINK_HEALTH_TTL_MS` | `30000` | How long the link-health snapshot (live / invalidated edge counts, mean strength, max degree, stale stamps) is reused by `/api/admin/stats` and `/metrics` before the graphs are queried again (0 to 3600000). |
-| `LORE_RECALL_LINK_ORDERING` | off | Recall: order each seed's related hops by live link strength, then label, then id (`1` \| `true` \| `yes` \| `on`). |
+| `LORE_LINK_DISCOVERY` | off | Links Loop D master switch (`1` \| `true` \| `on`). A background pass proposes old-to-old links Loop A missed (neighbours of recently changed nodes, same stored vectors and the same `minSim` / `k`), through the normal linker write path (idempotent, `policy_version` stamped). It also types pairs (rules, optional local NLI, optional LLM judge): `supports` is written as an inferred edge, `contradicts` / `supersedes` are only **proposals**. Off = no object, no timer, no table. Settings are global (the link policy has no per-workspace settings). Embedded: `createLore({ linkDiscovery: true \| {...} })`. |
+| `LORE_LINK_DISCOVERY_INTERVAL_MS` | `60000` | How often the sweep looks for work (100 to 86400000). The sweep backs off while the host is busy (queued embeds, outbox, arrival queue). |
+| `LORE_LINK_DISCOVERY_BATCH_SIZE` | `50` | Seed nodes examined per step (1 to 1000). |
+| `LORE_LINK_DISCOVERY_MAX_NODES` | `500` | Per-run budget: seed nodes. A run that hits any budget stops and resumes from the saved per-workspace cursor on the next sweep. Budgets are checked between steps, so a step can overshoot slightly. |
+| `LORE_LINK_DISCOVERY_MAX_PAIRS` | `200` | Per-run budget: candidate pairs examined. |
+| `LORE_LINK_DISCOVERY_MAX_MS` | `5000` | Per-run budget: wall time in milliseconds (10 to 3600000). |
+| `LORE_LINK_DISCOVERY_YIELD_MS` | `50` | Pause between steps (0 to 60000). |
+| `LORE_LINK_SUPERSEDE_SIM` | `0.97` | A new pair at or above this similarity with differing timestamps becomes a supersession candidate (0 to 1). |
+| `LORE_LINK_NLI` | off | Local NLI typer. Needs `LORE_LINK_NLI_MODEL` (a text-pair classifier id). Never downloads weights unless `LORE_LINK_NLI_DOWNLOAD=1`; with the model not already cached it reports itself unavailable and the cascade moves on. |
+| `LORE_LINK_NLI_MODEL` | unset | Hugging Face id of a text-pair NLI classifier. |
+| `LORE_LINK_NLI_MIN_CONFIDENCE` | `0.8` | Minimum classifier score for a verdict (0 to 1); below it the pair falls through to the next tier. |
+| `LORE_LINK_NLI_DOWNLOAD` | off | Permission to fetch the NLI model on first use. Without it only an already-cached model loads. |
+| `LORE_LINK_JUDGE_URL` | unset (no judge) | Base URL of an OpenAI-compatible server (`.../v1`) used as the LLM judge typer, with `LORE_LINK_JUDGE_MODEL`. A URL that is not loopback is **refused** unless `LORE_LINK_JUDGE_HOSTED=1`; verdicts from such an endpoint are marked **NOT SOVEREIGN** (`!NOT-SOVEREIGN` in the model fingerprint, flagged in the typing log and on proposals). |
+| `LORE_LINK_JUDGE_API_KEY` | unset | Bearer key for the judge. Read only when the judge is built, never logged. |
+| `LORE_LINK_JUDGE_MODEL` | unset | Model name sent to the judge endpoint. |
+| `LORE_LINK_JUDGE_HOSTED` | off | Explicit permission to use a judge endpoint that is not loopback (verdicts are then NOT SOVEREIGN). |
+| `LORE_LINK_JUDGE_BUDGET` | `20` | Judge calls per workspace per run (0 disables the judge). |
+| `LORE_LINK_JUDGE_DAILY_BUDGET` | `200` | Judge calls per workspace per UTC day, persisted (0 = no daily cap). |
+| `LORE_LINK_JUDGE_MIN_CONFIDENCE` | `0.7` | Minimum judge confidence for a verdict (0 to 1). |
+| `LORE_LINK_JUDGE_TIMEOUT_MS` | `20000` | Per-call judge timeout (100 to 600000). |
+| `LORE_RECALL_LINK_ORDERING` | **on** (changed in C1; was off) | Recall: order each seed's related hops by live link strength, then label, then id. `0` \| `false` \| `off` \| `no` turns it off. A seed with no `semantic_neighbor` edge keeps traversal order, so a workspace without links recalls exactly as before. Never changes the primary hits. |
+| `LORE_RECALL_RELATED_PER_HIT` | unset (no cap) | Recall: keep at most N neighbours per primary hit in `related[]` (positive integer). Applied after link ordering, so it keeps each hit's strongest neighbours. Primary hits are never capped. |
+| `LORE_RECALL_RELATED_MAX_DEGREE` | unset (off) | Recall: drop a `related[]` neighbour that has more than N live edges (in + out, any relation; positive integer). Measured with two bounded edge reads per candidate (no scan), and only for candidates that could still be shown. A hub is never removed from the primary hits, only from `related[]`. |
 
 All of these are on the env-scrub allowlist, so they reach the HTTP and stdio daemon (before this they were
 silently scrubbed there, and only embedded hosts saw them).
@@ -4615,6 +4834,8 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_CACHE_DISABLED` | off | Core |
 | `LORE_ARCHIVE_DIR` | `<LORE_HOME>/archive` | Core |
 | `LORE_BACKUP_KEEP` | `7` | Core |
+| `LORE_WORKSPACE_ERASE_AFTER_DAYS` | `7` | Core |
+| `LORE_WORKSPACE_ERASE_MAX_UNVERIFIABLE_ATTEMPTS` | `5` | Core |
 | `LORE_FRESHNESS_TTL_HOURS` | `24` | Core |
 | `LORE_ACCESS_FLUSH_MS` | `60000` | Core |
 | `LORE_OCR_LANGUAGES` | `eng` | Core |
@@ -4703,8 +4924,11 @@ Source: `src/engines/surreal/surrealSettle.ts`
 | `LORE_STREAM_CONSUMER` | built-in | Streaming |
 | `LORE_LANCE_BATCH_ROWS` | `5000` | Load/LanceDB |
 | `LORE_RECALL_RANKING` | enabled | Recall |
-| `LORE_RECALL_LINK_ORDERING` | off | Recall |
+| `LORE_RECALL_LINK_ORDERING` | on (`0` to disable) | Recall |
+| `LORE_RECALL_RELATED_PER_HIT` | unset (no cap) | Recall |
+| `LORE_RECALL_RELATED_MAX_DEGREE` | unset (off) | Recall |
 | `LORE_LINK_ON_ARRIVAL` | off | Links |
+| `LORE_LINK_DISCOVERY` | off | Links |
 | `LORE_RECALL_CANDIDATE_FLOOR` | `0` (opt-in `50`) | Recall |
 | `LORE_RECALL_LEXICAL_BASE` | `rrf` (opt-in `anchored`) | Recall |
 | `LORE_SUPERSESSION_ENFORCE` | off | Write/Supersession |

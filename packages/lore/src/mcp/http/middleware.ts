@@ -280,7 +280,7 @@ export async function runHttpGates(
                 principal = {
                     kind: 'shared-secret',
                     workspace: deps.getBootstrapWorkspace(),
-                    scopes: ['read', 'write', 'cross-workspace-read', 'cross-workspace-write'],
+                    scopes: ['read', 'write', 'review', 'cross-workspace-read', 'cross-workspace-write'],
                     label: 'shared-secret',
                     // TW-3a — the master/service principal: cross-workspace
                     // scopes authorize ANY tenant header (no allow-list
@@ -291,7 +291,7 @@ export async function runHttpGates(
                 principal = {
                     kind: 'bootstrap',
                     workspace: deps.getBootstrapWorkspace(),
-                    scopes: ['read', 'write'],
+                    scopes: ['read', 'write', 'review'],
                     label: 'bootstrap',
                     // TW-3a — bootstrap is confined to the boot workspace;
                     // it explicitly holds NO cross-workspace scope, so a

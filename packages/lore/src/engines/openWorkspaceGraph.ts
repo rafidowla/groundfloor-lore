@@ -42,6 +42,7 @@ import * as path from 'node:path';
 import { SurrealGraph } from './surrealGraph.js';
 import { SqliteGraph } from './sqliteGraph.js';
 import { PostgresGraph } from './postgres/postgresGraph.js';
+import { resolvePostgresWorkspaceKey } from './postgres/postgresWorkspaceKey.js';
 import { redactedPostgresLocation, sharedPostgresPool } from './postgres/postgresPoolOwner.js';
 import { surrealDataPath } from './surreal/surrealConnection.js';
 import { sqliteGraphDataPath } from './sqlite/sqliteGraphSchema.js';
@@ -186,20 +187,20 @@ export function openWorkspaceGraph(
     }
     if (engine === 'postgres') {
         // LOUD, never a substitution: the postgres engine needs BOTH a
-        // registered workspace (its name is the `workspace_id` every row is
+        // registered workspace (its permanent id is the `workspace_id` every row is
         // sliced by) and a pool, whose URL comes from LORE_PG_URL —
         // sharedPostgresPool()/createPostgresPool throw naming that env var
         // when it is unset. No fallback to SQLite/Surreal, ever.
         const pgWorkspaceId = workspaceId ?? workspace ?? undefined;
         if (!pgWorkspaceId) {
             throw new Error(
-                `openWorkspaceGraph: engine 'postgres' requires a REGISTERED workspace (the workspace name is the `
+                `openWorkspaceGraph: engine 'postgres' requires a REGISTERED workspace (its permanent registry id is the `
                 + `postgres workspace_id), but '${basePath}' matched no workspaces.json entry. Register the workspace `
                 + '(name it in workspaces.json with graphEngine "postgres") and open it by name.',
             );
         }
         return new PostgresGraph(
-            pgWorkspaceId,
+            resolvePostgresWorkspaceKey(pgWorkspaceId, opts.home),
             sharedPostgresPool(),
             {
                 ...(opts.cacheTtlMs !== undefined ? { cacheTtlMs: opts.cacheTtlMs } : {}),

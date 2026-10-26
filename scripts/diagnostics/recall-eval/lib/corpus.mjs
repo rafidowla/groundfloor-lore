@@ -18,7 +18,7 @@ export const FIXTURE_SEED = 'riverstone-fixture-v1';
 export const WORKSPACE = 'default';
 export const ECOSYSTEM = 'riverstone';
 
-const COMPONENTS = [
+export const COMPONENTS = [
     'scheduler', 'worker-pool', 'lease-manager', 'checkpoint-store', 'connector-bus',
     'tenant-router', 'retry-policy', 'dead-letter-queue', 'rate-limiter', 'config-loader',
     'metrics-exporter', 'webhook-relay', 'job-table', 'outbox', 'audit-log', 'cli',

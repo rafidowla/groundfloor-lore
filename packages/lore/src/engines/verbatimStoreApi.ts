@@ -62,7 +62,7 @@ export interface VerbatimStoreApi extends VectorProvider {
      *  the Linker falls back to one `searchByVector` per query on an engine without it. */
     searchByVectors?(
         queries: Array<{ key: string; vector: number[] }>,
-        opts: { topK: number; filter?: Partial<VerbatimDocument['metadata']>; actorScopes?: ReadonlyArray<string> },
+        opts: { topK: number; filter?: Partial<VerbatimDocument['metadata']>; actorScopes?: ReadonlyArray<string>; columns?: 'full' | 'link' },
     ): Promise<Map<string, VerbatimSearchResult[]>>;
 
     /** Keyword (BM25) search. See verbatimBm25Result.ts for the
@@ -85,6 +85,10 @@ export interface VerbatimStoreApi extends VectorProvider {
         updatedAt?: string;
         security_scopes?: string[];
     } | null>;
+
+    /** `getById` for many ids at once: Map of id -> row, absent when the id has no canonical row. `columns: 'link'` may return only
+     *  `ecosystem` + `security_scopes` (an engine may ignore the hint). Optional: callers fall back to per-id `getById`. */
+    getByIds?(ids: string[], opts?: { columns?: 'full' | 'link' }): Promise<Map<string, NonNullable<Awaited<ReturnType<VerbatimStoreApi['getById']>>>>>;
 
     getContentHashesByIds(ids: string[]): Promise<Map<string, string>>;
 

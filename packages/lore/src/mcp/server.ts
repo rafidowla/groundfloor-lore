@@ -82,7 +82,7 @@ import { createStorageClient } from './storageBundle.js';
 import { wireOrchestration } from '../schemas/orchestration/wiring.js';
 import { createActiveSessionTracker } from './activeSessions.js';
 import type { TokenSweeperHandle } from '../auth/tokens.js';
-import { wireDaemonTimers } from './daemonTimers.js'; import { wireStorageGrowthSweeps } from './storageGrowthSweeps.js'; // storage-growth fix 2/3 (R3+R4)
+import { wireDaemonTimers } from './daemonTimers.js'; import { wireStorageGrowthSweeps } from './storageGrowthSweeps.js'; import { wireWorkspaceEraseTick } from '../engines/workspaceErase/wiring.js'; // storage-growth fix 2/3 (R3+R4); f6b scheduled workspace erase
 import { buildMergedEnums } from './mergedEnums.js';
 import { AuxStore } from '../outbox/auxStore.js';
 import { VersionStore } from '../outbox/versionStore.js';
@@ -92,7 +92,7 @@ import { validateVersionHistoryPolicy, resolveVersionHistoryPolicy } from '../ou
 import { resolveEffectiveVersionHistoryPolicy } from '../outbox/versionPruningPolicy.js';
 import { wireOutbox } from '../outbox/wiring.js';
 import { wireEmbedQueue } from '../embed/wiring.js';
-import { createLinkService, linkServiceOptionFields, type LinkOnArrivalOption } from '../link/createLinkService.js'; import type { EmbeddedIngestionOption } from './embeddedIngestionTypes.js';
+import { createLinkService, discoveryHostFields, linkServiceOptionFields, type LinkOnArrivalOption } from '../link/createLinkService.js'; import type { LinkDiscoveryOption } from '../link/discoveryConfig.js'; import type { EmbeddedIngestionOption } from './embeddedIngestionTypes.js';
 import { dispatchHttpRequest } from './http/dispatcher.js';
 import { writeError } from './http/helpers.js';
 import { LoadJobsStore } from '../storage/loadJobsStore.js';
@@ -135,7 +135,7 @@ import { runBootEphemeralPrune } from './bootEphemeralPrune.js';
 import { recordHotWriteBatch } from '../outbox/hotLane.js';
 import { setTimeout as delayMs } from 'node:timers/promises';
 import { runBulkIngest, mapLimit, type BulkIngestNodeArgs, type BulkIngestOpts, type BulkIngestResult } from './bulkIngest.js';
-import { inProcessRecall, type RecallOpts, type RecallResult } from '../recall/inProcessRecall.js';
+import { inProcessRecall, type RecallOpts, type RecallResult } from '../recall/inProcessRecall.js'; import { parseRecallRelatedOption, type RecallRelatedOption } from '../recall/relatedLimits.js';
 import { log } from '../logger.js';
 // TW-2b — the native-pool process-global safety net is OPT-IN: only a process
 // Lore OWNS (the daemon path) arms it; embedded createLore() never does, so it
@@ -194,7 +194,7 @@ export interface CreateLoreOptions extends EmbeddingInjectionOptions {
      * entry for the full precedence writeup.
      */
     // 3.24: recallRerank (D8d rerank-enabled default), rerankBackend (Part B, omitted ⇒ localRerankBackend, set once), modelServer (Part C — false/env LORE_MODEL_SERVER=0 opts out), onModelStatus (fires on shared/fallback/recovery transitions; exceptions caught+logged).
-    supersessionEnforce?: boolean; recallRerank?: boolean; rerankBackend?: RerankBackend; modelServer?: boolean; onModelStatus?: (status: PublicModelStatus) => void; linkOnArrival?: LinkOnArrivalOption; recallLinkOrdering?: boolean; ingestion?: EmbeddedIngestionOption; // embedded-ingest-links: all three OFF by default, option > env, see docs/CONFIGURATION.md; `ingestion` is attached by index.ts createLore (mcp/embeddedIngestion.ts).
+    supersessionEnforce?: boolean; recallRerank?: boolean; rerankBackend?: RerankBackend; modelServer?: boolean; onModelStatus?: (status: PublicModelStatus) => void; linkOnArrival?: LinkOnArrivalOption; linkDiscovery?: LinkDiscoveryOption; recallLinkOrdering?: boolean; recallRelated?: RecallRelatedOption; ingestion?: EmbeddedIngestionOption; // embedded-ingest-links: all three OFF by default, option > env, see docs/CONFIGURATION.md; `ingestion` is attached by index.ts createLore (mcp/embeddedIngestion.ts).
     /**
      * Local embedding provider overrides. Programmatic alternative to the
      * LORE_LOCAL_EMBEDDING_DEVICE / LORE_LOCAL_EMBEDDING_MODEL env vars.
@@ -626,7 +626,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     // Q2.2 slice 3 — Mode-conditional vector-store factory (local: embedded LanceDB VerbatimStore; cloud: DataplaneVectorStore). Both implement VectorProvider.
     const verbatimStore: LoreVectorStore = await createVectorStore({
         deploymentMode, graphBasePath, embeddingProvider, injectedEmbeddingProvider, home: dataHome, pieceVectors: opts.pieceVectors, embedOverrides: opts.embedding as Record<string, unknown> | undefined, searchWorkerPolicy: opts.searchWorkerPolicy, vectorStoreRole: typeof opts.vectorStoreRole === 'function' ? opts.vectorStoreRole(graphBasePath) : opts.vectorStoreRole, workspaceId: getActiveWorkspaceName(dataHome),
-        modelServer: opts.modelServer, // 3.21 step 2 part 2: resolves ITS OWN vectorEngine by name, same as createGraph() above.
+        modelServer: opts.modelServer, getBootResolver: () => workspaceVerbatimResolver, // 3.21 step 2 part 2: resolves ITS OWN vectorEngine by name, same as createGraph() above. D7: getBootResolver is late-bound (the resolver is built just below) so a background promotion swaps the primed boot entry and a retired boot write is replayed on the promoted store.
     });
 
     // SP-F3 — per-workspace verbatim resolver (local mode); autoEvict gated on OWNERSHIP (processOwnership.ts), not mode alone — a 'local'-mode caller that never claimed ownership must start no more recurring loops than 'embedded' does (tw2a-embedded-lifecycle-unit.ts (d)). vectorStoreRole threads the same per-path role resolution as the boot verbatimStore above. LORE-ASK-SEARCH-WORKER-POLICY: resolver ctor treats "no policy" as undecided, so this call site applies the env fallback, same as pre-policy. injectedEmbeddingProvider threads strictFingerprintCheck the same way as the boot verbatimStore.
@@ -664,7 +664,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     // workspace's import embedded into the boot store (or silently skipped).
     // Link-on-arrival (flag-gated; null when off): one durable queue + worker fed by every vector-commit site.
     const linkService = deploymentMode === 'cloud' ? null : createLinkService({
-        loreDir, onError: (m) => log.warn(m), embeddingProvider, ...linkServiceOptionFields(opts.linkOnArrival), // embedded option wins over LORE_LINK_ON_ARRIVAL; absent => env, as the daemon
+        loreDir, onError: (m) => log.warn(m), embeddingProvider, ...linkServiceOptionFields(opts.linkOnArrival), ...discoveryHostFields(opts.linkDiscovery, dataHome, () => embedQueue, () => outboxWiring.store), // embedded option wins over LORE_LINK_ON_ARRIVAL; absent => env, as the daemon. Loop D (OFF by default): embed queue / outbox are built below => lazy
         resolveHandles: async (ws) => {
             try {
                 return { graph: graphRegistry ? await graphRegistry.getGraphHandle(ws) : graph, verbatim: workspaceVerbatimResolver ? await workspaceVerbatimResolver.getOrOpen(ws) : verbatimStore } as never;
@@ -712,7 +712,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
     // D5 round 2 (#2): host-level default, precedence createLore() option >
     // LORE_SUPERSESSION_ENFORCE env > false. Threaded into every write path
     // below (embedded + MCP + REST) via DaemonWiring.supersessionEnforceDefault.
-    const hostSupersessionDefault = resolveHostSupersessionDefault(opts.supersessionEnforce); if (opts.recallRerank !== undefined) setHostRerankDefault(opts.recallRerank); const rerankBackend: RerankBackend = hostModel.rerankBackend; const hostLinkOrdering = opts.recallLinkOrdering; // D8d/N11 — resolved once in hostWiring.ts.
+    const hostSupersessionDefault = resolveHostSupersessionDefault(opts.supersessionEnforce); if (opts.recallRerank !== undefined) setHostRerankDefault(opts.recallRerank); const rerankBackend: RerankBackend = hostModel.rerankBackend; const hostLinkOrdering = opts.recallLinkOrdering; const hostRelatedLimits = parseRecallRelatedOption(opts.recallRelated); // D8d/N11 — resolved once in hostWiring.ts.
 
     // D5 round 2 (HIGH #1): shared resolver for the embedded nodeUpsert/nodeUpsertBatch
     // call sites below, so each doesn't repeat the same param block. graphRegistry is
@@ -987,7 +987,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         workspace: detectedScope.workspace,
         // RC-round4 — fan sweeps per-workspace (local). Lazy graphRegistry: assigned later in boot. See daemonTimers.
         workspaceVerbatimResolver, auditLog, graphRegistry: { getGraphHandle: (ws: string, o?: { touch?: boolean }) => graphRegistry!.getGraphHandle(ws, o), tableStorageFor: (ws: string, o?: { touch?: boolean }) => graphRegistry!.tableStorageFor(ws, o) }, versionStore: localVersionStore, versionPolicy: effectiveVersionPolicy });
-    const storageGrowthSweeps = wireStorageGrowthSweeps({ startsDaemonTimers, versionPruneSweeper, versionStore: localVersionStore ?? null, versionPolicy: effectiveVersionPolicy, outboxWiring }); // storage-growth 2/3 (R3+R4)
+    const storageGrowthSweeps = wireStorageGrowthSweeps({ startsDaemonTimers, versionPruneSweeper, versionStore: localVersionStore ?? null, versionPolicy: effectiveVersionPolicy, outboxWiring }); const eraseWiring = wireWorkspaceEraseTick(dataHome); // storage-growth 2/3 (R3+R4); f6b erase tick: daemon AND embedded, stopped by the shutdown drain
     /** C6b (Phase 4) — MCP client runtime (connects outward to external MCP servers). */
     const mcpClientRuntime = new McpClientRuntime();
 
@@ -1051,7 +1051,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         embedQueue,
         consistencySweeper,
         compactionSweeper,
-        ...storageGrowthSweeps,
+        ...storageGrowthSweeps, ...eraseWiring,
         getLoadJobsRunner: () => loadJobsRunner,
         migrationWiring: migrationWiring ?? undefined,
         authTokenSweeper,
@@ -1372,7 +1372,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
                 await delayMs(25);
             }
         },
-        recall: hostModel.wrapRecall((topic: string, opts: RecallOpts) => inProcessRecall(topic, opts, { store, graphRegistry: graphRegistry ?? undefined, workspaceVerbatimResolver, rerankBackend, linkOrdering: hostLinkOrdering })), modelStatus: hostModel.modelStatus, // 3.24 B/C: wrapRecall adds _meta.models while degraded.
+        recall: hostModel.wrapRecall((topic: string, opts: RecallOpts) => inProcessRecall(topic, opts, { store, graphRegistry: graphRegistry ?? undefined, workspaceVerbatimResolver, rerankBackend, linkOrdering: hostLinkOrdering, relatedLimits: hostRelatedLimits })), modelStatus: hostModel.modelStatus, // 3.24 B/C: wrapRecall adds _meta.models while degraded.
         // 1.2 (2026-08-17 audit) — `workspace` now actually ROUTES (via the
         // facade's per-workspace read routers) instead of silently landing
         // in the `project` positional of the boot graph. '*' keeps the
@@ -1635,16 +1635,15 @@ async function main(): Promise<LoreInstance | void> {
     // adapter has been resolved (env → keychain upgrade). Fire-and-forget.
     void d.fireBootHealthPing();
 
-    runLogRotation();
-    // RA2-reaudit2 — runLogRotation truncates audit.jsonl in place; reset the
-    // audit chain head so the first post-rotation entry starts a fresh valid
-    // chain (else verifyChain false-positives on a dangling prevHash).
-    auditLog.onRotated();
+    // Rotate while the audit writer is quiesced (no append can land between the rotator's read and truncate, and
+    // rotation cannot interleave with a workspace-erase blank-out); the continuation record is written in the same
+    // section so the chain stays linked to the archive.
+    await auditLog.rotateExclusive(() => runLogRotation());
     runWorkspaceLogRotation(loreDir);
     // Audit 2026-05-13: also rotate periodically during the daemon's lifetime.
     // hc-log-rotation-interval — cadence is env-overridable (LORE_LOG_ROTATION_MS).
     const logRotationInterval = setInterval(() => {
-        try { runLogRotation(); auditLog.onRotated(); } catch { /* best-effort */ }
+        void auditLog.rotateExclusive(() => runLogRotation()).catch(() => { /* best-effort */ });
     }, LOG_ROTATION_MS);
     if (typeof logRotationInterval.unref === 'function') logRotationInterval.unref();
 

@@ -1,0 +1,158 @@
+# EXPLAIN (ANALYZE, BUFFERS) — quiet — ws pgbench — 2026-10-25T04:18:10.171Z
+
+## graph keyword leg, mid term "vufor" (nodes, LIMIT 2000)
+```
+Limit  (cost=0.42..20277.62 rows=2000 width=587) (actual time=0.088..319.535 rows=2000 loops=1)
+  Buffers: shared hit=100104
+  ->  Index Scan using idx_nodes_updatedat on nodes  (cost=0.42..299727.72 rows=29563 width=587) (actual time=0.088..319.438 rows=2000 loops=1)
+        Index Cond: (workspace_id = 'pgbench'::text)
+        Filter: (((tags)::jsonb @> '["tag-vufor"]'::jsonb) OR (lower(label) ~~ '%vufor%'::text) OR (lower(content) ~~ '%vufor%'::text))
+        Rows Removed by Filter: 97051
+        Buffers: shared hit=100104
+Settings: effective_cache_size = '6GB', work_mem = '32MB'
+Planning:
+  Buffers: shared hit=4
+Planning Time: 0.207 ms
+Execution Time: 319.617 ms
+```
+
+## verbatim BM25 ts_rank, common term "all" (1 token)
+```
+Limit  (cost=199300.16..199304.82 rows=40 width=527) (actual time=154.748..169.439 rows=40 loops=1)
+  Buffers: shared hit=200368 read=19257
+  ->  Gather Merge  (cost=199300.16..219125.31 rows=169918 width=527) (actual time=151.873..166.562 rows=40 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=200368 read=19257
+        ->  Sort  (cost=198300.13..198512.53 rows=84959 width=527) (actual time=144.829..144.831 rows=33 loops=3)
+              Sort Key: (ts_rank(v.text_tsv, '''all'''::tsquery)) DESC, v.id
+              Sort Method: top-N heapsort  Memory: 81kB
+              Buffers: shared hit=200368 read=19257
+              Worker 0:  Sort Method: top-N heapsort  Memory: 85kB
+              Worker 1:  Sort Method: top-N heapsort  Memory: 79kB
+              ->  Parallel Seq Scan on verbatim_ws_dcf8cde3a1704b891ed9487b v  (cost=0.00..195189.81 rows=84959 width=527) (actual time=2.159..135.963 rows=64867 loops=3)
+                    Filter: ((text_tsv @@ '''all'''::tsquery) AND (workspace_id = 'pgbench'::text) AND (is_canonical = 1) AND (is_tombstone = 0))
+                    Rows Removed by Filter: 275199
+                    Buffers: shared hit=200278 read=19257
+Settings: effective_cache_size = '6GB', work_mem = '32MB'
+Planning:
+  Buffers: shared hit=1
+Planning Time: 0.115 ms
+JIT:
+  Functions: 13
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 0.728 ms, Inlining 0.000 ms, Optimization 0.584 ms, Emission 8.716 ms, Total 10.027 ms
+Execution Time: 169.661 ms
+```
+
+## verbatim BM25 ts_rank, mid term "vufor" (1 token)
+```
+Limit  (cost=29282.65..29282.75 rows=40 width=527) (actual time=9.976..9.979 rows=40 loops=1)
+  Buffers: shared hit=9798
+  ->  Sort  (cost=29282.65..29303.55 rows=8362 width=527) (actual time=9.976..9.977 rows=40 loops=1)
+        Sort Key: (ts_rank(v.text_tsv, '''vufor'''::tsquery)) DESC, v.id
+        Sort Method: top-N heapsort  Memory: 67kB
+        Buffers: shared hit=9798
+        ->  Bitmap Heap Scan on verbatim_ws_dcf8cde3a1704b891ed9487b v  (cost=1254.85..29018.33 rows=8362 width=527) (actual time=1.774..8.193 rows=8987 loops=1)
+              Recheck Cond: (text_tsv @@ '''vufor'''::tsquery)
+              Filter: ((workspace_id = 'pgbench'::text) AND (is_canonical = 1) AND (is_tombstone = 0))
+              Rows Removed by Filter: 378
+              Heap Blocks: exact=9291
+              Buffers: shared hit=9798
+              ->  Bitmap Index Scan on verbatim_ws_dcf8cde3a1704b891ed9487b_text_tsv_idx  (cost=0.00..1252.76 rows=8362 width=0) (actual time=1.093..1.093 rows=9554 loops=1)
+                    Index Cond: (text_tsv @@ '''vufor'''::tsquery)
+                    Buffers: shared hit=287
+Settings: effective_cache_size = '6GB', work_mem = '32MB'
+Planning:
+  Buffers: shared hit=1
+Planning Time: 0.108 ms
+Execution Time: 9.993 ms
+```
+
+## verbatim BM25 ts_rank, 2 tokens "all vufor"
+```
+Limit  (cost=199409.62..199414.29 rows=40 width=527) (actual time=165.627..180.163 rows=40 loops=1)
+  Buffers: shared hit=201668 read=18085
+  ->  Gather Merge  (cost=199409.62..219887.92 rows=175516 width=527) (actual time=162.667..177.200 rows=40 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=201668 read=18085
+        ->  Sort  (cost=198409.60..198629.00 rows=87758 width=527) (actual time=155.682..155.683 rows=35 loops=3)
+              Sort Key: (ts_rank(v.text_tsv, '''all'' | ''vufor'''::tsquery)) DESC, v.id
+              Sort Method: top-N heapsort  Memory: 80kB
+              Buffers: shared hit=201668 read=18085
+              Worker 0:  Sort Method: top-N heapsort  Memory: 67kB
+              Worker 1:  Sort Method: top-N heapsort  Memory: 74kB
+              ->  Parallel Seq Scan on verbatim_ws_dcf8cde3a1704b891ed9487b v  (cost=0.00..195196.81 rows=87758 width=527) (actual time=2.121..146.762 rows=67236 loops=3)
+                    Filter: ((text_tsv @@ '''all'' | ''vufor'''::tsquery) AND (workspace_id = 'pgbench'::text) AND (is_canonical = 1) AND (is_tombstone = 0))
+                    Rows Removed by Filter: 272831
+                    Buffers: shared hit=201578 read=18085
+Settings: effective_cache_size = '6GB', work_mem = '32MB'
+Planning:
+  Buffers: shared hit=1
+Planning Time: 0.130 ms
+JIT:
+  Functions: 13
+  Options: Inlining false, Optimization false, Expressions true, Deforming true
+  Timing: Generation 0.726 ms, Inlining 0.000 ms, Optimization 0.598 ms, Emission 8.680 ms, Total 10.004 ms
+Execution Time: 180.411 ms
+```
+
+## verbatim vector kNN (HNSW, top 20, canonical+non-tombstone filter)
+```
+Limit  (cost=807.83..842.55 rows=20 width=539) (actual time=0.443..0.516 rows=20 loops=1)
+  Buffers: shared hit=756
+  ->  Index Scan using verbatim_ws_dcf8cde3a1704b891ed9487b_vector_idx on verbatim_ws_dcf8cde3a1704b891ed9487b verbatim  (cost=807.83..1799913.82 rows=1036610 width=539) (actual time=0.442..0.514 rows=20 loops=1)
+        Order By: (vector <=> '[-0.04143,0.07911,-0.05829,0.06432,0.02237,0.0571,0.07871,-0.04302,0.04074,-0.03241,-0.00389,-0.05917,-0.03754,0.01317,-0.02615,-0.00329,-0.00174,0.06256,0.05419,0.04733,-0.08279,-0.09787,0.00249,-0.04258,-0.03619,-0.04234,0.01306,0.03656,-0.07671,0.04881,-0.02092,-0.05386,0.02237,-0.01982,-0.00569,0.0299,0.05405,-0.01944,0.05716,-0.07006,0.05418,0.03205,-0.07302,0.01685,0.00772,0.07132,0.01476,-0.05472,-0.05242,0.02813,0.00884,-0.00855,0.03358,0.02741,-0.02272,-0.06403,0.01003,-0.017,0.05018,-0.03571,-0.01944,0.03193,0.03478,-0.03823,0.02844,-0.00517,-0.0187,-0.10594,0.02501,0.06317,0.05457,0.00225,0.06449,0.04137,-0.05497,0.02434,-0.03523,0.00963,0.02315,-0.09339,0.01517,-0.00158,0.02709,-0.09224,-0.06261,-0.00012,0.03073,-0.0346,0.02113,-0.00798,-0.02458,0.10344,0.0266,-0.06939,-0.03079,0.03096,-0.01423,-0.06001,-0.00302,-0.06345,0.0252,0.01253,-0.02828,-0.025,0.06451,-0.00466,-0.04246,0.03273,0.03577,-0.00332,-0.04426,-0.00932,0.00943,0.05158,0.02207,-0.07543,0.11609,0.02702,0.01659,0.10823,0.00326,0.01119,-0.07615,0.04127,0.01054,0.11424,-0.01012,0.08097,-0.05013,0.01405,0.00661,0.11338,0.02774,0.0358,-0.06829,-0.03874,0.00066,-0.04699,-0.01433,-0.01141,-0.08725,0.00503,0.08112,0.04628,0.01244,0.00576,-0.05173,-0.05304,-0.01434,-0.05146,0.01814,-0.0551,0.0155,-0.02309,-0.07386,0.0504,-0.05083,-0.01907,0.09345,-0.01435,0.01238,-0.06364,0.01269,0.02388,-0.03476,0.05211,0.06463,0.05308,0.08485,0.03199,0.01626,0.09159,-0.02329,-0.0243,0.01494,0.01916,0.02984,-0.07418,0.06684,0.02705,-0.01792,0.10452,-0.11947,-0.01655,-0.00346,-0.02013,-0.03466,0.00828,-0.00499,0.01235,-0.04824,0.02944,-0.11949,-0.09527,-0.00939,0.02716,-0.00671,0.04014,0.06961,0.08374,0.07244,0.05231,-0.05729,-0.02167,0.05463,0.06778,0.01262,0.05061,0.07264,0.04802,0.06447,-0.00688,-0.08312,-0.01267,0.05547,-0.03917,-0.03453,0.04415,-0.0026,0.07327,0.00342,-0.01865,-0.00721,-0.00353,-0.01534,-0.14326,-0.12175,0.05305,-0.0737,-0.00469,0.08981,-0.02148,-0.05648,-0.0484,0.00022,0.05611,0.0581,0.03635,0.04698,0.09579,0.10076,-0.06025,0.08246,0.04296,-0.04722,0.07791,-0.00409,0.03305,0.04118,-0.03259,0.06442,0.01003,0.04526,0.04189,0.04897,-0.00441,-0.0105,-0.00953,-0.01766,-0.07005,0.03923,-0.06335,-0.05516,-0.01211,-0.06604,0.02025,-0.02142,0.01743,-0.01778,0.04319,-0.08843,-0.1347,0.09521,0.05568,0.00343,-0.07717,0.00043,-0.06201,0.0733,0.00891,-0.01901,0.03332,-0.00918,0.04859,-0.00381,0.12887,-0.00845,0.07203,-0.07228,0.02668,0.09598,-0.04041,0.01601,-0.0224,0.12962,-0.02551,-0.06384,0.02843,0.02691,0.13958,-0.03144,-0.10383,-0.04234,-0.03066,-0.00417,0.05122,-0.07242,-0.05508,-0.04796,-0.01777,0.01452,-0.06516,0.02848,-0.02986,-0.0023,0.02809,0.0326,0.02491,-0.02463,-0.05525,-0.00967,0.15234,-0.00597,-0.05681,0.01271,0.06394,-0.06675,-0.0526,-0.03416,-0.02667,-0.00369,0.09855,-0.07105,0.01393,0.00785,0.01262,0.04841,-0.00734,-0.02074,-0.06961,-0.03064,0.04925,0.01148,0.04582,-0.04991,-0.01955,-0.03718,0.06542,-0.01041,0.02543,-0.03563,-0.03272,0.02844,0.02143,-0.03612,-0.04072,0.05386,0.00311,-0.03952,-0.05095,0.06906,0.04943,0.02383,-0.02368,0.03989,-0.06929,-0.03282,0.04934,0.0209,0.06082,0.02806,0.02514,-0.02707,-0.07861,-0.04018,-0.0818,0.04632,0.0243,-0.01739,-0.00702,-0.05318,-0.01623,0.0733,0.05648]'::vector)
+        Filter: ((workspace_id = 'pgbench'::text) AND (is_canonical = 1) AND (is_tombstone = 0))
+        Buffers: shared hit=756
+Settings: effective_cache_size = '6GB', work_mem = '32MB'
+Planning:
+  Buffers: shared hit=1
+Planning Time: 0.059 ms
+Execution Time: 0.523 ms
+```
+
+## verbatim count(*) (the cached count)
+```
+Finalize Aggregate  (cost=33957.98..33957.99 rows=1 width=8) (actual time=36.557..39.951 rows=1 loops=1)
+  Buffers: shared hit=11638
+  ->  Gather  (cost=33957.76..33957.97 rows=2 width=8) (actual time=36.401..39.947 rows=3 loops=1)
+        Workers Planned: 2
+        Workers Launched: 2
+        Buffers: shared hit=11638
+        ->  Partial Aggregate  (cost=32957.76..32957.77 rows=1 width=8) (actual time=30.462..30.462 rows=1 loops=3)
+              Buffers: shared hit=11638
+              ->  Parallel Index Only Scan using verbatim_ws_dcf8cde3a1704b891ed9487b_workspace_id_project_idx on verbatim_ws_dcf8cde3a1704b891ed9487b verbatim  (cost=0.42..31877.96 rows=431921 width=0) (actual time=0.024..21.322 rows=340067 loops=3)
+                    Index Cond: (workspace_id = 'pgbench'::text)
+                    Heap Fetches: 57597
+                    Buffers: shared hit=11638
+Settings: effective_cache_size = '6GB', work_mem = '32MB'
+Planning Time: 0.066 ms
+Execution Time: 39.967 ms
+```
+
+## traverse edge fetch (src side)
+```
+Nested Loop  (cost=1.27..59.24 rows=5 width=30) (actual time=0.006..0.013 rows=6 loops=1)
+  Buffers: shared hit=32
+  ->  Index Scan using idx_nodes_sk on nodes f  (cost=0.42..8.45 rows=1 width=14) (actual time=0.002..0.002 rows=1 loops=1)
+        Index Cond: (sk = 12346)
+        Filter: (workspace_id = 'pgbench'::text)
+        Buffers: shared hit=4
+  ->  Nested Loop  (cost=0.85..50.75 rows=5 width=32) (actual time=0.004..0.010 rows=6 loops=1)
+        Buffers: shared hit=28
+        ->  Index Only Scan using edges_pkey on edges e  (cost=0.42..8.52 rows=5 width=42) (actual time=0.002..0.003 rows=6 loops=1)
+              Index Cond: ((workspace_id = 'pgbench'::text) AND (src_sk = 12346))
+              Heap Fetches: 0
+              Buffers: shared hit=4
+        ->  Index Scan using idx_nodes_sk on nodes t  (cost=0.42..8.45 rows=1 width=22) (actual time=0.001..0.001 rows=1 loops=6)
+              Index Cond: (sk = e.dst_sk)
+              Filter: (workspace_id = 'pgbench'::text)
+              Buffers: shared hit=24
+Settings: effective_cache_size = '6GB', work_mem = '32MB'
+Planning:
+  Buffers: shared hit=21
+Planning Time: 0.111 ms
+Execution Time: 0.020 ms
+```

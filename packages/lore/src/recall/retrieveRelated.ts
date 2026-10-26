@@ -29,6 +29,7 @@ import type { CalibrationResult } from './calibration.js';
 import { zScore } from './abstention.js';
 import { resolveLiveNodes, type AdmitNode } from './supersessionRecall.js';
 import { orderHopsByLinkStrength, linkOrderingEnabled, type StrengthEdge } from './linkOrdering.js';
+import { exceedsDegree, resolveRelatedLimits, type RecallRelatedOption } from './relatedLimits.js';
 
 const TRAVERSE_CONCURRENCY = 4;
 
@@ -72,8 +73,10 @@ export interface CollectRelatedOptions {
     replaceSuperseded: boolean;
     /** D5 visibility gate for successors fetched outside the hop list. */
     admit: AdmitNode;
-    /** D4 (LORE_RECALL_LINK_ORDERING, default off): order each seed's hops by live link strength, then label, then id. Unset: read from the env flag. */
+    /** D4 (LORE_RECALL_LINK_ORDERING, default ON since C1): order each seed's hops by live link strength, then label, then id. Unset: read from the env flag. */
     linkOrdering?: boolean;
+    /** C1: per-hit neighbour cap and hub-degree drop for `related[]` (both default off). Unset: read from the env. */
+    relatedLimits?: RecallRelatedOption;
 }
 
 /**
@@ -89,6 +92,14 @@ export async function collectRelated(
     const related = new Map<string, RelatedResult>();
     if (opts.depth <= 0) return related;
     const seeds = [...direct.values()].map((r) => r.node);
+    const { perHit, maxDegree } = resolveRelatedLimits(opts.relatedLimits);
+    const hubMemo = new Map<string, boolean>(); // id -> is a hub, per recall
+    const isHub = async (id: string): Promise<boolean> => {
+        if (maxDegree === undefined) return false;
+        let h = hubMemo.get(id);
+        if (h === undefined) { h = await exceedsDegree(graph, id, maxDegree); hubMemo.set(id, h); }
+        return h;
+    };
     for (let i = 0; i < seeds.length; i += TRAVERSE_CONCURRENCY) {
         const batch = seeds.slice(i, i + TRAVERSE_CONCURRENCY);
         const hops = await Promise.all(batch.map((sn) => graph.traverse(sn.id, opts.depth)));
@@ -100,7 +111,9 @@ export async function collectRelated(
             // D2-recall-2: traverse() does no scope filtering — filter every
             // hop through the actor's scopes before it can surface.
             const allowedHops = new Set(opts.filterByActorScope(hops[idx]!.map((item) => item.node)).map((n) => n.id));
+            let kept = 0;
             for (const item of hops[idx]!) {
+                if (perHit !== undefined && kept >= perHit) break;
                 if (!allowedHops.has(item.node.id) || !opts.hopAllowed(item.node)) continue;
                 let node: LoreNode | undefined = item.node;
                 if (opts.replaceSuperseded && (node as HiddenFlags).supersededBy) {
@@ -108,8 +121,10 @@ export async function collectRelated(
                     if (!node) continue; // no admissible live successor — drop, never show the dead node
                 }
                 if (direct.has(node.id) || related.has(node.id)) continue;
+                if (await isHub(node.id)) continue; // C1: a hub may be a primary hit, never a neighbour
                 // `relation` is the REAL edge relation traverse() reported.
                 related.set(node.id, { node, via: sn.id, relation: item.relation, depth: item.depth, score: 0.3 / (1 + item.depth) });
+                kept++;
             }
         }
     }

@@ -53,6 +53,7 @@ await test('consumers: only the SQLite promotion code reads or writes the log; P
     assert.deepEqual(filesMentioningLog(srcRoot).sort(), [
         'engines/postgres/postgresVerbatimSchema.ts',   // CREATE TABLE only
         'engines/postgres/postgresVerbatimStore.ts',    // VACUUM ANALYZE in compact()
+        'engines/postgres/postgresWorkspaceErase.ts',   // named in the erase skip list only (no workspace column, nothing to erase)
         'engines/sqliteVerbatimSchema.ts',              // SQLite table create / drop
         'engines/verbatimPromotionGate.ts',             // lock-aware gate: reads MAX(seq) / unseen-row count on the SQLite file (3.35.3)
         'engines/verbatimPromotionStage.ts',            // copyTail: THE consumer (better-sqlite3 rowid -> LanceDB)

@@ -19,6 +19,8 @@ const TMP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'lore-bw8-'));
 process.env['LORE_HOME'] = TMP_HOME;
 
 const { WorkspaceRegistry } = await import('../packages/lore/src/engines/maintain/adapters.js');
+// Lane f6b: keep the erase lifecycle off the machine's OS keychain in tests.
+(await import('../packages/lore/src/engines/workspaceErase/lifecycle.js')).setLifecycleTestDefaults({ eraserFactory: { keyringEnabled: false } });
 
 let passed = 0, failed = 0;
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
@@ -54,9 +56,12 @@ await test('delete closes the cached handle BEFORE removing the data dir', async
     } as never;
     const reg = new WorkspaceRegistry(spyRegistry);
     const { bytesFreed } = await reg.delete('ephemeral-x');
-    assert.equal(calls.length, 1, 'closeWorkspace called exactly once');
-    assert.equal(calls[0]!.name, 'ephemeral-x', 'closed the right workspace');
-    assert.equal(calls[0]!.dirExistedAtClose, true, 'handle closed BEFORE the dir was rmSync-ed');
+    // Lane f6b: the lifecycle closes once before the data dir is moved to the holding folder and once more after
+    // (a request could have reopened the handle in between), so the close is called twice.
+    assert.equal(calls.length, 2, 'closeWorkspace called before and after the dir is staged');
+    assert.ok(calls.every((c) => c.name === 'ephemeral-x'), 'closed the right workspace');
+    assert.equal(calls[0]!.dirExistedAtClose, true, 'handle closed BEFORE the dir was moved or removed');
+    assert.equal(calls[1]!.dirExistedAtClose, false, 'second close ran after the dir was staged into the holding folder');
     assert.ok(!fs.existsSync(wsPath), 'data dir removed after the handle was closed');
     assert.ok(bytesFreed >= 0, 'bytesFreed reported');
 });

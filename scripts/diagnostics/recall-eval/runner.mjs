@@ -86,6 +86,26 @@
  *                                     fixture build (or vice versa): they hash to different cache dirs.
  *                                     Per DESIGN-3.23.md §7.1, pass --force if you want a guaranteed
  *                                     rebuild regardless of cache state.)
+ *
+ * B4 (link eval) additions:
+ * --link-on-arrival                  (build the fixture WITH inferred links: createLore({linkOnArrival:true}),
+ *                                     bulkIngest without autolink:false, link queue flushed before the build is
+ *                                     cached. A separate cache key from the links-off build. Needs --depth >= 1
+ *                                     for related[] to show anything.)
+ * --link-discovery                   (D6: with --link-on-arrival, after the arrival queue settles run Links Loop D
+ *                                     discovery passes to completion, so the build also holds discovered edges. A
+ *                                     separate fixture cache key; the build's link stats report what discovery added.)
+ * --link-ordering                    (eval instance opens with createLore({recallLinkOrdering:true}); without it
+ *                                     the option is passed explicitly as false so an ambient
+ *                                     LORE_RECALL_LINK_ORDERING cannot leak in; the product default is now ON)
+ *
+ * C1 (related[] trims) additions, both passed explicitly so ambient env cannot leak in:
+ * --related-per-hit N                (createLore({recallRelated:{perHit:N}}): keep each hit's N strongest neighbours)
+ * --related-max-degree N             (createLore({recallRelated:{maxDegree:N}}): drop neighbours with more than N live edges)
+ *                                    Both add a `links` section to the report: related[] precision / nDCG / noise
+ *                                    against the fixture's known structure (lib/linkMetrics.mjs documents the
+ *                                    ground truth and its limits) and link-graph coverage / degree stats.
+ *                                    Compare arms with compareLinkArms.mjs.
  */
 import { spawnSync, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -150,6 +170,12 @@ const IDENTIFIERS_PATH = argOf('--identifiers-file', argOf('--identifiers', path
 const SKIP_IDENTIFIERS = hasFlag('--skip-identifiers');
 const ABSENT_IDENTIFIERS_FILE = argOf('--absent-identifiers-file', null);
 const PIECE_VECTORS = argOf('--piece-vectors', 'off') === 'on'; // D7c — fixture-shape input, see buildFixture.mjs
+const LINK_DISCOVERY = hasFlag('--link-discovery'); // D6 -- fixture-shape input: also run Links Loop D passes after the build (needs --link-on-arrival)
+const LINK_ON_ARRIVAL = hasFlag('--link-on-arrival'); // B4 — fixture-shape input, see buildFixture.mjs
+const LINK_ORDERING = hasFlag('--link-ordering'); // B4 — createLore({recallLinkOrdering})
+const intArg = (flag) => { const v = argOf(flag, undefined); if (v === undefined) return null; const n = Number(v); if (!Number.isInteger(n) || n < 1) throw new Error(`${flag} must be a positive integer`); return n; };
+const RELATED_PER_HIT = intArg('--related-per-hit'); // C1 — createLore({recallRelated:{perHit}})
+const RELATED_MAX_DEGREE = intArg('--related-max-degree'); // C1 — createLore({recallRelated:{maxDegree}})
 
 const [graphEngine, vectorEngine] = ENGINE === 'surreal-lance' ? ['surreal', 'lance'] : ['sqlite', 'sqlite'];
 
@@ -185,7 +211,7 @@ async function main() {
     const t0 = Date.now();
     const fixture = await ensureFixture({
         graphEngine, vectorEngine, codeRowCount: CODE_ROWS, embedder: EMBEDDER,
-        pieceVectors: PIECE_VECTORS,
+        pieceVectors: PIECE_VECTORS, linkOnArrival: LINK_ON_ARRIVAL, linkDiscovery: LINK_DISCOVERY,
         cacheRoot: CACHE_ROOT, force: FORCE, log,
     });
     const fixtureMs = Date.now() - t0;
@@ -199,6 +225,10 @@ async function main() {
     // didn't pass --piece-vectors would otherwise open a piece-off fixture
     // with pieceVectors:true and see an empty/invalid index at query time.
     if (fixture.pieceVectors) evalOpts.pieceVectors = true;
+    // B4 — always explicit, so the arm is decided by the flag alone (an ambient
+    // LORE_RECALL_LINK_ORDERING cannot change it).
+    evalOpts.recallLinkOrdering = LINK_ORDERING;
+    evalOpts.recallRelated = { perHit: RELATED_PER_HIT, maxDegree: RELATED_MAX_DEGREE }; // C1 — null = explicitly off
     if (EMBEDDER === 'fake') {
         const { FakeEmbeddingProvider } = await import(path.join(HERE, 'lib', 'fakeEmbeddingProvider.mjs'));
         evalOpts.embeddingProvider = new FakeEmbeddingProvider();
@@ -225,8 +255,8 @@ async function main() {
 
         const entry = {
             id: q.id, source: q.source, expectedIds: q.expectedIds,
-            chatty: { ids: chattyR.ids, rank, hit1: rank === 1, hit3: hit3Chatty, topScore: chattyR.topScore, confidence: chattyR.confidence, abstained: chattyR.abstained, topRelevance: chattyR.topRelevance, overridden: chattyR.overridden, abstainReason: chattyR.abstainReason, termCoverage: chattyR.termCoverage },
-            terse: { ids: terseR.ids, rank: rankTerse, hit1: rankTerse === 1, hit3: hit3Terse, topScore: terseR.topScore, confidence: terseR.confidence, abstained: terseR.abstained, topRelevance: terseR.topRelevance, overridden: terseR.overridden, abstainReason: terseR.abstainReason, termCoverage: terseR.termCoverage },
+            chatty: { ids: chattyR.ids, related: chattyR.related, rank, hit1: rank === 1, hit3: hit3Chatty, topScore: chattyR.topScore, confidence: chattyR.confidence, abstained: chattyR.abstained, topRelevance: chattyR.topRelevance, overridden: chattyR.overridden, abstainReason: chattyR.abstainReason, termCoverage: chattyR.termCoverage },
+            terse: { ids: terseR.ids, related: terseR.related, rank: rankTerse, hit1: rankTerse === 1, hit3: hit3Terse, topScore: terseR.topScore, confidence: terseR.confidence, abstained: terseR.abstained, topRelevance: terseR.topRelevance, overridden: terseR.overridden, abstainReason: terseR.abstainReason, termCoverage: terseR.termCoverage },
             prefixStableChatty,
             prefixStableTerse,
             prefixStableBoth: prefixStableChatty && prefixStableTerse,
@@ -288,6 +318,10 @@ async function main() {
     }
     const evalMs = Date.now() - t1;
 
+    // B4 — related[] metrics against the fixture's known structure + link-graph stats.
+    // Read BEFORE dispose (the edge read needs the open graph).
+    const links = await computeLinks(lore, perQuestion);
+
     await lore.dispose('recall-eval-complete');
 
     const latSorted = [...latencies].sort((a, b) => a - b);
@@ -301,13 +335,14 @@ async function main() {
             engine: ENGINE, graphEngine, vectorEngine, embedder: EMBEDDER, codeRows: CODE_ROWS, depth: DEPTH, pieceVectors: PIECE_VECTORS,
             searchMode: SEARCH_MODE, max: MAX, wideMax: WIDE_MAX, abstain: ABSTAIN, relevanceFloor: RELEVANCE_FLOOR ?? null, rerank: RERANK ?? null, termCoverage: TERM_COVERAGE, termCoverageMin: process.env.LORE_RECALL_TERM_COVERAGE_MIN ?? null,
             gibberishFile: path.basename(gibberishPath), distractorsFile: DISTRACTORS_FILE ?? null, questionsFiles: QUESTIONS_FILES,
-            withQueries: WITH_QUERIES,
+            withQueries: WITH_QUERIES, linkOnArrival: LINK_ON_ARRIVAL, linkDiscovery: LINK_DISCOVERY, linkOrdering: LINK_ORDERING, relatedPerHit: RELATED_PER_HIT, relatedMaxDegree: RELATED_MAX_DEGREE,
             candidateFloor: process.env.LORE_RECALL_CANDIDATE_FLOOR ?? null,
             lexicalBase: process.env.LORE_RECALL_LEXICAL_BASE ?? null,
             identifiersFile: identifiers ? path.basename(IDENTIFIERS_PATH) : null,
             absentIdentifiersFile: ABSENT_IDENTIFIERS_FILE ? path.basename(ABSENT_IDENTIFIERS_FILE) : null,
         },
-        fixture: { dataDir: fixture.dataDir, reused: fixture.reused, counts: fixture.counts, buildMs: fixtureMs },
+        fixture: { dataDir: fixture.dataDir, reused: fixture.reused, counts: fixture.counts, buildMs: fixtureMs, linkBuild: fixture.linkBuild ?? null },
+        links,
         // meanRecallMs: mean over every recall() call actually made (D3's latency sampler).
         timings: { fixtureMs, evalMs, totalMs: Date.now() - t0, meanRecallMs: latSorted.length ? latSorted.reduce((a, b) => a + b, 0) / latSorted.length : null },
         latency,
@@ -354,6 +389,39 @@ async function recallOne(lore, topic, max, queries, searchModeOverride) {
         // D1 term-coverage signal (--term-coverage on).
         abstainReason: meta.abstain_reason ?? null,
         termCoverage: meta.term_coverage ?? null,
+        // B4 — neighbours in the order recall() returned them (depth >= 1 only).
+        related: (result.related ?? []).map((r) => ({ id: r.id, via: r.via, relation: r.relation, depth: r.depth })),
+    };
+}
+
+/**
+ * B4 — link metrics. Related lists come from the real questions (terse and
+ * chatty phrasings, at --max); edges are read straight from the open graph.
+ */
+async function computeLinks(lore, perQuestion) {
+    const HERE = path.dirname(SELF);
+    const { buildCorpus } = await import(path.join(HERE, 'lib', 'corpus.mjs'));
+    const { buildGroundTruth, relatedMetrics, linkGraphStats } = await import(path.join(HERE, 'lib', 'linkMetrics.mjs'));
+    const corpus = buildCorpus({ codeRowCount: CODE_ROWS });
+    const gt = buildGroundTruth(corpus);
+    const lists = perQuestion.flatMap((q) => [
+        { expectedIds: q.expectedIds, ids: q.terse.ids, related: q.terse.related ?? [] },
+        { expectedIds: q.expectedIds, ids: q.chatty.ids, related: q.chatty.related ?? [] },
+    ]);
+    const nodeIds = [...corpus.knowledgeNodes, ...corpus.notes, ...corpus.codeRows].map((n) => n.id);
+    const edges = [];
+    const g = lore.store?.loreGraph;
+    if (g?.queryEdges) {
+        for (let offset = 0; ; offset += 5000) {
+            const page = await g.queryEdges({ limit: 5000, offset });
+            edges.push(...page);
+            if (page.length < 5000) break;
+        }
+    }
+    return {
+        depth: DEPTH,
+        related: relatedMetrics(lists, gt, 10),
+        graph: linkGraphStats(edges, nodeIds, gt),
     };
 }
 
@@ -676,7 +744,16 @@ ${a.withQueries ? `| queries[] variant hit@1 / hit@3 / MRR (terse + queries:[cha
 ${qRow('real (n=' + a.n_questions + ')', q.real)}
 ${qRow('gibberish (n=' + a.n_gibberish + ')', q.gibberish)}
 ${a.distractors ? qRow('distractors (n=' + a.distractors.n + ')', a.distractors.topScoreQuantiles) : ''}
-${negRows}${idRows}`;
+${negRows}${idRows}${renderLinks(report)}`;
+}
+
+/** B4 -- links section (see lib/linkMetrics.mjs for the ground truth and its limits). */
+function renderLinks(report) {
+    const L = report.links;
+    if (!L) return '';
+    const r = L.related, g = L.graph;
+    const rows = (m) => Object.entries(m).map(([k, v]) => `| ${k} | ${v === null ? 'n/a' : v} |`).join('\n');
+    return `\n## Links (B4) -- linkOnArrival=${report.config.linkOnArrival}, linkOrdering=${report.config.linkOrdering}, relatedPerHit=${report.config.relatedPerHit}, relatedMaxDegree=${report.config.relatedMaxDegree}, depth=${L.depth}\n\nrelated[] lists: ${r.lists}, with any related: ${r.listsWithRelated}, mean related per list: ${r.meanRelated}\n\n### Relevant to the seed it hangs off\n\n| metric | value |\n|---|---|\n${rows(r.seed)}\n\n### Relevant to the expected answer\n\n| metric | value |\n|---|---|\n${rows(r.expected)}\n\n### Neighbours of the expected answer only\n\n| metric | value |\n|---|---|\n${rows(r.ofExpected)}\n\n### Per seed ordering\n\n| metric | value |\n|---|---|\n${rows(r.perSeed)}\n\nnear-duplicate partner in related: ${JSON.stringify(r.dupPartner)}\n\n### Link graph\n\nsemantic edges ${g.semanticEdges}, other edges ${g.otherEdges} ${JSON.stringify(g.otherRelations)}; nodes with a link ${g.nodesWithLink}; degree mean/p50/p90/max ${g.degreeMean}/${g.degreeP50}/${g.degreeP90}/${g.degreeMax}; edge grade share ${JSON.stringify(g.edgeGradeShare)}; score-vs-relevance AUC ${g.scoreVsRelevantAuc}\n\nby class: ${JSON.stringify(g.byClass)}\n\nendpoint pairs: ${JSON.stringify(g.pairs)}\n\nby score: ${JSON.stringify(g.byScore)}\n`;
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

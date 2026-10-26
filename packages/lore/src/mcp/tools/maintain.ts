@@ -31,6 +31,8 @@ import type { VersionStoreApi } from '../../outbox/versionStoreApi.js';
 import type { OutboxStore } from '../../outbox/types.js';
 import { sweepOrphanAliases, type OrphanAliasSweepResult } from '../../core/orphanAliasSweep.js';
 import { VersionStore } from '../../outbox/versionStore.js';
+import { getActiveIngestionHost } from '../ingestionBoot.js';
+import type { HandleSources } from '../../engines/workspaceErase/closeHandles.js';
 import {
     resolveMaintainPolicy,
     runMaintenance,
@@ -127,6 +129,12 @@ export interface MaintainToolsDeps {
  * lockstep: whichever workspace the registry says is active right now is the
  * one whose name AND path get used.
  */
+/** Lane f6b — the vector-store resolver and ingestion host also hold a workspace's files open; close them before an expiry erase. */
+function ephemeralEraseHandles(resolver: { getOrOpen(ws: string): Promise<unknown> } | undefined): Omit<HandleSources, 'graphRegistry'> {
+    const r = resolver as { closeWorkspace?: (ws: string) => Promise<boolean> } | undefined;
+    return { ...(r?.closeWorkspace ? { verbatimResolver: { closeWorkspace: (ws: string) => r.closeWorkspace!(ws) } } : {}), getIngestionHost: getActiveIngestionHost };
+}
+
 function safeActiveWorkspace(home: string, fallbackPath: string): { name: string; path: string } {
     try {
         const file = loadWorkspacesIfPresent(home);
@@ -325,7 +333,7 @@ export function registerMaintainTools(mcpServer: McpServer, deps: MaintainToolsD
                     // workspace's open graph handle is closed before its dir is deleted.
                     // Defect 3 (3.20.2) — scoped to deps.dataHome, not the
                     // process-wide loreHome() default.
-                    workspaces: new WorkspaceRegistry(deps.graphRegistry, deps.dataHome),
+                    workspaces: new WorkspaceRegistry(deps.graphRegistry, deps.dataHome, ephemeralEraseHandles(deps.workspaceVerbatimResolver)),
                     safety: new AlwaysSafe(),
                 }, { dryRun, scopeLabel: 'store:ephemeral-workspaces' });
 

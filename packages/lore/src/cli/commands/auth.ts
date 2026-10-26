@@ -8,10 +8,12 @@
  * Subcommands:
  *
  *   issue --workspace <name> --label <text>
- *         [--scopes read,write,cross-workspace-read,cross-workspace-write]
+ *         [--scopes read,write,review,cross-workspace-read,cross-workspace-write]
  *
  *     Mints a new token bound to <workspace>. Default scopes are
- *     `read,write`. Cross-workspace scopes must be passed explicitly —
+ *     `read,write`. `review` (approve/reject on the table-review queue and
+ *     link proposals) is NOT in the default set and is not implied by
+ *     `write` — pass it explicitly. Cross-workspace scopes must be passed explicitly —
  *     bootstrap-equivalent tokens MUST NOT silently auto-elevate.
  *     The plaintext is printed once; the daemon never stores it
  *     again, only its SHA-256 hash.
@@ -48,6 +50,7 @@ function usage(): string {
         '                       --ephemeral: token expires (default TTL 1h); auto-swept.',
         '                       --ttl: override TTL (e.g. 30m, 1h, 2h, 90s). Implies --ephemeral.',
         '                       --admin: also grant cross-workspace-read+write (operator recovery).',
+        '                       review: approve/reject table-review items and link proposals; never implied by write.',
         '                       Token plaintext is written ONLY to stdout — never to the bootstrap',
         '                       token files (~/.groundfloor/auth.token or lore-local-data/auth.token).',
         '                       Available scopes: ' + ALL_SCOPES.join(', '),

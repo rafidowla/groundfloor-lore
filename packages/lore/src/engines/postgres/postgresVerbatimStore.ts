@@ -82,6 +82,7 @@ import type { VerbatimStoreApi } from '../verbatimStoreApi.js';
 import type { BulkAddResult } from '../verbatimBatch.js';
 import type { VerbatimStoreRole } from '../verbatimStoreRole.js';
 import { assertWritableRole } from '../verbatimStoreRole.js';
+import { VerbatimStoreClosedError, VerbatimStoreNotInitializedError } from '../verbatimStoreClosedError.js';
 import { applyFingerprintOnOpen, stampFingerprint } from '../verbatimFingerprintGate.js';
 import { readFingerprint, readFingerprintOrLegacy } from '../embeddingFingerprint.js';
 import { applyActorScopeFilter } from '../../security/scopeFilter.js';
@@ -92,10 +93,12 @@ import { ReadCache, cacheKey } from '../cache.js';
 import { LocalEmbeddingProvider } from '../../providers/localEmbeddingProvider.js';
 
 import { createPostgresPool, closePostgresPool, type PostgresPoolOptions } from './postgresClient.js';
+import { ensureRekeyed } from './postgresRekey.js';
 import { connectForStartup, runSchemaBootstrap } from './postgresStartup.js';
 import { cachedVerbatimCount, invalidateVerbatimCount, DEFAULT_COUNT_CACHE_TTL_MS } from './postgresVerbatimCount.js';
 import { ensureVerbatimSchema } from './postgresVerbatimSchema.js';
 import { bm25Search as ftsBm25Search, pgFilterSql } from './postgresVerbatim/postgresVerbatimFts.js';
+import { Bm25StopListHolder } from './postgresVerbatim/postgresBm25StopListHolder.js';
 import * as pgHistory from './postgresVerbatim/postgresVerbatimHistory.js';
 import * as pgWrite from './postgresVerbatim/postgresVerbatimWrite.js';
 import * as pgVectorSearch from './postgresVerbatim/postgresVerbatimVectorSearch.js';
@@ -146,6 +149,8 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
      */
     private readonly searchCache: ReadCache;
     private readonly searchInFlight = new Map<string, Promise<unknown>>();
+    /** BM25 common-token stop-list (LORE_BM25_COMMON_TOKEN_RATIO); built in the background, never on the recall path. */
+    private readonly bm25StopList: Bm25StopListHolder;
     private searchCacheEpoch = 0;
     private static readonly SEARCH_CACHE_TTL_MS: number = (() => {
         const raw = process.env.LORE_SEARCH_CACHE_TTL_MS;
@@ -199,6 +204,10 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
         const maxEntries = (rawMax && rawMax.trim() !== '' && Number.isFinite(Number(rawMax)) && Number(rawMax) > 0)
             ? Number(rawMax)
             : 500;
+        this.bm25StopList = new Bm25StopListHolder({
+            pool: () => this.requirePool(), workspaceId, count: () => this.count(), owner: this,
+            isClosed: () => this.closed || !this.initialized, onChanged: () => { this.searchCacheEpoch++; }, log,
+        });
         this.searchCache = new ReadCache({
             maxSize: maxEntries,
             ttlMs: PostgresVerbatimStore.SEARCH_CACHE_TTL_MS,
@@ -239,6 +248,12 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
         if (this.pool) return this.pool;
         this.pool = typeof this.poolOrFactory === 'function' ? this.poolOrFactory() : this.poolOrFactory;
         return this.pool;
+    }
+
+    /** A write on a closed / never-initialized store must throw (applied === false), never resolve as a silent no-op the outbox reads as "replicated". */
+    private assertWritable(method: string): void {
+        if (this.closed) throw new VerbatimStoreClosedError(this.basePath, method);
+        if (!this.initialized) throw new VerbatimStoreNotInitializedError(this.basePath, method);
     }
 
     private requirePool(): Pool {
@@ -316,6 +331,7 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
             ?? (this.embeddingProvider.dimension > 0 ? this.embeddingProvider.dimension : legacyDim);
         await runSchemaBootstrap(pool, { requirePgvector: true },
             (ddlClient) => ensureVerbatimSchema(ddlClient, this.workspaceId, dimension));
+        await ensureRekeyed(pool, this.workspaceId); // one-time name -> permanent-id row rewrite (postgresRekey.ts)
         this.dimension = dimension;
 
         // The SAME fingerprint policy as SqliteVerbatimStore.initialize():
@@ -353,13 +369,14 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     async store(doc: VerbatimDocument): Promise<void> {
         assertWritableRole(this.role, 'store');
-        if (!this.initialized) return;
+        this.assertWritable('store');
         await pgWrite.store(this.writeDeps(), doc);
     }
 
     async storeBatch(docs: VerbatimDocument[]): Promise<void> {
         assertWritableRole(this.role, 'storeBatch');
-        if (!this.initialized || docs.length === 0) return;
+        if (docs.length === 0) return;
+        this.assertWritable('storeBatch');
         await pgWrite.storeBatch(this.writeDeps(), docs);
     }
 
@@ -368,14 +385,14 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
         // J4 — ids are bound as parameters (no Lance WHERE-predicate
         // injection surface), so no id is rejected here; the result shape
         // matches the Lance/SQLite stores'.
-        if (!this.initialized) return { rejectedCount: 0, rejectedIds: [] };
+        this.assertWritable('bulkAddPrebuiltRows');
         await pgWrite.bulkAddPrebuiltRows(this.writeDeps(), rows);
         return { rejectedCount: 0, rejectedIds: [] };
     }
 
     async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
         assertWritableRole(this.role, 'bulkUpsertPrebuiltRows');
-        if (!this.initialized) return;
+        this.assertWritable('bulkUpsertPrebuiltRows');
         await pgWrite.bulkUpsertPrebuiltRows(this.writeDeps(), rows);
     }
 
@@ -385,13 +402,14 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     async physicalDelete(id: string): Promise<void> {
         assertWritableRole(this.role, 'physicalDelete');
-        if (!this.initialized) return;
+        this.assertWritable('physicalDelete');
         await pgWrite.physicalDelete(this.writeDeps(), id);
     }
 
     async physicalDeleteMany(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'physicalDeleteMany');
-        if (!this.initialized) return 0;
+        if (ids.length === 0) return 0;
+        this.assertWritable('physicalDeleteMany');
         return pgWrite.physicalDeleteMany(this.writeDeps(), ids);
     }
 
@@ -399,14 +417,23 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
      *  share the id on this engine, exactly like SQLite). */
     async purgeWithHistory(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'purgeWithHistory');
-        if (!this.initialized) return 0;
+        if (ids.length === 0) return 0;
+        this.assertWritable('purgeWithHistory');
         return pgWrite.purgeRows(this.writeDeps(), ids);
     }
 
     async tombstone(id: string, reason: string): Promise<void> {
         assertWritableRole(this.role, 'tombstone');
-        if (!this.initialized) return;
+        this.assertWritable('tombstone');
         await pgWrite.tombstone(this.writeDeps(), id, reason);
+    }
+
+    /** Batched `tombstone()` (see pgWrite.tombstoneMany): same result, O(chunks) round trips and one batched embed.
+     *  Throws if a chunk fails; `deleteNodesEverywhere` then retries node by node. */
+    async tombstoneMany(ids: string[], reason: string): Promise<void> {
+        assertWritableRole(this.role, 'tombstoneMany');
+        if (!this.initialized) return;
+        await pgWrite.tombstoneMany(this.writeDeps(), ids, reason);
     }
 
     // ---- vector search -----------------------------------------------------
@@ -471,7 +498,7 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
      */
     async searchByVectors(
         queries: Array<{ key: string; vector: number[] }>,
-        opts: { topK: number; filter?: VerbatimQueryFilter; actorScopes?: ReadonlyArray<string> },
+        opts: { topK: number; filter?: VerbatimQueryFilter; actorScopes?: ReadonlyArray<string>; columns?: 'full' | 'link' },
     ): Promise<Map<string, VerbatimSearchResult[]>> {
         if (!this.initialized) return new Map(queries.map((q) => [q.key, []]));
         return pgVectorSearch.searchMany(this.requirePool(), this.workspaceId, queries, opts);
@@ -496,18 +523,38 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
                     .sort(([a], [b]) => a.localeCompare(b)),
             )
             : null;
+        // Resolved before the cache so the key reflects the ratio in force; a missing/stale list is rebuilt in the background.
+        const { stopList, ratio } = await this.bm25StopList.forQuery();
         return this.cachedRead<Bm25Envelope<VerbatimSearchResult>>(
             'verbatim-bm25',
-            { q: query, limit, filter: normFilter, scopes: sortedScopes },
-            () => ftsBm25Search(this.requirePool(), this.workspaceId, query, limit, filter, actorScopes),
+            { q: query, limit, filter: normFilter, scopes: sortedScopes, cr: stopList ? ratio : 0 },
+            () => ftsBm25Search(this.requirePool(), this.workspaceId, query, limit, filter, actorScopes, stopList),
         );
     }
+
+    /** Rebuild the BM25 common-token stop-list when missing/stale (or `force`). Ops/test seam; ensureFtsIndex and compact call it. */
+    async refreshBm25StopList(opts?: { force?: boolean }): Promise<{ built: boolean; commonCount: number }> {
+        if (!this.initialized) return { built: false, commonCount: 0 };
+        return this.bm25StopList.refresh({ force: opts?.force });
+    }
+
+    /** Test/ops seam: wait for the in-flight background stop-list refresh, if any. */
+    async awaitBm25StopListIdle(): Promise<void> { await this.bm25StopList.idle(); }
+
+    /** Test/ops seam: lexemes currently dropped from BM25 queries. */
+    bm25CommonLexemes(): string[] { return this.bm25StopList.commonLexemes(); }
 
     // ---- reads (postgresVerbatimHistory.ts) --------------------------------
 
     async getById(id: string): Promise<VerbatimGetByIdResult | null> {
         if (!this.initialized) return null;
         return pgHistory.getById(this.requirePool(), this.workspaceId, id);
+    }
+
+    /** Batched `getById` (one round trip per chunk; see postgresVerbatimHistory.getByIds). Missing ids are absent from the Map. */
+    async getByIds(ids: string[], opts?: { columns?: 'full' | 'link' }): Promise<Map<string, VerbatimGetByIdResult>> {
+        if (!this.initialized || ids.length === 0) return new Map();
+        return pgHistory.getByIds(this.requirePool(), this.workspaceId, ids, opts);
     }
 
     /** 3.27.0 — which of `ids` have a canonical row (batched getById; nodeDeleteMany). */
@@ -636,6 +683,8 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
     async ensureFtsIndex(_opts?: { minRows?: number; tokenizer?: FtsTokenizerSettings }): Promise<boolean> {
         if (!this.initialized) return false;
         const pool = this.requirePool();
+        // Bulk-ingest finish: refresh the BM25 common-token stop-list if the workspace moved (best-effort, awaited here, never on recall).
+        await this.bm25StopList.refresh().catch((err) => log.error(`[PostgresVerbatimStore] BM25 stop-list refresh failed (non-fatal): ${(err as Error).message}`));
         try {
             const existing = await pool.query(
                 `SELECT 1 FROM pg_indexes
@@ -681,6 +730,7 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
                 await client.query(`VACUUM ANALYZE verbatim_changes_log`);
             }, { owner: this });
             if (!ran.ran) return null;
+            await this.bm25StopList.refresh({ force: true }).catch((err) => log.error(`[PostgresVerbatimStore:compact] BM25 stop-list refresh failed (non-fatal): ${(err as Error).message}`));
             return { fragmentsRemoved: 0, filesRemoved: 0, bytesRemoved: 0, oldVersionsRemoved: 0 };
         } catch (err) {
             log.error(`[PostgresVerbatimStore:compact] best-effort vacuum failed (continuing): ${(err as Error).message}`);

@@ -113,6 +113,8 @@ export interface MigrateEmbeddingModelResult {
      * that residual loss is intentional-but-documented, not silent.
      */
     nonNodeRowsPreserved: number;
+    /** Preserved non-node rows whose re-store FAILED (logged per row). Absent/0 on a clean run. */
+    nonNodeRowsFailed?: number;
     /**
      * True when `shouldAbort` stopped the re-embed sweep early. The new
      * fingerprint is then NOT written, so the on-disk fingerprint still names
@@ -310,6 +312,7 @@ export async function migrateEmbeddingModel(
     //     sweep is no reason to leave store_verbatim content lost as well.
     //     Best-effort per row: one bad row must not lose the rest.
     let nonNodeRowsPreserved = 0;
+    let nonNodeRowsFailed = 0;
     for (const row of preservedRows) {
         try {
             await verbatimStore.store({
@@ -329,7 +332,11 @@ export async function migrateEmbeddingModel(
                 },
             });
             nonNodeRowsPreserved++;
-        } catch { /* best-effort restore — one bad row must not lose the rest */ }
+        } catch (restoreErr) {
+            // Best-effort so one bad row does not lose the rest, but these rows are the ONLY copy: say which one failed and why.
+            nonNodeRowsFailed++;
+            log.error(`[migrateEmbeddingModel] could not restore preserved verbatim row ${row.id} (${(restoreErr as Error).name}): ${(restoreErr as Error).message}`);
+        }
     }
 
     // 2c. An aborted re-embed leaves the table PARTIALLY populated, so the
@@ -349,6 +356,7 @@ export async function migrateEmbeddingModel(
             fingerprintWritten: false,
             completedAt: '',
             nonNodeRowsPreserved,
+            ...(nonNodeRowsFailed ? { nonNodeRowsFailed } : {}),
             aborted: true,
         };
     }
@@ -369,6 +377,7 @@ export async function migrateEmbeddingModel(
         fingerprintWritten: true,
         completedAt: new Date().toISOString(),
         nonNodeRowsPreserved,
+        ...(nonNodeRowsFailed ? { nonNodeRowsFailed } : {}),
     };
     } finally {
         if (!committed) {

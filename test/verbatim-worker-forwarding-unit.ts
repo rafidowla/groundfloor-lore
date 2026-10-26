@@ -62,6 +62,7 @@ const PARENT_SAFE: Record<string, string> = {
     _searchUncached: 'private; reached only via forwarded search()',
     _runVectorSearchUncached: 'private; reached only via forwarded searchByVector()/search()',
     _bm25SearchUncached: 'private; reached only via forwarded bm25Search()',
+    assertWritable: 'private; closed/not-initialized guard called at the top of each write method, so it runs in the CHILD on the real store (d1)',
     writeLane: 'private; the per-path write lane, entered only from forwarded write methods inside the child (3.28.0)',
     stampLegacyFingerprintForReadRole: 'private; called from initialize() inside the child (3.28.0)',
     // Observability / offline tooling: no production caller reaches them through the proxy.

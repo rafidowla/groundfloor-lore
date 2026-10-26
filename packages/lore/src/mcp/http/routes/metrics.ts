@@ -249,6 +249,21 @@ export async function renderMetrics(deps: MetricsDeps): Promise<string> {
                 lines.push('# TYPE lore_link_max_degree gauge');
                 lines.push(fmtLine('lore_link_max_degree', null, ls.health.maxDegree));
             }
+            if (ls.discovery) {
+                const d = ls.discovery;
+                const counter = (name: string, help: string, v: number): void => { lines.push(`# HELP ${name} ${help}`); lines.push(`# TYPE ${name} counter`); lines.push(fmtLine(name, null, v)); };
+                counter('lore_link_discovery_runs_total', 'Links Loop D discovery runs that examined at least one node, all time', d.runs);
+                counter('lore_link_discovery_passes_total', 'Links Loop D discovery passes completed, all time', d.passes);
+                counter('lore_link_discovery_nodes_scanned_total', 'Seed nodes examined by discovery, all time', d.nodesScanned);
+                counter('lore_link_discovery_pairs_scanned_total', 'Candidate pairs examined by discovery, all time', d.pairsScanned);
+                counter('lore_link_discovery_links_added_total', 'New inferred links written by discovery, all time', d.linksAdded);
+                counter('lore_link_discovery_supports_added_total', 'Typed supports edges written by discovery, all time', d.supportsAdded);
+                counter('lore_link_discovery_proposals_raised_total', 'Supersedes/contradicts proposals raised by discovery, all time', d.proposalsRaised);
+                counter('lore_link_discovery_budget_stops_total', 'Discovery runs or judge calls stopped by a budget, all time', d.budgetStops);
+                lines.push('# HELP lore_link_discovery_pending_proposals Typing proposals waiting for accept or reject');
+                lines.push('# TYPE lore_link_discovery_pending_proposals gauge');
+                lines.push(fmtLine('lore_link_discovery_pending_proposals', null, d.pendingProposals));
+            }
             if (ls.rebuild && ls.rebuild.runs.length > 0) {
                 lines.push('# HELP lore_link_rebuild_nodes Link rebuild progress per workspace: nodes walked (done) and to walk (total)');
                 lines.push('# TYPE lore_link_rebuild_nodes gauge');

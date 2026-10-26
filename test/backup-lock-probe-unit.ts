@@ -42,6 +42,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+// Lane f6b: keep the erase lifecycle off the machine's OS keychain in tests.
+(await import('../packages/lore/src/engines/workspaceErase/lifecycle.js')).setLifecycleTestDefaults({ eraserFactory: { keyringEnabled: false } });
+
 let passed = 0;
 let failed = 0;
 const cases: Array<{ name: string; fn: () => Promise<void> | void }> = [];
@@ -319,31 +322,23 @@ test(
 );
 
 test(
-    'T6 (QA round 3): a partial rmSync failure (some siblings removed before a permission-protected '
-    + 'one throws) must never leave the REGISTERED path half-emptied, and a retry clears the sideline',
+    'T6 (QA round 3, lane f6b semantics): a partial removal (some siblings removed before a permission-protected '
+    + 'one throws) never leaves the REGISTERED path half-emptied; the workspace is hidden, its remains are held '
+    + 'under the id-named holding folder, and an erase retry clears them',
     async () => {
-        // Round-3 QA (attack5-partial-rmsync.ts): `fs.rmSync({recursive:true,
-        // force:true})` is not transactional — `force` only swallows a
-        // missing-path error, not a permission error hit partway through the
-        // recursive walk. Pre-fix, `WorkspaceRegistry.delete()` called
-        // `rmSync` directly on the REGISTERED path: several sibling
-        // files/dirs were removed before it reached a permission-protected
-        // subdirectory and threw, leaving the still-registered path
-        // half-emptied on disk — neither present nor gone, contradicting the
-        // round-2 fix's own claim that a failed delete "leaves the workspace
-        // exactly as it was". The fix renames the whole directory aside
-        // atomically first, so the registered path is now either fully
-        // intact (rename never happened) or wholly gone (rename succeeded) —
-        // never half-emptied — and only the sideline copy can end up
-        // partially deleted.
+        // Lane f6b: maintain-delete now runs through the shared delete lifecycle. The data dir is renamed to the
+        // hidden `.erase-hold-<id>` folder in one atomic step (so the registered path is fully intact or wholly
+        // gone, never half-emptied), the durable `deleted` record is written, and the registry entry is removed
+        // at once. The erase then runs; when it cannot finish, the remains stay in the holding folder and the
+        // scheduled erase (or `erase-now`) retries. Legacy `.pending-delete-*` sidelines are still retried by
+        // delete() itself (T8 / T9 below).
         const { createWorkspace, loadWorkspaces } = await import('../packages/lore/src/config/workspaces.js');
         const { WorkspaceRegistry } = await import('../packages/lore/src/engines/maintain/adapters.js');
+        const { readDeletionLog } = await import('../packages/lore/src/config/deletedWorkspaces.js');
+        const { eraseNow } = await import('../packages/lore/src/engines/workspaceErase/tick.js');
 
         const workspacesDir = path.join(root, 'workspaces');
-        const findSideline = (): string | undefined => {
-            const match = fs.readdirSync(workspacesDir).find((e) => e.startsWith('.pending-delete-t6-partial-rmsync-'));
-            return match ? path.join(workspacesDir, match) : undefined;
-        };
+        const holds = (): string[] => fs.readdirSync(workspacesDir).filter((e) => e.startsWith('.erase-hold-'));
 
         const entry = createWorkspace('t6-partial-rmsync', {}, root);
         fs.mkdirSync(path.join(entry.path, 'removable-a'), { recursive: true });
@@ -354,64 +349,39 @@ test(
         fs.writeFileSync(path.join(entry.path, 'zzz-protected', 'inner.txt'), 'c'.repeat(1000));
         fs.chmodSync(path.join(entry.path, 'zzz-protected'), 0o555); // listable, not writable: unlink inside fails EACCES
 
-        let sidelineProtectedDir: string | undefined;
+        const holdsBefore = holds();
+        let heldProtectedDir: string | undefined;
         try {
             const registry = new WorkspaceRegistry(); // CLI path: no graphRegistry wired
-            await assert.rejects(() => registry.delete('t6-partial-rmsync'));
+            await assert.rejects(() => registry.delete('t6-partial-rmsync'), /removal is incomplete/);
 
-            const stillRegistered = loadWorkspaces().workspaces.some((w) => w.name === 't6-partial-rmsync');
-            assert.ok(stillRegistered, 'the registry entry must remain when the physical delete could not fully complete');
+            assert.ok(!loadWorkspaces().workspaces.some((w) => w.name === 't6-partial-rmsync'),
+                'the workspace is hidden at once: its registry entry is gone even though the erase could not finish');
+            assert.equal(fs.existsSync(entry.path), false, 'the registered path is wholly gone (atomic rename), never half-emptied');
 
-            // The core assertion: the REGISTERED path is either fully intact
-            // or wholly gone — never half-emptied. It must NOT exist with
-            // only some of its original children (the pre-fix failure mode).
-            const registeredPathExists = fs.existsSync(entry.path);
-            if (registeredPathExists) {
-                assert.deepEqual(
-                    fs.readdirSync(entry.path).sort(),
-                    ['removable-a', 'removable-b', 'zzz-protected'],
-                    'if the registered path still exists, ALL of its original children must still be there — not partially emptied',
-                );
-            }
-            // With this fixture (rename always succeeds; only the sideline
-            // rmSync can fail on the protected subdir), the registered path
-            // is expected to be wholly gone, not merely "if present, intact".
-            assert.equal(registeredPathExists, false, 'the registered path must be wholly gone once the atomic rename to a sideline succeeded');
+            const rec = [...readDeletionLog(root).byId.values()].find((st) => st.deletion?.name === 't6-partial-rmsync');
+            assert.ok(rec?.deletion, 'a durable deletion record was written before the registry entry was removed');
+            const heldPath = rec!.deletion!.holdingPath!;
+            assert.equal(path.basename(heldPath), `.erase-hold-${rec!.deletion!.id}`, 'the holding folder carries the permanent id');
+            assert.ok(!holdsBefore.includes(path.basename(heldPath)));
+            heldProtectedDir = path.join(heldPath, 'zzz-protected');
+            assert.ok(fs.existsSync(heldProtectedDir), 'the protected subdir (the reason the removal failed) survives in the holding folder');
+            assert.ok(!fs.existsSync(path.join(heldPath, 'removable-a')), 'the removable siblings were already cleared by the failed pass');
+            assert.equal(rec!.lastErased?.status, 'partial', 'the receipt says partial, never complete');
+            assert.equal(rec!.completedErase, undefined, 'no complete receipt exists');
 
-            // The sideline copy — not the registered path — is where the
-            // partial deletion is allowed to have happened.
-            const sideline = findSideline();
-            assert.ok(sideline, 'a sideline directory must exist for a later maintain pass to retry');
-            sidelineProtectedDir = path.join(sideline!, 'zzz-protected');
-            assert.ok(fs.existsSync(sidelineProtectedDir), 'the protected subdir (the reason rmSync failed) must survive inside the sideline');
-            assert.ok(!fs.existsSync(path.join(sideline!, 'removable-a')), 'removable-a was already cleared out of the sideline by the failed rmSync pass');
-
-            // A subsequent maintain pass retries the same name and finds the
-            // leftover sideline directory rather than throwing ENOENT trying
-            // to rename an already-vanished registered path.
-            await assert.rejects(
-                () => registry.delete('t6-partial-rmsync'),
-                /cleanup is still incomplete/,
-                'a retry must target the leftover sideline directory, not fail trying to re-rename a vanished path',
-            );
-            const stillRegisteredAfterRetry = loadWorkspaces().workspaces.some((w) => w.name === 't6-partial-rmsync');
-            assert.ok(stillRegisteredAfterRetry, 'the registry entry must still remain after a retry that also cannot fully clear the sideline');
-            assert.equal(findSideline(), sideline, 'the retry must reuse the SAME sideline directory, not create another one');
+            // Fix permissions, then retry: the erase finishes, nothing is left, the receipt is complete.
+            fs.chmodSync(heldProtectedDir, 0o700);
+            const out = await eraseNow(rec!.deletion!.id, { home: root, eraserFactory: { keyringEnabled: false } });
+            assert.equal(out.kind, 'complete', 'the retry completes the erase');
+            assert.equal(fs.existsSync(heldPath), false, 'the holding folder is fully cleared');
+            assert.ok(readDeletionLog(root).byId.get(rec!.deletion!.id)?.completedErase, 'a complete receipt now exists');
+            heldProtectedDir = undefined;
         } finally {
-            if (sidelineProtectedDir) {
-                try { fs.chmodSync(sidelineProtectedDir, 0o700); } catch { /* already cleared */ }
+            if (heldProtectedDir) {
+                try { fs.chmodSync(heldProtectedDir, 0o700); } catch { /* already cleared */ }
             }
         }
-
-        // Once permissions are fixed, a further retry fully clears the
-        // sideline and deregisters — nothing is stuck forever.
-        const registry2 = new (await import('../packages/lore/src/engines/maintain/adapters.js')).WorkspaceRegistry();
-        const result = await registry2.delete('t6-partial-rmsync');
-        assert.ok(result.bytesFreed >= 0);
-        assert.ok(!fs.existsSync(entry.path), 'the workspace directory is gone once cleanup is retried after permissions are fixed');
-        assert.equal(findSideline(), undefined, 'the sideline directory is fully cleared once cleanup finally succeeds');
-        const stillRegisteredFinal = loadWorkspaces().workspaces.some((w) => w.name === 't6-partial-rmsync');
-        assert.ok(!stillRegisteredFinal, 'the registry entry is finally removed once the sideline is fully cleared');
     },
 );
 

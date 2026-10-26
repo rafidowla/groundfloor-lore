@@ -365,6 +365,32 @@ export async function deleteNode(pool: Pool, workspaceId: string, id: string): P
 }
 
 /**
+ * deleteNodes — `deleteNode` for many ids in ONE transaction (one commit instead of one per node; on a real disk the
+ * per-node commit flush, not the SQL, is what a 10k-node delete spends its time on). Same effect per id: its link opt-out,
+ * every edge touching it (soft-invalidated included) and the node go. Returns the ids that existed. All-or-nothing: a
+ * failure rolls the whole call back and throws (callers fall back to the per-node path).
+ */
+export async function deleteNodes(pool: Pool, workspaceId: string, ids: string[]): Promise<Set<string>> {
+    const unique = [...new Set(ids)];
+    if (unique.length === 0) return new Set();
+    try {
+        return await withTransaction(pool, async (client) => {
+            await client.query(`DELETE FROM link_optout WHERE ${WS} = $1 AND node_id = ANY($2::text[])`, [workspaceId, unique]);
+            const found = await client.query(`SELECT id, sk FROM nodes WHERE ${WS} = $1 AND id = ANY($2::text[])`, [workspaceId, unique]);
+            const rows = found.rows as Array<{ id: string; sk: string }>;
+            if (rows.length === 0) return new Set<string>();
+            const sks = rows.map((r) => r.sk);
+            await client.query(`DELETE FROM edges WHERE ${WS} = $1 AND src_sk = ANY($2::bigint[])`, [workspaceId, sks]);
+            await client.query(`DELETE FROM edges WHERE dst_sk = ANY($2::bigint[]) AND ${WS} = $1`, [workspaceId, sks]);
+            await client.query(`DELETE FROM nodes WHERE ${WS} = $1 AND id = ANY($2::text[])`, [workspaceId, rows.map((r) => r.id)]);
+            return new Set(rows.map((r) => r.id));
+        });
+    } catch (error) {
+        throw pgError(`Failed to delete ${unique.length} nodes`, 'deleteNodes', error);
+    }
+}
+
+/**
  * addEdge — create or update a directed relation for the (source, target,
  * relation) triple. Missing endpoints fail loudly (NW-BULK), same as
  * SurrealGraph/SqliteGraph. `ON CONFLICT ... DO UPDATE` is the native

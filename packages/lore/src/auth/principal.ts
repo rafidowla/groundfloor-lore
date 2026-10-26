@@ -122,6 +122,36 @@ export function requireWriteToWorkspace(
 }
 
 /**
+ * Require the ACT ("review") permission against `requestedWorkspace`. The
+ * principal MUST hold the `review` scope — `write` alone is NOT enough, and
+ * `review` alone does not grant write. A target that differs from the
+ * principal's bound workspace additionally requires `cross-workspace-write`
+ * (acting on another workspace's queue is a cross-workspace mutation).
+ * `'*'` is never a valid act target.
+ */
+export function requireReviewToWorkspace(
+    principal: Principal | null,
+    requestedWorkspace: string | undefined,
+): ScopeOutcome {
+    if (!principal) return { ok: false, status: 401, code: 'auth_required' };
+    if (!principal.scopes.includes('review')) {
+        return { ok: false, status: 403, code: 'scope_missing', reason: "token lacks 'review' scope" };
+    }
+    const target = requestedWorkspace ?? principal.workspace;
+    if (target !== principal.workspace) {
+        if (!principal.scopes.includes('cross-workspace-write')) {
+            return {
+                ok: false,
+                status: 403,
+                code: 'workspace_forbidden',
+                reason: `token is scoped to workspace "${principal.workspace}", cannot review in "${target}" (missing 'cross-workspace-write' scope)`,
+            };
+        }
+    }
+    return { ok: true };
+}
+
+/**
  * Require read access. `'*'` means "every workspace" and ALWAYS
  * requires `cross-workspace-read`. A targeted workspace name that
  * doesn't match the principal's bound workspace also requires

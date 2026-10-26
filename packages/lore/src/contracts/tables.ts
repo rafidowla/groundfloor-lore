@@ -34,7 +34,19 @@ export type ColumnType =
     | 'boolean'
     | 'date'      // ISO 8601 date string (YYYY-MM-DD)
     | 'datetime'  // ISO 8601 with time
-    | 'json';     // arbitrary JSON; adapter stores as JSONB / VARCHAR
+    | 'json'      // arbitrary JSON; adapter stores as JSONB / VARCHAR
+    | 'money';    // { amount, currency } - Postgres tables only (Tables P1 slice 2); SQLite refuses it
+
+/**
+ * MoneyValue — the read/write shape of a `money` column: an exact decimal `amount`
+ * (a string, never a JS float) and an ISO-4217-style three-letter `currency`.
+ * Money in different currencies is never summed or compared silently - see
+ * `MixedCurrencyError` (engines/postgres/postgresTableErrors.ts).
+ */
+export interface MoneyValue {
+    amount: string;
+    currency: string;
+}
 
 /**
  * ColumnDecl — one column in a table.

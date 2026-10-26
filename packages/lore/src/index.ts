@@ -143,6 +143,13 @@ export type {
     EmbeddedIngestionOption, EmbeddedIngestionOptions, EmbeddedIngestionScheduler, EmbeddedIngestionCallback, IngestionHandle, IngestionApi,
 } from './mcp/embeddedIngestionTypes.js';
 export type { LinkOnArrivalOption } from './link/createLinkService.js';
+// Links Loop D (discovery + relation typing; OFF by default): option type, proposals and typing-log shapes (LinkService.listProposals / acceptProposal / rejectProposal).
+export type { LinkDiscoveryOption, LinkDiscoveryConfig } from './link/discoveryConfig.js';
+export type { LinkProposal, ProposalFilter, ProposalKind, ProposalStatus, TypingLogEntry } from './link/proposalStore.js';
+export type { DecideOutcome, DecideOptions } from './link/discoveryAccept.js';
+export type { DiscoveryRunResult, DiscoveryStats } from './link/discoveryRunner.js';
+export type { IRelationTyper, RelationCandidate, RelationVerdict } from './link/relationTyper.js';
+export type { RecallRelatedOption } from './recall/relatedLimits.js';
 export type { IngestionCoordinator, EnqueueFileArgs, StructureSpec, RunSummary } from './ingestion/coordinator.js';
 export type { IngestionJob, SourceRecord, JobState } from './ingestion/store.js';
 // getVectors (3.27.1) - engine-neutral stored-embedding read; throws GetVectorsUnsupportedError on a cloud workspace.

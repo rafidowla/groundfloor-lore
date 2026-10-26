@@ -23,6 +23,8 @@ import * as verbatimHistory from './verbatimHistory.js';
 import { assertSafeLanceId, assertSafeLanceHash, isRevisionHistoryId, HISTORY_ID_LIKE_PATTERN, toPlainVector as toPlainVectorShared, toPlainStringList as toPlainStringListShared } from './verbatimHistory.js';
 import { redactSecrets } from '../security/secretScan.js';
 import * as verbatimBatch from './verbatimBatch.js';
+import { assertLanceWritable } from './lanceWriteGuard.js';
+import { isVerbatimStoreNotInitializedError } from './verbatimStoreClosedError.js';
 import { purgeRowsWithHistory, existingIdsInTable, deleteExistingIds } from './verbatimPurgeRows.js';
 import type { VerbatimBatchCtx, BulkAddResult } from './verbatimBatch.js';
 import { VERBATIM_CHUNK_SIZE, suppliedVector } from './verbatimBatch.js';
@@ -96,16 +98,19 @@ export class VerbatimStoreError extends Error {
 /** H1 (3.28.0 review): a write queued on the per-path lane ran AFTER its store's close() released the
  *  handles. It did not run; no row changed. Distinct type so callers can tell it from an I/O failure. */
 export class VerbatimStoreClosedError extends VerbatimStoreError {
+    /** Always false: the write was rejected BEFORE it ran (the outbox treats it as transient). */
+    readonly applied = false as const;
     constructor(operation: string) {
         super('closed', `${operation}: the store was closed before this queued write ran; nothing was written`);
         this.name = 'VerbatimStoreClosedError';
     }
 }
 const rethrowAs = (operation: string, error: unknown): VerbatimStoreError =>
-    error instanceof VerbatimStoreClosedError ? error : new VerbatimStoreError(operation, (error as Error).message);
+    error instanceof VerbatimStoreClosedError || isVerbatimStoreNotInitializedError(error) ? error as VerbatimStoreError : new VerbatimStoreError(operation, (error as Error).message);
 
 export class VerbatimStore implements VectorProvider {
     private initialized: boolean = false;
+    private closing: boolean = false; // true from the start of close() until initialize() reconnects: a write then throws Closed, not NotInitialized
     private handlesReleased: boolean = false; // set once close() has decided the handles are gone; queued lane writes then reject
     private db: lancedb.Connection | null = null;
     private table: lancedb.Table | null = null;
@@ -448,6 +453,8 @@ export class VerbatimStore implements VectorProvider {
      * duplicate (verified, stale-handle probe). The refresh also covers a
      * table another writer created after this store opened with none.
      */
+    /** Throws a typed error (applied === false) unless the store is open; see lanceWriteGuard.ts. */
+    private assertWritable(method: string): void { assertLanceWritable({ initialized: this.initialized, db: this.db, closed: this.closing }, this.lancedbPath, method, () => new VerbatimStoreClosedError(method)); }
     private writeLane<T>(fn: () => Promise<T>): Promise<T> {
         return this.writeGate.exclusive(async () => {
             // H1: a write that reaches the lane after close() released this store must REJECT, never no-op as success.
@@ -483,11 +490,11 @@ export class VerbatimStore implements VectorProvider {
             if (this.initialized) return;
             // Best-effort embedder warm-up (non-fatal; retried on first embed).
             await warmEmbeddingProvider(this.embeddingProvider, '[VerbatimStore]');
-            this.db = await lancedb.connect(this.lancedbPath); this.nativesClosed = false; this.handlesReleased = false; // reconnect => close() runs again
+            this.db = await lancedb.connect(this.lancedbPath); this.nativesClosed = false; this.handlesReleased = false; this.closing = false; // reconnect => close() runs again
             try {
                 this.table = shouldOpenWriteTable(this.role) ? await this.db.openTable('lore_verbatim') : null; // role:'read' skips this open
-            } catch (e) {
-                // Table doesn't exist yet; it will be created on first store()
+            } catch (e) { // Table doesn't exist yet (created on first store()); any OTHER failure is logged, not hidden
+                if (!/not found|does not exist|no such table/i.test((e as Error)?.message ?? '')) log.warn(`[VerbatimStore] openTable failed (${(e as Error)?.name}): ${(e as Error)?.message}; treating as no table`);
                 this.table = null;
             }
             // Embedding-model fingerprint check at open: legacy stamp, then
@@ -679,7 +686,7 @@ export class VerbatimStore implements VectorProvider {
      * wired in mcp/server.ts. NOT a hot-path API — bulk loads only.
      */
     async bulkAddPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<BulkAddResult> {
-        assertWritableRole(this.role, 'bulkAddPrebuiltRows');
+        assertWritableRole(this.role, 'bulkAddPrebuiltRows'); this.assertWritable('bulkAddPrebuiltRows');
         const result = await this.writeGate.run(() => this.writeLane(() => verbatimBatch.bulkAddPrebuiltRows(this.batchCtx, rows)));
         // D7 (3.23) — best-effort piece maintenance; bulk-loaded rows carry
         // no redaction step upstream (Sprint Z2 skip-embed contract), so
@@ -705,7 +712,7 @@ export class VerbatimStore implements VectorProvider {
      * large batch does not build an unbounded predicate / payload.
      */
     async bulkUpsertPrebuiltRows(rows: Array<Record<string, unknown>>): Promise<void> {
-        assertWritableRole(this.role, 'bulkUpsertPrebuiltRows');
+        assertWritableRole(this.role, 'bulkUpsertPrebuiltRows'); this.assertWritable('bulkUpsertPrebuiltRows');
         await this.writeGate.run(() => this.writeLane(() => verbatimBatch.bulkUpsertPrebuiltRows(this.batchCtx, rows)));
         await this.pieceIndex.upsertForRows(rows as unknown as PieceSourceRow[]);
     }
@@ -954,9 +961,7 @@ export class VerbatimStore implements VectorProvider {
         if (isEmbeddingDisabled(this.embeddingProvider)) return;
         assertWritableRole(this.role, 'store'); // must not be rewrapped below
         this.writeGate.enter(); try {
-            if (!this.initialized || !this.db) {
-                throw new Error('Store not initialized');
-            }
+            this.assertWritable('store');
             const rawText = doc.text;
             doc.text = redactSecrets(doc.text); // 2.6 — screen secrets before embed/persist
             const wasRedacted = doc.text !== rawText;
@@ -1105,7 +1110,7 @@ export class VerbatimStore implements VectorProvider {
         // this ONE guard covers "bulkIngest with embed:'sync'/'async'
         // degrades to no-vector, never errors" for every one of them.
         if (isEmbeddingDisabled(this.embeddingProvider)) return;
-        assertWritableRole(this.role, 'storeBatch'); if (!this.initialized || !this.db) throw new Error('Store not initialized');
+        assertWritableRole(this.role, 'storeBatch'); this.assertWritable('storeBatch');
         if (docs.length === 0) return;
         this.writeGate.enter(); try {
         const redactedIds = redactBatch(docs); // 2.6 — screen secrets (ids whose text changed are never skipped)
@@ -1539,7 +1544,7 @@ export class VerbatimStore implements VectorProvider {
     async physicalDelete(id: string): Promise<void> {
         assertWritableRole(this.role, 'physicalDelete'); assertSafeLanceId(id, 'physicalDelete'); // D2-inj-1: guard id before WHERE interpolation, mirroring physicalDeleteMany/tombstone — outside try so validation errors propagate
         this.writeGate.enter(); try {
-            if (!this.initialized || !this.db) return; // table may be null here: another writer can have created it since we opened (writeLane refreshes)
+            this.assertWritable('physicalDelete'); // table may be null below: another writer can have created it since we opened (writeLane refreshes)
             await this.writeLane(async () => { // ordered with overlapping writes (3.28.0)
                 if (!this.table) return;
                 await this.table.delete(`id = '${id.replace(/'/g, "''")}'`);
@@ -1565,7 +1570,7 @@ export class VerbatimStore implements VectorProvider {
      * something was actually deleted.
      */
     async physicalDeleteMany(ids: string[]): Promise<number> {
-        assertWritableRole(this.role, 'physicalDeleteMany'); if (!this.initialized || !this.db || ids.length === 0) return 0;
+        assertWritableRole(this.role, 'physicalDeleteMany'); if (ids.length === 0) return 0; this.assertWritable('physicalDeleteMany');
         // SP-25 F2: reject oversized ids before building the IN predicate.
         // 512 chars is generous for any legitimate lore: / sha-style id.
         const MAX_ID_LEN = 512;
@@ -1606,7 +1611,7 @@ export class VerbatimStore implements VectorProvider {
      *  3.27.1 — no-op replay: no version, no epoch bump, guarded piece delete (verbatimPurgeRows.ts). */
     async purgeWithHistory(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'purgeWithHistory');
-        if (!this.initialized || !this.db || ids.length === 0) return 0;
+        if (ids.length === 0) return 0; this.assertWritable('purgeWithHistory');
         ids.forEach((id) => assertSafeLanceId(id, 'purgeWithHistory')); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
         this.writeGate.enter(); try {
             const all = await this.writeLane(async () => (this.table ? purgeRowsWithHistory(this.table, ids, VERBATIM_CHUNK_SIZE) : [])); // ordered with overlapping writes (3.28.0)
@@ -1694,7 +1699,7 @@ export class VerbatimStore implements VectorProvider {
     async tombstone(id: string, reason: string, pre?: { ts: string; vector: number[] }): Promise<void> {
         assertWritableRole(this.role, 'tombstone'); assertSafeLanceId(id, 'tombstone'); // SECURITY: assertSafeLanceId — outside try so validation errors propagate
         this.writeGate.enter(); try {
-            if (!this.initialized || !this.db) return;
+            this.assertWritable('tombstone');
             if (this.isHistoryId(id)) return; // never tombstone a snapshot
             // Read-check-write under the store write mutex (3.28.0): an overlapping
             // store()/storeBatch() otherwise interleaves with the snapshot + upsert.
@@ -1762,14 +1767,10 @@ export class VerbatimStore implements VectorProvider {
             // so its pieces must also drop out of piece search.
             await this.pieceIndex.deleteForIds([id]);
         } catch (error) {
-            // 1.M10 (2026-08-17 audit) — was a bare `catch {}`: every failure
-            // (LanceDB IO, embed provider down) was swallowed while callers
-            // (delete_node, POST /api/verbatim/tombstone, prune_nodes,
-            // bulk-delete, reap, auto-archive) reported success for a delete
-            // that never happened. Propagate, mirroring physicalDelete's
-            // VerbatimStoreError contract. The graceful no-op cases (store
-            // not initialized, row absent, already tombstoned, history id)
-            // still return normally above.
+            // 1.M10 (2026-08-17 audit): was a bare `catch {}` that swallowed every failure while callers reported
+            // success for a delete that never happened. Propagate. A store that is closed / never initialized
+            // now throws a typed error (assertWritable above) instead of returning; row absent, already
+            // tombstoned and history ids still return normally.
             throw rethrowAs('tombstone', error);
         } finally { this.writeGate.exit(); }
     }
@@ -2120,7 +2121,7 @@ export class VerbatimStore implements VectorProvider {
     async close(): Promise<void> {
         if (this.nativesClosed) return;
         try {
-            this.initialized = false;
+            this.initialized = false; this.closing = true;
             const nativeClose = nativeCloseEnabled();
             const drained = nativeClose ? await this.writeGate.drain(closeDrainTimeoutMs(), `VerbatimStore(${this.lancedbPath})`) : true;
             this.handlesReleased = true; // from here a write still queued on the lane rejects (H1)

@@ -3,7 +3,7 @@
  *
  * Issue, lookup, list, and revoke tokens that bind a connected app
  * (Claude Code, Antigravity, Loom, …) to a specific workspace. Each
- * token also carries a scope set (`read`, `write`, optionally
+ * token also carries a scope set (`read`, `write`, optionally `review`,
  * `cross-workspace-read` / `cross-workspace-write`) so an operator can
  * mint a token that's powerful enough for an integration without
  * granting daemon-wide control.
@@ -34,14 +34,22 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { loreHome, loreHomePath } from '../config/loreHome.js';
 
+/**
+ * `review` is the ACT permission for the review surfaces (table review queue
+ * and link-proposal accept/reject). It is deliberately NOT implied by `write`
+ * (and `write` is not implied by it): approving or rejecting what the system
+ * proposed is a separate human decision from writing data. Viewing those
+ * queues uses the ordinary `read` scope.
+ */
 export type TokenScope =
     | 'read'
     | 'write'
+    | 'review'
     | 'cross-workspace-read'
     | 'cross-workspace-write';
 
 export const ALL_SCOPES: ReadonlyArray<TokenScope> = Object.freeze([
-    'read', 'write', 'cross-workspace-read', 'cross-workspace-write',
+    'read', 'write', 'review', 'cross-workspace-read', 'cross-workspace-write',
 ]);
 
 export interface TokenRecord {

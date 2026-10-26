@@ -35,6 +35,7 @@
  */
 
 import { VerbatimStore } from '../engines/verbatimStore.js';
+import { VerbatimResolverSealedError } from '../engines/verbatimStoreClosedError.js';
 import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import { VerbatimSearchWorkerProxy, resolveSearchWorkerIsolation, type SearchWorkerPolicy } from '../engines/verbatimSearchWorkerProxy.js';
 import { openWorkspaceVerbatim, resolveVerbatimEngineForPath } from '../engines/openWorkspaceVerbatim.js';
@@ -108,6 +109,11 @@ export class WorkspaceVerbatimResolver {
     private readonly now: () => number;
     /** Background idle-eviction timer (when constructed with autoEvict). */
     private sweepTimer: NodeJS.Timeout | null = null;
+    /** Set by closeAll() BEFORE it closes anything and never cleared: a resolver is single-lifecycle. Once sealed,
+     *  getOrOpen / swapToLance / prime / startEvictionSweep open nothing (see closeAll()). */
+    private sealed = false;
+    /** In-flight opens and promotion swaps; closeAll() waits for them so none lands an untracked handle. */
+    private readonly pendingOps = new Set<Promise<unknown>>();
     private guardrails: WorkspaceVerbatimResolverGuardrails = {};
     /** TW-2a-class fix (STEP2-CLOSE-PATH-DESIGN.md (e)) — instance-scoped Lore
      *  data root, threaded into every getWorkspacePath() call the same way
@@ -202,7 +208,7 @@ export class WorkspaceVerbatimResolver {
      *  Idempotent; the timer is unref()'d so it never holds the process
      *  open. Mirrors LocalGraphRegistry.startEvictionSweep(). */
     startEvictionSweep(): void {
-        if (this.sweepTimer) return;
+        if (this.sweepTimer || this.sealed) return;
         const t = setInterval(() => { void this.evictIdle(this.now(), IDLE_TTL_MS); }, SWEEP_INTERVAL_MS);
         if (typeof t.unref === 'function') t.unref();
         this.sweepTimer = t;
@@ -223,6 +229,7 @@ export class WorkspaceVerbatimResolver {
      * is not registered (a later getOrOpen throws the same error).
      */
     prime(workspace: string, store: VerbatimStoreApi): void {
+        if (this.sealed) return;
         let resolvedPath: string;
         try {
             resolvedPath = getWorkspacePath(workspace, this.home);
@@ -251,6 +258,9 @@ export class WorkspaceVerbatimResolver {
         // Wave 4.1 — substrate chokepoint (same contract as
         // LocalGraphRegistry.getOrOpen). The outbox replicator calls this from
         // its own timer chain (no request slot) → allowed, unchanged.
+        // Sealed at shutdown (closeAll): refuse before ANY lookup so neither a cache miss, an idle-evicted reopen nor a
+        // forwarded retired read/write can reopen a store the drain just closed.
+        if (this.sealed) throw new VerbatimResolverSealedError(workspace);
         assertWorkspaceOpenAllowed(workspace);
         const touch = opts.touch !== false;
         const resolvedPath = getWorkspacePath(workspace, this.home);
@@ -304,7 +314,18 @@ export class WorkspaceVerbatimResolver {
                     // holds for the workspace AFTER the swap (never the retired instance itself).
                     resolveSuccessor: () => this.getOrOpen(workspace, { touch: false }),
                 });
-            await store.initialize();
+            try {
+                await store.initialize();
+            } catch (err) {
+                if (this.sealed) await this.closeQuietly(store);
+                throw err;
+            }
+            // closeAll() ran while this open was in flight: it cannot see an entry that is not tracked yet, so this
+            // open closes its own handle and reports the seal instead of landing an opened-but-untracked store.
+            if (this.sealed) {
+                await this.closeQuietly(store);
+                throw new VerbatimResolverSealedError(workspace);
+            }
             // Background open (touch:false): stale sentinel, not `this.now()`
             // — mirrors LocalGraphRegistry's matching fix. A maintenance
             // fan-out reopening an evicted/never-opened workspace must not
@@ -314,10 +335,24 @@ export class WorkspaceVerbatimResolver {
             return store;
         })();
         this.inflight.set(resolvedPath, opening);
+        this.pendingOps.add(opening);
         try {
             return await opening;
         } finally {
             this.inflight.delete(resolvedPath);
+            this.pendingOps.delete(opening);
+        }
+    }
+
+    /** True once closeAll() has sealed this resolver. */
+    isSealed(): boolean {
+        return this.sealed;
+    }
+
+    private async closeQuietly(store: unknown): Promise<void> {
+        const closable = store as { close?: () => Promise<void> | void };
+        if (typeof closable.close === 'function') {
+            try { await closable.close(); } catch { /* best-effort */ }
         }
     }
 
@@ -347,6 +382,13 @@ export class WorkspaceVerbatimResolver {
      * right engine on its own, with nothing to swap.
      */
     async swapToLance(workspace: string): Promise<void> {
+        if (this.sealed) return; // sealed at shutdown: a promotion opens nothing; the boot-owned instance is closed by the drain
+        const run = this.swapToLanceInner(workspace);
+        this.pendingOps.add(run);
+        try { await run; } finally { this.pendingOps.delete(run); }
+    }
+
+    private async swapToLanceInner(workspace: string): Promise<void> {
         let resolvedPath: string;
         try {
             resolvedPath = getWorkspacePath(workspace, this.home);
@@ -372,7 +414,8 @@ export class WorkspaceVerbatimResolver {
         // Re-check after the await: only swap if the entry is still the
         // SAME one we decided to promote (a concurrent evictIdle/
         // closeWorkspace/another swap could have already replaced it).
-        if (old !== entry) {
+        // A closeAll() meanwhile also lands here (it cleared the map): `fresh` is closed, never tracked.
+        if (this.sealed || old !== entry) {
             const closable = fresh as unknown as { close?: () => Promise<void> | void };
             if (typeof closable.close === 'function') {
                 try { await closable.close(); } catch { /* best-effort */ }
@@ -380,7 +423,14 @@ export class WorkspaceVerbatimResolver {
             return;
         }
         this.byPath.set(resolvedPath, { store: fresh, lastAccessedAt: entry.lastAccessedAt, names: entry.names });
-        log.info(`[WorkspaceVerbatimResolver] swapped "${workspace}" to its promoted LanceDB store.`);
+        // D7 - a PINNED entry is the daemon's boot store: other holders (server.ts, routes, the shutdown drain)
+        // still reference that instance, so it is NOT closed here (closing it mid-write would turn their writes into
+        // Closed errors and their reads into empty results). It stays open but retired: SqliteVerbatimStore rejects
+        // (or replays on this resolver's current store) every write that reaches it, and the shutdown drain closes it.
+        // The promoted store is resolver-owned from now on, so the path is unpinned: closeAll()/idle eviction own it.
+        const bootOwned = this.pinnedPaths.delete(resolvedPath);
+        log.info(`[WorkspaceVerbatimResolver] swapped "${workspace}" to its promoted LanceDB store${bootOwned ? ' (boot-owned SQLite instance left open and retired)' : ''}.`);
+        if (bootOwned) return;
         const closable = entry.store as unknown as { close?: () => Promise<void> | void };
         if (typeof closable.close === 'function') {
             try { await closable.close(); } catch { /* best-effort */ }
@@ -486,9 +536,24 @@ export class WorkspaceVerbatimResolver {
      * runtime eviction, so the guardrail does not apply here (the daemon
      * is exiting either way; the (a) write-drain inside close() itself is
      * what keeps this safe for any in-flight write).
+     *
+     * SEALS the resolver (single-lifecycle, f5): afterwards getOrOpen throws
+     * {@link VerbatimResolverSealedError} and swapToLance/prime/startEvictionSweep
+     * do nothing, so a read/write forwarded from the retired boot store (or an
+     * idle-eviction reopen) during the shutdown window cannot reopen a store.
+     * Opens in flight when this runs close their own handle; this waits for them.
+     * Nothing legitimately reuses a resolver after closeAll: the daemon exits after
+     * the drain, and each embedded createLore() builds a fresh resolver.
      */
     async closeAll(): Promise<void> {
+        // Seal FIRST (synchronously, before any await): from here on getOrOpen / swapToLance / prime refuse, so a
+        // read or write forwarded from the retired boot store during the shutdown window cannot reopen a store.
+        // Idempotent: a second drain just re-runs the (now empty) close.
+        this.sealed = true;
         this.stopEvictionSweep();
+        // Opens and swaps already in flight see the seal when their initialize() returns, close their own handle and
+        // reject; wait for them so none is still opening (or landing an untracked store) after closeAll resolves.
+        while (this.pendingOps.size > 0) await Promise.allSettled([...this.pendingOps]);
         for (const [p, entry] of this.byPath.entries()) {
             if (this.pinnedPaths.has(p)) continue;
             const closable = entry.store as unknown as { close?: () => Promise<void> | void };
@@ -498,5 +563,6 @@ export class WorkspaceVerbatimResolver {
         }
         this.byPath.clear();
         this.inflight.clear();
+        this.pinnedPaths.clear();
     }
 }

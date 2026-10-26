@@ -20,6 +20,11 @@ import { createHash } from 'node:crypto';
 
 export type JobStage = 'extract' | 'structure';
 export type JobState = 'queued' | 'running' | 'awaiting_callback' | 'succeeded' | 'failed' | 'dead_letter';
+/**
+ * Job states that will never run again on their own. (`dead_letter` can be re-queued by an operator, which then needs the
+ * blob: a purged one fails permanently with a "re-upload the file" message.) There is no 'cancelled' state.
+ */
+export const TERMINAL_JOB_STATES: readonly JobState[] = ['succeeded', 'failed', 'dead_letter'];
 
 export interface SourceRecord {
     sourceId: string;
@@ -31,6 +36,11 @@ export interface SourceRecord {
     /** Opaque reference to where the bytes live (path or object key). Never exposed to processors. */
     storageRef: string;
     createdAt: string;
+    /**
+     * Set when the blob behind `storageRef` was removed by blob retention (see {@link IIngestionStore.claimBlobPurge}).
+     * The row itself is never deleted. Re-uploading the same bytes stores a new blob and clears this.
+     */
+    blobPurgedAt: string | null;
 }
 
 export interface IngestionJob {
@@ -125,11 +135,15 @@ export function resolvePurge(now: Date, o: PurgeDeliveriesOptions = {}): { cutof
     return { cutoff: new Date(now.getTime() - days * 86_400_000), limit };
 }
 
+/** `workspace` is the id scope: the workspace name for per-workspace stores, the permanent id for shared (Postgres) stores. */
 export function makeSourceId(workspace: string, sha256: string): string {
     return 'src_' + createHash('sha256').update(`${workspace}\0${sha256}`).digest('hex').slice(0, 32);
 }
 
-/** Same workspace + source + stage + processor + contract + params => same id. */
+/**
+ * Same workspace + source + stage + processor + contract + params => same id. `workspace` is the id scope (see
+ * {@link makeSourceId}): a store that shares one job-id namespace across workspaces must pass something that is never reused.
+ */
 export function makeJobId(j: Pick<NewJob, 'workspace' | 'sourceId' | 'stage' | 'processorId' | 'contractVersion'> & { params?: Record<string, unknown>; parentJobId?: string | null }): string {
     const h = createHash('sha256');
     h.update([j.workspace, j.sourceId, j.stage, j.processorId, j.contractVersion, j.parentJobId ?? '', stableJson(j.params ?? {})].join('\0'));
@@ -147,9 +161,41 @@ export function stableJson(v: unknown): string {
 }
 
 export interface IIngestionStore {
+    /**
+     * The source id this store uses (or already uses) for `sha256` in `workspace`. Callers that look a source up before
+     * uploading ({@link getSource}) must ask the store rather than call {@link makeSourceId} themselves: a store whose
+     * ids hash something other than the workspace name (Postgres: the permanent id) says so here, and a source created
+     * under an older id scheme keeps answering with its original id.
+     */
+    resolveSourceId(workspace: string, sha256: string): Promise<string>;
     /** Idempotent on (workspace, sha256). Returns the existing record on repeat. */
-    upsertSource(s: Omit<SourceRecord, 'sourceId' | 'createdAt'>): Promise<SourceRecord>;
+    upsertSource(s: Omit<SourceRecord, 'sourceId' | 'createdAt' | 'blobPurgedAt'>): Promise<SourceRecord>;
     getSource(workspace: string, sourceId: string): Promise<SourceRecord | undefined>;
+    /** Point a source at a freshly stored blob and clear its purged mark (re-upload after retention, or blob repair). */
+    setSourceBlob(workspace: string, sourceId: string, storageRef: string): Promise<void>;
+    /**
+     * Blob retention, step 1. Atomically marks up to `limit` sources as purged (`blobPurgedAt = now`) and returns them:
+     * a source qualifies only when it has at least one job, EVERY job is terminal ({@link TERMINAL_JOB_STATES}), the newest
+     * job finished at or before `cutoff`, its blob is not already purged, and no other source that is not purged and
+     * not fully terminal points at the same `storageRef`. The row is kept. The caller then deletes the blob and, if that
+     * fails, calls {@link releaseBlobPurge}.
+     */
+    claimBlobPurge(cutoff: Date, now: Date, limit: number): Promise<Array<{ workspace: string; sourceId: string; storageRef: string }>>;
+    /** Undo a {@link claimBlobPurge} mark whose blob could not be deleted, so a later sweep retries it. */
+    releaseBlobPurge(workspace: string, sourceId: string): Promise<void>;
+    /**
+     * Workspace erase, step 1 (read-only). One page of the sources whose blob may still exist, in `sourceId` order:
+     * `workspace` = the workspace key to list (a store bound to one workspace returns nothing for any other key), or
+     * `null` for every source in the store (legitimate only when the store is dedicated to the workspace being erased,
+     * e.g. its own SQLite file). Sources already marked purged are left out. Pass the last `sourceId` as `after` for the next page.
+     */
+    listSourceBlobRefs(workspace: string | null, limit: number, after?: string): Promise<Array<{ sourceId: string; storageRef: string }>>;
+    /**
+     * Workspace erase, step 2 (read-only, system use only). How many not-purged sources of OTHER workspaces in this
+     * store's database point at `storageRef`; a blob with a non-zero count must not be deleted. A store that only ever
+     * holds one workspace returns 0.
+     */
+    countBlobRefsHeldByOtherWorkspaces(workspace: string, storageRef: string): Promise<number>;
 
     /** Idempotent on the deterministic job id; `created=false` when it already existed. */
     createJob(j: NewJob, now: Date): Promise<{ job: IngestionJob; created: boolean }>;

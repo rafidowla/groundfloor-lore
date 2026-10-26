@@ -121,6 +121,26 @@ await test('searchByVectors: 300 queries in one call - every key answered, resul
     for (const hits of batch.values()) for (let i = 1; i < hits.length; i++) assert.ok(hits[i - 1]!.score >= hits[i]!.score - 1e-9);
 });
 
+await test("searchByVectors columns:'link': same ids, order, scores, ecosystem and scopes as full rows, without the text", async () => {
+    const s = await open('pg-gate-vs-link-columns');
+    await s.bulkAddPrebuiltRows([
+        row('lore:a', 0, { ecosystem: 'eco-x', scopes: ['team-a'] }), row('lore:b', 10, { ecosystem: 'eco-x' }), row('lore:c', 20), row('lore:d', 40, { ecosystem: 'eco-y' }),
+    ]);
+    const qs = [{ key: 'k1', vector: at(0) }, { key: 'k2', vector: at(35) }];
+    for (const filter of [undefined, { ecosystem: 'eco-x' }] as const) {
+        for (const actorScopes of [undefined, [] as string[], ['team-a']]) {
+            const full = await s.searchByVectors(qs, { topK: 4, ...(filter ? { filter } : {}), ...(actorScopes ? { actorScopes } : {}) });
+            const link = await s.searchByVectors(qs, { topK: 4, columns: 'link', ...(filter ? { filter } : {}), ...(actorScopes ? { actorScopes } : {}) });
+            assert.deepEqual([...link.keys()], [...full.keys()]);
+            for (const [k, hits] of full) {
+                const narrow = link.get(k)!;
+                assert.deepEqual(narrow.map((h) => [h.id, h.score, h.metadata.ecosystem, h.metadata.security_scopes]), hits.map((h) => [h.id, h.score, h.metadata.ecosystem, h.metadata.security_scopes]), `${k} ${JSON.stringify({ filter, actorScopes })}`);
+                for (const h of narrow) assert.equal(h.text, '', 'the narrow form must not fetch the row text');
+            }
+        }
+    }
+});
+
 await cleanupGateWorkspaces(pool);
 await closeGatePool(pool);
 for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });

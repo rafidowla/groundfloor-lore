@@ -45,6 +45,7 @@ import type { ServerResponse } from 'node:http';
 import {
     getCurrentPrincipal,
     requireReadFromWorkspace,
+    requireReviewToWorkspace,
     requireWriteToWorkspace,
 } from '../auth/principal.js';
 
@@ -174,6 +175,8 @@ function writeDenial(res: ServerResponse, status: number, code: string, reason?:
  *      NEVER consults detectedScope / getActiveWorkspaceName / any boot value.
  *   3. Scope check with the CONCRETE target (never literal-undefined):
  *      requireWriteToWorkspace(principal, target) for 'write',
+ *      requireReviewToWorkspace(principal, target) for 'review' (the ACT scope
+ *      of the review surfaces; NOT implied by 'write'),
  *      requireReadFromWorkspace(principal, target) for 'read'.
  *   4. requested === '*' (aggregation): intent must be 'read'; requires
  *      cross-workspace-read; on success sets lane='cross-workspace', returns '*'.
@@ -186,7 +189,7 @@ function writeDenial(res: ServerResponse, status: number, code: string, reason?:
  */
 export function bindRouteTarget(
     res: ServerResponse,
-    opts: { requested?: string; intent: 'read' | 'write' },
+    opts: { requested?: string; intent: 'read' | 'write' | 'review' },
 ): string | null {
     const principal = getCurrentPrincipal();
     const slot = getRouteBinding();
@@ -225,7 +228,9 @@ export function bindRouteTarget(
         const outcome =
             opts.intent === 'write'
                 ? requireWriteToWorkspace(principal, target)
-                : requireReadFromWorkspace(principal, target);
+                : opts.intent === 'review'
+                    ? requireReviewToWorkspace(principal, target)
+                    : requireReadFromWorkspace(principal, target);
         if (!outcome.ok) {
             writeDenial(res, outcome.status ?? 403, outcome.code ?? 'workspace_forbidden', outcome.reason);
             return null;

@@ -397,6 +397,8 @@ export interface RetrieveContext {
      * future `shared` model-server backend).
      */
     rerankBackend?: RerankBackend;
-    /** Per-instance link ordering (`CreateLoreOptions.recallLinkOrdering`). Undefined => `LORE_RECALL_LINK_ORDERING` decides. */
+    /** Per-instance link ordering (`CreateLoreOptions.recallLinkOrdering`). Undefined => `LORE_RECALL_LINK_ORDERING` decides (default on). */
     linkOrdering?: boolean;
+    /** C1: per-instance `related[]` limits (`CreateLoreOptions.recallRelated`). Undefined => `LORE_RECALL_RELATED_PER_HIT` / `_MAX_DEGREE` decide (default off). */
+    relatedLimits?: import('./relatedLimits.js').RecallRelatedOption;
 }

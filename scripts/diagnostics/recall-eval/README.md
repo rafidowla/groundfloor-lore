@@ -86,6 +86,23 @@ Flags:
   Atlas's own PR #30 already uses for the same reason. If D4 needs
   depth-sensitive numbers from this harness, use `--depth 1` explicitly and
   say so in the output — don't change the default.
+- `--link-on-arrival` — build the fixture with link-on-arrival ON (e5-small
+  policy: minSim 0.80, k 5) and settle the link queue before evaluating.
+  Off by default; a linked fixture is cached under its own key. Pair with
+  `--depth 1` so `related[]` is populated. The report gains a `links` block
+  (B4): related[] precision/nDCG/noise against a fixture-derived ground truth
+  and link-graph stats. Ground truth and its limits: `lib/linkMetrics.mjs`.
+- `--link-ordering` — evaluate with `recallLinkOrdering` ON (edge-score order
+  within a hit's neighbours). Off by default. The B4 comparison of the three
+  arms (off / links / links + ordering) is built by `compareLinkArms.mjs`; see
+  `results/link-eval-2026-10-24.md`.
+  The runner always passes the option explicitly, so without this flag the
+  eval runs with ordering OFF even though the product default is now ON.
+- `--related-per-hit N` / `--related-max-degree N` — C1: evaluate with the
+  `recallRelated` trims (per-hit neighbour cap; drop neighbours whose link
+  degree is above N). Off unless given. `compareLinkArms.mjs --arm label=file
+  [--arm ...] [--off links-off.json] --out BASE` compares any number of arms;
+  see `results/link-eval-c1-2026-10-24.md`.
 - `--search-mode hybrid|semantic|keyword` — passed through to `recall()`.
 - `--max N` / `--wide-max N` — primary result window (default 10) and the
   wider window used for the prefix-stability check (default 50).

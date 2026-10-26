@@ -34,6 +34,7 @@
 
 import type { PoolClient } from 'pg';
 
+import { BM25_STOPLIST_DDL, COMMON_LEXEMES_TABLE, COMMON_LEXEMES_META_TABLE } from './postgresVerbatim/postgresBm25StopList.js';
 import { migrateVerbatimToPartitioned } from './postgresVerbatimPartitionMigration.js';
 import {
     VERBATIM_INDEX_NAMES, TEXT_TSV_FUNCTION_DDL, partitionedVerbatimDdl, ensureWorkspacePartition, assertDimension,
@@ -144,6 +145,8 @@ export function verbatimSchema_ddl(dimension: number): string[] {
         TEXT_TSV_FUNCTION_DDL,
         TEXT_TSV_TRIGGER_IF_ABSENT_DDL,
         CHANGES_LOG_DDL,
+        // Additive: the BM25 common-token stop-list tables (derived data, see postgresBm25StopList.ts).
+        ...BM25_STOPLIST_DDL,
     ];
 }
 
@@ -172,6 +175,13 @@ export async function ensureVerbatimSchema(client: PoolClient, workspaceId: stri
         // partitioned one) before it finds the index exists, which would stall live writers.
         for (let i = 1; i < ddl.length; i++) await client.query(ddl[i]!);
     }
+    // The BM25 stop-list tables are additive and independent of the table/index set above: when only they are missing
+    // (a database from before the feature) create just them, instead of making schemaIsCurrent() fail and re-running
+    // every CREATE INDEX IF NOT EXISTS (a SHARE lock per partition) once at first open after the upgrade.
+    const present = await client.query<{ ok: boolean }>(
+        `SELECT to_regclass('${COMMON_LEXEMES_TABLE}') IS NOT NULL AND to_regclass('${COMMON_LEXEMES_META_TABLE}') IS NOT NULL AS ok`,
+    );
+    if (present.rows[0]?.ok !== true) for (const stmt of BM25_STOPLIST_DDL) await client.query(stmt);
     await ensureWorkspacePartition(client, workspaceId);
 }
 

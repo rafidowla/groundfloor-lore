@@ -21,8 +21,13 @@
  *   show <n>    — print full record (path, createdAt, retention) for
  *                 a single workspace. Errors if the name is unknown.
  *
+ *   deleted             — workspaces in their recovery window, erased ones (with receipt), restored ones
+ *   restore <id> [--as <new-name>]  — bring a deleted workspace back (same permanent id) before its erase starts
+ *   erase-now <id>      — skip the recovery window and erase a deleted workspace's data now
+ *
  * Does NOT expose `delete` or `rename` — those have higher blast radius
- * and warrant a separate, more deliberate add.
+ * and warrant a separate, more deliberate add. (Deleting is `DELETE /api/workspaces/:name`; it hides the
+ * workspace at once and Lore erases its data after LORE_WORKSPACE_ERASE_AFTER_DAYS — see docs/WORKSPACE_DELETE.md.)
  */
 
 import {
@@ -41,6 +46,7 @@ import {
     RERANK_K_MAX,
 } from '../../recall/rerankConfig.js';
 import { parseOrExit, type ArgSpec } from '../args.js';
+import { printDeleted, runRestore, runEraseNow } from './workspacesDeleted.js';
 
 function usage(): string {
     return [
@@ -64,6 +70,9 @@ function usage(): string {
         '                                               Set / clear the per-workspace vocab policy.',
         '                                               --mode open clears any prior types/onMismatch.',
         '  get-vocab-policy <name> [--json]             Print the resolved policy.',
+        '  deleted [--json]                             List deleted workspaces: pending erase, erased (receipt), restored.',
+        '  restore <id> [--as <new-name>]               Bring a deleted workspace back before its erase starts.',
+        '  erase-now <id>                               Erase a deleted workspace\'s data now (skips the recovery window).',
     ].join('\n');
 }
 
@@ -77,6 +86,9 @@ const SUB_SPECS: Readonly<Record<string, ArgSpec>> = {
     'get-rerank': { bool: ['--json'], positionals: { min: 1, max: 1 } },
     'set-vocab-policy': { value: ['--mode', '--types', '--on-mismatch'], positionals: { min: 1, max: 1 } },
     'get-vocab-policy': { bool: ['--json'], positionals: { min: 1, max: 1 } },
+    deleted: { bool: ['--json'] },
+    restore: { value: ['--as'], positionals: { min: 1, max: 1 } },
+    'erase-now': { positionals: { min: 1, max: 1 } },
 };
 
 export async function workspacesCommand(args: string[]): Promise<void> {
@@ -106,6 +118,10 @@ export async function workspacesCommand(args: string[]): Promise<void> {
         }
         return;
     }
+
+    if (sub === 'deleted') { printDeleted(json); return; }
+    if (sub === 'restore') { await runRestore(parsed?.positionals[0], readFlag(rest, '--as')); return; }
+    if (sub === 'erase-now') { await runEraseNow(parsed?.positionals[0]); return; }
 
     if (sub === 'active') {
         console.log(getActiveWorkspaceName());

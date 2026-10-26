@@ -45,8 +45,27 @@ export function findTransformersCacheDir() {
     return null;
 }
 
+/**
+ * Lore's own provider loads the model from `$LORE_HOME/models/<id>` (with a
+ * `.complete` marker) when LORE_HOME is set -- this is where a run with an
+ * isolated LORE_HOME (copied model, offline) finds it. Read-only check.
+ */
+export function findLoreHomeModelDir() {
+    const home = process.env.LORE_HOME;
+    if (!home) return null;
+    const dir = path.join(home, 'models', MODEL_ID);
+    return fs.existsSync(path.join(dir, '.complete')) ? dir : null;
+}
+
 /** Returns { cached: boolean, dir: string|null, files: string[] } without downloading anything. */
 export function checkLocalEmbedderCached() {
+    const loreHomeDir = findLoreHomeModelDir();
+    if (loreHomeDir) {
+        const files = fs.readdirSync(loreHomeDir, { recursive: true }).filter((f) => typeof f === 'string');
+        if (files.some((f) => f.includes('tokenizer.json')) && files.some((f) => f.endsWith('.onnx'))) {
+            return { cached: true, dir: loreHomeDir, files };
+        }
+    }
     const dir = findTransformersCacheDir();
     if (!dir || !fs.existsSync(dir)) return { cached: false, dir, files: [] };
     const files = fs.readdirSync(dir, { recursive: true }).filter((f) => typeof f === 'string');

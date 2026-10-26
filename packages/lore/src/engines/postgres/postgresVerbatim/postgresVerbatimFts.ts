@@ -48,6 +48,7 @@ import type { Pool } from 'pg';
 import { makeBm25Envelope, type Bm25Envelope } from '../../verbatimBm25Result.js';
 import type { VerbatimSearchResult, VerbatimQueryFilter } from '../../../providers/types.js';
 import { buildSqlFilterEntries } from '../../verbatimHistory.js';
+import { lexemesForTokens, partitionTokens } from './postgresBm25StopList.js';
 import { applyActorScopeFilter } from '../../../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../../../security/actorContext.js';
 
@@ -117,6 +118,18 @@ function rowToResult(r: Record<string, unknown>): VerbatimSearchResult & { score
 }
 
 /**
+ * Common-token stop-list handed to bm25Search by the store (see
+ * postgresBm25StopList.ts). `common` is the workspace's lexemes that occur in at
+ * least LORE_BM25_COMMON_TOKEN_RATIO of its rows; `lexemeCache` memoizes
+ * token -> 'simple' lexemes (a pure function of the token).
+ */
+export interface Bm25StopList {
+    common: ReadonlySet<string>;
+    lexemeCache: Map<string, string[]>;
+}
+const LEXEME_CACHE_MAX = 5_000;
+
+/**
  * bm25Search — `text_tsv @@ (phraseto || phraseto || …)` + ts_rank ranking,
  * canonical/non-tombstone filtering and the metadata-filter allowlist
  * applied exactly like the FTS5 path. One statement, all user text bound.
@@ -128,13 +141,37 @@ export async function bm25Search(
     limit: number,
     rawFilter: VerbatimQueryFilter | undefined,
     actorScopes: ReadonlyArray<string> | undefined,
+    stopList?: Bm25StopList,
 ): Promise<Bm25Envelope<VerbatimSearchResult>> {
     // D2: array-valued filter fields (e.g. `types: string[]`) become an
     // IN (...) pushdown instead of being silently dropped. Placeholders are
     // renumbered to follow the token params ($2..$k+1); the LIMIT param
     // follows the filter params.
-    const tokens = query.split(/\s+/).filter((t) => t.length > 0);
+    let tokens = query.split(/\s+/).filter((t) => t.length > 0);
     if (tokens.length === 0) return makeBm25Envelope([], true);
+    // Common-token stop-list: drop single-lexeme tokens that appear in most rows (they force ts_rank to score most of
+    // the table and carry no ranking signal). Multi-lexeme tokens are phrases and are never touched. When EVERY
+    // meaningful token is common (a punctuation-only token like `???` is not a meaningful token, so `the ???` counts)
+    // there is nothing selective to rank by: an unfiltered query returns no BM25 hits instead of a full scan (the
+    // vector leg still answers). A query with a metadata filter runs the ORIGINAL query instead: the filter bounds the
+    // candidate set, and returning nothing for a query the filter could answer would be a regression.
+    if (stopList && stopList.common.size > 0) {
+        const cache = stopList.lexemeCache;
+        const missing = [...new Set(tokens.filter((t) => !cache.has(t)))];
+        if (missing.length > 0) {
+            if (cache.size + missing.length > LEXEME_CACHE_MAX) cache.clear();
+            for (const [tok, lex] of await lexemesForTokens(pool, missing)) cache.set(tok, lex);
+        }
+        const part = partitionTokens(tokens, (t) => cache.get(t) ?? [], stopList.common);
+        if (part.droppedAny) {
+            if (!part.hasSelective) {
+                if (buildSqlFilterEntries(rawFilter).length === 0) return makeBm25Envelope([], true);
+                // filtered: keep every original token (pre-stop-list query)
+            } else {
+                tokens = part.kept;
+            }
+        }
+    }
     const filter = pgFilterSql(rawFilter, tokens.length + 2);
     const limitParam = `$${tokens.length + 2 + filter.params.length}`;
 

@@ -1,8 +1,10 @@
 /**
  * linkOrdering.ts — D4: order a seed's related expansion by link strength.
  *
- * Behind `LORE_RECALL_LINK_ORDERING` (default OFF). Off, `collectRelated`
- * never reaches this module and recall is byte-identical to before.
+ * `LORE_RECALL_LINK_ORDERING` is ON by default (C1; it was off before). `0` / `false` /
+ * `off` / `no` turns it off, and then `collectRelated` never reaches this module.
+ * A seed with no live `semantic_neighbor` link edge is left in traversal order, so a
+ * workspace without links recalls byte-identically to before.
  *
  * On, the hops of ONE seed are ordered: depth first (unchanged), then within
  * the one-step ring by the strength of the live edge joining the hop to the
@@ -27,13 +29,16 @@ export interface Hop { node: LoreNode; depth: number; relation: string }
 const PAGE = 500;
 const MAX_PAGES = 20;
 
+/** Default ON. Only an explicit `0` / `false` / `off` / `no` switches it off; anything else (unset, empty, `1`, ...) is on. */
 export function linkOrderingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
     const v = env.LORE_RECALL_LINK_ORDERING?.trim().toLowerCase();
-    return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+    return !(v === '0' || v === 'false' || v === 'off' || v === 'no');
 }
 
-/** neighbourId -> strongest live edge score to `seedId` (either direction). */
-export async function liveEdgeStrengths(graph: StrengthGraph, seedId: string): Promise<Map<string, number>> {
+const LINK_RELATION = 'semantic_neighbor';
+
+/** neighbourId -> strongest live edge score to `seedId` (either direction). `linked.has` is set when the seed has a live link-relation edge. */
+export async function liveEdgeStrengths(graph: StrengthGraph, seedId: string, linked?: { has: boolean }): Promise<Map<string, number>> {
     const out = new Map<string, number>();
     if (typeof graph.queryEdges !== 'function') return out;
     for (const side of ['source', 'target'] as const) {
@@ -41,6 +46,7 @@ export async function liveEdgeStrengths(graph: StrengthGraph, seedId: string): P
             const rows = await graph.queryEdges({ [side]: seedId, limit: PAGE, offset: page * PAGE });
             for (const e of rows) {
                 const other = side === 'source' ? e.targetId : e.sourceId;
+                if (linked && e.relation === LINK_RELATION) linked.has = true;
                 const s = typeof e.confidenceScore === 'number' && Number.isFinite(e.confidenceScore) ? e.confidenceScore : 1;
                 if (s > (out.get(other) ?? -Infinity)) out.set(other, s);
             }
@@ -56,7 +62,9 @@ const labelOf = (n: LoreNode): string => String((n as { label?: unknown }).label
 /** Returns a new array; the input is not mutated. */
 export async function orderHopsByLinkStrength<T extends Hop>(graph: StrengthGraph, seedId: string, hops: T[]): Promise<T[]> {
     if (hops.length < 2 || typeof graph.queryEdges !== 'function') return hops;
-    const strength = await liveEdgeStrengths(graph, seedId);
+    const linked = { has: false };
+    const strength = await liveEdgeStrengths(graph, seedId, linked);
+    if (!linked.has) return hops; // no link edges at this seed: keep traversal order (byte-identical to ordering off)
     return [...hops].sort((a, b) => {
         if (a.depth !== b.depth) return a.depth - b.depth;
         if (a.depth === 1) {

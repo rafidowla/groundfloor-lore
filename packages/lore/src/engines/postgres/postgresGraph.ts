@@ -51,6 +51,7 @@ import { ReadCache, type CacheStats } from '../cache.js';
 import { LoreGraphError } from '../loreGraphError.js';
 import { KeyedMutex } from '../writeQueue.js';
 import { runBidirectionalEdgeWrite } from '../graphShared/bidirectionalEdgeLock.js';
+import { ensureRekeyed } from './postgresRekey.js';
 import { runSchemaBootstrap } from './postgresStartup.js';
 import { ensureGraphSchema } from './postgresGraphSchema.js';
 import { keywordIndexBuildDone, releaseKeywordIndexBuild, startKeywordIndexBuild } from './postgresKeywordIndex.js';
@@ -167,6 +168,7 @@ export class PostgresGraph implements LoreGraphHandle {
         const schema = await runSchemaBootstrap(pool, {}, (client) =>
             ensureGraphSchema(client, this.workspaceId, this.keywordIndexInlineRowLimit === undefined
                 ? {} : { keywordIndexInlineRowLimit: this.keywordIndexInlineRowLimit }));
+        await ensureRekeyed(pool, this.workspaceId); // one-time name -> permanent-id row rewrite (postgresRekey.ts)
         this.initialized = true;
         // Large table, indexes missing: build off the open path (never blocks a search or a write).
         if (schema.pending) void startKeywordIndexBuild(pool, this);
@@ -429,6 +431,20 @@ export class PostgresGraph implements LoreGraphHandle {
             if (deleted) this.bumpWriteEpoch();
             return deleted;
         });
+    }
+
+    /** Batched `deleteNode`: one transaction for the whole set (see writes.deleteNodes). Returns the ids that existed.
+     *  Takes the per-node write chains in sorted order so it queues behind, and ahead of, single-node writes exactly
+     *  like `deleteNode` does. */
+    async deleteNodes(ids: string[]): Promise<Set<string>> {
+        await this.initialize();
+        const keys = [...new Set(ids)].sort();
+        const held = (i: number): Promise<Set<string>> => i >= keys.length
+            ? writes.deleteNodes(this.db(), this.workspaceId, keys)
+            : this.nodeWriteChain.run(keys[i]!, () => held(i + 1));
+        const deleted = await held(0);
+        if (deleted.size > 0) this.bumpWriteEpoch();
+        return deleted;
     }
 
     /* ── edges ───────────────────────────────────────────────────── */

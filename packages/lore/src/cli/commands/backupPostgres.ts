@@ -19,6 +19,7 @@ import Database from 'better-sqlite3';
 
 import { resolveWorkspaceGraphEngine } from '../../engines/graphEngineSelector.js';
 import { resolveWorkspaceVectorEngine } from '../../engines/vectorEngineSelector.js';
+import { resolvePostgresWorkspaceKey } from '../../engines/postgres/postgresWorkspaceKey.js';
 import {
     LogicalBackupError, openWorkspaceLogicalBackup,
     type LogicalBackupSummary, type LogicalRestoreSummary,
@@ -74,11 +75,15 @@ function escapeRe(s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** Prune older logical bundles (and their sidecar manifests) for one workspace beyond `keep`. */
-export function pruneOldPostgresBundles(outDir: string, wsName: string, keep: number): string[] {
+/**
+ * Prune older logical bundles (and their sidecar manifests) for one workspace beyond `keep`. Bundles are named after the
+ * workspace's permanent id (what the rows are keyed by); bundles written before that are named after the workspace name,
+ * so `labels` carries both.
+ */
+export function pruneOldPostgresBundles(outDir: string, labels: string | readonly string[], keep: number): string[] {
     if (!fs.existsSync(outDir)) return [];
-    const safe = wsName.replace(/[^A-Za-z0-9._-]/g, '_');
-    const re = new RegExp(`^lore-pgbackup-${escapeRe(safe)}-\\d{4}-\\d{2}-\\d{2}T[^/]*\\.ndjson(\\.gz)?$`);
+    const safe = [...new Set(typeof labels === 'string' ? [labels] : labels)].map((l) => escapeRe(l.replace(/[^A-Za-z0-9._-]/g, '_'))).join('|');
+    const re = new RegExp(`^lore-pgbackup-(?:${safe})-\\d{4}-\\d{2}-\\d{2}T[^/]*\\.ndjson(\\.gz)?$`);
     const bundles = fs.readdirSync(outDir)
         .filter((n) => re.test(n))
         .map((n) => ({ n, mtime: fs.statSync(path.join(outDir, n)).mtimeMs }))
@@ -97,14 +102,16 @@ export async function backupPostgresWorkspace(
     wsName: string, workspaceDir: string, outDir: string, keep: number,
 ): Promise<LogicalBackupSummary> {
     console.log(`→ Backing up postgres workspace '${wsName}' (logical bundle; rows read from the shared database)`);
+    // Rows are keyed by the workspace's permanent id; the bundle records (and is named after) that id.
+    const key = resolvePostgresWorkspaceKey(wsName);
     const port = await openWorkspaceLogicalBackup('postgres');
     try {
-        const s = await port.backup({ workspaceId: wsName, outDir, outboxDepth: async () => readOutboxDepth(workspaceDir, wsName) });
+        const s = await port.backup({ workspaceId: key, outDir, outboxDepth: async () => readOutboxDepth(workspaceDir, wsName) });
         console.log(`✓ ${s.bundlePath}`);
         console.log(`  ${(s.bytes / 1024 / 1024).toFixed(1)} MB · ${s.tables.length} table(s) · ${s.totalRows} row(s) · ${(s.durationMs / 1000).toFixed(1)}s`);
         console.log(`  verified: per-table counts match the snapshot and the written file was re-read; manifest ${s.manifestHash.slice(0, 16)}…`);
         for (const w of s.warnings) console.error(`  ! ${w}`);
-        const pruned = pruneOldPostgresBundles(outDir, wsName, keep);
+        const pruned = pruneOldPostgresBundles(outDir, [key, wsName], keep);
         if (pruned.length > 0) console.log(`  rotated: pruned ${pruned.length} older bundle(s) beyond keep=${keep}`);
         return s;
     } finally {
@@ -117,10 +124,12 @@ export async function restorePostgresBundle(
     bundlePath: string, targetWorkspace: string, workspaceDir: string, replace: boolean,
 ): Promise<LogicalRestoreSummary> {
     console.log(`→ Restoring '${path.basename(bundlePath)}' into postgres workspace '${targetWorkspace}'`);
+    // Rows land under the target's permanent id, whatever key the bundle's rows carried (an older bundle holds the name).
+    const targetKey = resolvePostgresWorkspaceKey(targetWorkspace);
     const port = await openWorkspaceLogicalBackup('postgres');
     try {
         const r = await port.restore({
-            bundlePath, targetWorkspaceId: targetWorkspace, force: replace,
+            bundlePath, targetWorkspaceId: targetKey, force: replace,
             outboxDepth: async () => readOutboxDepth(workspaceDir, targetWorkspace),
         });
         console.log(`✓ Restored ${r.totalRows} row(s) across ${r.tables.length} table(s) · ${(r.durationMs / 1000).toFixed(1)}s`);
@@ -164,7 +173,10 @@ export async function restoreLogicalBundleCli(
         console.error('  A logical bundle holds postgres rows; restoring it would not make the workspace readable.');
         return false;
     }
-    if (sourceWorkspace !== targetWorkspace && !flags.allowNameMismatch) {
+    // A bundle names its source by the key its rows carried: the workspace NAME (written before rows were keyed by id)
+    // or the permanent id. Either one is "the same workspace" as the target.
+    const targetKey = resolvePostgresWorkspaceKey(targetWorkspace);
+    if (sourceWorkspace !== targetWorkspace && sourceWorkspace !== targetKey && !flags.allowNameMismatch) {
         console.error(`lore restore: this bundle was taken from workspace '${sourceWorkspace}' but you are restoring into '${targetWorkspace}'.`);
         console.error('  If that is intended (e.g. restoring a copy next to the original), pass --allow-name-mismatch.');
         return false;

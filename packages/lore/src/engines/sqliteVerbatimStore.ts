@@ -53,13 +53,19 @@ import { normalizeGetVectorsIds } from './verbatimGetVectors.js';
 import * as sqliteWrite from './sqliteVerbatimWrite.js';
 import { maybeTriggerPromotion } from './verbatimPromotionTrigger.js';
 import { openVerbatimRawImport, type VerbatimRawImport } from './sqliteVerbatimImport.js';
-import { withWriteBarrier } from './verbatimWriteBarrier.js';
+import { currentRetireGeneration, withWriteBarrier } from './verbatimWriteBarrier.js';
 import { forwardToSuccessor, type ResolveSuccessor } from './verbatimRetiredRetry.js';
+import { followRetiredRead } from './verbatimRetiredRead.js';
+import { searchKeyParts } from './sqliteVerbatimSearchKey.js';
+import { VerbatimStoreClosedError, VerbatimStoreNotInitializedError } from './verbatimStoreClosedError.js';
 
 export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
     private initialized = false;
     private db: DatabaseType | null = null;
     private closed = false;
+    private initPromise: Promise<void> | null = null;
+    /** Promotion-retire generation of basePath when this instance opened; a later retire makes this handle stale. */
+    private barrierGeneration = 0;
     private readonly basePath: string;
     private readonly embeddingProvider: EmbeddingProvider;
     private readonly role: VerbatimStoreRole;
@@ -199,22 +205,33 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         return await promise;
     }
 
+    /** Single-flight: concurrent callers (a lazy write and the boot init) share one open instead of racing two handles. */
     async initialize(): Promise<void> {
         if (this.initialized) return;
+        this.initPromise ??= this.initializeOnce().finally(() => { this.initPromise = null; });
+        return this.initPromise;
+    }
+
+    private async initializeOnce(): Promise<void> {
         // Best-effort warm-up: a model-cache failure must not fail open; the first embed retries.
         await warmEmbeddingProvider(this.embeddingProvider, '[SqliteVerbatimStore]');
         const { db, tableExisted, vec } = await openSqliteVerbatimDb(this.basePath);
         this.db = db;
         this.vecStatus = vec;
-        applyFingerprintOnOpen(this.basePath, tableExisted, this.embeddingProvider, this.strictFingerprintCheck);
-        if (!tableExisted) {
-            stampFingerprint(this.basePath, this.embeddingProvider, 'table birth');
+        try {
+            applyFingerprintOnOpen(this.basePath, tableExisted, this.embeddingProvider, this.strictFingerprintCheck);
+            if (!tableExisted) {
+                stampFingerprint(this.basePath, this.embeddingProvider, 'table birth');
+            }
+        } catch (err) {
+            // A fingerprint mismatch used to leave the opened handle behind with initialized=false.
+            this.db = null;
+            try { db.close(); } catch (closeErr) { log.warn(`[SqliteVerbatimStore] close after failed init: ${(closeErr as Error).message}`); }
+            throw err;
         }
-        // One real COUNT(*) at open — the ONE allowed per design section 3
-        // ("a cheap counter, not COUNT(*)" refers to every WRITE after
-        // this, not this one-time seed). Canonical rows only: history/
-        // tombstone rows are not what the promotion threshold is sized
-        // against.
+        this.barrierGeneration = currentRetireGeneration(this.basePath);
+        // The one real COUNT(*) per design section 3 (every WRITE after this uses the cheap counter);
+        // canonical rows only, since history/tombstone rows are not what the promotion threshold is sized against.
         try {
             this.rowCountEstimate = (this.db!.prepare(
                 `SELECT count(*) as c FROM verbatim WHERE is_canonical = 1`,
@@ -250,8 +267,20 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         });
     }
 
+    /** Gate for every mutator. A closed store throws {@link VerbatimStoreClosedError}. A never-initialized one is
+     *  initialized here (single-flight): the old `if (!this.initialized) return;` guards resolved the write as success
+     *  while storing nothing, and the daemon's boot-time outbox replay reaches the boot store before its own
+     *  `initialize()`. Init failure propagates (loud), never a silent drop. */
+    private async ensureWritable(method: string): Promise<void> {
+        if (this.closed) throw new VerbatimStoreClosedError(this.basePath, method);
+        if (!this.initialized) await this.initialize();
+        if (this.closed) throw new VerbatimStoreClosedError(this.basePath, method);
+        if (!this.initialized || !this.db) throw new VerbatimStoreNotInitializedError(this.basePath, method);
+    }
+
     private requireDb(): DatabaseType {
-        if (!this.db) throw new Error('SqliteVerbatimStore: store not initialized');
+        if (this.closed) throw new VerbatimStoreClosedError(this.basePath);
+        if (!this.db) throw new VerbatimStoreNotInitializedError(this.basePath);
         return this.db;
     }
 
@@ -280,14 +309,19 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         }
     }
 
+    /** Wave E e5: once retired, a read answers from the promoted store (verbatimRetiredRead.ts); else `local`. `missing`: the Lance engine lacks searchByVectors (answered per query) and findUnchangedRowIds (nothing unchanged, so a stale file never skips a write). */
+    private followRead<T>(method: string, args: unknown[], local: () => Promise<T> | T, missing?: (successor: Record<string, unknown>) => Promise<T> | T): Promise<T> {
+        return followRetiredRead<T>({ self: this, basePath: this.basePath, barrierGeneration: this.barrierGeneration, resolveSuccessor: this.resolveSuccessor, live: this.initialized && !this.closed }, method, args, local, missing);
+    }
+
     async store(doc: VerbatimDocument): Promise<void> {
         return this.retiredAware<void>('store', [doc], () => this.storeHere(doc));
     }
 
     private async storeHere(doc: VerbatimDocument): Promise<void> {
         assertWritableRole(this.role, 'store');
-        if (!this.initialized) return;
-        await withWriteBarrier(this.basePath, () => sqliteWrite.store(this.writeDeps(), doc));
+        await this.ensureWritable('store');
+        await withWriteBarrier(this.basePath, this.barrierGeneration, () => sqliteWrite.store(this.writeDeps(), doc));
         this.checkPromotion(1);
         // D7 (3.23) — best-effort piece maintenance. sqliteVerbatimWrite.ts
         // redacts doc.text into a LOCAL variable only (never writes it back
@@ -307,8 +341,9 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     private async storeBatchHere(docs: VerbatimDocument[]): Promise<void> {
         assertWritableRole(this.role, 'storeBatch');
-        if (!this.initialized || docs.length === 0) return;
-        await withWriteBarrier(this.basePath, () => sqliteWrite.storeBatch(this.writeDeps(), docs));
+        if (docs.length === 0) return;
+        await this.ensureWritable('storeBatch');
+        await withWriteBarrier(this.basePath, this.barrierGeneration, () => sqliteWrite.storeBatch(this.writeDeps(), docs));
         this.checkPromotion(docs.length);
         // D7 (3.23) — same independent-redaction rationale as store() above.
         await this.pieceIndex?.upsertForRows(docs.map((doc) => ({
@@ -323,11 +358,11 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     private async bulkAddPrebuiltRowsHere(rows: Array<Record<string, unknown>>): Promise<BulkAddResult> {
         assertWritableRole(this.role, 'bulkAddPrebuiltRows');
+        await this.ensureWritable('bulkAddPrebuiltRows');
         // J4 — SQLite binds ids as parameters (no Lance WHERE-predicate
         // injection surface), so no id is rejected here; the result shape
         // matches the Lance store's.
-        if (!this.initialized) return { rejectedCount: 0, rejectedIds: [] };
-        await withWriteBarrier(this.basePath, () => sqliteWrite.bulkAddPrebuiltRows(this.writeDeps(), rows));
+        await withWriteBarrier(this.basePath, this.barrierGeneration, () => sqliteWrite.bulkAddPrebuiltRows(this.writeDeps(), rows));
         this.checkPromotion(rows.length);
         // D7 (3.23) — bulk-loaded rows carry no redaction step upstream
         // (matches sqliteVerbatimWrite.ts's bulkAddPrebuiltRows, which does
@@ -342,8 +377,8 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     private async bulkUpsertPrebuiltRowsHere(rows: Array<Record<string, unknown>>): Promise<void> {
         assertWritableRole(this.role, 'bulkUpsertPrebuiltRows');
-        if (!this.initialized) return;
-        await withWriteBarrier(this.basePath, () => sqliteWrite.bulkUpsertPrebuiltRows(this.writeDeps(), rows));
+        await this.ensureWritable('bulkUpsertPrebuiltRows');
+        await withWriteBarrier(this.basePath, this.barrierGeneration, () => sqliteWrite.bulkUpsertPrebuiltRows(this.writeDeps(), rows));
         this.checkPromotion(rows.length);
         await this.pieceIndex?.upsertForRows(rows as unknown as PieceSourceRow[]);
     }
@@ -358,8 +393,8 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     private async physicalDeleteHere(id: string): Promise<void> {
         assertWritableRole(this.role, 'physicalDelete');
-        if (!this.initialized) return;
-        await withWriteBarrier(this.basePath, () => sqliteWrite.physicalDelete(this.writeDeps(), id));
+        await this.ensureWritable('physicalDelete');
+        await withWriteBarrier(this.basePath, this.barrierGeneration, () => sqliteWrite.physicalDelete(this.writeDeps(), id));
         await this.pieceIndex?.deleteForIds([id]);
     }
 
@@ -369,8 +404,8 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     private async physicalDeleteManyHere(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'physicalDeleteMany');
-        if (!this.initialized) return 0;
-        const processed = await withWriteBarrier(this.basePath, () => sqliteWrite.physicalDeleteMany(this.writeDeps(), ids));
+        await this.ensureWritable('physicalDeleteMany');
+        const processed = await withWriteBarrier(this.basePath, this.barrierGeneration, () => sqliteWrite.physicalDeleteMany(this.writeDeps(), ids));
         await this.pieceIndex?.deleteForIds(ids);
         return processed;
     }
@@ -387,8 +422,8 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     private async purgeWithHistoryHere(ids: string[]): Promise<number> {
         assertWritableRole(this.role, 'purgeWithHistory');
-        if (!this.initialized) return 0;
-        const removed = await withWriteBarrier(this.basePath, () => sqliteWrite.purgeRows(this.writeDeps(), ids));
+        await this.ensureWritable('purgeWithHistory');
+        const removed = await withWriteBarrier(this.basePath, this.barrierGeneration, () => sqliteWrite.purgeRows(this.writeDeps(), ids));
         await this.pieceIndex?.deleteForIds(ids);
         return removed;
     }
@@ -399,8 +434,8 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     private async tombstoneHere(id: string, reason: string): Promise<void> {
         assertWritableRole(this.role, 'tombstone');
-        if (!this.initialized) return;
-        await withWriteBarrier(this.basePath, () => sqliteWrite.tombstone(this.writeDeps(), id, reason));
+        await this.ensureWritable('tombstone');
+        await withWriteBarrier(this.basePath, this.barrierGeneration, () => sqliteWrite.tombstone(this.writeDeps(), id, reason));
         // D7 (3.23) — tombstoned content is excluded from search/bm25Search,
         // so its pieces must also drop out of piece search.
         await this.pieceIndex?.deleteForIds([id]);
@@ -416,21 +451,12 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         actorScopes?: ReadonlyArray<string>,
     ): Promise<VerbatimSearchResult[]> {
         if (!this.initialized) return [];
-        const sortedScopes = actorScopes
-            ? [...actorScopes].sort()
-            : (getCurrentActorScopes() ? [...getCurrentActorScopes()!].sort() : null);
-        const normFilter = filter
-            ? Object.fromEntries(
-                Object.entries(filter)
-                    .filter(([, v]) => v !== undefined && v !== null)
-                    .sort(([a], [b]) => a.localeCompare(b)),
-            )
-            : null;
-        return this.cachedRead<VerbatimSearchResult[]>(
+        const { sortedScopes, normFilter } = searchKeyParts(filter, actorScopes);
+        return this.followRead('search', [query, limit, filter, opts, actorScopes], () => this.cachedRead<VerbatimSearchResult[]>(
             'verbatim-search',
             { q: query, limit, filter: normFilter, includeHistory: opts?.includeHistory ?? false, scopes: sortedScopes },
             () => this._searchUncached(query, limit, filter, opts, actorScopes),
-        );
+        ));
     }
 
     private async _searchUncached(
@@ -441,10 +467,22 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         actorScopes?: ReadonlyArray<string>,
     ): Promise<VerbatimSearchResult[]> {
         const vector = await this.embeddingProvider.embedQuery(query);
-        return this.searchByVector(vector, { topK: limit, filter, includeHistory: opts?.includeHistory, actorScopes });
+        return this.searchByVectorHere(vector, { topK: limit, filter, includeHistory: opts?.includeHistory, actorScopes });
     }
 
     async searchByVector(
+        queryVector: number[],
+        opts?: {
+            topK?: number;
+            filter?: VerbatimQueryFilter;
+            includeHistory?: boolean;
+            actorScopes?: ReadonlyArray<string>;
+        },
+    ): Promise<VerbatimSearchResult[]> {
+        return this.followRead('searchByVector', [queryVector, opts], () => this.searchByVectorHere(queryVector, opts));
+    }
+
+    private async searchByVectorHere(
         queryVector: number[],
         opts?: {
             topK?: number;
@@ -510,13 +548,14 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
      */
     async searchByVectors(
         queries: Array<{ key: string; vector: number[] }>,
-        opts: { topK: number; filter?: VerbatimQueryFilter; actorScopes?: ReadonlyArray<string> },
+        opts: { topK: number; filter?: VerbatimQueryFilter; actorScopes?: ReadonlyArray<string>; columns?: 'full' | 'link' },
     ): Promise<Map<string, VerbatimSearchResult[]>> {
-        const out = new Map<string, VerbatimSearchResult[]>();
-        for (const q of queries) {
-            out.set(q.key, await this.searchByVector(q.vector, { topK: opts.topK, filter: opts.filter, actorScopes: opts.actorScopes }));
-        }
-        return out;
+        const each = async (target: { searchByVector(v: number[], o: object): Promise<VerbatimSearchResult[]> }): Promise<Map<string, VerbatimSearchResult[]>> => {
+            const out = new Map<string, VerbatimSearchResult[]>();
+            for (const q of queries) out.set(q.key, await target.searchByVector(q.vector, { topK: opts.topK, filter: opts.filter, actorScopes: opts.actorScopes }));
+            return out;
+        };
+        return this.followRead('searchByVectors', [queries, opts], () => each({ searchByVector: (v, o) => this.searchByVectorHere(v, o) }), (succ) => each(succ as never));
     }
 
     async bm25Search(
@@ -526,71 +565,62 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         actorScopes?: ReadonlyArray<string>,
     ): Promise<Bm25Envelope<VerbatimSearchResult>> {
         if (!this.initialized) return { hits: [], ranked: true };
-        const sortedScopes = actorScopes
-            ? [...actorScopes].sort()
-            : (getCurrentActorScopes() ? [...getCurrentActorScopes()!].sort() : null);
-        const normFilter = filter
-            ? Object.fromEntries(
-                Object.entries(filter)
-                    .filter(([, v]) => v !== undefined && v !== null)
-                    .sort(([a], [b]) => a.localeCompare(b)),
-            )
-            : null;
-        return this.cachedRead<Bm25Envelope<VerbatimSearchResult>>(
+        const { sortedScopes, normFilter } = searchKeyParts(filter, actorScopes);
+        return this.followRead('bm25Search', [query, limit, filter, actorScopes], () => this.cachedRead<Bm25Envelope<VerbatimSearchResult>>(
             'verbatim-bm25',
             { q: query, limit, filter: normFilter, scopes: sortedScopes },
             () => Promise.resolve(ftsBm25Search(this.requireDb(), query, limit, filter, actorScopes)),
-        );
+        ));
     }
 
     // ---- reads -------------------------------------------------------------
 
     async getById(id: string): ReturnType<VerbatimStoreApi['getById']> {
         if (!this.initialized) return null;
-        return sqliteHistory.getById(this.requireDb(), id);
+        return this.followRead('getById', [id], () => sqliteHistory.getById(this.requireDb(), id));
     }
 
     /** 3.27.0 — which of `ids` have a canonical row (batched getById; nodeDeleteMany). */
     async getExistingIds(ids: string[]): Promise<string[]> {
         if (!this.initialized || ids.length === 0) return [];
-        return sqliteHistory.getExistingIds(this.requireDb(), ids);
+        return this.followRead('getExistingIds', [ids], () => sqliteHistory.getExistingIds(this.requireDb(), ids));
     }
 
     /** 3.35.0 - bulkIngest's pre-embed probe: which prebuilt rows are already stored identically (see sqliteVerbatimWrite.ts). */
     async findUnchangedRowIds(rows: Array<Record<string, unknown>>): Promise<string[]> {
         if (!this.initialized || rows.length === 0) return [];
-        return sqliteWrite.findUnchangedRowIds(this.requireDb(), rows);
+        return this.followRead('findUnchangedRowIds', [rows], () => sqliteWrite.findUnchangedRowIds(this.requireDb(), rows), () => []);
     }
 
     /** 3.27.1 - stored embeddings by exact canonical row id (engine-neutral; verbatimGetVectors.ts). */
     async getVectors(ids: string[]): Promise<Map<string, number[]>> {
         const unique = normalizeGetVectorsIds(ids);
         if (!this.initialized || unique.length === 0) return new Map();
-        return sqliteHistory.getVectors(this.requireDb(), unique);
+        return this.followRead('getVectors', [unique], () => sqliteHistory.getVectors(this.requireDb(), unique));
     }
 
     async getContentHashesByIds(ids: string[]): Promise<Map<string, string>> {
         if (!this.initialized) return new Map();
-        return sqliteHistory.getContentHashesByIds(this.requireDb(), ids);
+        return this.followRead('getContentHashesByIds', [ids], () => sqliteHistory.getContentHashesByIds(this.requireDb(), ids));
     }
 
     async listIds(prefix?: string, opts?: { project?: string; includeHistory?: boolean }): Promise<string[]> {
         if (!this.initialized) return [];
-        return sqliteHistory.listIds(this.requireDb(), prefix, opts);
+        return this.followRead('listIds', [prefix, opts], () => sqliteHistory.listIds(this.requireDb(), prefix, opts));
     }
 
     async exportRows(opts?: { project?: string }): Promise<{ modelId: string; dim: number; rows: VerbatimExportRow[] }> {
         await this.initialize();
-        return {
+        return this.followRead('exportRows', [opts], () => ({
             modelId: this.embeddingProvider.modelId,
             dim: this.embeddingProvider.dimension,
             rows: sqliteHistory.exportRows(this.requireDb(), opts),
-        };
+        }));
     }
 
     async getHistory(id: string): ReturnType<VerbatimStoreApi['getHistory']> {
         if (!this.initialized) return [];
-        return sqliteHistory.getHistory(this.requireDb(), id);
+        return this.followRead('getHistory', [id], () => sqliteHistory.getHistory(this.requireDb(), id));
     }
 
     /** Matches VerbatimStore.count()'s actual semantics EXACTLY: total
@@ -603,12 +633,9 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
      *  replicating that, not silently fixing it here). */
     async count(): Promise<number> {
         if (!this.initialized || !this.db) return 0;
-        try {
-            const row = this.db.prepare(`SELECT count(*) as c FROM verbatim`).get() as { c: number };
-            return row.c;
-        } catch {
-            return 0;
-        }
+        return this.followRead('count', [], () => {
+            try { return (this.db!.prepare(`SELECT count(*) as c FROM verbatim`).get() as { c: number }).c; } catch { return 0; }
+        });
     }
 
     // ---- index maintenance ---------------------------------------------
@@ -694,9 +721,10 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         actorScopes?: ReadonlyArray<string>,
     ): Promise<PieceSearchHit[]> {
         if (!this.pieceIndex) return [];
+        const pieceIndex = this.pieceIndex;
         const filterEntries = buildSqlFilterEntries(filter as Record<string, unknown> | undefined);
         const rowFilter = filterEntries.map((e) => [e.column, e.rowValue] as const);
-        return this.pieceIndex.searchPieces(query, topK, rowFilter, actorScopes ?? getCurrentActorScopes());
+        return this.followRead('searchPieces', [query, topK, filter, actorScopes], () => pieceIndex.searchPieces(query, topK, rowFilter, actorScopes ?? getCurrentActorScopes()));
     }
 
     /** D7 (3.23) — observability/ops hook mirroring SqlitePieceIndex.status(). */
@@ -750,6 +778,7 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
 
     async close(): Promise<void> {
         if (this.closed) return;
+        await this.initPromise?.catch(() => undefined); // let an in-flight lazy init settle so it cannot reopen after us
         this.closed = true;
         this.initialized = false;
         try {

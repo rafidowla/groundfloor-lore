@@ -6,6 +6,574 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+## [3.37.0] — 2026-10-26
+
+Honest workspace delete (hide at once, erase after a recovery window, across every store Lore controls, including
+Postgres rows, uploaded files and the deleted workspace's audit entries), Postgres rows keyed by the workspace's
+permanent id, the HTTP table-review and link-proposal API, Tables P3 query plans, `lore tables copy`, ingestion blob
+retention with a Groundfloor Files blob store and m2m login, `related[]` link ordering on by default, and a set of
+Postgres keyword/BM25 and SQLite link-rebuild fixes.
+
+Upgrade notes:
+
+- **Workspace delete now erases.** A deleted workspace is hidden at once and erased after
+  `LORE_WORKSPACE_ERASE_AFTER_DAYS` (default 7; 0 = at once) by a scheduled tick in the daemon and in the embedded
+  `createLore()` host (first run a minute after boot, then hourly; no off switch). `lore workspaces restore <id>` brings
+  one back until its erase starts. Deletes made before this release (legacy records) are never erased automatically.
+  The deleted workspace's `audit.jsonl` entries are blanked (kept: time, tool, result, chain hashes).
+- **Postgres:** a one-time rewrite at engine open re-keys every row from workspace name to permanent id. Upgrade every
+  process sharing the database together; an older build writing name-keyed rows afterwards makes the next open refuse
+  that workspace (`postgres_rekey_mixed_keys`). `workspaces.json` may be rewritten once to backfill ids. Bundles taken
+  before this release restore fine.
+- **`related[]` link ordering is ON by default.** Set `LORE_RECALL_LINK_ORDERING=0` for the old order.
+- SQLite link rebuild pauses 200 ms between batches by default (was 10 ms); `LORE_LINK_REBUILD_IDLE_YIELD_MS` overrides.
+- New `review` token scope for the table-review / link-proposal routes; not in the default issue set.
+- Schema changes are additive only (Postgres tables slice 2, link proposal queue, `blob_purged_at`,
+  `lore_pg_rekey_ledger`). Embedded SQLite hosts (Atlas, MIRA, PM Helper) need no data migration.
+- Off by default: Links Loop D, ingestion blob retention, the `related[]` trims.
+
+### Changed — Audit rotation runs under the writer lock
+
+- `AuditLog.rotateExclusive` rotates `audit.jsonl` while holding the same lock as appends and writes the continuation
+  record synchronously, so an append can no longer land between the archive copy and the truncate.
+- Archives are created with flag `wx`; a name clash retries `<ts>-N.gz` (up to 100) instead of overwriting. Archive
+  order is deterministic (`compareArchives`); `RotateOptions.now` for tests.
+- Test: `test:unit:audit-rotation-lock`.
+
+### Changed — Erase-now audit entry names the permanent id
+
+- The audit entry for `DELETE /api/workspaces/:name?erase=now` (or any delete whose erase ran inside the request) logs
+  `{workspaceId, erase, eraseStatus}` instead of the workspace name: it is written after the audit blank-out, so a name in
+  it would never be blanked. The actor is kept.
+- Known limit, documented in `docs/WORKSPACE_DELETE.md`: `lore workspaces erase-now` in a second process while a daemon
+  runs on the same `LORE_HOME` can lose an audit line the daemon writes at the same instant. Use HTTP `?erase=now` or
+  stop the daemon. A cross-process lock is a planned follow-up.
+- The end-to-end suites were deflaked (no behaviour change).
+
+### Added — Workspace erase: audit-log step (runs last)
+
+- A deleted workspace's entries in `<LORE_HOME>/audit.jsonl` and the rotated `audit.jsonl.<ts>.gz` archives are blanked,
+  not removed. Kept: `timestamp`, `toolName`, `result`, `durationMs`, `prevHash`, `anchorHash`. Blanked: `actor`, `args`,
+  `resultDetail`, `approvalId`. Each stub keeps `redacted.origHash`, so the hash chain still verifies.
+- One `audit.redacted` marker per run records `{runId, workspaceId, count, digest}` (permanent id only, never the name).
+  `verifyChain` / `verifyChainWithHistory` accept a stub only when it is canonical and vouched for by a marker.
+- Entries that cannot be tied to the workspace (no name or id, or an ambiguous name) are left as they are and reported
+  `unverifiable`. Details: `docs/WORKSPACE_DELETE.md`.
+- The Postgres daemon e2e compares only non-empty tables.
+
+### Changed — Postgres ingestion ids hash the permanent id
+
+- Postgres ingestion job and source ids now hash the workspace's permanent id, so a same-name successor can no longer
+  collide with a held, not-yet-erased workspace's rows. Job ids made by older builds (name-hashed) are still found, but
+  only within the same workspace (`created = false`).
+- `IIngestionStore.resolveSourceId(workspace, sha256)` is the one place the coordinator gets a source id. SQLite keeps the
+  name hash (its store is per workspace).
+- Test: `test:unit:pg-ingest-ids`; `docs/WORKSPACE_DELETE.md` updated.
+
+### Fixed — Daemon passes ingestion blob settings through the env scrub
+
+- The daemon's environment scrub now keeps `LORE_INGEST_BLOB_STORE`, `LORE_INGEST_BLOB_RETENTION_DAYS` and the
+  `LORE_INGEST_GF_*` settings, which it used to drop, so blob retention and the Groundfloor Files blob store can be
+  configured for a daemon. The GF token is held in a redacting `Secret`.
+- It also keeps `LORE_WORKSPACE_ERASE_MAX_UNVERIFIABLE_ATTEMPTS` (#262), which it used to drop, so the daemon
+  honours that setting.
+
+### Fixed — Test-only: `save-ingestion-roots`, test type check
+
+- `save-ingestion-roots` used fixture roots that the NW-1a root-safety check now rejects; it now builds them under the
+  home folder and covers the rejection and load-filter cases. Script `test:unit:save-ingestion-roots`.
+- Nine test files added since 3.36.0 failed the test type check (`scripts/test-test-types.mjs`), which stopped the full
+  chain before any suite ran. Fixed in the files (no new quarantine entries); no behaviour change.
+
+### Changed — SQLite link rebuild: longer idle pause between batches (200 ms)
+
+- The default idle pause between link-rebuild batches (`rebuildIdleYieldMs`, `LORE_LINK_REBUILD_IDLE_YIELD_MS`) is now engine-aware: 200 ms for a workspace on the SQLite graph engine, 10 ms on Postgres (unchanged). On SQLite a batch is compute-bound and blocks the event loop for 2 to 4.5 s, so the old 10 ms gap left other requests no room; the bench showed 10 vs 200 ms moves rebuild throughput by only about 5%.
+- An explicit `LORE_LINK_REBUILD_IDLE_YIELD_MS` (or programmatic `rebuildIdleYieldMs`) wins for both engines. The pause is still capped at `LORE_LINK_REBUILD_YIELD_MS`. Other engines (including an unregistered workspace, which resolves to the default engine) keep 10 ms.
+- Internals: `LinkRuntimeConfig.rebuildIdleYieldMsSqlite`, `rebuildIdleYieldFor(config, engine)`, `RebuilderOptions.idleYieldMs` may now be a per-workspace function, and `createLinkService` takes `graphEngineOf` (wired by `discoveryHostFields`). Hosts that do not pass `graphEngineOf` keep the 10 ms pause.
+- This shortens nothing inside a batch: the 2 to 4.5 s stall per batch remains. Options are written up in `docs/followups/LINK-REBUILD-SQLITE-STALL.md`.
+- Test: `npm run test:unit:link-rebuild-idle-yield-engine`.
+
+### Added — Workspace erase: terminal `needs-operator` state
+
+An erase that can never resolve by retrying (data in shared storage that cannot be told apart, a link where a folder should be, no Postgres connection for a Postgres workspace) used to be retried by the tick forever. See `docs/WORKSPACE_DELETE.md`.
+
+- New `LORE_WORKSPACE_ERASE_MAX_UNVERIFIABLE_ATTEMPTS` (integer 1-100, default 5; invalid falls back to 5). After that many consecutive attempts in which every incomplete store is `unverifiable`, the `erased` receipt gets status `needs-operator`. A `partial` step or a failed attempt never counts and resets the run.
+- The counter is `unverifiableStreak` on the `erased` receipt in `workspace-deletions.jsonl` (additive; absent = 0, so older logs load unchanged). `readDeletionLog` exposes `unverifiableStreak` and `needsOperator` on `DeletionState`.
+- The tick stops retrying a `needs-operator` record. `lore workspaces deleted` (and `--json`) shows state `needs-operator` with the reason per store and the receipt; `lore workspaces erase-now <id>` still runs it, resetting the counter (exit 2 if it is still not complete).
+- No new route, scope or permission. There is no HTTP listing of deleted workspaces and no erase counter in `/api/admin/stats` today, so nothing was added there.
+- Tests: `test:unit:workspace-erase-needs-operator`.
+
+### Changed — Postgres rows are keyed by the workspace's permanent id (lane g1)
+
+Every Postgres table keyed its rows by workspace NAME. A rename orphaned the rows, a deleted name reused by a different workspace re-attached the old rows to the new owner, and the workspace eraser could not delete Postgres rows safely. `workspace_id` now holds the registry entry's permanent `id` in every table (graph, edges, verbatim and its per-workspace partitions, link opt-outs, table-storage `lore_entity*` and the `lore_tv_*` views, ingestion `lore_ingest_*`, history versions, and scaffolding such as `edges_next`).
+
+- One resolver, `resolvePostgresWorkspaceKey(name, home)` (`engines/postgres/postgresWorkspaceKey.ts`), turns a name into the key for every open path (graph, verbatim, table storage, ingestion store, the local graph registry, the backup CLI). There is no fallback to the name: a workspace with no registry entry or no valid id throws `PostgresWorkspaceKeyError` (`postgres_workspace_key_missing`). Resolving backfills missing ids in `workspaces.json`, so a Postgres workspace opened on this build may cause the registry file to be rewritten once.
+- One-time rewrite at engine open (`postgresRekey.ts`), run under the schema advisory lock after the store's own DDL: for each registry workspace (live, and deleted/held ones by their recorded id) `UPDATE ... SET workspace_id = <id> WHERE workspace_id = <name>` across every table found in the catalog, in ONE transaction per workspace. The same transaction swaps the verbatim list partition, rebuilds the `lore_tv_*` views and records the workspace in the new `lore_pg_rekey_ledger` table (`key_id`, `rekeyed_at`, `rows_moved`, per-table counts). A recorded workspace is skipped, so the pass is idempotent and cheap on every later open.
+- Mixed-key guard: if rows exist under BOTH a workspace's name and its id, nothing for that workspace changes and `PostgresRekeyConflictError` (`postgres_rekey_mixed_keys`) names the tables. It is thrown when that workspace is the one being opened; for any other workspace it is logged as a warning and left for its own open.
+- Rows under a key that matches no live or deleted registry workspace are left alone and counted in one log line. If a live and a deleted workspace shared a name, the old rows are ambiguous: the live workspace gets them and the deleted one is counted in the same log line (`shadowed`).
+- Edge surrogate-key migration in progress (`edges_pk_progress` exists): the rewrite refuses until it is finished.
+- Eraser: `POSTGRES_ROWS_KEYED_BY` is now `'permanent-id'`, so a delete of a Postgres workspace removes its rows for real and the receipt can be `complete`. The "Postgres name reuse" `unverifiable` branches in `hostErasers.ts` are gone and the Postgres ingestion part is keyed by `target.id`. The filesystem and Files-API blob name-reuse guards are unchanged. The `lore_pg_rekey_ledger` table is on the reviewed global-table list and is skipped (with a stated reason) by the logical backup.
+- Logical backups: a bundle now records, and is named after, the permanent id. Restoring ANY bundle (including one taken before this change, whose rows carry the name) rewrites every row to the restoring workspace's id. `lore restore` accepts a bundle whose source is either the target's name or its id without `--allow-name-mismatch`.
+- Upgrade note: every process that shares the database must run this build. An older build would write name-keyed rows again after the rewrite, and the next open would then refuse that workspace with the mixed-key error. No new env var, route, scope or permission.
+- Ingestion job and source ids still hash the NAME the caller presents (they are a global primary key). A same-name successor that re-ingests byte-identical content while the old workspace's rows are still held can collide until the old workspace is erased. (Superseded by the ingestion-id entry above: on Postgres they now hash the permanent id.)
+- Proofs: `test/pg-rekey-unit.ts` (re-key of every table, idempotence, mixed-key refusal, name reuse then erase of the old id with a `complete` receipt, old-bundle restore) and `test/pg-workspace-erase-unit.ts`.
+
+### Changed — Workspace erase engines wired in (lane f6c)
+
+The Postgres and uploaded-file (ingestion blob) erasers from lane f6a are now part of the delete lifecycle in every real path: the daemon's scheduled tick, the embedded `createLore()` host, `DELETE /api/workspaces/:name?erase=now`, maintain expiry and `lore workspaces erase-now`. See `docs/WORKSPACE_DELETE.md`.
+
+- New `engines/workspaceErase/hostErasers.ts` builds both erasers lazily per deleted workspace; `resolveErasers` is the single wiring point. A caller-supplied eraser for the same store still replaces the built-in one.
+- Uploaded files: erased through the workspace's own ingestion store (SQLite file as a whole, or Postgres ingestion tables by name). Name guard: if a LIVE workspace has the same name, files in the deleted workspace's own `.erase-hold-<id>` folder (fs blob store) are still erased; anything keyed by name in shared storage (Files API blobs; Postgres ingestion rows too until lane g1 above keyed them by id) is left alone and reported `unverifiable`, so the receipt stays `partial` instead of falsely `complete`.
+- Fix: re-creating a workspace with a deleted one's name (same default folder) made the `local-dir` step report `not-applicable` and the receipt `complete` while `.erase-hold-<id>` was never removed. A new-style delete now checks only the id-derived holding folder against live entries, and a refused folder that still exists is `unverifiable`, never `not-applicable`. Test: `test:unit:workspace-erase-name-reuse`.
+- Postgres: uses a private connection pool (new `dedicatedPool` option) so the host's shared pool is never closed. In this lane, rows on direct Postgres were NOT erased: the engine keyed rows by workspace name, so the step was `unverifiable`, the receipt `partial` and retried. Superseded by lane g1 above: rows are keyed by permanent id and erased for real.
+- `EraseTarget` gains an optional `engine` field (additive). No new env var, route, scope or permission.
+- Maintain expiry: a `partial` receipt no longer throws when the local folder is already gone.
+- Proofs: real daemon over HTTP on SQLite (uploaded file erased, neighbour byte-identical) and on direct Postgres (receipt `partial`, zero rows changed for both workspaces).
+
+### Fixed — cloud-purge refuses before deleting (lane f6d)
+
+- `lore maintain cloud-purge --apply` (and the workspace eraser that shares `applyWorkspacePurge`) checked "a newer write exists after the delete" only in its `lore_node` pass, which runs last. A refusal therefore arrived after `lore_edge`, `lore_version` and `lore_verbatim` rows were already deleted, leaving a half-purged workspace. `applyWorkspacePurge` now does a read-only `lore_node` walk and runs `probeCheck` before ANY delete; a refusal deletes nothing and is reported exactly as before (`aborted-probe`, exit 2, `stoppedIn: lore_node`, message `recent-write probe refused: ...`). The in-pass check still runs, so a write landing mid-run is still caught. The eraser's own duplicate pre-flight was removed.
+
+### Changed — Workspace delete erases data (lane f6b)
+
+Delete used to remove only the registry entry (HTTP) or erase at once with no record (maintain). It now means the same everywhere: hide at once, erase what Lore controls after a recovery window. Full description: `docs/WORKSPACE_DELETE.md`.
+
+- New `LORE_WORKSPACE_ERASE_AFTER_DAYS` (integer >= 0, default 7, 0 = erase at once). An invalid value falls back to 7.
+- `DELETE /api/workspaces/:name` and the maintain ephemeral-expiry path close the workspace's handles (refusing if they cannot be closed), rename the data folder atomically to `workspaces/.erase-hold-<permanent id>`, append the `deleted` record (additive `eraseAfter`, `holdingPath`, `entry`), then remove the registry entry. Maintain expiry uses window 0 through the same erasers.
+- Additive `erase` object on the delete response (`status`, `eraseAfter`, `windowDays`, `restoreCommand`, `notReached`). `?erase=now` erases immediately; any other `erase` value is a 400. No new permission, scope or route.
+- Scheduled erase tick (daemon and embedded host; first run a minute after boot, then hourly) with retry backoff, attempt records and a cross-process stale-safe lock (`workspace-erase.lock`). There is no switch to turn it off.
+- Append-only `erased` / `erase-failed` / `restored` receipts in `workspace-deletions.jsonl` (version stays 1; readers skip unknown or torn lines; existing `purge` events still count). A receipt is `complete` only when every store verified empty; `unverifiable` or leftover data makes it `partial` and is retried.
+- Erasers: local folder, Dataplane (wraps cloud-purge apply), OS keychain, outbox rows and the workspace-paths entry (name-keyed, skipped while any live workspace has that name). `buildWorkspaceErasers(deps, extra)` has a fixed run order and a slot for the Postgres and blob erasers.
+- CLI: `lore workspaces deleted`, `restore <id> [--as <name>]` (same permanent id; refuses once an erase has started), `erase-now <id>`. Restore has no HTTP route.
+- Legacy `deleted` records (no `eraseAfter`) are never erased automatically; listed as "kept — legacy delete" and erased only by `erase-now` (`AUTO_ERASE_LEGACY_DELETES = false`).
+- Not erased: operator backups and exports, and the hash-chained `audit.jsonl`. (Superseded by the audit-log step above: the deleted workspace's audit entries are now blanked; backups and exports are still not erased.)
+- Direct-Postgres rows and ingestion blobs are erased only once the engine erasers are plugged into the factory; until then a direct-Postgres delete leaves those rows. (Superseded by lane g1 above: direct-Postgres rows are now erased.)
+
+### Added — Workspace erase engines (lane f6a)
+
+The two engine-side erasers for "honest workspace delete", built on the `WorkspaceEraser` contract (`engines/workspaceErase/types.ts`). Lifecycle, scheduling and routes are lane f6b; nothing calls these yet.
+
+- `createPostgresWorkspaceEraser` (`engines/postgres/postgresWorkspaceErase.ts`) removes every Postgres row, list-partition (`verbatim_ws_*`, DETACH + DROP), per-workspace view (`lore_tv_*`) and per-field partial index (`lore_ev_*`) for one workspace, in batches, then VACUUMs and re-counts. Tables are found from the live catalog (any table with a `workspace_id` column, including migration scaffolding the logical backup skips), not a list. A completeness test fails when a new table is neither workspace-scoped nor on the reviewed `GLOBAL_POSTGRES_TABLES` list, and an unrecognised workspace-like column turns `complete` into `unverifiable`.
+- The Postgres engine stores the workspace NAME in `workspace_id`, not the permanent id, so erasing by id would match nothing and erasing by name could hit a same-name successor. The destructive path is therefore gated by `POSTGRES_ROWS_KEYED_BY = 'workspace-name'`: in production `erase()` only counts and returns `unverifiable` ("nothing was deleted"). The destructive path is fully tested (over id-keyed stores) and switches on when the engine is migrated to permanent ids and the constant is flipped.
+- `openWorkspaceEraser('postgres')` (`engines/workspaceErase/openWorkspaceEraser.ts`): lazy port so `pg` stays under `engines/postgres/` (D-017).
+- `createIngestionBlobEraser` (`ingestion/ingestionBlobErase.ts`) deletes a workspace's ingestion blobs from the blob store (filesystem or Groundfloor Files) using the refs recorded in the ingestion store, never by scanning the blob store. A blob ref also recorded by another workspace is kept. `IIngestionStore` gains `listSourceBlobRefs` and `countBlobRefsHeldByOtherWorkspaces` (SQLite and Postgres implementations).
+- Tests: `test:unit:pg-workspace-erase` (real Postgres; neighbour workspaces byte-identical before and after, resume after abort, idempotency) and `test:unit:ingestion-blob-erase` (real SQLite + filesystem + Postgres + a fake Groundfloor Files server).
+
+Postgres erase is a logical delete plus VACUUM: physical bytes can remain in free space, WAL and backups until they are overwritten or expire.
+
+### Fixed — Keyword CTE guard (lane f1)
+
+Follow-up to the Postgres keyword CTE (#251), from an independent review.
+
+- The CTE route is no longer taken when the planner would build the CTE from a full scan of `nodes`. Before, the guard only
+  checked estimates, so when the CTE's `CTE m` came out as a Seq Scan it evaluated the LIKE / jsonb predicate on every row
+  of the workspace (repro: 60,000 rows of ~230 bytes, scan cap 200, term in 5% of rows: original 6.4-6.9 ms, CTE 85.9-89.3 ms).
+  A fourth probe, reached only when the first three already say "CTE", now `EXPLAIN`s the CTE statement (no execution) and accepts
+  it only if the subtree under `CTE m` has no Seq Scan and reaches the keyword GIN indexes through a Bitmap Index Scan.
+  Plan shape rather than Total Cost: the two statements' costs rest on the same estimates that misled the planner, whereas
+  "no full scan inside the CTE" is exactly the property that makes the CTE cheap. Unreadable plans keep the original statement.
+- A failing probe (EXPLAIN error, connection error, `statement_timeout`) no longer fails the search: it falls back to the
+  original statement and warns once per error class/SQLSTATE (never with query text).
+- New setting `LORE_PG_KEYWORD_CTE` (default on; `0` / `false` / `off` / `no` = off). Off skips the probes and runs the
+  original statement: exactly the pre-#251 behaviour, no extra round trips. Documented in `docs/CONFIGURATION.md`, allowlisted
+  in `envScrub`.
+- Tests: `test/pg-keyword-cte-guard-unit.ts` (`test:unit:pg-keyword-cte-guard`).
+
+### Fixed — Seal verbatim resolver at shutdown (lane f5)
+
+`WorkspaceVerbatimResolver.closeAll()` closed and cleared its maps but set no state, so `getOrOpen` could reopen a
+store after shutdown had "closed all". Since #249, reads on a retired boot store forward to the resolver's successor,
+and since d7 so do writes: during the window between the resolver's `closeAll()` (drain step 9.7) and the boot store's
+`close()` (step 10) a forwarded call could reopen a Lance/SQLite store and leak the handle.
+
+- `closeAll()` now seals the resolver before it closes anything. Afterwards `getOrOpen` throws the new typed
+  `VerbatimResolverSealedError` (`applied: false`); `swapToLance`, `prime` and `startEvictionSweep` do nothing.
+- Opens and promotion swaps in flight when `closeAll()` runs close their own handle (no opened-but-untracked store);
+  `closeAll()` waits for them. `closeAll()` stays idempotent.
+- A forwarded retired write now fails fast with the sealed error instead of waiting out the 5 s retired-retry budget; a
+  forwarded retired read still answers from the old store (it already treated a throwing resolver that way). The outbox
+  classifies the sealed error as transient (replay on the next lifecycle, never a counted attempt or dead-letter).
+- A resolver is single-lifecycle by design: the daemon exits after the drain and each embedded `createLore()` builds a
+  fresh resolver, so nothing legitimately reuses one after `closeAll()`.
+- Test: `test:unit:verbatim-resolver-seal-shutdown` (real `createLore()` + real promotion + real drain, plus
+  open-vs-closeAll and swap-vs-closeAll races).
+
+### Fixed — GF m2m renewal and rotation (lane f2)
+
+Follow-up to the Groundfloor m2m login (`groundfloorM2mToken.ts`, PR #248), from an independent review.
+
+- **A failed renewal no longer takes the blob store down.** When the 80% renewal failed (mint endpoint blip), the still-valid
+  token was thrown away, so every Files API call failed for the 5 s cooldown and until a mint succeeded. Now the token keeps
+  being served until its real expiry (mint request time + `expires_in`, minus the smaller of 5 s and 5% of its life). A renewal on
+  a still-valid token is one attempt with no backoff sleep in the caller's path, then waits out the existing 5 s cooldown
+  (at most 12 mint calls a minute, under the platform's 20/min). Only an expired token makes a mint failure surface. A 401 from the
+  Files API still forces a fresh mint and the rejected token is never served again.
+- **Secret rotation without restart.** `LORE_INGEST_GF_M2M_CLIENT_SECRET_FILE` is now re-read when the file changes (same
+  mechanism as `LORE_INGEST_GF_TOKEN_FILE`) and used at the next mint. A secret given by value is still fixed until restart.
+  `docs/CONFIGURATION.md` now recommends the 0600 `_FILE` form.
+- The cached token and the secret reader are `#private` fields: `util.inspect(p, { customInspect: false })`, `Object.entries`
+  and spread no longer show them.
+- A client secret that cannot be read (throws, or empty) is a configuration fault: no request, no retries, a secret-free error.
+- A failed mint now reports `retryable = true` on every path. The 401 path used to report `false` while `token()` reported `true`
+  for the same cooldown failure. True is right: every cause (outage, rate limit, rotation in progress, secret file being fixed)
+  is fixable without changing the job, and the job's own attempt limit bounds the retrying.
+- `expires_in` is clamped to [30 s, 24 h]: `1e306` no longer means "never renew" and `0.001` no longer means "mint on every call".
+
+### Changed — Link rebuild throughput (lane e3)
+
+The Loop C link rebuild makes the same links as before, faster. 100k-node bench on local Postgres, alternating code versions
+back to back (two rounds each, `uptime` load 4 to 6 throughout), 45 s budget per run, rebuild phase of `pg-scale-bench`:
+
+| Step (cumulative) | Empty edges, nodes/s | Pre-populated, other policy, nodes/s |
+|---|---|---|
+| before (cd8548a0) | 151 | 76 |
+| 1 narrow kNN rows | 153 | 77 |
+| 2 batched row reads | 154 | 80 |
+| 3 reuse of computed link sets | 155 | 80 |
+| 4 prefetch of the next batch | 204 | 91 |
+| 5 idle-aware yield | 697 | 149 |
+
+Projected 1M rebuild (naive 1M / rate, not measured at 1M): about 1.8 h before, about 24 min after, on an empty edge table.
+Where the time went before: roughly 60% of wall time was the fixed 200 ms pause between 50-node batches.
+
+- Narrow kNN rows: the rebuild's kNN no longer returns `text` (about 1 KB per row) or the other unused columns. Postgres only
+  (`KnnOptions.columns: 'link'`); other callers and the default are unchanged.
+- Batched row reads: the per-node `getById` of a batch is one `getByIds` on Postgres. SQLite keeps point reads.
+- Reuse: an outside endpoint whose link set was already computed in this run (current, previous and prefetched batch) is not
+  recomputed in `reconcileLinks`. Rebuild ids are walked in sorted order and an edge is judged by its lower endpoint, so hits
+  come from the prefetched batch; on a plain first run they are few. No reuse across runs.
+- Prefetch: the next batch's read-only compute overlaps the current batch's edge reads and writes. It is dropped and recomputed
+  when the host was busy, and on stop, cancel or error; the checkpoint cursor still moves only after a batch's writes, so
+  resume is unchanged. One difference: a prefetched compute can be one batch plus one pause older when the opt-out flag is
+  read; an opt-out set in that window is honoured one batch later (the next rebuild catches it, as before).
+- New `LORE_LINK_REBUILD_IDLE_YIELD_MS` (default 10, range 0 to 60000, never above `LORE_LINK_REBUILD_YIELD_MS`): the pause
+  between batches while the host is idle. A busy host (queue backlog or ingestion) still gets the full `LORE_LINK_REBUILD_YIELD_MS`
+  and the wait for quiet. Set it equal to the yield to restore the old pacing. Cost: an idle host now spends much more of its
+  CPU and database time on the rebuild.
+- Tests: `test:unit:link-rebuild-parity` (old vs each step vs all on, SQLite and Postgres: identical edges and counters over
+  opt-outs, scope and ecosystem confinement, tombstones, foreign edges, removable edges, an unembedded node) and
+  `test:unit:link-rebuild-flow` (stop and resume with prefetch, failed prefetch, cancel, busy drop, idle yield, config, and the
+  env-configured `createLinkService` plus admin route against a legacy twin).
+
+### Fixed — Link rebuild busy signal (lane f3)
+
+- "Idle" for the link rebuild's short pause (`LORE_LINK_REBUILD_IDLE_YIELD_MS`, lane e3) meant only an empty link queue: the
+  production boot passed no host probe, so a host still embedding fresh writes (nothing on the link queue yet) counted as idle.
+  The rebuild's busy check now also uses the host's embed queue (non-empty, or jobs for the rebuilt workspace) and the workspace's
+  pending outbox entries, the same check Loop D discovery already used (`discoveryBusy`, wired by `discoveryHostFields` in
+  `mcp/server.ts`). `RebuilderOptions.isBusy` now receives the workspace and may be async; a probe that throws counts as busy.
+  No recall / read-traffic signal exists on the host (the search gate is private to each store), so heavy recall alone still counts
+  as idle; none was invented. `docs/CONFIGURATION.md` now states what busy means.
+- Rebuild prefetch: a prefetch dropped because the host turned busy was not awaited, so a kNN / `getByIds` could still be running
+  after the run returned (`drain()` / `close()` could report done early). Dropped prefetches are now awaited before the recompute
+  and again in `finally`.
+- Reuse window: the prefetched batch was added to the window twice, so `REUSE_WINDOW_BATCHES = 3` held only 2 generations. Each
+  batch is now added once.
+- Tests: `test:unit:link-rebuild-busy-signal` (through `createLore()`: an idle host is never waited for; a write whose embedding is
+  still running makes the rebuild wait; fails on the old wiring) and new cases in `test:unit:link-rebuild-flow` (dropped prefetch
+  awaited, window adds once per batch, async / throwing busy probe); the `reusedComputes >= 0` assertion is now an equality.
+- Bench only: `scripts/bench/sqlite-link-rebuild-bench.mts` (SQLite seed + rebuild A/B with an optional concurrent writer). At 100k
+  on SQLite the rebuild is compute-bound (~21 nodes/s), so `LORE_LINK_REBUILD_IDLE_YIELD_MS` 10 vs 200 moves throughput by about
+  5% (noise level); the multi-second event-loop stalls per batch are the same in both settings.
+
+### Changed — Postgres graph keyword leg (lane e1)
+
+- The graph keyword search (`postgresGraphReads.search`, the keyword leg of recall on Postgres) is faster for mid-frequency terms,
+  with identical rows and identical order. For a term that matches more rows than the scan cap but a small share of the table,
+  the planner answered `ORDER BY "updatedAt" DESC, id ASC LIMIT cap` by walking `idx_nodes_updatedat` and filtering, reading
+  about `cap * N / M` rows. In that case the engine now runs a `MATERIALIZED` CTE of the matching `(id, "updatedAt")` pairs (a
+  bitmap over the existing trigram and tag GIN indexes), takes the top `cap`, and joins back on `(workspace_id, id)`.
+- The choice is made per query from three `EXPLAIN (FORMAT JSON)` probes (planner estimates only, nothing is executed): does the
+  original statement walk the recency index, is the estimated match count inside the window where the CTE wins
+  (`cap/2 < M <= 200000` and `M^2 <= 0.5 * cap * N`), and the workspace row estimate. Anything unreadable keeps the original
+  statement. Rare terms and terms the planner already serves from the GIN indexes pay one extra round trip (about 0.4 to 1 ms);
+  very common terms, where the recency walk is already cheap, always keep the original statement. Results are memoised by the
+  read cache, so probes run only on a cache miss.
+- On the 100k bench (alternating before/after, same machine): the mid term at cap 200 (the same cap/N and M/N ratios as cap 2000
+  at 1M) went 16.4 ms to 12.7 ms; at cap 2000, terms in the window went 76 to 29 ms on `EXPLAIN ANALYZE`. The 1M effect is
+  projected from the plan shape, not measured. No new setting.
+- New: `test/pg-keyword-cte-unit.ts` (`test:unit:pg-keyword-cte`, real Postgres, old SQL kept as the reference), bench-only
+  `scripts/bench/pg-keyword-ab.mts` and `pg-keyword-explain.mts`.
+
+### Fixed — BM25 stop-list backoff and filtered queries (lane f4)
+
+Follow-ups to the lane e2 stop-list (`LORE_BM25_COMMON_TOKEN_RATIO`), from an independent review. No new setting.
+
+- A list that cannot be built no longer costs work on every query. A pool with no background slot (`LORE_PG_POOL_MAX=1`, or
+  `LORE_PG_BACKGROUND_CONCURRENCY=0`) with a workspace of 5,000+ rows, or a refresh that throws, used to re-read the metadata
+  table and retry on every uncached query (and log every time on a throw). The once-a-minute recheck now covers that case
+  too; a failure is logged once per window.
+- A query whose words are all common now runs the original (pre-stop-list) query when a metadata filter is applied, instead
+  of returning no keyword hits: the filter bounds the rows to rank, so the result is the same as with the feature off.
+  Unfiltered all-common queries still return no keyword hits (empty envelope, `ranked: true`). A common word plus a
+  punctuation-only token (`the ???`) counts as all-common, filtered or not.
+- Restoring a workspace from a backup clears that workspace's stop-list rows (derived data, never in the bundle) so the list is
+  rebuilt for the restored contents. There is no Postgres workspace-delete path that removes rows today (workspace delete is
+  registry + local directory only); `clearStopListRows()` is ready for it.
+- When a refresh loads a list that another process built and it differs from the one in memory, the search cache is
+  invalidated (the same epoch bump a local build does).
+- One-time upgrade cost removed. The stop-list tables had been part of the "schema is current" check, so the first open of
+  each existing database after e2 re-ran the whole schema DDL, including `CREATE INDEX IF NOT EXISTS` (a SHARE lock per
+  partition). They are now created on their own with `CREATE TABLE IF NOT EXISTS` when missing. Databases already opened by a
+  build with e2 are unaffected; databases that have not yet are no longer hit by the full re-run.
+- Tests: `test/pg-bm25-stoplist-unit.ts` (+8 cases, real Postgres; all 8 fail on the pre-fix code).
+
+### Changed — Postgres BM25 common-token stop-list (lane e2)
+
+- The Postgres keyword (BM25) leg no longer ranks most of a large table for common words. Each workspace keeps a small list of
+  "common" lexemes (those in at least `LORE_BM25_COMMON_TOKEN_RATIO` of its rows, default 0.2, found with `ts_stat` over a
+  bounded `TABLESAMPLE` so the cost is flat in table size, ~140 ms). `bm25Search` drops those tokens from the tsquery when at
+  least one non-common term remains; a query made only of common words returns no keyword hits (the vector leg still answers)
+  instead of scoring the whole table. Multi-lexeme tokens (`foo-bar`, URLs) are phrases and are never dropped.
+  100k rows, same machine, back to back: common-only / all-common ~20-24 ms to 0 ms, common + mid-frequency ~21-25 ms to ~1 ms,
+  rare-only unchanged (~1.3 ms).
+- The list is additive derived data (`verbatim_common_lexemes`, `verbatim_common_lexemes_meta`, auto-created with the rest of
+  the verbatim schema, excluded from backups), built at the end of a bulk ingest (`ensureFtsIndex`), by `compact()`, and in a
+  guarded background job when it is missing or stale (row count moved 20%, ratio changed, or 6 h old). Never inline on recall.
+  Workspaces under 5,000 rows keep no list.
+- `LORE_BM25_COMMON_TOKEN_RATIO` (default 0.2, `0` = off and exactly the previous query). Documented in `docs/CONFIGURATION.md`
+  and allowlisted in `envScrub`. Postgres only; the SQLite FTS5 path is unchanged and was not measured.
+
+### Fixed — Boot verbatim reads follow promotion (lane e5)
+
+- After a background SQLite -> LanceDB promotion, the daemon's boot `SqliteVerbatimStore` (held by `server.ts`, the routes,
+  the sync engine and the shutdown drain) now forwards its READ methods to the promoted store, as d7 (#244) already did for
+  writes. Before, a held reference kept answering from the pre-promotion SQLite handle, so anything written after the swap
+  was invisible through it until restart. Forwarded: `search`, `bm25Search`, `searchByVector(s)`, `getById`,
+  `getExistingIds`, `getVectors`, `getContentHashesByIds`, `listIds`, `exportRows`, `getHistory`, `count`, `searchPieces`,
+  `findUnchangedRowIds` (the Lance engine has no probe, so a retired store reports nothing unchanged rather than trusting the
+  stale file).
+- Rules: a store counts as retired by the same retire-generation check as writes; before the swap lands (or if it fails)
+  the old store keeps answering and a read never waits; a closed or uninitialized store answers exactly as before and never
+  asks the resolver; the replay never targets the retired instance itself (no bounce-back) and the successor is re-resolved
+  on every call (once more if it was idle-evicted in between); a failing replay is surfaced, not answered from the stale file.
+- No response shape, error code, setting or env changes. Maintenance and sync methods (`compact`, `ensure*Index`,
+  `pieceIndexStatus`, `readPoolStats`, ...) are not forwarded. New: `engines/verbatimRetiredRead.ts`,
+  `engines/sqliteVerbatimSearchKey.ts` (the duplicated search cache-key normalisation, extracted to stay under the 800-line cap).
+
+### Added — Groundfloor blob store machine login (lane e4)
+
+- `LORE_INGEST_BLOB_STORE=groundfloor` can now authenticate with a Groundfloor M2M client instead of a static bearer token:
+  `LORE_INGEST_GF_M2M_CLIENT_ID` plus `LORE_INGEST_GF_M2M_CLIENT_SECRET` (or `_SECRET_FILE`, read once; a group/world
+  readable file logs a warning). New `M2mTokenProvider` (`ingestion/groundfloorM2mToken.ts`) mints via
+  `POST {api}/v1/workspaces/{ws}/m2m/token`, caches the token, renews it at 80% of `expires_in`, shares one in-flight mint
+  between concurrent callers, retries 5xx/429/network errors on the mint with bounded backoff, and fails fast for 5 s after a
+  failed mint. The Files API client renews once and retries once on a 401. Static token and m2m together fail closed at
+  startup (no workspace opens, no disk fallback). The mint URL is https (http for loopback only), carries no credentials, and
+  redirects are refused. The secret, tokens and response bodies never reach logs, errors or `status()`. Not yet checked
+  against the real Groundfloor platform (local fakes only). The static-token path is unchanged. No new permissions or scopes.
+
+### Fixed — Postgres at 1M: delete and link-rebuild batching
+
+- `nodeDeleteMany` on a Postgres workspace is about 2.5x faster (10k nodes at 100k scale: 58 s to 23.5 s, same machine back to back).
+  The graph side of each 50-node chunk is now one transaction (`PostgresGraph.deleteNodes`: link opt-outs, edges in both
+  directions, nodes) instead of one transaction per node, and the verbatim tombstone is one batched embed plus one transaction
+  (`PostgresVerbatimStore.tombstoneMany`). Both fall back to the per-node path if the batched call throws, so results,
+  response shapes and error behaviour are unchanged.
+- The link rebuild (and link-on-arrival) read the existing edges and stored vectors with bounded concurrency (4) instead of one
+  at a time, merged in the original order so the diff is identical. About 8 to 10% more edges per second on the 100k bench.
+
+### Added — Postgres at 1M: re-measure and bench tooling
+
+- `scripts/bench/pg-seed-1m.mts`, `pg-scale-bench.mts`, `pg-explain.mts`: seed N synthetic nodes into a real Postgres workspace
+  through Lore's own schema and index builders, then measure recall, keyword leg, count(*) calls, graph walk, link rebuild,
+  link-on-arrival, as-of, bulk delete, embedding batching overhead and EXPLAIN on the top queries. Bench-only, not shipped.
+- `docs/bench/PG-1M-REMEASURE-2026-10.md` and `PG-1M-EXPLAIN-2026-10.txt`: the 100k and 1M results (recall p50 302 ms at 1M on a
+  quiet machine), what is still slow (mid-frequency graph keyword leg, BM25 over common tokens, rebuild rate) and recommendations.
+
+### Fixed — Groundfloor blob store against the real stage Files API
+
+- Checked against the real stage Files API (GF Cloud Demo workspace, 2026-10-24): upload, finalize, download with sha256 check and delete all work. Two gaps found and fixed:
+  - Delete is a soft delete on the server: asking for a deleted file's download URL answers 409 `File is deleted, not active`, not 404. `has()` now returns false and `get()` throws `BlobNotFoundError` for it (any other 409 is still an error). A repeat delete answers 200, so `delete()` returns true.
+  - Stage user access tokens last 5 minutes, but `LORE_INGEST_GF_TOKEN_FILE` was read once at start. The file is now re-read whenever it changes, so an outside refresher can rotate the token without a restart; if it vanishes or is empty the last good token is kept. A token given by value is unchanged.
+- Test fake now soft-deletes like the real server.
+
+### Added — HTTP API for table review and link proposals
+
+- New REST routes for two features that were library-only. Table review (Postgres table storage):
+  `GET /api/table-review/{settings,queue,aliases,unresolved}`, `POST /api/table-review/{confirm,correct,aliases}`,
+  `DELETE /api/table-review/aliases/:aliasId`. Link proposals (Loop D, `LORE_LINK_DISCOVERY`): `GET /api/link-proposals`,
+  `GET /api/link-proposals/:id`, `POST /api/link-proposals/:id/{accept,reject}`. A workspace on SQLite table storage
+  answers `404 table_review_unavailable`; link proposals answer `404 link_proposals_unavailable` when discovery is off.
+- New token scope **`review`** (the only scope added). Listing/getting uses the existing `read` scope; approving,
+  correcting, rejecting and alias add/remove require `review`, which is not implied by `write` and not in the default
+  `lore auth issue` set (`--scopes read,review`). The bootstrap and shared-secret operator principals hold it, as they
+  hold `write`. Routes are workspace-bound (cross-workspace needs `cross-workspace-write` for acts), paginated
+  (`limit` <= 200), bodies are capped at 64 KiB, errors carry no stack or SQL, and the reviewer is the authenticated
+  principal. The review confidence threshold stays read-only over HTTP. No existing route, response shape or error
+  code changed. `docs/API_REFERENCE.md` documents the routes.
+
+
+### Fixed — Daemon boot verbatim store survives a background promotion
+
+- After a background SQLite -> LanceDB promotion, writes through the daemon's boot verbatim store (and outbox rows
+  for the boot workspace, which resolve to it) failed with `VerbatimStoreRetiredError` until the daemon restarted.
+  The boot store now carries a late-bound `resolveSuccessor` and an `onLancePromoted` that swaps the workspace
+  resolver's primed entry to the promoted store, so a write that reaches the retired boot instance is replayed once
+  on the promoted store (nothing was applied before, so nothing is double-applied). The boot instance is left open
+  (other holders and the shutdown drain own it) but retired: it never writes the old SQLite file. No response shape,
+  error code or setting changed. Reads through a held boot reference are not forwarded yet (they still see the
+  pre-promotion file until restart); resolver-routed reads and all writes use the promoted store.
+
+### Added — Ingestion blob retention + Groundfloor blob store
+
+- `LORE_INGEST_BLOB_RETENTION_DAYS` (OFF by default): the scheduler deletes the source file of sources whose jobs
+  are all finished at least that many days ago. The source row, jobs and extracted memory stay; an additive
+  `blob_purged_at` column records it (SQLite and Postgres). Blobs used by any unfinished source are never deleted,
+  re-uploading identical bytes restores the file, and the sweep logs and counts purges (`status().blobs`).
+- `LORE_INGEST_BLOB_STORE=groundfloor`: keeps ingestion files in the Groundfloor Files API instead of local disk
+  (streaming, timeouts, retries on 5xx/429 with backoff, sha256 verified on read; base URL and token from
+  `LORE_INGEST_GF_*`, never logged). Default stays `fs`. A misconfigured store fails closed, no disk fallback.
+  Tested against a local fake server only; the real service was not called.
+- The disk blob store now refuses refs that are not `<16 hex>/<64 hex>` and verifies the sha256 on write.
+
+### Changed — `related[]` link ordering ON by default
+
+- Link ordering of `related[]` is now ON by default (`LORE_RECALL_LINK_ORDERING` / `recallLinkOrdering`). Neighbours
+  reached over inferred `semantic_neighbor` links are listed strongest-first; a hit with no such links keeps its traversal
+  order, so a workspace without links returns byte-identical results. Turn it off with `LORE_RECALL_LINK_ORDERING=0`
+  (`false`, `off`, `no`) or `createLore({ recallLinkOrdering: false })`; the option wins over the env var. Primary hits
+  never change.
+
+### Added — Links Loop D: discovery + relation typing
+
+Off by default (`LORE_LINK_DISCOVERY=1` or `createLore({ linkDiscovery })`); with it off no object, timer or table exists.
+Settings are global. SQLite and Postgres. Full settings list: `docs/CONFIGURATION.md` section 11b.
+
+- Discovery pass: neighbour-of-neighbour over recently changed regions, proposing old-to-old pairs Loop A missed. Scores with
+  stored vectors and Loop A's policy (minSim, k), writes through the existing linker path (idempotent, `policy_version`).
+  Resumable per-workspace cursor, per-run budgets (nodes, pairs, time), back-off while the host is busy. Caller edges are
+  untouched and `autolink:false` items are excluded in both directions.
+- Typing cascade behind `IRelationTyper`: rules (on with discovery), local NLI (off, never downloads unless
+  `LORE_LINK_NLI_DOWNLOAD=1`), LLM judge (off, per-run and per-day budget; a non-loopback endpoint needs
+  `LORE_LINK_JUDGE_HOSTED=1` and its verdicts are marked NOT SOVEREIGN).
+- `supports` is written as an inferred edge (origin `discovery`). `contradicts` and `supersedes` are proposals only, kept in
+  the link queue database; library API on the link service: list, accept (through the supersede path), reject.
+- Metrics, additive: `link.discovery` in `/api/admin/stats`, `lore_link_discovery_*` in `/metrics`.
+- recall-eval runner: `--link-discovery` (with `--link-on-arrival`) runs discovery to completion after the build.
+- New env vars are on the env-scrub allowlist so they reach the HTTP and stdio daemon.
+
+### Fixed — Verbatim store: no silent write drops
+
+Several verbatim-store write paths returned success without writing anything, so the outbox marked the row
+replicated and the data was lost with no error. They now fail loudly with a typed, transient error (`applied === false`),
+which the outbox retries without counting an attempt.
+
+- **SQLite** (`SqliteVerbatimStore`): a write before `initialize()` used to return silently. Every write entry point now
+  opens the store lazily (single-flight) and throws `VerbatimStoreNotInitializedError` only if it still cannot open.
+  A write on a closed store throws `VerbatimStoreClosedError`. A write issued before a background promotion to Lance and
+  resumed after it is rejected as retired (retire-generation counter in the write barrier) instead of landing in the old file.
+- **Lance** (`VerbatimStore`): writes after `close()` or before `initialize()` threw nothing and wrote nothing; they now throw
+  `VerbatimStoreClosedError` / `VerbatimStoreNotInitializedError` (new `engines/lanceWriteGuard.ts`).
+- **Postgres** (`PostgresVerbatimStore`) and the search-worker proxy: same typed errors on closed/uninitialized writes.
+- **Outbox**: `isSqliteOrRetiredTransient` also treats `VerbatimStoreNotInitializedError` as transient.
+- **Restore paths**: `migrateEmbeddingModel` (verbatim restore) and the Arcade backup restore loop no longer swallow a failed
+  verbatim re-embed; the failure is counted and logged.
+- Reads on an uninitialized or closed SQLite store still return empty/null (unchanged, documented, tested).
+
+### Added — `related[]` trims, recall-eval link flags, Postgres tables slice 2
+
+- `related[]` trims, both OFF by default: a per-hit neighbour cap (`LORE_RECALL_RELATED_PER_HIT`, or
+  `createLore({ recallRelated: { perHit } })`, applied after ordering) and hub exclusion (`LORE_RECALL_RELATED_MAX_DEGREE`,
+  or `recallRelated: { maxDegree }`) which drops neighbours whose live link degree (any relation, either direction) is
+  above the limit. The degree is read with two bounded indexed edge queries on SQLite and Postgres, only for candidates
+  that could still be listed. Hubs stay in the primary hits. The recall-eval runner gains `--related-per-hit` and
+  `--related-max-degree`, and `compareLinkArms.mjs` an N-arm mode (`--arm label=file`). Results and the suggested
+  settings: `scripts/diagnostics/recall-eval/results/link-eval-c1-2026-10-24.md`.
+- recall-eval harness: `--link-on-arrival` and `--link-ordering` flags, a `links` report block (related[] precision, nDCG
+  and noise share against a fixture-derived ground truth, plus link-graph stats), and `compareLinkArms.mjs`. First
+  results: `scripts/diagnostics/recall-eval/results/link-eval-2026-10-24.md`. Diagnostics only; no product code changed.
+- Postgres tables, slice 2 (additive, off the SQLite path; a 3.36.0 database upgrades in place on first open):
+  - Typed record links: `defineLinkType` / `addLink` / `closeLink` / `listLinks` with database-enforced cardinality and
+    soft (valid-time) invalidation; new tables `lore_link_type`, `lore_entity_link`.
+  - Optional per-value provenance (source document, page, verified quote, confidence, needs-review, extractor, contract,
+    extracted/reviewed at) accepted on `insert` / `insertBatch` / `update` and returned only with `{ provenance: true }`.
+  - `money` column type (`numeric` amount + `char(3)` currency) with `aggregateMoney`, which refuses mixed currencies with
+    a typed `MixedCurrencyError`. SQLite refuses `money` clearly ("not supported on SQLite yet").
+  - `queryAsOf(..., { time: 'recorded', validAt? })` reads what was known on a date; valid time remains the default.
+
+### Added — Tables: review queue + alias table (Postgres)
+
+- Postgres table storage only (SQLite returns a typed `not_supported` error); library API via `tableReviewFor(storage)`,
+  no new HTTP route or scope. Schema additions are all `IF NOT EXISTS` and upgrade a 3.36.0 database in place.
+  - Review queue: `listQueue` / `countQueue` (workspace scoped, cursor paginated; filters table, field, source document,
+    max confidence), `confirm` and `correct` (each writes a new reviewed value row that supersedes the extractor row, with
+    `supersedes_value_id` lineage; idempotent for the same reviewer, `conflict` for a second one).
+  - Per-workspace `reviewConfidenceThreshold` (default 0.8): values below it count as needing review even with
+    `needsReview: false`. See `docs/CONFIGURATION.md`.
+  - Plan results gain `unreviewed` per row and a `review` header (`threshold`, `unreviewedRows`, `totalRows`); the `exact`
+    label is unchanged.
+  - Alias table `lore_entity_alias`: `addAlias` / `listAliases` / `removeAlias` (soft, `valid_to`) / `listUnresolved`,
+    one documented normalisation function, and plan `eq` / `in` filters on string columns match the canonical plus its
+    aliases (`aliasesApplied` in the result). No fuzzy matching.
+
+### Added — Tables P3: a query-plan validator and a Postgres executor, no model involved
+
+A closed-grammar JSON query plan over the typed tables of one workspace, answered with exact rows and per-step counts.
+Library API only: `executePlan(storage, workspace, plan, limits?)` in `packages/lore/src/query/executePlan.ts`. No MCP
+tool, HTTP route or environment variable; off unless a host calls it. Postgres table storage only; other engines
+answer `engine_not_supported`. See `docs/QUERY_PLANS.md`.
+
+- Steps: `filter` (equals, in, range, text match, null checks), `join` (inner, on any declared column including the
+  reserved ones), `aggregate` (sum/count/min/max/avg, group-by, having), `as_of` (valid time), `order`, `limit`.
+  `follow_link`, `semantic_search`, `judge` and recorded-time `as_of` are in the grammar and refused with
+  `not_supported_yet`.
+- Validator: strict schema, every type and field checked against the catalogue, step cap 12, join cap 4
+  (`MAX_JOIN_HOPS`), unknown steps and properties refused, a plan cannot name a workspace; returns every reason.
+- Executor: fixed SQL templates, catalogue identifiers quoted, all values bound; one `READ ONLY` snapshot transaction
+  with `SET LOCAL` statement/lock timeouts; per-step and total-rows caps that name the cap and the step (no silent
+  truncation); "step N left 0 rows" with counts at each step; every step and row labelled `exact`.
+- Mixed-currency sums must be refused once a money column kind exists; recorded as a rule only (no money kind yet).
+- New: `PostgresTableStorage.runReadOnly(opts, fn)`.
+- Tests: `test:unit:query-plan-validator`, `test:unit:pg-query-plan`.
+
+### Added — `lore tables copy`
+
+- `lore tables copy --workspace <name>`: copies every table (schema, all rows, reserved `_memory_node_id` / `_source_id` /
+  `_valid_from` / `_valid_to` columns, UNIQUE) from a workspace's `tables.sqlite` into its Postgres table storage through
+  `ITableStorage`. Dry run by default, `--yes` executes, `--replace` empties conflicting Postgres tables first, `--json` for
+  scripts. Reads a private copy of the file (the original is never opened or changed), writes in batches of at most 100
+  operations, resumes after a crash by comparing against the file, and verifies row counts plus an order-independent
+  checksum per table. Exit codes 0/1/2/3/4/5 are documented in `docs/OPERATIONS.md`. Engine code: `engines/tableCopy.ts`,
+  `engines/tablesLeftBehind.ts`.
+- A Postgres-engine workspace that still has a non-empty `tables.sqlite` logs one warning per workspace per process (where
+  the table-storage factory chooses Postgres) naming the file and `lore tables copy`.
+
+### Fixed — closed `SqliteVerbatimStore` writes, rollback-copies test
+
+- **A write on a closed `SqliteVerbatimStore` is no longer a silent no-op.** `close()` cleared `initialized`, and every
+  write method opened with `if (!this.initialized) return;`, so `store`, `storeBatch`, `bulkAddPrebuiltRows`,
+  `bulkUpsertPrebuiltRows`, `delete`/`tombstone`, `physicalDelete`, `physicalDeleteMany` and `purgeWithHistory` all
+  resolved without writing, and the outbox marked the row replicated with nothing stored. They now throw the new
+  `VerbatimStoreClosedError` (`engines/verbatimStoreClosedError.ts`, `applied: false`), also for a write that was parked
+  behind the promotion barrier and resumes after `close()`. It is deliberately distinct from `VerbatimStoreRetiredError`:
+  the retired-retry path does not replay it through the workspace resolver (which would re-open a store that shutdown
+  just closed). The outbox classifies it as transient (same as a SQLite lock or a retired store): the row is retried, the
+  attempt is not counted and it is never reported as success. Reads on a closed store are unchanged (empty results).
+  New suite `test:unit:sqlite-verbatim-closed-store`.
+- **`test/postgres-rollback-copies-unit.ts`: the "URL password never prints" check no longer fails falsely.** With the
+  usual harness password `lore` the word appears in ordinary output (paths, names). The suite now creates its own
+  throwaway role with a long random password for the CLI under test, checks every CLI run's stdout and stderr for it,
+  and drops the role afterwards. Test-only change.
+
+### Added — Query plans: currency-aware money columns
+
+- Query plans (`docs/QUERY_PLANS.md`) now accept money columns in `filter`, `order` and `aggregate` instead of refusing
+  them with `not_supported_yet`. A money filter value must carry its currency (`{ "amount": "1000.00", "currency": "USD" }`,
+  amount as a decimal string); the pseudo-field `<column>__currency` filters and groups by currency. Comparisons only
+  hold within the literal's currency, and the number of rows left out because they are in another currency is reported
+  per step as the additive field `excludedOtherCurrency`. `sum/min/max/avg` return exact `{ amount, currency }` decimal
+  strings (never JS floats); `count` needs no single currency.
+- An aggregate that would combine more than one currency (within a group, if grouped) returns the typed plan error
+  `mixed_currency` (`column`, `currencies`, step), the same code the table API's `MixedCurrencyError` uses; `having` and
+  `limit` cannot hide a mixed group. A `having` threshold on a money measure must be `{ amount, currency }`; a currency
+  that contradicts the plan is a validation error naming the step. There is still no rate table: the single extension
+  point `decideCurrencyCombination` (`packages/lore/src/query/planMoney.ts`) always refuses.
+- Still `not_supported_yet`: `follow_link`, `semantic_search`, `judge`, recorded-time `as_of`, a money column as a
+  `group_by` key (use `<col>__currency`) and a money column as a `join` key.
+- Fixed in passing: any plan over a table with a money column used to fail when rows were produced; money values now come
+  back as `{ amount, currency }`.
+
 ## [3.36.0] — 2026-10-24
 
 The Postgres engine (graph, vector, full-text, tables) for server deployments, link-on-arrival with link freshness,

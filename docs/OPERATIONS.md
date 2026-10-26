@@ -455,6 +455,44 @@ lore postgres rollback-copies --drop all --yes             # drop both
 
 Background: `docs/POSTGRES_EDGE_LAYOUT.md` (rollback section) and `docs/CONFIGURATION.md` (vector storage, upgrade steps).
 
+## Copying tables to Postgres (`lore tables copy`)
+
+Switching a workspace's graph engine to `postgres` does not move its tables: the Postgres table storage starts empty and
+never reads `<workspace>/.lore/tables.sqlite`. This command copies every table (schema and rows) from that file into the
+workspace's Postgres table storage, through the same `ITableStorage` interface on both sides.
+
+```
+lore tables copy --workspace acme                 # dry run: tables + row counts, nothing written (exit 2 if work is pending)
+lore tables copy --workspace acme --yes           # copy, then verify
+lore tables copy --workspace acme --yes --replace # overwrite conflicting Postgres tables (see below)
+```
+
+- **What is copied.** Each table's declared columns (types, primary key, `UNIQUE`, required, indexed) and all rows, including
+  the reserved `_memory_node_id`, `_source_id`, `_valid_from`, `_valid_to`. Dates, booleans, JSON and NULLs round-trip.
+  Columns the SQLite file holds outside the declared schema are not copied.
+- **Source is never touched.** The command reads a private temporary copy of `tables.sqlite` (plus its `-wal` and schema
+  sidecar), so the original is not opened, locked, modified or deleted. Delete it yourself once you are satisfied.
+- **Preconditions** (exit 3 otherwise): the workspace is registered, its graph engine is `postgres`, and `LORE_PG_URL` is set.
+  A workspace with no `tables.sqlite` reports "nothing to copy" and exits 0.
+- **Safe re-runs and resume.** There is no progress marker: each run compares Postgres against the file by primary key.
+  Rows already identical are skipped, missing rows are written (upserts, at most 100 operations per transaction, read in
+  pages by primary key). A run that crashed part way therefore leaves a clean subset, and running the same command again
+  finishes it. A fully identical table is reported `done`; a second run with nothing left exits 0.
+- **Conflicts and `--replace`.** If a Postgres table already holds a row that differs from the file, or a row the file does
+  not have, the table is a conflict and the command refuses (exit 4) before writing anything to any table. `--replace`
+  resolves conflicts per table: it empties that Postgres table (schema kept) and copies the file's rows in. It never touches
+  conflict-free tables, tables that exist only in Postgres, or other workspaces. A table with a different shape
+  (columns) in Postgres is refused even with `--replace`, as is a value Postgres cannot store (for example a malformed date).
+- **Verification.** After copying, every table is checked: row count plus an order-independent checksum over normalized
+  row values, compared between the file and Postgres. A mismatch exits 5.
+- **Left-behind warning.** When a Postgres-engine workspace opens its table storage and a non-empty `tables.sqlite` is still
+  there, Lore logs one warning per workspace per process naming the file and this command. The check only asks whether any
+  table has a row.
+- **Scripts.** `--json` prints one JSON document on stdout (human text goes to stderr). Exit codes: `0` copied and verified,
+  or nothing to copy; `1` usage error or unexpected failure; `2` dry run with work pending (needs `--yes`); `3` refused
+  precondition (unknown workspace, engine is not `postgres`, `LORE_PG_URL` unset); `4` refused plan (conflicts without
+  `--replace`, shape mismatch, unconvertible value); `5` copied but verification failed.
+
 ## Related ops commands
 
 | Command | Purpose |
@@ -465,5 +503,6 @@ Background: `docs/POSTGRES_EDGE_LAYOUT.md` (rollback section) and `docs/CONFIGUR
 | `lore workspaces` | List / show / switch / report the active workspace |
 | `lore outbox` | Outbox operator tools (drain-failed self-heal sweep). `--no-check-substrate` is SQLite-only and safe to run alongside the daemon; the default `--check-substrate` mode opens the graph store directly and refuses while the daemon is up (or another process holds the store's lock), same as `lore compact` — `--force` bypasses the refusal (not a genuine lock). |
 | `lore diagnose` | Tri-substrate consistency diagnostics |
+| `lore tables copy` | Copy a workspace's `tables.sqlite` into its Postgres table storage (dry run by default) |
 
 Run `lore --help` for the full command list.

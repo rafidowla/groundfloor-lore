@@ -12,7 +12,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
     DEFAULT_BACKOFF, DEFAULT_MAX_ATTEMPTS, computeBackoffMs, makeJobId, makeSourceId, resolvePurge,
-    RECLAIM_ERROR, type BackoffOptions, type IIngestionStore, type IngestionJob, type JobState, type NewJob, type PendingStructured, type PurgeDeliveriesOptions, type ReclaimOptions, type SourceRecord,
+    RECLAIM_ERROR, TERMINAL_JOB_STATES, type BackoffOptions, type IIngestionStore, type IngestionJob, type JobState, type NewJob, type PendingStructured, type PurgeDeliveriesOptions, type ReclaimOptions, type SourceRecord,
 } from './store.js';
 
 const SCHEMA = `
@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS ingest_jobs (
   results_written_at TEXT, result_json TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT);
 CREATE INDEX IF NOT EXISTS ingest_jobs_due ON ingest_jobs (state, next_attempt_at);
 CREATE INDEX IF NOT EXISTS ingest_jobs_ws ON ingest_jobs (workspace, state);
+CREATE INDEX IF NOT EXISTS ingest_jobs_src ON ingest_jobs (source_id);
 CREATE TABLE IF NOT EXISTS ingest_pending (
   job_id TEXT PRIMARY KEY, workspace TEXT NOT NULL, source_id TEXT NOT NULL, reason TEXT NOT NULL, payload_json TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ingest_deliveries (
@@ -65,9 +66,16 @@ export class SqliteIngestionStore implements IIngestionStore {
     private migrate(): void {
         const cols = this.db.prepare('PRAGMA table_info(ingest_jobs)').all() as Row[];
         if (!cols.some((c) => c.name === 'lease_until')) this.db.exec('ALTER TABLE ingest_jobs ADD COLUMN lease_until TEXT');
+        const srcCols = this.db.prepare('PRAGMA table_info(ingest_sources)').all() as Row[];
+        if (!srcCols.some((c) => c.name === 'blob_purged_at')) this.db.exec('ALTER TABLE ingest_sources ADD COLUMN blob_purged_at TEXT');
     }
 
-    async upsertSource(s: Omit<SourceRecord, 'sourceId' | 'createdAt'>): Promise<SourceRecord> {
+    /** One file per workspace, so ids never collide across workspaces: they keep hashing the name (no change for existing files). */
+    async resolveSourceId(workspace: string, sha256: string): Promise<string> {
+        return makeSourceId(workspace, sha256);
+    }
+
+    async upsertSource(s: Omit<SourceRecord, 'sourceId' | 'createdAt' | 'blobPurgedAt'>): Promise<SourceRecord> {
         const sourceId = makeSourceId(s.workspace, s.sha256);
         this.db.prepare(`INSERT OR IGNORE INTO ingest_sources (source_id, workspace, file_name, mime_type, sha256, size_bytes, storage_ref, created_at)
             VALUES (?,?,?,?,?,?,?,?)`).run(sourceId, s.workspace, s.fileName, s.mimeType, s.sha256, s.sizeBytes, s.storageRef, new Date().toISOString());
@@ -76,7 +84,46 @@ export class SqliteIngestionStore implements IIngestionStore {
 
     async getSource(workspace: string, sourceId: string): Promise<SourceRecord | undefined> {
         const r = this.db.prepare('SELECT * FROM ingest_sources WHERE workspace = ? AND source_id = ?').get(workspace, sourceId) as Row | undefined;
-        return r && { sourceId: r.source_id, workspace: r.workspace, fileName: r.file_name, mimeType: r.mime_type, sha256: r.sha256, sizeBytes: r.size_bytes, storageRef: r.storage_ref, createdAt: r.created_at };
+        return r && { sourceId: r.source_id, workspace: r.workspace, fileName: r.file_name, mimeType: r.mime_type, sha256: r.sha256, sizeBytes: r.size_bytes, storageRef: r.storage_ref, createdAt: r.created_at, blobPurgedAt: r.blob_purged_at ?? null };
+    }
+
+    async setSourceBlob(workspace: string, sourceId: string, storageRef: string): Promise<void> {
+        this.db.prepare('UPDATE ingest_sources SET storage_ref = ?, blob_purged_at = NULL WHERE workspace = ? AND source_id = ?').run(storageRef, workspace, sourceId);
+    }
+
+    async claimBlobPurge(cutoff: Date, now: Date, limit: number): Promise<Array<{ workspace: string; sourceId: string; storageRef: string }>> {
+        const terminal = TERMINAL_JOB_STATES.map((t) => `'${t}'`).join(',');
+        const tx = this.db.transaction(() => {
+            const rows = this.db.prepare(`SELECT s.workspace, s.source_id, s.storage_ref FROM ingest_sources s
+                WHERE s.blob_purged_at IS NULL
+                  AND EXISTS (SELECT 1 FROM ingest_jobs j WHERE j.source_id = s.source_id)
+                  AND NOT EXISTS (SELECT 1 FROM ingest_jobs j WHERE j.source_id = s.source_id AND j.state NOT IN (${terminal}))
+                  AND (SELECT MAX(COALESCE(j.completed_at, j.updated_at)) FROM ingest_jobs j WHERE j.source_id = s.source_id) <= ?
+                  AND NOT EXISTS (SELECT 1 FROM ingest_sources o WHERE o.storage_ref = s.storage_ref AND o.source_id <> s.source_id AND o.blob_purged_at IS NULL
+                      AND (NOT EXISTS (SELECT 1 FROM ingest_jobs j WHERE j.source_id = o.source_id)
+                           OR EXISTS (SELECT 1 FROM ingest_jobs j WHERE j.source_id = o.source_id AND j.state NOT IN (${terminal}))))
+                ORDER BY s.created_at, s.source_id LIMIT ?`).all(cutoff.toISOString(), Math.max(1, Math.floor(limit))) as Row[];
+            const upd = this.db.prepare('UPDATE ingest_sources SET blob_purged_at = ? WHERE source_id = ? AND blob_purged_at IS NULL');
+            return rows.filter((r) => upd.run(now.toISOString(), r.source_id).changes === 1).map((r) => ({ workspace: r.workspace as string, sourceId: r.source_id as string, storageRef: r.storage_ref as string }));
+        });
+        return tx.immediate();
+    }
+
+    async releaseBlobPurge(workspace: string, sourceId: string): Promise<void> {
+        this.db.prepare('UPDATE ingest_sources SET blob_purged_at = NULL WHERE workspace = ? AND source_id = ?').run(workspace, sourceId);
+    }
+
+    async listSourceBlobRefs(workspace: string | null, limit: number, after?: string): Promise<Array<{ sourceId: string; storageRef: string }>> {
+        const n = Math.max(1, Math.floor(limit));
+        const rows = (workspace === null
+            ? this.db.prepare('SELECT source_id, storage_ref FROM ingest_sources WHERE blob_purged_at IS NULL AND source_id > ? ORDER BY source_id LIMIT ?').all(after ?? '', n)
+            : this.db.prepare('SELECT source_id, storage_ref FROM ingest_sources WHERE workspace = ? AND blob_purged_at IS NULL AND source_id > ? ORDER BY source_id LIMIT ?').all(workspace, after ?? '', n)) as Row[];
+        return rows.map((r) => ({ sourceId: r.source_id as string, storageRef: r.storage_ref as string }));
+    }
+
+    async countBlobRefsHeldByOtherWorkspaces(workspace: string, storageRef: string): Promise<number> {
+        const r = this.db.prepare('SELECT COUNT(*) AS n FROM ingest_sources WHERE workspace <> ? AND storage_ref = ? AND blob_purged_at IS NULL').get(workspace, storageRef) as Row;
+        return Number(r.n);
     }
 
     async createJob(j: NewJob, now: Date): Promise<{ job: IngestionJob; created: boolean }> {

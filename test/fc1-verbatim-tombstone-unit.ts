@@ -15,7 +15,7 @@
  *          covers the persisted metadata columns too.
  *   M10 — tombstone() swallowed every error with a bare `catch {}` while
  *          callers reported success. It now propagates VerbatimStoreError;
- *          the graceful no-op cases (uninitialized, absent, already
+ *          the graceful no-op cases (absent, already
  *          tombstoned, history id) still return normally.
  *
  * Run: npx tsx test/fc1-verbatim-tombstone-unit.ts
@@ -145,11 +145,13 @@ async function main() {
 
     console.log('M10 — tombstone propagates real failures, keeps graceful no-ops');
 
-    await test('T1.M10a graceful no-ops unchanged (absent row, already tombstoned, uninitialized)', async () => {
+    await test('T1.M10a graceful no-ops unchanged (absent row, already tombstoned); uninitialized is no longer silent', async () => {
         const { store, cleanup } = tmpStore();
         try {
-            // Uninitialized store — graceful no-op.
-            await store.tombstone('lore:nothing', 'x');
+            // Uninitialized store: no longer a silent no-op (Wave D d1). SQLite opens lazily and then no-ops on the
+            // absent row; Lance rejects with a typed NotInitialized error (applied === false).
+            if (testVectorEngine() === 'sqlite') await store.tombstone('lore:nothing', 'x');
+            else await assert.rejects(() => store.tombstone('lore:nothing', 'x'), (e: unknown) => (e as { name?: string }).name === 'VerbatimStoreNotInitializedError');
             await store.initialize();
             // Absent row — graceful no-op.
             await store.tombstone('lore:absent', 'x');

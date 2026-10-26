@@ -35,3 +35,4 @@ export { verbatimCommand } from './verbatim.js';
 export { workspacesCommand } from './workspaces.js';
 export { operatorCommand } from './operator.js';
 export { postgresCommand } from './postgres.js';
+export { tablesCommand } from './tables.js';

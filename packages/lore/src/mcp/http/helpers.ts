@@ -45,7 +45,7 @@ function isPayloadTooLarge(err: unknown): boolean {
  * base64-encoded import previews, raw text). For JSON, prefer
  * readJsonBody which adds JSON.parse on top of this bound.
  */
-export async function readBoundedBody(req: IncomingMessage): Promise<string> {
+export async function readBoundedBody(req: IncomingMessage, maxBytes: number = MAX_BODY_BYTES): Promise<string> {
     return new Promise((resolve, reject) => {
         let bytes = 0;
         let overflowed = false;
@@ -53,7 +53,7 @@ export async function readBoundedBody(req: IncomingMessage): Promise<string> {
         req.on('data', (chunk: Buffer) => {
             if (overflowed) return; // discard further chunks
             bytes += chunk.length;
-            if (bytes > MAX_BODY_BYTES) {
+            if (bytes > maxBytes) {
                 overflowed = true;
                 // Drop the buffered chunks so we don't sit on the
                 // memory we were trying to bound.
@@ -65,7 +65,7 @@ export async function readBoundedBody(req: IncomingMessage): Promise<string> {
                 // pause() halts the flow; the actual socket teardown happens
                 // in writeOversizeError() after the 413 is written.
                 try { req.pause(); } catch { /* already closing */ }
-                const err = new Error(`request body exceeded ${MAX_BODY_BYTES} bytes`) as Error & { code?: string };
+                const err = new Error(`request body exceeded ${maxBytes} bytes`) as Error & { code?: string };
                 err.code = PAYLOAD_TOO_LARGE;
                 reject(err);
                 return;
@@ -156,7 +156,7 @@ export function writeInvalidJson(res: ServerResponse, err: unknown): void {
  * that exceeded MAX_BODY_BYTES. Use inside a catch block after
  * isPayloadTooLarge(err) returns true.
  */
-export function writeOversizeError(res: ServerResponse, req?: IncomingMessage): void {
+export function writeOversizeError(res: ServerResponse, req?: IncomingMessage, maxBytes: number = MAX_BODY_BYTES): void {
     // Connection: close signals to the client that the server will not
     // read any more of the in-flight request body. Pairs with req.pause()
     // inside readBoundedBody: after the 413 flushes, we destroy the socket
@@ -168,8 +168,8 @@ export function writeOversizeError(res: ServerResponse, req?: IncomingMessage): 
     });
     res.end(JSON.stringify({
         code: PAYLOAD_TOO_LARGE,
-        message: `request body exceeded ${MAX_BODY_BYTES} bytes`,
-        maxBytes: MAX_BODY_BYTES,
+        message: `request body exceeded ${maxBytes} bytes`,
+        maxBytes,
     }));
     // SP-12 — tear down the underlying socket after the response flushes so
     // buffered TCP bytes aren't read + discarded. Deferred a tick so the

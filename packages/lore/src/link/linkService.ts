@@ -24,6 +24,10 @@ import type { LinkEdgeStats, LinkEdgeStatsCapable, LinkItem, Linker } from './li
 import type { LinkPruner, PruneResult } from './linkPruner.js';
 import type { LinkRebuilder, RebuildStats } from './linkRebuilder.js';
 import type { RebuildState } from './linkRebuildStore.js';
+import { acceptProposal, rejectProposal, type AcceptGraph, type DecideOptions, type DecideOutcome } from './discoveryAccept.js';
+import type { DiscoveryRunResult, DiscoveryStats, LinkDiscovery } from './discoveryRunner.js';
+import type { LinkProposal, ProposalFilter, ProposalStore, TypingLogEntry } from './proposalStore.js';
+import type { OutboxStore } from '../outbox/types.js';
 
 export interface LinkStats {
     enabled: true;
@@ -50,6 +54,10 @@ export interface LinkStats {
     prune?: { cap: number; evictedTotal: number; passes: number; dirtyWorkspaces: number; lastPassAt: number | null };
     /** Link-health snapshot across workspaces; null until the first `refreshHealth()` (cached `healthTtlMs`). */
     health: LinkHealth | null;
+    /** False when only discovery (Loop D) is on: arrival linking then neither queues nor links. */
+    arrival: boolean;
+    /** Present when discovery + relation typing (Loop D, `LORE_LINK_DISCOVERY`) is wired. */
+    discovery?: DiscoveryStats;
 }
 
 /** Aggregate over every workspace the service has seen. Counts cover `link_on_arrival` edges only. */
@@ -75,6 +83,14 @@ export interface LinkServiceOptions {
     pruner?: LinkPruner;
     /** The policy version + model the Linker stamps today; health counts edges stamped otherwise as `stale`. Absent => policy version only. */
     currentStamp?: () => { policyVersion: string; modelFingerprint: string | null };
+    /** Loop A switch. Default true; false when the service exists only for discovery (signal() then does nothing). */
+    arrival?: boolean;
+    /** Loop D: the discovery pass + the proposals it raises. Absent => none of it exists. */
+    discovery?: LinkDiscovery;
+    discoveryIntervalMs?: number;
+    proposals?: ProposalStore;
+    /** The host's outbox, when it has one (late-bound: the outbox is built after this service). */
+    getOutbox?: () => OutboxStore | null | undefined;
 }
 
 const LAG_WINDOW = 256;
@@ -93,6 +109,12 @@ export class LinkService {
     private readonly currentStamp: () => { policyVersion: string; modelFingerprint: string | null };
     private readonly seenWorkspaces = new Set<string>();
     private pruneTimer: ReturnType<typeof setInterval> | null = null;
+    private discoveryTimer: ReturnType<typeof setInterval> | null = null;
+    private readonly arrival: boolean;
+    private readonly discovery: LinkDiscovery | null;
+    private readonly discoveryIntervalMs: number;
+    private readonly proposals: ProposalStore | null;
+    private readonly getOutbox: () => OutboxStore | null | undefined;
     private refreshedTotal = 0;
     private invalidatedTotal = 0;
     private health: LinkHealth | null = null;
@@ -115,13 +137,18 @@ export class LinkService {
         this.rebuilder = o.rebuilder ?? null;
         this.resolveGraph = o.resolveGraph ?? (async () => null);
         this.pruner = o.pruner ?? null;
+        this.arrival = o.arrival !== false;
+        this.discovery = o.discovery ?? null;
+        this.discoveryIntervalMs = o.discoveryIntervalMs ?? 60_000;
+        this.proposals = o.proposals ?? null;
+        this.getOutbox = o.getOutbox ?? (() => null);
         this.currentStamp = o.currentStamp ?? (() => ({ policyVersion: o.config.policyVersion, modelFingerprint: null }));
         this.optOuts = new LinkOptOutGate({ queue: o.queue, resolveGraph: this.resolveGraph, now: this.now, onError: this.onError });
     }
 
     /** A vector for each of `items` is now committed. Synchronous, durable, never throws. */
     signal(workspace: string, items: ReadonlyArray<LinkItem>): void {
-        if (this.sealedFlag || this.closed || items.length === 0) return;
+        if (!this.arrival || this.sealedFlag || this.closed || items.length === 0) return;
         try {
             this.lastSignalAt = this.now();
             this.seenWorkspaces.add(workspace);
@@ -149,6 +176,49 @@ export class LinkService {
         // Move any legacy queue-file opt-outs into the workspace stores BEFORE a resumed rebuild reads them.
         void this.optOuts.sweep(() => this.closed).then(() => { if (!this.closed && !this.sealedFlag) this.rebuilder?.resumeAll(); });
         this.startPruneSweep();
+        this.startDiscoverySweep();
+    }
+
+    /** Loop D: sweep discovery on a timer. Unref'd, cleared by seal/close; a sweep never overlaps itself (the runner single-flights per workspace). */
+    private startDiscoverySweep(): void {
+        if (!this.discovery || this.discoveryTimer) return;
+        this.discoveryTimer = setInterval(() => { void this.discoveryTick(); }, this.discoveryIntervalMs);
+        this.discoveryTimer.unref?.();
+    }
+
+    private async discoveryTick(): Promise<void> {
+        if (!this.discovery || this.sealedFlag || this.closed) return;
+        try { await this.discovery.sweep(this.seenWorkspaces); } catch (err) { this.onError(`link discovery sweep failed: ${(err as Error).message}`); }
+    }
+
+    /** True when discovery (Loop D) is wired. */
+    get hasDiscovery(): boolean { return this.discovery !== null; }
+
+    /** Run discovery on one workspace now (tests, admin tools; resumes from the durable cursor). No-op result when not wired. */
+    async runDiscovery(workspace: string): Promise<DiscoveryRunResult | null> {
+        if (!this.discovery || this.closed) return null;
+        this.seenWorkspaces.add(workspace);
+        return this.discovery.run(workspace);
+    }
+
+    /** Discovery's per-workspace hook: make sure the durable autolink opt-outs are in place before candidates are scored. */
+    ensureOptOutsReady(workspace: string): Promise<void> { return this.optOuts.ensureMigrated(workspace); }
+
+    /** Typing proposals (`supersedes` / `contradicts`) raised by discovery. Pending by default, best score first. */
+    listProposals(workspace: string, filter?: ProposalFilter): LinkProposal[] { return this.proposals?.list(workspace, filter) ?? []; }
+    /** One proposal by id, scoped to `workspace` (another workspace's id is simply absent). */
+    getProposal(workspace: string, id: number): LinkProposal | null { return this.proposals?.get(workspace, id) ?? null; }
+    listTypingLog(workspace: string, limit = 100): TypingLogEntry[] { return this.proposals?.listLog(workspace, limit) ?? []; }
+
+    /** Accept a proposal through the existing supersede path (see discoveryAccept.ts). Nothing is applied until this is called. */
+    async acceptProposal(workspace: string, id: number, opt?: DecideOptions): Promise<DecideOutcome> {
+        if (!this.proposals) return { ok: false, reason: 'not_found' };
+        const graph = (await this.resolveGraph(workspace).catch(() => null)) as AcceptGraph | null;
+        return acceptProposal({ workspace, graph, proposals: this.proposals, outbox: this.getOutbox() ?? null, now: this.now, onError: this.onError }, id, opt);
+    }
+    rejectProposal(workspace: string, id: number, opt?: DecideOptions): DecideOutcome {
+        if (!this.proposals) return { ok: false, reason: 'not_found' };
+        return rejectProposal({ workspace, proposals: this.proposals, now: this.now }, id, opt);
     }
 
     /** Run the cap prune on a timer while `maxLinksPerNode > 0`. The timer is unref'd and cleared by seal/close. */
@@ -188,6 +258,8 @@ export class LinkService {
         this.sealedFlag = true;
         if (this.timer) { clearTimeout(this.timer); this.timer = null; }
         if (this.pruneTimer) { clearInterval(this.pruneTimer); this.pruneTimer = null; }
+        if (this.discoveryTimer) { clearInterval(this.discoveryTimer); this.discoveryTimer = null; }
+        this.discovery?.stop();
     }
     isSealed(): boolean { return this.sealedFlag; }
 
@@ -196,12 +268,13 @@ export class LinkService {
         this.seal();
         const rb = this.rebuilder ? this.rebuilder.drain(timeoutMs) : Promise.resolve({ timedOut: false });
         void this.pruner?.drain();
-        if (!this.running) return rb;
+        const dr = this.discovery ? this.discovery.drain(timeoutMs) : Promise.resolve({ timedOut: false });
+        if (!this.running) { const [a, b] = await Promise.all([rb, dr]); return { timedOut: a.timedOut || b.timedOut }; }
         let t: ReturnType<typeof setTimeout> | undefined;
         const expired = new Promise<'timeout'>((r) => { t = setTimeout(() => r('timeout'), timeoutMs); t.unref?.(); });
         try {
             const out = await Promise.race([this.running.then(() => 'done' as const), expired]);
-            return { timedOut: out === 'timeout' || (await rb).timedOut };
+            return { timedOut: out === 'timeout' || (await rb).timedOut || (await dr).timedOut };
         } finally { if (t) clearTimeout(t); }
     }
 
@@ -210,6 +283,7 @@ export class LinkService {
         this.seal();
         this.rebuilder?.close();
         this.pruner?.stop();
+        this.proposals?.close();
         this.q.close();
     }
 
@@ -246,6 +320,8 @@ export class LinkService {
             invalidatedTotal: this.invalidatedTotal,
             ...(this.pruner ? { prune: this.pruneStats() } : {}),
             health: this.health,
+            arrival: this.arrival,
+            ...(this.discovery ? { discovery: this.discovery.stats() } : {}),
         };
     }
 

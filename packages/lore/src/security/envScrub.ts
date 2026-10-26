@@ -48,6 +48,8 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_LOG_LEVEL',
     'LORE_HOME',                                // 2026-04-28 relocate the entire data tree (default ~/.groundfloor)
     'LORE_WORKSPACE',                           // forces a specific active workspace
+    'LORE_WORKSPACE_ERASE_AFTER_DAYS',          // lane f6b — recovery window (days, integer >= 0, default 7; 0 = erase at once) before a deleted workspace's data is erased (workspaceErase/config.ts)
+    'LORE_WORKSPACE_ERASE_MAX_UNVERIFIABLE_ATTEMPTS', // #262 — consecutive all-unverifiable erase attempts (1-100, default 5) before a deletion becomes needs-operator (workspaceErase/config.ts)
     'LORE_DEPLOYMENT_MODE',                     // Q2.1 — pin mode to 'local' or 'cloud'
     'LORE_CACHE_DISABLED',                      // Q1.3 operator killswitch for the read cache
     'LORE_DEFAULT_GRAPH_ENGINE',                 // 3.21 step 1d — operator escape hatch: NEW local workspaces default to 'sqlite'; set to 'surreal' to keep the pre-3.21 default, or 'postgres' for the Postgres engine
@@ -60,6 +62,8 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_PG_BACKGROUND_RESERVE',                // postgres engine — connections kept free for foreground queries when background work (index builds, VACUUM) runs; default min(4, max(1, floor(poolMax/2))) (postgresPoolGuard.ts / postgresClient.ts nonNegIntEnv)
     'LORE_PG_BACKGROUND_CONCURRENCY',            // postgres engine — max concurrent background jobs per pool, default 2; 0 disables background work (postgresPoolGuard.ts / postgresClient.ts nonNegIntEnv)
     'LORE_PG_BACKGROUND_STATEMENT_TIMEOUT_MS',   // postgres engine — statement_timeout (ms) for background jobs (index builds, VACUUM); default 0 = unbounded (postgresPoolGuard.ts / postgresClient.ts nonNegIntEnv)
+    'LORE_BM25_COMMON_TOKEN_RATIO',              // postgres engine — document-frequency stop-list ratio for the BM25 leg, default 0.2, 0 = off (engines/postgres/postgresVerbatim/postgresBm25StopList.ts); without this entry the operator's override would be silently dropped by this scrub
+    'LORE_PG_KEYWORD_CTE',                       // postgres engine — 0/false/off disables the MATERIALIZED-CTE route of the graph keyword leg (no EXPLAIN probes, original statement), default on (engines/postgres/postgresKeywordPlan.ts keywordCteEnabled)
     'LORE_OPENAI_BASE_URL',                     // 2026-05-05 OpenAI-compatible gateway override (e.g. OpenRouter)
     'CLERK_ISSUER',                             // RA2-reaudit2 — cloud-mode Clerk JWT issuer; scrubbing it silently disabled cloud auth (read at dispatcher.ts/operator.ts)
 
@@ -410,7 +414,7 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_ARCADE_KMS_KEK',                   // base64-encoded 32-byte KEK (SECRET; prefer LORE_ARCADE_KMS_KEK_FILE in prod)
 
     // Ingestion host (ingestion/hostConfig.ts, mcp/ingestionBoot.ts). Off unless LORE_INGEST_ENABLED is on.
-    // Three of these carry secrets (CALLBACK_SECRET, CALLBACK_WEBHOOK_SECRET, HOSTED_STRUCTURING_TOKEN): the daemon
+    // Four of these carry secrets (CALLBACK_SECRET, CALLBACK_WEBHOOK_SECRET, HOSTED_STRUCTURING_TOKEN, GF_TOKEN): the daemon
     // reads them AFTER this scrub, so they must be allowlisted. Prefer the *_FILE form in production so only a
     // path, not the key material, sits in the environment. They are wrapped in a redacting Secret on load.
     'LORE_INGEST_ENABLED',
@@ -448,6 +452,18 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_INGEST_EXTRACT_WORKER_URL',         // or use a separately run loopback extractor worker at this URL (wins over the flag)
     'LORE_INGEST_EXTRACT_TIMEOUT_MS',         // per-file deadline; a hung worker is killed and the job retried (default 120000)
     'LORE_INGEST_EXTRACT_MAX_BYTES',          // largest file the extractor worker takes (default 100 MiB)
+    'LORE_INGEST_BLOB_STORE',                 // where source-file bytes live: fs (default) | groundfloor
+    'LORE_INGEST_BLOB_RETENTION_DAYS',        // opt-in: purge blobs of finished sources after N days (unset = keep forever)
+    'LORE_INGEST_GF_API_URL',                 // Groundfloor Files API base URL (operator config only)
+    'LORE_INGEST_GF_WORKSPACE_ID',
+    'LORE_INGEST_GF_TOKEN',                   // secret: Files API bearer token (never logged)
+    'LORE_INGEST_GF_TOKEN_FILE',
+    'LORE_INGEST_GF_M2M_CLIENT_ID',           // machine login: client id (alternative to the static token; the two are exclusive)
+    'LORE_INGEST_GF_M2M_CLIENT_SECRET',       // secret: machine login client secret (never logged)
+    'LORE_INGEST_GF_M2M_CLIENT_SECRET_FILE',
+    'LORE_INGEST_GF_TIMEOUT_MS',
+    'LORE_INGEST_GF_MAX_RETRIES',
+    'LORE_INGEST_GF_MAX_BYTES',
     'LORE_INGEST_EXTRACT_MAX_MEMORY_MB',      // child process heap ceiling (default 2048)
     'LORE_INGEST_VISION_URL',                 // loopback OpenAI-compatible vision endpoint for scans and images (needs _MODEL too)
     'LORE_INGEST_VISION_MODEL',               // model name sent to the local vision endpoint
@@ -469,13 +485,38 @@ const ALLOWED_VARS: readonly string[] = [
     'LORE_LINK_MAX_ATTEMPTS',
     'LORE_LINK_REBUILD_BATCH_SIZE',
     'LORE_LINK_REBUILD_YIELD_MS',
+    'LORE_LINK_REBUILD_IDLE_YIELD_MS',
     'LORE_LINK_REBUILD_MAX_WAIT_MS',
     'LORE_LINK_REFRESH_ON_CHANGE',
     'LORE_LINK_MAX_PER_NODE',
     'LORE_LINK_PRUNE_INTERVAL_MS',
     'LORE_LINK_PRUNE_BATCH_SIZE',
     'LORE_LINK_HEALTH_TTL_MS',
+    // Links Loop D: discovery + relation typing (link/discoveryConfig.ts), all default OFF. LORE_LINK_JUDGE_API_KEY is
+    // allowlisted like LORE_EMBEDDING_API_KEY: read once, post-scrub, by the judge factory; never logged.
+    'LORE_LINK_JUDGE_API_KEY',
+    'LORE_LINK_DISCOVERY',
+    'LORE_LINK_DISCOVERY_INTERVAL_MS',
+    'LORE_LINK_DISCOVERY_BATCH_SIZE',
+    'LORE_LINK_DISCOVERY_MAX_NODES',
+    'LORE_LINK_DISCOVERY_MAX_PAIRS',
+    'LORE_LINK_DISCOVERY_MAX_MS',
+    'LORE_LINK_DISCOVERY_YIELD_MS',
+    'LORE_LINK_SUPERSEDE_SIM',
+    'LORE_LINK_NLI',
+    'LORE_LINK_NLI_MODEL',
+    'LORE_LINK_NLI_MIN_CONFIDENCE',
+    'LORE_LINK_NLI_DOWNLOAD',
+    'LORE_LINK_JUDGE_URL',
+    'LORE_LINK_JUDGE_MODEL',
+    'LORE_LINK_JUDGE_HOSTED',
+    'LORE_LINK_JUDGE_BUDGET',
+    'LORE_LINK_JUDGE_DAILY_BUDGET',
+    'LORE_LINK_JUDGE_MIN_CONFIDENCE',
+    'LORE_LINK_JUDGE_TIMEOUT_MS',
     'LORE_RECALL_LINK_ORDERING',
+    'LORE_RECALL_RELATED_PER_HIT',            // C1: keep at most N neighbours per primary hit in related[] (default off)
+    'LORE_RECALL_RELATED_MAX_DEGREE',         // C1: drop related[] neighbours with more than N live edges (default off)
 
 ];
 

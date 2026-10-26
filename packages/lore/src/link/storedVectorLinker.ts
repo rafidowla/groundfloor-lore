@@ -28,8 +28,10 @@ import { withEdgeLocks } from '../core/nodeWriteLock.js';
 import { normalizeScopes } from '../security/scopeFilter.js';
 import type { EdgeKey, EdgeProvenance, EdgeQuery, LoreEdge, VerbatimSearchResult } from '../providers/types.js';
 import type { LinkPolicy } from './linkConfig.js';
+import { boundedMap, LINK_READ_CONCURRENCY } from './boundedMap.js';
 import { nodeIdOfRow, selectLinks } from './selectLinks.js';
 import { emptyDiffCounters, reconcileLinks } from './linkDiff.js';
+import { resolveTuning, type RebuildTuning } from './linkTuning.js';
 import {
     SEMANTIC_RELATION,
     hasLinkOptOutSupport,
@@ -41,6 +43,8 @@ import {
 export interface LinkVerbatim {
     getVectors(ids: string[]): Promise<Map<string, number[]>>;
     getById(id: string): Promise<{ ecosystem?: string; security_scopes?: string[] } | null>;
+    /** Batched `getById` (id -> row, absent when the row is gone). Optional: the linker falls back to one `getById` per node. */
+    getByIds?(ids: string[], opts?: { columns?: 'full' | 'link' }): Promise<Map<string, { ecosystem?: string; security_scopes?: string[] }>>;
     searchByVector(vector: number[], opts?: { topK?: number; filter?: Record<string, unknown>; actorScopes?: ReadonlyArray<string> }): Promise<VerbatimSearchResult[]>;
     searchByVectors?(queries: KnnQuery[], opts: KnnOptions): Promise<Map<string, VerbatimSearchResult[]>>;
     /** Every stored row id with the prefix (the rebuild enumerates `lore:`); absent on stores that cannot list. */
@@ -104,7 +108,11 @@ function mergeHits(into: Map<string, VerbatimSearchResult[]>, from: Map<string, 
 
 export class StoredVectorLinker implements Linker {
     /** `modelFingerprint` = embeddingProviderFingerprint() of the provider that embedded the vectors; stamped on every edge. */
-    constructor(private readonly resolve: LinkHandleResolver, private readonly policy: LinkPolicy, private readonly modelFingerprint: string | null = null) {}
+    private readonly tuning: RebuildTuning;
+    constructor(
+        private readonly resolve: LinkHandleResolver, private readonly policy: LinkPolicy, private readonly modelFingerprint: string | null = null,
+        tuning?: Partial<RebuildTuning>,
+    ) { this.tuning = resolveTuning(tuning); }
 
     /** Provenance stamped on every edge this linker writes (edge provenance, design D3). */
     private provenance(): EdgeProvenance {
@@ -209,8 +217,9 @@ export class StoredVectorLinker implements Linker {
 
         const vectors = await verbatim.getVectors(items.map((i) => ROW_PREFIX + i.id));
         const ready: Array<{ id: string; vector: number[]; ecosystem: string; scopes: string }> = [];
-        for (const it of items) {
-            const row = await verbatim.getById(ROW_PREFIX + it.id);
+        const rows = await this.readRows(verbatim, items);
+        for (const [idx, it] of items.entries()) {
+            const row = rows[idx];
             if (!row) { gone.push(it.id); continue; } // node (or its row) is gone: nothing to link
             const vector = vectors.get(ROW_PREFIX + it.id);
             if (!vector || vector.length === 0) { noVector.push(it.id); continue; }
@@ -241,6 +250,22 @@ export class StoredVectorLinker implements Linker {
             duplicates.push(...sel.duplicates);
         }
         return { bySource, gone, noVector, optedOut, duplicates };
+    }
+
+    /**
+     * The stored row (ecosystem + scopes) of every item, in item order; null = gone. One batched read where the engine has
+     * `getByIds` (a failed batch falls back to per-node reads, so a transient error cannot turn a whole batch into "gone");
+     * otherwise one point read per item, a few at a time.
+     */
+    private async readRows(verbatim: LinkVerbatim, items: LinkItem[]): Promise<Array<{ ecosystem?: string; security_scopes?: string[] } | null>> {
+        if (this.tuning.batchLookups && verbatim.getByIds) {
+            try {
+                const byId = await verbatim.getByIds(items.map((it) => ROW_PREFIX + it.id), { columns: 'link' });
+                return items.map((it) => byId.get(ROW_PREFIX + it.id) ?? null);
+            } catch { /* fall through to the per-node reads */ }
+        }
+        // One point read per item: overlap the round trips (results stay in item order).
+        return boundedMap(items, LINK_READ_CONCURRENCY, (it) => verbatim.getById(ROW_PREFIX + it.id));
     }
 
     /**
@@ -315,7 +340,8 @@ export class StoredVectorLinker implements Linker {
     }
 
     private async knn(verbatim: LinkVerbatim, queries: KnnQuery[], opts: KnnOptions): Promise<Map<string, VerbatimSearchResult[]>> {
-        if (verbatim.searchByVectors) return verbatim.searchByVectors(queries, opts);
+        // The linker reads only id / score / ecosystem / security_scopes of a hit (selectFor, selectLinks, ambiguousHitAllowed).
+        if (verbatim.searchByVectors) return verbatim.searchByVectors(queries, this.tuning.narrowRows ? { ...opts, columns: 'link' } : opts);
         const out = new Map<string, VerbatimSearchResult[]>();
         for (const q of queries) out.set(q.key, await verbatim.searchByVector(q.vector, { topK: opts.topK, filter: opts.filter }));
         return out;

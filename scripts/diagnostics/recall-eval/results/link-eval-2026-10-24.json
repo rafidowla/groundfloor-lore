@@ -1,0 +1,670 @@
+{
+  "generatedAt": "2026-10-24T22:18:26.895Z",
+  "config": {
+    "codeRows": 10000,
+    "depth": 1,
+    "embedder": "real",
+    "engine": "sqlite",
+    "searchMode": "hybrid",
+    "max": 10,
+    "questionsFiles": "questions.json,questions-heldout.json"
+  },
+  "primaryUnchanged": {
+    "unordered": {
+      "lists": 134,
+      "identicalTop10": 134
+    },
+    "ordered": {
+      "lists": 134,
+      "identicalTop10": 134
+    }
+  },
+  "arms": {
+    "off": {
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "hit1Terse": 0.8805970149253731,
+        "hit3Terse": 0.9402985074626866,
+        "mrrTerse": 0.9196517412935324,
+        "identifiers": {
+          "n": 20,
+          "rank1": 0.85,
+          "hit3": 0.9,
+          "found10": 0.95,
+          "abstainedPct": 0,
+          "overriddenCount": 0
+        },
+        "zeroHitGibberishPct": 0,
+        "latency": {
+          "n": 412,
+          "p50": 27.09654099999989,
+          "p90": 60.39608399999997,
+          "p95": 65.12579200000027,
+          "p99": 118.58358399999997
+        }
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 106,
+        "meanRelated": 2.51,
+        "seed": {
+          "relevantAt10": 0,
+          "strongAt10": 0,
+          "noiseAt10": 1,
+          "relevantAll": 0,
+          "noiseAll": 1,
+          "ndcgSetAt10": null,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 1,
+          "relevantSlotShare": 0,
+          "strongSlotShare": 0,
+          "slots": 337
+        },
+        "expected": {
+          "relevantAt10": 0.0075,
+          "strongAt10": 0.0075,
+          "noiseAt10": 0.9925,
+          "relevantAll": 0.0085,
+          "noiseAll": 0.9915,
+          "ndcgSetAt10": 0.1792,
+          "ndcgPoolAt10": 0.0066,
+          "noiseSlotShare": 0.9525,
+          "relevantSlotShare": 0.0475,
+          "strongSlotShare": 0.0475,
+          "slots": 337
+        },
+        "perSeed": {
+          "groups": 150,
+          "groupsWith2plus": 20,
+          "meanNeighbours": 2.25,
+          "firstNeighbourRelevant": 0,
+          "firstNeighbourStrong": 0,
+          "ndcgWithinSeed": null,
+          "groupsWithPerfectOrder": null
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 55,
+          "meanNeighbours": 1.6,
+          "relevantSlotShare": 0,
+          "strongSlotShare": 0,
+          "noiseSlotShare": 1,
+          "noiseHubShare": 0.625,
+          "firstNeighbourRelevant": 0,
+          "firstNeighbourStrong": 0,
+          "ndcgWithinSeed": null,
+          "groupsWithAnyRelevant": 0,
+          "groupsWithAnyStrong": 0
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 0,
+          "inHitsOrRelated": 11,
+          "meanRelatedRank": null
+        }
+      },
+      "graph": {
+        "semanticEdges": 0,
+        "otherEdges": 36,
+        "otherRelations": {
+          "relates_to": 36
+        },
+        "nodesTotal": 10380,
+        "nodesWithLink": 0,
+        "degreeMean": 0,
+        "degreeP50": 0,
+        "degreeP90": 0,
+        "degreeMax": 0,
+        "byClass": {
+          "anchor": {
+            "nodes": 24,
+            "withLink": 0,
+            "degreeMean": 0,
+            "degreeP50": 0,
+            "degreeP90": 0,
+            "degreeMax": 0
+          },
+          "filler": {
+            "nodes": 42,
+            "withLink": 0,
+            "degreeMean": 0,
+            "degreeP50": 0,
+            "degreeP90": 0,
+            "degreeMax": 0
+          },
+          "dup": {
+            "nodes": 12,
+            "withLink": 0,
+            "degreeMean": 0,
+            "degreeP50": 0,
+            "degreeP90": 0,
+            "degreeMax": 0
+          },
+          "hub": {
+            "nodes": 2,
+            "withLink": 0,
+            "degreeMean": 0,
+            "degreeP50": 0,
+            "degreeP90": 0,
+            "degreeMax": 0
+          },
+          "note": {
+            "nodes": 300,
+            "withLink": 0,
+            "degreeMean": 0,
+            "degreeP50": 0,
+            "degreeP90": 0,
+            "degreeMax": 0
+          },
+          "code": {
+            "nodes": 10000,
+            "withLink": 0,
+            "degreeMean": 0,
+            "degreeP50": 0,
+            "degreeP90": 0,
+            "degreeMax": 0
+          }
+        },
+        "pairs": {},
+        "linkRecall": {
+          "nearDuplicatePairs": {
+            "linked": 0,
+            "total": 6
+          },
+          "sameComponentCuratedPairs": {
+            "linked": 0,
+            "total": 182
+          }
+        },
+        "edgeGradeShare": null,
+        "edgeGradeCounts": {
+          "g0": 0,
+          "g1": 0,
+          "g2": 0,
+          "g3": 0
+        },
+        "scoreMin": null,
+        "scoreP50": null,
+        "scoreMax": null,
+        "byScore": [
+          {
+            "range": "0-0.82",
+            "edges": 0,
+            "relevant": null,
+            "strong": null,
+            "meanGrade": null
+          },
+          {
+            "range": "0.82-0.85",
+            "edges": 0,
+            "relevant": null,
+            "strong": null,
+            "meanGrade": null
+          },
+          {
+            "range": "0.85-0.9",
+            "edges": 0,
+            "relevant": null,
+            "strong": null,
+            "meanGrade": null
+          },
+          {
+            "range": "0.9-1",
+            "edges": 0,
+            "relevant": null,
+            "strong": null,
+            "meanGrade": null
+          }
+        ],
+        "scoreVsRelevantAuc": null
+      }
+    },
+    "unordered": {
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "hit1Terse": 0.8805970149253731,
+        "hit3Terse": 0.9402985074626866,
+        "mrrTerse": 0.9196517412935324,
+        "identifiers": {
+          "n": 20,
+          "rank1": 0.85,
+          "hit3": 0.9,
+          "found10": 0.95,
+          "abstainedPct": 0,
+          "overriddenCount": 0
+        },
+        "zeroHitGibberishPct": 0,
+        "latency": {
+          "n": 412,
+          "p50": 28.84574999999859,
+          "p90": 55.866124999999556,
+          "p95": 63.7478329999999,
+          "p99": 71.90416700000014
+        }
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 40.57,
+        "seed": {
+          "relevantAt10": 0.6679,
+          "strongAt10": 0.1478,
+          "noiseAt10": 0.3321,
+          "relevantAll": 0.7227,
+          "noiseAll": 0.2773,
+          "ndcgSetAt10": 0.5335,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.2825,
+          "relevantSlotShare": 0.7175,
+          "strongSlotShare": 0.0986,
+          "slots": 5437
+        },
+        "expected": {
+          "relevantAt10": 0.4015,
+          "strongAt10": 0.1112,
+          "noiseAt10": 0.5985,
+          "relevantAll": 0.2964,
+          "noiseAll": 0.7036,
+          "ndcgSetAt10": 0.5524,
+          "ndcgPoolAt10": 0.3882,
+          "noiseSlotShare": 0.7361,
+          "relevantSlotShare": 0.2639,
+          "strongSlotShare": 0.0381,
+          "slots": 5437
+        },
+        "perSeed": {
+          "groups": 1241,
+          "groupsWith2plus": 1101,
+          "meanNeighbours": 4.38,
+          "firstNeighbourRelevant": 0.7381,
+          "firstNeighbourStrong": 0.1201,
+          "ndcgWithinSeed": 0.9165,
+          "groupsWithPerfectOrder": 0.6817
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 126,
+          "meanNeighbours": 4.9,
+          "relevantSlotShare": 0.5219,
+          "strongSlotShare": 0.1831,
+          "noiseSlotShare": 0.4781,
+          "noiseHubShare": 0.128,
+          "firstNeighbourRelevant": 0.4841,
+          "firstNeighbourStrong": 0.2619,
+          "ndcgWithinSeed": 0.8329,
+          "groupsWithAnyRelevant": 0.7857,
+          "groupsWithAnyStrong": 0.5397
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      },
+      "graph": {
+        "semanticEdges": 43740,
+        "otherEdges": 36,
+        "otherRelations": {
+          "relates_to": 36
+        },
+        "nodesTotal": 10380,
+        "nodesWithLink": 1,
+        "degreeMean": 8.43,
+        "degreeP50": 7,
+        "degreeP90": 13,
+        "degreeMax": 65,
+        "byClass": {
+          "anchor": {
+            "nodes": 24,
+            "withLink": 1,
+            "degreeMean": 5.71,
+            "degreeP50": 6,
+            "degreeP90": 7,
+            "degreeMax": 8
+          },
+          "filler": {
+            "nodes": 42,
+            "withLink": 1,
+            "degreeMean": 6.86,
+            "degreeP50": 7,
+            "degreeP90": 9,
+            "degreeMax": 12
+          },
+          "dup": {
+            "nodes": 12,
+            "withLink": 1,
+            "degreeMean": 5,
+            "degreeP50": 5,
+            "degreeP90": 5,
+            "degreeMax": 5
+          },
+          "hub": {
+            "nodes": 2,
+            "withLink": 1,
+            "degreeMean": 5,
+            "degreeP50": 5,
+            "degreeP90": 5,
+            "degreeMax": 5
+          },
+          "note": {
+            "nodes": 300,
+            "withLink": 1,
+            "degreeMean": 6.82,
+            "degreeP50": 6,
+            "degreeP90": 9,
+            "degreeMax": 15
+          },
+          "code": {
+            "nodes": 10000,
+            "withLink": 1,
+            "degreeMean": 8.49,
+            "degreeP50": 7,
+            "degreeP90": 13,
+            "degreeMax": 65
+          }
+        },
+        "pairs": {
+          "anchor+anchor": 16,
+          "anchor+filler": 22,
+          "anchor+note": 65,
+          "anchor+dup": 12,
+          "anchor+hub": 6,
+          "code+code": 42469,
+          "dup+dup": 6,
+          "dup+note": 34,
+          "dup+filler": 2,
+          "filler+filler": 127,
+          "filler+note": 8,
+          "filler+hub": 2,
+          "hub+hub": 1,
+          "note+note": 970
+        },
+        "linkRecall": {
+          "nearDuplicatePairs": {
+            "linked": 6,
+            "total": 6
+          },
+          "sameComponentCuratedPairs": {
+            "linked": 93,
+            "total": 182
+          }
+        },
+        "edgeGradeShare": {
+          "g0": 0.3021,
+          "g1": 0.6957,
+          "g2": 0.0021,
+          "g3": 0.0001
+        },
+        "edgeGradeCounts": {
+          "g0": 13212,
+          "g1": 30429,
+          "g2": 93,
+          "g3": 6
+        },
+        "scoreMin": 0.8355215638875961,
+        "scoreP50": 0.9974280279129744,
+        "scoreMax": 0.9996048808679916,
+        "byScore": [
+          {
+            "range": "0-0.82",
+            "edges": 0,
+            "relevant": null,
+            "strong": null,
+            "meanGrade": null
+          },
+          {
+            "range": "0.82-0.85",
+            "edges": 25,
+            "relevant": 0.44,
+            "strong": 0.04,
+            "meanGrade": 0.48
+          },
+          {
+            "range": "0.85-0.9",
+            "edges": 139,
+            "relevant": 0.7626,
+            "strong": 0.2014,
+            "meanGrade": 0.964
+          },
+          {
+            "range": "0.9-1",
+            "edges": 43576,
+            "relevant": 0.6979,
+            "strong": 0.0016,
+            "meanGrade": 0.7
+          }
+        ],
+        "scoreVsRelevantAuc": 0.8418
+      }
+    },
+    "ordered": {
+      "primary": {
+        "hit1": 0.7313432835820896,
+        "hit3": 0.8208955223880597,
+        "mrr": 0.7878701729447999,
+        "hit1Terse": 0.8805970149253731,
+        "hit3Terse": 0.9402985074626866,
+        "mrrTerse": 0.9196517412935324,
+        "identifiers": {
+          "n": 20,
+          "rank1": 0.85,
+          "hit3": 0.9,
+          "found10": 0.95,
+          "abstainedPct": 0,
+          "overriddenCount": 0
+        },
+        "zeroHitGibberishPct": 0,
+        "latency": {
+          "n": 412,
+          "p50": 29.875833999999486,
+          "p90": 55.461833999999726,
+          "p95": 63.87658399999964,
+          "p99": 72.11058299999968
+        }
+      },
+      "related": {
+        "lists": 134,
+        "listsWithRelated": 134,
+        "meanRelated": 40.57,
+        "seed": {
+          "relevantAt10": 0.6828,
+          "strongAt10": 0.1619,
+          "noiseAt10": 0.3172,
+          "relevantAll": 0.7227,
+          "noiseAll": 0.2773,
+          "ndcgSetAt10": 0.5575,
+          "ndcgPoolAt10": null,
+          "noiseSlotShare": 0.2825,
+          "relevantSlotShare": 0.7175,
+          "strongSlotShare": 0.0986,
+          "slots": 5437
+        },
+        "expected": {
+          "relevantAt10": 0.3978,
+          "strongAt10": 0.109,
+          "noiseAt10": 0.6022,
+          "relevantAll": 0.2964,
+          "noiseAll": 0.7036,
+          "ndcgSetAt10": 0.5626,
+          "ndcgPoolAt10": 0.3919,
+          "noiseSlotShare": 0.7361,
+          "relevantSlotShare": 0.2639,
+          "strongSlotShare": 0.0381,
+          "slots": 5437
+        },
+        "perSeed": {
+          "groups": 1241,
+          "groupsWith2plus": 1101,
+          "meanNeighbours": 4.38,
+          "firstNeighbourRelevant": 0.8147,
+          "firstNeighbourStrong": 0.1418,
+          "ndcgWithinSeed": 0.9526,
+          "groupsWithPerfectOrder": 0.7584
+        },
+        "ofExpected": {
+          "listsWithExpectedHit": 126,
+          "listsWithNeighbours": 126,
+          "meanNeighbours": 4.9,
+          "relevantSlotShare": 0.5219,
+          "strongSlotShare": 0.1831,
+          "noiseSlotShare": 0.4781,
+          "noiseHubShare": 0.128,
+          "firstNeighbourRelevant": 0.6508,
+          "firstNeighbourStrong": 0.246,
+          "ndcgWithinSeed": 0.8736,
+          "groupsWithAnyRelevant": 0.7857,
+          "groupsWithAnyStrong": 0.5397
+        },
+        "dupPartner": {
+          "lists": 12,
+          "inHits": 11,
+          "inRelated": 1,
+          "inHitsOrRelated": 12,
+          "meanRelatedRank": 1
+        }
+      },
+      "graph": {
+        "semanticEdges": 43740,
+        "otherEdges": 36,
+        "otherRelations": {
+          "relates_to": 36
+        },
+        "nodesTotal": 10380,
+        "nodesWithLink": 1,
+        "degreeMean": 8.43,
+        "degreeP50": 7,
+        "degreeP90": 13,
+        "degreeMax": 65,
+        "byClass": {
+          "anchor": {
+            "nodes": 24,
+            "withLink": 1,
+            "degreeMean": 5.71,
+            "degreeP50": 6,
+            "degreeP90": 7,
+            "degreeMax": 8
+          },
+          "filler": {
+            "nodes": 42,
+            "withLink": 1,
+            "degreeMean": 6.86,
+            "degreeP50": 7,
+            "degreeP90": 9,
+            "degreeMax": 12
+          },
+          "dup": {
+            "nodes": 12,
+            "withLink": 1,
+            "degreeMean": 5,
+            "degreeP50": 5,
+            "degreeP90": 5,
+            "degreeMax": 5
+          },
+          "hub": {
+            "nodes": 2,
+            "withLink": 1,
+            "degreeMean": 5,
+            "degreeP50": 5,
+            "degreeP90": 5,
+            "degreeMax": 5
+          },
+          "note": {
+            "nodes": 300,
+            "withLink": 1,
+            "degreeMean": 6.82,
+            "degreeP50": 6,
+            "degreeP90": 9,
+            "degreeMax": 15
+          },
+          "code": {
+            "nodes": 10000,
+            "withLink": 1,
+            "degreeMean": 8.49,
+            "degreeP50": 7,
+            "degreeP90": 13,
+            "degreeMax": 65
+          }
+        },
+        "pairs": {
+          "anchor+anchor": 16,
+          "anchor+filler": 22,
+          "anchor+note": 65,
+          "anchor+dup": 12,
+          "anchor+hub": 6,
+          "code+code": 42469,
+          "dup+dup": 6,
+          "dup+note": 34,
+          "dup+filler": 2,
+          "filler+filler": 127,
+          "filler+note": 8,
+          "filler+hub": 2,
+          "hub+hub": 1,
+          "note+note": 970
+        },
+        "linkRecall": {
+          "nearDuplicatePairs": {
+            "linked": 6,
+            "total": 6
+          },
+          "sameComponentCuratedPairs": {
+            "linked": 93,
+            "total": 182
+          }
+        },
+        "edgeGradeShare": {
+          "g0": 0.3021,
+          "g1": 0.6957,
+          "g2": 0.0021,
+          "g3": 0.0001
+        },
+        "edgeGradeCounts": {
+          "g0": 13212,
+          "g1": 30429,
+          "g2": 93,
+          "g3": 6
+        },
+        "scoreMin": 0.8355215638875961,
+        "scoreP50": 0.9974280279129744,
+        "scoreMax": 0.9996048808679916,
+        "byScore": [
+          {
+            "range": "0-0.82",
+            "edges": 0,
+            "relevant": null,
+            "strong": null,
+            "meanGrade": null
+          },
+          {
+            "range": "0.82-0.85",
+            "edges": 25,
+            "relevant": 0.44,
+            "strong": 0.04,
+            "meanGrade": 0.48
+          },
+          {
+            "range": "0.85-0.9",
+            "edges": 139,
+            "relevant": 0.7626,
+            "strong": 0.2014,
+            "meanGrade": 0.964
+          },
+          {
+            "range": "0.9-1",
+            "edges": 43576,
+            "relevant": 0.6979,
+            "strong": 0.0016,
+            "meanGrade": 0.7
+          }
+        ],
+        "scoreVsRelevantAuc": 0.8418
+      }
+    }
+  }
+}

@@ -44,6 +44,8 @@ import * as os from 'os';
 import * as zlib from 'zlib';
 import * as crypto from 'crypto';
 import type { AuditEntry } from './audit.js';
+import { RedactionTracker, chainHashOfLine } from './auditRedact.js';
+import { listRotatedArchives } from './logRotator.js';
 
 /**
  * Same 25 MB ceiling tail()/since() use — the verifier is an O(n) full read.
@@ -151,22 +153,12 @@ export function isContinuationEntry(e: Partial<AuditEntry>): boolean {
 
 // ─── Archive discovery ────────────────────────────────────────────────────
 
-/** All `<audit>.<ts>.gz` rotated archives, oldest → newest by mtime. */
+/**
+ * All `<audit>.<ts>[-N].gz` rotated archives, oldest → newest: mtime, then the embedded timestamp, then the numeric
+ * collision suffix (shared with the logRotator retention sweep — see compareArchives).
+ */
 export function listArchives(filePath: string): string[] {
-    try {
-        const dir = path.dirname(filePath);
-        const base = path.basename(filePath);
-        return fs.readdirSync(dir)
-            .filter((f) => f.startsWith(base + '.') && f.endsWith('.gz'))
-            .map((f) => {
-                const full = path.join(dir, f);
-                return { full, mtime: fs.statSync(full).mtimeMs };
-            })
-            .sort((a, b) => a.mtime - b.mtime)
-            .map((x) => x.full);
-    } catch {
-        return [];
-    }
+    return listRotatedArchives(filePath);
 }
 
 /** Newest rotated archive for this audit file, or null if none exist. */
@@ -189,7 +181,7 @@ export function readTailHash(filePath: string): string | null {
         const lines = fs.readFileSync(filePath, 'utf-8').split('\n');
         for (let i = lines.length - 1; i >= 0; i--) {
             const line = lines[i]!;
-            if (line !== '') return sha256Hex(line + '\n');
+            if (line !== '') return chainHashOfLine(line);
         }
         return null;
     } catch {
@@ -250,6 +242,9 @@ export function verifyLiveChain(filePath: string): VerifyChainResult {
     let note: ChainNote = anchor ? 'anchored' : 'legacy_genesis';
     let continuedFrom: string | undefined;
     let prevLineHash: string | null = null;
+    // Blanked lines (workspace erase) carry their original hash; a marker entry must vouch for them (auditRedact.ts).
+    // Live-only: a marker may cover lines in archives we cannot see here, so only its presence is checked, not its digest.
+    const tracker = new RedactionTracker(false);
 
     for (let i = 0; i < effective.length; i++) {
         const line = effective[i]!;
@@ -277,7 +272,9 @@ export function verifyLiveChain(filePath: string): VerifyChainResult {
                 // Legacy genesis must be null (preserve the original contract).
                 return { ok: false, brokenAt: 0, reason: `prevHash mismatch at line 0: record says ${entry.prevHash}, actual null` };
             }
-            prevLineHash = sha256Hex(line + '\n');
+            const h0 = tracker.hashOf(line, entry);
+            if ('error' in h0) return { ok: false, brokenAt: i, reason: h0.error };
+            prevLineHash = h0.hash;
             continue;
         }
 
@@ -289,8 +286,14 @@ export function verifyLiveChain(filePath: string): VerifyChainResult {
                 reason: `prevHash mismatch at line ${i}: record says ${expected ?? 'null'}, actual ${prevLineHash ?? 'null'}`,
             };
         }
-        prevLineHash = sha256Hex(line + '\n');
+        const h = tracker.hashOf(line, entry);
+        if ('error' in h) return { ok: false, brokenAt: i, reason: h.error };
+        const markerErr = tracker.note(entry);
+        if (markerErr) return { ok: false, brokenAt: i, reason: markerErr };
+        prevLineHash = h.hash;
     }
+    const pendingErr = tracker.finish();
+    if (pendingErr) return { ok: false, brokenAt: effective.length - 1, reason: pendingErr };
 
     return { ok: true, count: effective.length, note, ...(continuedFrom ? { continuedFrom } : {}) };
 }
@@ -337,6 +340,7 @@ export function verifyChainWithHistory(filePath: string): VerifyChainResult {
 
     let prevTail: string | null = null;
     let globalIndex = 0;
+    const tracker = new RedactionTracker(true);
 
     for (let s = 0; s < segments.length; s++) {
         const seg = segments[s]!;
@@ -377,10 +381,16 @@ export function verifyChainWithHistory(filePath: string): VerifyChainResult {
                 }
             }
 
-            prevTail = sha256Hex(line + '\n');
+            const h = tracker.hashOf(line, entry);
+            if ('error' in h) return { ok: false, brokenAt: globalIndex, reason: `${h.error} (${seg.label}, local line ${i})` };
+            const markerErr = tracker.note(entry);
+            if (markerErr) return { ok: false, brokenAt: globalIndex, reason: markerErr };
+            prevTail = h.hash;
             globalIndex++;
         }
     }
+    const pendingErr = tracker.finish();
+    if (pendingErr) return { ok: false, brokenAt: globalIndex - 1, reason: pendingErr };
 
     return { ok: true, count: globalIndex, segments: segments.length, note: anchor ? 'anchored' : 'legacy_history' };
 }

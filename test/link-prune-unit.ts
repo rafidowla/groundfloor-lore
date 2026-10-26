@@ -170,7 +170,7 @@ for (const eng of engines) {
         const race = mkPruner(g, 2);
         let fired = false;
         // the write lands after the pass has started scanning (inside the first over-cap query)
-        const slow = Object.create(g, { linkNodesOverCap: { value: async (...a: Parameters<G['linkNodesOverCap']>) => { if (!fired) { fired = true; racing.markDirty('ws-b'); } return g.linkNodesOverCap(...a); } } });
+        const slow = Object.create(g, { linkNodesOverCap: { value: async (...a: [cap: number, limit: number, afterId?: string | null]) => { if (!fired) { fired = true; racing.markDirty('ws-b'); } return g.linkNodesOverCap(...a); } } });
         const racing = new LinkPruner({ store: race.store, cap: () => 2, batchSize: 10, resolveHandles: async () => ({ graph: slow as never, verbatim: {} as never }) });
         racing.markDirty('ws-b');
         await racing.prune('ws-b');

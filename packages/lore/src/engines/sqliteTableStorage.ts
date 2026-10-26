@@ -74,6 +74,11 @@ function sqliteType(t: ColumnType): string {
         case 'date':     return 'TEXT';    // ISO YYYY-MM-DD
         case 'datetime': return 'TEXT';    // ISO 8601
         case 'json':     return 'TEXT';    // JSON-stringified
+        case 'money':
+            // Money is (amount, currency) with exact decimals and a refuse-mixed-currency
+            // rule; the logical-table parity slice for SQLite has not landed. Refuse
+            // loudly rather than mis-store it as a bare number.
+            throw new Error("SqliteTableStorage: the 'money' column type is not supported on SQLite yet (Postgres tables only)");
     }
 }
 

@@ -46,6 +46,7 @@ import {
     type BundleHeader, type BundleTrailer,
 } from './postgresBackupBundle.js';
 import { streamWorkspaceRows } from './postgresBackupExport.js';
+import { clearStopListRows } from './postgresVerbatim/postgresBm25StopList.js';
 import { ensureWorkspacePartition, type PartitionProvisioner } from './postgresWorkspacePartitions.js';
 import {
     BUNDLE_HASH_MISMATCH, LogicalBackupError, OUTBOX_NOT_DRAINED, RESTORE_TARGET_NOT_EMPTY, SCHEMA_MISMATCH,
@@ -315,6 +316,9 @@ export async function restoreWorkspaceBundle(pool: Pool, opts: RestoreOptions): 
                 if (ceiling > 0n) await client.query(`SELECT setval($1::regclass, $2::bigint, true)`, [seq, ceiling.toString()]);
             }
         }
+        // The restored text_tsv rows replace whatever the BM25 stop-list was built from: drop the (derived, not
+        // backed up) list inside the same transaction so the next query rebuilds it for the restored data.
+        await clearStopListRows(client, target, schema.schema);
         await client.query('COMMIT');
 
         const idRemaps: LogicalRestoreSummary['idRemaps'] = [];

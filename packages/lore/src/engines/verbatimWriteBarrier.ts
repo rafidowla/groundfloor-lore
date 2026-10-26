@@ -28,7 +28,7 @@
  * resolver swaps it for the Lance store). Letting them resume would silently lose exactly the writes
  * the barrier parked, so `retire()` rejects them with `VerbatimStoreRetiredError` instead (nothing
  * was applied; SqliteVerbatimStore replays them on the promoted store, see verbatimRetiredRetry.ts). Writes arriving later on the old
- * store instance keep their pre-existing behavior (see the 3.35.3 notes on the post-commit window).
+ * store instance are rejected too (D1): see `retireGenerations`.
  *
  * Do not nest `withWriteBarrier` calls: an inner call parked behind a raised barrier would keep its
  * outer call "in flight" until the drain timeout lowers the barrier.
@@ -63,6 +63,19 @@ interface BarrierState {
 
 const states = new Map<string, BarrierState>();
 
+/**
+ * Per-path count of committed promotions (`retire()` calls). It outlives the barrier state on purpose: a store
+ * instance opened BEFORE the promotion still holds an fd to the renamed-away SQLite file, and a write arriving
+ * AFTER the commit (not parked, so not rejected by `retire()`) used to land in that dead file and vanish. Instances
+ * remember the generation they opened under; `withWriteBarrier` rejects a writer whose generation is behind.
+ */
+const retireGenerations = new Map<string, number>();
+
+/** Number of promotions that committed for this path so far (0 if none). */
+export function currentRetireGeneration(basePath: string): number {
+    return retireGenerations.get(path.resolve(basePath)) ?? 0;
+}
+
 function stateFor(key: string): BarrierState {
     let s = states.get(key);
     if (!s) {
@@ -77,13 +90,21 @@ function gc(key: string, s: BarrierState): void {
 }
 
 /** Run a write so a raised barrier parks it first and a raise can wait for it to finish. */
-export async function withWriteBarrier<T>(basePath: string, fn: () => Promise<T> | T): Promise<T> {
+export async function withWriteBarrier<T>(basePath: string, fn: () => Promise<T> | T): Promise<T>;
+/** `generation` is the {@link currentRetireGeneration} the caller opened under; a newer one throws VerbatimStoreRetiredError (nothing applied). */
+export async function withWriteBarrier<T>(basePath: string, generation: number, fn: () => Promise<T> | T): Promise<T>;
+export async function withWriteBarrier<T>(basePath: string, a: number | (() => Promise<T> | T), b?: () => Promise<T> | T): Promise<T> {
+    const generation = typeof a === 'number' ? a : undefined;
+    const fn = (typeof a === 'number' ? b : a) as () => Promise<T> | T;
     const key = path.resolve(basePath);
+    const stale = (): boolean => generation !== undefined && (retireGenerations.get(key) ?? 0) > generation;
+    if (stale()) throw new VerbatimStoreRetiredError(key);
     let s = stateFor(key);
     while (s.raised) {
         if ((await s.opened) === 'retired') throw new VerbatimStoreRetiredError(key);
         s = stateFor(key); // the entry may have been collected and recreated while we waited
     }
+    if (stale()) throw new VerbatimStoreRetiredError(key);
     s.inflight++;
     try {
         return await fn();
@@ -143,6 +164,12 @@ export async function raiseWriteBarrier(basePath: string, opts: RaiseOptions = {
         gc(key, s);
     };
     const release = (): void => lower('open');
+    let retiredOnce = false;
+    const retire = (): void => {
+        // Bump even when the hold already expired: the commit happened regardless of the barrier state.
+        if (!retiredOnce) { retiredOnce = true; retireGenerations.set(key, (retireGenerations.get(key) ?? 0) + 1); }
+        lower('retired');
+    };
 
     if (s.inflight > 0) {
         const drained = await new Promise<boolean>((resolve) => {
@@ -161,7 +188,7 @@ export async function raiseWriteBarrier(basePath: string, opts: RaiseOptions = {
     // Not unref'd: parked writers are bare promises, and the auto-release is what resumes them if the
     // promotion hangs. It is cleared on release, so it keeps the process alive for at most holdMs.
     timer = setTimeout(release, holdMs);
-    return { deadline, isHeld: () => held, release, retire: () => lower('retired') };
+    return { deadline, isHeld: () => held, release, retire };
 }
 
 /** Test seam: number of workspaces with live barrier state (0 when idle). */

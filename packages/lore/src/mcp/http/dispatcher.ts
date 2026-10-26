@@ -29,6 +29,8 @@ import { tryWorkspaceExportRoutes } from './routes/workspaceExport.js';
 import { tryAuditRoutes } from './routes/audit.js';
 import { tryAdminRoutes } from './routes/admin.js';
 import { tryLinkRebuildRoutes } from './routes/linkRebuild.js';
+import { tryLinkProposalRoutes } from './routes/linkProposals.js';
+import { tryTableReviewRoutes } from './routes/tableReview.js';
 import { tryIngestEnqueueRoutes } from './routes/ingestEnqueue.js';
 import { getActiveIngestionHost } from '../ingestionBoot.js';
 import { tryConfigRoutes } from './routes/config.js';
@@ -419,6 +421,20 @@ async function dispatchAfterGates(
         dataplane: deps.dataplane,
     })) return;
 
+    // Review surfaces: VIEW = `read`, ACT = the separate `review` scope (never implied by `write`).
+    if (await tryLinkProposalRoutes(req, res, url, pathname, {
+        linkService: deps.store.linkService ?? null,
+        deploymentMode: deps.deploymentMode,
+        dataplane: deps.dataplane,
+    })) return;
+
+    if (await tryTableReviewRoutes(req, res, url, pathname, {
+        store: deps.store,
+        graphRegistry: deps.graphRegistry,
+        deploymentMode: deps.deploymentMode,
+        dataplane: deps.dataplane,
+    })) return;
+
     if (await tryIngestEnqueueRoutes(req, res, url, pathname, {
         getIngestionHost: deps.getIngestionHost ?? getActiveIngestionHost,
         deploymentMode: deps.deploymentMode,
@@ -446,6 +462,12 @@ async function dispatchAfterGates(
         auditLog: deps.auditLog,
         deploymentMode: deps.deploymentMode,
         dataplane: deps.dataplane,
+        // Lane f6b — DELETE closes these handles before the data dir is hidden.
+        eraseHandles: {
+            graphRegistry: deps.graphRegistry,
+            verbatimResolver: deps.workspaceVerbatimResolver,
+            getIngestionHost: deps.getIngestionHost ?? getActiveIngestionHost,
+        },
     })) return;
 
     if (await tryRetentionRoutes(req, res, url, pathname, {

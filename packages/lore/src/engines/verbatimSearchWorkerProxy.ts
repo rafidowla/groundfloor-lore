@@ -26,7 +26,7 @@
  * Gated + default OFF (LORE_SEARCH_WORKER). The in-process path is unchanged when
  * the gate is off; this file is inert unless the factory selects it.
  */
-
+import { VerbatimStoreClosedError } from './verbatimStoreClosedError.js';
 import { fork, type ChildProcess } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -532,7 +532,7 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
     }
 
     private ensureChild(): Promise<void> {
-        if (this.closed) return Promise.reject(new Error('search worker proxy is closed'));
+        if (this.closed) return Promise.reject(new VerbatimStoreClosedError('search-worker-proxy', 'call'));
         if (this.fatalInitError) return Promise.reject(this.fatalInitError);
         if (this.ready) return Promise.resolve();
         if (this.startInFlight) return this.startInFlight;
@@ -678,7 +678,7 @@ export class VerbatimSearchWorkerProxy extends VerbatimStore {
      * forwarded method (plain writes) must never get one.
      */
     private async call(method: DispatchableMethod, args: unknown[], callOpts?: { signal?: AbortSignal; deadline?: number }): Promise<unknown> {
-        if (this.closed) throw new Error('search worker proxy is closed');
+        if (this.closed) throw new VerbatimStoreClosedError('search-worker-proxy', 'call');
         await this.ensureChild();
         const child = this.child;
         if (!child || !this.ready) {

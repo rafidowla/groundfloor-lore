@@ -57,6 +57,7 @@ import { ArcadeGraphStore } from '../../../engines/arcade/arcadeGraphStore.js';
 import { ArcadeVectorStore } from '../../../engines/arcade/arcadeVectorStore.js';
 import { NODE_TYPE, VERBATIM_TYPE } from '../../../engines/arcade/arcadeSchema.js';
 import type { LoreNode, LoreEdge } from '../../../providers/types.js';
+import { log } from '../../../logger.js';
 
 export interface ArcadeBackupDeps {
     auditLog?: AuditLog;
@@ -346,7 +347,7 @@ async function handleRestore(
             await vector.storePrebuilt(carryable);
             importedVerbatim += carryable.length;
         } else {
-            for (const r of verbatim) { try { await vector.store({ id: r.id, text: r.text, metadata: r.metadata as never }); importedVerbatim++; } catch { /* skip */ } }
+            for (const r of verbatim) { try { await vector.store({ id: r.id, text: r.text, metadata: r.metadata as never }); importedVerbatim++; } catch (e) { log.warn(`[arcade restore] verbatim row ${r.id} skipped (${(e as Error).name}): ${(e as Error).message}`); } }
         }
         return { imported: { nodes: importedNodes, edges: importedEdges, verbatim: importedVerbatim }, embeddings: carry ? 'carried' : 're-embedded' as const };
     }).catch((e: unknown) => { if (e instanceof BackupError) return e; throw e; });

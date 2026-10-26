@@ -7,7 +7,8 @@
  *   option on          `linkOnArrival: true` links arrivals; an object overrides settings; bad values throw at construction
  *   option vs env      false beats LORE_LINK_ON_ARRIVAL=1; options beat env tunables
  *   opt-out            `autolink:false` is never queued; a durable opt-out survives a restart
- *   recall ordering    `recallLinkOrdering` reaches recall (and wins over LORE_RECALL_LINK_ORDERING)
+ *   recall ordering    `recallLinkOrdering` is on by default, reaches recall and wins over LORE_RECALL_LINK_ORDERING
+ *   related limits     `recallRelated` (perHit / maxDegree) reaches recall and wins over the env
  *   process safety     createLore with the options adds no process-wide listeners and mutates no env
  *
  *   LORE_HOME=<scratch> LORE_MODEL_SERVER=0 npx tsx test/embedded-link-options-e2e.ts
@@ -18,7 +19,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { EmbeddingProvider } from '../packages/lore/src/providers/types.js';
 
-for (const k of Object.keys(process.env)) if (k.startsWith('LORE_LINK_') || k === 'LORE_RECALL_LINK_ORDERING' || k.startsWith('LORE_INGEST_')) delete process.env[k];
+for (const k of Object.keys(process.env)) if (k.startsWith('LORE_LINK_') || k === 'LORE_RECALL_LINK_ORDERING' || k.startsWith('LORE_RECALL_RELATED_') || k.startsWith('LORE_INGEST_')) delete process.env[k];
 
 class DetEmbedProvider implements EmbeddingProvider {
     readonly dimension = 16;
@@ -169,21 +170,40 @@ async function related(lore: any): Promise<string[]> {
     return rel.map((x) => String(x.id ?? x.node?.id));
 }
 
-await test('recallLinkOrdering reaches recall and wins over LORE_RECALL_LINK_ORDERING in both directions', async () => {
+await test('recallLinkOrdering is ON by default; the option wins over LORE_RECALL_LINK_ORDERING in both directions', async () => {
+    const dflt = await open(tmp());
+    try { assert.deepEqual(await related(dflt), ['n3', 'n2', 'n1'], 'no option, no env => ordering on (C1 default)'); } finally { await dflt.dispose(); }
     const on = await open(tmp(), { recallLinkOrdering: true });
     let onOrder: string[];
     try { onOrder = await related(on); } finally { await on.dispose(); }
     assert.deepEqual(onOrder, ['n3', 'n2', 'n1'], 'strongest link first');
-    process.env.LORE_RECALL_LINK_ORDERING = '1';
+    const off0 = await open(tmp(), { recallLinkOrdering: false });
+    let offOrder: string[];
+    try { offOrder = await related(off0); } finally { await off0.dispose(); }
+    assert.notDeepEqual(offOrder, ['n3', 'n2', 'n1'], 'explicit false turns it off');
+    assert.deepEqual([...offOrder].sort(), ['n1', 'n2', 'n3'], 'same set');
+    process.env.LORE_RECALL_LINK_ORDERING = '0';
     try {
-        const off = await open(tmp(), { recallLinkOrdering: false });
-        let offOrder: string[];
-        try { offOrder = await related(off); } finally { await off.dispose(); }
-        assert.notDeepEqual(offOrder, ['n3', 'n2', 'n1'], 'explicit false beats the env flag');
-        assert.deepEqual([...offOrder].sort(), ['n1', 'n2', 'n3'], 'same set');
-        const envOnly = await open(tmp());
-        try { assert.deepEqual(await related(envOnly), ['n3', 'n2', 'n1'], 'no option => env flag decides'); } finally { await envOnly.dispose(); }
+        const envOff = await open(tmp());
+        try { assert.deepEqual(await related(envOff), offOrder, 'no option => env 0 turns it off'); } finally { await envOff.dispose(); }
+        const optOn = await open(tmp(), { recallLinkOrdering: true });
+        try { assert.deepEqual(await related(optOn), ['n3', 'n2', 'n1'], 'explicit true beats env 0'); } finally { await optOn.dispose(); }
     } finally { delete process.env.LORE_RECALL_LINK_ORDERING; }
+});
+
+await test('recallRelated reaches recall: perHit caps, null forces off over env, bad values throw', async () => {
+    const capped = await open(tmp(), { recallRelated: { perHit: 2 } });
+    try { assert.deepEqual(await related(capped), ['n3', 'n2'], 'the two strongest neighbours'); } finally { await capped.dispose(); }
+    process.env.LORE_RECALL_RELATED_PER_HIT = '1';
+    try {
+        const envCap = await open(tmp());
+        try { assert.deepEqual(await related(envCap), ['n3'], 'no option => env decides'); } finally { await envCap.dispose(); }
+        const optNull = await open(tmp(), { recallRelated: { perHit: null } });
+        try { assert.deepEqual(await related(optNull), ['n3', 'n2', 'n1'], 'null beats the env'); } finally { await optNull.dispose(); }
+    } finally { delete process.env.LORE_RECALL_RELATED_PER_HIT; }
+    for (const bad of [{ perHit: 0 }, { perHit: 1.5 }, { maxDegree: -1 }, { maxDegree: '3' }]) {
+        await assert.rejects(() => open(tmp(), { recallRelated: bad }), RangeError);
+    }
 });
 
 await test('options add no process-wide listeners', async () => {

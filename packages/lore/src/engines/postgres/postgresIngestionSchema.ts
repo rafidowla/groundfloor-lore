@@ -41,6 +41,8 @@ export function ingestionSchema_ddl(): string[] {
     PRIMARY KEY (workspace_id, source_id),
     UNIQUE (workspace_id, sha256)
 )`,
+        // Additive: set when blob retention removed the source file's bytes (the row is kept).
+        `ALTER TABLE ${sources} ADD COLUMN IF NOT EXISTS blob_purged_at TIMESTAMPTZ`,
         `CREATE TABLE IF NOT EXISTS ${jobs} (
     job_id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,
@@ -67,6 +69,7 @@ export function ingestionSchema_ddl(): string[] {
         `ALTER TABLE ${jobs} ADD COLUMN IF NOT EXISTS lease_until TIMESTAMPTZ`,
         `CREATE INDEX IF NOT EXISTS lore_ingest_jobs_due ON ${jobs} (workspace_id, state, next_attempt_at, created_at)`,
         `CREATE INDEX IF NOT EXISTS lore_ingest_jobs_list ON ${jobs} (workspace_id, created_at, job_id)`,
+        `CREATE INDEX IF NOT EXISTS lore_ingest_jobs_source ON ${jobs} (workspace_id, source_id)`,
         `CREATE TABLE IF NOT EXISTS ${pending} (
     job_id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,

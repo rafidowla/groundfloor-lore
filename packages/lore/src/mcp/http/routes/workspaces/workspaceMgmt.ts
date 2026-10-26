@@ -30,12 +30,13 @@ import {
     getActiveWorkspaceName,
     createWorkspace,
     switchWorkspace,
-    deleteWorkspace,
     kebabCase,
     getWorkspaceRetention,
     setWorkspaceRetention,
 } from '../../../../config/workspaces.js';
 import { gateRoute } from '../../../../security/routeGate.js';
+import { deleteWorkspaceWithLifecycle } from '../../../../engines/workspaceErase/lifecycle.js';
+import { eraseResponseField } from '../../../../engines/workspaceErase/responseField.js';
 import { writePermissionDenied } from '../../../../security/rebacGate.js';
 import { isPayloadTooLarge, writeOversizeError, writeError, parseJsonBody, isInvalidJsonBody, writeInvalidJson } from '../../helpers.js';
 import { requestShutdown } from '../../../shutdownCoordinator.js';
@@ -272,15 +273,24 @@ export async function tryWorkspaceMgmtRoutes(req: IncomingMessage, res: ServerRe
             // Deletes the whole workspace (every row, hidden ones included): operator-only
             // for bound actors. Refused before the audit entry and any registry change.
             if (!requireOperatorForBoundActor(res, 'Deleting a workspace')) return true;
-            const next = deleteWorkspace(name);
+            // `?erase=now` skips the recovery window (same permission, same operator-only check as delete).
+            const eraseParam = new URL(url, 'http://localhost').searchParams.get('erase');
+            if (eraseParam !== null && eraseParam !== 'now') { writeError(res, 400, 'invalid_request', 'erase must be "now" when given'); return true; }
+            const eraseNow = eraseParam === 'now';
+            // Hides the workspace, schedules (or, for window 0 / erase=now, runs) the erase of everything Lore holds.
+            const out = await deleteWorkspaceWithLifecycle(name, { eraseNow }, { ...(deps.eraseHandles ? { handles: deps.eraseHandles } : {}) });
+            // When the erase already ran inside this request, the audit blank-out has finished before this entry is
+            // written, so it would keep the workspace name for good. Name the permanent id instead: it does not identify
+            // the client, and a later retry of a partial erase still matches the entry by that id and blanks it.
+            const target = out.erase ? { workspaceId: out.id } : { name };
             deps.auditLog.log({
                 toolName: 'workspaces.delete',
-                args: { name },
+                args: { ...target, ...(eraseNow ? { erase: 'now' } : {}), eraseStatus: out.status },
                 result: 'success',
                 durationMs: Date.now() - startMs,
             });
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(next));
+            res.end(JSON.stringify({ ...out.file, erase: eraseResponseField(out) }));
         } catch (err) {
             deps.auditLog.log({
                 toolName: 'workspaces.delete',

@@ -516,3 +516,71 @@ export async function tombstone(deps: PostgresVerbatimWriteDeps, id: string, rea
     });
     deps.onMutate();
 }
+
+/** embedOrNull for many texts: ONE batched provider call per `maxBatchSize` window when the provider has
+ *  `embedDocumentBatch`, otherwise per-text. A disabled embedder yields all-null. Any other error propagates. */
+async function embedManyOrNull(deps: PostgresVerbatimWriteDeps, texts: string[]): Promise<Array<Float32Array | null>> {
+    const p = deps.embeddingProvider;
+    if ('disabled' in p && p.disabled === true) return texts.map(() => null);
+    if (typeof p.embedDocumentBatch !== 'function') {
+        const out: Array<Float32Array | null> = [];
+        for (const t of texts) out.push(await embedOrNull(deps, t));
+        return out;
+    }
+    const cap = Math.max(1, p.maxBatchSize ?? 32);
+    const out: Array<Float32Array | null> = [];
+    try {
+        for (let i = 0; i < texts.length; i += cap) {
+            const vecs = await p.embedDocumentBatch(texts.slice(i, i + cap));
+            for (const v of vecs) out.push(Float32Array.from(v));
+        }
+    } catch (err) {
+        if (isEmbeddingDisabledError(err)) return texts.map(() => null);
+        throw err;
+    }
+    return out;
+}
+
+/** tombstoneMany() — `tombstone()` for many ids with the same observable result, in O(chunks) round trips instead of
+ *  O(ids): one SELECT of the canonical rows, ONE batched embed of the marker texts, then one transaction per chunk
+ *  (one UPDATE superseding the old canonical rows, one INSERT ... unnest of the tombstone rows). Already-tombstoned
+ *  and absent ids are skipped exactly as in `tombstone()`. Throws on any failure (the chunk's transaction rolled
+ *  back); callers fall back to the per-id path so a bad id only fails itself. */
+export async function tombstoneMany(deps: PostgresVerbatimWriteDeps, ids: string[], reason: string): Promise<void> {
+    const unique = [...new Set(ids)];
+    let mutated = false;
+    for (let i = 0; i < unique.length; i += VERBATIM_CHUNK_SIZE) {
+        const chunk = unique.slice(i, i + VERBATIM_CHUNK_SIZE);
+        const existing = await deps.pool.query<TombstoneSourceRow & { id: string }>(
+            `SELECT row_id, id, text, type, label, tags, project, ecosystem, security_scopes
+             FROM verbatim WHERE workspace_id = $1 AND id = ANY($2::text[]) AND is_canonical = 1`,
+            [deps.workspaceId, chunk],
+        );
+        const rows = existing.rows.filter((r) => !r.text.startsWith('[TOMBSTONED'));
+        if (rows.length === 0) continue;
+        const ts = new Date().toISOString();
+        const texts = rows.map((r) => `[TOMBSTONED ${ts} reason: ${reason}]\n\n${r.text}`);
+        const vectors = await embedManyOrNull(deps, texts);
+        await withTransaction(deps.pool, async (tx) => {
+            await tx.query(
+                `UPDATE verbatim SET is_canonical = 0, superseded_at = $1 WHERE workspace_id = $2 AND row_id = ANY($3::bigint[])`,
+                [ts, deps.workspaceId, rows.map((r) => r.row_id)],
+            );
+            await tx.query(
+                `INSERT INTO verbatim ${INSERT_COLUMNS}
+                 SELECT $1, t.id, t.text, t.vec::vector, t.hash, t.type, t.label, t.tags, t.project, t.ecosystem,
+                        $2, t.scopes, 1, 1, NULL, $2, $2
+                 FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[])
+                      AS t(id, text, vec, hash, type, label, tags, project, ecosystem, scopes)`,
+                [
+                    deps.workspaceId, ts,
+                    rows.map((r) => r.id), texts, vectors.map((v) => (v ? toPgVectorText(v) : null)), texts.map((t) => computeContentHash(t)),
+                    rows.map((r) => r.type), rows.map((r) => r.label), rows.map((r) => r.tags), rows.map((r) => r.project),
+                    rows.map((r) => r.ecosystem), rows.map((r) => r.security_scopes),
+                ],
+            );
+        });
+        mutated = true;
+    }
+    if (mutated) deps.onMutate();
+}

@@ -122,6 +122,23 @@ export interface AuditEntry {
      * locate the prior segment and confirm the cross-rotation link.
      */
     rotatedFrom?: string;
+    /**
+     * Workspace-delete blank-out (see auditRedact.ts). Present ONLY on a line whose content was blanked when its workspace
+     * was erased: every field except time / tool / outcome / duration / chain links is replaced by a fixed stub, and this
+     * block says when, by what, for which permanent workspace id and in which run. The verifier accepts such a line only
+     * when a later `audit.redacted` marker entry vouches for it (the line's own hash can no longer be recomputed).
+     */
+    redacted?: { at: string; by: 'workspace-erase'; workspaceId: string; runId: string; origHash: string };
+}
+
+/**
+ * Handle given to an {@link AuditLog.runExclusive} callback. The callback runs synchronously while the writer is
+ * quiesced (every queued append has landed, new `log()` calls are parked), so it may rewrite the file safely.
+ */
+export interface AuditExclusiveHandle {
+    filePath: string;
+    /** Append one properly chained entry NOW (sync), chained from the file's real tail. */
+    append(entry: Pick<AuditEntry, 'toolName' | 'args' | 'result' | 'durationMs'>): AuditEntry;
 }
 
 export interface AuditLogOptions {
@@ -139,7 +156,7 @@ export interface AuditLogOptions {
 }
 
 export class AuditLog {
-    private readonly filePath: string;
+    readonly filePath: string;
     private readonly includePrefixes: string[];
     /**
      * Sprint B-local — optional cloud-pluggable exporter. When set,
@@ -174,6 +191,10 @@ export class AuditLog {
      * conversion.
      */
     private writeChain: Promise<void> = Promise.resolve();
+
+    /** Number of open {@link runExclusive} sections. While > 0, `log()` parks entries instead of stamping them. */
+    private gate = 0;
+    private parked: Array<() => void> = [];
 
     constructor(options: AuditLogOptions = {}) {
         this.filePath = options.path ?? loreHomePath('audit.jsonl');
@@ -214,6 +235,14 @@ export class AuditLog {
             return;
         }
         const actor = entry.actor ?? currentUser();
+        const timestamp = new Date().toISOString();
+        // A quiesced section (runExclusive) is rewriting the file: park the entry. It is stamped with the chain head
+        // that holds AFTER the section, so the chain stays linear and no entry is lost.
+        if (this.gate > 0) { this.parked.push(() => this.stampAndAppend(entry, actor, timestamp)); return; }
+        this.stampAndAppend(entry, actor, timestamp);
+    }
+
+    private stampAndAppend(entry: Omit<AuditEntry, 'timestamp' | 'actor'>, actor: LoreUser, timestamp: string): void {
         // Audit fix #3 / DEFECT 2 — genesis anchoring. When we're about to write
         // the very first record of a genuinely empty file, mint (or load) the
         // one-time genesis anchor and tie this record to it. Gate on BOTH
@@ -225,7 +254,7 @@ export class AuditLog {
             anchorHash = ensureAnchor(this.filePath);
         }
         const fullEntry: AuditEntry = {
-            timestamp: new Date().toISOString(),
+            timestamp,
             actor: { id: actor.id, roles: actor.roles },
             toolName: entry.toolName,
             args: entry.args,
@@ -240,6 +269,42 @@ export class AuditLog {
             ...(anchorHash ? { anchorHash } : {}),
         };
         this.appendEntry(fullEntry);
+    }
+
+    /**
+     * runExclusive — quiesce this writer and run `fn` while nothing else can append (workspace-delete audit blank-out).
+     * Waits for every queued append to land, then runs `fn` (which should be synchronous so no await can let another
+     * writer in). Meanwhile `log()` calls are parked and replayed, in order, once the section ends. The handle's `append`
+     * writes one chained entry synchronously from the file's real tail. Nestable and safe to call concurrently.
+     */
+    async runExclusive<T>(fn: (h: AuditExclusiveHandle) => T | Promise<T>): Promise<T> {
+        this.gate++;
+        try {
+            await this.writeChain;
+            return await fn({
+                filePath: this.filePath,
+                append: (e) => {
+                    const actor = currentUser();
+                    const full: AuditEntry = {
+                        timestamp: new Date().toISOString(),
+                        actor: { id: actor.id, roles: actor.roles },
+                        toolName: e.toolName, args: e.args, result: e.result, durationMs: e.durationMs,
+                        prevHash: readTailHash(this.filePath) ?? this.lastHash,
+                    };
+                    this.appendEntry(full, true);
+                    return full;
+                },
+            });
+        } finally {
+            this.gate--;
+            if (this.gate === 0) {
+                // The section may have rewritten the file or appended a marker (possibly through another instance on the
+                // same path): re-read the real chain head before any parked entry is stamped from it.
+                this.lastHash = readTailHash(this.filePath) ?? this.lastHash;
+                const run = this.parked; this.parked = [];
+                for (const p of run) { try { p(); } catch (err) { console.error(`[audit] parked append failed: ${(err as Error).message}`); } }
+            }
+        }
     }
 
     /**
@@ -258,14 +323,19 @@ export class AuditLog {
      * contract is "never fail the tool call because audit failed". (Audit
      * 2026-05-13 moved this off appendFileSync to unblock the event loop.)
      */
-    private appendEntry(fullEntry: AuditEntry): void {
+    private appendEntry(fullEntry: AuditEntry, sync = false): void {
         const serialized = JSON.stringify(fullEntry) + '\n';
         this.lastHash = sha256Hex(serialized);
-        this.writeChain = this.writeChain
-            .then(() => fs.promises.appendFile(this.filePath, serialized, { mode: 0o600 }))
-            .catch((err) => {
-                console.error(`[audit] append failed: ${(err as Error).message}`);
-            });
+        if (sync) {
+            // runExclusive only: the writer is quiesced, so write now and keep file order trivially.
+            fs.appendFileSync(this.filePath, serialized, { mode: 0o600 });
+        } else {
+            this.writeChain = this.writeChain
+                .then(() => fs.promises.appendFile(this.filePath, serialized, { mode: 0o600 }))
+                .catch((err) => {
+                    console.error(`[audit] append failed: ${(err as Error).message}`);
+                });
+        }
         // Sprint B-local — additive cloud-pluggable export. The exporter contract
         // demands non-throwing + non-blocking onAuditEvent; a misbehaving custom
         // exporter must NEVER fail a tool call, hence the try/catch.
@@ -403,6 +473,33 @@ export class AuditLog {
      * it stays safe to call unconditionally.
      */
     onRotated(): void {
+        this.writeContinuation(false);
+    }
+
+    /**
+     * rotateExclusive — run a rotation (`rotate()`, which gzips + truncates audit.jsonl in place) while this writer
+     * is quiesced, then write the continuation record SYNCHRONOUSLY in the same section. Waits for every queued
+     * append to land first (so none is lost between the rotator's read and its truncate), parks concurrent `log()`
+     * calls until the section ends, and never interleaves with a runExclusive rewrite (blank-out). The continuation's
+     * prevHash is the on-disk tail read just before `rotate()`, i.e. the hash of the last line in the archive.
+     * Best-effort and non-throwing: a failing `rotate()` is logged, never propagated.
+     */
+    async rotateExclusive(rotate: () => void): Promise<void> {
+        try {
+            await this.runExclusive(() => {
+                // Re-sync the head with the file we are about to archive (another instance may have appended).
+                this.lastHash = readTailHash(this.filePath) ?? this.lastHash;
+                try { rotate(); }
+                catch (err) { console.error(`[audit] rotation failed (non-fatal): ${(err as Error).message}`); }
+                this.writeContinuation(true);
+            });
+        } catch (err) {
+            console.error(`[audit] rotateExclusive failed (non-fatal): ${(err as Error).message}`);
+        }
+    }
+
+    /** Shared body of onRotated() / rotateExclusive(); `sync` picks the append path (sync only inside a quiesced section). */
+    private writeContinuation(sync: boolean): void {
         try {
             // Live file still has content → nothing was rotated; or a previous
             // onRotated() already wrote the continuation. No-op.
@@ -430,7 +527,7 @@ export class AuditLog {
                 kind: 'continuation',
                 rotatedFrom: path.basename(archive),
             };
-            this.appendEntry(continuation);
+            this.appendEntry(continuation, sync);
         } catch { /* best-effort — never fail a tool call over audit bookkeeping */ }
     }
 

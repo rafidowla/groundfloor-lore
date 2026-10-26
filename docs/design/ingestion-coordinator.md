@@ -136,3 +136,24 @@ Still needed for the full Postgres lane:
 - Blobs live on local disk (`<workspace>/ingestion-blobs`) even for Postgres workspaces: single-host until a shared
   object store exists. With no Postgres `ITableStorage`, structured results are recorded as pending.
 - Not wired to a CLI/REST/MCP surface.
+
+### Open items: blob retention and Groundfloor blob store (lane d5, 2026-10-24)
+
+- Retention is a sweep on the existing purge tick, OFF unless `LORE_INGEST_BLOB_RETENTION_DAYS` is set. It claims
+  eligible sources atomically (marks `blob_purged_at`), deletes the blob, and releases the mark if the delete fails.
+  There is no `cancelled` job state, so "terminal" means succeeded, failed or dead_letter. `dead_letter` can be
+  requeued by an operator, so a purged dead-lettered job fails permanently with "upload the file again" until the
+  file is re-uploaded.
+- A re-upload creates no new job (job ids are deterministic), so a re-uploaded, already-finished source becomes
+  eligible again at the next sweep once its old completion time is past the window. Restoring is for re-running or
+  re-reading, not a new retention clock.
+- In-process enqueue and sweep are serialised by a mutex. Across processes sharing one database there is a narrow
+  window where a sweep can delete a blob an enqueue just reused; the affected job then fails permanently with a
+  clear re-upload message. No cross-process lock was added.
+- Groundfloor Files API contract was taken from the installed `gf` CLI 0.2.5 source, not the live service, and the
+  real endpoint was never called. Unverified: server-side size limit, token type and lifetime (builder vs M2M),
+  finalize semantics, whether `name` accepts arbitrary strings (Lore sends `lore-ingest-<workspace hash>-<sha>`).
+  Presigned URL hostnames are not pinned against DNS rebinding (IP literals are checked).
+- `put` on the Groundfloor store is not idempotent (each call makes a new object), so the coordinator reuses a
+  source's existing blob reference when `has` is true.
+

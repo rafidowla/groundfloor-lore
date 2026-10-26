@@ -59,6 +59,8 @@ import { handleAdminStats } from '../packages/lore/src/mcp/http/routes/diagnosti
 import { tryAuditRoutes } from '../packages/lore/src/mcp/http/routes/audit.js';
 import { tryArcadeAdminRoutes } from '../packages/lore/src/mcp/http/routes/arcadeAdmin.js';
 import { readWorkspaceRegistry, writeWorkspaceRegistry, upsertWorkspaceMapping } from '../packages/lore/src/config/workspaceRegistry.js';
+import { readDeletionLog } from '../packages/lore/src/config/deletedWorkspaces.js';
+import { loreHome } from '../packages/lore/src/config/loreHome.js';
 import { registerDrain, __setExitFnForTests, __resetForTests } from '../packages/lore/src/mcp/shutdownCoordinator.js';
 import { runWithActor } from '../packages/lore/src/security/actorContext.js';
 import { runWithPrincipal, type Principal } from '../packages/lore/src/auth/principal.js';
@@ -743,7 +745,7 @@ await test('GET retention policy still works for a bound non-operator (REST, bot
     setWorkspaceRetention(WS, { autoArchiveSupersededAfterDays: null });
 });
 
-await test('unbound and operator callers still rename and delete a workspace; rows on disk stay', async () => {
+await test('unbound and operator callers still rename and delete a workspace; the rows are held (hidden), not erased, inside the recovery window', async () => {
     const name = freshName('wsm-keep');
     const entry = createWorkspace(name);
     const marker = path.join(entry.path, 'row-marker.txt');
@@ -753,7 +755,11 @@ await test('unbound and operator callers still rename and delete a workspace; ro
     assert.equal(getWorkspacePath(`${name}-2`), entry.path, 'rename keeps the same data path');
     assert.equal((await MODES[2]!.run(() => mgmt('DELETE', `/api/workspaces/${name}-2`))).status, 200);
     assert.ok(!loadWorkspaces().workspaces.some((w) => w.name === `${name}-2`), 'registry entry removed');
-    assert.ok(fs.existsSync(marker), 'data on disk untouched by workspace DELETE');
+    // Lane f6b: delete now hides the folder under a holding path for the recovery window (default 7 days); nothing is erased yet.
+    const rec = [...readDeletionLog(loreHome()).byId.values()].find((st) => st.deletion?.name === `${name}-2`)?.deletion;
+    assert.ok(rec?.holdingPath, 'the deletion record carries the holding path');
+    assert.equal(fs.readFileSync(path.join(rec!.holdingPath!, 'row-marker.txt'), 'utf8'), 'row', 'data is held, intact, during the recovery window');
+    assert.ok(!fs.existsSync(marker), 'and hidden from its old location');
 });
 
 await test('workspace CREATE and list stay open to a bound non-operator; create cannot clobber an existing entry', async () => {
