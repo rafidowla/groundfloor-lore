@@ -99,6 +99,10 @@ async function main(): Promise<void> {
     await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
     await admin.query(`CREATE DATABASE ${dbName}`);
     const pool = new Pool({ connectionString: withDb(dbName), max: 6 });
+    // pool.end() resolves before each idle client's socket has closed, so the DROP ... WITH (FORCE) in the
+    // finally can terminate one mid-close (57P01). Without a listener that error crashes the process after
+    // every test already passed. The product pool (postgresClient.ts) has the same guard.
+    pool.on('error', () => undefined);
     try {
         const c = await pool.connect();
         try {

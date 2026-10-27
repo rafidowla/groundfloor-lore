@@ -22,10 +22,12 @@
  * `process.exit` — statusCommand calls that synchronously on several
  * branches, and letting it actually fire mid-write risks truncating captured
  * stdio piped back to the parent. The child then prints its own captured
- * results as `KEY=value` markers and exits cleanly itself via a real
- * `process.exit(0)` at the very end, once nothing more needs to be written —
- * the same pattern doctor-daemon-port-unit.ts and cli-daemon-preflight-unit.ts
- * already use for their own child-process result markers.
+ * results as `KEY=value` markers and exits itself via a real
+ * `process.exit(0)` — but only from the write callback of that single result
+ * block (see `writeThenExit`). On macOS, stdout to a pipe is asynchronous, so
+ * calling `process.exit` straight after `console.log` can drop the buffered
+ * tail under load (seen 2026-10-27 in a full-chain run: the parent got
+ * `===RESULT_START===` and nothing else, child status 0).
  *
  *   1. "owndaemon" — a fake daemon that DOES write this home's `auth.token`
  *      and answers `/api/health` with a matching `loreHome` for that exact
@@ -141,17 +143,29 @@ async function runStatusCapturing(): Promise<{
     return { stdout, stderr, exitCode, elapsedMs };
 }
 
+/** Write `text` to `stream` as one chunk and call the real `process.exit`
+ *  only from the write callback, i.e. once the chunk has been handed to the
+ *  OS. Never resolves — the process ends inside the callback. */
+function writeThenExit(stream: NodeJS.WriteStream, text: string, code: number): Promise<never> {
+    return new Promise<never>(() => {
+        stream.write(text, () => process.exit(code));
+    });
+}
+
 /** Print a child's captured result as `KEY=value` markers between fixed
- *  delimiters, exactly like doctor-daemon-port-unit.ts's own child bodies —
- *  the multi-line stdout/stderr text is JSON-stringified so embedded
- *  newlines survive the line-oriented marker format. */
-function printResult(result: { stdout: string; stderr: string; exitCode: number | null; elapsedMs: number }): void {
-    console.log('===RESULT_START===');
-    console.log(`STDOUT=${JSON.stringify(result.stdout)}`);
-    console.log(`STDERR=${JSON.stringify(result.stderr)}`);
-    console.log(`EXIT_CODE=${result.exitCode === null ? 'null' : String(result.exitCode)}`);
-    console.log(`ELAPSED_MS=${result.elapsedMs}`);
-    console.log('===RESULT_END===');
+ *  delimiters, then exit 0 after the block has flushed. The multi-line
+ *  stdout/stderr text is JSON-stringified so embedded newlines survive the
+ *  line-oriented marker format. */
+function printResultAndExit(result: { stdout: string; stderr: string; exitCode: number | null; elapsedMs: number }): Promise<never> {
+    const block = [
+        '===RESULT_START===',
+        `STDOUT=${JSON.stringify(result.stdout)}`,
+        `STDERR=${JSON.stringify(result.stderr)}`,
+        `EXIT_CODE=${result.exitCode === null ? 'null' : String(result.exitCode)}`,
+        `ELAPSED_MS=${result.elapsedMs}`,
+        '===RESULT_END===',
+    ].join('\n') + '\n';
+    return writeThenExit(process.stdout, block, 0);
 }
 
 /**
@@ -185,8 +199,7 @@ async function childOwnDaemon(): Promise<void> {
 
     const result = await runStatusCapturing();
     server.close();
-    printResult(result);
-    process.exit(0);
+    await printResultAndExit(result);
 }
 
 /**
@@ -215,8 +228,7 @@ async function childUnrelatedDaemon(): Promise<void> {
 
     const result = await runStatusCapturing();
     server.close();
-    printResult(result);
-    process.exit(0);
+    await printResultAndExit(result);
 }
 
 async function childHolder(): Promise<void> {
@@ -240,8 +252,7 @@ async function childLockVictim(): Promise<void> {
     const home = process.env['LORE_HOME']!;
     assert.ok(!fs.existsSync(path.join(home, 'auth.token')), 'test setup: no auth.token expected');
     const result = await runStatusCapturing();
-    printResult(result);
-    process.exit(0);
+    await printResultAndExit(result);
 }
 
 /**
@@ -255,8 +266,7 @@ async function childFreeStore(): Promise<void> {
     assert.ok(!fs.existsSync(path.join(home, 'auth.token')), 'test setup: no auth.token expected');
 
     const result = await runStatusCapturing();
-    printResult(result);
-    process.exit(0);
+    await printResultAndExit(result);
 }
 
 /**
@@ -269,8 +279,7 @@ async function childMissingLoreDir(): Promise<void> {
     assert.ok(!fs.existsSync(path.join(home, '.lore')), 'test setup: .lore must not exist yet');
 
     const result = await runStatusCapturing();
-    printResult(result);
-    process.exit(0);
+    await printResultAndExit(result);
 }
 
 /* ───────────────────────────── Orchestrator ────────────────────────────── */
@@ -434,8 +443,7 @@ async function main(): Promise<void> {
     await test('missing .lore dir: "lore init" message, exit 1', scenarioMissingLoreDir);
 
     if (failed > 0) {
-        console.error(`\n${failed} test(s) failed, ${passed} passed`);
-        process.exit(1);
+        await writeThenExit(process.stderr, `\n${failed} test(s) failed, ${passed} passed\n`, 1);
     }
     console.log(`\nall ${passed} tests passed`);
 }
@@ -451,7 +459,7 @@ if (childIdx !== -1) {
     else if (which === 'lockvictim') await childLockVictim();
     else if (which === 'freestore') await childFreeStore();
     else if (which === 'missingloredir') await childMissingLoreDir();
-    else { console.error(`unknown --child ${which}`); process.exit(2); }
+    else await writeThenExit(process.stderr, `unknown --child ${which}\n`, 2);
 } else {
     await main();
 }

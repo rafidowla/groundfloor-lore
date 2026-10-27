@@ -19,6 +19,12 @@ export interface IBlobStore {
     has?(ref: string): Promise<boolean>;
     /** Remove a blob. Resolves false when it was already gone. Optional: a store without it cannot take part in blob retention. */
     delete?(ref: string): Promise<boolean>;
+    /**
+     * Pure syntax check: is `ref` shaped like a ref THIS store hands out? A ref that is not can name no blob the store
+     * holds, so a caller (workspace erase) may treat it as "nothing to delete" instead of a failure. Must not do I/O and
+     * must not throw. Optional: without it a caller cannot tell a malformed ref from an I/O fault and must treat any throw as a failure.
+     */
+    isValidRef?(ref: string): boolean;
 }
 
 /** The bytes behind a ref are gone (purged by retention or removed out of band). Never retryable by itself: re-upload the file. */
@@ -50,10 +56,15 @@ export class FsBlobStore implements IBlobStore {
         return path.join(wsDir, sha256);
     }
 
+    /** True only for `<16 hex>/<64 hex>`: traversal (`../x`), absolute paths and anything else this store never produced are malformed. */
+    isValidRef(ref: string): boolean {
+        return typeof ref === 'string' && FS_REF.test(ref.split(path.sep).join('/'));
+    }
+
     /** Resolve a ref to a path inside the root, or throw. A tampered job row must not become an arbitrary file read or delete. */
     private resolve(ref: string): string {
         const norm = ref.split(path.sep).join('/');
-        if (!FS_REF.test(norm)) throw new Error('blob ref is not a valid blob reference');
+        if (!this.isValidRef(ref)) throw new Error('blob ref is not a valid blob reference');
         const full = path.resolve(this.root, norm);
         if (full !== this.root && !full.startsWith(this.root + path.sep)) throw new Error('blob ref escapes root');
         return full;

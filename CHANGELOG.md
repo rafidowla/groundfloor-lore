@@ -4,6 +4,36 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.37.2] — 2026-10-27
+
+Patch: two Postgres-found fixes. No data migration, no schema change, no config change; swap the tarball and
+restart. Rollback to 3.37.1 is a tarball swap.
+
+### Fixed
+
+- **Workspace erase no longer stalls on one malformed `storage_ref`.** A source whose stored blob reference the blob store
+  cannot parse (garbage, `../x`, an absolute path) made `has()`/`delete()` throw; the blob step counted that as a failed
+  blob, reported `partial`, and the lifecycle stops at a `partial` step before the row-erase steps, so the workspace could
+  never finish erasing without a hand-fixed row. `IBlobStore` gains an optional `isValidRef(ref)` (implemented by
+  `FsBlobStore`: `<16 hex>/<64 hex>`, and `GroundfloorBlobStore`: `gf1:<fileId>:<sha256>`); the blob eraser treats a ref the
+  store does not recognise as "no blob could exist", never touches it on disk, records the count in the step note (not the
+  ref), and carries on. A real I/O error on a well-formed ref (permission denied, Files API failure) is still a failure:
+  `partial`, and the ingestion rows are kept because they are the only record of which blobs belong to the workspace. Same
+  code path for SQLite and Postgres ingestion stores.
+- **Restoring a Postgres logical bundle into a NEW workspace while the source still exists no longer fails with a duplicate
+  key.** `lore_ingest_jobs.job_id`, `lore_ingest_pending.job_id` and `lore_ingest_deliveries(job_id, delivery_id)` are
+  global keys (not scoped by `workspace_id`), and the restore loaded the source's job ids verbatim, so it hit
+  `lore_ingest_jobs_pkey` (or the deliveries/pending PK). When the target workspace id differs from the bundle's, the
+  restore now re-mints every ingestion job id for the target with `makeJobId` (the same derivation a native `createJob`
+  there uses; parents first, since the parent id is a hash input) and rewrites `lore_ingest_jobs.parent_job_id`,
+  `lore_ingest_pending.job_id` and `lore_ingest_deliveries.job_id` to match (`postgresBackupJobIds.ts`). Resubmitting the
+  same work in the restored workspace therefore still resolves to the restored job (`created = false`). Read-back
+  verification maps the new ids back before comparing against the manifest, so checksums stay over the original rows. No
+  schema change. A restore into the bundle's own workspace id keeps ids byte for byte. Informational echoes of the old id
+  (`result`/`payload` JSON, graph node `metadata.ingestion.jobId`, structured-table `_job_id`, memory node ids derived from
+  the job id) are restored as-is. `lore_ingest_sources` and every other restored table are keyed by `(workspace_id, ...)` and
+  were already collision-free.
+
 ## [3.37.1] — 2026-10-26
 
 Patch: workspace erase now also blanks the audit export copy, and two Postgres fixes (restore into a new

@@ -46,6 +46,7 @@ import {
     type BundleHeader, type BundleTrailer,
 } from './postgresBackupBundle.js';
 import { streamWorkspaceRows } from './postgresBackupExport.js';
+import { planJobIdRewrite } from './postgresBackupJobIds.js';
 import { clearStopListRows } from './postgresVerbatim/postgresBm25StopList.js';
 import { ensureWorkspacePartition, type PartitionProvisioner } from './postgresWorkspacePartitions.js';
 import {
@@ -223,6 +224,9 @@ export async function restoreWorkspaceBundle(pool: Pool, opts: RestoreOptions): 
     }
     const batchRows = opts.batchRows ?? 500;
     const warnings = header.excluded.map((e) => `bundle did not carry table '${e.table}': ${e.reason}`);
+    // Ingestion job ids are globally keyed, so a restore into another workspace re-mints them (postgresBackupJobIds.ts).
+    const jobIds = await planJobIdRewrite(opts.bundlePath, header, target);
+    if (jobIds && jobIds.count > 0) warnings.push(`re-minted ${jobIds.count} ingestion job id(s) for workspace '${target}' (job ids are globally unique)`);
 
     const client = await pool.connect();
     try {
@@ -278,7 +282,7 @@ export async function restoreWorkspaceBundle(pool: Pool, opts: RestoreOptions): 
             };
             for await (const row of rows) {
                 if (row.table !== curTable) { await flush(); curTable = row.table; }
-                batch.push(row.values);
+                batch.push(jobIds ? jobIds.forward(row.table, row.values) : row.values);
                 chars += row.values.reduce((a, v) => a + (v === null ? 4 : v.length), 0);
                 if (batch.length >= batchRows || chars > 4_000_000) await flush();
             }
@@ -297,7 +301,7 @@ export async function restoreWorkspaceBundle(pool: Pool, opts: RestoreOptions): 
         for (const plan of plans) {
             const want = trailer.tables[plan.index]!;
             const sum = new RowChecksum();
-            const n = await streamWorkspaceRows(client, plan.target, target, 2000, (values) => sum.add(rowLine(plan.index, values)), { unmap: plan.remap });
+            const n = await streamWorkspaceRows(client, plan.target, target, 2000, (values) => sum.add(rowLine(plan.index, jobIds ? jobIds.reverse(plan.index, values) : values)), { unmap: plan.remap });
             if (n !== want.rowCount) {
                 throw new LogicalBackupError(VERIFICATION_FAILED, `table ${want.name}: restored ${n} row(s) but the manifest says ${want.rowCount}; restore rolled back`, 500);
             }

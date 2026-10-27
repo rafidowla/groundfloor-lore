@@ -17,6 +17,12 @@
  *     LATER workspace that reused the same NAME and uploaded the same bytes (same FsBlobStore ref). A caller that
  *     knows of such a workspace passes `isRefHeldElsewhere`.
  *
+ * A ref the blob store cannot parse as one of its own (`IBlobStore.isValidRef` false: garbage, `../x`, an absolute path)
+ * names no blob that store holds, so there is nothing to delete for it: it is noted, never touched on disk, and it is NOT a
+ * failure (a single bad `storage_ref` used to make has()/delete() throw -> `partial` -> the erase never reached the row steps).
+ * A throw on a WELL-FORMED ref (permission denied, network error) is still a failure. A store without `isValidRef` cannot
+ * tell the two apart, so there any throw stays a failure.
+ *
  * Key: `workspaceKey` (default: the permanent id). The caller chooses what the store's `workspace` column holds
  * for this workspace. `wholeStore: true` lists every source in the store - only for a store dedicated to the
  * target (its own SQLite file), where the file's location, not a column, proves ownership.
@@ -68,10 +74,16 @@ export function createIngestionBlobEraser(o: IngestionBlobEraserOptions): Worksp
         const kept = new Set<string>();
         let seen = 0;
         let failed = 0;
+        let malformed = 0;
         let aborted = false;
 
         const canDelete = typeof o.blobStore.delete === 'function';
         const canCheck = typeof o.blobStore.has === 'function';
+
+        // Pure syntax check, no I/O. A store that cannot classify (or whose check throws) never reports "malformed".
+        const isMalformed = (ref: string): boolean => {
+            try { return o.blobStore.isValidRef !== undefined && !o.blobStore.isValidRef(ref); } catch { return false; }
+        };
 
         const heldElsewhere = async (ref: string): Promise<boolean> => {
             if (key !== null && (await o.ingestionStore.countBlobRefsHeldByOtherWorkspaces(key, ref)) > 0) return true;
@@ -81,6 +93,7 @@ export function createIngestionBlobEraser(o: IngestionBlobEraserOptions): Worksp
         for await (const ref of refs(key, opts.signal)) {
             seen++;
             if (opts.signal?.aborted) { aborted = true; break; }
+            if (isMalformed(ref)) { malformed++; continue; }
             if (!canDelete) continue;
             try {
                 if (await heldElsewhere(ref)) { kept.add(ref); continue; }
@@ -97,7 +110,7 @@ export function createIngestionBlobEraser(o: IngestionBlobEraserOptions): Worksp
         let verifiable = canCheck;
         if (canCheck) {
             for await (const ref of refs(key)) {
-                if (kept.has(ref)) continue;
+                if (kept.has(ref) || isMalformed(ref)) continue;
                 try {
                     if (await o.blobStore.has!(ref)) bump(remaining, 'blobs');
                 } catch {
@@ -109,6 +122,7 @@ export function createIngestionBlobEraser(o: IngestionBlobEraserOptions): Worksp
 
         const notes: string[] = [];
         if (kept.size > 0) notes.push(`${kept.size} blob(s) are still referenced by another workspace and were kept`);
+        if (malformed > 0) notes.push(`${malformed} source(s) had an unreadable storage reference; no blob could exist for them`);
         if (failed > 0) notes.push(`${failed} blob(s) could not be deleted (will be retried)`);
         if (aborted) notes.push('erase was aborted before it finished');
         if (!canDelete) notes.push('this blob store cannot delete blobs');

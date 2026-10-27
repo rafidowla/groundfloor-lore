@@ -146,6 +146,9 @@ export class GroundfloorBlobStore implements IBlobStore {
         return `gf1:${id}:${sha256}`;
     }
 
+    /** True only for `gf1:<fileId>:<sha256>`; anything else names no Files API object this store created. */
+    isValidRef(ref: string): boolean { return typeof ref === 'string' && REF.test(ref); }
+
     async get(ref: string): Promise<Buffer> {
         const { id, sha } = parseRef(ref);
         const dl = await this.control('download-url', 'GET', `/files/${encodeURIComponent(id)}/download-url`);
