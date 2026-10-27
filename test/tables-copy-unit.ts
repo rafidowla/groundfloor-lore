@@ -29,6 +29,7 @@ import { Client } from 'pg';
 
 import { SqliteTableStorage } from '../packages/lore/src/engines/sqliteTableStorage.js';
 import { PostgresTableStorage } from '../packages/lore/src/engines/postgres/postgresTableStorage.js';
+import { resolvePostgresWorkspaceKey } from '../packages/lore/src/engines/postgres/postgresWorkspaceKey.js';
 import { createPostgresPool, closePostgresPool } from '../packages/lore/src/engines/postgres/postgresClient.js';
 import { closeSharedPostgresPool } from '../packages/lore/src/engines/postgres/postgresPoolOwner.js';
 import { validateSchema } from '../packages/lore/src/engines/postgres/postgresTableCatalog.js';
@@ -156,7 +157,9 @@ async function buildSource(ws: string, opts: { events?: number; tables?: TableSc
 }
 const sha = (f: string): string => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
 const listing = (ws: string): string[] => fs.readdirSync(path.join(wsDir(ws), '.lore')).sort();
-const pgFor = (ws: string): Promise<PostgresTableStorage> => PostgresTableStorage.open(ws, pool);
+// Rows are keyed by the workspace's permanent id (3.37.0 re-key), exactly as the CLI and runtime resolve it;
+// opening by name would write name-keyed rows, which the re-key guard refuses as an older build's writes.
+const pgFor = (ws: string): Promise<PostgresTableStorage> => PostgresTableStorage.open(resolvePostgresWorkspaceKey(ws, home), pool);
 async function openSource(ws: string): Promise<SqliteTableStorage> {
     const dir = path.join(wsDir(ws), '.lore');
     // work on a throwaway copy so the engine-level tests never open the fixture file in place

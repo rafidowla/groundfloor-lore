@@ -64,6 +64,12 @@ export class FileTailExporter implements AuditLogExporter {
     private sidecarPath = '';
     private timer: NodeJS.Timeout | null = null;
     private started = false;
+    /** Serializes appends: the tail of every flush started so far (never rejects). */
+    private flushing: Promise<void> = Promise.resolve();
+    /** > 0 while a workspace-erase rewrite of the sidecar runs; the timer flush then leaves the queue alone. */
+    private paused = 0;
+    /** True when the most recent append failed (its records were put back on the queue). */
+    private lastFlushFailed = false;
     private readonly opts: FileTailExporterOptions;
 
     constructor(opts: FileTailExporterOptions = {}) {
@@ -120,12 +126,46 @@ export class FileTailExporter implements AuditLogExporter {
         // Final synchronous-ish drain so graceful shutdown ships all
         // pending entries before exit. `await` here is fine — stop()
         // is called from the daemon shutdown path, not the hot path.
-        await this.flush();
+        await this.drain();
     }
 
-    /** Drain the in-memory queue to disk. */
-    private async flush(): Promise<void> {
-        if (this.queue.length === 0 && this.droppedSinceLastWarn === 0) return;
+    /** Timer flush: skipped while an erase rewrite holds the sidecar (records stay queued in memory, none are lost). */
+    private flush(): Promise<void> {
+        if (this.paused > 0) return Promise.resolve();
+        return this.drain();
+    }
+
+    /** Append the queue to disk after every append already in flight (appends never overlap). */
+    private drain(): Promise<void> {
+        const run = this.flushing.then(() => this.flushOnce());
+        this.flushing = run.catch(() => { /* swallowed in flushOnce */ });
+        return run;
+    }
+
+    /**
+     * Run a synchronous section that rewrites the sidecar (workspace erase blanks the deleted workspace's lines in it).
+     *
+     * Why this shape: the sidecar is appended by an async `appendFile` every second from an in-memory queue. A rewrite
+     * (read, edit, temp file, rename) racing an append would silently drop the appended lines, so: (1) pause the timer
+     * flush, (2) wait for the append already in flight, (3) drain the queue to disk so records queued for the erased
+     * workspace are in the file and get blanked, (4) run `fn` synchronously (no append can start in between, because
+     * node runs it to completion), (5) resume. Records emitted while paused only queue in memory and are appended
+     * after the rewrite (like audit.jsonl's own parked entries). If the drain fails (disk error) this throws without
+     * running `fn`: rewriting around unflushed records would let them reach the file later, un-blanked.
+     */
+    async runExclusive<T>(fn: (sidecarPath: string) => T): Promise<T> {
+        this.paused++;
+        try {
+            await this.drain();
+            if (this.lastFlushFailed) throw new Error('the pending audit export records could not be written to disk');
+            return fn(this.sidecarPath);
+        } finally {
+            this.paused--;
+        }
+    }
+
+    private async flushOnce(): Promise<void> {
+        if (this.queue.length === 0 && this.droppedSinceLastWarn === 0) { this.lastFlushFailed = false; return; }
         const drained = this.queue;
         this.queue = [];
         if (this.droppedSinceLastWarn > 0) {
@@ -136,7 +176,9 @@ export class FileTailExporter implements AuditLogExporter {
         const payload = drained.map((e) => JSON.stringify(e)).join('\n') + '\n';
         try {
             await fs.promises.appendFile(this.sidecarPath, payload, { mode: 0o600 });
+            this.lastFlushFailed = false;
         } catch (err) {
+            this.lastFlushFailed = true;
             // Sink unavailable — re-queue at head (without exceeding
             // MAX_QUEUE) so the next tick retries. If chronic, the
             // overflow path drops oldest, which is preferable to

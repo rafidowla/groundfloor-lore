@@ -14,6 +14,14 @@
  * left alone and the step reports `unverifiable` (never `complete`). Entries with no workspace attribution at all (for
  * example a delete by node id) cannot be matched and are not touched.
  *
+ * Export sidecar: the default local exporter (`audit/fileTailExporter.ts`) keeps a second copy of every audit record in
+ * `<home>/audit-export.jsonl`. It is cleaned in the same step with the same matching rule and the same stub form. It is
+ * not a hash chain, so there is no marker and no chain repair; line count and timestamps are kept. The exporter appends
+ * asynchronously from a memory queue, so a live exporter is quiesced (`FileTailExporter.runExclusive`: pause, drain the
+ * queue to disk, rewrite synchronously, resume) and queued records of the erased workspace are blanked too. The step only
+ * reports `complete` when the audit log AND the export file are clean. It does not rotate. Cloud/SIEM exporters are out
+ * of reach (see docs/WORKSPACE_DELETE.md).
+ *
  * Writing: each file is rebuilt in a temp file in the same directory (mode 0600, fsynced) and renamed over the original;
  * archives keep their modification time because the chain verifier orders archives by it. In this process the writers are
  * quiesced for the whole scan + rewrite + marker (`AuditLog.runExclusive`), so no queued append is lost. A DIFFERENT process
@@ -51,6 +59,18 @@ export interface AuditEraserDeps {
     /** Fault-injection seam: called with the temp file path after it is written, before the change check and rename (tests). */
     beforeRename?: (file: string) => void;
 }
+
+const EXPORT_FILE = 'audit-export.jsonl';
+
+/** A live exporter that can run a synchronous section while its sidecar is quiesced (FileTailExporter). */
+interface QuiescableExporter {
+    getSidecarPath(): string;
+    runExclusive<R>(fn: (sidecarPath: string) => R): Promise<R>;
+}
+const isQuiescable = (x: unknown): x is QuiescableExporter =>
+    !!x && typeof (x as QuiescableExporter).getSidecarPath === 'function' && typeof (x as QuiescableExporter).runExclusive === 'function';
+
+interface ExportOutcome { present: boolean; blanked: number; remaining: number; ambiguous: number; problems: string[] }
 
 const res = (status: EraseStepResult['status'], detail?: string, removed: Record<string, number> = {}, remaining: Record<string, number> = {}): EraseStepResult =>
     ({ store: STORE, status, removed, remaining, ...(detail ? { detail } : {}) });
@@ -189,6 +209,61 @@ function otherHolders(home: string, target: EraseTarget): NameInterval[] {
     return out;
 }
 
+/**
+ * Blank the workspace's lines in the export sidecar(s). Paths = the default `<home>/audit-export.jsonl` plus the sidecar
+ * of every live exporter attached to an AuditLog on `auditFile` (an override path, or a stale file while the exporter
+ * is off). Live exporters are quiesced first; a file with no in-process owner is rewritten directly, guarded by the same
+ * size/mtime check as the audit files (a different process appending cannot be fenced - see the header).
+ */
+async function cleanExports(auditFile: string, match: MatchTarget, runId: string, at: string, hook?: (file: string) => void): Promise<ExportOutcome> {
+    const out: ExportOutcome = { present: false, blanked: 0, remaining: 0, ambiguous: 0, problems: [] };
+    const clean = (file: string): void => {
+        if (!fs.existsSync(file)) return;
+        out.present = true;
+        const sc = scan([{ file, gz: false }], match, runId, at);
+        out.problems.push(...sc.problems);
+        for (const p of sc.plans) {
+            out.ambiguous += p.ambiguous;
+            if (!p.newText) continue;
+            const err = rewrite(p, runId, hook);
+            if (err) { out.problems.push(err); out.remaining += p.matched; } else out.blanked += p.matched;
+        }
+    };
+    const done = new Set<string>();
+    const exporters = liveAuditLogsAt<{ filePath?: string; flush(): Promise<void>; getExporter?: () => unknown }>(auditFile)
+        .map((l) => (typeof l.getExporter === 'function' ? l.getExporter() : null)).filter(isQuiescable);
+    const canon = (f: string): string => { try { return fs.realpathSync(f); } catch { return path.resolve(f); } };
+    for (const ex of new Set(exporters)) {
+        const f = ex.getSidecarPath();
+        if (!f || done.has(canon(f))) continue;
+        done.add(canon(f));
+        try { await ex.runExclusive(() => clean(f)); }
+        catch (e) { out.present = fs.existsSync(f) || out.present; out.problems.push(`${path.basename(f)}: ${(e as Error).message}`.slice(0, 200)); out.remaining += 1; }
+    }
+    const dflt = path.join(path.dirname(auditFile), EXPORT_FILE);
+    if (!done.has(canon(dflt))) clean(dflt);
+    return out;
+}
+
+/** Fold the export sidecar outcome into the audit step's result: `complete` only when both are clean. */
+function mergeExport(a: EraseStepResult | null, x: ExportOutcome): EraseStepResult {
+    if (!x.present && a) return a;
+    const base = a ?? res('complete', UNATTRIBUTED_NOTE, { entries: 0 }, { entries: 0 });
+    const removed = { ...base.removed, ...(x.present ? { exportEntries: x.blanked } : {}) };
+    const remaining: Record<string, number> = { ...base.remaining, exportEntries: x.remaining };
+    let status = base.status; let detail = base.detail;
+    if (x.problems.length > 0 || x.remaining > 0) {
+        status = 'partial';
+        const why = `the audit export file ${EXPORT_FILE} could not be fully cleaned and will be retried (${x.problems.join('; ') || 'rewrite failed'})`;
+        detail = detail ? `${detail}; ${why}` : why;
+    } else if (x.ambiguous > 0 && status === 'complete') {
+        status = 'unverifiable';
+        detail = `${x.ambiguous} audit export entr${x.ambiguous === 1 ? 'y names' : 'ies name'} this workspace only by name at a time another workspace could have used that name, so ${x.ambiguous === 1 ? 'it was' : 'they were'} left in place; ${UNATTRIBUTED_NOTE}`;
+        remaining.ambiguous = Math.max(remaining.ambiguous ?? 0, x.ambiguous);
+    }
+    return { ...base, status, removed, remaining, ...(detail ? { detail: detail.slice(0, 500) } : {}) };
+}
+
 export function createAuditEraser(deps: AuditEraserDeps): WorkspaceEraser {
     const nowOf = deps.now ?? (() => new Date());
     return {
@@ -197,7 +272,8 @@ export function createAuditEraser(deps: AuditEraserDeps): WorkspaceEraser {
             const live = path.join(deps.home, 'audit.jsonl');
             const file = deps.auditPath ?? live;
             const files: Array<{ file: string; gz: boolean }> = [...listArchives(file).map((f) => ({ file: f, gz: true })), ...(fs.existsSync(file) ? [{ file, gz: false }] : [])];
-            if (files.length === 0) return res('not-applicable', 'no audit log exists in this deployment');
+            const hasExport = fs.existsSync(path.join(path.dirname(file), EXPORT_FILE));
+            if (files.length === 0 && !hasExport && liveAuditLogsAt(file).length === 0) return res('not-applicable', 'no audit log exists in this deployment');
 
             let others: NameInterval[];
             try { others = otherHolders(deps.home, target); }
@@ -206,8 +282,12 @@ export function createAuditEraser(deps: AuditEraserDeps): WorkspaceEraser {
             const runId = crypto.randomUUID();
             const at = nowOf().toISOString();
 
+            let exportOutcome: ExportOutcome;
+            try { exportOutcome = await cleanExports(file, match, runId, at, deps.beforeRename); }
+            catch (e) { exportOutcome = { present: true, blanked: 0, remaining: 1, ambiguous: 0, problems: [(e as Error).message.slice(0, 200)] }; }
+            if (files.length === 0) return mergeExport(null, exportOutcome);
             try {
-                return await withQuiesced(file, (h): EraseStepResult => {
+                return mergeExport(await withQuiesced(file, (h): EraseStepResult => {
                     const sc = scan(files, match, runId, at);
                     const matched = sc.plans.reduce((n, p) => n + p.matched, 0);
                     const ambiguous = sc.plans.reduce((n, p) => n + p.ambiguous, 0);
@@ -240,9 +320,9 @@ export function createAuditEraser(deps: AuditEraserDeps): WorkspaceEraser {
                         return res('unverifiable', `${ambiguous} audit entr${ambiguous === 1 ? 'y names' : 'ies name'} this workspace only by name at a time another workspace could have used that name, so ${ambiguous === 1 ? 'it was' : 'they were'} left in place; ${UNATTRIBUTED_NOTE}`, { entries: blanked }, { entries: 0, ambiguous });
                     }
                     return res('complete', `${UNATTRIBUTED_NOTE}`, { entries: blanked }, { entries: 0 });
-                });
+                }), exportOutcome);
             } catch (e) {
-                return res('partial', `the audit log could not be cleaned and will be retried (${(e as Error).message})`.slice(0, 300));
+                return mergeExport(res('partial', `the audit log could not be cleaned and will be retried (${(e as Error).message})`.slice(0, 300)), exportOutcome);
             }
         },
     };

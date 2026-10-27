@@ -14,6 +14,12 @@
  *     reused. Partitions created here are named
  *     `<parent>_ws_<12 hex of sha256(workspace_id)>`; indexes defined on the
  *     parent (e.g. the pgvector HNSW index) are created on it by Postgres.
+ *   - The `verbatim` table is the one table with engine-specific partition DDL: it is delegated to
+ *     postgresVerbatimPartitionDdl.ts (`verbatim_ws_<24 hex>`, the name the runtime's own
+ *     ensureVerbatimSchema derives and later probes). Provisioning it under any other name leaves the
+ *     runtime unable to create its partition (the bound overlaps) and the workspace unwritable. Every
+ *     caller goes through this function, so none can get the name wrong. Its indexes (HNSW, GIN, btree)
+ *     are declared on the parent; the partition needs no DDL of its own beyond the name.
  *   - Anything else (RANGE, multi-column key): refused loudly — there is no
  *     safe way to guess a bound.
  *
@@ -25,6 +31,7 @@
 import * as crypto from 'node:crypto';
 import type { PoolClient } from 'pg';
 import { quoteIdent, quoteLiteral, WORKSPACE_COLUMN, type BackupTable } from './postgresBackupDiscovery.js';
+import { ensureWorkspacePartition as ensureVerbatimPartition } from './postgresVerbatimPartitionDdl.js';
 
 /** Custom provisioner: make sure `table` can accept rows for `workspaceId`. */
 export type PartitionProvisioner = (client: PoolClient, table: BackupTable, workspaceId: string) => Promise<void>;
@@ -48,6 +55,12 @@ async function partitionInfo(client: PoolClient, qualified: string): Promise<Par
  */
 export async function ensureWorkspacePartition(client: PoolClient, table: BackupTable, workspaceId: string): Promise<void> {
     if (!table.partitioned) return;
+    if (table.name === 'verbatim') {
+        const schema = (await client.query<{ s: string }>(
+            `SELECT n.nspname AS s FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = $1::regclass`, [table.qualified])).rows[0]!.s;
+        await ensureVerbatimPartition(client, workspaceId, 'verbatim', schema);
+        return;
+    }
     const info = await partitionInfo(client, table.qualified);
     if (!info) return;
     if (info.partstrat === 'h') return;

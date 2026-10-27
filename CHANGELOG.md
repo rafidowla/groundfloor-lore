@@ -4,7 +4,41 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
-## [Unreleased]
+## [3.37.1] — 2026-10-26
+
+Patch: workspace erase now also blanks the audit export copy, and two Postgres fixes (restore into a new
+workspace, mixed-key guard after re-key). No data migration, no config change; swap the tarball and restart.
+Rollback to 3.37.0 is a tarball swap.
+
+### Fixed
+
+- **Workspace erase now blanks the audit export copy.** The audit-log erase step blanked the deleted workspace's entries
+  in `audit.jsonl` and its archives but left them in the default file exporter's sidecar `audit-export.jsonl`, while the
+  receipt said `complete`. The step now blanks that file too (same matching and stub form; line count and timestamps
+  kept), pauses and drains a running exporter around the rewrite so no appended record is lost, and reports `partial`
+  until both files are clean. Non-file (SIEM) exporters cannot be reached and are listed under "What delete does NOT
+  erase". Workspaces erased by 3.37.0 keep their lines in `audit-export.jsonl`.
+- **Restoring a Postgres bundle into a new workspace now gives it vector recall and working writes.** The restore
+  provisioned the `verbatim` partition through the generic per-table provisioner, which names it `verbatim_ws_<12 hex>`;
+  the runtime uses `verbatim_ws_<24 hex>`. A restored workspace therefore had a differently named partition than the
+  runtime expected, so recall found no vectors and its writes dead-lettered. The generic provisioner
+  (`ensureWorkspacePartition` in `postgresWorkspacePartitions.ts`) now delegates to the verbatim DDL for `verbatim`
+  (one source of the partition name), and that DDL reuses any partition that already holds the workspace's list bound
+  under another name instead of failing on the overlap. The re-key special case in `postgresRekey.ts` is now a single
+  call. No other table has engine-specific partition DDL.
+- **A workspace that was already re-keyed is now rechecked for name-keyed rows on open.** An older build writing
+  name-keyed rows after the 3.37 upgrade used to go unnoticed because the workspace already had a ledger row. The next
+  open now refuses with `PostgresRekeyConflictError` (`postgres_rekey_mixed_keys`) naming the tables, and changes
+  nothing (no auto-merge). Added cost per open of a recorded workspace: one catalog lookup plus one combined
+  `UNION ALL ... LIMIT 1` query, about 20 ms on 7 keyed tables; none for a workspace with no old names.
+
+### Known (not fixed here)
+
+- Restoring a Postgres bundle into a new workspace while the source workspace still exists fails on
+  `lore_ingest_jobs_pkey` (the primary key is `job_id` alone; there is also `UNIQUE(workspace_id, job_id)`). Restore a
+  copy only after the source is gone.
+- One malformed `storage_ref` makes the Postgres workspace erase report `partial` and stop before deleting rows. Fix the
+  ref and rerun the erase.
 
 ## [3.37.0] — 2026-10-26
 

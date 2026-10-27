@@ -1,6 +1,6 @@
 {
   "name": "@groundfloor/lore",
-  "version": "3.37.0",
+  "version": "3.37.1",
   "description": "Knowledge database for agentic AI — a local-first, schema-agnostic knowledge graph (SQLite by default; SurrealDB + LanceDB legacy) exposed to any AI tool over MCP, with optional Dataplane team sync.",
   "type": "module",
   "license": "Elastic-2.0",
@@ -128,6 +128,7 @@
     "test:unit:pg-workspace-erase": "tsx test/pg-workspace-erase-unit.ts",
     "test:unit:pg-ingest-ids": "tsx test/pg-ingest-ids-unit.ts",
     "test:unit:pg-rekey": "tsx test/pg-rekey-unit.ts",
+    "test:unit:pg-restore-partition-rekey-guard": "tsx test/pg-restore-partition-rekey-guard-unit.ts",
     "test:unit:ingestion-blob-erase": "tsx test/ingestion-blob-erase-unit.ts",
     "test:unit:postgres-edge-backup": "tsx test/postgres-edge-backup-unit.ts",
     "test:unit:embeddable-capstone": "tsx test/embeddable-capstone-e2e.ts",
@@ -319,6 +320,7 @@
     "test:unit:workspace-erase-daemon-e2e": "tsx test/workspace-erase-daemon-e2e.ts",
     "test:unit:workspace-erase-sidestores": "tsx test/workspace-erase-sidestores-unit.ts",
     "test:unit:workspace-erase-audit": "tsx test/workspace-erase-audit-unit.ts",
+    "test:unit:workspace-erase-audit-export": "tsx test/workspace-erase-audit-export-unit.ts",
     "test:unit:workspace-erase-name-reuse": "tsx test/workspace-erase-name-reuse-unit.ts",
     "test:unit:workspace-erase-host-erasers": "tsx test/workspace-erase-host-erasers-unit.ts",
     "test:unit:workspace-erase-plugin-daemon-e2e": "tsx test/workspace-erase-plugin-daemon-e2e.ts",

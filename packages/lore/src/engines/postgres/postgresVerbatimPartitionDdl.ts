@@ -10,6 +10,8 @@ import { createHash } from 'node:crypto';
 
 import type { PoolClient } from 'pg';
 
+import { quoteIdent } from './postgresBackupDiscovery.js';
+
 /**
  * pgvector's HNSW index supports at most 2000 dimensions for the `vector`
  * type (the column itself allows 16000). Since this schema always builds the
@@ -109,24 +111,46 @@ export function verbatimPartitionName(workspaceId: string): string {
  * created the partition. Throws if the derived name is already taken by a
  * relation that is not a partition of `verbatim` (a 96-bit hash collision or
  * foreign object — refusing beats writing into the wrong table).
+ *
+ * A partition that already holds this workspace's bound under ANOTHER name is
+ * reused (returns false), never duplicated: `CREATE ... PARTITION OF` would
+ * fail with an overlap error and the workspace could not be written to. Such
+ * a partition was created by 3.37.0 / 3.37.1's restore (generic
+ * `verbatim_ws_<12 hex>` name); this is what lets a workspace restored on
+ * those builds open on a later one.
+ *
+ * `schema` (optional) qualifies the parent and the partition; omitted, both
+ * resolve through the connection's search_path, as every runtime caller does.
  */
-export async function ensureWorkspacePartition(client: PoolClient, workspaceId: string, parent = 'verbatim'): Promise<boolean> {
+export async function ensureWorkspacePartition(
+    client: PoolClient, workspaceId: string, parent = 'verbatim', schema?: string,
+): Promise<boolean> {
     if (typeof workspaceId !== 'string' || workspaceId === '') {
         throw new Error('ensureWorkspacePartition: workspaceId must be a non-empty string');
     }
     const name = verbatimPartitionName(workspaceId);
+    // `qualify` feeds to_regclass (plain names resolve through search_path); `ident` is the quoted form spliced into DDL.
+    const qualify = (rel: string): string => (schema === undefined ? rel : `${quoteIdent(schema)}.${quoteIdent(rel)}`);
+    const ident = (rel: string): string => (schema === undefined ? quoteIdent(rel) : qualify(rel));
     const probe = await client.query<{ attached: boolean | null }>(
         `SELECT EXISTS (SELECT 1 FROM pg_inherits i WHERE i.inhrelid = c.oid AND i.inhparent = to_regclass($2)) AS attached
            FROM pg_class c WHERE c.oid = to_regclass($1)`,
-        [name, parent],
+        [qualify(name), qualify(parent)],
     );
     if (probe.rowCount !== 0) {
         if (probe.rows[0]?.attached) return false;
         throw new Error(`ensureWorkspacePartition: relation ${name} exists but is not a partition of ${parent} — refusing to guess`);
     }
+    // Same bound under a different name (a partition another path created): reuse it.
+    const byBound = await client.query(
+        `SELECT 1 FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+          WHERE i.inhparent = to_regclass($1) AND pg_get_expr(c.relpartbound, c.oid) = format('FOR VALUES IN (%L)', $2::text)`,
+        [qualify(parent), workspaceId],
+    );
+    if ((byBound.rowCount ?? 0) > 0) return false;
     const stmt = await client.query<{ ddl: string }>(
-        `SELECT format('CREATE TABLE IF NOT EXISTS %I PARTITION OF %I FOR VALUES IN (%L)', $1::text, $3::text, $2::text) AS ddl`,
-        [name, workspaceId, parent],
+        `SELECT format('CREATE TABLE IF NOT EXISTS %s PARTITION OF %s FOR VALUES IN (%L)', $1::text, $3::text, $2::text) AS ddl`,
+        [ident(name), workspaceId, ident(parent)],
     );
     await client.query(stmt.rows[0]!.ddl);
     return true;

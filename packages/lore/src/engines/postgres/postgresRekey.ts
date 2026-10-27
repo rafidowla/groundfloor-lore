@@ -32,8 +32,7 @@ import { runSchemaBootstrap } from './postgresStartup.js';
 import { loadCatalog } from './postgresTableCatalog.js';
 import { TABLE_TABLES } from './postgresTableSchema.js';
 import { viewDdl } from './postgresTableViews.js';
-import { ensureWorkspacePartition as ensureVerbatimPartition } from './postgresVerbatimPartitionDdl.js';
-import { ensureWorkspacePartition as ensureGenericPartition } from './postgresWorkspacePartitions.js';
+import { ensureWorkspacePartition } from './postgresWorkspacePartitions.js';
 import { registryHomeForKey } from './postgresWorkspaceKey.js';
 
 export const REKEY_LEDGER_TABLE = 'lore_pg_rekey_ledger';
@@ -47,9 +46,13 @@ const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS ${REKEY_LEDGER_TABLE} (
 /** Rows exist under both a workspace's name and its permanent id: refuse rather than merge. */
 export class PostgresRekeyConflictError extends Error {
     public readonly code = 'postgres_rekey_mixed_keys' as const;
-    constructor(public readonly id: string, public readonly tables: string[], public readonly names: string[]) {
-        super(`Postgres rows for workspace id '${id}' exist under BOTH its name (${names.map((n) => `'${n}'`).join(', ')}) and its permanent id `
-            + `(tables: ${tables.join(', ')}). Lore will not merge them; nothing was changed. Decide which set is current, remove the other, and reopen.`);
+    constructor(public readonly id: string, public readonly tables: string[], public readonly names: string[], afterRekey = false) {
+        super(afterRekey
+            ? `Postgres rows for workspace id '${id}' were written under its old name (${names.map((n) => `'${n}'`).join(', ')}) after it was re-keyed to its permanent id `
+                + `(tables: ${tables.join(', ')}); a process on an older Lore build is probably still writing to this database. Stop it and upgrade it. `
+                + `Lore will not merge the rows; nothing was changed. Decide which set is current, remove the other, and reopen.`
+            : `Postgres rows for workspace id '${id}' exist under BOTH its name (${names.map((n) => `'${n}'`).join(', ')}) and its permanent id `
+                + `(tables: ${tables.join(', ')}). Lore will not merge them; nothing was changed. Decide which set is current, remove the other, and reopen.`);
         this.name = 'PostgresRekeyConflictError';
     }
 }
@@ -113,15 +116,27 @@ async function observe(client: PoolClient, tables: KeyedTable[], keys: string[])
     return out;
 }
 
+/** One round trip: per keyed table, rows under any of the (recorded) workspace's old names. Any hit refuses the open; nothing is changed. */
+async function refuseNameKeyedStragglers(client: PoolClient, tables: KeyedTable[], t: RekeyTarget): Promise<void> {
+    if (tables.length === 0) return;
+    const sql = tables.map((x, i) => `(SELECT ${i}::int AS i FROM ${x.qualified} WHERE ${WORKSPACE_COLUMN} = ANY($1::text[]) LIMIT 1)`).join(' UNION ALL ');
+    const hit = (await client.query<{ i: number }>(sql, [t.names])).rows.map((r) => tables[r.i]!.name).sort();
+    if (hit.length > 0) throw new PostgresRekeyConflictError(t.id, hit, t.names, true);
+}
+
 async function migrate(client: PoolClient, plan: RekeyPlan, openedKey: string): Promise<void> {
     if (plan.targets.length === 0) return;
     await client.query(LEDGER_DDL);
     const recorded = new Set((await client.query<{ key_id: string }>(`SELECT key_id FROM ${REKEY_LEDGER_TABLE}`)).rows.map((r) => r.key_id));
     const pending = plan.targets.filter((t) => !recorded.has(t.id));
-    if (pending.length === 0) return;
+    // Already re-keyed, but the workspace being opened may have name-keyed rows again (an older build wrote them after the upgrade).
+    const recheck = plan.targets.find((t) => t.id === openedKey && recorded.has(t.id) && t.names.length > 0);
+    if (pending.length === 0 && recheck === undefined) return;
 
     const schema = await currentSchema(client);
     const tables = await discoverKeyedTables(client, schema);
+    if (recheck !== undefined) await refuseNameKeyedStragglers(client, tables, recheck);
+    if (pending.length === 0) return;
     if ((await client.query<{ ok: boolean }>(`SELECT to_regclass($1) IS NOT NULL AS ok`, [`${quoteIdent(schema)}.edges_pk_progress`])).rows[0]?.ok) {
         throw new Error('postgres re-key: an edge surrogate-key migration is still in progress (edges_pk_progress exists); finish it by reopening a workspace on the previous build, then retry');
     }
@@ -167,10 +182,8 @@ async function rekeyOne(client: PoolClient, schema: string, all: KeyedTable[], n
         await client.query(`SET LOCAL lock_timeout = '60s'`);
         const altered = nameTables.length > 0 ? await deferForeignKeys(client, schema, all) : [];
         for (const tbl of nameTables) {
-            if (tbl.partitioned) {
-                if (tbl.name === 'verbatim') await ensureVerbatimPartition(client, t.id);
-                else await ensureGenericPartition(client, { name: tbl.name, qualified: tbl.qualified, partitioned: true } as unknown as BackupTable, t.id);
-            }
+            // The provisioner knows each table's partition naming (verbatim has its own), so no special case here.
+            if (tbl.partitioned) await ensureWorkspacePartition(client, { name: tbl.name, qualified: tbl.qualified, partitioned: true } as unknown as BackupTable, t.id);
         }
         for (const tbl of nameTables) {
             const r = await client.query(`UPDATE ${tbl.qualified} SET ${WORKSPACE_COLUMN} = $1 WHERE ${WORKSPACE_COLUMN} = ANY($2::text[])`, [t.id, t.names]);

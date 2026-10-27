@@ -159,12 +159,13 @@ Keying: the engine stores the workspace's permanent id in `workspace_id` (`POSTG
 ## What delete does NOT erase
 
 - Database backups and exports made by an operator. Lore cannot reach them; they expire on your own backup schedule.
+- Copies of audit records that a non-file audit exporter (`LORE_AUDIT_EXPORTER=splunk|datadog|elastic`, or a custom one) has already sent to an external system such as a SIEM. Lore cannot recall or edit them; erase them there. The default file exporter's sidecar `<LORE_HOME>/audit-export.jsonl` IS erased (blanked) by the audit-log step.
 - Audit entries that cannot be tied to the deleted workspace, for example a delete by node id or `retention.sweep`. They carry no workspace name or id, so they are left as they are (decided 2026-10-25). See the audit-log step below.
 - The `workspaces.delete` entry of an erase-now HTTP request. It is written after the erase, but carries only the permanent id (see "Erase now"), never the name.
 
 ### Audit log step (`audit-log`, runs last)
 
-The deleted workspace's entries in `<LORE_HOME>/audit.jsonl` and the rotated `audit.jsonl.<ts>.gz` archives are blanked, not removed (Rafi 2026-10-25: audit content may hold sensitive client data).
+The deleted workspace's entries in `<LORE_HOME>/audit.jsonl`, the rotated `audit.jsonl.<ts>.gz` archives and the file exporter's copy `<LORE_HOME>/audit-export.jsonl` are blanked, not removed (Rafi 2026-10-25: audit content may hold sensitive client data).
 
 - **Kept on a blanked line:** `timestamp`, `toolName` (the action), `result` (the outcome), `durationMs`, `prevHash`, and `anchorHash` on a genesis record.
 - **Blanked:** `actor` (becomes `{id:'redacted',roles:[]}`), `args` (becomes `{}`), `resultDetail`, `approvalId`.
@@ -173,6 +174,7 @@ The deleted workspace's entries in `<LORE_HOME>/audit.jsonl` and the rotated `au
 - **Matching:** an entry belongs to the workspace when its args contain the permanent id, or when its `workspace`/`oldName`/`newName` (or `name` on `workspaces.*` tools) equals the name within the workspace's lifetime (creation to deletion plus 60 s) and no other workspace could have held that name then. If another holder overlaps, the entry is ambiguous: it is left untouched and the step reports `unverifiable` (the receipt stays `partial`, then `needs-operator`).
 - **Verification:** `verifyChain()` and `verifyChainWithHistory()` accept a blanked line only if it is in the exact canonical blanked form and a later marker of the same run vouches for it. The full-history verifier also checks the marker's count and digest; the live-file verifier only checks that a marker exists, because the marker can cover archived lines. Changing a kept field, forging a blanked line or dropping the marker fails verification.
 - **Rewrite safety:** archives are rewritten via temp file + fsync + rename, keeping their mtime (archive order depends on it). In the running process, appends are paused for the rewrite. A crash between rewrite and marker is repaired on the next run by a `recovered` marker.
+- **Export copy (`audit-export.jsonl`):** the default local exporter writes a second copy of every audit record. It is blanked with the same matching rule and the same stub form, keeping line count and timestamps. It is not a hash chain, so it gets no marker. A running exporter is paused, its queued records are written first (so they are blanked too), the file is rewritten, then appending resumes; no appended record is lost. The receipt says `complete` only when this file is clean too; if it cannot be rewritten the step is `partial` and is retried. If the file does not exist (exporter off, or a cloud exporter), there is nothing to do. The exporter does not rotate this file. Erases completed before this fix (3.37.0) left their lines in this file.
 - **Known limits:** a second process appending at the same time (for example `lore workspaces erase-now` while a daemon runs) is only narrowed by a size/mtime check before the rename; run CLI erase-now with the daemon stopped, or use HTTP `?erase=now`. A same-user attacker can still append a forged marker (tamper-evidence, as with the rest of the chain). Each audit file is read whole (256 MB cap).
 
 ## Older deletes (legacy records)
