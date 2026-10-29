@@ -93,8 +93,13 @@ await test('error mapping: auth, missing database, privilege, unknown', async ()
 });
 
 await test('old server version is refused with the supported minimum', async () => {
-    const pool = fakePool((sql) => (/server_version_num/.test(sql) ? { rows: [{ v: '130012' }] } : { rows: [] }));
-    await assert.rejects(runSchemaBootstrap(pool, {}, async () => undefined), /PostgreSQL 14 or newer/);
+    for (const v of ['130012', '140010']) {
+        const pool = fakePool((sql) => (/server_version_num/.test(sql) ? { rows: [{ v }] } : { rows: [] }));
+        await assert.rejects(runSchemaBootstrap(pool, {}, async () => undefined), (err: Error) =>
+            /PostgreSQL 15 or newer/.test(err.message) && /Upgrade the server/.test(err.message) && /Nothing was changed/.test(err.message));
+    }
+    const ok = fakePool((sql) => (/server_version_num/.test(sql) ? { rows: [{ v: '150000' }] } : { rows: [] }));
+    await runSchemaBootstrap(ok, {}, async () => undefined); // 15.0 is accepted
 });
 
 await test('missing pgvector is refused with an install hint (graph-only bootstrap does not need it)', async () => {
@@ -114,6 +119,20 @@ await test('pgvector too old is refused', async () => {
         return { rows: [] };
     };
     await assert.rejects(runSchemaBootstrap(fakePool(script), { requirePgvector: true }, async () => undefined), /too old/);
+});
+
+await test('pgvector 0.7.x (no iterative scans) is refused with upgrade steps; 0.8.0 is accepted', async () => {
+    const withVersion = (installed: string) => (sql: string): { rows: unknown[] } => {
+        if (/server_version_num/.test(sql)) return { rows: [{ v: '160000' }] };
+        if (/pg_available_extensions/.test(sql)) return { rows: [{ installed, available: installed }] };
+        return { rows: [] };
+    };
+    await assert.rejects(
+        runSchemaBootstrap(fakePool(withVersion('0.7.4')), { requirePgvector: true }, async () => undefined),
+        (e: Error) => /too old/.test(e.message) && /0\.8\.0/.test(e.message) && /ALTER EXTENSION vector UPDATE/.test(e.message) && /pgvector\/pgvector/.test(e.message),
+    );
+    assert.equal(await runSchemaBootstrap(fakePool(withVersion('0.8.0')), { requirePgvector: true }, async () => 'ok-0.8.0'), 'ok-0.8.0');
+    assert.equal(await runSchemaBootstrap(fakePool(withVersion('0.8.5')), { requirePgvector: true }, async () => 'ok-0.8.5'), 'ok-0.8.5');
 });
 
 await test("the DDL callback's own deliberate error keeps its exact message", async () => {

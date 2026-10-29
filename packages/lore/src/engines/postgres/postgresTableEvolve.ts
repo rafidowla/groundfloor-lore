@@ -61,7 +61,7 @@ export async function evolveTable(
         if (n.extractedFields) upd.extractedFields = n.extractedFields.map(e => ({ ...e }));
         merged[i] = upd;
         if (addUnique || addIndexed) {
-            indexDdl.push(...fieldIndexDdl(ids.get(old.name)!, upd));
+            indexDdl.push(...fieldIndexDdl(workspace, ids.get(old.name)!, upd));
             steps.push({ kind: 'add_index', column: old.name });
         }
         for (const ef of newEfs) { assertIdent(ef.key); steps.push({ kind: 'add_extracted_field', column: old.name, extractedKey: ef.key }); }
@@ -95,7 +95,7 @@ export async function evolveTable(
                 [workspace, current.entityTypeId, String(fid), BACKFILL[col.type]]);
         }
         if (col.unique || col.indexed) {
-            indexDdl.push(...fieldIndexDdl(fid, col));
+            indexDdl.push(...fieldIndexDdl(workspace, fid, col));
             if (col.indexed || col.unique) steps.push({ kind: 'add_index', column: col.name });
         }
         for (const ef of col.extractedFields ?? []) { assertIdent(ef.key); steps.push({ kind: 'add_extracted_field', column: col.name, extractedKey: ef.key }); }

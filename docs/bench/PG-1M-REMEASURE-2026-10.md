@@ -185,3 +185,141 @@ LORE_PG_URL=... npx tsx scripts/bench/pg-explain.mts --seed-info <dir>/seed-info
   1M passes are not on identical data.
 - The 1M link rebuild and delete were not A/B'd quiet; 1M rebuild is time-boxed and extrapolated.
 - Docker on Mac inflates per-commit cost.
+
+## Re-measure on an M1 Pro MacBook after the fixes (2026-10-27 run)
+
+Date: 2026-10-27, 20:48 to 22:31 EDT. Lore `e6324436` (3.37.2 plus a bench seed fix). Same container shape as the M5 Max run
+above (4 cpu / 8 GB, `shared_buffers` 2 GB), PostgreSQL 16.15, pgvector 0.8.7, fake embeddings, same synthetic Zipf corpus
+(100k and 1M). Purpose: check the keyword CTE route (#251) and the BM25 common-token stop-list against their pre-fix
+baselines on slower hardware. Before and after pairs are in-run only. Raw logs (`runs/<size>/`, `runs/1m/2b-keyword-ab-recheck.log`,
+load samples) stayed on the MacBook in `~/lore-scale-eval/runs/`; they are not in the repo.
+
+### Machine
+
+| | |
+|---|---|
+| Host | MacBookPro18,1, Apple M1 Pro (8 performance + 2 efficiency cores), 16 GB, macOS 26.5.1 |
+| Docker Desktop | VM 10 cpus / 10 GB; Postgres container `--cpus=4 --memory=8g` |
+| Node | 22.23.4 |
+
+Background apps were stopped before the run. Every step began after a 5-minute load below 2; during the measured steps
+(keyword-ab, stop-list, recall pairs) the 1-minute load stayed between 1.4 and 2.5. Higher load (up to 6) only appeared during
+the seed and the full scale bench.
+
+### Verdict: FAIL on one rule
+
+| Rule (1M, in-run pairs) | Result |
+|---|---|
+| Recall p50 after lower than before | **Pass**: 457 -> 183 ms (-60%); p95 926 -> 710 ms (-23%). ABBA order, two pairs. |
+| keyword-ab `engine` not slower than `old` by more than 10% or 2 ms | **FAIL**: term `linest` 216 -> 559 ms (+159%). The other 10 terms pass. |
+| BM25 stop-list after not slower than before | **Pass** (see note on skipped legs) |
+| keyword-ab results identical (`same ids`) | **Pass**: 11/11 rows |
+
+Results were identical in every case; only speed differs.
+
+### Analysis
+
+- **Plan choice is unstable near the switch-over.** The rule in `postgresKeywordPlan.ts` picks the CTE when
+  `M_est^2 <= 0.5 * cap * N_est` with `cap` = `SEARCH_SCAN_CAP` (2000), so at N = 1M the switch-over is about 31.6k estimated
+  matches. `linest` was estimated at 30,453 (just under) while the real count is 41,026, so it took the CTE and ran 2.6x slower.
+  The planner's estimate for a term moves between ANALYZE runs, so terms near 31.6k flip between plans from run to run.
+- **Re-check confirms it** (4 terms near the boundary, 11 reps, run after the scale bench deleted 10,000 nodes and Postgres
+  re-analysed): `linest` now estimated 60,556 and routed correctly (old 230.5 -> engine 229.0 ms), while `because` fell from
+  60,755 to 30,035, took the CTE and went 190.5 -> 256.1 ms (+34%, also over the limit). `land` stayed on the CTE and won
+  (308 -> 171 ms). A right flip saves up to about 2x; a wrong one costs 1.3 to 2.6x. The re-check started after the 20-minute
+  load-wait cap, at a 5-minute load of 2.16.
+- **CTE cost does not follow match count alone.** `linest` CTE ran 562 ms at 41k matches, while `ityfo` CTE ran 234 ms at 45k.
+  Hypothesis, not verified: the trigram bitmap recheck volume differs between terms. No EXPLAIN was taken for it.
+- **At 1M the engine route was within +-2% of old for every other term**, and correctly avoided the CTE for common words where
+  it would be 7x to 200x slower (`would` 542 vs 76 ms, `and` 3,180 vs 15 ms). The clear CTE wins were at 100k (`keep`, 3,011
+  matches: 275 -> 77 ms); at 1M only `land` benefited, by 2%.
+- **Most of the 1M recall gain comes from the stop-list**, not the CTE: common-word queries went 374 -> 105 ms p50, while
+  mid-frequency single-term p50 did not move (284 -> 299 ms; p95 improved 1,397 -> 472 ms).
+- **A follow-up fix to the switch rule is open and being decided.** Nothing is prescribed here, and no code was changed in this run.
+
+### Recall by query kind (first-seen queries, depth 1, 48 queries, average of two runs per side, p50 / p95 ms)
+
+| | 100k before | 100k after | 1M before | 1M after |
+|---|---|---|---|---|
+| **Overall** | 64.4 / 122.3 | 45.1 / 103.1 | 457.3 / 926.3 | **182.6 / 709.8** |
+| common-1term | 86.2 / 112.5 | 60.7 / 122.4 | 373.8 / 752.3 | 105.2 / 158.5 |
+| mid-1term | 39.8 / 56.2 | 40.9 / 58.3 | 284.1 / 1396.6 | 299.1 / 471.6 |
+| phrase-3term | 63.0 / 185.4 | 39.6 / 137.5 | 567.0 / 789.9 | 337.9 / 760.0 |
+| question-8term | 76.3 / 122.3 | 52.7 / 103.1 | 617.4 / 1017.0 | 375.0 / 760.9 |
+| rare-1term | 15.4 / 17.7 | 17.2 / 19.2 | 83.1 / 104.8 | 52.3 / 79.7 |
+
+Order was before1, after1, after2, before2. At 1M, before1 ran first after the seed, so its rare-term figure was partly cold; the
+warm before2 still gave overall p50 462 ms, so the gap is not a cache effect.
+
+### keyword-ab at 1M (p50 ms, 7 reps)
+
+| term | matches | engine plan | old | cte | engine | engine vs old |
+|---|---|---|---|---|---|---|
+| cenessgu | 182 | ordered-walk | 33.3 | 32.5 | 32.7 | -2% |
+| iveestwor | 10,005 | ordered-walk | 88.1 | 93.1 | 89.1 | +1% |
+| land | 30,123 | cte | 169.0 | 167.0 | 165.6 | -2% |
+| **linest** | **41,026** | **cte** | **215.7** | 562.5 | **558.5** | **+159%** |
+| ityfo | 45,197 | ordered-walk | 197.2 | 234.2 | 197.4 | 0% |
+| because | 49,611 | ordered-walk | 177.3 | 261.5 | 177.5 | 0% |
+| would | 119,649 | ordered-walk | 76.1 | 541.5 | 76.6 | +1% |
+| way | 164,957 | ordered-walk | 55.5 | 703.8 | 55.3 | 0% |
+| you | 233,400 | ordered-walk | 41.5 | 949.8 | 41.7 | 0% |
+| was | 422,344 | ordered-walk | 25.7 | 1,625.2 | 26.1 | +2% |
+| and | 901,100 | ordered-walk | 15.5 | 3,180.0 | 15.3 | -1% |
+
+At 100k all 11 terms passed.
+
+### BM25 common-token stop-list (average of 2 rounds, ms)
+
+| query | 100k before | 100k after | 1M before | 1M after |
+|---|---|---|---|---|
+| common-only | 29.5 | 0.0 (0 hits) | 295.8 | 0.0 (0 hits) |
+| all-common | 31.5 | 0.0 (0 hits) | 317.1 | 0.0 (0 hits) |
+| mixed (common + mid) | 31.9 | 2.5 | 319.6 | 15.6 |
+| mixed-2 | 33.3 | 2.5 | 338.8 | 14.7 |
+| rare-only | 2.7 | 2.8 | 17.2 | 17.4 |
+
+Stop-list build: 212 ms at 100k, 497 ms at 1M (30 common words). By design, queries made only of common words now return
+**no BM25 hits** (40 before), so the two common-only rows are the leg being skipped, not a faster query. Mixed queries return the
+same 40 hits about 20x faster.
+
+### Graph walk, delete, link rebuild (full scale bench, fixes on)
+
+| | 100k | 1M |
+|---|---|---|
+| Recall p50 / p95 (scale bench's own pass) | 46.1 / 101.1 ms | 184.9 / 700.3 ms |
+| Keyword leg p50: common / mid / rare / phrase | 33.7 / 28.3 / 5.7 / 18.9 ms | 36.0 / 166.8 / 32.3 / 157.5 ms |
+| Graph traverse p50, depth 1 / 2 / 3 | 2.7 / 6.3 / 14.9 ms | 4.4 / 8.1 / 17.0 ms |
+| As-of query (limit 100) p50 | 2.1 ms | 3.5 ms |
+| Link on arrival (200 new nodes) | 12.8 ms/node | 38.7 ms/node |
+| Delete 10,000 nodes | 40.7 s (4.1 ms/node) | 86.3 s (8.6 ms/node) |
+| Link rebuild | full: 100k nodes in 222 s (450 nodes/s), 431k edges | 600 s budget: 120k of 1M nodes (199 nodes/s, 175/s steady), 543k edges; full rebuild projected about 95 min |
+
+Recall with links at depth 2 / 3 was 79.4 / 109.2 ms at 100k; the 1M pair (424.7 / 79.1 ms) is not comparable, since depth 2 ran
+first and warmed the caches.
+
+Write-side scaling, 100k -> 1M: link-on-arrival 12.8 -> 38.7 ms/node (3.0x), full link rebuild about 450 -> 175 nodes/s steady
+(projected about 95 min at 1M; the M5 Max run above projected about 1.9 h, but that is cross-machine and not comparable), delete 4.1 -> 8.6 ms/node (2.1x). The 1M
+rebuild was time-boxed and projected, not run to completion; the 1M delete ran on a database that had already been mutated.
+
+### Size, time and memory
+
+| | 100k | 1M |
+|---|---|---|
+| Seed wall time | 45 s | 11 m 00 s (bulk load 144 s, HNSW index 381 s) |
+| DB size after seed | 718 MB | 6.9 GB |
+| Peak Postgres container memory | 1.18 GiB | 5.65 GiB |
+| Peak Node memory (any step) | 643 MB (seed) | 701 MB (seed) |
+| Full scale bench wall time | 5 m 15 s | 13 m 46 s |
+
+### Cross-machine (informational only)
+
+| | M5 Max, pre-fix | M1 Pro, before | M1 Pro, after |
+|---|---|---|---|
+| 1M recall p50 / p95 | 302 / 450 ms | 457 / 926 ms | 183 / 710 ms |
+| 100k recall p50 / p95 | 44.5 / 96 ms | 64.4 / 122.3 ms | 45.1 / 103.1 ms |
+
+On the same pre-fix code the M1 Pro is about 1.5x slower than the M5 Max. Cross-machine numbers mix hardware, Postgres minor
+version, and code changes, so only the in-run before/after pairs are used for claims. After the fixes the M1 Pro beats the M5 Max
+pre-fix median at 1M (183 vs 302 ms) but not its p95 (710 vs 450 ms): the slowest recalls still come from mid-frequency and
+multi-term queries.

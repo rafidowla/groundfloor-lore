@@ -15,14 +15,15 @@
 import { readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import pg from 'pg';
-import { argv } from './pg-bench-common.mts';
+import { argv, pgWorkspaceKey } from './pg-bench-common.mts';
 import { PgParams } from '../../packages/lore/src/engines/postgres/postgresGraphRow.js';
 import { keywordMatchClause } from '../../packages/lore/src/engines/postgres/postgresKeywordMatch.js';
 import { candidateCteSql, orderedWalkSql, probeKeywordPlan } from '../../packages/lore/src/engines/postgres/postgresKeywordPlan.js';
 import { keywordSearchTerms } from '../../packages/lore/src/engines/searchRanking.js';
 
 const seedInfo = JSON.parse(readFileSync(argv('seed-info')!, 'utf8'));
-const ws: string = seedInfo.ws;
+// workspace_id holds the permanent workspace id since 3.37.0, not the name.
+const ws: string = seedInfo.wsKey ?? await pgWorkspaceKey(seedInfo.home, seedInfo.ws);
 const cap = Number(argv('cap', '2000'));
 const reps = Number(argv('reps', '7'));
 const url = process.env.LORE_PG_URL;
@@ -48,12 +49,12 @@ async function pickWords(): Promise<string[]> {
 const words = argv('words') ? argv('words')!.split(',') : await pickWords();
 console.log(`# uptime: ${execSync('uptime').toString().trim()}`);
 console.log(`# ws=${ws} cap=${cap} reps=${reps}`);
-console.log('term | matches | planner walks | est M | est N | engine plan | old p50 ms | cte p50 ms | engine p50 ms | same ids');
+console.log('term | matches | planner walks | est M | cand est | est N | engine plan | old p50 ms | cte p50 ms | engine p50 ms | same ids');
 for (const w of words) {
     const params = new PgParams();
     params.add(ws);
     const where = keywordMatchClause(params, keywordSearchTerms(w), w.toLowerCase());
-    const decision = await probeKeywordPlan(pool, ws, where, params.values, cap);
+    const decision = await probeKeywordPlan(pool, ws, where, params.values, cap, keywordSearchTerms(w));
     const lim = params.add(cap);
     const oldSql = orderedWalkSql(where, lim), cteSql = candidateCteSql(where, lim);
     const engSql = decision.plan === 'cte' ? cteSql : oldSql;
@@ -69,6 +70,6 @@ for (const w of words) {
     for (let i = 0; i < reps; i++) { await run('old', oldSql); await run('cte', cteSql); await run('eng', engSql); }
     const m = Number((await pool.query(`SELECT count(*) c FROM nodes WHERE workspace_id = $1 AND ${where}`, params.values.slice(0, params.values.length - 1))).rows[0].c);
     const same = ids.old === ids.cte && ids.old === ids.eng;
-    console.log(`${w} | ${m} | ${decision.walks} | ${decision.estMatches} | ${decision.estRows} | ${decision.plan} | ${p50(times.old!).toFixed(1)} | ${p50(times.cte!).toFixed(1)} | ${p50(times.eng!).toFixed(1)} | ${same}`);
+    console.log(`${w} | ${m} | ${decision.walks} | ${decision.estMatches} | ${decision.estCandidates ?? '-'} | ${decision.estRows} | ${decision.plan} | ${p50(times.old!).toFixed(1)} | ${p50(times.cte!).toFixed(1)} | ${p50(times.eng!).toFixed(1)} | ${same}`);
 }
 await pool.end();

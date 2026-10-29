@@ -31,9 +31,26 @@ import { withTransaction } from './postgresClient.js';
 import { ensureRekeyed } from './postgresRekey.js';
 import { sharedPostgresPool } from './postgresPoolOwner.js';
 import { runSchemaBootstrap } from './postgresStartup.js';
-import { INGEST_TABLES, ingestionSchema_ddl } from './postgresIngestionSchema.js';
+import { INGEST_TABLES, ingestionSchema_ddl, ensureIngestionWorkspaceKeys } from './postgresIngestionSchema.js';
 
 const { sources: SOURCES, jobs: JOBS, pending: PENDING, deliveries: DELIVERIES } = INGEST_TABLES;
+
+/**
+ * While the legacy single-column keys still exist next to the workspace-led ones (Phase 0 expand, until the contract step),
+ * two concurrent inserts of the same row can trip the NON-arbiter key (23505) instead of reaching the ON CONFLICT arm. A
+ * retry finds the committed row through the arbiter and takes the conflict path, so the caller sees the old behaviour.
+ */
+async function retryUniqueRace<T>(fn: () => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+        try { return await fn(); }
+        catch (err) {
+            if ((err as { code?: string }).code !== '23505' || attempt >= 3) throw err;
+        }
+    }
+}
+
+/** Re-runs of the open-time schema + key steps after a deadlock (40P01) between concurrent first opens. */
+const OPEN_DEADLOCK_RETRIES = 5;
 
 type Row = Record<string, any>;
 
@@ -97,7 +114,19 @@ export class PostgresIngestionStore implements IIngestionStore {
     static async open(workspace: string, pool: Pool = sharedPostgresPool(), key: string = workspace): Promise<PostgresIngestionStore> {
         if (!workspace) throw new Error('PostgresIngestionStore.open: workspace is required');
         if (!key) throw new Error('PostgresIngestionStore.open: key is required');
-        await runSchemaBootstrap(pool, {}, async (client) => { for (const stmt of ingestionSchema_ddl()) await client.query(stmt); });
+        for (let attempt = 0; ; attempt++) {
+            try {
+                await runSchemaBootstrap(pool, {}, async (client) => { for (const stmt of ingestionSchema_ddl()) await client.query(stmt); });
+                await ensureIngestionWorkspaceKeys(pool); // workspace-led unique keys the ON CONFLICT targets need (built CONCURRENTLY, outside the schema lock)
+                break;
+            } catch (err) {
+                // Concurrent first opens: one opener's schema DDL (ALTER TABLE ... IF NOT EXISTS still takes ACCESS EXCLUSIVE)
+                // can deadlock against another opener's CONCURRENTLY key build. Postgres aborts one side (40P01); both steps
+                // are idempotent and an INVALID index left by an aborted build is dropped and rebuilt, so re-running finishes.
+                if ((err as { code?: string }).code !== '40P01' || attempt >= OPEN_DEADLOCK_RETRIES) throw err;
+                await new Promise((r) => setTimeout(r, 25 * (attempt + 1) + Math.random() * 50));
+            }
+        }
         await ensureRekeyed(pool, key); // one-time name -> permanent-id row rewrite (postgresRekey.ts)
         return new PostgresIngestionStore(pool, workspace, key);
     }
@@ -170,12 +199,10 @@ export class PostgresIngestionStore implements IIngestionStore {
         return r.rows.map((x: Row) => ({ sourceId: x.source_id as string, storageRef: x.storage_ref as string }));
     }
 
-    /** System use only (workspace erase): reads across workspaces, returns a count and nothing else. */
-    async countBlobRefsHeldByOtherWorkspaces(workspace: string, storageRef: string): Promise<number> {
-        const r = await this.pool.query(
-            `SELECT count(*)::text AS n FROM ${SOURCES} WHERE workspace_id <> $1 AND storage_ref = $2 AND blob_purged_at IS NULL`,
-            [workspace, text(storageRef)]);
-        return Number(r.rows[0]?.n ?? '0');
+    /** New blobs are filed under the permanent workspace id (see {@link IIngestionStore.blobScope}). */
+    blobScope(workspace: string): string {
+        this.own(workspace);
+        return this.key;
     }
 
     async createJob(j: NewJob, now: Date): Promise<{ job: IngestionJob; created: boolean }> {
@@ -322,20 +349,19 @@ export class PostgresIngestionStore implements IIngestionStore {
     /** True when this (job, delivery) pair is new. A job that is not in this workspace never records (false): otherwise
      *  another tenant could pre-claim a delivery id and make the owner's real callback look like a replay. */
     async recordDelivery(jobId: string, deliveryId: string, now: Date): Promise<boolean> {
-        const r = await this.pool.query(
+        const r = await retryUniqueRace(() => this.pool.query(
             `INSERT INTO ${DELIVERIES} (job_id, delivery_id, workspace_id, seen_at)
              SELECT job_id, $2, workspace_id, $3 FROM ${JOBS} WHERE job_id = $1 AND workspace_id = $4
-             ON CONFLICT DO NOTHING`,
-            [jobId, text(deliveryId), now, this.key]);
+             ON CONFLICT (workspace_id, job_id, delivery_id) DO NOTHING`,
+            [jobId, text(deliveryId), now, this.key]));
         return r.rowCount === 1;
     }
 
     async purgeOldDeliveries(now: Date, opts?: PurgeDeliveriesOptions): Promise<number> {
         const { cutoff, limit } = resolvePurge(now, opts);
         const r = await this.pool.query(
-            `DELETE FROM ${DELIVERIES} WHERE (job_id, delivery_id) IN (
-                 SELECT job_id, delivery_id FROM ${DELIVERIES} WHERE workspace_id = $1 AND seen_at < $2 ORDER BY seen_at LIMIT $3)
-             AND workspace_id = $1`,
+            `DELETE FROM ${DELIVERIES} WHERE (workspace_id, job_id, delivery_id) IN (
+                 SELECT workspace_id, job_id, delivery_id FROM ${DELIVERIES} WHERE workspace_id = $1 AND seen_at < $2 ORDER BY seen_at LIMIT $3)`,
             [this.key, cutoff, limit]);
         return r.rowCount ?? 0;
     }
@@ -344,13 +370,12 @@ export class PostgresIngestionStore implements IIngestionStore {
         this.own(p.workspace);
         // Replace semantics (SQLite INSERT OR REPLACE) but never take over another tenant's row.
         // The job must be in this workspace, so one tenant can never occupy (and thereby block) another tenant's pending slot.
-        const r = await this.pool.query(
+        const r = await retryUniqueRace(() => this.pool.query(
             `INSERT INTO ${PENDING} (job_id, workspace_id, source_id, reason, payload, created_at)
              SELECT job_id, workspace_id, $2, $3, $4::jsonb, $5 FROM ${JOBS} WHERE job_id = $1 AND workspace_id = $6
-             ON CONFLICT (job_id) DO UPDATE SET source_id = EXCLUDED.source_id, reason = EXCLUDED.reason, payload = EXCLUDED.payload,
-                 created_at = EXCLUDED.created_at
-             WHERE ${PENDING}.workspace_id = EXCLUDED.workspace_id`,
-            [p.jobId, p.sourceId, text(p.reason.slice(0, 1000)), jsonb(p.payload), now, this.key]);
+             ON CONFLICT (workspace_id, job_id) DO UPDATE SET source_id = EXCLUDED.source_id, reason = EXCLUDED.reason,
+                 payload = EXCLUDED.payload, created_at = EXCLUDED.created_at`,
+            [p.jobId, p.sourceId, text(p.reason.slice(0, 1000)), jsonb(p.payload), now, this.key]));
         if (r.rowCount !== 1) throw new Error(`recordPending: job ${p.jobId} is not in workspace '${this.workspace}'`);
     }
 

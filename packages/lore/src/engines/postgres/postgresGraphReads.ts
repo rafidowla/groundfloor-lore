@@ -274,7 +274,7 @@ export async function search(
             // `where` = everything after `workspace_id = $1`. The keyword-plan probe runs BEFORE the limit
             // placeholder is minted so it binds exactly the parameters it references.
             const where = searchWhere(params, query, { project, ecosystem, excludeHidden, types, entities, topics });
-            const decision = await chooseKeywordPlan(ctx.pool, ctx.workspaceId, where, params.values, SEARCH_SCAN_CAP);
+            const decision = await chooseKeywordPlan(ctx.pool, ctx.workspaceId, where, params.values, SEARCH_SCAN_CAP, process.env, keywordSearchTerms(query));
             const limitParam = params.add(SEARCH_SCAN_CAP);
             const sql = decision.plan === 'cte' ? candidateCteSql(where, limitParam) : orderedWalkSql(where, limitParam);
             const rows = await ctx.pool.query(sql, params.values);

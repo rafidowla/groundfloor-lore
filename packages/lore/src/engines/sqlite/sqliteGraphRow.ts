@@ -22,6 +22,7 @@
 
 import type { LoreNode } from '../../providers/types.js';
 import { tagsToArray } from '../normalizeTags.js';
+import { resolvePartitionKey } from '../graphShared/partitionKey.js';
 
 /** The node document as stored — SAME key set as surrealGraphWrites' `NodeDocument`. */
 export type SqliteNodeDocument = Record<string, unknown>;
@@ -164,6 +165,8 @@ export function toNodeRow(
         supersededBy: node.supersededBy ?? priorStr('supersededBy') ?? '',
         supersededAt: node.supersededAt ?? priorStr('supersededAt') ?? '',
         supersededReason: node.supersededReason ?? priorStr('supersededReason') ?? '',
+        // L3: omitted = keep the stored key; a change of a non-empty key throws PartitionKeyImmutableError.
+        partition_key: resolvePartitionKey(node.id, node.partitionKey, priorStr('partition_key')),
     };
 }
 
@@ -173,5 +176,5 @@ export const NODE_WRITE_COLUMNS = [
     'createdAt', 'updatedAt', 'syncedAt', 'security_scopes', 'language',
     'ephemeral', 'ttl_ms', 'stale', 'status', 'classification',
     'anchor_stale', 'anchor_stale_since', 'validFrom', 'validUntil',
-    'supersededBy', 'supersededAt', 'supersededReason',
+    'supersededBy', 'supersededAt', 'supersededReason', 'partition_key',
 ] as const;

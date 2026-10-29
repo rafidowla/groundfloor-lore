@@ -1,0 +1,444 @@
+{
+  "header": {
+    "t": "header",
+    "format": "lore-pg-workspace-bundle",
+    "formatVersion": 1,
+    "createdAt": "2026-10-29T11:38:19.609Z",
+    "loreVersion": "3.37.2",
+    "pgvectorVersion": "0.8.5",
+    "serverVersion": "16.14 (Debian 16.14-1.pgdg12+1)",
+    "schema": "public",
+    "schemaFingerprint": "6491f8378a6331f37d5992b0e6a3a43449340cbbe2dda250f9e8639c5c794b9c",
+    "sourceWorkspaceId": "old-ws",
+    "tables": [
+      {
+        "name": "nodes",
+        "partitioned": false,
+        "workspaceIdType": "text",
+        "columns": [
+          {
+            "name": "id",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "type",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "label",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "content",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "tags",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "project",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "ecosystem",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "metadata",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "createdAt",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "updatedAt",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "syncedat",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "security_scopes",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "language",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "ephemeral",
+            "type": "integer",
+            "notNull": true
+          },
+          {
+            "name": "ttl_ms",
+            "type": "integer",
+            "notNull": true
+          },
+          {
+            "name": "stale",
+            "type": "integer",
+            "notNull": true
+          },
+          {
+            "name": "status",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "classification",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "anchor_stale",
+            "type": "integer",
+            "notNull": true
+          },
+          {
+            "name": "anchor_stale_since",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "validFrom",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "validUntil",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "supersededby",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "supersededat",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "supersededreason",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "lastaccessedat",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "last_retrieved_at",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "success_count",
+            "type": "integer",
+            "notNull": true
+          },
+          {
+            "name": "failure_count",
+            "type": "integer",
+            "notNull": true
+          },
+          {
+            "name": "partial_count",
+            "type": "integer",
+            "notNull": true
+          },
+          {
+            "name": "confirmation_score",
+            "type": "double precision",
+            "notNull": true
+          },
+          {
+            "name": "revision",
+            "type": "integer",
+            "notNull": true
+          },
+          {
+            "name": "sk",
+            "type": "bigint",
+            "notNull": true
+          },
+          {
+            "name": "valid_from_at",
+            "type": "timestamp with time zone",
+            "notNull": false
+          },
+          {
+            "name": "valid_until_at",
+            "type": "timestamp with time zone",
+            "notNull": false
+          }
+        ],
+        "generatedColumns": [],
+        "identityColumns": [
+          "sk"
+        ],
+        "references": []
+      },
+      {
+        "name": "edges",
+        "partitioned": false,
+        "workspaceIdType": "text",
+        "columns": [
+          {
+            "name": "src_sk",
+            "type": "bigint",
+            "notNull": true
+          },
+          {
+            "name": "dst_sk",
+            "type": "bigint",
+            "notNull": true
+          },
+          {
+            "name": "confidenceScore",
+            "type": "double precision",
+            "notNull": true
+          },
+          {
+            "name": "created_at",
+            "type": "timestamp with time zone",
+            "notNull": false
+          },
+          {
+            "name": "valid_to",
+            "type": "timestamp with time zone",
+            "notNull": false
+          },
+          {
+            "name": "relation",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "confidence",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "origin",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "policy_version",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "model_fingerprint",
+            "type": "text",
+            "notNull": false
+          }
+        ],
+        "generatedColumns": [],
+        "identityColumns": [],
+        "references": [
+          {
+            "column": "src_sk",
+            "refTable": "nodes",
+            "refColumn": "sk",
+            "source": "comment"
+          },
+          {
+            "column": "dst_sk",
+            "refTable": "nodes",
+            "refColumn": "sk",
+            "source": "comment"
+          }
+        ]
+      },
+      {
+        "name": "link_optout",
+        "partitioned": false,
+        "workspaceIdType": "text",
+        "columns": [
+          {
+            "name": "node_id",
+            "type": "text",
+            "notNull": true
+          }
+        ],
+        "generatedColumns": [],
+        "identityColumns": [],
+        "references": []
+      },
+      {
+        "name": "verbatim",
+        "partitioned": true,
+        "workspaceIdType": "text",
+        "columns": [
+          {
+            "name": "row_id",
+            "type": "bigint",
+            "notNull": true
+          },
+          {
+            "name": "id",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "text",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "vector",
+            "type": "vector(4)",
+            "notNull": false
+          },
+          {
+            "name": "content_hash",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "type",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "label",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "tags",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "project",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "ecosystem",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "updatedAt",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "security_scopes",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "is_canonical",
+            "type": "integer",
+            "notNull": true
+          },
+          {
+            "name": "is_tombstone",
+            "type": "integer",
+            "notNull": true
+          },
+          {
+            "name": "superseded_at",
+            "type": "text",
+            "notNull": false
+          },
+          {
+            "name": "created_at",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "updated_at",
+            "type": "text",
+            "notNull": true
+          },
+          {
+            "name": "text_tsv",
+            "type": "tsvector",
+            "notNull": true
+          }
+        ],
+        "generatedColumns": [],
+        "identityColumns": [
+          "row_id"
+        ],
+        "references": []
+      }
+    ],
+    "excluded": [
+      {
+        "table": "verbatim_changes_log",
+        "reason": "no workspace_id column — not workspace-scoped, so a per-workspace backup cannot select its rows"
+      },
+      {
+        "table": "verbatim_common_lexemes",
+        "reason": "derived BM25 common-token stop-list (rebuilt from text_tsv) - not workspace data"
+      },
+      {
+        "table": "verbatim_common_lexemes_meta",
+        "reason": "derived BM25 common-token stop-list metadata (rebuilt from text_tsv) - not workspace data"
+      }
+    ]
+  },
+  "trailer": {
+    "t": "trailer",
+    "tables": [
+      {
+        "name": "nodes",
+        "rowCount": 0,
+        "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+        "identityRanges": {}
+      },
+      {
+        "name": "edges",
+        "rowCount": 0,
+        "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+        "identityRanges": {}
+      },
+      {
+        "name": "link_optout",
+        "rowCount": 0,
+        "checksum": "0000000000000000000000000000000000000000000000000000000000000000",
+        "identityRanges": {}
+      },
+      {
+        "name": "verbatim",
+        "rowCount": 12,
+        "checksum": "019fe67c8fd4042e3f695612b7f6857aa5883819cc47cc1c1675274f4eebb87f",
+        "identityRanges": {
+          "row_id": {
+            "min": "1",
+            "max": "12"
+          }
+        }
+      }
+    ],
+    "bodyBytes": 7145,
+    "bodySha256": "f17175d69ce0c45ab20b408bcca9c4e983b89c9e97c97f56ec9ccdbaabe235ad",
+    "manifestHash": "abd8360f15280cc5ed09f00fc3c5277e247663ad8c072c7f651d434f0388f549"
+  }
+}

@@ -32,6 +32,7 @@ import type { VerbatimDocument, EmbeddingProvider } from '../../../providers/typ
 import { isEmbeddingDisabledError } from '../../../providers/nullEmbeddingProvider.js';
 import { withTransaction } from '../postgresClient.js';
 import { toPgVectorText } from './postgresVerbatimVector.js';
+import { scopesToArray, scopesJsonToArray } from '../postgresVerbatimScopeArr.js';
 
 export interface PostgresVerbatimWriteDeps {
     pool: Pool;
@@ -45,7 +46,8 @@ export interface PostgresVerbatimWriteDeps {
 
 /** Columns of one canonical row to write — shared by every INSERT below. */
 const INSERT_COLUMNS = `(workspace_id, id, text, vector, content_hash, type, label, tags, project, ecosystem,
-             "updatedAt", security_scopes, is_canonical, is_tombstone, superseded_at, created_at, updated_at)`;
+             "updatedAt", security_scopes, security_scope_arr, is_canonical, is_tombstone, superseded_at, created_at, updated_at,
+             partition_key)`;
 
 function scopesToJson(scopes: string[] | undefined): string | null {
     return scopes && scopes.length > 0 ? JSON.stringify(scopes) : null;
@@ -96,11 +98,13 @@ async function upsertCanonical(
         id: string; text: string; vector: Float32Array | null; contentHash: string;
         type?: string; label?: string; tags?: string; project?: string; ecosystem?: string;
         updatedAt?: string; security_scopes?: string[];
+        /** L3: undefined keeps the existing canonical row's key ('' for a new row). */
+        partitionKey?: string;
     },
 ): Promise<void> {
     const now = new Date().toISOString();
     const existing = await client.query<CanonicalScopeRow>(
-        `SELECT row_id, security_scopes FROM verbatim WHERE workspace_id = $1 AND id = $2 AND is_canonical = 1`,
+        `SELECT row_id, security_scopes, partition_key FROM verbatim WHERE workspace_id = $1 AND id = $2 AND is_canonical = 1`,
         [workspaceId, row.id],
     );
     // Overwrite without `security_scopes` keeps the existing canonical row's labels; an explicit array
@@ -114,11 +118,12 @@ async function upsertCanonical(
     }
     await client.query(
         `INSERT INTO verbatim ${INSERT_COLUMNS}
-         VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8, $9, $10, $11, $12, 1, 0, NULL, $13, $14)`,
+         VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8, $9, $10, $11, $12, $15::text[], 1, 0, NULL, $13, $14, $16)`,
         [
             workspaceId, row.id, row.text, row.vector ? toPgVectorText(row.vector) : null, row.contentHash,
             row.type ?? null, row.label ?? null, row.tags ?? null, row.project ?? null, row.ecosystem ?? null,
-            row.updatedAt ?? '', scopesJson, now, now,
+            row.updatedAt ?? '', scopesJson, now, now, scopesJsonToArray(scopesJson),
+            row.partitionKey ?? existing.rows[0]?.partition_key ?? '',
         ],
     );
 }
@@ -128,6 +133,7 @@ async function upsertCanonical(
 interface CanonicalScopeRow {
     row_id: string;
     security_scopes: string | null;
+    partition_key?: string;
 }
 
 /**
@@ -144,27 +150,31 @@ async function replaceCanonical(
         id: string; text: string; vector: Float32Array | null; contentHash: string;
         type?: string; label?: string; tags?: string; project?: string; ecosystem?: string;
         updatedAt?: string; security_scopes?: string[];
+        /** L3: undefined keeps the existing canonical row's key ('' for a new row). */
+        partitionKey?: string;
     },
 ): Promise<void> {
     const now = new Date().toISOString();
     // Same keep-existing-labels rule as upsertCanonical when no `security_scopes` is passed.
     let keptScopes: string | null | undefined = undefined;
-    if (row.security_scopes === undefined) {
+    let keptKey: string | undefined = undefined;
+    if (row.security_scopes === undefined || row.partitionKey === undefined) {
         const kept = await client.query<CanonicalScopeRow>(
-            `SELECT security_scopes FROM verbatim WHERE workspace_id = $1 AND id = $2 AND is_canonical = 1`,
+            `SELECT security_scopes, partition_key FROM verbatim WHERE workspace_id = $1 AND id = $2 AND is_canonical = 1`,
             [workspaceId, row.id],
         );
-        keptScopes = kept.rows[0]?.security_scopes;
+        if (row.security_scopes === undefined) keptScopes = kept.rows[0]?.security_scopes;
+        keptKey = kept.rows[0]?.partition_key;
     }
     const scopesJson = keptScopes !== undefined ? keptScopes : scopesToJson(row.security_scopes);
     await client.query(`DELETE FROM verbatim WHERE workspace_id = $1 AND id = $2 AND is_canonical = 1`, [workspaceId, row.id]);
     await client.query(
         `INSERT INTO verbatim ${INSERT_COLUMNS}
-         VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8, $9, $10, $11, $12, 1, 0, NULL, $13, $14)`,
+         VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8, $9, $10, $11, $12, $15::text[], 1, 0, NULL, $13, $14, $16)`,
         [
             workspaceId, row.id, row.text, row.vector ? toPgVectorText(row.vector) : null, row.contentHash,
             row.type ?? null, row.label ?? null, row.tags ?? null, row.project ?? null, row.ecosystem ?? null,
-            row.updatedAt ?? '', scopesJson, now, now,
+            row.updatedAt ?? '', scopesJson, now, now, scopesJsonToArray(scopesJson), row.partitionKey ?? keptKey ?? '',
         ],
     );
 }
@@ -182,6 +192,7 @@ interface CanonicalSkipRow {
     ecosystem: string | null;
     updatedAt: string | null;
     security_scopes: string | null;
+    partition_key: string;
 }
 
 /** Canonical rows for `ids` (chunked `id IN (...)`), keyed by id — the columns the skip-identical rule compares. */
@@ -196,7 +207,7 @@ async function readCanonicalForSkip(
         const placeholders = chunk.map((_, j) => `$${j + 2}`).join(', ');
         const res = await query(
             `SELECT id, content_hash, vector IS NOT NULL AS has_vector, type, label, tags, project, ecosystem,
-                    "updatedAt", security_scopes
+                    "updatedAt", security_scopes, partition_key
              FROM verbatim
              WHERE workspace_id = $1 AND id IN (${placeholders}) AND is_canonical = 1 AND is_tombstone = 0`,
             [workspaceId, ...chunk],
@@ -218,7 +229,9 @@ function isIdenticalIgnoringUpdatedAt(existing: CanonicalSkipRow, doc: VerbatimD
     const sameScopes = doc.metadata?.security_scopes === undefined
         || JSON.stringify([...existingScopes].sort())
         === JSON.stringify([...doc.metadata.security_scopes].sort());
-    return (existing.type ?? '') === (doc.metadata?.type ?? '') &&
+    // L3: an undefined key means "keep the row's key", so it never differs; a different explicit key rewrites the row.
+    const sameKey = doc.metadata?.partitionKey === undefined || (existing.partition_key ?? '') === doc.metadata.partitionKey;
+    return sameKey && (existing.type ?? '') === (doc.metadata?.type ?? '') &&
         (existing.label ?? '') === (doc.metadata?.label ?? '') &&
         (existing.tags ?? '') === (doc.metadata?.tags ?? '') &&
         (existing.project ?? '') === (doc.metadata?.project ?? '') &&
@@ -243,6 +256,7 @@ export async function findUnchangedRowIds(deps: PostgresVerbatimWriteDeps, rows:
             type: String(r.type ?? ''), label: String(r.label ?? ''), tags: String(r.tags ?? ''),
             project: String(r.project ?? ''), ecosystem: String(r.ecosystem ?? ''),
             security_scopes: scopesFromArray(r.security_scopes),
+            partitionKey: typeof r.partitionKey === 'string' ? r.partitionKey : undefined,
         } } as unknown as VerbatimDocument;
         if (isIdenticalIgnoringUpdatedAt(cur, doc, r.contentHash ? String(r.contentHash) : computeContentHash(text))) out.push(String(r.id));
     }
@@ -290,7 +304,7 @@ export async function store(deps: PostgresVerbatimWriteDeps, doc: VerbatimDocume
         id: doc.id, text: redactedText, vector, contentHash,
         type: doc.metadata?.type, label: doc.metadata?.label, tags: doc.metadata?.tags,
         project: doc.metadata?.project, ecosystem: doc.metadata?.ecosystem, updatedAt: doc.metadata?.updatedAt,
-        security_scopes: doc.metadata?.security_scopes,
+        security_scopes: doc.metadata?.security_scopes, partitionKey: doc.metadata?.partitionKey,
     }));
     deps.onMutate();
 }
@@ -305,7 +319,7 @@ export async function storeBatch(deps: PostgresVerbatimWriteDeps, docs: Verbatim
     type Prepared = {
         id: string; text: string; vector: Float32Array | null; contentHash: string;
         type?: string; label?: string; tags?: string; project?: string; ecosystem?: string;
-        updatedAt?: string; security_scopes?: string[];
+        updatedAt?: string; security_scopes?: string[]; partitionKey?: string;
     };
     // Skip-identical (3.35.0, same rule as store()): ONE chunked canonical-row SELECT, then drop the docs that are
     // already stored verbatim BEFORE any embed. Redacted docs never skip. The read is a hint only; the write
@@ -335,7 +349,7 @@ export async function storeBatch(deps: PostgresVerbatimWriteDeps, docs: Verbatim
             id: doc.id, text: redactedText, vector, contentHash, wasRedacted,
             type: doc.metadata?.type, label: doc.metadata?.label, tags: doc.metadata?.tags,
             project: doc.metadata?.project, ecosystem: doc.metadata?.ecosystem, updatedAt: doc.metadata?.updatedAt,
-            security_scopes: doc.metadata?.security_scopes,
+            security_scopes: doc.metadata?.security_scopes, partitionKey: doc.metadata?.partitionKey,
         });
     }
     for (let i = 0; i < prepared.length; i += VERBATIM_CHUNK_SIZE) {
@@ -347,7 +361,7 @@ export async function storeBatch(deps: PostgresVerbatimWriteDeps, docs: Verbatim
                 const existing = fresh.get(row.id);
                 const asDoc = { id: row.id, text: row.text, metadata: {
                     type: row.type, label: row.label, tags: row.tags, project: row.project, ecosystem: row.ecosystem,
-                    security_scopes: row.security_scopes,
+                    security_scopes: row.security_scopes, partitionKey: row.partitionKey,
                 } } as unknown as VerbatimDocument;
                 if (!row.wasRedacted && existing && isIdenticalIgnoringUpdatedAt(existing, asDoc, row.contentHash)) {
                     if (await syncUpdatedAt((sql, params) => tx.query(sql, params), deps.workspaceId, row.id, existing.updatedAt, row.updatedAt)) touched = true;
@@ -374,7 +388,7 @@ export async function bulkAddPrebuiltRows(deps: PostgresVerbatimWriteDeps, rows:
                 const vec = Array.isArray(r.vector) ? Float32Array.from(r.vector) : null;
                 await tx.query(
                     `INSERT INTO verbatim ${INSERT_COLUMNS}
-                     VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8, $9, $10, $11, $12, 1, 0, NULL, $13, $14)`,
+                     VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8, $9, $10, $11, $12, $15::text[], 1, 0, NULL, $13, $14, $16)`,
                     [
                         deps.workspaceId, String(r.id), String(r.text ?? ''), vec ? toPgVectorText(vec) : null,
                         r.contentHash ? String(r.contentHash) : null,
@@ -382,7 +396,8 @@ export async function bulkAddPrebuiltRows(deps: PostgresVerbatimWriteDeps, rows:
                         r.project ? String(r.project) : null, r.ecosystem ? String(r.ecosystem) : null,
                         r.updatedAt ? String(r.updatedAt) : now,
                         scopesToJson(scopesFromArray(r.security_scopes)),
-                        now, now,
+                        now, now, scopesToArray(scopesFromArray(r.security_scopes)),
+                        typeof r.partitionKey === 'string' ? r.partitionKey : '',
                     ],
                 );
             }
@@ -413,6 +428,7 @@ export async function bulkUpsertPrebuiltRows(deps: PostgresVerbatimWriteDeps, ro
                     ecosystem: r.ecosystem ? String(r.ecosystem) : undefined,
                     updatedAt: r.updatedAt ? String(r.updatedAt) : now,
                     security_scopes: scopesFromArray(r.security_scopes),
+                    partitionKey: typeof r.partitionKey === 'string' ? r.partitionKey : undefined,
                 });
             }
         });
@@ -474,6 +490,7 @@ interface TombstoneSourceRow {
     project: string | null;
     ecosystem: string | null;
     security_scopes: string | null;
+    partition_key: string;
 }
 
 /** tombstone() — marks the canonical row superseded (is_tombstone=1) and
@@ -484,7 +501,7 @@ interface TombstoneSourceRow {
  *  row (idempotent). Port of sqliteVerbatimWrite.tombstone. */
 export async function tombstone(deps: PostgresVerbatimWriteDeps, id: string, reason: string): Promise<void> {
     const existing = await deps.pool.query<TombstoneSourceRow>(
-        `SELECT row_id, text, type, label, tags, project, ecosystem, security_scopes
+        `SELECT row_id, text, type, label, tags, project, ecosystem, security_scopes, partition_key
          FROM verbatim WHERE workspace_id = $1 AND id = $2 AND is_canonical = 1`,
         [deps.workspaceId, id],
     );
@@ -506,11 +523,11 @@ export async function tombstone(deps: PostgresVerbatimWriteDeps, id: string, rea
         await tx.query(`UPDATE verbatim SET is_canonical = 0, superseded_at = $2 WHERE workspace_id = $3 AND row_id = $1`, [row.row_id, ts, deps.workspaceId]);
         await tx.query(
             `INSERT INTO verbatim ${INSERT_COLUMNS}
-             VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8, $9, $10, $11, $12, 1, 1, NULL, $13, $14)`,
+             VALUES ($1, $2, $3, $4::vector, $5, $6, $7, $8, $9, $10, $11, $12, verbatim_scopes_to_arr($12::text), 1, 1, NULL, $13, $14, $15)`,
             [
                 deps.workspaceId, id, tombstoneText, vector ? toPgVectorText(vector) : null, contentHash,
                 row.type, row.label, row.tags, row.project, row.ecosystem,
-                ts, row.security_scopes, ts, ts,
+                ts, row.security_scopes, ts, ts, row.partition_key,
             ],
         );
     });
@@ -552,7 +569,7 @@ export async function tombstoneMany(deps: PostgresVerbatimWriteDeps, ids: string
     for (let i = 0; i < unique.length; i += VERBATIM_CHUNK_SIZE) {
         const chunk = unique.slice(i, i + VERBATIM_CHUNK_SIZE);
         const existing = await deps.pool.query<TombstoneSourceRow & { id: string }>(
-            `SELECT row_id, id, text, type, label, tags, project, ecosystem, security_scopes
+            `SELECT row_id, id, text, type, label, tags, project, ecosystem, security_scopes, partition_key
              FROM verbatim WHERE workspace_id = $1 AND id = ANY($2::text[]) AND is_canonical = 1`,
             [deps.workspaceId, chunk],
         );
@@ -569,14 +586,14 @@ export async function tombstoneMany(deps: PostgresVerbatimWriteDeps, ids: string
             await tx.query(
                 `INSERT INTO verbatim ${INSERT_COLUMNS}
                  SELECT $1, t.id, t.text, t.vec::vector, t.hash, t.type, t.label, t.tags, t.project, t.ecosystem,
-                        $2, t.scopes, 1, 1, NULL, $2, $2
-                 FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[])
-                      AS t(id, text, vec, hash, type, label, tags, project, ecosystem, scopes)`,
+                        $2, t.scopes, verbatim_scopes_to_arr(t.scopes), 1, 1, NULL, $2, $2, t.pkey
+                 FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[], $13::text[])
+                      AS t(id, text, vec, hash, type, label, tags, project, ecosystem, scopes, pkey)`,
                 [
                     deps.workspaceId, ts,
                     rows.map((r) => r.id), texts, vectors.map((v) => (v ? toPgVectorText(v) : null)), texts.map((t) => computeContentHash(t)),
                     rows.map((r) => r.type), rows.map((r) => r.label), rows.map((r) => r.tags), rows.map((r) => r.project),
-                    rows.map((r) => r.ecosystem), rows.map((r) => r.security_scopes),
+                    rows.map((r) => r.ecosystem), rows.map((r) => r.security_scopes), rows.map((r) => r.partition_key),
                 ],
             );
         });

@@ -19,17 +19,18 @@ WITH input AS (
     SELECT * FROM unnest($2::text[], $3::text[], $4::text[], $5::float8[], $6::text[], $7::text[], $8::text[], $9::timestamptz[])
         AS t(src, dst, rel, score, origin, pv, mf, ca)
 ), resolved AS (
-    SELECT i.*, s.sk AS ssk, d.sk AS dsk FROM input i
+    SELECT i.*, s.sk AS ssk, d.sk AS dsk, s.partition_key AS spk FROM input i
     JOIN nodes s ON s.workspace_id = $1 AND s.id = i.src
     JOIN nodes d ON d.workspace_id = $1 AND d.id = i.dst
 ), ins AS (
     INSERT INTO edges (workspace_id, src_sk, dst_sk, relation, confidence, "confidenceScore",
-                       origin, policy_version, model_fingerprint, created_at)
-    SELECT $1, ssk, dsk, rel, 'inferred', score, origin, pv, mf, ca FROM resolved
+                       origin, policy_version, model_fingerprint, created_at, partition_key)
+    SELECT $1, ssk, dsk, rel, 'inferred', score, origin, pv, mf, ca, spk FROM resolved
     ON CONFLICT (workspace_id, src_sk, dst_sk, relation) DO UPDATE SET
         "confidenceScore" = EXCLUDED."confidenceScore",
         origin = EXCLUDED.origin, policy_version = EXCLUDED.policy_version, model_fingerprint = EXCLUDED.model_fingerprint,
-        created_at = COALESCE(edges.created_at, EXCLUDED.created_at), valid_to = NULL
+        created_at = COALESCE(edges.created_at, EXCLUDED.created_at), valid_to = NULL,
+        partition_key = EXCLUDED.partition_key
     WHERE edges.confidence = 'inferred'
     RETURNING 1
 )

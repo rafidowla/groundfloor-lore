@@ -727,7 +727,6 @@ export class PostgresVerbatimStore implements VerbatimStoreApi, VectorProvider {
             // is too small to spare a connection beyond the foreground reserve, or when this store closes mid-run.
             const ran = await poolGuardFor(pool).run('verbatim-compact', async (client) => {
                 await client.query(`VACUUM ANALYZE verbatim`);
-                await client.query(`VACUUM ANALYZE verbatim_changes_log`);
             }, { owner: this });
             if (!ran.ran) return null;
             await this.bm25StopList.refresh({ force: true }).catch((err) => log.error(`[PostgresVerbatimStore:compact] BM25 stop-list refresh failed (non-fatal): ${(err as Error).message}`));

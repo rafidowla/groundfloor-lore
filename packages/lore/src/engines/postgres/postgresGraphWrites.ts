@@ -38,6 +38,7 @@ import { wouldCreateSupersedeCycle } from '../graphShared/supersedeCycle.js';
 import { supersedeGuardVerdict, type SupersedeResult } from '../graphShared/supersedeGuard.js';
 import { NodeAlreadyExistsError } from '../graphShared/conditionalInsert.js';
 import { RevisionConflictError } from '../graphShared/revision.js';
+import { PartitionKeyImmutableError } from '../graphShared/partitionKey.js';
 import { withTransaction } from './postgresClient.js';
 import { toPgTimestamp } from './postgresAsOfSchema.js';
 import {
@@ -142,6 +143,13 @@ async function storedRevisionOf(db: PgQueryable, workspaceId: string, id: string
     return res.rows.length > 0 ? Number(res.rows[0]!['revision'] ?? 0) : 0;
 }
 
+/** A zero-row guarded write: if the stored non-empty key differs from the one we tried to write, that is the refusal. */
+async function assertKeyNotRaced(db: PgQueryable, workspaceId: string, id: string, attempted: string): Promise<void> {
+    const res = await db.query(`SELECT partition_key FROM nodes WHERE ${WS} = $1 AND id = $2`, [workspaceId, id]);
+    const stored = res.rows.length > 0 ? String(res.rows[0]!['partition_key'] ?? '') : '';
+    if (stored !== '' && stored !== attempted) throw new PartitionKeyImmutableError(id, stored, attempted);
+}
+
 /**
  * writeNode — the async postgres twin of sqliteGraphWrites' `writeNodeSync`
  * (same statements, same errors: RevisionConflictError / LoreGraphError).
@@ -176,10 +184,12 @@ export async function writeNode(
             const expected = upd.add(m.expectedRevision);
             const res = await db.query(
                 `UPDATE nodes SET ${sets}, revision = nodes.revision + 1`
-                + ` WHERE ${WS} = ${ws} AND id = ${idp} AND revision = ${expected} RETURNING revision`,
+                + ` WHERE ${WS} = ${ws} AND id = ${idp} AND revision = ${expected}`
+                + ` AND (nodes.partition_key = '' OR nodes.partition_key = ${upd.add(doc['partition_key'])}) RETURNING revision`,
                 upd.values,
             );
             if (res.rows.length === 0) {
+                await assertKeyNotRaced(db, workspaceId, node.id, String(doc['partition_key']));
                 const actual = await storedRevisionOf(db, workspaceId, node.id);
                 throw new RevisionConflictError(node.id, m.expectedRevision, actual);
             }
@@ -191,6 +201,7 @@ export async function writeNode(
                 updatedAt: now,
                 syncedAt: null,
                 revision: stored,
+                ...(doc['partition_key'] ? { partitionKey: doc['partition_key'] as string } : {}),
             };
         }
 
@@ -208,19 +219,23 @@ export async function writeNode(
             : m.mode === 'conditional' ? m.expectedRevision + 1 : m.revision;
         const values: unknown[] = [workspaceId, node.id, ...insertValues, insertRevision];
         let updateRevision: string;
-        let guard = '';
+        // L3: partition_key is immutable once non-empty. The JS check in toNodeRow covers the read-then-write
+        // path; this guard covers a concurrent writer that keyed the row after our read (0 rows -> re-read ->
+        // PartitionKeyImmutableError below).
+        const guards = ["(nodes.partition_key = '' OR nodes.partition_key = EXCLUDED.partition_key)"];
         if (m.mode === 'conditional') {
             values.push(m.expectedRevision);
             updateRevision = 'nodes.revision + 1';
-            guard = ` WHERE nodes.revision = $${values.length}`;
+            guards.unshift(`nodes.revision = $${values.length}`);
         } else if (m.mode === 'replay') {
             values.push(m.revision);
             const rev = `$${values.length}`;
             updateRevision = rev;
-            guard = ` WHERE nodes.revision < ${rev}`;
+            guards.unshift(`nodes.revision < ${rev}`);
         } else {
             updateRevision = m.mode === 'keep' ? 'nodes.revision' : 'nodes.revision + 1';
         }
+        const guard = ` WHERE ${guards.join(' AND ')}`;
         const setClause = NODE_WRITE_COLUMNS.map((c) => `${pgColumn(c)} = EXCLUDED.${pgColumn(c)}`).join(', ');
         const insertPlaceholders = insertValues.map((_, i) => `$${i + 3}`).join(', ');
         const res = await db.query(
@@ -231,6 +246,7 @@ export async function writeNode(
             values,
         );
         if (res.rows.length === 0) {
+            await assertKeyNotRaced(db, workspaceId, node.id, String(doc['partition_key']));
             const actual = await storedRevisionOf(db, workspaceId, node.id);
             throw new RevisionConflictError(
                 node.id,
@@ -246,9 +262,10 @@ export async function writeNode(
             updatedAt: now,
             syncedAt: null,
             revision: stored,
+            ...(doc['partition_key'] ? { partitionKey: doc['partition_key'] as string } : {}),
         };
     } catch (error) {
-        if (error instanceof LoreGraphError || error instanceof RevisionConflictError) throw error;
+        if (error instanceof LoreGraphError || error instanceof RevisionConflictError || error instanceof PartitionKeyImmutableError) throw error;
         throw pgError(`Failed to upsert node '${node.id}'`, 'upsertNode', error);
     }
 }
@@ -277,7 +294,7 @@ export async function insertNodeIfAbsent(
             + ` VALUES ($1, $2, ${placeholders}, $${values.length + 3})`,
             [workspaceId, node.id, ...values, 1],
         );
-        return { ...node, tags: tagsToArray(node.tags), createdAt: now, updatedAt: now, syncedAt: null, revision: 1 };
+        return { ...node, tags: tagsToArray(node.tags), createdAt: now, updatedAt: now, syncedAt: null, revision: 1, ...(doc['partition_key'] ? { partitionKey: doc['partition_key'] as string } : {}) };
     } catch (error) {
         if (isUniqueViolation(error)) throw new NodeAlreadyExistsError(node.id);
         if (error instanceof LoreGraphError) throw error;
@@ -305,13 +322,13 @@ export async function importRaw(
     // Verbatim import: supplied provenance (incl. validTo) is kept; an edge with none is stamped 'import'.
     // The nodes of this call are written first in the same transaction, so the sk subselects resolve.
     const insertEdgeSql = `INSERT INTO edges (${WS}, relation, confidence, "confidenceScore",`
-        + ` src_sk, dst_sk, origin, policy_version, model_fingerprint, created_at, valid_to)`
-        + ` SELECT $1, $4, $5, $6, s.sk, t.sk, $7, $8, $9, $10, $11`
+        + ` src_sk, dst_sk, origin, policy_version, model_fingerprint, created_at, valid_to, partition_key)`
+        + ` SELECT $1, $4, $5, $6, s.sk, t.sk, $7, $8, $9, $10, $11, s.partition_key`
         + ` FROM nodes s, nodes t WHERE s.workspace_id = $1 AND s.id = $2 AND t.workspace_id = $1 AND t.id = $3`
         + ` ON CONFLICT (${WS}, src_sk, dst_sk, relation) DO UPDATE SET`
         + ` confidence = EXCLUDED.confidence, "confidenceScore" = EXCLUDED."confidenceScore", origin = EXCLUDED.origin,`
         + ` policy_version = EXCLUDED.policy_version, model_fingerprint = EXCLUDED.model_fingerprint,`
-        + ` created_at = EXCLUDED.created_at, valid_to = EXCLUDED.valid_to`;
+        + ` created_at = EXCLUDED.created_at, valid_to = EXCLUDED.valid_to, partition_key = EXCLUDED.partition_key`;
 
     let written = 0;
     await withTransaction(pool, async (client) => {
@@ -399,9 +416,11 @@ export async function deleteNodes(pool: Pool, workspaceId: string, ids: string[]
 export async function addEdge(db: PgQueryable, workspaceId: string, edge: LoreEdge): Promise<void> {
     try {
         const present = await db.query(
-            `SELECT id, sk FROM nodes WHERE ${WS} = $1 AND id = ANY($2)`, [workspaceId, [edge.sourceId, edge.targetId]],
+            `SELECT id, sk, partition_key FROM nodes WHERE ${WS} = $1 AND id = ANY($2)`, [workspaceId, [edge.sourceId, edge.targetId]],
         );
         const skById = new Map<string, string>((present.rows as Array<{ id: string; sk: string }>).map((r) => [r.id, r.sk]));
+        // L3: the edge inherits its SOURCE node's partition key.
+        const srcKey = String((present.rows as Array<{ id: string; partition_key: string | null }>).find((r) => r.id === edge.sourceId)?.partition_key ?? '');
         const presentIds = new Set<string>(skById.keys());
         if (!presentIds.has(edge.sourceId) || !presentIds.has(edge.targetId)) {
             const which = [
@@ -418,14 +437,14 @@ export async function addEdge(db: PgQueryable, workspaceId: string, edge: LoreEd
         const pv = resolveEdgeProvenance(edge.provenance, 'caller');
         await db.query(
             `INSERT INTO edges (${WS}, src_sk, dst_sk, relation, confidence, "confidenceScore",`
-            + ` origin, policy_version, model_fingerprint, created_at)`
-            + ` VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+            + ` origin, policy_version, model_fingerprint, created_at, partition_key)`
+            + ` VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
             + ` ON CONFLICT (${WS}, src_sk, dst_sk, relation) DO UPDATE SET`
             + ` confidence = EXCLUDED.confidence, "confidenceScore" = EXCLUDED."confidenceScore", origin = EXCLUDED.origin,`
             + ` policy_version = EXCLUDED.policy_version, model_fingerprint = EXCLUDED.model_fingerprint,`
-            + ` created_at = COALESCE(edges.created_at, EXCLUDED.created_at), valid_to = NULL`,
+            + ` created_at = COALESCE(edges.created_at, EXCLUDED.created_at), valid_to = NULL, partition_key = EXCLUDED.partition_key`,
             [workspaceId, skById.get(edge.sourceId), skById.get(edge.targetId), edge.relation, edge.confidence ?? 'extracted', edge.confidenceScore ?? 1.0,
-                pv.origin, pv.policyVersion, pv.modelFingerprint, pv.createdAt],
+                pv.origin, pv.policyVersion, pv.modelFingerprint, pv.createdAt, srcKey],
         );
     } catch (error) {
         if (error instanceof LoreGraphError) throw error;

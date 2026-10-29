@@ -29,6 +29,7 @@
  * the target LocalGraph per request.
  */
 
+import { validatePartitionKey } from '../../../engines/graphShared/partitionKey.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { GroundfloorClient } from 'groundfloor-ts-sdk';
 import type { StorageBundle } from '../../services.js';
@@ -419,6 +420,11 @@ async function handleBulkNodes(
         if (forbidden.length > 0) {
             results[i] = { ok: false, id: raw.id as string, error: `unknown_field: ${forbidden.join(', ')}` };
             continue;
+        }
+        // Phase 0 L3 - bulk items bypass nodeUpsert, so `partitionKey` is validated here (the engines enforce immutability).
+        if ((raw as Record<string, unknown>).partitionKey !== undefined) {
+            const pk = validatePartitionKey((raw as Record<string, unknown>).partitionKey);
+            if (!pk.ok) { results[i] = { ok: false, id: raw.id as string, error: `invalid_partition_key: ${pk.error}` }; continue; }
         }
         // Conditional writes R1 — `ifAbsent` is a write-time directive (stripped
         // like `supersedes`/`force` below); anything but a boolean is refused.

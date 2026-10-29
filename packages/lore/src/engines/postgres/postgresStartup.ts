@@ -29,10 +29,17 @@
 import type { Pool, PoolClient } from 'pg';
 import { redactPgUrl } from './postgresClient.js';
 
-/** Oldest supported server: `CREATE OR REPLACE TRIGGER` (used by the verbatim schema) needs 14. */
-export const MIN_POSTGRES_SERVER_VERSION_NUM = 140000;
-/** Oldest pgvector with HNSW indexes (the verbatim schema always builds one). */
-export const MIN_PGVECTOR_VERSION = [0, 5, 0] as const;
+/**
+ * Oldest supported server: 15. `ON DELETE SET NULL (column_list)` (the lore_entity -> nodes composite foreign key,
+ * postgresWorkspaceSk.ts) needs 15; `CREATE OR REPLACE TRIGGER` (the verbatim schema) needs 14.
+ */
+export const MIN_POSTGRES_SERVER_VERSION_NUM = 150000;
+/**
+ * Oldest supported pgvector. 0.8.0 added iterative index scans (`hnsw.iterative_scan`): without them an HNSW search
+ * that is post-filtered by scope/ecosystem/type returns only the ef_search (default 40) nearest candidates that
+ * happen to pass the filter, so a scoped actor can get far fewer than topK rows. The vector leg relies on it.
+ */
+export const MIN_PGVECTOR_VERSION = [0, 8, 0] as const;
 
 /**
  * Arbitrary constant key for the schema-bootstrap advisory lock. Session-level
@@ -113,7 +120,10 @@ async function assertServerVersion(client: PoolClient): Promise<void> {
     const num = Number(res.rows[0]?.v ?? 0);
     if (num < MIN_POSTGRES_SERVER_VERSION_NUM) {
         throw new PostgresStartupError(
-            `postgres engine: server at ${targetLabel()} is version ${num} — Lore requires PostgreSQL 14 or newer.`,
+            `postgres engine: server at ${targetLabel()} is version ${num} — Lore requires PostgreSQL 15 or newer `
+            + `(the per-workspace node key uses ON DELETE SET NULL (column), added in 15). `
+            + `Upgrade the server (pg_upgrade or dump/restore to a PostgreSQL 15+ instance, e.g. the pgvector/pgvector:pg16 image), then restart Lore. `
+            + `Nothing was changed in this database.`,
         );
     }
 }
@@ -121,7 +131,7 @@ async function assertServerVersion(client: PoolClient): Promise<void> {
 /**
  * pgvector gate for the verbatim (vector) substrate. Checks the extension is
  * installable on this server (or already installed) at a version with HNSW
- * support, so a missing package fails with an install hint, not with
+ * iterative-scan support (0.8+), so a missing package fails with an install hint, not with
  * `extension "vector" is not available` out of a CREATE EXTENSION.
  */
 async function assertPgvector(client: PoolClient): Promise<void> {
@@ -143,7 +153,9 @@ async function assertPgvector(client: PoolClient): Promise<void> {
     if (!versionAtLeast(parseVersion(have), MIN_PGVECTOR_VERSION)) {
         throw new PostgresStartupError(
             `postgres engine: pgvector ${have} at ${targetLabel()} is too old — Lore needs ${MIN_PGVECTOR_VERSION.join('.')} `
-            + 'or newer (HNSW indexes). Upgrade the extension (ALTER EXTENSION vector UPDATE) and retry.',
+            + 'or newer (HNSW iterative index scans, `hnsw.iterative_scan`, which scope-filtered vector search needs). '
+            + 'To upgrade: install the pgvector 0.8+ package for your server (e.g. the `pgvector/pgvector:pg16` image tag, or your '
+            + "OS's postgresql-<version>-pgvector package), then run `ALTER EXTENSION vector UPDATE;` in this database and retry.",
         );
     }
 }

@@ -24,6 +24,13 @@ export interface LoreNode {
     revision?: number;
     security_scopes?: string[];
     /**
+     * Optional shard/placement hint (Phase 0 lane L3; engines/graphShared/partitionKey.ts).
+     * Omitted on write = keep the stored key ('' for a new node). A non-empty key never
+     * changes (PARTITION_KEY_IMMUTABLE). Absent on read when the node is unkeyed, so
+     * existing output shapes are unchanged. Not used by recall yet.
+     */
+    partitionKey?: string;
+    /**
      * ISO 639-1 language code tagged by the caller at ingest, or null
      * when unknown. See docs/LANGUAGE_DETECTION.md: core never sets this
      * automatically — it's always an explicit tag from the ingest path
@@ -530,6 +537,8 @@ export interface VerbatimDocument {
         ecosystem?: string;
         updatedAt?: string;
         security_scopes?: string[];
+        /** Owning node's partition key (L3). Omitted = keep the stored row's key. Postgres verbatim only. */
+        partitionKey?: string;
         /**
          * PR #69 P2 — content fingerprint of the verbatim text.
          * When supplied, verbatimStore.store() uses it to short-circuit

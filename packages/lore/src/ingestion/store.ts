@@ -191,11 +191,12 @@ export interface IIngestionStore {
      */
     listSourceBlobRefs(workspace: string | null, limit: number, after?: string): Promise<Array<{ sourceId: string; storageRef: string }>>;
     /**
-     * Workspace erase, step 2 (read-only, system use only). How many not-purged sources of OTHER workspaces in this
-     * store's database point at `storageRef`; a blob with a non-zero count must not be deleted. A store that only ever
-     * holds one workspace returns 0.
+     * The string a blob store hashes to file `workspace`'s NEW blobs (FsBlobStore: the `<sha256(scope)[:16]>` folder). A store
+     * whose rows are keyed by a permanent workspace id (Postgres) returns that id, so a successor workspace that reuses a deleted
+     * workspace's NAME never lands on the old workspace's blob refs. Omitted: the caller uses the workspace name (SQLite, one file
+     * per workspace). Refs minted before this existed hash the name; they stay valid and are never rewritten.
      */
-    countBlobRefsHeldByOtherWorkspaces(workspace: string, storageRef: string): Promise<number>;
+    blobScope?(workspace: string): string;
 
     /** Idempotent on the deterministic job id; `created=false` when it already existed. */
     createJob(j: NewJob, now: Date): Promise<{ job: IngestionJob; created: boolean }>;

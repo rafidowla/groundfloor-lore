@@ -11,13 +11,14 @@
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import pg from 'pg';
-import { argv } from './pg-bench-common.mts';
+import { argv, pgWorkspaceKey } from './pg-bench-common.mts';
 import { clusterCenters, queryVector, vecText } from './pg-corpus.mts';
 
 const seedInfo = JSON.parse(readFileSync(argv('seed-info')!, 'utf8'));
 const out = argv('out')!;
 const label = argv('label', 'run')!;
-const ws: string = seedInfo.ws;
+// workspace_id holds the permanent workspace id since 3.37.0, not the name.
+const ws: string = seedInfo.wsKey ?? await pgWorkspaceKey(seedInfo.home, seedInfo.ws);
 const params = seedInfo.params;
 const url = process.env.LORE_PG_URL;
 if (!url) throw new Error('LORE_PG_URL required');

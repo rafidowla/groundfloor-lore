@@ -1768,8 +1768,25 @@ Postgres vector engine.
   a workspace's name and its id the open refuses with a clear error and changes
   nothing. Run every process that shares the database on the same build. The vector store is
   additionally partitioned by workspace (see "Vector storage" below).
-- The server needs PostgreSQL 14 or newer. The vector store needs the
-  `pgvector` extension (0.5.0 or newer, for HNSW indexes); the first open
+- The server needs PostgreSQL 15 or newer (raised from 14: the typed-table foreign key to graph nodes is
+  per workspace and uses `ON DELETE SET NULL (column)`, added in 15). On an older server Lore refuses to start
+  and says so, changing nothing. To upgrade: move the database to a 15+ server (`pg_upgrade` in place, or
+  dump and restore into a new 15+ instance; the `pgvector/pgvector:pg16` image works) and point `LORE_PG_URL`
+  at it. Managed services (RDS, Cloud SQL, Azure, Supabase, Neon) all offer 15 and 16.
+  Graph node keys (`nodes.sk`) are unique per workspace, not per database: on first open of a database
+  that predates this, Lore builds `UNIQUE (workspace_id, sk)` on `nodes`, `idx_edges_ws_dst_sk` on `edges`
+  and a composite `lore_entity -> nodes` foreign key. Small tables are built inline; a table over 50,000 rows
+  is built in the background with `CREATE INDEX CONCURRENTLY` (reads and writes keep working, graph reads
+  that join edges to nodes are only slower until it finishes). The older database-wide indexes
+  (`idx_nodes_sk`, `idx_edges_dst_sk`, `lore_entity_node_sk_idx`, the single-column foreign key and the
+  old per-field `lore_ev_<id>_u|_i` indexes) are kept so an older build can still use the database; once
+  every process runs this build, remove them with `lore postgres drop-global-sk-indexes` (dry run by
+  default, `--yes` to apply). Startup never drops them.
+- The vector store needs the `pgvector` extension, **0.8.0 or newer** (HNSW iterative index scans, which
+  keep scope-filtered vector search returning a full top-K). An older pgvector
+  is refused at open with the upgrade steps: install the 0.8+ package (for
+  example the `pgvector/pgvector:pg16` image tag), then run
+  `ALTER EXTENSION vector UPDATE;` in the database. The first open
   runs `CREATE EXTENSION IF NOT EXISTS vector`, so the role must be allowed
   to do that (or an admin installs it once).
 - Startup failures are explicit: unreachable server, bad credentials, missing
@@ -2004,8 +2021,9 @@ connection, so each batch must fit within it).
 
 #### `verbatim_changes_log` is not written on Postgres
 
-The table exists on Postgres (the schema check requires it) but nothing
-populates it and nothing reads it. On SQLite it is a short-lived tail log: triggers fill it only
+Postgres no longer creates the table (it has no workspace column, nothing
+populates it and nothing reads it); a database that already has the empty table
+keeps it until `lore postgres contract-phase0 --yes` drops it. On SQLite it is a short-lived tail log: triggers fill it only
 while a SQLite to LanceDB promotion is staging, and its single reader is the
 promotion's `copyTail`, which works on a `verbatim.sqlite` file by `rowid` and
 writes LanceDB. That path is tied to a local SQLite file, and a Postgres

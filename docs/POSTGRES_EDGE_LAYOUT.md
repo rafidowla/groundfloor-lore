@@ -10,12 +10,16 @@ times over. Layout 2 keys edges by the nodes' integer surrogate keys:
 
 ```
 PRIMARY KEY (workspace_id, src_sk, dst_sk, relation)
-idx_edges_dst_sk   (dst_sk)                reverse lookups (who points at X)
+idx_edges_ws_dst_sk (workspace_id, dst_sk)    reverse lookups (who points at X), workspace-led
+idx_edges_dst_sk   (dst_sk)                legacy reverse index; kept for older builds, removed by `lore postgres drop-global-sk-indexes`
 idx_edges_relation (workspace_id, relation) relation-only reads (supersession, link rebuild, prune)
 ```
 
-- `source_id` / `target_id` no longer exist on `edges`. Reads join `nodes` on `sk` (`nodes.sk` is a BIGINT identity with a
-  unique index) to return the text ids, so the API surface (`LoreEdge`) is unchanged.
+- `source_id` / `target_id` no longer exist on `edges`. Reads join `nodes` on `(workspace_id, sk)` to return the text ids,
+  so the API surface (`LoreEdge`) is unchanged. `nodes.sk` is a BIGINT identity, but the invariant is that it is unique
+  PER WORKSPACE (`UNIQUE (workspace_id, sk)`, constraint `nodes_workspace_sk_key`), not per database: a restore, a moved
+  workspace or a sharded cluster can hold the same `sk` in two workspaces. Every join therefore names both columns
+  (`ON s.workspace_id = e.workspace_id AND s.sk = e.src_sk`). The database-wide `idx_nodes_sk` is kept for older builds.
 - Forward lookups (`src_sk = X`) use the primary key; there is no separate source index.
 - 8-byte columns are stored first to avoid alignment padding.
 - `src_sk` / `dst_sk` carry the column comment `lore:references nodes.sk`. There is no foreign key: Lore's delete paths

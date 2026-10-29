@@ -91,13 +91,13 @@ await test('a deadlock victim (manual ANALYZE/VACUUM vs CREATE INDEX CONCURRENTL
     assert.equal(f.creates(), KEYWORD_INDEXES.length + 1);
 });
 await test('a persistent deadlock gives up after 3 attempts and moves on to the next index; other errors are not retried', async () => {
-    const f = fakeBuildClient([deadlock(), deadlock(), deadlock(), new Error('disk full'), null]);
+    const f = fakeBuildClient([deadlock(), deadlock(), deadlock(), new Error('disk full')]);
     const warn = console.warn; console.warn = () => {};
     try {
         const out = await buildKeywordIndexes(f.client, { isCancelled: () => false });
         assert.equal(out.failed.length, 2);
         assert.equal(out.built.length, KEYWORD_INDEXES.length - 2);
-        assert.equal(f.creates(), 5, '3 attempts for the first index, 1 for the second (not retried), 1 for the third');
+        assert.equal(f.creates(), 3 + 1 + (KEYWORD_INDEXES.length - 2), '3 attempts for the first index, 1 for the second (not retried), 1 each for the rest');
     } finally { console.warn = warn; }
 });
 
@@ -325,11 +325,16 @@ try {
                FROM generate_series(1, 30000) g`, [WS]);
     await g4.upsertNode(node('hit1', { label: 'alpha', content: 'beta', tags: ['beta'] }));
     await q('VACUUM ANALYZE nodes'); // flushes the GIN pending lists the planner would otherwise cost in
-    const planOf = async (text: string, values: unknown[]): Promise<string> => {
+    /** `only` drops (inside the rolled-back transaction) every keyword index outside that family, so the plan shows what that family can do. */
+    const planOf = async (text: string, values: unknown[], only?: 'legacy' | 'workspace'): Promise<string> => {
         const c = await pool.connect();
         try {
             await c.query('BEGIN');
             await c.query('SET LOCAL enable_seqscan = off');
+            for (const s of KEYWORD_INDEXES) {
+                if (only === 'legacy' && s.workspaceLed) await c.query(`DROP INDEX IF EXISTS ${s.name}`);
+                if (only === 'workspace' && !s.workspaceLed) await c.query(`DROP INDEX IF EXISTS ${s.name}`);
+            }
             const r = await c.query(`EXPLAIN (FORMAT TEXT) ${text}`, values);
             await c.query('ROLLBACK');
             return r.rows.map((x) => x['QUERY PLAN']).join('\n');
@@ -339,9 +344,12 @@ try {
         seen.length = 0;
         await g4.search('alpha beta', 5);
         assert.equal(seen.length, 1);
-        const plan = await planOf(seen[0]!.text, seen[0]!.values);
-        for (const s of KEYWORD_INDEXES) assert.match(plan, new RegExp(s.name), `plan does not use ${s.name}:\n${plan}`);
-        assert.match(plan, /BitmapOr/);
+        const wsPlan = await planOf(seen[0]!.text, seen[0]!.values, 'workspace');
+        for (const s of KEYWORD_INDEXES.filter((x) => x.workspaceLed)) assert.match(wsPlan, new RegExp(s.name), `plan does not use ${s.name}:\n${wsPlan}`);
+        assert.match(wsPlan, /BitmapOr/);
+        const legacyPlan = await planOf(seen[0]!.text, seen[0]!.values, 'legacy');
+        for (const s of KEYWORD_INDEXES.filter((x) => !x.workspaceLed)) assert.match(legacyPlan, new RegExp(s.name), `plan does not use ${s.name}:\n${legacyPlan}`);
+        if (process.env.LORE_PRINT_PLANS) console.log(`--- plan, legacy indexes only:\n${legacyPlan}\n--- plan, workspace-led indexes only:\n${wsPlan}`);
     });
     await test('negative control: the legacy statement cannot use any keyword index', async () => {
         const { sql, values } = clauseFor('alpha beta', true);
@@ -352,7 +360,7 @@ try {
         seen.length = 0;
         await g4.search('ab', 5);
         const plan = await planOf(seen[0]!.text, seen[0]!.values);
-        assert.doesNotMatch(plan, /idx_nodes_(label|content)_trgm/);
+        assert.doesNotMatch(plan, /idx_nodes_(ws_)?(label|content)_trgm/);
     });
     await g4.close();
     await g3.close();

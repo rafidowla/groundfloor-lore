@@ -27,7 +27,8 @@ import { createPostgresPool, closePostgresPool } from '../packages/lore/src/engi
 import { PgParams } from '../packages/lore/src/engines/postgres/postgresGraphRow.js';
 import { searchWhere, type SearchScope } from '../packages/lore/src/engines/postgres/postgresGraphReads.js';
 import {
-    CTE_BREAK_EVEN, CTE_MAX_MATCHES, candidateCteSql, decideKeywordPlan, orderedWalkSql, planRowsOf,
+    CTE_BREAK_EVEN, CTE_MAX_MATCHES, candidateCteSql, candidateProbeSql, chooseKeywordPlan, decideKeywordPlan,
+    orderedWalkSql, planRowsOf, probeableTerms, termTrigrams,
     probeKeywordPlan, setKeywordPlanForce, setKeywordPlanObserver, walksRecencyIndex, type KeywordPlanDecision,
 } from '../packages/lore/src/engines/postgres/postgresKeywordPlan.js';
 import { rankSearchResults, SEARCH_SCAN_CAP } from '../packages/lore/src/engines/searchRanking.js';
@@ -49,7 +50,8 @@ function referenceSql(where: string, limitPlaceholder: string): string {
 console.log('\npure');
 await test('decideKeywordPlan: the CTE only in the window where it beats the recency walk; unknown estimates keep the original', () => {
     const cap = 2000, n = 1_000_000;
-    assert.equal(decideKeywordPlan(29_000, n, cap), 'cte', 'the 1M mid term from the bench');
+    assert.equal(decideKeywordPlan(40_000, n, cap), 'ordered-walk', 'past the K=0.5 break-even (~31.6k at cap 2000, N 1M): the walk');
+    assert.equal(decideKeywordPlan(9_000, n, cap), 'cte', 'a mid term well inside the window');
     assert.equal(decideKeywordPlan(1_000, n, cap), 'ordered-walk', 'M <= cap/2: planner already uses the bitmap');
     assert.equal(decideKeywordPlan(2_500, n, cap), 'cte');
     assert.equal(decideKeywordPlan(650_000, n, cap), 'ordered-walk', 'very common term');
@@ -57,6 +59,7 @@ await test('decideKeywordPlan: the CTE only in the window where it beats the rec
     assert.equal(decideKeywordPlan(40_000, n, cap), 'ordered-walk', 'just past break-even (M^2 > K*cap*N)');
     assert.equal(decideKeywordPlan(Math.floor(Math.sqrt(CTE_BREAK_EVEN * cap * n)), n, cap), 'cte', 'at break-even');
     assert.equal(decideKeywordPlan(12_000, 100_000, cap), 'ordered-walk', 'same M ratio at 100k rows: the walk is cheap there');
+    assert.equal(CTE_BREAK_EVEN, 0.5, 'K: the measured 1M crossover (~31.6k matches at cap 2000)');
     for (const bad of [null, 0, -1, Number.NaN]) {
         assert.equal(decideKeywordPlan(bad as never, n, cap), 'ordered-walk');
         assert.equal(decideKeywordPlan(5_000, bad as never, cap), 'ordered-walk');
@@ -97,18 +100,117 @@ await test('probeKeywordPlan with canned planner answers: stops after the first 
     };
     let r = await run(bitmapPlan, 29_000, 1_000_000);
     assert.deepEqual([r.d.plan, r.trips, r.firstIsWalkExplain], ['ordered-walk', 1, true], 'planner already uses the GIN: one round trip, original statement');
-    r = await run(walkPlan, 29_000, 1_000_000);
-    assert.deepEqual([r.d.plan, r.trips, r.d.walks, r.d.estMatches, r.d.estRows], ['cte', 4, true, 29_000, 1_000_000]);
+    r = await run(walkPlan, 9_000, 1_000_000);
+    assert.deepEqual([r.d.plan, r.trips, r.d.walks, r.d.estMatches, r.d.estRows], ['cte', 4, true, 9_000, 1_000_000]);
+    r = await run(walkPlan, 40_000, 1_000_000);
+    assert.deepEqual([r.d.plan, r.trips], ['ordered-walk', 3], 'M past K break-even: stops after the N probe, no CTE EXPLAIN');
     r = await run(walkPlan, 650_000, 1_000_000);
     assert.deepEqual([r.d.plan, r.trips], ['ordered-walk', 2], 'M above the cap on the materialised set: no N probe');
     r = await run(walkPlan, 900, 1_000_000);
     assert.deepEqual([r.d.plan, r.trips], ['ordered-walk', 2], 'M below the window');
-    r = await run(walkPlan, 29_000, null);
+    r = await run(walkPlan, 9_000, null);
     assert.equal(r.d.plan, 'ordered-walk', 'unknown N keeps the original');
     r = await run(walkPlan, null, null);
     assert.equal(r.d.plan, 'ordered-walk', 'unknown M keeps the original');
-    r = await run([{ 'QUERY PLAN': 'garbage' }], 29_000, 1_000_000);
+    r = await run([{ 'QUERY PLAN': 'garbage' }], 9_000, 1_000_000);
     assert.deepEqual([r.d.plan, r.d.walks, r.trips], ['ordered-walk', null, 1], 'unreadable walk probe keeps the original');
+});
+await test('decideKeywordPlan with candidate volume (C_est): inflated candidates walk, clean terms stay on the CTE under +-50% estimate error', () => {
+    const cap = 2000, n = 1_000_000;
+    const T = Math.sqrt(CTE_BREAK_EVEN * cap * n); // M (and C) threshold at this N: ~31.6k
+    const plan = (m: number, nn: number, c?: number | null) => decideKeywordPlan(Math.round(m), Math.round(nn), cap, c === undefined ? undefined : c === null ? null : Math.round(c));
+    // trigram inflation: M comfortably inside the window, but the GIN returns 3x as many candidates -> walk
+    assert.equal(plan(0.9 * T, n), 'cte', 'precondition: the M/N rule alone accepts 0.9*T');
+    assert.equal(plan(0.9 * T, n, 3 * 0.9 * T), 'ordered-walk', 'C_est = 3 * M_est');
+    assert.equal(plan(0.9 * T, n, 0.9 * T), 'cte', 'C_est = M_est (clean term) at 0.9*T is still inside');
+    assert.equal(plan(0.3 * T, n, 0.3 * T * 3), 'cte', '3x candidates but both still under T');
+    assert.equal(plan(0.3 * T, n, 4 * T), 'ordered-walk');
+    assert.equal(plan(0.3 * T, n, CTE_MAX_MATCHES + 1), 'ordered-walk', 'absolute cap applies to candidates too');
+    assert.equal(plan(0.3 * T, n, 0.1 * T), 'cte', 'a candidate figure below M is lifted to M (candidates are a superset of matches)');
+    // unreadable / invalid probe -> walk; undefined (nothing probeable) -> the M/N rule alone
+    for (const bad of [null, 0, -5, Number.NaN, Number.POSITIVE_INFINITY]) assert.equal(decideKeywordPlan(0.5 * T, n, cap, bad as never), 'ordered-walk', String(bad));
+    assert.equal(decideKeywordPlan(0.5 * T, n, cap, undefined), 'cte');
+    // robustness band: whatever the estimate error (M and N each +-50%, all four corners), a clean term at 0.4*T stays cte ...
+    for (const fm of [0.5, 1, 1.5]) for (const fn of [0.5, 1, 1.5]) {
+        assert.equal(plan(0.4 * T * fm, n * fn, 0.4 * T * fm), 'cte', `clean 0.4T, M x${fm}, N x${fn}`);
+        // ... and a term at 2.5*T stays on the walk
+        assert.equal(plan(2.5 * T * fm, n * fn, 2.5 * T * fm), 'ordered-walk', `over 2.5T, M x${fm}, N x${fn}`);
+    }
+    // single-axis error at the 0.5T / 1.5T points of the review
+    for (const f of [0.5, 1.5]) {
+        assert.equal(plan(0.5 * T * f, n, 0.5 * T * f), 'cte', `clean 0.5T, M x${f}`);
+        assert.equal(plan(0.5 * T, n * f, 0.5 * T), 'cte', `clean 0.5T, N x${f}`);
+        assert.equal(plan(1.5 * T * f, n, 1.5 * T * f), f < 1 ? 'cte' : 'ordered-walk', `1.5T, M x${f} (0.75T is inside)`);
+        assert.equal(plan(1.5 * T, n * f, 1.5 * T), 'ordered-walk', `1.5T, N x${f}: sqrt(1.5) = 1.22 < 1.5, still out`);
+    }
+    assert.equal(plan(1.5 * T, n, 1.5 * T), 'ordered-walk', 'a term at 1.5x the threshold is a walk at nominal estimates');
+});
+await test('termTrigrams / candidateProbeSql / probeableTerms: distinct 3-grams as bound LIKE patterns over label OR content, nothing interpolated', () => {
+    assert.deepEqual(termTrigrams('linest'), ['lin', 'ine', 'nes', 'est']);
+    assert.deepEqual(termTrigrams('aaaaa'), ['aaa'], 'distinct');
+    assert.deepEqual(termTrigrams('ab'), []);
+    assert.deepEqual(termTrigrams('日本語テキスト'), ['日本語', '本語テ', '語テキ', 'テキス', 'キスト'], 'by code point');
+    const p = candidateProbeSql('ws-1', 'linest')!;
+    assert.deepEqual(p.values, ['ws-1', '%lin%', '%ine%', '%nes%', '%est%']);
+    assert.equal(p.sql, 'EXPLAIN (FORMAT JSON) SELECT 1 FROM nodes WHERE workspace_id = $1 AND ((lower(label) LIKE $2 AND lower(label) LIKE $3 AND lower(label) LIKE $4 AND lower(label) LIKE $5) OR (lower(content) LIKE $2 AND lower(content) LIKE $3 AND lower(content) LIKE $4 AND lower(content) LIKE $5))');
+    const evil = candidateProbeSql('ws', "x_%\\'; drop table nodes;--")!;
+    assert.ok(!/drop|nodes;|'/.test(evil.sql.replace('FROM nodes', '')), 'user text never reaches the SQL text');
+    assert.equal(evil.values[1], '%x\\_\\%%', 'underscore and percent escaped');
+    assert.ok(evil.values.slice(1).every((v) => /^%(?:[^\\%_]|\\[\\%_])+%$/.test(v)), `every pattern is a fully escaped literal: ${JSON.stringify(evil.values)}`);
+    assert.equal(candidateProbeSql('ws', 'ab'), null);
+    assert.deepEqual(probeableTerms(['ab', 'because', 'linest', 'linest', 'zq', 'authentication', 'tokens', 'oauth']), ['authentication', 'because', 'linest'], 'longest first, deduplicated, short terms dropped, capped');
+    assert.deepEqual(probeableTerms(['ab', 'x']), []);
+    assert.equal(probeableTerms(['aaa1', 'bbb2', 'ccc3', 'ddd4', 'eee5']).length, 3, 'MAX_CANDIDATE_PROBES = 3');
+});
+await test('probeKeywordPlan with terms (canned planner): candidate probes, min over terms, early exit, unreadable -> walk, short terms skipped', async () => {
+    const okCte = [{ 'QUERY PLAN': [{ Plan: { Plans: [{ 'Subplan Name': 'CTE m', 'Node Type': 'Bitmap Heap Scan', Plans: [{ 'Node Type': 'Bitmap Index Scan', 'Index Name': 'idx_nodes_content_trgm' }] }] } }] }];
+    const walkPlan = [{ 'QUERY PLAN': [{ Plan: { Plans: [{ 'Index Name': 'idx_nodes_updatedat' }] } }] }];
+    const rows = (v: number | null) => [{ 'QUERY PLAN': v === null ? 'x' : [{ Plan: { 'Plan Rows': v } }] }];
+    const M = 12_000, NN = 1_000_000; // inside the M/N window at cap 2000; 3*M is past it (~31.6k)
+    const mk = (cand: Record<string, number | null>, throwOn?: string) => {
+        const seen: string[] = [];
+        return { seen, pool: { async query(sql: string, values?: unknown[]) {
+            seen.push(sql);
+            if (/lower\(label\) LIKE \$2/.test(sql)) {
+                const term = Object.keys(cand).find((t) => (values ?? []).includes(`%${t.slice(0, 3)}%`))!;
+                if (throwOn === term) throw Object.assign(new Error('boom'), { code: '57014' });
+                return { rows: rows(cand[term] === null ? null : Math.round(cand[term]!)) } as never; // planner row counts are integers
+            }
+            return { rows: /WITH m AS MATERIALIZED/.test(sql) ? okCte : /SELECT 1 FROM nodes WHERE workspace_id = \$1 AND/.test(sql) ? rows(M) : /SELECT 1 FROM nodes WHERE workspace_id = \$1$/.test(sql) ? rows(NN) : walkPlan } as never;
+        } } };
+    };
+    const run = async (cand: Record<string, number | null>, terms: string[], throwOn?: string) => {
+        const c = mk(cand, throwOn);
+        const d = await probeKeywordPlan(c.pool as never, 'ws', 'X', ['ws'], 2000, terms);
+        return { d, probes: c.seen.filter((x) => /lower\(label\) LIKE/.test(x)).length, trips: c.seen.length };
+    };
+    let r = await run({ aaaaaa: 3 * M }, ['aaaaaa']);
+    assert.deepEqual([r.d.plan, r.d.estCandidates, r.probes, r.trips], ['ordered-walk', 3 * M, 1, 4], 'inflated: no CTE EXPLAIN is spent');
+    r = await run({ aaaaaa: 1.1 * M }, ['aaaaaa']);
+    assert.deepEqual([r.d.plan, r.d.estCandidates, r.probes, r.trips], ['cte', Math.round(1.1 * M), 1, 5], 'clean term: M/N + 1 candidate probe + CTE shape probe');
+    r = await run({ aaaaaa: 3 * M, bbbbbb: 1.2 * M }, ['aaaaaa', 'bbbbbb']);
+    assert.deepEqual([r.d.plan, r.probes], ['cte', 2], 'one selective term is enough: min over terms');
+    assert.equal(r.d.estCandidates, Math.round(1.2 * M));
+    r = await run({ aaaaaa: 1.1 * M, bbbbbb: 3 * M }, ['aaaaaa', 'bbbbbb']);
+    assert.deepEqual([r.d.plan, r.probes], ['cte', 1], 'early exit once a term clears the bar');
+    r = await run({ aaaaaa: 3 * M, bbbbbb: 4 * M }, ['aaaaaa', 'bbbbbb']);
+    assert.deepEqual([r.d.plan, r.d.estCandidates, r.probes], ['ordered-walk', 3 * M, 2]);
+    r = await run({ aaaaaa: null }, ['aaaaaa']);
+    assert.deepEqual([r.d.plan, r.d.estCandidates, r.probes], ['ordered-walk', null, 1], 'unreadable probe -> walk');
+    r = await run({ aaaaaa: 1.1 * M, bbbbbb: null }, ['bbbbbb', 'aaaaaa']);
+    assert.equal(r.d.plan, 'ordered-walk', 'an unreadable probe on a probed term -> walk even if another term would pass');
+    const warn = console.warn; console.warn = () => { /* expected */ };
+    try { r = await run({ aaaaaa: 1.1 * M }, ['aaaaaa'], 'aaaaaa'); } finally { console.warn = warn; }
+    assert.deepEqual([r.d.plan, r.d.probeError], ['ordered-walk', 'Error 57014'], 'a probe that throws -> walk, never propagates');
+    r = await run({}, ['ab', 'x']);
+    assert.deepEqual([r.d.plan, r.d.estCandidates, r.probes, r.trips], ['cte', undefined, 0, 4], 'no probeable term: today\'s behaviour (M/N rule + CTE shape probe)');
+    r = await run({}, []);
+    assert.deepEqual([r.d.plan, r.probes], ['cte', 0], 'no terms given: today\'s behaviour');
+    const c = mk({ aaaaaa: 1.1 * M });
+    const off = await chooseKeywordPlan(c.pool as never, 'ws', 'X', ['ws'], 2000, { LORE_PG_KEYWORD_CTE: '0' }, ['aaaaaa']);
+    assert.deepEqual([off.plan, off.disabled, c.seen.length], ['ordered-walk', true, 0], 'off switch: no probe at all');
+    const on = await chooseKeywordPlan(mk({ aaaaaa: 1.1 * M }).pool as never, 'ws', 'X', ['ws'], 2000, {}, ['aaaaaa']);
+    assert.equal(on.plan, 'cte');
 });
 await test('SQL shape: workspace_id stays a plain equality, the match set is MATERIALIZED, the sort key is unchanged', () => {
     const cte = candidateCteSql('X', '$9');

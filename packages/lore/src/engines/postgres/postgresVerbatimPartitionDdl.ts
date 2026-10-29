@@ -26,11 +26,19 @@ export const VERBATIM_INDEX_NAMES = [
     'verbatim_project_idx', 'verbatim_text_tsv_gin', 'verbatim_vector_hnsw',
 ] as const;
 
+/**
+ * Scope-array GIN index on the partitioned parent (one per partition). Kept OUT of {@link VERBATIM_INDEX_NAMES} on
+ * purpose: `schemaIsCurrent` counts those names, and a database from before this index existed must be upgraded by
+ * the concurrent per-partition build in postgresVerbatimScopeArr.ts, not by re-running the plain
+ * `CREATE INDEX IF NOT EXISTS` list (which would build it with a blocking SHARE lock on every partition).
+ */
+export const VERBATIM_SCOPE_INDEX_NAME = 'verbatim_scope_arr_gin';
+
 /** Every physical column of `verbatim` in declaration order (copy lists, tests). */
 export const VERBATIM_COLUMNS = [
     'row_id', 'workspace_id', 'id', 'text', 'vector', 'content_hash', 'type', 'label', 'tags', 'project',
-    'ecosystem', '"updatedAt"', 'security_scopes', 'is_canonical', 'is_tombstone', 'superseded_at',
-    'created_at', 'updated_at', 'text_tsv',
+    'ecosystem', '"updatedAt"', 'security_scopes', 'security_scope_arr', 'is_canonical', 'is_tombstone', 'superseded_at',
+    'created_at', 'updated_at', 'partition_key', 'text_tsv',
 ] as const;
 
 /** Column definitions shared by `verbatim` and the migration's staging table `verbatim_next`. */
@@ -48,11 +56,13 @@ const VERBATIM_COLUMN_DEFS = (dimension: number): string => `
     ecosystem TEXT,
     "updatedAt" TEXT,
     security_scopes TEXT,
+    security_scope_arr TEXT[] NOT NULL DEFAULT '{}',
     is_canonical INTEGER NOT NULL DEFAULT 1,
     is_tombstone INTEGER NOT NULL DEFAULT 0,
     superseded_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    partition_key TEXT NOT NULL DEFAULT '',
     text_tsv tsvector NOT NULL DEFAULT ''::tsvector`;
 
 /**
@@ -78,12 +88,34 @@ export function partitionedVerbatimDdl(dimension: number, table: string, indexPr
         `CREATE INDEX IF NOT EXISTS ${indexPrefix}_project_idx ON ${table}(workspace_id, project)`,
         // Full-text (replaces the FTS5 external-content virtual table); one GIN per partition.
         `CREATE INDEX IF NOT EXISTS ${indexPrefix}_text_tsv_gin ON ${table} USING gin(text_tsv)`,
+        // Scope filter pushdown: `security_scope_arr && $scopes` (cardinality() = 0 is the public-row arm, a seq/filter test).
+        // `<indexPrefix>_scope_arr_gin` matches VERBATIM_SCOPE_INDEX_NAME for the live table.
+        `CREATE INDEX IF NOT EXISTS ${indexPrefix}_scope_arr_gin ON ${table} USING gin(security_scope_arr)`,
         // Vector: HNSW, cosine ops — same distance as the SQLite/Lance path. Declared on the
         // partitioned parent, Postgres builds one independent HNSW graph per workspace partition.
         `CREATE INDEX IF NOT EXISTS ${indexPrefix}_vector_hnsw ON ${table} USING hnsw(vector vector_cosine_ops)`,
     ];
 }
 
+
+/**
+ * Phase 0 lane L3: add `partition_key TEXT NOT NULL DEFAULT ''` to `table` (a plain legacy `verbatim`, the partitioned
+ * parent, or a staging `verbatim_next`) when it is missing. A constant-default ADD COLUMN is catalog-only on PG 11+ (no
+ * rewrite, and it propagates to every partition); `ADD COLUMN IF NOT EXISTS` still takes ACCESS EXCLUSIVE when the
+ * column exists, so the catalog is probed first and an up-to-date table is never locked. Returns true when added.
+ */
+export async function ensureVerbatimPartitionKeyColumn(client: PoolClient, table: string): Promise<boolean> {
+    const probe = await client.query<{ present: boolean; exists: boolean }>(
+        `SELECT to_regclass($1) IS NOT NULL AS exists,
+                EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = to_regclass($1) AND attname = 'partition_key'
+                          AND attnum > 0 AND NOT attisdropped) AS present`,
+        [table],
+    );
+    const row = probe.rows[0];
+    if (!row || row.exists !== true || row.present === true) return false;
+    await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS partition_key TEXT NOT NULL DEFAULT ''`);
+    return true;
+}
 
 /** The trigger FUNCTION (replaceable without any table lock). */
 export const TEXT_TSV_FUNCTION_DDL = `

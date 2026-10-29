@@ -28,7 +28,7 @@
  *   - the workspace's list-partition of a partitioned table (`verbatim_ws_<hash>`; recognised by its
  *     bound `FOR VALUES IN ('<id>')`, not by name): DETACH + DROP, which also frees the disk;
  *   - per-workspace read views `lore_tv_<entity_type_id>` (the id is baked into the view body);
- *   - per-field partial indexes `lore_ev_<field_id>_u|_i` on lore_entity_value.
+ *   - per-field partial indexes `lore_ev_<hash>_<field_id>_u|_i` (and the legacy `lore_ev_<field_id>_u|_i`) on lore_entity_value.
  * Tables with no `workspace_id` are skipped only when listed in {@link GLOBAL_POSTGRES_TABLES}; a table that
  * is neither covered nor listed, or whose columns look workspace-scoped under another name, makes the
  * result `unverifiable` instead of silently "complete". A test fails the build when a new table appears
@@ -43,6 +43,7 @@ import {
 import { closePostgresPool, createPostgresPool } from './postgresClient.js';
 import { closeSharedPostgresPool, sharedPostgresPool } from './postgresPoolOwner.js';
 import { TABLE_TABLES, TABLE_VIEW_PREFIX } from './postgresTableSchema.js';
+import { fieldIndexName, legacyFieldIndexName } from './postgresFieldIndexName.js';
 
 export type PostgresRowKey = 'permanent-id' | 'workspace-name';
 
@@ -203,7 +204,13 @@ async function typedObjects(client: PoolClient, inv: Inventory, key: string): Pr
     if (await tableExists(client, inv.schema, TABLE_TABLES.fieldDef)) {
         const r = await client.query<{ id: string }>(
             `SELECT field_id::text AS id FROM ${ident(inv.schema, TABLE_TABLES.fieldDef)} WHERE ${WORKSPACE_COLUMN} = $1`, [key]);
-        for (const row of r.rows) { indexes.add(`lore_ev_${row.id}_u`); indexes.add(`lore_ev_${row.id}_i`); }
+        for (const row of r.rows) {
+            // Workspace-led names (Phase 0) and the legacy field-id-only names: both may exist until the contract step.
+            for (const kind of ['u', 'i'] as const) {
+                indexes.add(fieldIndexName(key, Number(row.id), kind));
+                indexes.add(legacyFieldIndexName(Number(row.id), kind));
+            }
+        }
     }
     // Views left over from an earlier, interrupted erase (type rows already gone): the id literal is in the body.
     const lit = `${WORKSPACE_COLUMN} = ${quoteLiteral(key)}`;

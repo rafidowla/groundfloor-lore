@@ -4,6 +4,89 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.38.0] — 2026-10-29
+
+Phase 0 of the shard-ready data model (`_lore-3.25-handoff/SHARD-READY-DATA-MODEL-REVIEW-2026-10-28.md`, decisions
+D1–D10): every Postgres key and join now names the workspace, rows carry an optional host-chosen `partition_key` and a
+typed `created_at_ts`, and scope filtering moved into SQL. Plus a fix to the Postgres keyword plan choice found by the
+1M-row MacBook run. Expand-only: every new structure is built at startup (inline on small tables, by a guarded
+background job on large ones); every drop of a legacy structure is an explicit, manual CLI step. No SQLite migration
+beyond one additive column.
+
+### Requirements (Postgres engine only)
+
+- **PostgreSQL ≥ 15** (was 14). `lore_entity`'s new foreign key uses `ON DELETE SET NULL (column)`, which is PG 15
+  syntax. Startup refuses an older server with an upgrade message.
+- **pgvector ≥ 0.8.0** (was 0.5). Vector search uses iterative HNSW scans. Startup refuses an older extension; install
+  the 0.8+ package or image and run `ALTER EXTENSION vector UPDATE;`.
+
+### Added
+
+- **`partition_key` (all engines) and `created_at_ts` (Postgres).** Optional `partitionKey` on `LoreNode`,
+  `NodeBatchWrite`, verbatim metadata, MCP `store_node` and `POST /api/node` (≤ 128 chars, no control characters;
+  invalid → `invalid_partition_key` / HTTP 400). Stored as `TEXT NOT NULL DEFAULT ''` on Postgres `nodes`, `edges`,
+  `verbatim` and SQLite `nodes`; edges and verbatim rows inherit their node's key on Postgres. Omitted from output when
+  empty, so unkeyed callers see unchanged shapes. **Immutable once set:** `''` → `'x'` is allowed, any other change
+  raises `PartitionKeyImmutableError` (`PARTITION_KEY_IMMUTABLE`, HTTP 409), enforced in JS and by an in-SQL guard.
+  Round-trips through backups and exports. Not yet used by recall (Phase 3). `created_at_ts timestamptz` is the typed
+  twin of `nodes."createdAt"`, written on every insert and backfilled per workspace in batches.
+- **`lore postgres drop-global-sk-indexes [--yes] [--json]`** (dry run by default): drops the database-wide
+  `idx_nodes_sk`, `idx_edges_dst_sk`, the legacy `lore_entity` FK/index and old-named D10 field indexes, each only when
+  its workspace-led replacement exists and is valid.
+- **`lore postgres contract-phase0 [--yes] [--json]`**: drops the legacy ingestion keys (promoting the workspace-led
+  key to each table's PRIMARY KEY), the three legacy keyword GIN indexes, and an empty `verbatim_changes_log`. Each step
+  refuses and drops nothing when its replacement is missing or invalid. Idempotent; brief ACCESS EXCLUSIVE locks with
+  `lock_timeout` 15 s.
+
+### Changed (Postgres)
+
+- **Per-workspace `sk` (D1).** `nodes.sk` is unique per workspace (`UNIQUE (workspace_id, sk)`), and every edge-to-node
+  join, traversal frontier, stats, overview and lint query names both `workspace_id` and `sk`. New
+  `idx_edges_ws_dst_sk`, workspace-led `lore_entity` FK + index, D10 field indexes renamed `lore_ev_<h(ws)>_<field>_u|_i`
+  keyed `(workspace_id, value)`. Restore shifts identity values when a bundle's `sk` range overlaps the live table.
+- **Workspace in every key (D2, D9, G14).** Ingestion `UNIQUE (workspace_id, job_id)` /
+  `(workspace_id, job_id, delivery_id)` keys with `ON CONFLICT` switched to them (bounded 23505 retry while both keys
+  exist); workspace-led trigram and tag GIN indexes (`idx_nodes_ws_{label,content}_trgm`, `idx_nodes_ws_tags_gin`,
+  btree_gin) beside the legacy three until the contract step; filesystem blob refs filed under the workspace's
+  permanent id (SQLite keeps the name); valid-time backfill per workspace and batched; Postgres no longer creates or
+  vacuums `verbatim_changes_log` (nothing used it).
+- **Scopes filtered in SQL before the LIMIT (L4).** New `verbatim.security_scope_arr text[]` (trigger-derived from the
+  TEXT column, so older writers and old bundles stay correct; per-partition GIN; batched backfill on first open).
+  Vector (`searchByVector`, `searchByVectors`) and keyword (`bm25Search`) legs filter by scope in SQL, and vector search
+  runs `SET LOCAL hnsw.iterative_scan = relaxed_order`. A scoped actor who can see a small share of a workspace now gets
+  a full topK (before: far fewer). **Fail closed:** scope text that cannot be parsed is now invisible to scoped actors
+  (it used to be treated as public).
+- **Keyword scores normalised once, after filtering (L5).** `bm25Search` carries raw `ts_rank`; the 0–1 scale is
+  applied once after the scope filter. Unchanged for actors with no scopes (byte-identical); for a scoped actor the best
+  visible hit is now 1.0 instead of being pinned by a hidden one.
+- **Keyword plan choice (PR #279).** Before choosing the materialised trigram CTE, a planning-only probe estimates GIN
+  *candidates* (every trigram of a term, ANDed, as the index serves them), not just matches; the CTE runs only when
+  `C_est² ≤ 0.5 × cap × N`. Unreadable probe → ordered walk. Terms like `linest` / `because` whose trigrams are everywhere
+  now walk (216 → 559 ms misroute at 1M rows fixed). Statistics target 1000 on the trigram expression column of every
+  trigram index, applied idempotently on open, with ANALYZE inline on small tables and in the background build on large
+  ones. `LORE_PG_KEYWORD_CTE=0` still turns the CTE off.
+
+### Fixed
+
+- **`lore postgres contract-phase0` on a database without ingestion tables.** Where ingestion never opened (embedded
+  hosts that do not ingest), the step failed on the missing `lore_ingest_jobs` and dropped nothing. It now skips absent
+  ingestion tables; if ingestion opens later, a re-run promotes their keys. Found by the 3.38.0 upgrade test.
+
+### Rollout
+
+1. Upgrade every Lore process that shares the database. Startup builds the new structures; reads and writes are correct
+   while background builds run. Until the contract steps, `nodes` carries six keyword GIN indexes instead of three (extra
+   disk and write cost).
+2. Rollback before the contract steps is a tarball swap: older builds work against the expanded schema.
+3. After every process runs 3.38.0 and the builds are valid, run `lore postgres drop-global-sk-indexes` (dry run, then
+   `--yes`) and `lore postgres contract-phase0 --yes`. **After the contract steps, rolling back to 3.37.x needs a
+   database backup restore** (older builds target the dropped keys).
+
+### Docs
+
+- `docs/CONFIGURATION.md` (PG 15 / pgvector 0.8 floors, contract commands), `docs/POSTGRES_EDGE_LAYOUT.md`, the
+  1M-row MacBook results and the filled-in vector path section of the review (PR #278).
+
 ## [3.37.2] — 2026-10-27
 
 Patch: two Postgres-found fixes. No data migration, no schema change, no config change; swap the tarball and

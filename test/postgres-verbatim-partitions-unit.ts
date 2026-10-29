@@ -108,11 +108,20 @@ await test('8 concurrent first-opens of the SAME new workspace and 8 of DISTINCT
 // ---------------------------------------------------------------- pruning
 /** A pool stand-in that EXPLAINs whatever the search module sends and keeps the plan. */
 function explainPool(onPlan: (plan: unknown) => void): Pool {
+    // The search module runs inside withTransaction (BEGIN / SET LOCAL hnsw.iterative_scan / COMMIT): pass the transaction
+    // control through on a real client and EXPLAIN every other statement on it.
     return {
-        query: async (sql: string, params: unknown[]) => {
-            const res = await pool.query(`EXPLAIN (FORMAT JSON) ${sql}`, params);
-            onPlan((res.rows[0] as Record<string, unknown>)['QUERY PLAN']);
-            return { rows: [] };
+        connect: async () => {
+            const c = await pool.connect();
+            return {
+                query: async (sql: string, params?: unknown[]) => {
+                    if (/^\s*(BEGIN|COMMIT|ROLLBACK|SET LOCAL)\b/i.test(sql)) return c.query(sql);
+                    const res = await c.query(`EXPLAIN (FORMAT JSON) ${sql}`, params);
+                    onPlan((res.rows[0] as Record<string, unknown>)['QUERY PLAN']);
+                    return { rows: [] };
+                },
+                release: () => c.release(),
+            };
         },
     } as unknown as Pool;
 }

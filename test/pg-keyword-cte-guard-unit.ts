@@ -226,12 +226,16 @@ try {
         const d = await probeKeywordPlan(realCteExplain(['enable_seqscan = off']), WS, where, params.values, CAP);
         assert.deepEqual([d.plan, d.ctePlanOk], ['ordered-walk', false], JSON.stringify(d));
     });
+    /** With statistics target 1000 on the trigram indexes the content estimate for this term is 90 (was 3), which makes the planner's
+     *  workspace-btree bitmap + filter marginally cheaper than the 3-arm GIN BitmapOr on this tiny table; SSD-style page costs restore the
+     *  GIN plan. The guard still rejects the btree shape (previous test), so this only pins the plan under test. */
+    const GIN_SWITCHES = ['enable_seqscan = off', 'random_page_cost = 1.1'];
     await test('GIN-backed CTE (rare term, seq scans off): real Postgres plan JSON passes the shape check, so the CTE is still taken (good case kept)', async () => {
         const { params, where } = build('zqgood');
-        const d = await probeKeywordPlan(realCteExplain(['enable_seqscan = off']), WS, where, params.values, CAP);
+        const d = await probeKeywordPlan(realCteExplain(GIN_SWITCHES), WS, where, params.values, CAP);
         assert.deepEqual([d.plan, d.ctePlanOk], ['cte', true], JSON.stringify(d));
         const lim = params.add(CAP);
-        assert.match(await explainText(withPlanner(['enable_seqscan = off']), candidateCteSql(where, lim), params.values), /CTE m\n\s+->\s+Bitmap Heap Scan on nodes\n[\s\S]*?Bitmap Index Scan on idx_nodes_(content|label)_trgm/);
+        assert.match(await explainText(withPlanner(GIN_SWITCHES), candidateCteSql(where, lim), params.values), /CTE m\n\s+->\s+Bitmap Heap Scan on nodes\n[\s\S]*?Bitmap Index Scan on idx_nodes_(content|label)_trgm/);
     });
     await test('unpinned decisions on the real planner are consistent: a CTE decision rests on a GIN-backed CTE plan and a walking original', async () => {
         for (const query of ['zqguard', 'zqgood', 'zqall', 'nomatchatall', 'body 12']) {

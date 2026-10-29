@@ -27,7 +27,7 @@ import { createNodeIfAbsent, type NodeInput } from '../engines/graphShared/condi
 import { isNodeBatchContention } from '../engines/graphShared/nodeBatchRetry.js';
 
 export type NodeGuardFailure =
-    | { ok: false; code: 'already_exists' | 'already_superseded' | 'supersedes_apply_failed' | 'write_failed'; error: Error }
+    | { ok: false; code: 'already_exists' | 'already_superseded' | 'supersedes_apply_failed' | 'write_failed' | 'partition_key_immutable'; error: Error }
     // Phase 2b — `ifRevision` / `preconditions` did not hold (or the engine keeps no revision).
     | { ok: false; code: 'revision_mismatch' | 'precondition_failed' | 'revision_unsupported'; error: Error; currentRevision?: number | null; failedPreconditions?: FailedPrecondition[] };
 

@@ -130,6 +130,8 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
             // convention/architecture. See core/supersessionPolicy.ts.
             supersedes: z.array(z.string().min(1)).optional()
                 .describe('Ids this write supersedes. Pass [] to explicitly assert "supersedes nothing". Required under an enforcing workspace supersession policy for decision/convention/architecture nodes — see the supersession_candidates tool for near-duplicate discovery.'),
+            partitionKey: z.string().optional()
+                .describe('Optional shard/partition grouping key (at most 128 characters, no control characters). Omit = unkeyed. Once a node has a non-empty key it is immutable: re-storing the node with a different key is refused with PARTITION_KEY_IMMUTABLE. Edges and the verbatim row inherit the key. Not used by recall.'),
             force: z.boolean().optional()
                 .describe('Bypasses the near-duplicate check for this one write (does not bypass the missing-field or prose-mismatch checks).'),
             autolink: z.boolean().optional()
@@ -198,6 +200,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                 const anchors = args.anchors as string | undefined;
                 const changeset_id = args.changeset_id as string | undefined;
                 const validFrom = args.validFrom as string | undefined;
+                const partitionKey = args.partitionKey as string | undefined;
                 const validUntil = args.validUntil as string | undefined;
                 // W1 — `embed: false` means skip the verbatim/lancedb write
                 // entirely. Default (undefined or true) keeps current
@@ -295,7 +298,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                             operation: 'store_node',
                             workspaceId: resolved.resolvedWorkspace,
                             initiator: deps.detectedScope.workspace,
-                            args: { id, type, label, content, tags, metadata, workspace: scopedWorkspace, ecosystem: scopedEcosystem },
+                            args: { id, type, label, content, tags, metadata, workspace: scopedWorkspace, ecosystem: scopedEcosystem, ...(partitionKey !== undefined ? { partitionKey } : {}) },
                             enqueueRationale: verdict.reason,
                         });
                         // NW-7f (api-004) — pre-fix this branch returned
@@ -362,6 +365,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                             ...(anchors !== undefined ? { anchors } : {}),
                             ...(validFrom !== undefined ? { validFrom } : {}),
                             ...(validUntil !== undefined ? { validUntil } : {}),
+                            ...(partitionKey !== undefined ? { partitionKey } : {}),
                         },
                     });
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ buffered: true, changeset_id, seq, id, workspace: scopedWorkspace }, null, 2) }] };
@@ -418,6 +422,7 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                     ...(anchors !== undefined ? { anchors } : {}),
                     ...(validFrom !== undefined ? { validFrom } : {}),
                     ...(validUntil !== undefined ? { validUntil } : {}),
+                    ...(partitionKey !== undefined ? { partitionKey } : {}),
                 };
 
                 // W3-SERVICE-LAYER — the guarded write core (outbox-first
@@ -512,6 +517,19 @@ export function registerStoreNodeTool(mcpServer: McpServer, deps: MemoryToolsDep
                     // violation is a caller input error, not a substrate
                     // failure; give it its own clear message + code instead of
                     // the generic "vector store unavailable" wording below.
+                    // Phase 0 L3 — a bad / immutable `partitionKey` is a caller input error with its own stable code.
+                    if (writeResult.code === 'invalid_partition_key') {
+                        return {
+                            content: [{ type: 'text' as const, text: JSON.stringify({ error: 'invalid_partition_key', reason: writeResult.error.message }, null, 2) }],
+                            isError: true,
+                        };
+                    }
+                    if (writeResult.code === 'partition_key_immutable') {
+                        return {
+                            content: [{ type: 'text' as const, text: JSON.stringify({ error: 'PARTITION_KEY_IMMUTABLE', reason: writeResult.error.message }, null, 2) }],
+                            isError: true,
+                        };
+                    }
                     if (writeResult.code === 'invalid_questions_meta') {
                         return {
                             content: [{ type: 'text' as const, text: JSON.stringify({ error: 'invalid_questions_meta', reason: writeResult.error.message }, null, 2) }],

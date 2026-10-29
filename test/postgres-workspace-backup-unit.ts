@@ -138,7 +138,7 @@ async function main(): Promise<void> {
             assert.equal(by['bk_items'], 25); assert.equal(by['bk_item_notes'], 25); assert.equal(by['bk_parted'], 25);
             assert.equal(sumA.totalRows, 25 * 6 + 24);
             const ex = sumA.excluded.map((e) => e.table).sort();
-            assert.ok(ex.includes('bk_global') && ex.includes('verbatim_changes_log'), JSON.stringify(ex));
+            assert.ok(ex.includes('bk_global') && ex.includes('verbatim_common_lexemes'), JSON.stringify(ex));
             assert.ok(sumA.excluded.every((e) => e.reason.length > 10));
             const manifest = JSON.parse(fs.readFileSync(sumA.manifestPath, 'utf8')) as { header: { sourceWorkspaceId: string; pgvectorVersion: string | null; loreVersion: string; tables: { columns: { type: string }[] }[] } };
             assert.equal(manifest.header.sourceWorkspaceId, 'ws-a');

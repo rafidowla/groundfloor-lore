@@ -19,6 +19,7 @@ import { wouldCreateSupersedeCycle } from '../graphShared/supersedeCycle.js';
 import { supersedeGuardVerdict, type SupersedeResult } from '../graphShared/supersedeGuard.js';
 import { NodeAlreadyExistsError } from '../graphShared/conditionalInsert.js';
 import { RevisionConflictError } from '../graphShared/revision.js';
+import { PartitionKeyImmutableError } from '../graphShared/partitionKey.js';
 import type { SqliteDb } from './sqliteGraphSchema.js';
 import { fromSqliteNodeRow, NODE_WRITE_COLUMNS, SQLITE_OUTCOME_COUNTER_SEED, toNodeRow } from './sqliteGraphRow.js';
 
@@ -155,8 +156,11 @@ export function writeNodeSync(
         const setClause = cols.map((c) => `${c} = @${c}`).join(', ');
         const insertRevision = m.mode === 'bump' || m.mode === 'keep' ? 1 : m.mode === 'conditional' ? m.expectedRevision + 1 : m.revision;
         const updateRevision = m.mode === 'replay' ? '@rev_new' : m.mode === 'keep' ? 'nodes.revision' : 'nodes.revision + 1';
-        const guard = m.mode === 'bump' || m.mode === 'keep' ? ''
-            : m.mode === 'conditional' ? ' WHERE nodes.revision = @rev_expected' : ' WHERE nodes.revision < @rev_new';
+        // L3: the key is immutable once non-empty - enforced here too so a second connection that keyed the row
+        // after the read above cannot be overwritten (zero rows -> re-read -> PartitionKeyImmutableError below).
+        const keyGuard = "(nodes.partition_key = '' OR nodes.partition_key = excluded.partition_key)";
+        const guard = m.mode === 'bump' || m.mode === 'keep' ? ` WHERE ${keyGuard}`
+            : m.mode === 'conditional' ? ` WHERE nodes.revision = @rev_expected AND ${keyGuard}` : ` WHERE nodes.revision < @rev_new AND ${keyGuard}`;
         // mustExist: a pure UPDATE, so a row deleted by another connection after the read above is a conflict, not an insert.
         const res = m.mode === 'conditional' && m.mustExist
             ? db.prepare(`UPDATE nodes SET ${setClause}, revision = nodes.revision + 1 WHERE id = @id AND nodes.revision = @rev_expected`)
@@ -170,6 +174,10 @@ export function writeNodeSync(
                 ...(m.mode === 'replay' ? { rev_new: m.revision } : {}),
             });
         if (res.changes === 0) {
+            const raced = db.prepare('SELECT revision, partition_key FROM nodes WHERE id = ?').get(node.id) as { revision: number; partition_key: string } | undefined;
+            if (raced && raced.partition_key !== '' && raced.partition_key !== doc['partition_key']) {
+                throw new PartitionKeyImmutableError(node.id, raced.partition_key, String(doc['partition_key']));
+            }
             const actual = (db.prepare('SELECT revision FROM nodes WHERE id = ?').get(node.id) as { revision: number } | undefined)?.revision ?? 0;
             throw new RevisionConflictError(node.id, m.mode === 'conditional' ? m.expectedRevision : m.mode === 'replay' ? m.revision : 0, actual);
         }
@@ -182,9 +190,10 @@ export function writeNodeSync(
             updatedAt: now,
             syncedAt: null,
             revision: stored?.revision ?? insertRevision,
+            ...(doc['partition_key'] ? { partitionKey: doc['partition_key'] as string } : {}),
         };
     } catch (error) {
-        if (error instanceof LoreGraphError || error instanceof RevisionConflictError) throw error;
+        if (error instanceof LoreGraphError || error instanceof RevisionConflictError || error instanceof PartitionKeyImmutableError) throw error;
         throw sqliteError(`Failed to upsert node '${node.id}'`, 'upsertNode', error);
     }
 }
@@ -201,12 +210,13 @@ export async function insertNodeIfAbsent(
 ): Promise<LoreNode> {
     try {
         const now = new Date().toISOString();
-        const doc = { ...SQLITE_OUTCOME_COUNTER_SEED, ...toNodeRow(node, now, now) };
+        const row = toNodeRow(node, now, now);
+        const doc = { ...SQLITE_OUTCOME_COUNTER_SEED, ...row };
         const cols = [...NODE_WRITE_COLUMNS, ...Object.keys(SQLITE_OUTCOME_COUNTER_SEED)];
         db.prepare(
             `INSERT INTO nodes (id, ${cols.join(', ')}, revision) VALUES (@id, ${cols.map((c) => `@${c}`).join(', ')}, 1)`,
         ).run({ id: node.id, ...doc });
-        return { ...node, tags: tagsToArray(node.tags), createdAt: now, updatedAt: now, syncedAt: null, revision: 1 };
+        return { ...node, tags: tagsToArray(node.tags), createdAt: now, updatedAt: now, syncedAt: null, revision: 1, ...(row['partition_key'] ? { partitionKey: row['partition_key'] as string } : {}) };
     } catch (error) {
         const e = error as { code?: unknown; message?: unknown };
         if ((typeof e.code === 'string' && e.code.startsWith('SQLITE_CONSTRAINT'))

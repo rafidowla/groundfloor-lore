@@ -15,9 +15,13 @@
  * Results are keyed exactly like the SQLite implementation: every input key is
  * present in the returned Map (an empty list when nothing matched).
  *
- * Approximation: HNSW returns ef_search (default 40) candidates BEFORE the
- * ecosystem/type/security filters apply, so a selective filter can return
- * fewer than topK rows. That is the same behavior as searchByVector.
+ * Scope filtering is in SQL (`security_scope_arr`, see postgresVerbatimScopeArr.ts), and every statement runs in
+ * a short explicit transaction with `SET LOCAL hnsw.iterative_scan = relaxed_order` (pgvector >= 0.8; the pool is
+ * autocommit, so SET LOCAL needs the transaction). With iterative scans the HNSW index keeps walking until the
+ * LIMIT is satisfied after the scope/ecosystem/type/canonical predicates, so a scoped actor who can see ~5% of the
+ * workspace still gets a full topK (bounded by hnsw.max_scan_tuples, default 20000). `relaxed_order` may emit
+ * neighbours slightly out of distance order, so the inner LIMIT is materialized and re-sorted. The JS
+ * applyActorScopeFilter after the query is kept only as a final assertion: it must never remove a row.
  */
 
 import type { Pool } from 'pg';
@@ -25,11 +29,28 @@ import type { Pool } from 'pg';
 import type { VerbatimQueryFilter, VerbatimSearchResult } from '../../../providers/types.js';
 import { applyActorScopeFilter } from '../../../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../../../security/actorContext.js';
+import { log } from '../../../logger.js';
 import { pgFilterSql } from './postgresVerbatimFts.js';
+import { withTransaction } from '../postgresClient.js';
+import { scopeFilterSql } from '../postgresVerbatimScopeArr.js';
 
 const RESULT_COLUMNS = `id, text, type, label, tags, project, ecosystem, "updatedAt", security_scopes`;
 /** Link-on-arrival / rebuild: the linker reads only the id, score, ecosystem and scopes of a hit; `text` is the heavy column. */
 const LINK_RESULT_COLUMNS = `id, ecosystem, security_scopes`;
+
+/** `SET LOCAL` of the iterative HNSW scan mode; only valid inside the transaction {@link withTransaction} opens. */
+const ITERATIVE_SCAN_SQL = `SET LOCAL hnsw.iterative_scan = relaxed_order`;
+
+/**
+ * Final assertion that the SQL scope predicate did its job: the same JS policy over the rows already returned. It
+ * must never remove anything (the SQL ran before the LIMIT); if it does, the SQL and the policy have drifted, so
+ * the surplus rows are dropped (fail closed) and the drift is logged.
+ */
+function assertScopes(rows: VerbatimSearchResult[], scopes: ReadonlyArray<string> | undefined): VerbatimSearchResult[] {
+    const kept = applyActorScopeFilter(rows, scopes);
+    if (kept.length !== rows.length) log.warn(`[verbatim-scope] SQL scope predicate returned ${rows.length - kept.length} row(s) the JS policy rejects; dropped`);
+    return kept;
+}
 
 /** pgvector text literal for one query vector. */
 function vectorLiteral(v: number[]): string {
@@ -63,19 +84,29 @@ export async function searchOne(
     pool: Pool, workspaceId: string, queryVector: number[], topK: number,
     filter: VerbatimQueryFilter | undefined, actorScopes: ReadonlyArray<string> | undefined,
 ): Promise<VerbatimSearchResult[]> {
+    const effective = actorScopes ?? getCurrentActorScopes();
     // Array-valued filter fields become IN (...) pushdowns; `?` placeholders renumber to $n after
     // $1 (workspace) and $2 (query vector). See postgresVerbatimFts.pgFilterSql.
     const f = pgFilterSql(filter as Record<string, unknown> | undefined, 3);
-    const res = await pool.query(
-        `SELECT ${RESULT_COLUMNS}, 1 - (vector <=> $2::vector) AS score
-           FROM verbatim
-          WHERE workspace_id = $1 AND is_canonical = 1 AND is_tombstone = 0
-          ${f.sql}
-          ORDER BY vector <=> $2::vector
-          LIMIT $${3 + f.params.length}`,
-        [workspaceId, vectorLiteral(queryVector), ...f.params, topK],
-    );
-    return applyActorScopeFilter(res.rows.map(rowToVectorResult), actorScopes ?? getCurrentActorScopes());
+    const sc = scopeFilterSql(effective, 3 + f.params.length);
+    const limitParam = 3 + f.params.length + sc.params.length;
+    const res = await withTransaction(pool, async (tx) => {
+        await tx.query(ITERATIVE_SCAN_SQL);
+        return tx.query(
+            `WITH hits AS MATERIALIZED (
+                 SELECT ${RESULT_COLUMNS}, 1 - (vector <=> $2::vector) AS score
+                   FROM verbatim
+                  WHERE workspace_id = $1 AND is_canonical = 1 AND is_tombstone = 0
+                  ${f.sql}
+                  ${sc.sql}
+                  ORDER BY vector <=> $2::vector
+                  LIMIT $${limitParam})
+             SELECT * FROM hits ORDER BY score DESC, id`,
+            [workspaceId, vectorLiteral(queryVector), ...f.params, ...sc.params, topK],
+        );
+    });
+    // Final assertion only: the SQL predicate already applied the policy before the LIMIT.
+    return assertScopes(res.rows.map(rowToVectorResult), effective);
 }
 
 /** Many query vectors -> a Map keyed by the caller's key, in ONE round trip. */
@@ -88,22 +119,28 @@ export async function searchMany(
     if (queries.length === 0) return out;
     const columns = opts.columns === 'link' ? LINK_RESULT_COLUMNS : RESULT_COLUMNS;
     // $1 workspace, $2 ordinals, $3 vectors, filter from $4, limit last.
-    const f = pgFilterSql(opts.filter as Record<string, unknown> | undefined, 4);
-    const res = await pool.query(
-        `SELECT q.ord, r.*
-           FROM unnest($2::int[], $3::text[]) AS q(ord, vec)
-           CROSS JOIN LATERAL (
-               SELECT ${columns}, 1 - (vector <=> q.vec::vector) AS score
-                 FROM verbatim
-                WHERE workspace_id = $1 AND is_canonical = 1 AND is_tombstone = 0
-                ${f.sql}
-                ORDER BY vector <=> q.vec::vector
-                LIMIT $${4 + f.params.length}
-           ) r
-          ORDER BY q.ord, r.score DESC, r.id`,
-        [workspaceId, queries.map((_, i) => i), queries.map((q) => vectorLiteral(q.vector)), ...f.params, opts.topK],
-    );
     const scopes = opts.actorScopes ?? getCurrentActorScopes();
+    const f = pgFilterSql(opts.filter as Record<string, unknown> | undefined, 4);
+    const sc = scopeFilterSql(scopes, 4 + f.params.length);
+    const limitParam = 4 + f.params.length + sc.params.length;
+    const res = await withTransaction(pool, async (tx) => {
+        await tx.query(ITERATIVE_SCAN_SQL);
+        return tx.query(
+            `SELECT q.ord, r.*
+               FROM unnest($2::int[], $3::text[]) AS q(ord, vec)
+               CROSS JOIN LATERAL (
+                   SELECT ${columns}, 1 - (vector <=> q.vec::vector) AS score
+                     FROM verbatim
+                    WHERE workspace_id = $1 AND is_canonical = 1 AND is_tombstone = 0
+                    ${f.sql}
+                    ${sc.sql}
+                    ORDER BY vector <=> q.vec::vector
+                    LIMIT $${limitParam}
+               ) r
+              ORDER BY q.ord, r.score DESC, r.id`,
+            [workspaceId, queries.map((_, i) => i), queries.map((q) => vectorLiteral(q.vector)), ...f.params, ...sc.params, opts.topK],
+        );
+    });
     const perOrd = new Map<number, VerbatimSearchResult[]>();
     for (const row of res.rows as Array<Record<string, unknown>>) {
         const ord = Number(row.ord);
@@ -111,6 +148,6 @@ export async function searchMany(
         list.push(rowToVectorResult(row));
         perOrd.set(ord, list);
     }
-    queries.forEach((q, i) => out.set(q.key, applyActorScopeFilter(perOrd.get(i) ?? [], scopes)));
+    queries.forEach((q, i) => out.set(q.key, assertScopes(perOrd.get(i) ?? [], scopes)));
     return out;
 }

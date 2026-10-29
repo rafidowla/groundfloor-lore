@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     supersededBy TEXT NOT NULL DEFAULT '',
     supersededAt TEXT NOT NULL DEFAULT '',
     supersededReason TEXT NOT NULL DEFAULT '',
+    partition_key TEXT NOT NULL DEFAULT '',
     lastAccessedAt TEXT NOT NULL DEFAULT '',
     last_retrieved_at TEXT NOT NULL DEFAULT '',
     success_count INTEGER NOT NULL DEFAULT 0,
@@ -145,6 +146,7 @@ export function openSqliteGraph(basePath: string): SqliteGraphConnection {
     db.function('lore_lower', loreLower);
     db.exec(NODES_DDL);
     ensureRevisionColumn(db);
+    ensurePartitionKeyColumn(db);
     db.exec(EDGES_DDL);
     ensureEdgeProvenanceColumns(db);
     db.exec(LINK_OPTOUT_DDL);
@@ -172,6 +174,22 @@ export function ensureRevisionColumn(db: SqliteDb): void {
     if (cols.some((c) => c.name === 'revision')) return;
     try {
         db.exec('ALTER TABLE nodes ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+    } catch (error) {
+        if (!/duplicate column name/i.test((error as Error).message)) throw error;
+    }
+}
+
+/**
+ * ensurePartitionKeyColumn - Phase 0 lane L3. Same probe-then-ALTER as `ensureRevisionColumn`:
+ * `nodes.partition_key TEXT NOT NULL DEFAULT ''` (existing rows read as unkeyed). SQLite edges carry
+ * no key column (the key is read through the source node). An older Lore opening the migrated file
+ * keeps working: its statements name their columns and the new one has a default.
+ */
+export function ensurePartitionKeyColumn(db: SqliteDb): void {
+    const cols = db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === 'partition_key')) return;
+    try {
+        db.exec("ALTER TABLE nodes ADD COLUMN partition_key TEXT NOT NULL DEFAULT ''");
     } catch (error) {
         if (!/duplicate column name/i.test((error as Error).message)) throw error;
     }

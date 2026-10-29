@@ -77,6 +77,8 @@ export const STORE_NODE_KNOWN_FIELDS: ReadonlyArray<string> = Object.freeze([
     'force',
     // Link-on-arrival: explicit `autolink:false` keeps this write out of the link queue. Never stored on the node.
     'autolink',
+    // Phase 0 lane L3 - optional shard/partition grouping key (<= 128 chars, immutable once non-empty). See engines/graphShared/partitionKey.ts.
+    'partitionKey',
 ]);
 
 // store_edge / recall strict-field arrays land in a follow-up slice

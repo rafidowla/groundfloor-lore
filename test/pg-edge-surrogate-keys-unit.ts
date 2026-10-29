@@ -70,11 +70,11 @@ try {
         assert.ok(!c.includes('source_id') && !c.includes('target_id'), `columns: ${c}`);
         assert.deepEqual(c.slice(0, 2), ['src_sk', 'dst_sk']);
     });
-    await test('primary key is (workspace_id, src_sk, dst_sk, relation); only dst_sk and relation indexes besides it', async () => {
+    await test('primary key is (workspace_id, src_sk, dst_sk, relation); only the dst_sk, workspace-led dst_sk and relation indexes besides it', async () => {
         const pk = await q<{ def: string }>("SELECT pg_get_constraintdef(oid) AS def FROM pg_constraint WHERE conrelid = 'edges'::regclass AND contype = 'p'");
         assert.equal(pk[0]!.def, 'PRIMARY KEY (workspace_id, src_sk, dst_sk, relation)');
         const idx = (await q<{ indexname: string }>("SELECT indexname FROM pg_indexes WHERE tablename = 'edges' ORDER BY 1")).map((r) => r.indexname);
-        assert.deepEqual(idx, ['edges_pkey', 'idx_edges_dst_sk', 'idx_edges_relation']);
+        assert.deepEqual(idx, ['edges_pkey', 'idx_edges_dst_sk', 'idx_edges_relation', 'idx_edges_ws_dst_sk']);
     });
     await test('src_sk / dst_sk carry the lore:references nodes.sk marker (backup remap), with no foreign key', async () => {
         const c = await q<{ n: string; d: string }>(

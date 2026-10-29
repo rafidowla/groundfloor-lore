@@ -45,8 +45,8 @@ function edgePairsBy(pool: Pool, workspaceId: string, column: string): Promise<A
     const col = pgQuoteIdent(assertIdent(column));
     return pool.query(
         `SELECT ns.${col} AS f, nt.${col} AS t FROM edges e`
-        + ' JOIN nodes ns ON ns.sk = e.src_sk'
-        + ' JOIN nodes nt ON nt.sk = e.dst_sk'
+        + ' JOIN nodes ns ON ns.workspace_id = e.workspace_id AND ns.sk = e.src_sk'
+        + ' JOIN nodes nt ON nt.workspace_id = e.workspace_id AND nt.sk = e.dst_sk'
         + ' WHERE e.workspace_id = $1 AND e.valid_to IS NULL LIMIT $2::int',
         [workspaceId, TOPOLOGY_OVERVIEW_EDGE_CAP],
     ).then((res) => res.rows as Array<{ f: string; t: string }>);
@@ -106,7 +106,7 @@ export async function lintGraph(pool: Pool, workspaceId: string): Promise<string
             `SELECT id, type FROM nodes n
              WHERE n.workspace_id = $1 AND n.type != 'note'
                AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.workspace_id = n.workspace_id AND e.src_sk = n.sk AND e.valid_to IS NULL)
-               AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst_sk = n.sk AND e.valid_to IS NULL)
+               AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.workspace_id = n.workspace_id AND e.dst_sk = n.sk AND e.valid_to IS NULL)
              ORDER BY id ASC`, // 3.27.1: deterministic message order
             [workspaceId],
         );

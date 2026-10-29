@@ -25,13 +25,31 @@
  *      statement, no execution) - if it does not, there is nothing to fix;
  *   2. M_est > cap / 2 (below that the walk is not the problem);
  *   3. M_est <= CTE_MAX_MATCHES (bound the materialised set);
- *   4. M_est^2 <= K * cap * N_est (K = CTE_BREAK_EVEN): the CTE is clearly cheaper than the walk;
- *   5. the CTE's own EXPLAIN builds `CTE m` from the keyword GIN indexes, not a Seq Scan (see below).
+ *   4. M_est^2 <= K * cap * N_est (K = CTE_BREAK_EVEN = 0.5): the CTE is cheaper than the walk (measured, see CTE_BREAK_EVEN);
+ *   5. the CANDIDATE VOLUME is affordable (see below): C_est <= CTE_MAX_MATCHES and C_est^2 <= K * cap * N_est;
+ *   6. the CTE's own EXPLAIN builds `CTE m` from the keyword GIN indexes, not a Seq Scan (see below).
  * M_est and N_est are the root "Plan Rows" of EXPLAIN (FORMAT JSON) probes (planning only; the
  * result is memoised by the caller's read cache like the search itself). Probes run in order of
  * cheapness and stop early: a term the planner already handles costs one extra round trip
- * (about 0.3-0.4 ms); only walking, mid-frequency terms pay for three, and one more (four) when the estimates favour the CTE. Anything the probe cannot
+ * (about 0.3-0.4 ms); only walking, mid-frequency terms pay for three, then one per probed term (at most MAX_CANDIDATE_PROBES) and one more when the estimates favour the CTE. Anything the probe cannot
  * read yields "keep the original".
+ *
+ * CANDIDATE VOLUME. `lower(content) LIKE '%linest%'` is served by the trigram GIN as "rows containing lin AND ine AND nes
+ * AND est" and every candidate is rechecked against the heap row by row, so the CTE's cost is linear in CANDIDATES, not in
+ * matches. When the term's trigrams are common, candidates >> matches and the planner's M_est does not see it (1M bench: `linest`
+ * est 30k / actual 41k went 216 -> 559 ms through the CTE; it rechecked ~120-150k rows). Probe 4 (after the M / N checks pass)
+ * therefore asks the planner, per trigram-served term, for the row estimate of the AND of that term's distinct 3-grams as
+ * separate LIKE patterns, over (label OR content) exactly as the real clause ORs them, in one EXPLAIN (planning only). The OR
+ * estimate is the sum of the two columns' candidate estimates minus their overlap, and is capped at N by construction.
+ * C_est = max(M_est, min over probed terms of C_term): the bitmap ANDs the terms, so the cheapest term bounds the work, and a
+ * candidate set can never be smaller than the matches. Terms shorter than a trigram (and tag-only arms, which are exact
+ * containment with no recheck inflation) are not probed; when NO term is probeable the M / N rule stands alone. A probe the
+ * planner cannot answer, or that throws, keeps the original statement. At most MAX_CANDIDATE_PROBES terms are probed (longest
+ * first: more trigrams, more selective), and probing stops at the first term that clears the bar.
+ *
+ * STATISTICS. Both estimates (M_est, C_term) come from LIKE selectivity on the lower(content) / lower(label) expression
+ * statistics, which are histogram-based on ~100 samples by default and swing about 2x between ANALYZEs. ensureKeywordIndexes
+ * raises the statistics target of the two trigram indexes' expression column to 1000 (postgresKeywordIndex.ts).
  *
  * THE CTE'S OWN PLAN (lane f1). The estimates above say the CTE should beat the walk, but they do not say HOW the
  * planner will build the CTE. When it puts a Seq Scan on nodes inside `CTE m` the CTE evaluates the LIKE / jsonb
@@ -50,11 +68,21 @@
  * pre-#251 behaviour, no extra round trips. Default on.
  */
 import type { Pool } from 'pg';
+import { escapeLike, isTrigramTerm } from './postgresKeywordMatch.js';
 
 /** Never materialise more candidates than this, whatever the estimates say. */
 export const CTE_MAX_MATCHES = 200_000;
-/** CTE is chosen while M^2 <= K * cap * N, i.e. when it is clearly (about 2x) cheaper than the recency walk. */
+/**
+ * CTE is chosen while M^2 <= K * cap * N (and C^2 <= K * cap * N for the candidate volume), i.e. when it is cheaper than the
+ * recency walk. K = 0.5 puts the switch at ~31.6k matches at 1M rows (cap 2000), where the 1M MacBook re-check (2026-10-29) measured
+ * the crossover: the CTE won 1.5-8x for clean terms up to ~31k true matches and the walk won from ~41k. Before the candidate probe
+ * and statistics target 1000, K = 0.5 misrouted `linest` (trigram-inflated candidates) and `because` (under-estimated M); with
+ * both in place, a 17-term x 3-ANALYZE simulation at K = 0.5 was never slower than the walk (worst 1.03x), total 6.9 s vs 10.2 s at
+ * K = 0.125 and 10.4 s for the walk alone. M_est still moves ~1.7x between ANALYZE runs, so terms near the threshold can flip plan.
+ */
 export const CTE_BREAK_EVEN = 0.5;
+/** Most terms whose candidate volume is probed for one query (each costs one planning-only round trip). */
+export const MAX_CANDIDATE_PROBES = 3;
 
 export type KeywordPlan = 'cte' | 'ordered-walk';
 
@@ -64,6 +92,11 @@ export interface KeywordPlanDecision {
     walks: boolean | null;
     estMatches: number | null;
     estRows: number | null;
+    /**
+     * Estimated candidates the CTE would touch: max(M_est, min over probed terms of C_term). undefined = not probed (the rule
+     * stopped earlier, or no term was probeable); null = a probe was unreadable.
+     */
+    estCandidates?: number | null;
     /** The CTE statement's own plan avoids a full scan of nodes (null = not probed or unreadable). */
     ctePlanOk?: boolean | null;
     /** The probe threw (class/code only, never query text); the original statement was kept. */
@@ -84,12 +117,57 @@ export function keywordCteEnabled(env: NodeJS.ProcessEnv = process.env): boolean
 /** The recency index the original statement walks (created unquoted, so Postgres folds it to lower case). */
 const RECENCY_INDEX = 'idx_nodes_updatedat';
 
-/** Pure decision rule (exported for tests). Unknown estimates keep the original statement. */
-export function decideKeywordPlan(estMatches: number | null, estRows: number | null, cap: number): KeywordPlan {
+/**
+ * Pure decision rule (exported for tests). Unknown estimates keep the original statement.
+ * `estCandidates` is C_est, the candidates the CTE would touch (see CANDIDATE VOLUME): undefined = no term could be probed,
+ * so only the M / N rule applies; null or invalid = a probe was unreadable, keep the original.
+ */
+export function decideKeywordPlan(
+    estMatches: number | null,
+    estRows: number | null,
+    cap: number,
+    estCandidates?: number | null,
+): KeywordPlan {
     if (estMatches === null || estRows === null || !(estMatches > 0) || !(estRows > 0)) return 'ordered-walk';
     if (estMatches <= cap / 2) return 'ordered-walk';
     if (estMatches > CTE_MAX_MATCHES) return 'ordered-walk';
-    return estMatches * estMatches <= CTE_BREAK_EVEN * cap * estRows ? 'cte' : 'ordered-walk';
+    if (estMatches * estMatches > CTE_BREAK_EVEN * cap * estRows) return 'ordered-walk';
+    if (estCandidates === undefined) return 'cte';
+    if (estCandidates === null || !Number.isFinite(estCandidates) || !(estCandidates > 0)) return 'ordered-walk';
+    const c = Math.max(estCandidates, estMatches); // a candidate set is never smaller than the matches
+    if (c > CTE_MAX_MATCHES) return 'ordered-walk';
+    return c * c <= CTE_BREAK_EVEN * cap * estRows ? 'cte' : 'ordered-walk';
+}
+
+/** Distinct 3-grams of `term` (by code point, in order of first appearance). Empty when the term has no trigram. */
+export function termTrigrams(term: string): string[] {
+    const cps = [...term];
+    const out = new Set<string>();
+    for (let i = 0; i + 3 <= cps.length; i++) out.add(cps.slice(i, i + 3).join(''));
+    return [...out];
+}
+
+/**
+ * Planning-only statement whose root Plan Rows is the candidate estimate of one trigram-served term: rows the trigram GIN
+ * indexes return for "all of the term's 3-grams" on label OR content (the arms the real clause ORs; an OR estimate is the
+ * sum minus the overlap, so it is capped at N). Every pattern is a bound parameter, LIKE metacharacters escaped as
+ * postgresKeywordMatch.escapeLike does. `values[0]` is the workspace id. Null for a term with no trigram.
+ */
+export function candidateProbeSql(workspaceId: string, term: string): { sql: string; values: string[] } | null {
+    if (!isTrigramTerm(term)) return null;
+    const grams = termTrigrams(term);
+    if (grams.length === 0) return null;
+    const values: string[] = [workspaceId, ...grams.map((g) => `%${escapeLike(g)}%`)];
+    const arm = (expr: string): string => grams.map((_, i) => `${expr} LIKE $${i + 2}`).join(' AND ');
+    return {
+        sql: `EXPLAIN (FORMAT JSON) SELECT 1 FROM nodes WHERE workspace_id = $1 AND ((${arm('lower(label)')}) OR (${arm('lower(content)')}))`,
+        values,
+    };
+}
+
+/** The terms to probe, in order: trigram-served only, longest first, deduplicated, at most MAX_CANDIDATE_PROBES. */
+export function probeableTerms(terms: readonly string[]): string[] {
+    return [...new Set(terms.filter(isTrigramTerm))].sort((a, b) => [...b].length - [...a].length).slice(0, MAX_CANDIDATE_PROBES);
 }
 
 /** Root "Plan Rows" of an `EXPLAIN (FORMAT JSON)` result, or null when the shape is not recognised. */
@@ -153,6 +231,7 @@ function safeParse(text: string): unknown {
 /**
  * probeKeywordPlan - decide between the original statement and the CTE form from planner estimates only.
  * `where` is the WHERE body after `workspace_id = $1`; `values` are its parameters ($1 = workspace id), WITHOUT the limit.
+ * `terms` are the query's keyword terms (keywordSearchTerms), used only for the candidate-volume probe; none = no such probe.
  */
 export async function probeKeywordPlan(
     pool: Pick<Pool, 'query'>,
@@ -160,9 +239,10 @@ export async function probeKeywordPlan(
     where: string,
     values: readonly unknown[],
     cap: number,
+    terms: readonly string[] = [],
 ): Promise<KeywordPlanDecision> {
     try {
-        return await probeUnguarded(pool, workspaceId, where, values, cap);
+        return await probeUnguarded(pool, workspaceId, where, values, cap, terms);
     } catch (err) {
         // A failed probe must never fail the search: run the original statement. Class / SQLSTATE only, never query text.
         const sig = errorSignature(err);
@@ -187,6 +267,7 @@ async function probeUnguarded(
     where: string,
     values: readonly unknown[],
     cap: number,
+    terms: readonly string[],
 ): Promise<KeywordPlanDecision> {
     // 1. Would the planner walk the recency index for the statement we are about to run?
     const walk = await pool.query(`EXPLAIN (FORMAT JSON) ${orderedWalkSql(where, `$${values.length + 1}`)}`, [...values, cap]);
@@ -202,10 +283,25 @@ async function probeUnguarded(
     const n = await pool.query('EXPLAIN (FORMAT JSON) SELECT 1 FROM nodes WHERE workspace_id = $1', [workspaceId]);
     const estRows = planRowsOf(n.rows);
     if (decideKeywordPlan(estMatches, estRows, cap) !== 'cte') return { plan: 'ordered-walk', walks, estMatches, estRows };
-    // 4. The estimates favour the CTE; confirm the planner will build it from the GIN indexes, not a full scan of nodes.
+    // 4. Candidate volume: the CTE rechecks every row the trigram indexes return, not just the matches.
+    let estCandidates: number | null | undefined;
+    for (const term of probeableTerms(terms)) {
+        const probe = candidateProbeSql(workspaceId, term);
+        if (!probe) continue;
+        const cr = await pool.query(probe.sql, probe.values);
+        const cTerm = planRowsOf(cr.rows);
+        if (cTerm === null) { estCandidates = null; break; } // unreadable: keep the original
+        const c = Math.max(cTerm, estMatches);
+        estCandidates = estCandidates === undefined || estCandidates === null ? c : Math.min(estCandidates, c);
+        if (decideKeywordPlan(estMatches, estRows, cap, estCandidates) === 'cte') break; // the cheapest term already clears the bar
+    }
+    if (estCandidates !== undefined && decideKeywordPlan(estMatches, estRows, cap, estCandidates) !== 'cte') {
+        return { plan: 'ordered-walk', walks, estMatches, estRows, estCandidates };
+    }
+    // 5. The estimates favour the CTE; confirm the planner will build it from the GIN indexes, not a full scan of nodes.
     const c = await pool.query(`EXPLAIN (FORMAT JSON) ${candidateCteSql(where, `$${values.length + 1}`)}`, [...values, cap]);
     const ctePlanOk = cteUsesKeywordIndexes(c.rows);
-    return { plan: ctePlanOk === true ? 'cte' : 'ordered-walk', walks, estMatches, estRows, ctePlanOk };
+    return { plan: ctePlanOk === true ? 'cte' : 'ordered-walk', walks, estMatches, estRows, ...(estCandidates !== undefined ? { estCandidates } : {}), ctePlanOk };
 }
 
 /**
@@ -219,9 +315,10 @@ export async function chooseKeywordPlan(
     values: readonly unknown[],
     cap: number,
     env: NodeJS.ProcessEnv = process.env,
+    terms: readonly string[] = [],
 ): Promise<KeywordPlanDecision> {
     if (!keywordCteEnabled(env)) return { plan: 'ordered-walk', walks: null, estMatches: null, estRows: null, disabled: true };
-    return resolveKeywordPlan(await probeKeywordPlan(pool, workspaceId, where, values, cap));
+    return resolveKeywordPlan(await probeKeywordPlan(pool, workspaceId, where, values, cap, terms));
 }
 
 /** The original statement: recency-ordered scan with the match as a filter. */

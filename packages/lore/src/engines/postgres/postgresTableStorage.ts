@@ -32,6 +32,8 @@ import { withTransaction } from './postgresClient.js';
 import { withReadOnlyTransaction, type ReadOnlyTxOptions } from './postgresReadOnlyTx.js';
 import { sharedPostgresPool } from './postgresPoolOwner.js';
 import { ensureRekeyed } from './postgresRekey.js';
+import { ensureWorkspaceSk, releaseWorkspaceSkBuild, startWorkspaceSkBuild, workspaceSkBuildDone } from './postgresWorkspaceSk.js';
+import { cancelFieldIndexBuild, ensureFieldIndexes } from './postgresFieldIndexes.js';
 import { runSchemaBootstrap } from './postgresStartup.js';
 import { ensureGraphSchema } from './postgresGraphSchema.js';
 import { CURRENCY_SUFFIX, TABLE_TABLES, tableSchemaDdl } from './postgresTableSchema.js';
@@ -85,14 +87,29 @@ export class PostgresTableStorage implements ITableStorage {
     /** Open (bootstrapping the schema if needed) a store bound to `workspace`. Throws if LORE_PG_URL is unset. */
     static async open(workspace: string, pool: Pool = sharedPostgresPool()): Promise<PostgresTableStorage> {
         if (!workspace) throw new Error(`${L}.open: workspace is required`);
-        await runSchemaBootstrap(pool, {}, async (client) => {
-            await ensureGraphSchema(client, workspace); // lore_entity.memory_node_sk references nodes(sk)
+        const skPending = await runSchemaBootstrap(pool, {}, async (client) => {
+            await ensureGraphSchema(client, workspace); // lore_entity.(workspace_id, memory_node_sk) references nodes(workspace_id, sk)
             for (const stmt of tableSchemaDdl()) await client.query(stmt);
+            // The composite lore_entity -> nodes FK needs the lore_entity table AND UNIQUE (workspace_id, sk): add it now.
+            return (await ensureWorkspaceSk(client)).pending;
         });
         await ensureRekeyed(pool, workspace); // one-time name -> permanent-id row rewrite (postgresRekey.ts)
         const s = new PostgresTableStorage(pool, workspace);
+        // Large database: finish the workspace-led structures off the open path (reads/writes are correct without them).
+        if (skPending) void startWorkspaceSkBuild(pool, s);
+        // Workspace-led names for the D10 per-field indexes; after the rekey, which fixes the id they hash.
+        s.fieldIndexes = (await ensureFieldIndexes(pool, workspace)).done;
         await s.reload();
         return s;
+    }
+
+    /** Background field-index build for this workspace (resolves immediately when nothing was missing). Test hook. */
+    fieldIndexes: Promise<void> = Promise.resolve();
+
+    /** Resolves when the background workspace-sk build and this workspace's field-index build have finished. */
+    async waitForIndexes(): Promise<void> {
+        await workspaceSkBuildDone(this.pool);
+        await this.fieldIndexes;
     }
 
     capabilities(): BackendCapabilities {
@@ -170,7 +187,7 @@ export class PostgresTableStorage implements ITableStorage {
                 ids.set(c.name, Number((f.rows[0] as { field_id: string }).field_id));
             }
             const m = buildMeta(typeId, schema, ids);
-            for (const c of schema.columns) for (const ddl of fieldIndexDdl(ids.get(c.name)!, c)) await client.query(ddl);
+            for (const c of schema.columns) for (const ddl of fieldIndexDdl(this.workspace, ids.get(c.name)!, c)) await client.query(ddl);
             await client.query(viewDdl(this.workspace, m));
             return m;
         });
@@ -480,7 +497,9 @@ export class PostgresTableStorage implements ITableStorage {
     }
 
     async close(): Promise<void> {
-        // The shared pool belongs to postgresPoolOwner; this handle only drops its caches.
+        // The shared pool belongs to postgresPoolOwner; this handle only drops its caches (and leaves any background build).
+        await releaseWorkspaceSkBuild(this.pool, this);
+        await cancelFieldIndexBuild(this.pool, this.workspace);
         this.metas.clear();
         this.schemas.clear();
     }

@@ -99,6 +99,10 @@ export function rowToLoreNode(row: Record<string, unknown>): LoreNode {
 
     const revision = numOrUndef('revision');
 
+    // L3: stored '' = unkeyed. Omitted (not '') so an unkeyed node's output shape is unchanged.
+    const rawPartitionKey = getValue('partition_key');
+    const partitionKey = typeof rawPartitionKey === 'string' && rawPartitionKey.length > 0 ? rawPartitionKey : undefined;
+
     return {
         id: (getValue('id') as string) ?? '',
         type: (getValue('type') as LoreNode['type']) ?? 'note',
@@ -116,6 +120,7 @@ export function rowToLoreNode(row: Record<string, unknown>): LoreNode {
         // projection/engine carries no revision, so a Surreal/Dataplane node has no `revision`
         // field at all; engines that track it default a missing value to 0 in their own mapper.
         ...(revision !== undefined ? { revision } : {}),
+        ...(partitionKey !== undefined ? { partitionKey } : {}),
         language,
         supersededBy: sBy.length > 0 ? sBy : null,
         supersededAt: sAt.length > 0 ? sAt : null,

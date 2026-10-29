@@ -121,11 +121,6 @@ export class SqliteIngestionStore implements IIngestionStore {
         return rows.map((r) => ({ sourceId: r.source_id as string, storageRef: r.storage_ref as string }));
     }
 
-    async countBlobRefsHeldByOtherWorkspaces(workspace: string, storageRef: string): Promise<number> {
-        const r = this.db.prepare('SELECT COUNT(*) AS n FROM ingest_sources WHERE workspace <> ? AND storage_ref = ? AND blob_purged_at IS NULL').get(workspace, storageRef) as Row;
-        return Number(r.n);
-    }
-
     async createJob(j: NewJob, now: Date): Promise<{ job: IngestionJob; created: boolean }> {
         const jobId = makeJobId(j);
         const iso = now.toISOString();

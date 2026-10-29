@@ -55,6 +55,8 @@ import { ensureRekeyed } from './postgresRekey.js';
 import { runSchemaBootstrap } from './postgresStartup.js';
 import { ensureGraphSchema } from './postgresGraphSchema.js';
 import { keywordIndexBuildDone, releaseKeywordIndexBuild, startKeywordIndexBuild } from './postgresKeywordIndex.js';
+import { createdAtTsBuildDone, releaseCreatedAtTsBuild, startCreatedAtTsBuild } from './postgresPartitionKeySchema.js';
+import { releaseWorkspaceSkBuild, startWorkspaceSkBuild, workspaceSkBuildDone } from './postgresWorkspaceSk.js';
 import {
     DEFAULT_LIST_NODES_CAP,
     getNode as readGetNode,
@@ -171,7 +173,21 @@ export class PostgresGraph implements LoreGraphHandle {
         await ensureRekeyed(pool, this.workspaceId); // one-time name -> permanent-id row rewrite (postgresRekey.ts)
         this.initialized = true;
         // Large table, indexes missing: build off the open path (never blocks a search or a write).
-        if (schema.pending) void startKeywordIndexBuild(pool, this);
+        if (schema.pending || schema.analyzePending) void startKeywordIndexBuild(pool, this, schema.analyzePending ? { analyze: true } : {});
+        // Same for the workspace-led `sk` unique index / edge index (postgresWorkspaceSk.ts).
+        if (schema.workspaceSkPending) void startWorkspaceSkBuild(pool, this);
+        // And the created_at_ts pending index + legacy backfill (postgresPartitionKeySchema.ts).
+        if (schema.createdAtTsPending) void startCreatedAtTsBuild(pool, this);
+    }
+
+    /** Resolves when any background created_at_ts build on this pool has finished (never rejects). Test/shutdown hook. */
+    waitForCreatedAtTs(): Promise<void> {
+        return createdAtTsBuildDone(this.pool);
+    }
+
+    /** Resolves when any background workspace-sk build on this pool has finished (never rejects). Test/shutdown hook. */
+    waitForWorkspaceSk(): Promise<void> {
+        return workspaceSkBuildDone(this.pool);
     }
 
     /** Resolves when any background keyword-index build on this pool has finished (never rejects). Test/shutdown hook. */
@@ -186,6 +202,8 @@ export class PostgresGraph implements LoreGraphHandle {
      */
     async close(): Promise<void> {
         await releaseKeywordIndexBuild(this.pool, this); // the last handle out cancels a running index build
+        await releaseWorkspaceSkBuild(this.pool, this);
+        await releaseCreatedAtTsBuild(this.pool, this);
         this.pool = null;
         this.initialized = false;
         this.nodeColumns = null;

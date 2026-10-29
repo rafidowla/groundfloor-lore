@@ -25,6 +25,7 @@ import {
 } from './postgresTableProvenance.js';
 import type { TableMeta } from './postgresTableCatalog.js';
 import { buildPgWhere } from './postgresTableWhere.js';
+import { fieldIdOfIndexName } from './postgresFieldIndexName.js';
 
 const L = 'PostgresTableStorage';
 const { entity: ENTITY, value: VALUE } = TABLE_TABLES;
@@ -43,9 +44,9 @@ export function mapPgWriteError(err: unknown, table: string, meta: TableMeta): u
     if (e.constraint === 'lore_entity_pk_uq') {
         return Object.assign(new Error(`UNIQUE constraint failed: ${table}.${meta.pk.name}`), { cause: err });
     }
-    const m = /^lore_ev_(\d+)_u$/.exec(e.constraint ?? '');
-    if (m) {
-        const f = [...meta.fields.entries()].find(([, v]) => v.fieldId === Number(m[1]));
+    const fid = fieldIdOfIndexName(e.constraint ?? '', 'u'); // new `lore_ev_<hash>_<id>_u` or legacy `lore_ev_<id>_u`
+    if (fid !== null) {
+        const f = [...meta.fields.entries()].find(([, v]) => v.fieldId === fid);
         if (f) return Object.assign(new Error(`UNIQUE constraint failed: ${table}.${f[0]}`), { cause: err });
     }
     return err;

@@ -6,6 +6,7 @@
  * SurrealGraph's and SqliteGraph's by construction.
  */
 
+import { withPartitionKeyProperty } from '../graphShared/partitionKey.js';
 import { normalizeTag } from '../normalizeTags.js';
 import type { BulkListPage, BulkListQuery, EdgeQuery, GraphStats, LoreEdge } from '../../providers/types.js';
 import { clampLimit } from '../topologyOverviewFold.js';
@@ -98,8 +99,8 @@ export async function getStats(pool: Pool, workspaceId: string, projectFilter?: 
         const edgeRes = projectFilter
             ? await pool.query(
                 `SELECT COUNT(*) AS c FROM edges e
-                 JOIN nodes ns ON ns.sk = e.src_sk
-                 JOIN nodes nt ON nt.sk = e.dst_sk
+                 JOIN nodes ns ON ns.workspace_id = e.workspace_id AND ns.sk = e.src_sk
+                 JOIN nodes nt ON nt.workspace_id = e.workspace_id AND nt.sk = e.dst_sk
                  WHERE e.workspace_id = $1 AND e.valid_to IS NULL AND ns.project = $2 AND nt.project = $2`,
                 [workspaceId, projectFilter],
             )
@@ -174,7 +175,7 @@ export async function getTopology(
 /** Exact column set — same as the sqlite aggregates' BULK_LIST_COLUMNS. */
 const BULK_LIST_COLUMNS = [
     'id', 'type', 'label', 'content', 'tags', 'metadata',
-    'project', 'ecosystem', 'updatedAt', 'createdAt', 'security_scopes', 'revision',
+    'project', 'ecosystem', 'updatedAt', 'createdAt', 'security_scopes', 'revision', 'partition_key',
 ] as const;
 
 /** bulkList — cursor-paginated enumeration on (updatedAt DESC, id ASC). Same keyset contract as the sqlite aggregates. */
@@ -204,7 +205,7 @@ export async function bulkList(pool: Pool, workspaceId: string, q: BulkListQuery
             + ` ORDER BY "updatedAt" DESC, id ASC LIMIT ${params.add(limit + 1)}::int`,
             params.values,
         );
-        const normalized = res.rows.map((row) => fromPgNodeRow(row));
+        const normalized = res.rows.map((row) => withPartitionKeyProperty(fromPgNodeRow(row)));
         const { page, hasMore, nextCursor } = buildKeysetPage(normalized, limit);
         return { nodes: page, hasMore, nextCursor };
     } catch (error) {

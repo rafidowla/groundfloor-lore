@@ -13,6 +13,7 @@
 import type { ColumnDecl } from '../../contracts/tables.js';
 import { CURRENCY_COLUMN, CURRENCY_SUFFIX, TABLE_TABLES, VALUE_COLUMN } from './postgresTableSchema.js';
 import { selectExpr } from './postgresTableCodec.js';
+import { fieldIndexName } from './postgresFieldIndexName.js';
 import type { FieldMeta, TableMeta } from './postgresTableCatalog.js';
 
 export const sqlLiteral = (s: string): string => `'${s.replace(/'/g, "''")}'`;
@@ -78,19 +79,26 @@ export function selectColumn(alias: string, c: ColumnDecl): string {
     return selectExpr(`${alias}.${qi(c.name)}`, c.type, cur);
 }
 
-/** Partial indexes for one field (header-stored reserved columns are indexed on the entity table already). */
-export function fieldIndexDdl(fieldId: number, col: ColumnDecl): string[] {
+export interface FieldIndexSpec { readonly name: string; readonly unique: boolean; readonly column: string; readonly fieldId: number }
+
+/** The partial indexes one field wants (header-stored reserved columns are indexed on the entity table already). */
+export function fieldIndexSpecs(workspace: string, fieldId: number, col: ColumnDecl): FieldIndexSpec[] {
     if (RESERVED_NAMES.has(col.name) || col.primary) return [];
-    const vc = VALUE_COLUMN[col.type];
-    const out: string[] = [];
-    if (col.unique) {
-        out.push(`CREATE UNIQUE INDEX IF NOT EXISTS lore_ev_${fieldId}_u ON ${TABLE_TABLES.value} (${vc}) ` +
-            `WHERE field_id = ${fieldId} AND superseded_at IS NULL`);
-    } else if (col.indexed) {
-        out.push(`CREATE INDEX IF NOT EXISTS lore_ev_${fieldId}_i ON ${TABLE_TABLES.value} (${vc}) ` +
-            `WHERE field_id = ${fieldId} AND superseded_at IS NULL`);
-    }
-    return out;
+    const column = VALUE_COLUMN[col.type];
+    if (col.unique) return [{ name: fieldIndexName(workspace, fieldId, 'u'), unique: true, column, fieldId }];
+    if (col.indexed) return [{ name: fieldIndexName(workspace, fieldId, 'i'), unique: false, column, fieldId }];
+    return [];
+}
+
+/** DDL for one field index, keyed (workspace_id, value column). `concurrently` is for a build outside a transaction. */
+export function fieldIndexSpecDdl(spec: FieldIndexSpec, concurrently: boolean): string {
+    return `CREATE ${spec.unique ? 'UNIQUE ' : ''}INDEX ${concurrently ? 'CONCURRENTLY ' : ''}IF NOT EXISTS ${spec.name} `
+        + `ON ${TABLE_TABLES.value} (workspace_id, ${spec.column}) WHERE field_id = ${spec.fieldId} AND superseded_at IS NULL`;
+}
+
+/** Partial indexes for one field of `workspace` (plain CREATE INDEX: safe inside a transaction; the field is new, so empty). */
+export function fieldIndexDdl(workspace: string, fieldId: number, col: ColumnDecl): string[] {
+    return fieldIndexSpecs(workspace, fieldId, col).map(s => fieldIndexSpecDdl(s, false));
 }
 
 const RESERVED_NAMES = new Set(['_memory_node_id', '_source_id', '_valid_from', '_valid_to']);

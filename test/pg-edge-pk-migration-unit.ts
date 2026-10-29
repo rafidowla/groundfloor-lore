@@ -116,7 +116,7 @@ try {
         const cols = (await q<{ column_name: string }>("SELECT column_name FROM information_schema.columns WHERE table_name = 'edges'")).map((r) => r.column_name);
         assert.ok(!cols.includes('source_id') && !cols.includes('target_id'));
         const idx = (await q<{ indexname: string }>("SELECT indexname FROM pg_indexes WHERE tablename = 'edges' ORDER BY 1")).map((r) => r.indexname);
-        assert.deepEqual(idx, ['edges_pkey', 'idx_edges_dst_sk', 'idx_edges_relation']);
+        assert.deepEqual(idx, ['edges_pkey', 'idx_edges_dst_sk', 'idx_edges_relation', 'idx_edges_ws_dst_sk']);
     });
     await test('every resolvable edge survived with the same relation, score, provenance and invalidation', async () => {
         const now = await triples(); const old = await legacyTriples();

@@ -89,6 +89,15 @@ export async function openLore(home: string, dim: number, extra: Record<string, 
     return lore as any;
 }
 
+/**
+ * The key Postgres rows of workspace `ws` carry in `workspace_id`. Since 3.37.0 (PG id re-key) that is the workspace's
+ * permanent id from `<home>/workspaces.json`, not its name, so raw bench SQL must filter by this, never by `ws`.
+ */
+export async function pgWorkspaceKey(home: string, ws: string): Promise<string> {
+    const { resolvePostgresWorkspaceKey } = await import('../../packages/lore/src/engines/postgres/postgresWorkspaceKey.js');
+    return resolvePostgresWorkspaceKey(ws, home);
+}
+
 export function pct(xs: number[], p: number): number {
     if (!xs.length) return NaN;
     const s = [...xs].sort((a, b) => a - b);

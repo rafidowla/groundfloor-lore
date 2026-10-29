@@ -54,14 +54,23 @@ import type { PoolClient } from 'pg';
 
 import { log } from '../../logger.js';
 import {
-    VERBATIM_COLUMNS, VERBATIM_INDEX_NAMES, TEXT_TSV_FUNCTION_DDL, partitionedVerbatimDdl, ensureWorkspacePartition,
+    VERBATIM_COLUMNS, VERBATIM_INDEX_NAMES, VERBATIM_SCOPE_INDEX_NAME, TEXT_TSV_FUNCTION_DDL, partitionedVerbatimDdl,
+    ensureWorkspacePartition, ensureVerbatimPartitionKeyColumn,
 } from './postgresVerbatimPartitionDdl.js';
+import { SCOPE_FUNCTIONS_DDL, scopeArrTriggerIfAbsentDdl } from './postgresVerbatimScopeArr.js';
 
 const BATCH_SIZE = 2_000;
-const COLS = VERBATIM_COLUMNS.join(', ');
-const O_COLS = VERBATIM_COLUMNS.map((c) => `o.${c}`).join(', ');
+/**
+ * The old single table has no `security_scope_arr`; the staging table's trigger derives it from `security_scopes`
+ * on every copied/caught-up row, so it is never part of a copy or compare list.
+ */
+const COPY_COLUMNS = VERBATIM_COLUMNS.filter((c) => c !== 'security_scope_arr');
+const COLS = COPY_COLUMNS.join(', ');
+const O_COLS = COPY_COLUMNS.map((c) => `o.${c}`).join(', ');
 /** Columns catch-up compares/updates (see CATCH-UP INVARIANT): everything except the key and the three bulky immutable ones. */
-const SCALAR_COLS = VERBATIM_COLUMNS.filter((c) => !['row_id', 'workspace_id', 'text', 'vector', 'text_tsv'].includes(c));
+const SCALAR_COLS = COPY_COLUMNS.filter((c) => !['row_id', 'workspace_id', 'text', 'vector', 'text_tsv'].includes(c));
+/** Index names the swap renames: the canonical set plus the scope-array GIN. */
+const RENAMED_INDEXES = [...VERBATIM_INDEX_NAMES, VERBATIM_SCOPE_INDEX_NAME];
 
 export interface PartitionMigrationOptions {
     /** Rows per copy transaction (default 2000). */
@@ -95,6 +104,14 @@ export async function migrateVerbatimToPartitioned(
 
     // 1. STAGE
     for (const stmt of partitionedVerbatimDdl(dimension, 'verbatim_next', 'verbatim_next')) await client.query(stmt);
+    // A staging table left by a build from before L3 (a resumed migration) has no partition_key; the copy names it.
+    await ensureVerbatimPartitionKeyColumn(client, 'verbatim_next');
+    // The source may pre-date L3 too (this function is also called directly): the copy names the column on both sides.
+    await ensureVerbatimPartitionKeyColumn(client, 'verbatim');
+    // security_scope_arr is derived from security_scopes by a trigger attached at stage time (unlike the tsvector
+    // trigger, which attaches at swap because its column is copied verbatim): the old table has no such column.
+    for (const stmt of SCOPE_FUNCTIONS_DDL) await client.query(stmt);
+    await client.query(scopeArrTriggerIfAbsentDdl('verbatim_next'));
     await client.query(`CREATE TABLE IF NOT EXISTS verbatim_partition_progress (id INTEGER PRIMARY KEY CHECK (id = 1), hwm BIGINT NOT NULL)`);
     await client.query(`INSERT INTO verbatim_partition_progress (id, hwm) VALUES (1, 0) ON CONFLICT DO NOTHING`);
     for (const ws of await workspacesOf(client, 'verbatim')) await ensureWorkspacePartition(client, ws, 'verbatim_next');
@@ -170,10 +187,10 @@ async function swap(client: PoolClient): Promise<void> {
             `CREATE TRIGGER verbatim_text_tsv_biur BEFORE INSERT OR UPDATE ON verbatim_next FOR EACH ROW EXECUTE FUNCTION verbatim_text_tsv_apply()`,
         );
         // Rename old indexes out of the way, then the tables, then the new indexes into the canonical names.
-        for (const idx of VERBATIM_INDEX_NAMES) await client.query(`ALTER INDEX IF EXISTS ${idx} RENAME TO ${idx}_pre_partition`);
+        for (const idx of RENAMED_INDEXES) await client.query(`ALTER INDEX IF EXISTS ${idx} RENAME TO ${idx}_pre_partition`);
         await client.query(`ALTER TABLE verbatim RENAME TO verbatim_pre_partition`);
         await client.query(`ALTER TABLE verbatim_next RENAME TO verbatim`);
-        for (const idx of VERBATIM_INDEX_NAMES) await client.query(`ALTER INDEX ${idx.replace('verbatim_', 'verbatim_next_')} RENAME TO ${idx}`);
+        for (const idx of RENAMED_INDEXES) await client.query(`ALTER INDEX ${idx.replace('verbatim_', 'verbatim_next_')} RENAME TO ${idx}`);
         await client.query(`DROP TABLE verbatim_partition_progress`);
         await client.query('COMMIT');
     } catch (err) {

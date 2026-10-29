@@ -16,9 +16,13 @@ export type EdgeRow = EdgeProvenanceRow & {
 
 /**
  * Edge rows with text endpoint ids resolved through `nodes.sk` (layout 2 stores only the keys). `e` is the edge,
- * `s` the source node, `t` the target node. Both joins hit the unique `idx_nodes_sk`.
+ * `s` the source node, `t` the target node. `sk` is only unique WITHIN a workspace (shard-ready model, Phase 0):
+ * every join also matches `workspace_id`, so it resolves through the unique `nodes (workspace_id, sk)` key and never
+ * depends on `sk` being unique across the database.
  */
-export const EDGE_ENDPOINT_JOINS = ' JOIN nodes s ON s.sk = e.src_sk JOIN nodes t ON t.sk = e.dst_sk';
+export const EDGE_ENDPOINT_JOINS =
+    ' JOIN nodes s ON s.workspace_id = e.workspace_id AND s.sk = e.src_sk'
+    + ' JOIN nodes t ON t.workspace_id = e.workspace_id AND t.sk = e.dst_sk';
 /** SELECT list for a resolved edge read (provenance appended when asked). */
 export const edgeSelectList = (withProvenance: boolean): string =>
     's.id AS source_id, t.id AS target_id, e.relation, e.confidence, e."confidenceScore"'
@@ -48,9 +52,11 @@ export const skOf = (wsParam: string, idParam: string): string =>
  */
 export function frontierEdgesSql(direction: 'out' | 'in', ordered: boolean): string {
     const [fromCol, toCol] = direction === 'out' ? ['src_sk', 'dst_sk'] : ['dst_sk', 'src_sk'];
-    // `e.workspace_id = $1` lets the forward direction use the primary key's (workspace_id, src_sk) prefix.
+    // Both joins carry the workspace: `sk` is unique per workspace only. `e.workspace_id` also lets the forward direction use
+    // the primary key's (workspace_id, src_sk) prefix, and the reverse direction `idx_edges_ws_dst_sk (workspace_id, dst_sk)`.
     return `SELECT f.id AS from_id, t.id AS to_id, e.relation FROM nodes f`
-        + ` JOIN edges e ON e.${fromCol} = f.sk JOIN nodes t ON t.sk = e.${toCol}`
+        + ` JOIN edges e ON e.workspace_id = f.workspace_id AND e.${fromCol} = f.sk`
+        + ` JOIN nodes t ON t.workspace_id = e.workspace_id AND t.sk = e.${toCol}`
         + ` WHERE f.workspace_id = $1 AND e.workspace_id = $1 AND f.id = ANY($2) AND e.valid_to IS NULL`
         + (ordered ? ' ORDER BY f.id, t.id, e.relation' : '');
 }

@@ -49,10 +49,11 @@ function filesMentioningLog(dir: string, out: string[] = []): string[] {
     }
     return out;
 }
-await test('consumers: only the SQLite promotion code reads or writes the log; Postgres only creates and vacuums the table', () => {
+await test('consumers: only the SQLite promotion code reads or writes the log; Postgres no longer creates or vacuums the table, it only drops a leftover one in the contract step', () => {
     assert.deepEqual(filesMentioningLog(srcRoot).sort(), [
-        'engines/postgres/postgresVerbatimSchema.ts',   // CREATE TABLE only
-        'engines/postgres/postgresVerbatimStore.ts',    // VACUUM ANALYZE in compact()
+        'cli/commands/postgresContractPhase0.ts',       // contract CLI help text names the table it drops
+        'engines/postgres/postgresPhase0Contract.ts',   // contractPhase0: calls dropVerbatimChangesLog
+        'engines/postgres/postgresVerbatimSchema.ts',   // dropVerbatimChangesLog (Phase 0 contract step); no CREATE TABLE any more
         'engines/postgres/postgresWorkspaceErase.ts',   // named in the erase skip list only (no workspace column, nothing to erase)
         'engines/sqliteVerbatimSchema.ts',              // SQLite table create / drop
         'engines/verbatimPromotionGate.ts',             // lock-aware gate: reads MAX(seq) / unseen-row count on the SQLite file (3.35.3)
@@ -90,7 +91,10 @@ class FixedEmbed implements EmbeddingProvider {
 }
 const dirs: string[] = [];
 const q = async <T extends Record<string, unknown> = Record<string, unknown>>(sql: string, params: unknown[] = []): Promise<T[]> => (await pool.query(sql, params)).rows as T[];
-const logRows = async (): Promise<number> => Number((await q<{ n: string }>('SELECT count(*) AS n FROM verbatim_changes_log'))[0]!.n);
+const logRows = async (): Promise<number> => {
+    if (!(await q<{ t: string | null }>(`SELECT to_regclass('verbatim_changes_log') AS t`))[0]!.t) return 0; // absent = nothing was recorded
+    return Number((await q<{ n: string }>('SELECT count(*) AS n FROM verbatim_changes_log'))[0]!.n);
+};
 const row = (id: string, x: number) => ({
     id, label: id, text: `text ${id}`, type: 'note', project: 'p', ecosystem: '*', security_scopes: [],
     vector: [Math.cos(x), Math.sin(x), 0, 0], contentHash: `h-${id}`, updatedAt: '2026-10-23T00:00:00.000Z',
@@ -101,14 +105,20 @@ stampGateManifest(base, 'pg-changes-log-pin', DIM);
 const store = new PostgresVerbatimStore(base, pool, 'pg-gate-clpin', new FixedEmbed());
 await store.initialize();
 
-await test('the table exists after initialize (schemaIsCurrent requires it) and carries no workspace column', async () => {
-    assert.equal((await q<{ t: string | null }>(`SELECT to_regclass('verbatim_changes_log') AS t`))[0]!.t, 'verbatim_changes_log');
-    const cols = (await q<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'verbatim_changes_log' ORDER BY ordinal_position`)).map((c) => c.column_name);
-    assert.deepEqual(cols, ['seq', 'row_rowid', 'row_id', 'is_canonical', 'op', 'at']);
+await test('initialize no longer creates the table (a database that already has it keeps it until the contract step)', async () => {
+    await q('DROP TABLE IF EXISTS verbatim_changes_log'); // the shared gate database may still hold one from an older build
+    const fresh = fs.mkdtempSync(path.join(os.tmpdir(), 'pg-clpin-fresh-'));
+    dirs.push(fresh);
+    stampGateManifest(fresh, 'pg-changes-log-pin', DIM);
+    const s2 = new PostgresVerbatimStore(fresh, pool, 'pg-gate-clpin-fresh', new FixedEmbed());
+    await s2.initialize();
+    assert.equal((await q<{ t: string | null }>(`SELECT to_regclass('verbatim_changes_log') AS t`))[0]!.t, null);
+    await s2.close();
 });
-await test('verbatim has no trigger besides the tsvector one (nothing records changes)', async () => {
+await test('verbatim has no trigger besides the tsvector and scope-array derivations (nothing records changes)', async () => {
     const trg = await q<{ tgname: string }>(`SELECT tgname FROM pg_trigger WHERE tgrelid = to_regclass('verbatim') AND NOT tgisinternal ORDER BY 1`);
-    assert.deepEqual(trg.map((t) => t.tgname), ['verbatim_text_tsv_biur']);
+    // verbatim_scope_arr_biu only derives security_scope_arr from security_scopes; neither trigger writes to the log.
+    assert.deepEqual(trg.map((t) => t.tgname), ['verbatim_scope_arr_biu', 'verbatim_text_tsv_biur']);
 });
 await test('every write path leaves the log untouched: store, batch, upsert, tombstone, delete, physical delete', async () => {
     const before = await logRows();

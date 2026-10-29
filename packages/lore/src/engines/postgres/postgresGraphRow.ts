@@ -43,19 +43,20 @@ import type { Pool, PoolClient } from 'pg';
 export type { Pool, PoolClient };
 
 /**
- * The postgres write-column list: the shared SQLite-mirrored list plus the two
- * derived TIMESTAMPTZ valid-time columns (postgresAsOfSchema.ts), so every
+ * The postgres write-column list: the shared SQLite-mirrored list plus the
+ * derived TIMESTAMPTZ columns (valid-time: postgresAsOfSchema.ts; `created_at_ts`: postgresPartitionKeySchema.ts), so every
  * write path that iterates this list (single, update, conditional, replay,
  * insert-if-absent, importRaw, node batch) fills them with no extra code.
  */
-export const NODE_WRITE_COLUMNS = [...SHARED_NODE_WRITE_COLUMNS, 'valid_from_at', 'valid_until_at'] as const;
+export const NODE_WRITE_COLUMNS = [...SHARED_NODE_WRITE_COLUMNS, 'valid_from_at', 'valid_until_at', 'created_at_ts'] as const;
 
-/** `toNodeRow` + the derived `valid_from_at` / `valid_until_at` (null when the text bound is unset or unparseable). */
+/** `toNodeRow` + the derived `valid_from_at` / `valid_until_at` / `created_at_ts` (null when the source text is unset or unparseable). */
 export function toNodeRow(
     ...args: Parameters<typeof sharedToNodeRow>
-): ReturnType<typeof sharedToNodeRow> & { valid_from_at: string | null; valid_until_at: string | null } {
+): ReturnType<typeof sharedToNodeRow> & { valid_from_at: string | null; valid_until_at: string | null; created_at_ts: string | null } {
     const doc = sharedToNodeRow(...args);
-    return { ...doc, valid_from_at: toPgTimestamp(doc.validFrom), valid_until_at: toPgTimestamp(doc.validUntil) };
+    // created_at_ts (L3) is derived from the same createdAt text the row stores, so the pair can never disagree.
+    return { ...doc, valid_from_at: toPgTimestamp(doc.validFrom), valid_until_at: toPgTimestamp(doc.validUntil), created_at_ts: toPgTimestamp(doc.createdAt) };
 }
 
 /** Anything that can run one parameterised statement: the pool or a client inside a transaction. */

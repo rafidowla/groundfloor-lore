@@ -302,6 +302,8 @@ function verbatimPayload(node: LoreNode, id: string, tagsStr: string, verbatimTe
             project: node.project,
             ecosystem: node.ecosystem,
             security_scopes: node.security_scopes ?? [],
+            // L3: the verbatim row inherits its node's key (omitted for an unkeyed node = keep the row's key).
+            ...(node.partitionKey ? { partitionKey: node.partitionKey } : {}),
             updatedAt: node.updatedAt,
             contentHash: computeContentHash(verbatimText),
         },
@@ -341,6 +343,7 @@ function aliasVerbatimPayload(node: LoreNode, id: string, index: number, questio
             project: node.project,
             ecosystem: node.ecosystem,
             security_scopes: node.security_scopes ?? [],
+            ...(node.partitionKey ? { partitionKey: node.partitionKey } : {}),
             updatedAt: node.updatedAt,
             contentHash: computeContentHash(question),
         },

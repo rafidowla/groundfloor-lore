@@ -317,9 +317,6 @@ try {
         const blocker = new Client({ connectionString: url });
         await blocker.connect();
         await blocker.query('BEGIN');
-        await blocker.query('LOCK TABLE verbatim_changes_log IN ROW EXCLUSIVE MODE'); // VACUUM ANALYZE never waits on this; use the verbatim table lock below
-        await blocker.query('ROLLBACK');
-        await blocker.query('BEGIN');
         await blocker.query('LOCK TABLE verbatim IN ACCESS EXCLUSIVE MODE'); // VACUUM ANALYZE verbatim blocks behind this
         try {
             const compacting = store.compact();

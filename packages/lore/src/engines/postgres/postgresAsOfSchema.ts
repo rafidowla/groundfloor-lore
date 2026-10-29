@@ -58,45 +58,49 @@ export function toPgTimestamp(value: unknown): string | null {
 const BACKFILL_BATCH = 5_000;
 
 /**
- * Fill `valid_from_at` / `valid_until_at` for rows written before the columns
- * existed. Keyset-batched on (workspace_id, id), each batch its own
- * autocommitted statement; the UPDATE re-checks the text it read, so a
- * concurrent write is never overwritten with a stale derivation. Rows whose
- * text does not parse stay NULL (matching the JS predicate) and are skipped
- * by the keyset, so the loop always ends. Idempotent: a second run finds
- * nothing pending. Returns rows updated.
+ * Fill `valid_from_at` / `valid_until_at` for ONE workspace's rows written before the columns existed.
+ *
+ * Scoped to `workspaceId` on purpose: this runs in the schema bootstrap of every handle open, and a whole-database
+ * pass would make the first open of any workspace walk every other workspace's rows too (and one database will hold
+ * many workspaces, possibly on many shards). Each workspace backfills its own rows when it is opened; the as-of
+ * predicate only ever runs inside one workspace (`workspace_id = $1`), so nothing reads another workspace's timestamps.
+ *
+ * Keyset-batched on (workspace_id = $ws, id), each batch its own autocommitted statement, served by the partial
+ * `idx_nodes_valid_at_pending (workspace_id, id)`; the UPDATE re-checks the text it read, so a concurrent write is
+ * never overwritten with a stale derivation. Rows whose text does not parse stay NULL (matching the JS predicate) and
+ * are skipped by the keyset, so the loop always ends. Idempotent: a second run finds nothing pending. Returns rows updated.
  */
 export async function backfillValidTimeColumns(
     client: Pick<PoolClient, 'query'>,
+    workspaceId: string,
     batch: number = BACKFILL_BATCH,
 ): Promise<number> {
+    if (typeof workspaceId !== 'string' || workspaceId === '') throw new Error('backfillValidTimeColumns: workspaceId is required');
     let total = 0;
-    let lastWs = '';
     let lastId = '';
     let first = true;
     for (;;) {
-        const res = await client.query<{ workspace_id: string; id: string; vf: string; vu: string }>(
-            `SELECT workspace_id, id, "validFrom" AS vf, "validUntil" AS vu FROM nodes
-             WHERE (("validFrom" <> '' AND valid_from_at IS NULL) OR ("validUntil" <> '' AND valid_until_at IS NULL))
-               AND ($1::boolean OR (workspace_id, id) > ($2, $3))
-             ORDER BY workspace_id, id LIMIT $4`,
-            [first, lastWs, lastId, batch],
+        const res = await client.query<{ id: string; vf: string; vu: string }>(
+            `SELECT id, "validFrom" AS vf, "validUntil" AS vu FROM nodes
+             WHERE workspace_id = $1
+               AND (("validFrom" <> '' AND valid_from_at IS NULL) OR ("validUntil" <> '' AND valid_until_at IS NULL))
+               AND ($2::boolean OR id > $3)
+             ORDER BY id LIMIT $4`,
+            [workspaceId, first, lastId, batch],
         );
         first = false;
         if (res.rows.length === 0) return total;
-        const last = res.rows[res.rows.length - 1]!;
-        lastWs = last.workspace_id;
-        lastId = last.id;
+        lastId = res.rows[res.rows.length - 1]!.id;
         const rows = res.rows.map((r) => ({ r, f: toPgTimestamp(r.vf), u: toPgTimestamp(r.vu) }))
             .filter((x) => x.f !== null || x.u !== null);
         if (rows.length > 0) {
             const upd = await client.query(
                 `UPDATE nodes n SET valid_from_at = v.f, valid_until_at = v.u
-                 FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::timestamptz[], $6::timestamptz[])
-                      AS v(ws, id, vf, vu, f, u)
-                 WHERE n.workspace_id = v.ws AND n.id = v.id AND n."validFrom" = v.vf AND n."validUntil" = v.vu`,
+                 FROM unnest($2::text[], $3::text[], $4::text[], $5::timestamptz[], $6::timestamptz[])
+                      AS v(id, vf, vu, f, u)
+                 WHERE n.workspace_id = $1 AND n.id = v.id AND n."validFrom" = v.vf AND n."validUntil" = v.vu`,
                 [
-                    rows.map((x) => x.r.workspace_id), rows.map((x) => x.r.id),
+                    workspaceId, rows.map((x) => x.r.id),
                     rows.map((x) => x.r.vf), rows.map((x) => x.r.vu),
                     rows.map((x) => x.f), rows.map((x) => x.u),
                 ],

@@ -48,6 +48,7 @@ import { isRevisionConflict, revisionOf } from '../engines/graphShared/revision.
 import { isOutcomeUnknown } from '../engines/graphShared/writeOutcome.js';
 import { parseConditionalFields, revisionMismatchMessage, type FailedPrecondition, type Precondition } from './conditionalChecks.js';
 import { createNodeIfAbsent, isNodeAlreadyExists, type NodeInput } from '../engines/graphShared/conditionalInsert.js';
+import { isPartitionKeyImmutable, PartitionKeyImmutableError, validatePartitionKey } from '../engines/graphShared/partitionKey.js';
 import { applyVerbatimFanout, readPriorNode, rollbackPartialWrite } from './nodeServiceVerbatim.js';
 import { validateQuestionsMeta, mergeQuestionsMetaIntoMetadataJson } from './questionAliases.js';
 import {
@@ -266,6 +267,8 @@ export type NodeWriteResult =
               | 'missing_supersedes_field' | 'prose_supersedes_mismatch' | 'unlisted_near_duplicate' | 'supersedes_apply_failed'
               // Conditional writes phase 1 — `ifAbsent` refusal / R2 supersede guard.
               | 'already_exists' | 'already_superseded'
+              // Phase 0 lane L3 — `partitionKey` failed validation / tried to change a node's non-empty key.
+              | 'invalid_partition_key' | 'partition_key_immutable'
               // Conditional writes phase 2b — `ifRevision` / `preconditions`.
               | 'revision_mismatch' | 'precondition_failed' | 'revision_unsupported' | 'invalid_if_revision' | 'invalid_preconditions'
               // D5 round 4 (#4) — supersedeNode failed for some (not all) ids
@@ -495,6 +498,12 @@ export async function nodeUpsert(
         }
     }
 
+    // 0b-2. L3 — `partitionKey` (optional): <= 128 chars, no control characters. Fail before any write.
+    if (nodeData['partitionKey'] !== undefined) {
+        const pk = validatePartitionKey(nodeData['partitionKey']);
+        if (!pk.ok) return { ok: false, code: 'invalid_partition_key', error: new Error(pk.error) };
+    }
+
     // 0c. Merge the top-level `id` into `nodeData` when nodeData omits it,
     //     and REFUSE the write when the two disagree. `id` is a required
     //     top-level arg (validated at step 0) but `targetGraph.upsertNode`
@@ -667,6 +676,12 @@ export async function nodeUpsert(
         // Conditional writes: refuse BEFORE the first side effect (no outbox row).
         const refused = await guardNodeWrite({ id, supersedes: args.supersedes, ifAbsent: args.ifAbsent, priorNode, targetGraph, isVisible: hooks.supersedesVisible, conditions });
         if (refused) return refused;
+        // L3: refuse a key change BEFORE the first side effect (no outbox row). The engines enforce it again
+        // (toNodeRow + an in-SQL guard) for writers that bypass this chokepoint or race it.
+        if (priorNode && typeof nodeData['partitionKey'] === 'string' && (priorNode.partitionKey ?? '') !== ''
+            && nodeData['partitionKey'] !== priorNode.partitionKey) {
+            return { ok: false, code: 'partition_key_immutable', error: new PartitionKeyImmutableError(id, priorNode.partitionKey!, nodeData['partitionKey']) };
+        }
         if (nodeData['security_scopes'] === undefined && priorNode !== undefined) {
             nodeData['security_scopes'] = priorNode?.security_scopes ?? [];
         }
@@ -715,6 +730,13 @@ export async function nodeUpsert(
                 // Lost the race on every attempt: nothing of ours is in the graph and writeNodeAtRevision took its row back (a rollback would overwrite the winner).
                 log.error(`${logPrefix} conditional write of ${redactId(id)} lost the revision race on every attempt`);
                 return { ok: false, code: 'write_failed', error: graphErr as Error };
+            }
+            if (isPartitionKeyImmutable(graphErr)) {
+                // Lost a race with a writer that keyed the node first: nothing of ours is in the graph, only the outbox row goes.
+                if (hooks.outboxStore && nodeUpsertOutboxEntryId) {
+                    await retractNodeUpsertRow({ store: hooks.outboxStore, entryId: nodeUpsertOutboxEntryId, workspace, graph: targetGraph, id, written: nodeData, initiator });
+                }
+                return { ok: false, code: 'partition_key_immutable', error: graphErr };
             }
             if (isNodeAlreadyExists(graphErr)) {
                 // Another process won the DB-level insert: nothing of ours is in the graph,

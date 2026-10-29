@@ -136,8 +136,8 @@ async function fingerprint(ws: string): Promise<Record<string, string>> {
         const parts = await c.query<{ n: string }>(`SELECT count(*)::text AS n FROM pg_inherits i JOIN pg_class c ON c.oid=i.inhrelid WHERE pg_get_expr(c.relpartbound, c.oid) = $1`, [`FOR VALUES IN ('${ws.replace(/'/g, "''")}')`]);
         out['@partitions'] = parts.rows[0]!.n;
         const idx = await c.query<{ n: string }>(
-            `SELECT count(*)::text AS n FROM pg_class i WHERE i.relkind='i' AND i.relname ~ '^lore_ev_[0-9]+_[ui]$'
-               AND substring(i.relname from '^lore_ev_([0-9]+)_') IN (SELECT field_id::text FROM lore_field_def WHERE workspace_id = $1)`, [ws]);
+            `SELECT count(*)::text AS n FROM pg_class i WHERE i.relkind='i' AND i.relname ~ '^lore_ev_([0-9a-f]{8}_)?[0-9]+_[ui]$'
+               AND substring(i.relname from '^lore_ev_(?:[0-9a-f]{8}_)?([0-9]+)_[ui]$') IN (SELECT field_id::text FROM lore_field_def WHERE workspace_id = $1)`, [ws]);
         out['@field_indexes'] = idx.rows[0]!.n;
         return out;
     } finally { c.release(); }

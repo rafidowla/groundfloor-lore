@@ -6,6 +6,7 @@
  * SurrealGraph's by construction.
  */
 
+import { withPartitionKeyProperty } from '../graphShared/partitionKey.js';
 import { normalizeTag } from '../normalizeTags.js';
 import type { BulkListPage, BulkListQuery, EdgeQuery, GraphStats, LoreEdge } from '../../providers/types.js';
 import { edgeProvenanceFromRow, type EdgeProvenanceRow } from '../../providers/edgeProvenance.js';
@@ -180,7 +181,7 @@ export async function getTopology(
 /** Exact column set — same as surrealGraphAggregates' BULK_LIST_COLUMNS. */
 const BULK_LIST_COLUMNS = [
     'id', 'type', 'label', 'content', 'tags', 'metadata',
-    'project', 'ecosystem', 'updatedAt', 'createdAt', 'security_scopes', 'revision',
+    'project', 'ecosystem', 'updatedAt', 'createdAt', 'security_scopes', 'revision', 'partition_key',
 ] as const;
 
 /** bulkList — cursor-paginated enumeration on (updatedAt DESC, id ASC). Same keyset contract as surrealGraphAggregates.bulkList. */
@@ -211,7 +212,7 @@ export async function bulkList(db: SqliteDb, q: BulkListQuery): Promise<BulkList
         const rows = db.prepare(
             `SELECT ${BULK_LIST_COLUMNS.join(', ')} FROM nodes${where} ORDER BY updatedAt DESC, id ASC LIMIT ?`,
         ).all(...params, limit + 1) as Array<Record<string, unknown>>;
-        const normalized = rows.map((row) => fromSqliteNodeRow(row));
+        const normalized = rows.map((row) => withPartitionKeyProperty(fromSqliteNodeRow(row)));
         const { page, hasMore, nextCursor } = buildKeysetPage(normalized, limit);
         return { nodes: page, hasMore, nextCursor };
     } catch (error) {

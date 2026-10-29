@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import pg from 'pg';
-import { argv, fmt, makeFakeEmbedder, now, openLore, summarize, WS_DEFAULT } from './pg-bench-common.mts';
+import { argv, fmt, makeFakeEmbedder, now, openLore, pgWorkspaceKey, summarize, WS_DEFAULT } from './pg-bench-common.mts';
 import { clusterCenters, defaultParams, nodeFields, nodeId, queryVector, VOCAB, zipfRank, type CorpusParams } from './pg-corpus.mts';
 import { rng } from './pg-bench-common.mts';
 
@@ -27,6 +27,8 @@ const phases = (argv('phases', 'startup,recall,keyword,rebuild,graph,asof,arriva
 const outDir = argv('out', path.dirname(infoPath))!;
 const budgetS = Number(argv('rebuild-budget-s', '600'));
 const ws = info.ws ?? WS_DEFAULT;
+// Lore API calls take the workspace NAME (ws); raw SQL filters workspace_id by the permanent id (wsKey, 3.37.0+).
+const wsKey = await pgWorkspaceKey(info.home, ws);
 const p = info.params;
 const centers = clusterCenters(p);
 const resultsFile = path.join(outDir, `results-${label}.json`);
@@ -177,8 +179,8 @@ try {
 
         if (phase === 'graph') {
             // Edge count and walk depth 2/3 from nodes that have links.
-            const e = await pool.query(`SELECT count(*) AS c FROM edges WHERE workspace_id = $1`, [ws]);
-            const seeds = (await pool.query(`SELECT id FROM (SELECT DISTINCT n.id FROM nodes n JOIN edges e ON e.workspace_id = n.workspace_id AND e.src_sk = n.sk WHERE n.workspace_id = $1) d ORDER BY md5(id || 'tv') LIMIT 400`, [ws])).rows.map((r) => r.id as string);
+            const e = await pool.query(`SELECT count(*) AS c FROM edges WHERE workspace_id = $1`, [wsKey]);
+            const seeds = (await pool.query(`SELECT id FROM (SELECT DISTINCT n.id FROM nodes n JOIN edges e ON e.workspace_id = n.workspace_id AND e.src_sk = n.sk WHERE n.workspace_id = $1) d ORDER BY md5(id || 'tv') LIMIT 400`, [wsKey])).rows.map((r) => r.id as string);
             const out: Record<string, unknown> = { edges: Number(e.rows[0].c), seeds: seeds.length };
             // traverse() is memoized per (node, depth) in the graph read cache: use disjoint, hash-random seed slices per
             // depth (and a pass-2 repeat) so the cold numbers are real DB walks, not cache hits.
@@ -204,7 +206,7 @@ try {
             const t0 = now();
             const upd = await pool.query(`UPDATE nodes SET "validFrom" = to_char("createdAt"::timestamptz AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'), valid_from_at = "createdAt"::timestamptz,
                 "validUntil" = to_char(("createdAt"::timestamptz + interval '90 days') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"'), valid_until_at = "createdAt"::timestamptz + interval '90 days'
-                WHERE workspace_id = $1 AND valid_from_at IS NULL AND (sk % 4) = 0`, [ws]);
+                WHERE workspace_id = $1 AND valid_from_at IS NULL AND (sk % 4) = 0`, [wsKey]);
             await pool.query('ANALYZE nodes');
             const { listNodesAsOf } = await import('../../packages/lore/src/core/temporalQuery.js');
             await pgssReset(); const ms: number[] = []; const sizes: number[] = [];
@@ -230,14 +232,14 @@ try {
             const upsertWall = now() - t0;
             const t2 = now(); await lore.awaitEmbeds?.(); await svc.flush();
             const linkWall = now() - t2;
-            const edges = await pool.query(`SELECT count(*) AS c FROM edges e JOIN nodes n ON n.workspace_id=e.workspace_id AND n.sk=e.src_sk WHERE e.workspace_id=$1 AND n.id LIKE 'arr%'`, [ws]);
+            const edges = await pool.query(`SELECT count(*) AS c FROM edges e JOIN nodes n ON n.workspace_id=e.workspace_id AND n.sk=e.src_sk WHERE e.workspace_id=$1 AND n.id LIKE 'arr%'`, [wsKey]);
             results['link_on_arrival'] = { nodes: N, upsert: summarize(up), upsert_wall_ms: upsertWall, flush_after_ms: linkWall, per_node_total_ms: (upsertWall + linkWall) / N, edges_from_new_nodes: Number(edges.rows[0].c), stats: svc.stats?.(), top_statements: await pgssTop(8) };
             log(`arrival: upsert p50 ${fmt(summarize(up).p50)} ms, link flush ${fmt(linkWall)} ms for ${N}; per node ${fmt((upsertWall + linkWall) / N)} ms`);
         }
 
         if (phase === 'delete') {
-            const total = Number((await pool.query('SELECT count(*) AS c FROM nodes WHERE workspace_id=$1', [ws])).rows[0].c);
-            const ids = (await pool.query(`SELECT id FROM nodes WHERE workspace_id=$1 AND id LIKE 'b%' ORDER BY id DESC LIMIT 10000`, [ws])).rows.map((r) => r.id as string);
+            const total = Number((await pool.query('SELECT count(*) AS c FROM nodes WHERE workspace_id=$1', [wsKey])).rows[0].c);
+            const ids = (await pool.query(`SELECT id FROM nodes WHERE workspace_id=$1 AND id LIKE 'b%' ORDER BY id DESC LIMIT 10000`, [wsKey])).rows.map((r) => r.id as string);
             await pgssReset(); const t0 = now();
             const res = await lore.nodeDeleteMany({ ids, workspace: ws });
             const wall = now() - t0;

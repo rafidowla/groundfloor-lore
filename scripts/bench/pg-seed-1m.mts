@@ -12,12 +12,12 @@
  * 4. Re-opens Lore and lets Lore's OWN builders recreate the indexes (graph.waitForKeywordIndexes, verbatim
  *    ensureVectorIndex / ensureFtsIndex, compact = VACUUM ANALYZE), timing each.
  *
- * Writes <root>/seed-info.json (paths, params, timings) for pg-scale-bench.mts. The corpus is deterministic (pg-corpus.mts).
+ * Writes <root>/seed-info.json (paths, workspace name + Postgres key, params, timings) for pg-scale-bench.mts. The corpus is deterministic (pg-corpus.mts).
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import pg from 'pg';
-import { argv, hasFlag, makeHome, openLore, makeFakeEmbedder, WS_DEFAULT, now } from './pg-bench-common.mts';
+import { argv, hasFlag, makeHome, openLore, makeFakeEmbedder, pgWorkspaceKey, WS_DEFAULT, now } from './pg-bench-common.mts';
 import { defaultParams, nodeFields, nodeVector, clusterCenters, verbatimText, contentHash, vecText, nodeId, queryVector } from './pg-corpus.mts';
 
 const url = process.env['LORE_PG_URL'];
@@ -48,6 +48,11 @@ const fake = makeFakeEmbedder(dim);
     await lore.dispose();
 }
 log(`schema created through Lore; home=${home}`);
+// Rows are keyed by the permanent workspace id (3.37.0+), not the name: bulk rows must carry the same key Lore wrote.
+const wsKey = await pgWorkspaceKey(home, ws);
+const wrote = (await q('SELECT workspace_id FROM nodes WHERE id = $1', [nodeId(0)])).rows.map((r) => r.workspace_id as string);
+if (wrote.length !== 1 || wrote[0] !== wsKey) throw new Error(`workspace key mismatch: resolver says ${wsKey}, Lore wrote node ${nodeId(0)} under ${JSON.stringify(wrote)}`);
+log(`workspace key ${wsKey}`);
 
 // ---- 2. drop the bulk-hostile indexes ------------------------------------------------------------------------
 const { KEYWORD_INDEXES } = await import('../../packages/lore/src/engines/postgres/postgresKeywordIndex.js');
@@ -77,8 +82,8 @@ async function loadBatch(from: number, to: number): Promise<void> {
         c.vid!.push(`lore:${f.id}`); c.text!.push(text); c.vec!.push(vecText(nodeVector(p, centers, i, f.cluster)));
         c.hash!.push(contentHash(text)); c.vtags!.push(f.tags.join(',')); c.blank!.push('');
     }
-    await q(NODE_SQL, [ws, c.id, c.type, c.label, c.content, c.tags, c.id.map(() => 'default'), c.id.map(() => '*'), c.created, c.updated, rev]);
-    await q(VERB_SQL, [ws, c.vid, c.text, c.vec, c.hash, c.type, c.label, c.vtags, c.updated, c.created, c.blank]);
+    await q(NODE_SQL, [wsKey, c.id, c.type, c.label, c.content, c.tags, c.id.map(() => 'default'), c.id.map(() => '*'), c.created, c.updated, rev]);
+    await q(VERB_SQL, [wsKey, c.vid, c.text, c.vec, c.hash, c.type, c.label, c.vtags, c.updated, c.created, c.blank]);
     loaded += to - from;
 }
 await timed('bulk_load', async () => {
@@ -94,7 +99,7 @@ await timed('bulk_load', async () => {
     };
     await Promise.all(Array.from({ length: CONC }, worker));
 });
-const counts = await q(`SELECT (SELECT count(*) FROM nodes WHERE workspace_id=$1) AS nodes, (SELECT count(*) FROM verbatim WHERE workspace_id=$1) AS verbatim`, [ws]);
+const counts = await q(`SELECT (SELECT count(*) FROM nodes WHERE workspace_id=$1) AS nodes, (SELECT count(*) FROM verbatim WHERE workspace_id=$1) AS verbatim`, [wsKey]);
 log(`rows: nodes=${counts.rows[0].nodes} verbatim=${counts.rows[0].verbatim}`);
 await pool.end();
 
@@ -121,7 +126,7 @@ await pool.end();
     const sz = await pool2.query(`SELECT c.relname, c.relkind, pg_total_relation_size(c.oid) AS bytes FROM pg_class c WHERE c.relkind IN ('r','i') AND c.relnamespace = 'public'::regnamespace AND (c.relname LIKE 'idx_nodes_%' OR c.relname IN ('nodes','edges') OR c.relname LIKE 'verbatim_ws_%') ORDER BY 3 DESC LIMIT 20`);
     await pool2.end();
     await lore.dispose();
-    fs.writeFileSync(path.join(root, 'seed-info.json'), JSON.stringify({ home, wsPath, ws, n, dim, params: p, timings, sizes: sz.rows, finished: new Date().toISOString() }, null, 2));
+    fs.writeFileSync(path.join(root, 'seed-info.json'), JSON.stringify({ home, wsPath, ws, wsKey, n, dim, params: p, timings, sizes: sz.rows, finished: new Date().toISOString() }, null, 2));
 }
 log(`done; ${path.join(root, 'seed-info.json')}`);
 void queryVector; void hasFlag; void sleep;

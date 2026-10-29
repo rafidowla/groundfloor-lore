@@ -119,7 +119,7 @@ export class IngestionCoordinator {
             let ref = existing?.storageRef ?? '';
             const present = !!existing && !existing.blobPurgedAt && ref !== ''
                 && (this.deps.blobs.has ? await this.deps.blobs.has(ref) : true);
-            if (!present) ref = await this.deps.blobs.put(a.workspace, sha, a.bytes);
+            if (!present) ref = await this.deps.blobs.put(this.deps.store.blobScope?.(a.workspace) ?? a.workspace, sha, a.bytes);
             const rec = await this.deps.store.upsertSource({
                 workspace: a.workspace, fileName: a.fileName, mimeType: a.mimeType, sha256: sha, sizeBytes: a.bytes.length, storageRef: ref,
             });

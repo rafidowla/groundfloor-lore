@@ -21,6 +21,10 @@
  *   4. `id TEXT PRIMARY KEY` becomes a composite PK column (`id` inside the
  *      (workspace_id, id) key) — same uniqueness, same column set.
  *
+ * `nodes.sk` is an identity column but is unique only PER WORKSPACE as far as the schema is concerned:
+ * `UNIQUE (workspace_id, sk)` (postgresWorkspaceSk.ts) is the invariant, and every join from an edge to a node
+ * names both columns. Do not write `ON s.sk = e.src_sk` without the workspace.
+ *
  * Node indexes mirror SQLite's one-for-one, each prefixed with workspace_id so the
  * shared per-workspace queries can use them (including the hot
  * `(workspace_id, "updatedAt" DESC, id)` ordering that backs keyset paging).
@@ -39,6 +43,8 @@ import {
 import { migrateEdgesToSurrogatePk } from './postgresEdgePkMigration.js';
 import { asOfSchemaDdl, backfillValidTimeColumns } from './postgresAsOfSchema.js';
 import { ensureKeywordIndexes, type KeywordIndexEnsureResult } from './postgresKeywordIndex.js';
+import { ensureWorkspaceSk } from './postgresWorkspaceSk.js';
+import { ensureCreatedAtTs, ensurePartitionColumns, partitionKeySchemaDdl } from './postgresPartitionKeySchema.js';
 import { LINK_OPTOUT_PG_DDL } from './postgresGraphLinkOptOut.js';
 
 /**
@@ -49,7 +55,7 @@ import { LINK_OPTOUT_PG_DDL } from './postgresGraphLinkOptOut.js';
  * (text-keyed) edges table is NOT handled here: `ensureGraphSchema` migrates it.
  */
 export function graphSchema_ddl(): string[] {
-    return [NODES_DDL, ...nodesSurrogateKeyDdl(), ...currentEdgeSchemaDdl(), ...asOfSchemaDdl(), LINK_OPTOUT_PG_DDL];
+    return [NODES_DDL, ...nodesSurrogateKeyDdl(), ...currentEdgeSchemaDdl(), ...asOfSchemaDdl(), ...partitionKeySchemaDdl(), LINK_OPTOUT_PG_DDL];
 }
 
 /**
@@ -62,7 +68,7 @@ export async function ensureGraphSchema(
     client: PoolClient,
     workspaceId: string,
     opts: { keywordIndexInlineRowLimit?: number } = {},
-): Promise<KeywordIndexEnsureResult> {
+): Promise<GraphSchemaResult> {
     if (typeof workspaceId !== 'string' || workspaceId.trim() === '') {
         throw new Error('ensureGraphSchema: workspaceId must be a non-empty string');
     }
@@ -75,11 +81,27 @@ export async function ensureGraphSchema(
     }
     for (const ddl of currentEdgeSchemaDdl()) await client.query(ddl); // fresh DB: creates the table; migrated DB: no-ops
     for (const ddl of asOfSchemaDdl()) await client.query(ddl);
+    await ensurePartitionColumns(client); // L3: partition_key (nodes, edges) + created_at_ts; catalog-probed, lock-free when present
     await client.query(LINK_OPTOUT_PG_DDL); // additive: durable link opt-out (postgresGraphLinkOptOut.ts)
-    await backfillValidTimeColumns(client); // legacy nodes: no-op once every text bound has its timestamp
+    await backfillValidTimeColumns(client, workspaceId); // this workspace's legacy nodes: no-op once every text bound has its timestamp
+    // L3: created_at_ts pending-rows index + legacy backfill: inline when small, `createdAtTsPending` (background) when large.
+    const createdAt = await ensureCreatedAtTs(client, opts.keywordIndexInlineRowLimit === undefined ? {} : { inlineRowLimit: opts.keywordIndexInlineRowLimit });
     // Keyword-search indexes (postgresKeywordIndex.ts): inline for small tables; on a large one the
     // result says `pending` and the graph handle builds them in the background.
-    return ensureKeywordIndexes(client, opts.keywordIndexInlineRowLimit === undefined ? {} : { inlineRowLimit: opts.keywordIndexInlineRowLimit });
+    const keyword = await ensureKeywordIndexes(client, opts.keywordIndexInlineRowLimit === undefined ? {} : { inlineRowLimit: opts.keywordIndexInlineRowLimit });
+    // Per-workspace `sk` (postgresWorkspaceSk.ts): UNIQUE (workspace_id, sk) + the workspace-led edge index, inline
+    // when small, `workspaceSkPending` when large (the graph handle then builds them in the background). The
+    // lore_entity foreign key is added by the same step on the table-storage bootstrap, once that table exists.
+    const sk = await ensureWorkspaceSk(client, opts.keywordIndexInlineRowLimit === undefined ? {} : { inlineRowLimit: opts.keywordIndexInlineRowLimit });
+    return { ...keyword, workspaceSkPending: sk.pending, createdAtTsPending: createdAt.pending };
+}
+
+/** What the graph bootstrap leaves for the handle to finish in the background. */
+export interface GraphSchemaResult extends KeywordIndexEnsureResult {
+    /** Large table, workspace-led `sk` structures still missing: the caller should start the background build. */
+    workspaceSkPending: boolean;
+    /** Large table, legacy `created_at_ts` rows still to fill (and the pending index to build): background job. */
+    createdAtTsPending: boolean;
 }
 
 /**

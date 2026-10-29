@@ -13,23 +13,25 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import pg from 'pg';
-import { argv, makeFakeEmbedder, pct, now } from './pg-bench-common.mts';
+import { argv, makeFakeEmbedder, pct, pgWorkspaceKey, now } from './pg-bench-common.mts';
 
 process.env.LORE_CACHE_DISABLED = '1'; // measure the query, not the read cache
 const url = process.env['LORE_PG_URL'];
 if (!url) { console.error('LORE_PG_URL is required'); process.exit(2); }
-const info = JSON.parse(fs.readFileSync(argv('seed-info')!, 'utf8')) as { wsPath: string; ws: string; dim?: number; n: number };
+const info = JSON.parse(fs.readFileSync(argv('seed-info')!, 'utf8')) as { home: string; wsPath: string; ws: string; wsKey?: string; dim?: number; n: number };
+// The store and the raw SQL both take the Postgres key (the permanent workspace id since 3.37.0), not the name.
+const wsKey = info.wsKey ?? await pgWorkspaceKey(info.home, info.ws);
 const iters = Number(argv('iters', '15'));
 const rounds = Number(argv('rounds', '2'));
 const { PostgresVerbatimStore } = await import('../../packages/lore/src/engines/postgres/postgresVerbatimStore.js');
 const pool = new pg.Pool({ connectionString: url, max: 8 });
-const store = new PostgresVerbatimStore(path.join(info.wsPath, '.lore'), pool, info.ws, makeFakeEmbedder(384) as never);
+const store = new PostgresVerbatimStore(path.join(info.wsPath, '.lore'), pool, wsKey, makeFakeEmbedder(384) as never);
 await store.initialize();
 
 // Pick real tokens by document frequency from the seeded corpus.
 const st = await pool.query<{ word: string; ndoc: string }>(
-    `SELECT word, ndoc FROM ts_stat($$SELECT text_tsv FROM verbatim TABLESAMPLE SYSTEM (30) WHERE workspace_id = '${info.ws.replace(/'/g, "''")}'$$) ORDER BY ndoc DESC`);
-const total = Number((await pool.query(`SELECT count(*) c FROM verbatim WHERE workspace_id=$1`, [info.ws])).rows[0].c);
+    `SELECT word, ndoc FROM ts_stat($$SELECT text_tsv FROM verbatim TABLESAMPLE SYSTEM (30) WHERE workspace_id = '${wsKey.replace(/'/g, "''")}'$$) ORDER BY ndoc DESC`);
+const total = Number((await pool.query(`SELECT count(*) c FROM verbatim WHERE workspace_id=$1`, [wsKey])).rows[0].c);
 const nearRatio = (r: number) => st.rows.filter((x) => /^[a-z]{3,}$/.test(x.word)).reduce((b, x) => Math.abs(Number(x.ndoc) / (0.3 * total) - r) < Math.abs(Number(b.ndoc) / (0.3 * total) - r) ? x : b).word;
 const mid = nearRatio(0.01), rare = nearRatio(0.001);
 const queries: Record<string, string> = { 'common-only': 'the', 'all-common': 'the of', 'mixed': `the ${mid}`, 'mixed-2': `of and ${mid}`, 'rare-only': `${mid} ${rare}` };

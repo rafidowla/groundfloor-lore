@@ -328,6 +328,15 @@ export async function handlePostNode(req: IncomingMessage, res: ServerResponse, 
                 writeError(res, 400, 'invalid_questions_meta', writeResult.error.message);
                 return;
             }
+            // Phase 0 L3 - `partitionKey` failed validation (400) / tried to change a node's non-empty key (409).
+            if (writeResult.code === 'invalid_partition_key') {
+                writeError(res, 400, 'invalid_partition_key', writeResult.error.message);
+                return;
+            }
+            if (writeResult.code === 'partition_key_immutable') {
+                writeError(res, 409, 'PARTITION_KEY_IMMUTABLE', writeResult.error.message);
+                return;
+            }
             // D5 — the write-time supersession rejection codes are caller
             // input errors (400), not substrate unavailability (500).
             // round 4 (#4) — `supersedes_partial` means the NEW node's own

@@ -149,7 +149,7 @@ try {
     const client = await pool.connect();
     try {
         await test('the backfill (batch of 5) fills every parseable bound and returns the row count', async () => {
-            const updated = await backfillValidTimeColumns(client, 5);
+            const updated = await backfillValidTimeColumns(client, WS, 5);
             assert.ok(updated === 17, `expected 17 rows updated (8 + 8 + the offset one), got ${updated}`);
             assert.deepEqual(await ts('L0'), { id: 'L0', f: F, u: U });
             assert.deepEqual(await ts('L1'), { id: 'L1', f: F, u: null });
@@ -159,10 +159,24 @@ try {
         });
         await test('a second run updates 0 rows and rewrites nothing (row versions unchanged)', async () => {
             const before = await q<{ ctid: string; xmin: string }>('SELECT ctid::text AS ctid, xmin::text AS xmin FROM nodes WHERE workspace_id = $1 ORDER BY id', [WS]);
-            assert.equal(await backfillValidTimeColumns(client, 5), 0);
-            assert.equal(await backfillValidTimeColumns(client), 0);
+            assert.equal(await backfillValidTimeColumns(client, WS, 5), 0);
+            assert.equal(await backfillValidTimeColumns(client, WS), 0);
             const after = await q<{ ctid: string; xmin: string }>('SELECT ctid::text AS ctid, xmin::text AS xmin FROM nodes WHERE workspace_id = $1 ORDER BY id', [WS]);
             assert.deepEqual(after, before);
+        });
+        await test('the backfill is scoped to one workspace: another workspace\'s empty columns are left alone', async () => {
+            const OTHER = `${WS}-other`;
+            await q('DELETE FROM nodes WHERE workspace_id = $1', [OTHER]);
+            await q(`INSERT INTO nodes (workspace_id, id, label, content, "validFrom", "updatedAt")
+                     SELECT $1, 'O' || g, 'o', 'o', $2, '2026-01-01T00:00:00.000Z' FROM generate_series(1, 12) g`, [OTHER, F]);
+            await q('UPDATE nodes SET valid_from_at = NULL, valid_until_at = NULL WHERE workspace_id = ANY($1)', [[WS, OTHER]]);
+            const before = await q<{ c: string }>('SELECT count(*) AS c FROM nodes WHERE workspace_id = $1 AND valid_from_at IS NULL', [OTHER]);
+            assert.equal(before[0]!.c, '12');
+            assert.equal(await backfillValidTimeColumns(client, WS, 4), 17, 'this workspace only');
+            const after = await q<{ c: string }>('SELECT count(*) AS c FROM nodes WHERE workspace_id = $1 AND valid_from_at IS NULL', [OTHER]);
+            assert.equal(after[0]!.c, '12', 'the other workspace was not touched');
+            assert.equal(await backfillValidTimeColumns(client, OTHER, 4), 12);
+            await q('DELETE FROM nodes WHERE workspace_id = $1', [OTHER]);
         });
     } finally { client.release(); }
 

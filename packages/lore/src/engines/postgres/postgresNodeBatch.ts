@@ -176,8 +176,9 @@ async function applySupersedes(client: PoolClient, workspaceId: string, s: NodeB
     for (const l of s.links) {
         if (!l.edge) continue;
         await client.query(
-            `INSERT INTO edges (workspace_id, relation, confidence, "confidenceScore", src_sk, dst_sk, origin, created_at)`
-            + ` VALUES ($1, 'supersedes', 'extracted', 1.0, ${skOf('$1', '$2')}, ${skOf('$1', '$3')}, 'caller', now())`
+            `INSERT INTO edges (workspace_id, relation, confidence, "confidenceScore", src_sk, dst_sk, origin, created_at, partition_key)`
+            + ` VALUES ($1, 'supersedes', 'extracted', 1.0, ${skOf('$1', '$2')}, ${skOf('$1', '$3')}, 'caller', now(),`
+            + ` COALESCE((SELECT partition_key FROM nodes WHERE workspace_id = $1 AND id = $2), ''))`
             + ` ON CONFLICT (workspace_id, src_sk, dst_sk, relation) DO UPDATE SET valid_to = NULL`,
             [workspaceId, s.successorId, l.targetId],
         );

@@ -8,14 +8,14 @@
  * How a blob is matched and why that is safe:
  *   - The target's blobs are the `storageRef`s of its own ingestion sources (not-purged ones; a purged source's
  *     blob is already gone). Nothing is found by scanning the blob store or by name.
- *   - A ref is deleted only when no source of ANOTHER workspace in the same ingestion database still points at it
- *     (`countBlobRefsHeldByOtherWorkspaces`) and the optional `isRefHeldElsewhere` hook says no. Refs are
- *     content-addressed per workspace (`FsBlobStore`: `<sha256(workspace name)[:16]>/<sha256>`; Groundfloor Files:
- *     `gf1:<fileId>:<sha>`, one upload per source), so two workspaces normally never share one - this is the
- *     belt-and-braces check.
- *   - Known gap, reported not guessed at: a SQLite ingestion store is one file per workspace, so it cannot see a
- *     LATER workspace that reused the same NAME and uploaded the same bytes (same FsBlobStore ref). A caller that
- *     knows of such a workspace passes `isRefHeldElsewhere`.
+ *   - A ref is deleted unless the optional `isRefHeldElsewhere` hook says another workspace still uses it. There is no
+ *     cross-workspace lookup in the ingestion store: refs are content-addressed per workspace and one upload per source
+ *     (`FsBlobStore`: `<sha256(scope)[:16]>/<sha256(bytes)>` where scope is the store's `blobScope` = the permanent
+ *     workspace id for Postgres; Groundfloor Files: `gf1:<fileId>:<sha>`), so two workspaces never share a ref.
+ *   - The one exception is LEGACY: a ref minted before `blobScope` hashes the workspace NAME, and a later workspace that
+ *     reused the same NAME and uploaded the same bytes (and any SQLite store, which has no permanent id) gets the same
+ *     FsBlobStore ref. Only a caller that knows of such a workspace can say so, through `isRefHeldElsewhere`
+ *     (hostErasers.ts does for name reuse).
  *
  * A ref the blob store cannot parse as one of its own (`IBlobStore.isValidRef` false: garbage, `../x`, an absolute path)
  * names no blob that store holds, so there is nothing to delete for it: it is noted, never touched on disk, and it is NOT a
@@ -86,7 +86,6 @@ export function createIngestionBlobEraser(o: IngestionBlobEraserOptions): Worksp
         };
 
         const heldElsewhere = async (ref: string): Promise<boolean> => {
-            if (key !== null && (await o.ingestionStore.countBlobRefsHeldByOtherWorkspaces(key, ref)) > 0) return true;
             return o.isRefHeldElsewhere ? o.isRefHeldElsewhere(ref) : false;
         };
 

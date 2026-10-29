@@ -37,8 +37,11 @@
  *     not for connectivity).
  *
  * RANKING: ts_rank(text_tsv, query), normalized like the FTS5 port —
- * divided by the best raw score in the result set (guard 1e-9) so every
- * engine speaks "higher = more relevant" on a comparable [0,1] scale.
+ * divided by the best raw score in the FINAL hit list (guard 1e-9) so every
+ * engine speaks "higher = more relevant" on a comparable [0,1] scale. The
+ * query returns the RAW rank; postgresKeywordScore.normalizeKeywordHits runs
+ * once, after the scope filter (Phase 0 L5), so rows the actor cannot see
+ * never set the scale.
  * Tie-break score desc, then id asc — same as every other ranked result set
  * in this codebase.
  */
@@ -49,6 +52,9 @@ import { makeBm25Envelope, type Bm25Envelope } from '../../verbatimBm25Result.js
 import type { VerbatimSearchResult, VerbatimQueryFilter } from '../../../providers/types.js';
 import { buildSqlFilterEntries } from '../../verbatimHistory.js';
 import { lexemesForTokens, partitionTokens } from './postgresBm25StopList.js';
+import { log } from '../../../logger.js';
+import { normalizeKeywordHits } from './postgresKeywordScore.js';
+import { scopeFilterSql } from '../postgresVerbatimScopeArr.js';
 import { applyActorScopeFilter } from '../../../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../../../security/actorContext.js';
 
@@ -173,7 +179,11 @@ export async function bm25Search(
         }
     }
     const filter = pgFilterSql(rawFilter, tokens.length + 2);
-    const limitParam = `$${tokens.length + 2 + filter.params.length}`;
+    // Scope policy in SQL, BEFORE the LIMIT (security_scope_arr; see postgresVerbatimScopeArr.ts). The JS
+    // applyActorScopeFilter below stays only as a final assertion.
+    const effectiveScopes = actorScopes ?? getCurrentActorScopes();
+    const scope = scopeFilterSql(effectiveScopes, tokens.length + 2 + filter.params.length, 'v.security_scope_arr');
+    const limitParam = `$${tokens.length + 2 + filter.params.length + scope.params.length}`;
 
     // The OR-joined per-token phraseto tsquery is wrapped in one sub-SELECT
     // so the expression is written once and reused for both @@ and ts_rank.
@@ -185,20 +195,29 @@ export async function bm25Search(
         FROM verbatim v, (SELECT ${tsqueryExpr} AS query) q
         WHERE v.workspace_id = $1 AND v.is_canonical = 1 AND v.is_tombstone = 0 AND v.text_tsv @@ q.query
         ${filter.sql}
+        ${scope.sql}
         ORDER BY raw_score DESC, v.id ASC
         LIMIT ${limitParam}
     `;
-    const rows = await pool.query(sql, [workspaceId, ...tokens, ...filter.params, limit]);
-    // ts_rank returns 0..~1 where higher is more relevant; normalize by the
-    // result set's own maximum, the SAME normalization shape the FTS5 path
-    // uses (divide by the best score present), so callers see the uniform
-    // "higher score = more relevant" scale across engines.
-    const magnitudes = rows.rows.map((r) => Number((r as Record<string, unknown>).raw_score ?? 0));
-    const maxMag = Math.max(...magnitudes, 1e-9);
-    const mapped = rows.rows.map((r) => {
-        const raw = Number((r as Record<string, unknown>).raw_score ?? 0);
-        return rowToResult({ ...r, score: raw / maxMag });
-    });
-    const filtered = applyActorScopeFilter(mapped, actorScopes ?? getCurrentActorScopes());
-    return makeBm25Envelope(filtered, true);
+    const rows = await pool.query(sql, [workspaceId, ...tokens, ...filter.params, ...scope.params, limit]);
+    // Hits carry the RAW ts_rank here (a pure function of document + query, so comparable across rows and, in Phase 3,
+    // across slices). The scale is decided exactly once, in finalizeKeywordHits, on the final list.
+    const raw = rows.rows.map((r) => rowToResult({ ...r, score: Number((r as Record<string, unknown>).raw_score ?? 0) }));
+    return makeBm25Envelope(finalizeKeywordHits(raw, effectiveScopes), true);
+}
+
+/**
+ * The single exit of the keyword leg: take RAW-scored hits (best-first, already cut to the limit), apply the scope
+ * policy as a final assertion, then normalize ONCE. Filtering strictly before normalizing is the contract: a hit the
+ * actor cannot see must never set the scale of the ones they can. Phase 3 (multi-slice) calls this after merging each
+ * slice's raw hits and re-cutting to `limit`.
+ */
+export function finalizeKeywordHits<T extends VerbatimSearchResult & { score: number }>(
+    rawHits: readonly T[],
+    effectiveScopes: ReadonlyArray<string> | undefined,
+): T[] {
+    // The SQL predicate already applied the policy (L4); this is only an assertion and must never remove a row.
+    const visible = applyActorScopeFilter(rawHits as T[], effectiveScopes);
+    if (visible.length !== rawHits.length) log.warn(`[verbatim-scope] bm25 SQL scope predicate returned ${rawHits.length - visible.length} row(s) the JS policy rejects; dropped`);
+    return normalizeKeywordHits(visible);
 }

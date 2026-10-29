@@ -36,12 +36,14 @@ import type { PoolClient } from 'pg';
 
 import { BM25_STOPLIST_DDL, COMMON_LEXEMES_TABLE, COMMON_LEXEMES_META_TABLE } from './postgresVerbatim/postgresBm25StopList.js';
 import { migrateVerbatimToPartitioned } from './postgresVerbatimPartitionMigration.js';
+import { SCOPE_FUNCTIONS_DDL, scopeArrTriggerIfAbsentDdl, ensureScopeArr } from './postgresVerbatimScopeArr.js';
 import {
     VERBATIM_INDEX_NAMES, TEXT_TSV_FUNCTION_DDL, partitionedVerbatimDdl, ensureWorkspacePartition, assertDimension,
+    ensureVerbatimPartitionKeyColumn,
 } from './postgresVerbatimPartitionDdl.js';
 
 export {
-    PGVECTOR_HNSW_MAX_DIMENSION, VERBATIM_INDEX_NAMES, VERBATIM_COLUMNS, TEXT_TSV_FUNCTION_DDL, partitionedVerbatimDdl,
+    PGVECTOR_HNSW_MAX_DIMENSION, VERBATIM_INDEX_NAMES, VERBATIM_SCOPE_INDEX_NAME, VERBATIM_COLUMNS, TEXT_TSV_FUNCTION_DDL, partitionedVerbatimDdl,
     verbatimPartitionName, ensureWorkspacePartition,
 } from './postgresVerbatimPartitionDdl.js';
 
@@ -116,24 +118,31 @@ BEGIN
     END IF;
 END $$;`;
 
-const CHANGES_LOG_DDL = `
--- changes-log — mirrors sqlite's verbatim_changes_log shape. NOTHING populates or reads it on
--- Postgres: the SQLite table feeds the SQLite -> LanceDB promotion tail copy (copyTail), which is
--- bound to a SQLite file and never runs for a Postgres workspace. Kept because schemaIsCurrent
--- requires it. See docs/CONFIGURATION.md and test/postgres-changes-log-pin-unit.ts.
-CREATE TABLE IF NOT EXISTS verbatim_changes_log (
-    seq BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    row_rowid BIGINT NOT NULL,
-    row_id TEXT NOT NULL,
-    is_canonical INTEGER NOT NULL,
-    op TEXT NOT NULL CHECK (op IN ('upsert', 'delete')),
-    at TEXT NOT NULL
-);`;
+/**
+ * `verbatim_changes_log` is no longer created on Postgres (Phase 0, shard-ready): the table has no workspace column, nothing
+ * populates it and nothing reads it (the SQLite table feeds the SQLite -> LanceDB promotion tail copy, which never runs for
+ * a Postgres workspace; see docs/CONFIGURATION.md and test/postgres-changes-log-pin-unit.ts). A database that already has
+ * the (empty) table keeps it until {@link dropVerbatimChangesLog}, the explicit contract step.
+ */
+export const VERBATIM_CHANGES_LOG_TABLE = 'verbatim_changes_log';
+
+/**
+ * CONTRACT step (never run at startup): drop the unused `verbatim_changes_log`. Refuses (keeps the table) if it holds any
+ * row, because that would mean something did write to it. Returns what happened.
+ */
+export async function dropVerbatimChangesLog(client: Pick<PoolClient, 'query'>): Promise<{ dropped: boolean; refused?: string }> {
+    const t = await client.query<{ t: string | null }>(`SELECT to_regclass('${VERBATIM_CHANGES_LOG_TABLE}')::text AS t`);
+    if (!t.rows[0]?.t) return { dropped: false };
+    const n = await client.query<{ n: string }>(`SELECT count(*)::text AS n FROM ${VERBATIM_CHANGES_LOG_TABLE}`);
+    if (Number(n.rows[0]?.n ?? '0') > 0) return { dropped: false, refused: `${VERBATIM_CHANGES_LOG_TABLE} holds ${n.rows[0]!.n} row(s); something wrote to it, so it was kept` };
+    await client.query(`DROP TABLE ${VERBATIM_CHANGES_LOG_TABLE}`);
+    return { dropped: true };
+}
 
 /**
  * The verbatim DDL as a statement array, PARAMETERIZED on the embedding
  * dimension: the extension, the sequence + partitioned parent + its indexes,
- * the tsvector function + trigger, the changes-log table. It creates NO
+ * the tsvector function + trigger. It creates NO
  * partition (see {@link ensureWorkspacePartition}). Exported for tests and
  * contract tests to run the SAME statements the engine runs — do not inline
  * copies elsewhere.
@@ -144,7 +153,9 @@ export function verbatimSchema_ddl(dimension: number): string[] {
         ...partitionedVerbatimDdl(dimension, 'verbatim', 'verbatim'),
         TEXT_TSV_FUNCTION_DDL,
         TEXT_TSV_TRIGGER_IF_ABSENT_DDL,
-        CHANGES_LOG_DDL,
+        // security_scope_arr is derived from the JSON TEXT column by a trigger (see postgresVerbatimScopeArr.ts).
+        ...SCOPE_FUNCTIONS_DDL,
+        scopeArrTriggerIfAbsentDdl('verbatim'),
         // Additive: the BM25 common-token stop-list tables (derived data, see postgresBm25StopList.ts).
         ...BM25_STOPLIST_DDL,
     ];
@@ -166,10 +177,16 @@ export async function ensureVerbatimSchema(client: PoolClient, workspaceId: stri
     await client.query(ddl[0]!); // CREATE EXTENSION vector — the column type below resolves against it
     await ensureVectorColumn(client, dimension);
     const state = await verbatimTableState(client);
+    // L3: an older database lacks the column; the migration below copies VERBATIM_COLUMNS (which names it), so add it first.
+    if (state !== 'absent') await ensureVerbatimPartitionKeyColumn(client, 'verbatim');
     if (state === 'legacy') {
         // Pre-partitioning database: one plain table. Convert in place (resumable; see the migration module).
         await migrateVerbatimToPartitioned(client, dimension);
     } else if (state === 'absent' || !(await schemaIsCurrent(client))) {
+        // A partitioned table from before the scope-array column must gain it (and its trigger) BEFORE the list below
+        // runs: that list's plain `CREATE INDEX IF NOT EXISTS ... (security_scope_arr)` would otherwise fail on the
+        // missing column, or build the index with a blocking lock. ensureScopeArr builds it concurrently instead.
+        if (state === 'partitioned') await ensureScopeArr(client, workspaceId);
         // Skipped on the common re-open: every statement below is IF NOT EXISTS, but even a no-op
         // CREATE INDEX IF NOT EXISTS takes a SHARE lock on the table (and on EVERY partition of a
         // partitioned one) before it finds the index exists, which would stall live writers.
@@ -183,6 +200,8 @@ export async function ensureVerbatimSchema(client: PoolClient, workspaceId: stri
     );
     if (present.rows[0]?.ok !== true) for (const stmt of BM25_STOPLIST_DDL) await client.query(stmt);
     await ensureWorkspacePartition(client, workspaceId);
+    // Common re-open: one catalog probe + one partition-comment read. Upgrade/backfill path: see postgresVerbatimScopeArr.ts.
+    await ensureScopeArr(client, workspaceId);
 }
 
 /** 'absent' (no table), 'legacy' (plain table from an earlier release), 'partitioned'. */
@@ -195,12 +214,11 @@ export async function verbatimTableState(client: PoolClient): Promise<'absent' |
     throw new Error(`ensureVerbatimSchema: "verbatim" exists with unexpected relkind "${kind}" — refusing to touch it`);
 }
 
-/** True when the parent, every named index, the trigger and the changes-log already exist. */
+/** True when the parent, every named index, the trigger and the row sequence already exist. */
 async function schemaIsCurrent(client: PoolClient): Promise<boolean> {
     const res = await client.query<{ ok: boolean }>(
         `SELECT (SELECT count(*) FROM pg_class WHERE relname = ANY($1::text[]) AND relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = to_regclass('verbatim'))) = $2
             AND EXISTS (SELECT 1 FROM pg_trigger WHERE tgrelid = to_regclass('verbatim') AND tgname = 'verbatim_text_tsv_biur')
-            AND to_regclass('verbatim_changes_log') IS NOT NULL
             AND to_regclass('verbatim_row_seq') IS NOT NULL AS ok`,
         [VERBATIM_INDEX_NAMES as unknown as string[], VERBATIM_INDEX_NAMES.length],
     );

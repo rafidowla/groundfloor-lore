@@ -69,22 +69,6 @@ await test('erases the target files, keeps every other workspace file, reports c
     assert.ok(await allThere(blobs, theirs.refs) && await allThere(blobs, theirs2.refs), 'neighbour files must be untouched');
     await store.close();
 });
-await test('a blob another workspace still points at is kept (and said so); it is not counted as remaining', async () => {
-    const blobs = new FsBlobStore(path.join(tmp, 'blobs2'));
-    const store = new SqliteIngestionStore(path.join(tmp, 'i2.db'));
-    const mine = await seedWs(store, blobs, TARGET, 'acme', 3);
-    // Another workspace registers a source over the SAME stored reference (same bytes, same blob dir).
-    const shared = mine.refs[1]!;
-    const b = bytesOf(`${TARGET}-1`);
-    await store.upsertSource({ workspace: OTHER, fileName: 'shared.txt', mimeType: 'text/plain', sha256: sha256Hex(b), sizeBytes: b.length, storageRef: shared });
-    const r = await createIngestionBlobEraser({ ingestionStore: store, blobStore: blobs }).erase(targetOf(TARGET));
-    assert.equal(r.status, 'complete', JSON.stringify(r));
-    assert.deepEqual(r.removed, { blobs: 2 });
-    assert.match(r.detail ?? '', /still referenced by another workspace/);
-    assert.equal(await blobs.has!(shared), true, 'the shared blob must survive');
-    assert.equal(await blobs.has!(mine.refs[0]!), false);
-    await store.close();
-});
 await test('second run is a clean no-op; an empty workspace is not-applicable', async () => {
     const blobs = new FsBlobStore(path.join(tmp, 'blobs3'));
     const store = new SqliteIngestionStore(path.join(tmp, 'i3.db'));
@@ -203,7 +187,7 @@ console.log('\nBoth ingestion backends');
 const backends = await ingestionBackends(tmp, 'ingestion-blob-erase');
 try {
     for (const be of backends.list) {
-        await test(`[${be.name}] erase by the store's own workspace key; a second workspace sharing one ref keeps it; neighbours untouched`, async () => {
+        await test(`[${be.name}] erase by the store's own workspace key; a legacy ref the caller reports as held elsewhere is kept; neighbours untouched`, async () => {
             const blobs = new FsBlobStore(path.join(tmp, `blobs-be-${be.name}`));
             const a = await be.open();
             const b = be.name === 'postgres' ? await be.open() : { store: a.store, ws: 'w2' }; // sqlite is one file per workspace: a second workspace lives in the same store
@@ -211,9 +195,10 @@ try {
             const theirs = await seedWs(b.store, blobs, b.ws, 'other', 3);
             const shared = mine.refs[2]!; const sb = bytesOf(`${a.ws}-2`);
             await b.store.upsertSource({ workspace: b.ws, fileName: 's.txt', mimeType: 'text/plain', sha256: sha256Hex(sb), sizeBytes: sb.length, storageRef: shared });
-            assert.equal(await a.store.countBlobRefsHeldByOtherWorkspaces(a.ws, shared), 1, 'the other workspace row is visible through the store');
             const target: EraseTarget = { id: a.ws, name: 'acme', path: '/x', mode: 'local', orgId: null };
-            const r = await createIngestionBlobEraser({ ingestionStore: a.store, blobStore: blobs }).erase(target);
+            // The ingestion store has no cross-workspace lookup (D9): a LEGACY name-hashed ref shared with another workspace is
+            // kept only when the caller says so through isRefHeldElsewhere (hostErasers does for name reuse).
+            const r = await createIngestionBlobEraser({ ingestionStore: a.store, blobStore: blobs, isRefHeldElsewhere: async (ref) => ref === shared }).erase(target);
             assert.equal(r.status, 'complete', JSON.stringify(r));
             assert.ok(await noneThere(blobs, mine.refs.filter((x) => x !== shared)));
             assert.equal(await blobs.has!(shared), true, 'shared ref kept');
