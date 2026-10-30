@@ -8,6 +8,7 @@
  *   config      slot arithmetic, default reserve (4 on the default pool of 16), env + option overrides, bad env fails loudly
  *   starvation  (a) with background jobs holding every slot, foreground queries still finish promptly;
  *               negative control: the same load taken straight from the pool DOES starve the foreground
+ *   exclusive   jobs sharing an exclusive key (the concurrent index builds) run one at a time; others are not held back
  *   cap         (b) slots cap concurrency (by `concurrency` and by poolMax - reserve); excess jobs queue without a connection
  *   cancel      (c) cancelOwner / AbortSignal / closePostgresPool cancel an in-flight statement, the job promise settles,
  *               the slot is freed, the backend is gone; a queued job is dropped without ever connecting
@@ -27,7 +28,7 @@ import { Client, type Pool } from 'pg';
 import { PostgresGraph } from '../packages/lore/src/engines/postgres/postgresGraph.js';
 import { createPostgresPool, closePostgresPool } from '../packages/lore/src/engines/postgres/postgresClient.js';
 import {
-    backgroundSlots, defaultBackgroundReserve, poolGuardFor,
+    backgroundSlots, defaultBackgroundReserve, INDEX_BUILD_EXCLUSIVE, poolGuardFor,
 } from '../packages/lore/src/engines/postgres/postgresPoolGuard.js';
 import { KEYWORD_INDEXES, releaseKeywordIndexBuild, startKeywordIndexBuild, validKeywordIndexes } from '../packages/lore/src/engines/postgres/postgresKeywordIndex.js';
 import { PostgresVerbatimStore } from '../packages/lore/src/engines/postgres/postgresVerbatimStore.js';
@@ -165,6 +166,59 @@ try {
         let now = 0, peak = 0;
         await Promise.all([0, 1, 2].map(() => g.run('capped1', async (c) => { now++; peak = Math.max(peak, now); await c.query('SELECT pg_sleep(0.1)'); now--; })));
         assert.equal(peak, 1);
+    });
+
+    console.log('\nexclusive (3.38.1)');
+    await test('jobs sharing an exclusive key never overlap; other keys and keyless jobs still run alongside', async () => {
+        const pool = mk({ max: 10, backgroundReserve: 2, backgroundConcurrency: 4 });
+        const g = poolGuardFor(pool);
+        const running = new Map<string, number>();
+        const peakFor = new Map<string, number>();
+        let now = 0, peak = 0;
+        const job = (label: string, key: string | undefined) => g.run(label, async (c) => {
+            now++; peak = Math.max(peak, now);
+            const k = key ?? `none-${label}`;
+            running.set(k, (running.get(k) ?? 0) + 1);
+            peakFor.set(k, Math.max(peakFor.get(k) ?? 0, running.get(k)!));
+            await c.query(`SELECT pg_sleep(0.3) /* guard-x-${label} */`);
+            running.set(k, running.get(k)! - 1);
+            now--;
+        }, key === undefined ? {} : { exclusive: key });
+        const jobs = [job('a1', INDEX_BUILD_EXCLUSIVE), job('a2', INDEX_BUILD_EXCLUSIVE), job('a3', INDEX_BUILD_EXCLUSIVE), job('b', 'other'), job('n', undefined)];
+        await waitFor('three jobs running', async () => (await activeSleeps('guard-x-')) === 3);
+        assert.equal(g.stats().waiting, 2, 'the two same-key jobs wait');
+        assert.equal(pool.totalCount, 3, 'waiting jobs hold no connection');
+        await Promise.all(jobs);
+        assert.equal(peakFor.get(INDEX_BUILD_EXCLUSIVE), 1, 'same-key jobs ran one at a time');
+        assert.equal(peak, 3, 'the other-key and keyless jobs overlapped the exclusive one');
+        assert.equal(g.stats().active, 0);
+        assert.equal(g.stats().completed, 5);
+    });
+    await test('a same-key waiter does not block a later job with no key while a slot is free', async () => {
+        const pool = mk({ max: 8, backgroundReserve: 2, backgroundConcurrency: 2 });
+        const g = poolGuardFor(pool);
+        const first = g.run('k1', (c) => c.query(`SELECT pg_sleep(0.6) /* guard-y-1 */`), { exclusive: 'k' });
+        await waitFor('first running', async () => (await activeSleeps('guard-y-1')) === 1);
+        const second = g.run('k2', (c) => c.query('SELECT 1'), { exclusive: 'k' });
+        const t = await timed(g.run('free', (c) => c.query('SELECT 1')));
+        assert.ok(t.ms < 400, `keyless job waited ${t.ms} ms behind a same-key waiter`);
+        await Promise.all([first, second]);
+    });
+    await test('an aborted same-key waiter is dropped; the key is released after a failing job', async () => {
+        const pool = mk({ max: 8, backgroundReserve: 2, backgroundConcurrency: 4 });
+        const g = poolGuardFor(pool);
+        const ac = new AbortController();
+        let abortedRan = false;
+        const failing = g.run('fail', async (c) => { await c.query(`SELECT pg_sleep(0.3) /* guard-z */`); throw new Error('boom'); }, { exclusive: 'k' });
+        const dropped = g.run('drop', async () => { abortedRan = true; }, { exclusive: 'k', signal: ac.signal });
+        await waitFor('waiter queued', () => g.stats().waiting === 1);
+        ac.abort();
+        assert.deepEqual(await dropped, { ran: false, reason: 'cancelled' });
+        await assert.rejects(failing, /boom/);
+        assert.equal(abortedRan, false);
+        const after = await g.run('next', async (c) => (await c.query('SELECT 7 AS n')).rows[0].n, { exclusive: 'k' });
+        assert.deepEqual(after, { ran: true, value: 7 });
+        assert.deepEqual([g.stats().active, g.stats().waiting], [0, 0]);
     });
 
     console.log('\ncancel (c)');

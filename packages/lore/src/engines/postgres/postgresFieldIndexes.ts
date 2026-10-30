@@ -18,7 +18,7 @@
  */
 import type { Pool, PoolClient } from 'pg';
 import type { ColumnDecl } from '../../contracts/tables.js';
-import { poolGuardFor } from './postgresPoolGuard.js';
+import { poolGuardFor, INDEX_BUILD_EXCLUSIVE } from './postgresPoolGuard.js';
 import { TABLE_TABLES } from './postgresTableSchema.js';
 import { fieldIndexSpecDdl, fieldIndexSpecs, type FieldIndexSpec } from './postgresTableViews.js';
 
@@ -87,7 +87,7 @@ export async function ensureFieldIndexes(pool: Pool, workspace: string): Promise
         try {
             await poolGuardFor(pool).run('field-index-build',
                 (client) => buildFieldIndexes(client, workspace, () => state.ctl.signal.aborted),
-                { signal: state.ctl.signal, timeoutMs: 0 });
+                { signal: state.ctl.signal, timeoutMs: 0, exclusive: INDEX_BUILD_EXCLUSIVE });
         } catch (err) {
             if (!state.ctl.signal.aborted) console.warn(`[PostgresTableStorage] background field index build failed: ${(err as Error).message}`);
         } finally {

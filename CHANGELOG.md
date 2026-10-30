@@ -4,6 +4,59 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.38.1] — 2026-10-30
+
+Fixes a Postgres open failure introduced by 3.38.0, found by the 1M-row 3.37.2 → 3.38.0 upgrade run. No migration, no
+new configuration; upgrading over 3.38.0 or 3.37.x is a drop-in.
+
+### Fixed
+
+- **Postgres: opening a workspace while a background index build runs no longer deadlocks (40P01).** On a large
+  database the first open after upgrading to 3.38.0 starts background `CREATE INDEX CONCURRENTLY` builds (workspace-led
+  sk indexes, keyword GIN indexes, `created_at_ts`). One embedded open builds two `PostgresGraph` handles (the MCP
+  services graph and the `LocalGraphRegistry` graph); the second handle's schema bootstrap replays
+  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS`, and Postgres takes those statements' table
+  locks (ACCESS EXCLUSIVE / SHARE) **before** checking "if not exists". The no-op statement queued behind the build's
+  SHARE UPDATE EXCLUSIVE lock, the build waited for it, and the open failed with `deadlock detected`. A second process
+  opening the same database during a build hit the same thing.
+  - The schema bootstrap now runs through `postgresLockFreeDdl.ts`: plain-text `CREATE TABLE IF NOT EXISTS`,
+    `CREATE [UNIQUE] INDEX IF NOT EXISTS` and `ALTER TABLE ... ADD [COLUMN] IF NOT EXISTS` statements are checked
+    against the catalog first and skipped when the object exists, so a steady-state open takes no table lock. Anything
+    else (DO blocks, parameterized queries, mixed statements) runs unchanged; a missing object is still created by the
+    original statement.
+  - The `idx_nodes_sk` / `idx_edges_dst_sk` DO block also checks `to_regclass` before its `CREATE INDEX IF NOT EXISTS`.
+  - `applyKeywordIndexStatistics` skips an index that is still being built (INVALID / not ready) instead of running
+    `ALTER INDEX ... SET STATISTICS` on it; the background builder sets the target when it finishes.
+  - A database left with an INVALID index by the failed 3.38.0 open needs nothing: the next 3.38.1 open's background
+    builder drops and rebuilds it.
+  - Residual: a 3.37.x or 3.38.0 process opening the same database while a 3.38.1 background build runs can still hit
+    the old deadlock. Upgrade every process, or retry that open after the build finishes.
+- **Postgres: background index builds no longer deadlock each other.** The pool guard runs up to two background jobs
+  at once, so on a large table the keyword GIN build and the `created_at_ts` pending-index build ran
+  `CREATE INDEX CONCURRENTLY` on `nodes` at the same time. Each concurrent build waits out the other's transaction,
+  and for partial / expression indexes that wait is a deadlock: the 1M-row verify of the fix above lost the
+  `created_at_ts` build and left `idx_nodes_created_at_ts_pending` INVALID.
+  - `postgresPoolGuard.ts` gains an `exclusive` job key: jobs sharing a key run one at a time, a waiting job holds no
+    slot and no connection, and jobs with another key (or none) are not held back. The four concurrent index builders
+    (keyword, field-index, workspace-sk, created_at_ts) share `INDEX_BUILD_EXCLUSIVE`. Plain `CREATE INDEX` and
+    `VACUUM` jobs of the verbatim store are unchanged.
+  - The `created_at_ts` pending-index build retries a 40P01 up to three times (dropping the INVALID leftover each
+    time), like the keyword and workspace-sk builds already did, so a build that loses a deadlock to another process
+    converges instead of waiting for the next open.
+
+### Tests
+
+- `test:unit:pg-lockfree-bootstrap` (in the chain): statement splitter / classifier cases; a graph open and a
+  table-storage open complete while another session holds SHARE UPDATE EXCLUSIVE on every table (fails without the
+  fix); dropped indexes and a dropped column are still recreated; a two-handle open with the edge index left to the
+  background build.
+- `test:unit:pg-lockfree-bootstrap` also makes the keyword, workspace-sk and `created_at_ts` builds pending together
+  on a 60k-row table and asserts at most one `CREATE INDEX CONCURRENTLY` runs at a time and no index is left INVALID
+  (fails 3/3 with the exclusive key disabled).
+- `test:unit:pg-pool-guard`: same-key jobs never overlap while other-key and keyless jobs run alongside; a same-key
+  waiter holds no connection and does not block a keyless job; an aborted same-key waiter is dropped and the key is
+  released after a job that throws.
+
 ## [3.38.0] — 2026-10-29
 
 Phase 0 of the shard-ready data model (`_lore-3.25-handoff/SHARD-READY-DATA-MODEL-REVIEW-2026-10-28.md`, decisions

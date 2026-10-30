@@ -79,11 +79,20 @@ export const EDGE_PRIMARY_KEY_COLUMNS = 'workspace_id, src_sk, dst_sk, relation'
 /**
  * Wrap an index creation so it runs only while the workspace-led constraint `UNIQUE (workspace_id, sk)` does not
  * exist yet. Once the contract step ({@link dropGlobalSkIndexes}) has dropped the database-wide index, the
- * constraint's presence stops every later open from re-creating it (which would undo the contract).
+ * constraint's presence stops every later open from re-creating it (which would undo the contract). The index's own
+ * presence is checked too: `CREATE INDEX IF NOT EXISTS` takes its SHARE lock before the existence check, and on every
+ * open that lock would queue behind (and deadlock with) a background CREATE INDEX CONCURRENTLY on the same table.
  */
+const indexName = (createIndex: string): string => {
+    const m = /IF NOT EXISTS (\w+) ON /.exec(createIndex);
+    if (!m) throw new Error(`unlessWorkspaceSkConstraint: no index name in ${createIndex}`);
+    return m[1]!;
+};
+
 const unlessWorkspaceSkConstraint = (createIndex: string): string => `DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '${NODES_WORKSPACE_SK_INDEX}' AND conrelid = 'nodes'::regclass) THEN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = '${NODES_WORKSPACE_SK_INDEX}' AND conrelid = 'nodes'::regclass)
+       AND to_regclass('${indexName(createIndex)}') IS NULL THEN
         ${createIndex};
     END IF;
 END $$`;

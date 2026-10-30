@@ -50,7 +50,7 @@
  * unindexed.
  */
 import type { Pool, PoolClient } from 'pg';
-import { poolGuardFor } from './postgresPoolGuard.js';
+import { poolGuardFor, INDEX_BUILD_EXCLUSIVE } from './postgresPoolGuard.js';
 
 export interface KeywordIndexSpec {
     readonly name: string;
@@ -136,8 +136,11 @@ export async function applyKeywordIndexStatistics(client: Q): Promise<boolean> {
         const col = keywordIndexExpressionColumn(spec);
         try {
             const cur = await client.query<{ t: number | null }>(
-                `SELECT a.attstattarget AS t FROM pg_attribute a WHERE a.attrelid = to_regclass($1) AND a.attnum = $2`, [spec.name, col]);
-            if (cur.rows.length === 0) continue; // index missing
+                `SELECT a.attstattarget AS t FROM pg_attribute a JOIN pg_index i ON i.indexrelid = a.attrelid
+                  WHERE a.attrelid = to_regclass($1) AND a.attnum = $2 AND i.indisvalid AND i.indisready`, [spec.name, col]);
+            // Missing, or INVALID (a concurrent build in progress or its leftover): ALTER INDEX would queue behind that
+            // build's lock and deadlock with it. The builder sets the target once the index is valid.
+            if (cur.rows.length === 0) continue;
             if (cur.rows[0]!.t === KEYWORD_STATISTICS_TARGET) continue;
             await client.query(`ALTER INDEX ${spec.name} ALTER COLUMN ${col} SET STATISTICS ${KEYWORD_STATISTICS_TARGET}`);
             changed = true;
@@ -317,7 +320,7 @@ export function startKeywordIndexBuild(pool: Pool, owner: object, opts: { analyz
         try {
             await poolGuardFor(pool).run('keyword-index-build',
                 (client) => buildKeywordIndexes(client, { isCancelled: () => state.ctl.signal.aborted }, opts.analyze ? { analyze: true } : {}),
-                { signal: state.ctl.signal, timeoutMs: 0 });
+                { signal: state.ctl.signal, timeoutMs: 0, exclusive: INDEX_BUILD_EXCLUSIVE });
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             if (!state.ctl.signal.aborted) console.warn(`[PostgresGraph] background keyword index build failed: ${msg}`);

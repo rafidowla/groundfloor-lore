@@ -21,13 +21,18 @@
  *      DDL transaction accumulates table locks across statements and
  *      deadlocks against live writers that take the same tables in another
  *      order (seen in the delete-honesty gate). Every statement is idempotent,
- *      so a bootstrap that dies midway is simply re-run.
+ *      so a bootstrap that dies midway is simply re-run. `fn` gets a client
+ *      whose idempotent DDL skips objects that already exist
+ *      (postgresLockFreeDdl.ts): Postgres takes the table lock before the
+ *      "if not exists" check, and a no-op statement queued behind a background
+ *      CREATE INDEX CONCURRENTLY deadlocks with it.
  *
  * Nothing here ever falls back to another engine.
  */
 
 import type { Pool, PoolClient } from 'pg';
 import { redactPgUrl } from './postgresClient.js';
+import { lockFreeDdlClient } from './postgresLockFreeDdl.js';
 
 /**
  * Oldest supported server: 15. `ON DELETE SET NULL (column_list)` (the lore_entity -> nodes composite foreign key,
@@ -188,7 +193,8 @@ export async function runSchemaBootstrap<T>(
         await assertServerVersion(client);
         if (opts.requirePgvector) await assertPgvector(client);
         try {
-            return await fn(client);
+            // Idempotent DDL skips what already exists, so a steady-state open takes no table lock (postgresLockFreeDdl.ts).
+            return await fn(lockFreeDdlClient(client));
         } catch (err) {
             // fn's own deliberate errors keep their message; privilege failures get the hint.
             const code = err && typeof err === 'object' && 'code' in err ? (err as { code?: unknown }).code : '';

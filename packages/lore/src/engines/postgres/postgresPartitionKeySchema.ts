@@ -17,7 +17,7 @@
  * CONCURRENTLY, but only OFF the bootstrap path (see {@link ensureCreatedAtTs}).
  */
 import type { Pool, PoolClient } from 'pg';
-import { poolGuardFor } from './postgresPoolGuard.js';
+import { poolGuardFor, INDEX_BUILD_EXCLUSIVE } from './postgresPoolGuard.js';
 import { toPgTimestamp } from './postgresAsOfSchema.js';
 
 type Q = Pick<PoolClient, 'query'>;
@@ -65,18 +65,28 @@ export const CREATED_AT_TS_INLINE_ROW_LIMIT = 50_000;
  * lock (40P01 deadlock, seen in pg-workspace-sk-unit). A failed concurrent build leaves an INVALID index behind;
  * it is dropped and rebuilt so a retry converges.
  */
-export async function ensureCreatedAtTsPendingIndex(client: Q, concurrently: boolean): Promise<void> {
-    const st = await client.query<{ indisvalid: boolean }>(
-        `SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
-         WHERE c.relname = $1 AND c.relnamespace = current_schema()::regnamespace`,
-        [PENDING_INDEX],
-    );
-    if (st.rows.length > 0 && st.rows[0]!.indisvalid) return;
-    if (st.rows.length > 0) await client.query(`DROP INDEX ${concurrently ? 'CONCURRENTLY ' : ''}IF EXISTS ${PENDING_INDEX}`);
-    await client.query(
-        `CREATE INDEX ${concurrently ? 'CONCURRENTLY ' : ''}IF NOT EXISTS ${PENDING_INDEX} ON nodes(workspace_id, id)
-         WHERE "createdAt" <> '' AND created_at_ts IS NULL`,
-    );
+export async function ensureCreatedAtTsPendingIndex(client: Q, concurrently: boolean, isCancelled: () => boolean = () => false): Promise<void> {
+    for (let attempt = 1; ; attempt++) {
+        const st = await client.query<{ indisvalid: boolean }>(
+            `SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid
+             WHERE c.relname = $1 AND c.relnamespace = current_schema()::regnamespace`,
+            [PENDING_INDEX],
+        );
+        if (st.rows.length > 0 && st.rows[0]!.indisvalid) return;
+        if (st.rows.length > 0) await client.query(`DROP INDEX ${concurrently ? 'CONCURRENTLY ' : ''}IF EXISTS ${PENDING_INDEX}`);
+        try {
+            await client.query(
+                `CREATE INDEX ${concurrently ? 'CONCURRENTLY ' : ''}IF NOT EXISTS ${PENDING_INDEX} ON nodes(workspace_id, id)
+                 WHERE "createdAt" <> '' AND created_at_ts IS NULL`,
+            );
+            return;
+        } catch (err) {
+            // Another process's concurrent build or a manual ANALYZE/VACUUM can deadlock with this one (40P01, the build
+            // is the victim; in-process builds are serialized by the pool guard): retry, the INVALID leftover is dropped.
+            const code = err && typeof err === 'object' && 'code' in err ? String((err as { code?: unknown }).code) : '';
+            if (!concurrently || code !== '40P01' || attempt >= 3 || isCancelled()) throw err;
+        }
+    }
 }
 
 async function pendingIndexValid(client: Q): Promise<boolean> {
@@ -173,12 +183,12 @@ export function startCreatedAtTsBuild(pool: Pool, owner: object): Promise<void> 
                 const lock = await client.query<{ ok: boolean }>('SELECT pg_try_advisory_lock($1) AS ok', [BUILD_LOCK_KEY]);
                 if (!lock.rows[0]!.ok) return; // another process is on it
                 try {
-                    await ensureCreatedAtTsPendingIndex(client, true);
+                    await ensureCreatedAtTsPendingIndex(client, true, cancelled);
                     await backfillCreatedAtTs(client, BACKFILL_BATCH, cancelled);
                 } finally {
                     await client.query('SELECT pg_advisory_unlock($1)', [BUILD_LOCK_KEY]).catch(() => undefined);
                 }
-            }, { signal: state.ctl.signal, timeoutMs: 0 });
+            }, { signal: state.ctl.signal, timeoutMs: 0, exclusive: INDEX_BUILD_EXCLUSIVE });
         } catch (err) {
             if (!cancelled()) console.warn(`[PostgresGraph] background created_at_ts build failed: ${(err as Error).message}`);
         } finally {

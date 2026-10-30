@@ -37,6 +37,15 @@
  * returned after every outstanding cancel finished, so a late cancel can never hit
  * whatever statement runs on that backend next.
  *
+ * EXCLUSIVE KEYS. Jobs that pass the same `exclusive` key never run at the same time on
+ * one pool: a later one waits in the queue (holding no slot and no connection) until
+ * the earlier one finishes, while jobs with other keys or none still start. Every
+ * background CREATE INDEX CONCURRENTLY builder uses {@link INDEX_BUILD_EXCLUSIVE}: two
+ * concurrent builds in one database wait for each other's transactions (each waits for
+ * older snapshots, and a second build on the same table queues on the first's SHARE
+ * UPDATE EXCLUSIVE lock), so running two at once can deadlock (40P01), and the loser
+ * leaves an INVALID index behind (seen on the 1M-row 3.38.0 upgrade run).
+ *
  * Guards are keyed per pool (WeakMap): several workspaces / graphs sharing one
  * pool share one budget. A guard never touches foreground queries.
  */
@@ -47,6 +56,8 @@ export const DEFAULT_BACKGROUND_CONCURRENCY = 2;
 /** Upper bound of the default foreground reserve. */
 export const MAX_DEFAULT_BACKGROUND_RESERVE = 4;
 const CANCEL_RETRY_MS = 250;
+/** The `exclusive` key shared by every background CREATE INDEX CONCURRENTLY job (see the header). */
+export const INDEX_BUILD_EXCLUSIVE = 'concurrent-index-build';
 /** Background jobs run without a statement timeout unless configured; cancellation (close / AbortSignal) bounds them. */
 export const DEFAULT_BACKGROUND_STATEMENT_TIMEOUT_MS = 0;
 
@@ -80,6 +91,8 @@ export interface BackgroundJobOptions {
     signal?: AbortSignal;
     /** `statement_timeout` for this job in ms; 0 = unbounded. Undefined = the guard default (`backgroundStatementTimeoutMs`, itself 0 = unbounded unless configured). */
     timeoutMs?: number;
+    /** Jobs with the same key never run at the same time on this pool (see the header). */
+    exclusive?: string;
 }
 
 export interface PoolGuardStats {
@@ -91,6 +104,7 @@ export interface PoolGuardStats {
 interface Job {
     name: string;
     owner: object | undefined;
+    exclusive: string | undefined;
     aborted: boolean;
     pid: number | null;
     cancelTimer: NodeJS.Timeout | null;
@@ -105,6 +119,7 @@ export class PoolGuard {
     private closed = false;
     private readonly waiters: Waiter[] = [];
     private readonly jobs = new Set<Job>();
+    private readonly heldKeys = new Set<string>();
     private readonly warned = new Set<string>();
     private counters = { started: 0, completed: 0, skipped: 0, cancelled: 0 };
 
@@ -139,7 +154,7 @@ export class PoolGuard {
         }
         let finish!: () => void;
         const job: Job = {
-            name, owner: opts.owner, aborted: false, pid: null, cancelTimer: null, inflightCancels: new Set(),
+            name, owner: opts.owner, exclusive: opts.exclusive, aborted: false, pid: null, cancelTimer: null, inflightCancels: new Set(),
             done: new Promise<void>((r) => { finish = r; }), finish: () => finish(),
         };
         this.jobs.add(job);
@@ -179,7 +194,7 @@ export class PoolGuard {
                 client.release(broken ?? (job.aborted ? new Error('background job cancelled') : undefined));
             }
             this.jobs.delete(job);
-            if (granted) this.releaseSlot();
+            if (granted) this.releaseSlot(job);
             job.finish();
         }
     }
@@ -199,16 +214,30 @@ export class PoolGuard {
         await Promise.all(all.map((j) => j.done));
     }
 
+    private canStart(job: Job): boolean {
+        return this.active < this.slots && (job.exclusive === undefined || !this.heldKeys.has(job.exclusive));
+    }
+
+    private grant(job: Job): void {
+        this.active++;
+        if (job.exclusive !== undefined) this.heldKeys.add(job.exclusive);
+    }
+
     private acquire(job: Job): Promise<boolean> {
-        if (this.active < this.slots) { this.active++; return Promise.resolve(true); }
+        if (this.canStart(job)) { this.grant(job); return Promise.resolve(true); }
         return new Promise<boolean>((resolve) => { this.waiters.push({ job, resolve }); });
     }
 
-    private releaseSlot(): void {
+    /** Free the job's slot and key, then start every queued job that can now run, in queue order. */
+    private releaseSlot(job: Job): void {
         this.active--;
-        while (this.waiters.length > 0 && this.active < this.slots) {
-            this.active++;
-            this.waiters.shift()!.resolve(true);
+        if (job.exclusive !== undefined) this.heldKeys.delete(job.exclusive);
+        for (let i = 0; i < this.waiters.length && this.active < this.slots;) {
+            const w = this.waiters[i]!;
+            if (!this.canStart(w.job)) { i++; continue; }
+            this.waiters.splice(i, 1);
+            this.grant(w.job);
+            w.resolve(true);
         }
     }
 

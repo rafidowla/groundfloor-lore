@@ -38,7 +38,7 @@ import {
     EDGES_WS_DST_SK_INDEX, GLOBAL_SK_INDEXES, NODES_WORKSPACE_SK_INDEX, workspaceSkIndexDdl, workspaceSkIndexSpecs,
     type WorkspaceSkIndexSpec,
 } from './postgresEdgeSchema.js';
-import { poolGuardFor } from './postgresPoolGuard.js';
+import { poolGuardFor, INDEX_BUILD_EXCLUSIVE } from './postgresPoolGuard.js';
 import { FIELD_INDEX_HASH_LEN } from './postgresFieldIndexName.js';
 
 type Q = Pick<PoolClient, 'query'>;
@@ -255,7 +255,7 @@ export function startWorkspaceSkBuild(pool: Pool, owner: object): Promise<void> 
                     if (!(await workspaceSkPending(client))) return;
                     await buildWorkspaceSk(client, { isCancelled: () => state.ctl.signal.aborted }, { concurrently: true });
                 },
-                { signal: state.ctl.signal, timeoutMs: 0 });
+                { signal: state.ctl.signal, timeoutMs: 0, exclusive: INDEX_BUILD_EXCLUSIVE });
         } catch (err) {
             if (!state.ctl.signal.aborted) console.warn(`[PostgresGraph] background workspace-sk build failed: ${(err as Error).message}`);
         } finally {
