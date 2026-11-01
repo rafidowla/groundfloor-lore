@@ -22,7 +22,7 @@ import type { Database as DatabaseType } from 'better-sqlite3';
 import { isCjkCorpus } from './ftsTokenizerProfile.js';
 import { makeBm25Envelope, type Bm25Envelope } from './verbatimBm25Result.js';
 import type { VerbatimSearchResult, VerbatimQueryFilter } from '../providers/types.js';
-import { escapeLikeWildcards, buildSqlFilterEntries } from './verbatimHistory.js';
+import { escapeLikeWildcards, buildSqlFilterEntries, renderSqlFilterEntry } from './verbatimHistory.js';
 import { applyActorScopeFilter } from '../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../security/actorContext.js';
 import { DEFAULT_TOKENIZER, CJK_TOKENIZER } from './sqliteVerbatimSchema.js';
@@ -243,7 +243,7 @@ export function bm25Search(
     // D2: array-valued filter fields (e.g. `types: string[]`) become an
     // IN (...) pushdown instead of being silently dropped.
     const filterEntries = buildSqlFilterEntries(filter as Record<string, unknown> | undefined);
-    const filterSql = filterEntries.map((e) => `AND v.${e.column} ${e.op}`).join(' ');
+    const filterSql = filterEntries.map((e) => `AND ${renderSqlFilterEntry(e, `v.${e.column}`, 'sqlite')}`).join(' ');
     const filterParams = filterEntries.flatMap((e) => e.params);
 
     const rawTokens = query.split(/\s+/).filter((t) => t.length > 0);

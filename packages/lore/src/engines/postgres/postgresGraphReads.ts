@@ -205,6 +205,8 @@ async function traverseUncached(ctx: PostgresReadCtx, nodeId: string, maxDepth: 
 export interface SearchScope {
     project?: string; ecosystem?: string; excludeHidden?: boolean;
     types?: string[]; entities?: string[]; topics?: string[];
+    /** 3.38.2 — required tags, ALL-of, exact membership (one tagEquals per tag, ANDed). */
+    tags?: string[];
 }
 
 /**
@@ -213,7 +215,7 @@ export interface SearchScope {
  * Placeholders are minted on `params` in order (match clause first, then the scope filters).
  */
 export function searchWhere(params: PgParams, query: string, scope: SearchScope): string {
-    const { project = '*', ecosystem = '*', excludeHidden = false, types, entities, topics } = scope;
+    const { project = '*', ecosystem = '*', excludeHidden = false, types, entities, topics, tags } = scope;
     const matchClause = keywordMatchClause(params, keywordSearchTerms(query), query.toLowerCase());
     const filters: string[] = [];
     if (project !== '*') { filters.push(`project = ${params.add(project)}`); }
@@ -229,6 +231,8 @@ export function searchWhere(params: PgParams, query: string, scope: SearchScope)
     }
     for (const e of entities ?? []) filters.push(metadataStringArrayContains(params, 'entities', e));
     for (const t of topics ?? []) filters.push(metadataStringArrayContains(params, 'topics', t));
+    // ALL-of: one exact-membership predicate per tag (NOT tagAnyOf, which is OR).
+    for (const t of tags ?? []) filters.push(tagEquals(params, t));
     return [matchClause, ...filters].join(' AND ');
 }
 
@@ -256,11 +260,12 @@ export async function search(
     types?: string[],
     entities?: string[],
     topics?: string[],
+    tags?: string[],
 ): Promise<LoreNode[]> {
     ctx.tally?.record('search', shapeLimit(limit));
     const clampedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000);
     const key = cacheKey('search', ctx.workspaceId, ctx.readCache.epoch, {
-        q: query.toLowerCase(), limit: clampedLimit, project, ecosystem, excludeHidden, types, entities, topics,
+        q: query.toLowerCase(), limit: clampedLimit, project, ecosystem, excludeHidden, types, entities, topics, tags,
     });
     const cached = await ctx.readCache.memoize<{ nodes: LoreNode[]; scanCapHit: boolean }>(key, async () => {
         try {
@@ -273,7 +278,7 @@ export async function search(
             params.add(ctx.workspaceId);
             // `where` = everything after `workspace_id = $1`. The keyword-plan probe runs BEFORE the limit
             // placeholder is minted so it binds exactly the parameters it references.
-            const where = searchWhere(params, query, { project, ecosystem, excludeHidden, types, entities, topics });
+            const where = searchWhere(params, query, { project, ecosystem, excludeHidden, types, entities, topics, tags });
             const decision = await chooseKeywordPlan(ctx.pool, ctx.workspaceId, where, params.values, SEARCH_SCAN_CAP, process.env, keywordSearchTerms(query));
             const limitParam = params.add(SEARCH_SCAN_CAP);
             const sql = decision.plan === 'cte' ? candidateCteSql(where, limitParam) : orderedWalkSql(where, limitParam);

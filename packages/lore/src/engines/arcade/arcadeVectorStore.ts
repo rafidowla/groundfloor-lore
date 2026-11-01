@@ -33,6 +33,7 @@ import { makeBm25Envelope } from '../verbatimBm25Result.js';
 import type { Bm25Envelope } from '../verbatimBm25Result.js';
 import { ArcadeHttp, ArcadeHttpError } from './arcadeHttp.js';
 import { log } from '../../logger.js';
+import { matchesArcadeRowFilter } from './arcadeRowFilter.js';
 import { buildProjectedNeighborsSql, buildSelfNeighborsSql, parseProjectedNeighbors, recallProjectionEnabled } from './arcadeRecallProjection.js';
 import { computeContentHash } from '../contentHash.js';
 import { applyActorScopeFilter, normalizeScopes } from '../../security/scopeFilter.js';
@@ -332,18 +333,7 @@ export class ArcadeVectorStore {
       // CONTRACT: metadata filter is an AND predicate applied BEFORE limit.
       // ArcadeDB's vector.neighbors filter arg is version-sensitive, so the
       // adapter applies the (exact-match) filter client-side. // CONTRACT-DEVIATION (T3)
-      if (filter) {
-        let ok = true;
-        for (const [key, val] of Object.entries(filter)) {
-          if (val === undefined || val === null || val === '') continue;
-          if (key === 'security_scopes' || key === 'contentHash') continue; // handled separately / not a filter axis
-          if (String(vertex[key] ?? '') !== String(val)) {
-            ok = false;
-            break;
-          }
-        }
-        if (!ok) continue;
-      }
+      if (filter && !matchesArcadeRowFilter(vertex, filter)) continue;
       // cosine distance in [0,2] → similarity score in [0,1].
       const score = Math.max(0, Math.min(1, 1 - distance));
       candidates.push({
@@ -448,18 +438,7 @@ export class ArcadeVectorStore {
     // (2) in-process lexical scoring + metadata AND-filter.
     const candidates: VerbatimSearchResult[] = [];
     for (const row of rows.slice(0, BM25_SCAN_CAP)) {
-      if (filter) {
-        let ok = true;
-        for (const [key, val] of Object.entries(filter)) {
-          if (val === undefined || val === null || val === '') continue;
-          if (key === 'security_scopes' || key === 'contentHash') continue;
-          if (String(row[key] ?? '') !== String(val)) {
-            ok = false;
-            break;
-          }
-        }
-        if (!ok) continue;
-      }
+      if (filter && !matchesArcadeRowFilter(row, filter)) continue;
       const hay = (
         String(row['text'] ?? '') +
         ' ' +

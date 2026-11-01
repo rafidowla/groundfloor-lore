@@ -50,7 +50,7 @@ import type { Pool } from 'pg';
 
 import { makeBm25Envelope, type Bm25Envelope } from '../../verbatimBm25Result.js';
 import type { VerbatimSearchResult, VerbatimQueryFilter } from '../../../providers/types.js';
-import { buildSqlFilterEntries } from '../../verbatimHistory.js';
+import { buildSqlFilterEntries, renderSqlFilterEntry } from '../../verbatimHistory.js';
 import { lexemesForTokens, partitionTokens } from './postgresBm25StopList.js';
 import { log } from '../../../logger.js';
 import { normalizeKeywordHits } from './postgresKeywordScore.js';
@@ -94,10 +94,9 @@ export function pgFilterSql(
     const params: string[] = [];
     let next = startParam;
     const fragments = entries.map((e) => {
-        let i = 0;
         const placeholders = e.params.map(() => `$${next++}`);
         params.push(...e.params);
-        return `AND ${PG_FILTER_COLUMNS[e.column] ?? e.column} ${e.op.replace(/\?/g, () => placeholders[i++])}`;
+        return `AND ${renderSqlFilterEntry(e, PG_FILTER_COLUMNS[e.column] ?? e.column, 'pg', placeholders)}`;
     });
     return { sql: fragments.join(' '), params };
 }

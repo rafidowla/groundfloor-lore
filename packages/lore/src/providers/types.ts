@@ -492,7 +492,7 @@ export interface GraphProvider {
      *                    disagree with. See DECISIONS.md
      *                    DEC-ECOSYSTEM-WILDCARD.
      */
-    search(query: string, limit?: number, project?: string, ecosystem?: string, excludeHidden?: boolean, signals?: { scanCapHit: boolean }, types?: string[], entities?: string[], topics?: string[]): Promise<LoreNode[]>;
+    search(query: string, limit?: number, project?: string, ecosystem?: string, excludeHidden?: boolean, signals?: { scanCapHit: boolean }, types?: string[], entities?: string[], topics?: string[], tags?: string[]): Promise<LoreNode[]>;
     /**
      * Filtered node list. ORDER IS GUARANTEED (3.27.1): `updatedAt` descending, then
      * `id` ascending among equal `updatedAt` — identical on every graph engine, so a
@@ -568,6 +568,12 @@ export type VerbatimQueryFilter = Omit<Partial<VerbatimDocument['metadata']>, 't
     /** Narrow to one row id (`id` is in VERBATIM_FILTERABLE_COLUMNS). Used by
      *  the migrate-vectors probes to verify a sampled row itself. */
     id?: string;
+    /** 3.38.2 — ALL-of, exact per-tag membership against the row's
+     *  comma-joined `tags` copy (unlike `tags`, which is whole-string
+     *  equality). Tags must already be normalized (lowercase, trimmed).
+     *  Pushed down by the SQLite and Postgres verbatim stores; other stores
+     *  ignore it. See verbatimHistory.ts TAGS_ALL_FILTER_KEY. */
+    tagsAll?: string[];
 };
 
 /**

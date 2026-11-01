@@ -175,11 +175,12 @@ export async function search(
     types?: string[],
     entities?: string[],
     topics?: string[],
+    tags?: string[],
 ): Promise<LoreNode[]> {
     ctx.tally?.record('search', shapeLimit(limit));
     const clampedLimit = Math.min(Math.max(Math.trunc(limit), 1), 1000);
     const key = cacheKey('search', ctx.workspaceId, ctx.readCache.epoch, {
-        q: query.toLowerCase(), limit: clampedLimit, project, ecosystem, excludeHidden, types, entities, topics,
+        q: query.toLowerCase(), limit: clampedLimit, project, ecosystem, excludeHidden, types, entities, topics, tags,
     });
     const cached = await ctx.readCache.memoize<{ nodes: LoreNode[]; scanCapHit: boolean }>(key, async () => {
         try {
@@ -247,6 +248,19 @@ export async function search(
             }
             for (const t of topics ?? []) {
                 filters.push(metaExists('$.topics'));
+                scopeParams.push(t);
+            }
+            // 3.38.2 — tags pushdown into the keyword leg: one exact-membership
+            // EXISTS per required tag, ANDed (ALL-of, same as retrieve.ts's
+            // passesSeedTags). The graph node's own tags are authoritative, so
+            // a hard filter is safe here (unlike the verbatim copy). Guarded
+            // like metaExists: json_each() throws on a malformed document.
+            for (const t of tags ?? []) {
+                filters.push(
+                    "CASE WHEN json_valid(nodes.tags) IS NOT 1 THEN 0"
+                    + " WHEN json_type(nodes.tags) IS NOT 'array' THEN 0"
+                    + " ELSE EXISTS (SELECT 1 FROM json_each(nodes.tags) jt WHERE jt.value = ?) END",
+                );
                 scopeParams.push(t);
             }
 

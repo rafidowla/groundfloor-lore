@@ -318,10 +318,10 @@ export class PostgresGraph implements LoreGraphHandle {
     async search(
         query: string, limit: number = 20, project: string = '*', ecosystem: string = '*',
         excludeHidden: boolean = false, signals?: { scanCapHit: boolean }, types?: string[],
-        entities?: string[], topics?: string[],
+        entities?: string[], topics?: string[], tags?: string[],
     ): Promise<LoreNode[]> {
         await this.initialize();
-        return readSearch(this.readCtx, query, limit, project, ecosystem, excludeHidden, signals, types, entities, topics);
+        return readSearch(this.readCtx, query, limit, project, ecosystem, excludeHidden, signals, types, entities, topics, tags);
     }
 
     async listNodes(

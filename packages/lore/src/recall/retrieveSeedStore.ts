@@ -137,6 +137,7 @@ export async function resolveSeedStore(
     signal?: AbortSignal,
     types?: string[],
     project?: string,
+    tags?: string[],
 ): Promise<VerbatimSeedStore | null> {
     // fix/search-worker-call-cancellation (3.20.2 follow-up): baked into the
     // closures below as a fixed value captured once per retrieveInner() call,
@@ -202,15 +203,32 @@ export async function resolveSeedStore(
     // stale are still found exactly as before. '' = no filter (same
     // truthiness as passesEntitiesTopicsProject). See CHANGELOG [Unreleased].
     const projectScope = project ? project : undefined;
-    type SeedFilter = { ecosystem?: string; type?: string[]; project?: string } | undefined;
-    const projectScoped = (): SeedFilter => ({ ...withTypes(filter), project: projectScope });
+    // 3.38.2 — `tags` (ALL-of, exact) rides the SAME extra scoped query as
+    // `project`, for the same reason: the verbatim row's `tags` is a
+    // write-time comma-joined copy that can be stale, and retrieve.ts's
+    // applySeedFilters checks the GRAPH node's tags (authoritative). So the
+    // unscoped queries still run unchanged and ONE scoped query (project
+    // and/or tagsAll) is unioned in — a narrow tag can no longer be crowded
+    // out of the fixed top-K window. When both are set, the one scoped query
+    // carries both: every seed must pass both checks anyway. Stores that
+    // cannot push `tagsAll` down (Lance, Dataplane) ignore the key, so the
+    // scoped query degrades to a duplicate of the base one — never a wrong
+    // result. See CHANGELOG 3.38.2.
+    const tagsScope = tags && tags.length > 0 ? tags : undefined;
+    type SeedFilter = { ecosystem?: string; type?: string[]; project?: string; tagsAll?: string[] } | undefined;
+    const hasScoped = projectScope !== undefined || tagsScope !== undefined;
+    const scoped = (): SeedFilter => ({
+        ...withTypes(filter),
+        ...(projectScope !== undefined ? { project: projectScope } : {}),
+        ...(tagsScope !== undefined ? { tagsAll: tagsScope } : {}),
+    });
     const vectorSeeds = (run: (lim: number, f: SeedFilter) => Promise<VerbatimSeedHit[]>, n: number): Promise<VerbatimSeedHit[]> => {
         const base = seedWithEcosystemUnion((lim, f) => run(lim, withTypes(f)), n, filter);
-        return projectScope ? unionSeedHits(base, run(n, projectScoped())) : base;
+        return hasScoped ? unionSeedHits(base, run(n, scoped())) : base;
     };
     const bm25Seeds = (run: (lim: number, f: SeedFilter) => Promise<Bm25Envelope<VerbatimSeedHit>>, n: number): Promise<Bm25Envelope<VerbatimSeedHit>> => {
         const base = bm25WithEcosystemUnion((lim, f) => run(lim, withTypes(f)), n, filter);
-        return projectScope ? unionBm25Envelopes(base, run(n, projectScoped())) : base;
+        return hasScoped ? unionBm25Envelopes(base, run(n, scoped())) : base;
     };
     if (isBootGraph) {
         // Active/boot workspace — the boot storageClient's verbatim methods see

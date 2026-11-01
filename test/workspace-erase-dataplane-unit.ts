@@ -41,7 +41,7 @@ async function seed(mock: MockDataplane, scope: DataplaneScope, n: number, stamp
     const client = createMockDataplaneClient(mock.url, KEY);
     const ids = (p: string): string[] => Array.from({ length: n }, (_, i) => `${p}${i}`); // identical lore_ids in every scope
     for (const [coll, prefix] of [['lore_node', 'n'], ['lore_edge', 'e'], ['lore_verbatim', 'v']] as const) {
-        for (const id of ids(prefix)) await client.insert(DP, coll, { ...scopeRowFields(scope, id), updated_at: stamp }, CONN);
+        for (const id of ids(prefix)) await client.insert(DP, coll, { ...scopeRowFields(scope, id), created_at: stamp, updated_at: stamp }, CONN);
     }
 }
 const rows = (mock: MockDataplane, pred: (r: Row) => boolean = () => true): Row[] => COLLECTIONS.flatMap((c) => mock.rows(DP, c, CONN).filter(pred));

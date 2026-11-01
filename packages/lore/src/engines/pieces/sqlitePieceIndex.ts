@@ -32,6 +32,7 @@ import type { Database as DatabaseType } from 'better-sqlite3';
 import type { EmbeddingProvider } from '../../providers/types.js';
 import { log } from '../../logger.js';
 import { encodeVector, decodeVector, type RowFilter } from '../sqliteVerbatimVector.js';
+import { delimitedListHas } from '../tagsAllFilter.js';
 import { VERBATIM_CHUNK_SIZE } from '../verbatimBatch.js';
 import {
     buildPieceRecords, isPieceSidecarValid, readPieceSidecar, writePieceSidecar,
@@ -105,9 +106,13 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 }
 
 function matchesFilter(row: PieceRowRaw, filter: RowFilter): boolean {
-    for (const [key, value] of filter) {
+    for (const [key, value, match] of filter) {
         const rowValue = (row as unknown as Record<string, unknown>)[key];
-        if (Array.isArray(value)) {
+        // 3.38.2 — piece rows carry no `tags` column, so a tag-membership
+        // entry never matches here (the caller's unscoped query still runs).
+        if (match === 'delimited') {
+            if (!delimitedListHas(rowValue, value as string)) return false;
+        } else if (Array.isArray(value)) {
             if (!value.includes(rowValue as string)) return false;
         } else if (rowValue !== value) {
             return false;

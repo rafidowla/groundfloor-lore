@@ -41,12 +41,12 @@ import { applyFingerprintOnOpen, stampFingerprint } from './verbatimFingerprintG
 import { applyActorScopeFilter } from '../security/scopeFilter.js';
 import { getCurrentActorScopes } from '../security/actorContext.js';
 import { redactSecrets } from '../security/secretScan.js';
-import { buildSqlFilterEntries } from './verbatimHistory.js';
+import { buildSqlFilterEntries, renderSqlFilterEntry } from './verbatimHistory.js';
 import { ReadCache, cacheKey } from './cache.js';
 import { SqlitePieceIndex, type PieceSourceRow, type PieceSearchHit, type PieceIndexStatus } from './pieces/sqlitePieceIndex.js';
 
 import { openSqliteVerbatimDb, type SqliteVecLoadResult } from './sqliteVerbatimSchema.js';
-import { BruteForceVectorCache, nativeVectorSearch, decodeVector, encodeVector } from './sqliteVerbatimVector.js';
+import { BruteForceVectorCache, nativeVectorSearch, decodeVector, encodeVector, toRowFilter } from './sqliteVerbatimVector.js';
 import { bm25Search as ftsBm25Search, detectSqliteTokenizer, currentFtsTokenizer, rebuildFtsTable } from './sqliteVerbatimFts.js';
 import * as sqliteHistory from './sqliteVerbatimHistory.js';
 import { normalizeGetVectorsIds } from './verbatimGetVectors.js';
@@ -500,14 +500,14 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         // IN (...) pushdown instead of being silently dropped — see
         // buildSqlFilterEntries's docstring (verbatimHistory.ts).
         const filterEntries = buildSqlFilterEntries(opts?.filter as Record<string, unknown> | undefined);
-        const extraWhereSql = filterEntries.map((e) => `${e.column} ${e.op}`).join(' AND ');
+        const extraWhereSql = filterEntries.map((e) => renderSqlFilterEntry(e, e.column, 'sqlite')).join(' AND ');
         const extraParams = filterEntries.flatMap((e) => e.params);
         // The SAME filter, shaped for the fallback path's post-filter
         // (see sqliteVerbatimVector.ts's RowFilter) — both paths MUST honor
         // an identical metadata filter regardless of which one serves the
         // query, or a native-vs-fallback toggle would silently change
         // result sets on a filtered search.
-        const rowFilter = filterEntries.map((e) => [e.column, e.rowValue] as const);
+        const rowFilter = toRowFilter(filterEntries);
         // includeHistory is not honored by the vector path on either engine
         // today — vector search only ever targets canonical, non-tombstoned
         // rows (matches VerbatimStore.searchByVector, which filters history
@@ -723,7 +723,7 @@ export class SqliteVerbatimStore implements VerbatimStoreApi, VectorProvider {
         if (!this.pieceIndex) return [];
         const pieceIndex = this.pieceIndex;
         const filterEntries = buildSqlFilterEntries(filter as Record<string, unknown> | undefined);
-        const rowFilter = filterEntries.map((e) => [e.column, e.rowValue] as const);
+        const rowFilter = toRowFilter(filterEntries);
         return this.followRead('searchPieces', [query, topK, filter, actorScopes], () => pieceIndex.searchPieces(query, topK, rowFilter, actorScopes ?? getCurrentActorScopes()));
     }
 

@@ -29,6 +29,8 @@
 import type { Database as DatabaseType } from 'better-sqlite3';
 
 import { log } from '../logger.js';
+import { delimitedListHas } from './tagsAllFilter.js';
+import type { SqlFilterEntry } from './verbatimHistory.js';
 
 /** Little-endian float32 encode/decode — the on-disk BLOB shape. */
 export function encodeVector(vec: readonly number[] | Float32Array): Buffer {
@@ -211,12 +213,20 @@ function topK(hits: VectorHit[], k: number): VectorHit[] {
  *  regardless of which one actually served the query. D2: `value` may be a
  *  `string[]` (IN-list semantics, e.g. `types: string[]`) as well as a
  *  plain scalar (equality) — see `buildSqlFilterEntries`'s `rowValue`. */
-export type RowFilter = ReadonlyArray<readonly [string, string | string[]]>;
+export type RowFilter = ReadonlyArray<readonly [string, string | string[], 'delimited'?]>;
 
-function matchesRowFilter(row: VectorHitRow, filter: RowFilter): boolean {
-    for (const [key, value] of filter) {
+/** 3.38.2 — SqlFilterEntry[] → RowFilter, carrying the `delimited` (tag
+ *  membership) marker so the JS fallback matches what the SQL path does. */
+export function toRowFilter(entries: ReadonlyArray<SqlFilterEntry>): RowFilter {
+    return entries.map((e) => (e.match ? [e.column, e.rowValue, e.match] as const : [e.column, e.rowValue] as const));
+}
+
+export function matchesRowFilter(row: VectorHitRow, filter: RowFilter): boolean {
+    for (const [key, value, match] of filter) {
         const rowValue = (row as unknown as Record<string, unknown>)[key];
-        if (Array.isArray(value)) {
+        if (match === 'delimited') {
+            if (!delimitedListHas(rowValue, value as string)) return false;
+        } else if (Array.isArray(value)) {
             if (!value.includes(rowValue as string)) return false;
         } else if (rowValue !== value) {
             return false;

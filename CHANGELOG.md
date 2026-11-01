@@ -4,6 +4,53 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.38.2] — 2026-10-31
+
+Fixes tag-scoped recall dropping matching nodes, reported by Nokshi on 3.38.1. Narrow fix release: no migration, no
+new configuration, no API change; upgrading over 3.38.x or 3.37.x is a drop-in.
+
+### Fixed
+
+- **`recall({ tags })` no longer returns zero or too few hits when the tag is narrow.** Tags were applied in
+  `recall/retrieve.ts` only **after** the seed-widening loop, as a final cut over a window of
+  `max(limit, 50) × SEED_HIDDEN_HEADROOM (4)` seeds. Widening (capped at 16×) only reacts to ACL / project / type /
+  entity / topic loss, so a tag held by a small share of the workspace never triggered it, and no retrieval leg knew
+  the tag existed: with 40 clients at 2.5% each, `max: 10` routinely came back empty in every search mode on SQLite
+  and Postgres.
+  - Step 1 (all engines): tags are checked inside `applySeedFilters`, with the other seed filters, so a tag-emptied
+    window now widens like any other filter loss. The post-loop tag cut is gone.
+  - Step 2 (vector + BM25 legs): `retrieveSeedStore` adds one scoped query carrying the new `VerbatimQueryFilter`
+    key `tagsAll` (ALL-of, exact, comma-delimited membership; helper `engines/tagsAllFilter.ts`), unioned with the
+    unscoped query. SQLite renders it as `instr(',' || tags || ',', ?) > 0`, Postgres as `strpos(...)` (never LIKE,
+    so `_` / `%` in a tag are literal). The in-memory row filters (`sqliteVerbatimVector`, `sqlitePieceIndex`) apply
+    the same membership rule via `renderSqlFilterEntry` / `matchesRowFilter`.
+  - Step 3 (keyword leg): `LoreGraph.search` takes `tags?: string[]`; SQLite pushes one guarded `json_each` EXISTS
+    per tag, Postgres one `tagEquals` per tag (ANDed, not `tagAnyOf`). Tags are part of both search cache keys.
+  - Per engine: **SQLite and Postgres** get all three steps. **LanceDB, Dataplane and SurrealDB** get step 1 only;
+    they ignore the unknown filter key, so the scoped query is a harmless duplicate of the base query. **ArcadeDB**
+    gets step 1 plus a guard: its client-side row filter (`engines/arcade/arcadeRowFilter.ts`) now does membership
+    for `tagsAll` instead of comparing the array as a string. **Piece mode** rows carry no tags column, so the scoped
+    query never matches there and the base query still runs.
+  - Residuals: on Postgres, a semantic-only recall for a very rare tag is bounded by HNSW iterative scan
+    (`hnsw.max_scan_tuples`, default 20000); keyword and hybrid modes are covered by the keyword leg. A verbatim row
+    whose tag copy is stale is only found through the keyword leg. Cross-workspace recall
+    (`mcp/tools/recallCrossWorkspace.ts`) still applies tags late and is a tracked follow-up.
+  - Test: `test/tag-scoped-recall-pushdown-unit.ts` (added to the `npm test` chain) — public `recall()` surface on
+    SQLite and Postgres across keyword / semantic / hybrid and `max` 10 / 30 / 100, ALL-of and exact-match cases, plus
+    unit checks of the SQL rendering, the row filters, the Postgres `searchWhere` predicates and the Arcade filter.
+    On 3.38.1 it fails 24 of 30 public-surface cases.
+  - Scale check (Postgres, 125k nodes, 40 client tags at 2.5% each, synthetic data): tagged recall now returns a full
+    `max` 10 / 30 / 100 in every mode (3.38.1: 0–16 on average), and a tag held by 5 of 125k nodes is found in every
+    mode (3.38.1: none), at p50 ≈ 130–180 ms. Untagged recall latency is unchanged.
+
+### Tests
+
+- **`test/workspace-erase-dataplane-unit.ts` no longer fails once the wall clock passes 2026-11-01T00:05Z.** Its
+  seeded rows set only `updated_at`, so the mock Dataplane filled `created_at` with the real current time; the
+  eraser's recent-write probe counts `created_at` too and, once real time passed the fixed `DELETED_AT` plus the
+  5-minute grace, refused every erase (4 of 7 cases failed, on `main` as well). `seed()` now sets `created_at` to the
+  same fixed stamp. Test-only; no product code changes.
+
 ## [3.38.1] — 2026-10-30
 
 Fixes a Postgres open failure introduced by 3.38.0, found by the 1M-row 3.37.2 → 3.38.0 upgrade run. No migration, no

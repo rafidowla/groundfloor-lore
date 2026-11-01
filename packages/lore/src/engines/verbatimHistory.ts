@@ -15,6 +15,7 @@
  */
 
 import * as lancedb from '@lancedb/lancedb';
+import { TAGS_ALL_FILTER_KEY, tagsAllValues } from './tagsAllFilter.js';
 
 /**
  * SECURITY (SP-05): escape LIKE-pattern metacharacters in a user-supplied
@@ -129,16 +130,56 @@ export function buildLanceFilterConditions(filter: Record<string, unknown> | und
  */
 export interface SqlFilterEntry {
     column: string;
-    /** Condition fragment AFTER the column name, e.g. `= ?` or `IN (?, ?)`. */
+    /** Condition fragment AFTER the column name, e.g. `= ?` or `IN (?, ?)`.
+     *  Ignored when `match === 'delimited'` — render with
+     *  `renderSqlFilterEntry`, never by concatenating column + op. */
     op: string;
     params: string[];
     rowValue: string | string[];
+    /** 3.38.2 — `'delimited'`: the column holds a comma-joined list and the
+     *  entry tests exact membership of ONE value (`rowValue`), never a
+     *  substring. `params[0]` is the comma-wrapped needle (`,tag,`). */
+    match?: 'delimited';
+}
+
+/* 3.38.2 — `tagsAll` (TAGS_ALL_FILTER_KEY, tagsAllFilter.ts) is kept OUT of
+ * VERBATIM_FILTERABLE_COLUMNS: it is not a column. The Lance builder above
+ * (scalar equality / IN only) skips it, so the Lance path keeps step-1
+ * (post-hydration) tag filtering only. Rendered with instr()/strpos(), not
+ * LIKE, so `%`/`_` in a tag are plain characters. */
+export { TAGS_ALL_FILTER_KEY, delimitedListHas } from './tagsAllFilter.js';
+
+/**
+ * Render one SqlFilterEntry as a WHERE fragment. `colRef` is the (possibly
+ * aliased / quoted) column reference; `placeholders` replaces each `?` in
+ * order (pass `?`s for SQLite, `$n`s for pg). `dialect` picks the
+ * membership function for `match: 'delimited'` entries.
+ */
+export function renderSqlFilterEntry(
+    e: SqlFilterEntry,
+    colRef: string,
+    dialect: 'sqlite' | 'pg',
+    placeholders: string[] = e.params.map(() => '?'),
+): string {
+    if (e.match === 'delimited') {
+        const fn = dialect === 'pg' ? 'strpos' : 'instr';
+        return `${fn}(',' || ${colRef} || ',', ${placeholders[0]}) > 0`;
+    }
+    let i = 0;
+    return `${colRef} ${e.op.replace(/\?/g, () => placeholders[i++]!)}`;
 }
 
 export function buildSqlFilterEntries(filter: Record<string, unknown> | undefined | null): SqlFilterEntry[] {
     const out: SqlFilterEntry[] = [];
     if (!filter) return out;
     for (const [key, value] of Object.entries(filter)) {
+        if (key === TAGS_ALL_FILTER_KEY) {
+            // One entry per tag, ANDed by every renderer — ALL-of semantics.
+            for (const t of tagsAllValues(value)) {
+                out.push({ column: 'tags', op: '', params: [`,${t},`], rowValue: t, match: 'delimited' });
+            }
+            continue;
+        }
         if (!VERBATIM_FILTERABLE_COLUMNS.has(key)) continue;
         if (Array.isArray(value)) {
             const vals = value.filter((v): v is string => typeof v === 'string' && v.length > 0);

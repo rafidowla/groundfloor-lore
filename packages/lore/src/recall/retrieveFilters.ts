@@ -68,3 +68,20 @@ export function passesEntitiesTopicsProject(
     if (projectFilter && node.project !== projectFilter) return false;
     return true;
 }
+
+/**
+ * 3.38.2 — normalized recall tag filter (ALL-of, exact per tag). Graph-node
+ * tags are stored normalized (lowercase, trimmed — engines/normalizeTags.ts),
+ * so the same normalization makes the membership test exact. Undefined when
+ * no tag filter was asked for.
+ */
+export function normalizeSeedTags(tags: string[] | undefined): string[] | undefined {
+    return tags && tags.length > 0 ? [...new Set(tags.map((t) => t.toLowerCase().trim()))] : undefined;
+}
+
+/** True when `node` carries every tag in `seedTags` (or no filter is set). */
+export function passesSeedTags(node: LoreNode, seedTags: string[] | undefined): boolean {
+    if (!seedTags || seedTags.length === 0) return true;
+    const nodeTags = node.tags ?? [];
+    return seedTags.every((t) => nodeTags.includes(t));
+}

@@ -45,7 +45,7 @@ import { ecosystemMatches } from '../core/ecosystemMatch.js';
 import { fetchSeeds } from './multiQuerySeedFetch.js';
 import { timeRecallStage, timeRecallStageSync, withRecallStageTiming } from './recallStageTiming.js';
 import { resolveSeedStore } from './retrieveSeedStore.js';
-import { filterNodesByActorScope, passesEntitiesTopicsProject } from './retrieveFilters.js';
+import { filterNodesByActorScope, normalizeSeedTags, passesEntitiesTopicsProject, passesSeedTags } from './retrieveFilters.js';
 import { resolveCandidateFloor, candidateLimit, resolveLexicalBase, computeSeedBaseScores } from './candidateWindow.js';
 import { getCalibration } from './calibration.js';
 import { decideAbstention, DEFAULT_RELEVANCE_FLOOR } from './abstention.js';
@@ -117,7 +117,7 @@ const SEED_MAX_HEADROOM = 16;
 /** Minimal view of the graph methods the core uses (keeps casts out of the
  *  pipeline; every `LoreGraphHandle` — SurrealDB or the Dataplane cloud adapter — satisfies it). */
 interface RetrievalGraph {
-    search(q: string, n: number, ws: string, eco: string, excludeHidden?: boolean, signals?: { scanCapHit: boolean }, types?: string[], entities?: string[], topics?: string[]): Promise<LoreNode[]>;
+    search(q: string, n: number, ws: string, eco: string, excludeHidden?: boolean, signals?: { scanCapHit: boolean }, types?: string[], entities?: string[], topics?: string[], tags?: string[]): Promise<LoreNode[]>;
     getNodesByIds(ids: string[]): Promise<Map<string, LoreNode>>;
     /** `relation` is present on every real engine's TraversalResult
      *  (providers/types.ts) — widened here (was omitted) so the D4 fix can
@@ -256,6 +256,7 @@ async function retrieveInner(
     // scope the keyword leg to empty-project rows and return nothing.
     const workspaceScope = projectFilter || '*';
     const ecosystemScope = crossProject ? '*' : (ecosystem ?? '*');
+    const seedTags = normalizeSeedTags(tags); // 3.38.2 — ALL-of, exact per tag (retrieveFilters.ts)
 
     // 2. Resolve the verbatim store for the READ's OWN workspace. P2
     //    (scalability): the boot storageClient only sees the active
@@ -278,7 +279,7 @@ async function retrieveInner(
     //    as a supplementary/fallback source, unioned with the bm25 seeds
     //    exactly like the hybrid path unions its keyword supplement (Finding
     //    5.1, below).
-    const seedStore = await resolveSeedStore(ctx, workspace, graph === bootGraph, ecosystemScope, signal, typesFilter, projectFilter);
+    const seedStore = await resolveSeedStore(ctx, workspace, graph === bootGraph, ecosystemScope, signal, typesFilter, projectFilter, seedTags);
     const verbatimConsulted = seedStore !== null
         ? (await seedStore.count()) > 0
         : false;
@@ -357,7 +358,7 @@ async function retrieveInner(
     // see Finding 5.1 below.
     const runKeywordSeeds = async (): Promise<LoreNode[]> => {
         const searchSignals = { scanCapHit: false };
-        const hits = await graph.search(query, candLimit, workspaceScope, ecosystemScope, true, searchSignals, typesFilter, entitiesFilter, topicsFilter); // D2: query-level types filter (fixed top-K scan can else fill with off-type rows); E2: entities/topics/project pushed the same way (workspaceScope above is already projectFilter || '*'); D3: candLimit window
+        const hits = await graph.search(query, candLimit, workspaceScope, ecosystemScope, true, searchSignals, typesFilter, entitiesFilter, topicsFilter, seedTags); // 3.38.2: tags pushed down (ALL-of) on engines that support it; D2: query-level types filter (fixed top-K scan can else fill with off-type rows); E2: entities/topics/project pushed the same way (workspaceScope above is already projectFilter || '*'); D3: candLimit window
         scanCapHit = searchSignals.scanCapHit;
         // D3 r2 — min of two non-zero leg counts (more selective leg wins).
         bm25CandidateCount = bm25CandidateCount > 0 && hits.length > 0 ? Math.min(bm25CandidateCount, hits.length) : (bm25CandidateCount || hits.length);
@@ -440,6 +441,12 @@ async function retrieveInner(
             // graph.search()'s JSON-path filtering instead (sqliteGraphReads.ts
             // / surrealGraphReads.ts).
             if (entitiesFilter || topicsFilter || projectFilter) s = s.filter((n) => passesEntitiesTopicsProject(n, entitiesFilter, topicsFilter, projectFilter));
+            // 3.38.2 — tags belong here for the same reason as E2 above: a
+            // post-loop tags pass ran AFTER the widening loop, so a narrow tag
+            // never widened and then emptied the window (Nokshi 3.38.1: 0 hits
+            // at limit 10). The loop is bounded (SEED_MAX_HEADROOM), so tags are
+            // ALSO pushed into resolveSeedStore and graph.search.
+            if (seedTags) s = s.filter((n) => passesSeedTags(n, seedTags));
             return s;
         });
     };
@@ -500,20 +507,10 @@ async function retrieveInner(
         seeds = [...byId.values()];
     }
 
-    // Finding 5.2 — the tags predicate must select from the WHOLE seed window
-    // (the limit×headroom over-fetch plus the keyword supplement), not from
-    // whatever survived the top-`limit` re-rank slice. Previously the filter
-    // ran AFTER `.slice(0, limit)`, so a genuinely tag-matching node ranked
-    // 11th+ was silently excluded and recall asserted the topic had no stored
-    // memory. Applied to seeds here; the results-level filter below still
-    // covers traversal NEIGHBOURS (they enter after this point).
-    if (tags && tags.length > 0) {
-        const lowerSeedTags = tags.map((t) => t.toLowerCase().trim());
-        seeds = seeds.filter((n) => {
-            const nodeTags = n.tags ?? [];
-            return lowerSeedTags.every((t) => nodeTags.includes(t));
-        });
-    }
+    // Finding 5.2 — the tags predicate selects from the WHOLE seed window, not
+    // the top-`limit` slice. 3.38.2 moved it into applySeedFilters (above) so
+    // the widening loop also sees tag shortfalls; the results-level filter
+    // below still covers traversal NEIGHBOURS (they enter after this point).
     // E2 — entities/topics/project filtering moved INTO applySeedFilters
     // (above, near the D2 types backstop) so it participates in the adaptive
     // over-fetch widening loop's shortfall detection. Every seed-producing
@@ -615,10 +612,9 @@ async function retrieveInner(
     if (candidateFloor > 0 && mode !== 'semantic') {
         rankedSeeds = await applyIdentifierLane(query, rankedSeeds, {
             bm25Search: seedStore && verbatimConsulted ? (q, n) => seedStore.bm25Search(q, n) : undefined,
-            keywordSearch: (q, n) => graph.search(q, n, workspaceScope, ecosystemScope, true, { scanCapHit: false }, typesFilter),
+            keywordSearch: (q, n) => graph.search(q, n, workspaceScope, ecosystemScope, true, { scanCapHit: false }, typesFilter, undefined, undefined, seedTags),
             hydrate: (ids) => graph.getNodesByIds(ids),
-            admit: (raw) => applySeedFilters(raw).filter((n) => (!tags || tags.length === 0 || tags.every((t) => (n.tags ?? []).includes(t.toLowerCase().trim())))
-                && (!(entitiesFilter || topicsFilter || projectFilter) || passesEntitiesTopicsProject(n, entitiesFilter, topicsFilter, projectFilter))),
+            admit: (raw) => applySeedFilters(raw), // tags/entities/topics/project are all inside applySeedFilters now
             provenance: seedProvenance,
         });
     }
@@ -695,14 +691,9 @@ async function retrieveInner(
     let results = Array.from(collected.values());
     let related = Array.from(relatedCollected.values());
 
-    if (tags && tags.length > 0) {
-        const lower = tags.map((t) => t.toLowerCase().trim());
-        const passesTags = (n: LoreNode) => {
-            const nodeTags = (n as { tags?: string[] }).tags ?? [];
-            return lower.every((t) => nodeTags.includes(t));
-        };
-        results = results.filter((r) => passesTags(r.node));
-        related = related.filter((r) => passesTags(r.node));
+    if (seedTags) {
+        results = results.filter((r) => passesSeedTags(r.node, seedTags));
+        related = related.filter((r) => passesSeedTags(r.node, seedTags));
     }
     // 3.21 step 3(f) — same filter, now applied to BOTH `results` and
     // `related` (entered after the seed-level filter above ran).
