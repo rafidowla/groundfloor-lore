@@ -4,6 +4,73 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [3.38.3] — 2026-11-01
+
+Batch release: SQLite outbox slowdown after a bulk import, tag pushdown for cross-workspace recall, and stable
+recall order across repeated calls. No migration, no new configuration, no API change; upgrading over 3.38.x or
+3.37.x is a drop-in.
+
+### Changed
+
+- **Recall ranks against the start of the current UTC day instead of the live clock.** The recency factor
+  (`0.85 + 0.15·exp(−ageDays / halfLife)`) is continuous in "now", so two near-tied results could swap places between
+  two identical recalls seconds apart (reported by Nokshi as order drift; `LORE_RECALL_RECENCY_HALF_LIFE_DAYS` set
+  very large removed it, which isolated the cause). Default recall (floor 0 + rrf) used `Date.now()` directly; the D3
+  minute bucket covered only anchored / BM25 modes and still flipped every 60 s.
+  - `recall/ranking.ts` `recallRankClockMs()`; used by `recall/retrieve.ts` in every mode and by cross-workspace
+    recall (`mcp/tools/recallCrossWorkspace.ts`).
+  - Effect: one recall's order is stable for the whole UTC day. Age can read up to 24 h young, which moves the
+    recency factor by at most about 0.5% (30-day half-life). Only near-ties can reorder versus 3.38.2, and a near-tie
+    can still change order once, at UTC midnight.
+  - Test: `test/recall-rank-clock-unit.ts` (added to the `npm test` chain) — clock values, a constructed near-tie that
+    flips within 90 s on the live clock but not on the day clock, and a wiring guard on both entry points.
+
+### Fixed
+
+- **SQLite: recall slowed to seconds after a large bulk import (outbox drain was O(n²)).** Since 3.34.0 (c323b478)
+  the replay path asks `sqliteHasNewerDeleteForKey` whether a later delete exists for the row's key before applying
+  each `node.upsert` / `edge.*` / `verbatim.*` entry. Its only usable index was `idx_outbox_workspace_seq`, so every
+  check scanned every later row in the workspace: draining an N-row backlog cost O(N²) and starved recall on the same
+  connection. At 125k nodes, 60k rows were still pending after the build and every SQLite recall took 2.5–5 s (some
+  filtered semantic cases 10–12 s).
+  - `outbox/deleteAwareReplay.ts`: three partial indexes, one per entity family —
+    `idx_outbox_delete_node|edge|verbatim` on `(workspace, sequenceId) WHERE operationKind IN <family delete kinds>`.
+    The index predicate and the lookup query are both rendered from `DELETE_KINDS`, so SQLite's partial-index
+    planner (which needs the `IN (...)` term to match textually) keeps using them; a unit test pins the plan.
+  - Created by `ensureDeleteKindIndexes(db)` from the `SqliteOutboxStore` constructor, so existing outbox files get
+    them on their next open (`CREATE INDEX IF NOT EXISTS`). Failure is logged and non-fatal: the lookup falls back to
+    the old scan, never a wrong answer.
+  - Measured (same 125k-node SQLite scale harness as 3.38.2, synthetic data): median recall p50 keyword 3.2 s →
+    175 ms, semantic 6.9 s → 183 ms, hybrid 3.1 s → 205 ms; 105/105 filter cases still exact (none short, none
+    wrong). Drain runs at about 300 rows/s while recall load is running.
+  - Test: `test/outbox-delete-kind-index-unit.ts` (added to the `npm test` chain) — indexes present on open and on
+    upgrade of a pre-3.38.3 file, `EXPLAIN QUERY PLAN` uses the family index, answers identical with and without the
+    indexes (pending/replicated deletes hit; failed/dead, earlier, other-workspace and other-family deletes miss),
+    and a failed `CREATE INDEX` warns without throwing.
+- **Cross-workspace recall now pushes `tags` into each workspace's seed legs.** The 3.38.2 follow-up:
+  `runCrossWorkspaceRecall` (`mcp/tools/recallCrossWorkspace.ts`) fetched a 20-row semantic window and a 10-row
+  keyword window per workspace with no tag and cut by tag after the merge, so a narrow tag came back short or empty.
+  - Semantic leg (boot store and per-workspace store, piece mode included): the unscoped query still runs and one
+    `tagsAll`-scoped query is unioned in (`mcp/tools/crossWorkspaceTagSeeds.ts`, same rule as 3.38.2's
+    `retrieveSeedStore`).
+  - Keyword leg: tags passed as `LoreGraph.search`'s `tags` argument.
+  - Per workspace, seed and keyword candidates are checked with `passesSeedTags` before the merge, so a tag-failing
+    row never takes a slot; graph-node tags stay authoritative over the verbatim row's copy. The post-merge tag cut is
+    kept as a backstop for successors resolved in the fan-out.
+  - No `tags` = the previous call shape (one semantic query, no tags argument).
+  - Test: `test/cross-workspace-tag-pushdown-unit.ts` (added to the `npm test` chain).
+- **SQLite: the replicator's next-batch read no longer walks replicated history.** `listPendingForWorkspace`
+  (`status IN ('pending', 'failed')` ordered by `sequenceId`) was also served by `idx_outbox_workspace_seq`, so each
+  batch stepped over every replicated row still kept for pruning (7 days by default) — linear in retained history.
+  - `outbox/pendingQueueIndex.ts`: partial index `idx_outbox_pending_ws_seq` on `(workspace, sequenceId) WHERE
+    status IN ('pending', 'failed')`, created from the `SqliteOutboxStore` constructor; the index predicate and the
+    query share `PENDING_STATUS_TERM`. Failure is logged and non-fatal.
+  - Measured on a copy of the 125k-node scale outbox (45.7k pending, 79.3k replicated): 21.9 ms → 0.16 ms per
+    100-row batch read. One-time index build on first open: 160 ms.
+  - Test: `test/outbox-pending-queue-index-unit.ts` (added to the `npm test` chain) — index present on open and on
+    upgrade, plan uses it with no sort step, batches identical with and without it (SP-21 retry-time rule, workspace
+    isolation, limit), and a failed `CREATE INDEX` warns without throwing.
+
 ## [3.38.2] — 2026-10-31
 
 Fixes tag-scoped recall dropping matching nodes, reported by Nokshi on 3.38.1. Narrow fix release: no migration, no

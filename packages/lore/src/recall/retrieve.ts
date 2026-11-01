@@ -37,7 +37,7 @@
 
 import type { LoreNode } from '../providers/types.js';
 import { WorkspaceNotFoundError } from '../engines/localGraphRegistry.js';
-import { curatedTypesFromSchema, reRankLoreNodes } from './ranking.js';
+import { curatedTypesFromSchema, recallRankClockMs, reRankLoreNodes } from './ranking.js';
 import { DEFAULT_SCHEMA_V2 } from '../schemas/types.js';
 import { ensureAccessTracker } from '../engines/accessTracker.js';
 import { estimateTokens } from '../mcp/tools/search/helpers.js';
@@ -602,10 +602,8 @@ async function retrieveInner(
     // Finding 5.4 / D3 §3.5 — real relevance score per seed (see candidateWindow.ts).
     const seedBaseScores = computeSeedBaseScores(seeds, semanticScoreById, seedProvenance, lexicalBaseMode, { candidateFloor, bm25CandidateCount, candLimit });
     const curatedTypes = ctx.curatedTypes ?? curatedTypesFromSchema(DEFAULT_SCHEMA_V2.nodeTypes);
-    // D3 §3.3 — minute-bucketed "now" keeps recency (and the ranking)
-    // deterministic within 60s; full legacy (floor 0 + rrf) keeps Date.now().
-    const fullLegacy = candidateFloor === 0 && lexicalBaseMode === 'rrf';
-    const rankNowMs = fullLegacy ? undefined : Math.floor(Date.now() / 60_000) * 60_000;
+    // D3 §3.3 + 3.38.3 — rank against the UTC day, in every mode, so repeated recalls keep their order (ranking.ts).
+    const rankNowMs = recallRankClockMs();
     let rankedSeeds = reRankLoreNodes(seeds, rankNowMs, seedBaseScores, curatedTypes);
     // D3 follow-up — exact-identifier lane (identifierLane.ts): anchored mode
     // only (floor > 0), never mode:'semantic'. Fixed-size lane fetch keeps it prefix-stable.

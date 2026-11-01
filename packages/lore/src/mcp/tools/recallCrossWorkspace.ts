@@ -29,8 +29,10 @@ import type { VerbatimStoreApi } from '../../engines/verbatimStoreApi.js';
 import type { DataplaneVectorStore } from '../../engines/dataplaneVectorStore.js';
 import type { ISessionCache } from '../../engines/sessionCache.js';
 import { pieceAwareSearch, resolvePieceRouting, type PieceVectorsMeta } from '../../recall/pieceSeedSearch.js';
+import { normalizeSeedTags, passesSeedTags } from '../../recall/retrieveFilters.js';
+import { seedSearchWithTags, type SeedFilter } from './crossWorkspaceTagSeeds.js';
 import { listWorkspaceNames } from '../../config/workspaces.js';
-import { curatedTypesFromSchema, rankScore } from '../../recall/ranking.js';
+import { curatedTypesFromSchema, rankScore, recallRankClockMs } from '../../recall/ranking.js';
 import { DEFAULT_SCHEMA_V2 } from '../../schemas/types.js';
 import { ecosystemMatches } from '../../core/ecosystemMatch.js';
 import { resolveRecallFanoutWsCap, resolveRecallFanoutConcurrency, mapWithConcurrency } from '../../recall/recallFanout.js';
@@ -163,6 +165,9 @@ export async function runCrossWorkspaceRecall(
     const SNIPPET_LEN = 120;
     const KEYWORD_LIMIT_PER_WORKSPACE = 10;
     const SEED_LIMIT = 20;
+    // 3.38.3 — tags pushed into every leg (crossWorkspaceTagSeeds.ts), not only cut after the merge.
+    const seedTags = normalizeSeedTags(tags);
+    const typeFilter: SeedFilter = types && types.length > 0 ? { type: types } : undefined;
 
     // F-LOW-T14: restrict the workspace universe to the bound principal's
     // allow-list (∪ own workspace) BEFORE any fan-out, so a scoped principal
@@ -225,9 +230,9 @@ export async function runCrossWorkspaceRecall(
                 // member, not necessarily piece-capable).
                 const pieceRouting = await resolvePieceRouting(verbatimStore);
                 pieceVectorsMeta = pieceRouting.meta;
-                const sem = pieceRouting.active
-                    ? await pieceAwareSearch(pieceRouting.capable!, topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined)
-                    : await verbatimStore.search(topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined);
+                const sem = await seedSearchWithTags((f) => (pieceRouting.active
+                    ? pieceAwareSearch(pieceRouting.capable!, topic, SEED_LIMIT, f)
+                    : verbatimStore.search(topic, SEED_LIMIT, f)), typeFilter, seedTags);
                 seeds = sem.map((r) => ({
                     id: r.id.startsWith('lore:') ? r.id.slice(5) : r.id,
                     score: r.score ?? 0,
@@ -293,9 +298,9 @@ export async function runCrossWorkspaceRecall(
                         // one differs from another workspace's).
                         const wsPieceRouting = await resolvePieceRouting(store);
                         wsPieceMeta = wsPieceRouting.meta;
-                        const sem = wsPieceRouting.active
-                            ? await pieceAwareSearch(wsPieceRouting.capable!, topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined)
-                            : await store.search(topic, SEED_LIMIT, types && types.length > 0 ? { type: types } : undefined);
+                        const sem = await seedSearchWithTags((f) => (wsPieceRouting.active
+                            ? pieceAwareSearch(wsPieceRouting.capable!, topic, SEED_LIMIT, f)
+                            : store.search(topic, SEED_LIMIT, f)), typeFilter, seedTags);
                         wsSeeds = sem.map((r) => ({
                             id: r.id.startsWith('lore:') ? r.id.slice(5) : r.id,
                             score: r.score ?? 0,
@@ -325,7 +330,7 @@ export async function runCrossWorkspaceRecall(
                 // GraphProvider.search — see providers/types.ts), same as
                 // the single-workspace retrieve() core's keyword leg
                 // (retrieve.ts's own `graph.search(..., typesFilter)` call).
-                wsGraph.search(topic, KEYWORD_LIMIT_PER_WORKSPACE, '*', ecosystemScope, true, kwSignals, types).catch(() => [] as LoreNode[]),
+                wsGraph.search(topic, KEYWORD_LIMIT_PER_WORKSPACE, '*', ecosystemScope, true, kwSignals, types, undefined, undefined, seedTags).catch(() => [] as LoreNode[]),
             ]);
             // D2-recall-1/2: scope-filter both the hydrated semantic seeds and
             // the keyword hits per workspace, so rows tagged with scopes the
@@ -335,8 +340,10 @@ export async function runCrossWorkspaceRecall(
             // pushdown above never sees them.
             const inEcosystem = (n: LoreNode): boolean =>
                 ecosystemMatches((n as { ecosystem?: string }).ecosystem, ecosystemScope);
-            const scopedSeedNodes = filterNodesByActorScope([...seedNodes.values()]).filter(inEcosystem);
-            const scopedKwHits = filterNodesByActorScope(kwHits).filter(inEcosystem);
+            // 3.38.3 — tags checked here too, so a tag-failing row never takes a merge slot.
+            const keep = (n: LoreNode): boolean => inEcosystem(n) && passesSeedTags(n, seedTags);
+            const scopedSeedNodes = filterNodesByActorScope([...seedNodes.values()]).filter(keep);
+            const scopedKwHits = filterNodesByActorScope(kwHits).filter(keep);
             // D5 #5 — this per-workspace hydration used to just HIDE a
             // superseded hit at merge time (`if (!includeSuperseded &&
             // node.supersededAt) continue`, below in the caller). Resolve
@@ -439,14 +446,12 @@ export async function runCrossWorkspaceRecall(
     const semanticConsulted = perWorkspaceSeeding ? anySemanticConsulted : verbatimCount > 0;
 
     const curatedTypes = curatedTypesFromSchema(DEFAULT_SCHEMA_V2.nodeTypes);
+    const nowMs = recallRankClockMs(); // 3.38.3: day-bucketed, same as recall() — stable order across repeats
     let merged = Array.from(byId.values())
-        .map((c) => ({ ...c, fs: rankScore({ node: c.node, baseScore: c.score, curatedTypes }) })).sort((a, b) => b.fs - a.fs);
+        .map((c) => ({ ...c, fs: rankScore({ node: c.node, baseScore: c.score, nowMs, curatedTypes }) })).sort((a, b) => b.fs - a.fs);
 
-    if (tags && tags.length > 0) {
-        const lowerTags = tags.map((t) => t.toLowerCase().trim());
-        merged = merged.filter((c) =>
-            lowerTags.every((t) => (c.node.tags ?? []).includes(t)));
-    }
+    // Backstop: a live successor resolved in the fan-out enters after the per-workspace check.
+    if (seedTags) merged = merged.filter((c) => passesSeedTags(c.node, seedTags));
 
     // fix/3.22.1-d1-recall-option-parity — D2 type/kind prefilter, ANY-of
     // (matches RetrieveOptions.types semantics). fix/3.22.1-recall-parity

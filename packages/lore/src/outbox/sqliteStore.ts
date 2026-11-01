@@ -48,7 +48,8 @@ import * as reclaimOps from './reclaimOps.js';
 import { rowToEntry, type Row } from './sqliteRows.js';
 import { markCommittedOf, listPendingCommitOf, pendingCommitCounts } from './sqlitePendingCommit.js';
 import { ensureTransientColumns, recordTransientFailureOf, listDeadOf, listDeadPageOf, requeueDeadOf, deadReasonCounts, deadSummaryOf } from './sqliteDeadLetters.js';
-import { sqliteHasNewerDeleteForKey } from './deleteAwareReplay.js';
+import { ensureDeleteKindIndexes, sqliteHasNewerDeleteForKey } from './deleteAwareReplay.js';
+import { ensurePendingQueueIndex, LIST_PENDING_FOR_WORKSPACE_SQL } from './pendingQueueIndex.js';
 
 // Re-exported so existing importers of MigrationReport from this module
 // keep working after the extraction.
@@ -117,6 +118,8 @@ export class SqliteOutboxStore implements IOutboxStore {
         this.db.pragma('synchronous = NORMAL');
         this.db.exec(SCHEMA_SQL);
         ensureNodeUpsertIdIndex(this.db); // 3.26.0: own guarded statement, never fails the open
+        ensureDeleteKindIndexes(this.db); // 3.38.3: delete-supersede lookups were O(n) per row
+        ensurePendingQueueIndex(this.db); // 3.38.3: batch reads walked every retained replicated row
         // SP-21: add nextAttemptAt column to existing DBs that predate this migration.
         // ALTER TABLE ADD COLUMN is idempotent in SQLite (no-op if column exists)
         // but SQLite <3.37 does not support IF NOT EXISTS on ADD COLUMN, so we
@@ -409,23 +412,8 @@ export class SqliteOutboxStore implements IOutboxStore {
     }
 
     async listPendingForWorkspace(workspace: string, limit: number): Promise<OutboxEntry[]> {
-        // SP-21: exclude 'failed' rows whose nextAttemptAt is in the future.
-        // Normalise both sides — never raw string compare: ISO-8601 'T'-format timestamps (stored
-        // by Date#toISOString) compare lexicographically GREATER than SQLite's
-        // space-format 'YYYY-MM-DD HH:MM:SS', so raw string compare is wrong.
-        // julianday() normalises both to a fractional day number for a correct
-        // UTC comparison. NOT datetime(): it truncates to whole seconds, so a
-        // sub-second backoff (the first step is retryBaseMs = 500 ms) was
-        // ignored — a row failed at hh:mm:05.100 with nextAttemptAt
-        // hh:mm:05.600 compared equal to 'now' and retried on the very next
-        // 10 ms busy tick, and every later step could fire up to 1 s early.
-        const rows = this.db.prepare(
-            `SELECT * FROM outbox_entries
-             WHERE workspace = ? AND status IN ('pending', 'failed')
-               AND (nextAttemptAt IS NULL OR julianday(nextAttemptAt) <= julianday('now'))
-             ORDER BY sequenceId ASC
-             LIMIT ?`,
-        ).all(workspace, Math.max(0, limit)) as Row[];
+        // SP-21 retry-time rule + 3.38.3 partial index: see pendingQueueIndex.ts.
+        const rows = this.db.prepare(LIST_PENDING_FOR_WORKSPACE_SQL).all(workspace, Math.max(0, limit)) as Row[];
         return rows.map(rowToEntry);
     }
 

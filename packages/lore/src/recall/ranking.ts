@@ -191,6 +191,20 @@ export function recencyDecay(updatedAt: string | null | undefined, nowMs: number
 }
 
 /**
+ * 3.38.3 — the clock recall ranks against: the start of the current UTC day.
+ *
+ * recencyDecay is continuous, so ranking against the live clock let two near-tied results swap
+ * places between two identical recalls seconds apart (seen by Nokshi as order drift; it vanishes
+ * with LORE_RECALL_RECENCY_HALF_LIFE_DAYS set huge). The D3 minute bucket only covered the
+ * anchored / BM25 modes and still flipped every 60 s. A day bucket keeps one recall's order
+ * stable for the whole UTC day in every mode; the cost is that "age" can read up to 24 h young,
+ * which moves a 30-day half-life factor by at most ~0.5%.
+ */
+export function recallRankClockMs(nowMs: number = Date.now()): number {
+    return Math.floor(nowMs / DAY_MS) * DAY_MS;
+}
+
+/**
  * Compute the curation boost. Returns DEFAULT_CURATION_BOOST when:
  *   - the node's metadata JSON parses to `{curated: true}`, OR
  *   - the node's type is in curatedTypes AND it has a non-empty label.

@@ -101,6 +101,8 @@ it depends on D2's store API, changes hit metrics, and costs roughly +5–10 ms.
   `(b.fs - a.fs) || (a.idx - b.idx) || idCompare(a, b)`, where `idx` is the input (RRF) position.
   This is identical to today's output, but no longer relies on sort stability.
 - `retrieve.ts`: pass `nowMs = floor(Date.now()/60_000)*60_000`, so recency is identical within a minute.
+  *(3.38.3: superseded by a UTC-day bucket in every mode — `ranking.ts` `recallRankClockMs()` — after the minute
+  bucket and the unbucketed legacy path both let near-ties swap between repeated recalls.)*
 
 ### 3.4 Compressed score range: inherent to the model
 
