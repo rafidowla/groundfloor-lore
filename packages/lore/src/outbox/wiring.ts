@@ -119,6 +119,9 @@ export function wireOutbox(input: {
      *  so cloud mode / no-registry callers keep resolving against the
      *  process-wide home exactly as before. */
     getRegistryHome?: () => string | undefined;
+    /** Local version store (`versions.sqlite`) for `verbatim.purge` replay: hard-deletes the purged nodes' version
+     *  history. Lazy (the store is opened after wireOutbox runs); undefined/absent in cloud mode and legacy test wirings. */
+    getVersionPurger?: () => { purgeNodes(nodeIds: readonly string[], workspace: string, upTo?: string): unknown } | undefined;
     /** Link-on-arrival: "vector committed" signal for the three verbatim commit sites below
      *  (verbatim.upsert, its merged batch, embed.batch). Lazy; null/absent = flag off. */
     getLinkSignaler?: () => LinkSignaler | null;
@@ -360,6 +363,11 @@ export function wireOutbox(input: {
             purgeVerbatim: async (ids: string[], workspace?: string) => {
                 const v = await resolveVerbatim(workspace);
                 await purgeVerbatimRows(v as PurgeCapableStore, ids, 'node purged (outbox replay)');
+            },
+            // Version history keeps the purged node's full content: remove it with the verbatim rows (same row, same replay).
+            purgeNodeVersions: async (nodeIds: string[], workspace?: string, upTo?: string) => {
+                const ws = workspace ?? input.defaultWorkspace?.();
+                if (ws) input.getVersionPurger?.()?.purgeNodes(nodeIds, ws, upTo);
             },
             // SP-13 — consolidated verbatim upsert. The replicator merges a
             // run of adjacent verbatim.upsert rows into one of these so

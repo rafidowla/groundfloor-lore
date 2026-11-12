@@ -375,7 +375,7 @@ export async function tryPolicyRoutes(req: IncomingMessage, res: ServerResponse,
             const existing = await (target as unknown as { getNode(id: string): Promise<{ security_scopes?: string[] } | null | undefined> }).getNode(parsed.id);
             const result = !existing || filterNodesByActorScope([existing]).length === 0
                 ? null
-                : await stampResolved(target as never, parsed.id, parsed.commit);
+                : await stampResolved(target as never, parsed.id, parsed.commit, wsTarget);
             if (!result) {
                 writeError(res, 404, 'not_found', `Deferred node '${parsed.id}' not found.`);
                 return true;

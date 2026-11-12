@@ -25,7 +25,7 @@
  * 'verbatim.purge' (every id absent) is unchanged.
  */
 
-import { dispatch, purgeIdsOf } from './dispatcher.js';
+import { dispatch, purgeIdsOf, purgeVersionBoundsOf } from './dispatcher.js';
 import { settleReplayFailure } from './failureDisposition.js';
 import type { OutboxEntry } from './types.js';
 import { SUPERSEDED_DEAD_ERROR } from './supersession.js';
@@ -92,7 +92,9 @@ export async function consolidateVerbatimPurgeRun(
     for (const e of survivors) if (await claimEntry(deps.store, e.id)) claimed.push(e);
     if (claimed.length === 0) return null;
     const ids = [...new Set(claimed.flatMap((e) => purgeIdsOf((e.payload ?? {}) as Record<string, unknown>)))];
-    const synth: OutboxEntry = { ...claimed[0], payload: { ids } };
+    // Each original row keeps its own time bound for the version purge (a later row's bound must not widen an earlier one).
+    const versionPurges = claimed.flatMap((e) => purgeVersionBoundsOf(e));
+    const synth: OutboxEntry = { ...claimed[0], payload: { ids, versionPurges } };
     try {
         await dispatch(synth, deps.substrates);
         for (const e of claimed) {

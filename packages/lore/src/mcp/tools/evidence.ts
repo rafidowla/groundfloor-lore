@@ -19,6 +19,7 @@ import { filterNodesByActorScope } from '../../security/scopeFilter.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
 import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
+import { withLockedExistingNode } from '../../core/nodeWriteLock.js';
 import { withTransactionConflictRetry } from '../../engines/transactionConflictRetry.js';
 
 export interface EvidenceDeps {
@@ -80,18 +81,24 @@ export function registerEvidenceTools(server: McpServer, deps: EvidenceDeps): vo
                 const graph = resolved.graph;
                 await graph.initialize();
 
-                const node = await graph.getNode(id);
-                // Row-level security_scopes: a node hidden from the bound actor is
-                // answered exactly like a missing one — no write, no length leak.
-                if (!node || filterNodesByActorScope([node]).length === 0) {
+                // Read + scope check + clear run under ONE node lock (core/nodeWriteLock.ts
+                // withLockedExistingNode): upsertNode inserts when absent, so writing a node read
+                // outside the lock would re-create one purged in between.
+                const locked = await withLockedExistingNode(resolved.resolvedWorkspace, id, async () => {
+                    const n = await graph.getNode(id);
+                    // Row-level security_scopes: a node hidden from the bound actor is
+                    // answered exactly like a missing one — no write, no length leak.
+                    return n && filterNodesByActorScope([n]).length > 0 ? n : null;
+                }, async (node) => {
+                    const prevEvidence = node.evidence ?? null;
+                    // Clear the evidence field.
+                    await withTransactionConflictRetry(() => graph.upsertNode({ ...node, evidence: null }));
+                    return prevEvidence ? prevEvidence.length : 0;
+                });
+                if (!locked.found) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'node_not_found', id }, null, 2) }], isError: true };
                 }
-
-                const prevEvidence = node.evidence ?? null;
-                const prevLen = prevEvidence ? prevEvidence.length : 0;
-
-                // Clear the evidence field.
-                await withTransactionConflictRetry(() => graph.upsertNode({ ...node, evidence: null }));
+                const prevLen = locked.value;
 
                 // Write audit log entry (non-fatal if audit fails).
                 try {

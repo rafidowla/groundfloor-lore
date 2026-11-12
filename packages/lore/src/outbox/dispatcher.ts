@@ -101,6 +101,10 @@ export interface DispatcherSubstrates {
      *  embedding call. Optional; a substrate without it falls through to
      *  UnwiredOperationKindError like the other kinds. */
     purgeVerbatim?: (ids: string[], workspace?: string) => Promise<void>;
+    /** Hard-delete the purged nodes' version-history rows (local `versions.sqlite`; the node's full content lives
+     *  there). Runs with `purgeVerbatim` on every `verbatim.purge` row, so replay converges both. Optional: absent
+     *  where no local version store exists (cloud: see VersionStoreApi.purgeNodes). Idempotent. */
+    purgeNodeVersions?: (nodeIds: string[], workspace?: string, upTo?: string) => Promise<void>;
     /** SP-13 — batched verbatim upsert. The replicator consolidates a run
      *  of adjacent `verbatim.upsert` outbox rows into ONE
      *  `verbatim.upsert.batch` dispatch so the underlying
@@ -246,6 +250,37 @@ export function purgeIdsOf(payload: Record<string, unknown>): string[] {
 }
 
 /**
+ * The node ids a `verbatim.purge` payload purges versions for: `nodeIds`, else the canonical `id` (`lore:<node id>`)
+ * of a row written before `nodeIds` existed. Never derived from the alias ids (a node id may itself contain `#q`).
+ */
+export function purgeNodeIdsOf(payload: Record<string, unknown>): string[] {
+    const out = new Set<string>();
+    const raw = payload['nodeIds'];
+    if (Array.isArray(raw)) for (const x of raw) if (typeof x === 'string' && x) out.add(x);
+    const id = payload['id'];
+    if (out.size === 0 && typeof id === 'string' && id.startsWith('lore:') && id.length > 5) out.add(id.slice(5));
+    return [...out];
+}
+
+/** One bounded version purge: these node ids, history no newer than `purgedAt` (ISO; undefined = unbounded). */
+export interface VersionPurgeBound { nodeIds: string[]; purgedAt?: string }
+
+/**
+ * The version purges a `verbatim.purge` row stands for. The time bound is when the purge happened (`payload.purgedAt`,
+ * else the row's own `createdAt` for rows written without it), so a replay that runs late cannot erase history of a node
+ * re-created after the purge. A consolidated run carries one bound per original row in `versionPurges`.
+ */
+export function purgeVersionBoundsOf(entry: { payload?: unknown; createdAt?: string }): VersionPurgeBound[] {
+    const payload = (entry.payload ?? {}) as Record<string, unknown>;
+    const many = payload['versionPurges'];
+    if (Array.isArray(many)) {
+        return many.filter((m): m is VersionPurgeBound => !!m && Array.isArray((m as VersionPurgeBound).nodeIds)).map((m) => ({ nodeIds: m.nodeIds, ...(m.purgedAt ? { purgedAt: m.purgedAt } : {}) }));
+    }
+    const at = typeof payload['purgedAt'] === 'string' && payload['purgedAt'] ? payload['purgedAt'] : entry.createdAt;
+    return [{ nodeIds: purgeNodeIdsOf(payload), ...(at ? { purgedAt: at } : {}) }];
+}
+
+/**
  * The contentHash a verbatim.upsert payload will persist —
  * `metadata.contentHash` wins (VerbatimStore.store's effectiveHash rule),
  * else the hash of the payload text. null when the payload carries
@@ -374,6 +409,7 @@ export async function dispatch(
             const ids = purgeIdsOf(payload);
             if (ids.length === 0) throw new MissingPayloadError(kind, 'id|ids');
             await substrates.purgeVerbatim(ids, ws);
+            for (const b of purgeVersionBoundsOf(entry)) await substrates.purgeNodeVersions?.(b.nodeIds, ws, b.purgedAt);
             return;
         }
         case 'verbatim.upsert.batch': {

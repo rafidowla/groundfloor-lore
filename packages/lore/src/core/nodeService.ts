@@ -32,7 +32,6 @@
  * `isActiveWorkspace`, exactly as the MCP tool gated it before.
  */
 
-import { randomUUID } from 'node:crypto';
 import { tagsToArray } from '../engines/normalizeTags.js';
 import { assertSafeLanceId } from '../engines/verbatimHistory.js';
 import { reconnectOneNode } from '../engines/reconnect.js';
@@ -65,7 +64,8 @@ import {
 import type { LoreNode } from '../providers/types.js';
 import type { OutboxStore } from '../outbox/types.js';
 import { withVersionIntent, type VersionStoreApi } from '../outbox/versionStoreApi.js';
-import { shouldRecordVersion } from '../outbox/versionPolicy.js';
+import { recordLocalVersion } from './nodeServiceVersion.js';
+import type { PurgeFence } from './purgeFence.js';
 import type { VersionHistoryPolicy } from '../outbox/versionPolicy.js';
 import type { WriteAheadLog } from '../engines/syncEngine.js';
 import { applyLinkIntent } from '../link/signalCommitted.js';
@@ -217,6 +217,11 @@ export interface NodeUpsertHooks {
     versionStore?: VersionStoreApi;
     /** Previous node state captured by the caller for the version record. */
     previousState?: LoreNode | null;
+    /** Snapshot restore (bulkIngest cancel): refuse, under the lock, when the id was purged after the snapshot (core/purgeFence.ts). */
+    purgeFence?: PurgeFence;
+    /** Changeset commit: record the version row (principal 'changeset') INSIDE the node lock, with the prior node read in-lock. Replaces `versionStore` for this write.
+     *  A row failure is stored in `failure` (not thrown) so WAL/autolink still run; the caller surfaces it after its own accounting. */
+    changesetVersion?: { versionStore: VersionStoreApi; changesetId: string; failure?: unknown };
     /** Principal string stamped on the version record. The MCP tool used
      *  the literal `'mcp'`; defaults to that when omitted so the version
      *  shape is unchanged. */
@@ -673,6 +678,7 @@ export async function nodeUpsert(
         //    when the caller omitted them (2.1/2.2 — store_node / POST
         //    /api/node never send scopes; defaulting to [] fails open).
         let priorNode = await readPriorNode(targetGraph, id);
+        if (hooks.purgeFence?.purgedSince(workspace, id)) return { ok: false, code: 'write_failed', error: new Error(`node ${id} was purged after the snapshot being restored`) };
         // Conditional writes: refuse BEFORE the first side effect (no outbox row).
         const refused = await guardNodeWrite({ id, supersedes: args.supersedes, ifAbsent: args.ifAbsent, priorNode, targetGraph, isVisible: hooks.supersedesVisible, conditions });
         if (refused) return refused;
@@ -802,6 +808,8 @@ export async function nodeUpsert(
             const fresh = await targetGraph.getNode!(id).catch(() => null);
             if (fresh && fresh.revision !== undefined) node = { ...node, revision: fresh.revision };
         }
+        // 5. Version record INSIDE the lock (M2): after release it could re-write content a concurrent purge just erased.
+        if (superseded.ok) await recordLocalVersion(hooks, id, workspace, nodeData, node, priorNode);
         return { node, embedPending: fanoutOutcome.embedPending, superseded };
     });
     if ('verbatimError' in writeOutcome) {
@@ -818,30 +826,6 @@ export async function nodeUpsert(
     // 4. WAL append — active-workspace only (P1.C scope), when wired.
     if (args.isActiveWorkspace && hooks.getWal) {
         hooks.getWal().append('upsert_node', { ...node });
-    }
-
-    // 5. Version record (non-fatal), when wired.
-    //
-    // Storage-growth fix 1/3 (R1/R2, 2026-09-28) — gated by shouldRecordVersion:
-    // skip when the node's type is in `versionHistoryPolicy.skipTypes`, or when
-    // `previousState` is present and content is unchanged once volatile
-    // bookkeeping fields (createdAt/updatedAt/syncedAt/…) are ignored. A missing
-    // `previousState` ALWAYS records — never skip on missing data. See
-    // outbox/versionPolicy.ts for the full rationale.
-    if (hooks.versionStore && !hooks.versionStore.runWithVersionIntent && shouldRecordVersion(typeof nodeData.type === 'string' ? nodeData.type : undefined, hooks.previousState, node, hooks.versionHistoryPolicy)) {
-        try {
-            await hooks.versionStore.recordVersion({
-                versionId: randomUUID(),
-                nodeId: id,
-                workspace,
-                timestamp: new Date().toISOString(),
-                principal: hooks.versionPrincipal ?? 'mcp',
-                operation: 'upsert',
-                previousState: hooks.previousState ?? null,
-                newState: node,
-                changesetId: null,
-            });
-        } catch { /* non-fatal */ }
     }
 
     // 6. Ingest-time autolink, when supplied.

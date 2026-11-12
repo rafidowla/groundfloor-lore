@@ -372,7 +372,7 @@ export function registerGovernanceTools(mcpServer: McpServer, deps: GovernanceTo
                 const existing = await resolved.graph.getNode(id);
                 const result = !existing || filterNodesByActorScope([existing]).length === 0
                     ? null
-                    : await stampResolved(resolved.graph, id, commit);
+                    : await stampResolved(resolved.graph, id, commit, resolved.resolvedWorkspace);
                 if (!result) {
                     return {
                         content: [{ type: 'text' as const, text: `Deferred node '${id}' not found.` }],

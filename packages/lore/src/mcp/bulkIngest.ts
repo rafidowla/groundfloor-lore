@@ -47,6 +47,7 @@ import {
     markCancelled,
     rollbackCancelledNode,
 } from './bulkIngestCancel.js';
+import { openPurgeFence, type PurgeFence } from '../core/purgeFence.js';
 
 export interface BulkIngestOpts {
     /**
@@ -341,6 +342,18 @@ export async function runBulkIngest(
     opts: BulkIngestOpts = {},
     deps: BulkIngestDeps,
 ): Promise<BulkIngestResult> {
+    // Opened BEFORE the previousStates pre-read: a cancel-restore of a node purged after that read
+    // is refused under the node lock instead of writing the erased snapshot back (core/purgeFence.ts).
+    const purgeFence = openPurgeFence();
+    try { return await runBulkIngestFenced(nodes, opts, deps, purgeFence); } finally { purgeFence.close(); }
+}
+
+async function runBulkIngestFenced(
+    nodes: BulkIngestNodeArgs[],
+    opts: BulkIngestOpts,
+    deps: BulkIngestDeps,
+    purgeFence: PurgeFence,
+): Promise<BulkIngestResult> {
     const embed = opts.embed ?? 'sync';
     const enableAutolink = opts.autolink ?? false;
     const resultSlots: BulkIngestResult['results'] = new Array(nodes.length);
@@ -437,6 +450,7 @@ export async function runBulkIngest(
                 previousState: previousStates[i],
                 graph: resolvedGraphs[i] ?? null,
                 deps,
+                purgeFence,
             });
         }));
     };

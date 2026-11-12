@@ -255,6 +255,21 @@ export function registerLifecycleTools(server: McpServer, deps: LifecycleDeps): 
                         // store_node cannot interleave between them (hard-delete).
                         // Raw substrate primitives only inside — no lock re-entry
                         // (nodeWriteLock.ts rule 1).
+                        // Feature 8: record version (non-fatal). Called INSIDE the node lock
+                        // (recordVersion takes no lock) so a racing embedded purge cannot slip
+                        // between the graph write and this row and leave erased content behind.
+                        const recordPruneVersion = async (
+                            operation: 'delete' | 'archive', prev: typeof node, next: typeof node | null,
+                        ): Promise<void> => {
+                            if (!deps.versionStore) return;
+                            try {
+                                await deps.versionStore.recordVersion({
+                                    versionId: randomUUID(), nodeId: prev.id, workspace,
+                                    timestamp: new Date().toISOString(), principal: 'mcp',
+                                    operation, previousState: prev, newState: next, changesetId: null,
+                                });
+                            } catch { /* non-fatal */ }
+                        };
                         const applied = await withNodeLock(resolved.resolvedWorkspace, node.id, async (): Promise<
                             { kind: 'archive' | 'hard_delete'; node: typeof node } | null
                         > => {
@@ -332,10 +347,12 @@ export function registerLifecycleTools(server: McpServer, deps: LifecycleDeps): 
                                 if (resolved.isActive && deps.getWal) {
                                     deps.getWal().append('delete_node', { id: fresh.id, workspace: resolved.resolvedWorkspace });
                                 }
+                                await recordPruneVersion('delete', fresh, null);
                                 return { kind: 'hard_delete', node: fresh };
                             }
                             // Soft archive: set status='archived' on the FRESH read.
                             await withTransactionConflictRetry(() => graph.upsertNode({ ...fresh, status: 'archived' }));
+                            await recordPruneVersion('archive', fresh, { ...fresh, status: 'archived' });
                             return { kind: 'archive', node: fresh };
                         });
 
@@ -346,19 +363,6 @@ export function registerLifecycleTools(server: McpServer, deps: LifecycleDeps): 
                         if (applied.kind === 'hard_delete') hardDeleted++;
                         else archived++;
 
-                        // Feature 8: record version (non-fatal).
-                        if (deps.versionStore) {
-                            try {
-                                await deps.versionStore.recordVersion({
-                                    versionId: randomUUID(), nodeId: applied.node.id, workspace,
-                                    timestamp: new Date().toISOString(), principal: 'mcp',
-                                    operation: applied.kind === 'hard_delete' ? 'delete' : 'archive',
-                                    previousState: applied.node,
-                                    newState: applied.kind === 'hard_delete' ? null : { ...applied.node, status: 'archived' },
-                                    changesetId: null,
-                                });
-                            } catch { /* non-fatal */ }
-                        }
                     } catch {
                         skipped++;
                     }
@@ -445,25 +449,26 @@ export function registerLifecycleTools(server: McpServer, deps: LifecycleDeps): 
                     if (!found || filterNodesByActorScope([found]).length === 0) return null;
                     const prev = found.status ?? 'active';
                     await withTransactionConflictRetry(() => graph.upsertNode({ ...found, status: 'active' }));
+                    // Feature 8: record version (non-fatal), INSIDE the node lock so a racing
+                    // embedded purge cannot be followed by a re-inserted version row.
+                    if (deps.versionStore) {
+                        try {
+                            await deps.versionStore.recordVersion({
+                                versionId: randomUUID(), nodeId: id, workspace,
+                                timestamp: new Date().toISOString(), principal: 'mcp',
+                                operation: 'restore',
+                                previousState: { ...found, status: prev },
+                                newState: { ...found, status: 'active' },
+                                changesetId: null,
+                            });
+                        } catch { /* non-fatal */ }
+                    }
                     return { node: found, previousStatus: prev };
                 });
                 if (!restored) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'node_not_found', id }, null, 2) }], isError: true };
                 }
-                const { node, previousStatus } = restored;
-                // Feature 8: record version (non-fatal).
-                if (deps.versionStore) {
-                    try {
-                        await deps.versionStore.recordVersion({
-                            versionId: randomUUID(), nodeId: id, workspace,
-                            timestamp: new Date().toISOString(), principal: 'mcp',
-                            operation: 'restore',
-                            previousState: { ...node, status: previousStatus },
-                            newState: { ...node, status: 'active' },
-                            changesetId: null,
-                        });
-                    } catch { /* non-fatal */ }
-                }
+                const { previousStatus } = restored;
                 return {
                     content: [{
                         type: 'text' as const,

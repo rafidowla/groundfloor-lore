@@ -6,6 +6,7 @@
 import { nodeUpsert as nodeServiceUpsert } from '../core/nodeService.js';
 import type { LoreGraph, LoreVectorStore } from './services.js';
 import type { LoreNode } from '../providers/types.js';
+import type { PurgeFence } from '../core/purgeFence.js';
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
 import type { BulkIngestDeps, BulkIngestNodeArgs, BulkIngestResult } from './bulkIngest.js';
 
@@ -25,12 +26,14 @@ export async function rollbackCancelledNode(args: {
     previousState: LoreNode | null | undefined;
     graph: LoreGraph | null;
     deps: BulkIngestDeps;
+    /** Refuses the restore under the node lock when the id was purged after the snapshot. */
+    purgeFence?: PurgeFence;
 }): Promise<void> {
-    const { node, previousState, graph, deps } = args;
+    const { node, previousState, graph, deps, purgeFence } = args;
     if (!graph) return;
     try {
         if (previousState) {
-            await withTransactionConflictRetry(() => nodeServiceUpsert(
+            const restored = await withTransactionConflictRetry(() => nodeServiceUpsert(
                 {
                     id: node.id,
                     workspace: node.workspace,
@@ -49,9 +52,12 @@ export async function rollbackCancelledNode(args: {
                     versionStore: deps.versionStore,
                     previousState,
                     versionPrincipal: 'lib',
+                    purgeFence,
                 },
             ));
-            return;
+            // Refused because the id was purged after the snapshot: the snapshot is erased content and
+            // must not come back. Whatever this call wrote after the purge was a create, so undo it like one.
+            if (restored.ok || !purgeFence?.purgedSince(node.workspace, node.id)) return;
         }
         await graph.deleteNode(node.id);
         const store = deps.workspaceVerbatimResolver

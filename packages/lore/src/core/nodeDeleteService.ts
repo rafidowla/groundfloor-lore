@@ -32,6 +32,7 @@ import { recordHotWrite } from '../outbox/hotLane.js';
 import type { OutboxEntry, OutboxStore } from '../outbox/types.js';
 import type { WriteAheadLog } from '../engines/writeAheadLog.js';
 import { withNodeLock } from './nodeWriteLock.js';
+import { notePurged } from './purgeFence.js';
 import { tombstoneQuestionAliases } from './nodeServiceVerbatim.js';
 import { aliasRowId, MAX_QUESTIONS } from './questionAliases.js';
 import { purgeVerbatimRows, type PurgeCapableStore } from './verbatimPurge.js';
@@ -67,6 +68,10 @@ export interface NodeDeleteInput {
     /** 3.27.0 — physically delete the node's verbatim rows (history and alias
      *  rows included) instead of tombstoning them. Default false. */
     purge?: boolean;
+    /** Hard-delete the purged node's version-history rows no newer than `upTo` (ISO; the purge moment, so history written
+     *  after the purge survives). Local store. Called only on the purge path, after the `verbatim.purge` outbox row
+     *  (which carries the same purge and bound for replay). Absent: no version store (cloud). */
+    purgeVersions?: (nodeIds: string[], upTo: string) => void | Promise<void>;
 }
 
 export interface NodeDeleteOutcome {
@@ -74,9 +79,13 @@ export interface NodeDeleteOutcome {
     deleted: boolean;
     /** Set when the graph node was deleted but its verbatim tombstone failed. */
     verbatimWarning?: string;
+    /** Set when `purge` could not remove the node's version-history rows (a `verbatim.purge` outbox row retries it, when an outbox is wired). */
+    versionWarning?: string;
     /** 3.27.0 — true when `purge` was requested and the verbatim rows were
      *  physically removed. Absent on the default (tombstone) path, and when a
-     *  store without any hard-delete primitive forced a tombstone fallback. */
+     *  store without any hard-delete primitive forced a tombstone fallback.
+     *  With `purge` it can also be true while `deleted` is false: the node was already gone (plain-deleted earlier) and
+     *  its leftover verbatim / version-history content was removed. */
     purged?: true;
 }
 
@@ -131,6 +140,8 @@ async function existingAliasRowIds(
 export async function deleteNodeEverywhere(input: NodeDeleteInput): Promise<NodeDeleteOutcome> {
     const { id, workspace, initiator, logPrefix, outboxStore } = input;
     return withNodeLock(workspace, id, async (): Promise<NodeDeleteOutcome> => {
+        // The purge moment: version history no newer than this is removed (replay carries it as `purgedAt`).
+        const purgedAt = new Date().toISOString();
         // SP-F3 — outbox-first: record node.delete BEFORE the substrate delete
         // so the delete gets the same durability + crash-recovery replay +
         // per-workspace replication as REST DELETE /api/node.
@@ -145,7 +156,9 @@ export async function deleteNodeEverywhere(input: NodeDeleteInput): Promise<Node
             : null;
         const deleted = await input.graph.deleteNode(id);
         if (entry) input.onInlineDeleteApplied?.(entry);
-        if (!deleted) return { deleted };
+        if (input.purge) notePurged(workspace, [id]); // core/purgeFence.ts: a pending snapshot restore must not write it back
+        // A purge of an already-deleted node still erases its leftover verbatim and version content (H2); a plain delete is done.
+        if (!deleted && !input.purge) return { deleted };
         // Verbatim is append-only memory: tombstone (kept + marked superseded)
         // rather than erase, so prior content stays recallable for history /
         // audit / undo. L-056 — the RESOLVED workspace's store, so the
@@ -155,6 +168,7 @@ export async function deleteNodeEverywhere(input: NodeDeleteInput): Promise<Node
         // instead of fire-and-forget success.
         let verbatimWarning: string | undefined;
         let purged: true | undefined;
+        let versionWarning: string | undefined;
         try {
             // 3.27.0 — null (undeterminable) = every slot, as before.
             const aliasIds = await existingAliasRowIds(id, workspace, store, outboxStore);
@@ -167,7 +181,7 @@ export async function deleteNodeEverywhere(input: NodeDeleteInput): Promise<Node
                     await recordHotWrite(outboxStore, {
                         workspace,
                         operationKind: 'verbatim.purge',
-                        payload: { id: `lore:${id}`, ids },
+                        payload: { id: `lore:${id}`, ids, nodeIds: [id], purgedAt },
                         initiator,
                         operation: 'verbatim.purge',
                     });
@@ -176,12 +190,20 @@ export async function deleteNodeEverywhere(input: NodeDeleteInput): Promise<Node
                 if (mode === 'none') {
                     for (const vid of ids) await input.verbatimDelete(vid);
                 }
+                // Version history holds the node's full content too; the outbox row above replays this if it fails.
+                // Its own failure is reported under its own field, not as a verbatim problem.
+                try {
+                    await input.purgeVersions?.([id], purgedAt);
+                } catch (verErr) {
+                    versionWarning = `version history purge failed${outboxStore ? ' (queued for retry)' : ''}: ${redactError(verErr)}`;
+                    console.error(`${logPrefix} Version-history purge failed for ${redactId(id)}: ${redactError(verErr)}`);
+                }
                 if (mode === 'tombstone') {
                     verbatimWarning = 'verbatim purge unsupported by this store; rows were tombstoned instead';
                 } else if (mode === 'none') {
                     // verbatimDelete may itself tombstone (cloud), so a purge is not claimed.
                     verbatimWarning = 'verbatim purge unsupported by this store; rows went through the legacy delete instead';
-                } else {
+                } else if (!versionWarning) {
                     purged = true;
                 }
             } else {
@@ -216,7 +238,7 @@ export async function deleteNodeEverywhere(input: NodeDeleteInput): Promise<Node
         }
         // ITEM X-walnode — mirror the upsert's WAL append (active workspace
         // only), inside the same lock the delete + tombstone ran under.
-        if (input.isActive) input.getWal().append('delete_node', { id, workspace });
-        return { deleted, verbatimWarning, ...(purged ? { purged } : {}) };
+        if (deleted && input.isActive) input.getWal().append('delete_node', { id, workspace });
+        return { deleted, verbatimWarning, ...(versionWarning ? { versionWarning } : {}), ...(purged ? { purged } : {}) };
     });
 }

@@ -14,6 +14,7 @@
  * store_node / POST /api/node write in every substrate.
  */
 
+import { randomUUID } from 'node:crypto';
 import { nodeUpsert as nodeServiceUpsert, type VerbatimWriter } from '../core/nodeService.js';
 import { withNodeLock } from '../core/nodeWriteLock.js';
 import type { NodeWriteGraph } from '../core/nodeService.js';
@@ -22,6 +23,16 @@ import { resolveSupersessionContext } from '../core/supersessionPolicy.js';
 import { recordHotWrite } from '../outbox/hotLane.js';
 import type { VerbatimStoreApi } from '../engines/verbatimStoreApi.js';
 import type { WriteAheadLog } from '../engines/syncEngine.js';
+import type { VersionStoreApi } from '../outbox/versionStoreApi.js';
+import type { LoreNode } from '../providers/types.js';
+import type { PurgeFence } from '../core/purgeFence.js';
+
+/** Commit-time version recording done INSIDE the per-node lock (a racing embedded purge cannot be followed by a re-inserted row). */
+export interface ChangesetVersionRecorder { versionStore: VersionStoreApi; changesetId: string }
+
+/** A changeset upsert whose node write landed but whose in-lock version row failed: the caller counts the
+ *  write (quota delta) first, then throws `error` into its per-write error tally, as 3.38.3 did. */
+export interface ChangesetUpsertOutcome { versionError?: unknown }
 
 export interface ChangesetWriteDeps {
     /** Outbox hot-lane store (durability + replication), as wired for the
@@ -78,7 +89,10 @@ export async function applyChangesetUpsert(
     targetGraph: NodeWriteGraph,
     workspace: string,
     nodeData: Record<string, unknown>,
-): Promise<void> {
+    version?: ChangesetVersionRecorder,
+    /** Snapshot restore (rollback_changeset): refused under the lock when the id was purged after the snapshot. */
+    purgeFence?: PurgeFence,
+): Promise<ChangesetUpsertOutcome> {
     // D5 round 2 (HIGH #1) — same shared helper every other write path
     // resolves through (storeNode.ts/postNode.ts/server.ts embedded
     // nodeUpsert/nodeUpsertBatch/bulkIngest.ts/bulkWrite.ts/import.ts).
@@ -97,6 +111,7 @@ export async function applyChangesetUpsert(
     });
     const rawSupersedes = nodeData['supersedes'];
     const supersedes = Array.isArray(rawSupersedes) ? rawSupersedes.map(String) : undefined;
+    const cv: { versionStore: VersionStoreApi; changesetId: string; failure?: unknown } | undefined = version ? { ...version } : undefined;
     const res = await nodeServiceUpsert(
         {
             id: String(nodeData['id'] ?? ''),
@@ -115,12 +130,16 @@ export async function applyChangesetUpsert(
             verbatim: deps.verbatim,
             // versionStore deliberately NOT passed: changeset commit/rollback
             // records its own version rows (principal 'changeset' +
-            // changesetId) — passing it here would double-record.
+            // changesetId) — passing it here would double-record. When the caller
+            // supplies `version`, nodeUpsert records that row inside its node lock.
+            ...(cv ? { changesetVersion: cv } : {}),
+            ...(purgeFence ? { purgeFence } : {}),
             supersessionPolicy,
             findSupersessionDuplicate,
         },
     );
     if (!res.ok) throw res.error;
+    return cv?.failure !== undefined ? { versionError: cv.failure } : {};
 }
 
 /**
@@ -134,6 +153,7 @@ export async function applyChangesetDelete(
     workspace: string,
     nodeId: string,
     reason: string,
+    version?: ChangesetVersionRecorder,
 ): Promise<void> {
     // Graph delete + verbatim tombstone under the SAME per-(workspace,id)
     // lock `nodeUpsert` holds (core/nodeWriteLock.ts) — unlocked, a
@@ -142,6 +162,9 @@ export async function applyChangesetDelete(
     // delegates to `nodeUpsert`, which takes this very lock itself, and
     // wrapping it would deadlock the key (nodeWriteLock.ts rule 1).
     await withNodeLock(workspace, nodeId, async () => {
+        // The prior node is read under the lock (not before it) so the version row never carries
+        // content a concurrent purge already erased.
+        const prevNode: LoreNode | null | undefined = version ? await targetGraph.getNode?.(nodeId) : undefined;
         // QA A2 round-2 finding 2 (2026-09-03) — record node.delete BEFORE
         // the substrate delete, same outbox-first pattern as delete_node /
         // DELETE /api/node / prune_nodes hard_delete. Without this, a still-
@@ -192,6 +215,13 @@ export async function applyChangesetDelete(
         // still inside the SAME lock the graph delete + tombstone ran under.
         if (deps.getWal && workspace === deps.activeWorkspace) {
             deps.getWal().append('delete_node', { id: nodeId, workspace });
+        }
+        if (version) {
+            await version.versionStore.recordVersion({
+                versionId: randomUUID(), nodeId, workspace, timestamp: new Date().toISOString(),
+                principal: 'changeset', operation: 'delete', previousState: prevNode ?? null, newState: null,
+                changesetId: version.changesetId,
+            });
         }
     });
 }

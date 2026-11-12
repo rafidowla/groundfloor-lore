@@ -120,6 +120,37 @@ export async function withNodeLock<T>(
     return withNodeLockWithin(workspace, id, nodeLockWaitMs(), fn);
 }
 
+/**
+ * Read-validate-write for UPDATE-intent writes (outcome counters, anchor stale flag, evidence
+ * redaction, deferred-resolution stamp). `read` runs INSIDE the
+ * `(workspace, id)` lock; a null read means the node is gone and `apply` never runs (the caller
+ * answers with its existing not-found result). `apply` gets the in-lock node.
+ *
+ * Why (fix/purge-version-history round 3): these paths used to read the node OUTSIDE the lock
+ * and then write `{ ...node, ... }` through `graph.upsertNode` / `upsertKeepingRevision`, both
+ * of which INSERT when the row is absent. A `nodeDelete({ purge: true })` (or plain delete) that
+ * ran between the read and the write — every delete/purge path holds this same lock — was
+ * undone: the stale read re-created the node, and a version row carrying it as `previousState`
+ * was written after the purge's `purgedAt` bound, so the erased content came back. Reading under
+ * the lock makes the read authoritative for the whole write. Create-intent writes (`nodeUpsert`,
+ * imports) are deliberately NOT routed through this: re-creating a node after a purge is a
+ * legitimate explicit write there. Same re-entrancy rule: `apply` touches raw primitives only.
+ * engines/retentionSweep.ts's archive patch has the same read-then-upsert shape but is not
+ * reachable today (its rule list is hard-empty); route it through here when rules are wired.
+ */
+export async function withLockedExistingNode<N, T>(
+    workspace: string,
+    id: string,
+    read: () => Promise<N | null | undefined>,
+    apply: (node: N) => Promise<T>,
+): Promise<{ found: false } | { found: true; value: T }> {
+    return withNodeLock(workspace, id, async () => {
+        const node = await read();
+        if (!node) return { found: false as const };
+        return { found: true as const, value: await apply(node) };
+    });
+}
+
 /** Thrown by {@link withNodeLockWithin} when the lock was not acquired in time; `fn` never ran. */
 export class NodeLockTimeoutError extends Error {
     constructor(readonly workspace: string, readonly id: string, readonly waitedMs: number) {

@@ -263,6 +263,20 @@ export async function tryLifecycleRoutes(
                     // POST /api/node cannot interleave between them
                     // (hard-delete). Raw substrate primitives only inside — no
                     // lock re-entry (nodeWriteLock.ts rule 1).
+                    // Version row (non-fatal), recorded INSIDE the node lock (recordVersion takes no lock) so a
+                    // racing embedded purge cannot slip between the graph write and this row.
+                    const recordPruneVersion = async (
+                        operation: 'delete' | 'archive', prev: typeof node, next: typeof node | null,
+                    ): Promise<void> => {
+                        if (!deps.versionStore) return;
+                        try {
+                            await deps.versionStore.recordVersion({
+                                versionId: randomUUID(), nodeId: prev.id, workspace,
+                                timestamp: new Date().toISOString(), principal: 'http',
+                                operation, previousState: prev, newState: next, changesetId: null,
+                            });
+                        } catch { /* non-fatal */ }
+                    };
                     const applied = await withNodeLock(workspace, node.id, async (): Promise<
                         { kind: 'archive' | 'hard_delete'; node: typeof node } | null
                     > => {
@@ -350,9 +364,11 @@ export async function tryLifecycleRoutes(
                             if (graphRes.isActive && deps.getWal) {
                                 deps.getWal().append('delete_node', { id: fresh.id, workspace });
                             }
+                            await recordPruneVersion('delete', fresh, null);
                             return { kind: 'hard_delete', node: fresh };
                         }
                         await withTransactionConflictRetry(() => graph.upsertNode({ ...fresh, status: 'archived' }));
+                        await recordPruneVersion('archive', fresh, { ...fresh, status: 'archived' });
                         return { kind: 'archive', node: fresh };
                     });
 
@@ -363,18 +379,6 @@ export async function tryLifecycleRoutes(
                     if (applied.kind === 'hard_delete') hardDeleted++;
                     else archived++;
 
-                    if (deps.versionStore) {
-                        try {
-                            await deps.versionStore.recordVersion({
-                                versionId: randomUUID(), nodeId: applied.node.id, workspace,
-                                timestamp: new Date().toISOString(), principal: 'http',
-                                operation: applied.kind === 'hard_delete' ? 'delete' : 'archive',
-                                previousState: applied.node,
-                                newState: applied.kind === 'hard_delete' ? null : { ...applied.node, status: 'archived' },
-                                changesetId: null,
-                            });
-                        } catch { /* non-fatal */ }
-                    }
                 } catch {
                     skipped++;
                 }
@@ -489,26 +493,26 @@ export async function tryLifecycleRoutes(
                 if (!found || filterNodesByActorScope([found]).length === 0) return null;
                 const prev = found.status ?? 'active';
                 await withTransactionConflictRetry(() => graph.upsertNode({ ...found, status: 'active' }));
+                // Version row (non-fatal) INSIDE the node lock, so a racing embedded purge cannot be followed by a re-inserted row.
+                if (deps.versionStore) {
+                    try {
+                        await deps.versionStore.recordVersion({
+                            versionId: randomUUID(), nodeId, workspace,
+                            timestamp: new Date().toISOString(), principal: 'http',
+                            operation: 'restore',
+                            previousState: { ...found, status: prev },
+                            newState: { ...found, status: 'active' },
+                            changesetId: null,
+                        });
+                    } catch { /* non-fatal */ }
+                }
                 return { node: found, previousStatus: prev };
             });
             if (!restored) {
                 writeError(res, 404, 'node_not_found', `node not found: ${nodeId}`, { id: nodeId });
                 return true;
             }
-            const { node, previousStatus } = restored;
-
-            if (deps.versionStore) {
-                try {
-                    await deps.versionStore.recordVersion({
-                        versionId: randomUUID(), nodeId, workspace,
-                        timestamp: new Date().toISOString(), principal: 'http',
-                        operation: 'restore',
-                        previousState: { ...node, status: previousStatus },
-                        newState: { ...node, status: 'active' },
-                        changesetId: null,
-                    });
-                } catch { /* non-fatal */ }
-            }
+            const { previousStatus } = restored;
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, id: nodeId, previous_status: previousStatus, new_status: 'active' }));

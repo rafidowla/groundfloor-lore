@@ -37,6 +37,7 @@ import { redactId, redactError } from '../security/logRedact.js';
 import { recordHotWrite, recordHotWriteBatch, type HotWriteSpec } from '../outbox/hotLane.js';
 import type { OutboxEntry } from '../outbox/types.js';
 import { withNodeLocks, BULK_LOCK_CHUNK_SIZE, chunkForLocking } from './nodeWriteLock.js';
+import { notePurged } from './purgeFence.js';
 import { aliasRowId, MAX_QUESTIONS } from './questionAliases.js';
 import { purgeVerbatimRows, type PurgeCapableStore } from './verbatimPurge.js';
 import { existingAliasRowIdsMany, type NodeDeleteInput, type NodeDeleteOutcome } from './nodeDeleteService.js';
@@ -87,6 +88,8 @@ async function deleteChunk(input: NodeDeleteManyInput, ids: string[]): Promise<N
     const { workspace, initiator, outboxStore } = input;
     const work: Work[] = ids.map((id) => ({ id, item: { id, deleted: false }, entry: null, deleted: false, walAppend: false }));
     const fail = (w: Work, err: unknown): void => { w.item.error = redactError(err); };
+    // The purge moment (all the chunk's locks are held): version history no newer than this is removed.
+    const purgedAt = new Date().toISOString();
 
     // 1. node.delete rows first (SP-F3 outbox-first), one batched insert; a
     //    batch failure falls back to per-id so one bad row only fails its id.
@@ -117,8 +120,10 @@ async function deleteChunk(input: NodeDeleteManyInput, ids: string[]): Promise<N
             w.item.deleted = w.deleted;
         } catch (err) { fail(w, err); }
     }
-    const live = work.filter((w) => w.deleted);
+    // A purge of an already-deleted id still erases its leftover verbatim / version content (H2); a plain delete has nothing left to do.
+    const live = work.filter((w) => !w.item.error && (w.deleted || input.purge));
     if (live.length === 0) return work.map((w) => w.item);
+    if (input.purge) notePurged(workspace, live.map((w) => w.id)); // core/purgeFence.ts: a pending snapshot restore must not write these back
 
     // 3. the workspace's verbatim store; if it cannot be resolved every deleted
     //    node reports it (as nodeDelete throws), and the WAL append is skipped.
@@ -127,9 +132,9 @@ async function deleteChunk(input: NodeDeleteManyInput, ids: string[]): Promise<N
 
     // 4. which alias rows exist: one batched lookup (null = every slot, as before).
     const aliasMap = await existingAliasRowIdsMany(live.map((w) => w.id), workspace, store, outboxStore);
-    for (const w of live) w.walAppend = true;
+    for (const w of live) w.walAppend = w.deleted;
 
-    if (input.purge) await purgeChunk(input, store, live, aliasMap);
+    if (input.purge) await purgeChunk(input, store, live, aliasMap, purgedAt);
     else await tombstoneChunk(input, store, live, aliasMap);
 
     // 5. ITEM X-walnode — WAL append for the active workspace, inside the lock.
@@ -138,7 +143,7 @@ async function deleteChunk(input: NodeDeleteManyInput, ids: string[]): Promise<N
 }
 
 async function purgeChunk(
-    input: NodeDeleteManyInput, store: unknown, live: Work[], aliasMap: Map<string, string[] | null>,
+    input: NodeDeleteManyInput, store: unknown, live: Work[], aliasMap: Map<string, string[] | null>, purgedAt: string,
 ): Promise<void> {
     const { workspace, initiator, outboxStore } = input;
     const idsOf = new Map<Work, string[]>(live.map((w) => [w, [`lore:${w.id}`, ...(aliasMap.get(w.id) ?? slots(w.id))]]));
@@ -147,7 +152,7 @@ async function purgeChunk(
     // purges that replay completes). One row per node; one batched insert.
     if (outboxStore) {
         const specs: HotWriteSpec[] = live.map((w) => ({
-            workspace, operationKind: 'verbatim.purge', payload: { id: `lore:${w.id}`, ids: idsOf.get(w)! }, initiator, operation: 'verbatim.purge',
+            workspace, operationKind: 'verbatim.purge', payload: { id: `lore:${w.id}`, ids: idsOf.get(w)!, nodeIds: [w.id], purgedAt }, initiator, operation: 'verbatim.purge',
         }));
         try {
             await recordHotWriteBatch(outboxStore, specs);
@@ -163,10 +168,19 @@ async function purgeChunk(
     const apply = async (ws: Work[], ids: string[]): Promise<void> => {
         const mode = await purgeVerbatimRows(store as PurgeCapableStore, ids, input.reason);
         if (mode === 'none') for (const vid of ids) await input.verbatimDelete(vid);
+        // Version history: own failure field (the `verbatim.purge` rows above retry it); verbatim success is not undone.
+        let versionWarning: string | undefined;
+        try {
+            await input.purgeVersions?.(ws.map((w) => w.id), purgedAt);
+        } catch (verErr) {
+            versionWarning = `version history purge failed${outboxStore ? ' (queued for retry)' : ''}: ${redactError(verErr)}`;
+            console.error(`${input.logPrefix} Version-history purge failed for ${ws.length} node(s): ${redactError(verErr)}`);
+        }
         for (const w of ws) {
+            if (versionWarning) w.item.versionWarning = versionWarning;
             if (mode === 'tombstone') w.item.verbatimWarning = 'verbatim purge unsupported by this store; rows were tombstoned instead';
             else if (mode === 'none') w.item.verbatimWarning = 'verbatim purge unsupported by this store; rows went through the legacy delete instead';
-            else w.item.purged = true;
+            else if (!versionWarning) w.item.purged = true;
         }
     };
     try {

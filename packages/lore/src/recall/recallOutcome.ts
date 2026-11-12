@@ -39,6 +39,7 @@ import type { VersionStoreApi } from '../outbox/versionStoreApi.js';
 import type { LoreNode } from '../providers/types.js';
 import { withTransactionConflictRetry } from '../engines/transactionConflictRetry.js';
 import { upsertKeepingRevision } from '../engines/graphShared/revision.js';
+import { withLockedExistingNode } from '../core/nodeWriteLock.js';
 
 /** Re-exported under this module's own name for callers that don't want
  *  to reach into outbox/auxStore.js directly — but this IS record_outcome's
@@ -103,45 +104,52 @@ export type ApplyRecallOutcomeResult =
 export async function applyRecallOutcome(args: ApplyRecallOutcomeArgs): Promise<ApplyRecallOutcomeResult> {
     const { auxStore, graph, versionStore, nodeId, workspace, outcome, queryId, recordedBy, principal } = args;
     await graph.initialize();
-    const node = await graph.getNode(nodeId);
-    if (!node) return { ok: false, code: 'node_not_found' };
 
+    // Read, validate, outcome row, counters, graph write and version row all run under ONE
+    // per-(workspace,id) node lock (core/nodeWriteLock.ts withLockedExistingNode): a node read
+    // outside the lock could be purged before the write, and upsertKeepingRevision would then
+    // RE-CREATE it from the stale read. Raw primitives only inside: no lock re-entry.
     const status = outcome;
-    const outcomeId = randomUUID();
-    auxStore.recordOutcome({
-        id: outcomeId,
-        nodeId,
-        workspace,
-        status,
-        notes: queryId ? `recall_outcome queryId=${queryId}` : undefined,
-        recordedBy,
+    const r = await withLockedExistingNode(workspace, nodeId, () => graph.getNode(nodeId), async (node) => {
+        const outcomeId = randomUUID();
+        auxStore.recordOutcome({
+            id: outcomeId,
+            nodeId,
+            workspace,
+            status,
+            notes: queryId ? `recall_outcome queryId=${queryId}` : undefined,
+            recordedBy,
+        });
+
+        const counts = auxStore.getOutcomeCount(nodeId, workspace);
+        const newScore = calcConfirmationScore(counts.success, counts.failure, counts.partial);
+
+        await withTransactionConflictRetry(() => upsertKeepingRevision(graph, {
+            ...node,
+            success_count: counts.success,
+            failure_count: counts.failure,
+            partial_count: counts.partial,
+            confirmation_score: newScore,
+        } as LoreNode));
+
+        auxStore.incrementCounter(workspace, `outcomes_${status}`);
+
+        if (versionStore) {
+            try {
+                await versionStore.recordVersion({
+                    versionId: randomUUID(), nodeId, workspace,
+                    timestamp: new Date().toISOString(), principal,
+                    operation: 'outcome',
+                    previousState: node,
+                    newState: { ...node, success_count: counts.success, failure_count: counts.failure, partial_count: counts.partial, confirmation_score: newScore },
+                    changesetId: null,
+                });
+            } catch { /* non-fatal, matches record_outcome's own posture */ }
+        }
+        return { outcomeId, newScore, counts };
     });
-
-    const counts = auxStore.getOutcomeCount(nodeId, workspace);
-    const newScore = calcConfirmationScore(counts.success, counts.failure, counts.partial);
-
-    await withTransactionConflictRetry(() => upsertKeepingRevision(graph, {
-        ...node,
-        success_count: counts.success,
-        failure_count: counts.failure,
-        partial_count: counts.partial,
-        confirmation_score: newScore,
-    } as LoreNode));
-
-    auxStore.incrementCounter(workspace, `outcomes_${status}`);
-
-    if (versionStore) {
-        try {
-            await versionStore.recordVersion({
-                versionId: randomUUID(), nodeId, workspace,
-                timestamp: new Date().toISOString(), principal,
-                operation: 'outcome',
-                previousState: node,
-                newState: { ...node, success_count: counts.success, failure_count: counts.failure, partial_count: counts.partial, confirmation_score: newScore },
-                changesetId: null,
-            });
-        } catch { /* non-fatal, matches record_outcome's own posture */ }
-    }
+    if (!r.found) return { ok: false, code: 'node_not_found' };
+    const { outcomeId, newScore, counts } = r.value;
 
     return { ok: true, outcomeId, status, newConfirmationScore: newScore, counts };
 }

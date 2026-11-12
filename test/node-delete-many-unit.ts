@@ -144,12 +144,12 @@ for (const engine of ['sqlite', 'lance'] as const) {
             assert.equal(results.length, askIds.length);
             assert.deepEqual(results.map((r) => r.id), askIds, 'results in request order');
             for (const r of results) {
-                if (r.id.startsWith('ghost')) { assert.equal(r.deleted, false, r.id); assert.equal(r.purged, undefined, r.id); }
+                if (r.id.startsWith('ghost')) { assert.equal(r.deleted, false, r.id); assert.equal(r.purged, true, r.id); assert.equal(r.versionWarning, undefined, r.id); }
                 else { assert.equal(r.deleted, true, r.id); assert.equal(r.purged, true, r.id); assert.equal(r.verbatimWarning, undefined, r.id); assert.equal(r.error, undefined, r.id); }
             }
             const kinds = (await pendingRows(lore)).map((e) => e.operationKind);
             assert.equal(kinds.filter((k) => k === 'node.delete').length, askIds.length, 'one node.delete row per id (ghosts too, as nodeDelete)');
-            assert.equal(kinds.filter((k) => k === 'verbatim.purge').length, ids.length, 'one verbatim.purge row per deleted node');
+            assert.equal(kinds.filter((k) => k === 'verbatim.purge').length, askIds.length, 'one verbatim.purge row per id (H2: ghosts / already-deleted ids still queue the erase)');
             assert.equal(kinds.filter((k) => k === 'verbatim.tombstone').length, 0);
             await drain(lore);
             for (let i = 0; i < ids.length; i++) {

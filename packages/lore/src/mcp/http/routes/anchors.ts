@@ -17,6 +17,7 @@ import { parseAnchors } from '../../anchorParse.js';
 import { redactError } from '../../../security/logRedact.js';
 import { writeError } from '../helpers.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
+import { withLockedExistingNode } from '../../../core/nodeWriteLock.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 
 // Widened when the local graph engine changed: naming the two CONCRETE
@@ -108,25 +109,37 @@ export async function tryAnchorsRoutes(
         }
         await graph.initialize();
 
-        const node = await graph.getNode(nodeId);
         // Row-level security_scopes confinement: hidden ⇒ same 404 as a
         // missing id (and never mutated by mark_stale). Unbound ⇒ no-op.
-        if (!node || filterNodesByActorScope([node]).length === 0) {
-            writeError(res, 404, 'node_not_found', `node not found: ${nodeId}`, { id: nodeId });
-            return true;
-        }
+        const readVisible = async () => {
+            const n = await graph.getNode(nodeId);
+            return n && filterNodesByActorScope([n]).length > 0 ? n : null;
+        };
+        const notFound = (): true => { writeError(res, 404, 'node_not_found', `node not found: ${nodeId}`, { id: nodeId }); return true; };
+        let node = await readVisible();
+        if (!node) return notFound();
 
-        const anchors = parseAnchors(node.anchors);
         let staleMarked = false;
 
         if (markStale && !node.anchor_stale) {
-            await withTransactionConflictRetry(() => graph.upsertNode({
-                ...node,
-                anchor_stale: true,
-                anchor_stale_since: new Date().toISOString(),
-            }));
-            staleMarked = true;
+            // Re-read under the node lock and write the IN-LOCK node (core/nodeWriteLock.ts
+            // withLockedExistingNode): upsertNode inserts when absent, so writing the read
+            // above would re-create a node purged in between.
+            const locked = await withLockedExistingNode(workspace, nodeId, readVisible, async (fresh) => {
+                if (fresh.anchor_stale) return { fresh, marked: false };
+                await withTransactionConflictRetry(() => graph.upsertNode({
+                    ...fresh,
+                    anchor_stale: true,
+                    anchor_stale_since: new Date().toISOString(),
+                }));
+                return { fresh, marked: true };
+            });
+            if (!locked.found) return notFound();
+            node = locked.value.fresh;
+            staleMarked = locked.value.marked;
         }
+
+        const anchors = parseAnchors(node.anchors);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({

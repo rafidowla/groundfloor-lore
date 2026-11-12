@@ -4,6 +4,54 @@ All notable changes to Lore are recorded here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loosely; dates are local.
 
+## [Unreleased]
+
+## [3.38.4] — 2026-11-12
+
+Honest-erase release: purge and workspace erase now also remove version history, plus a golden-baseline test
+harness. No migration, no new configuration, no API change; upgrading over 3.38.x is a drop-in. Plain (non-purge)
+delete and all other outputs are unchanged (golden snapshots identical apart from the purge section).
+
+### Added
+
+- **Golden-baseline harness** (`test/golden-baseline/`): a fixed workload through store / recall / search / export /
+  graph / stats / erase on SQLite and Postgres, compared against committed snapshots; part of the full chain.
+
+### Fixed
+
+- **`nodeDelete({ purge: true })`, `nodeDeleteMany({ purge: true })` and workspace erase now remove the node / workspace from the version store.**
+  Before, a purged node (or an erased workspace) was gone from the graph and verbatim store but its full content stayed
+  readable through `versionStore.getVersions` (`node_versions` in `versions.sqlite`), on SQLite and Postgres workspaces.
+  - New `VersionStore.purgeNodes(nodeIds, workspace)` / `purgeWorkspace(workspace)` (`outbox/versionPurgeOps.ts`):
+    transactional, idempotent, also remove the buffered `changeset_writes` that carry node content.
+  - Every purge entry point calls it, and the `verbatim.purge` outbox row now carries `nodeIds`, so replay after a
+    crash converges (rows written before this change fall back to the canonical `lore:<id>`).
+  - Workspace erase gets a `versions` eraser (`engines/workspaceErase/versionsEraser.ts`) that mirrors the outbox
+    eraser: exact workspace name, skipped while a live workspace uses the name, never creates a file.
+  - Time bound: a purge removes history no newer than the purge moment (`purgedAt` in the `verbatim.purge` payload,
+    inclusive, ms precision), so a late outbox replay cannot wipe a node re-created afterwards. The inline erase runs
+    under the node lock, and `nodeUpsert` now records its local version inside that lock too, so an upsert cannot
+    re-write erased content into history after the purge.
+  - Purging an already plain-deleted id now erases its leftover verbatim and version content (`{ deleted: false,
+    purged: true }`); a version-store failure is reported as `versionWarning`, not `verbatimWarning`.
+  - Workspace erase: when a live workspace re-uses the deleted name, only history no newer than the deletion is removed
+    (the new workspace keeps its own); without a usable deletion time the step is `unverifiable`.
+  - Plain delete is unchanged (history kept). Known gaps, purge is not a forensic erase: the cloud/Dataplane version
+    store has no node-scoped delete wired; replicated `node.upsert` / `verbatim.upsert` outbox rows keep their payloads
+    for the 7-day retention; SQLite WAL files and `sync.wal` (until pushed) may still hold the bytes.
+  - Read-then-write paths that could re-create an erased node from a read taken before the purge now read, scope-check
+    and write under one node lock: `record_outcome` (MCP + HTTP) and recall outcomes, `check_anchors` (MCP + HTTP),
+    `redact_evidence`, deferred resolve (governance + retention policy), changeset delete. A node purged first gets
+    each call's existing not-found result. Local version rows take their prior state from the in-lock read.
+  - Snapshot restores (bulk-ingest cancel restore, `rollback_changeset` MCP + HTTP) refuse ids purged while the
+    restore was running (`write_failed`) instead of writing erased content back. A bulk-ingest cancel restore now
+    records one version row back to the pre-ingest state.
+  - Known low follow-ups: a re-create in the same millisecond as a purge can lose its own version row on outbox
+    replay (no erased content returns); workspace erase does not take node locks.
+  - Tests: `test/version-purge-store-unit.ts`, `test/version-purge-embedded-unit.ts`,
+    `test/purge-version-lock-race-unit.ts`, `test/purge-stale-read-race-unit.ts`,
+    `test/purge-restore-fence-unit.ts`; golden snapshots updated (`purge` section only).
+
 ## [3.38.3] — 2026-11-01
 
 Batch release: SQLite outbox slowdown after a bulk import, tag pushdown for cross-workspace recall, and stable

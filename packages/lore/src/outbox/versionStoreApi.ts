@@ -39,6 +39,13 @@ export interface VersionStoreApi {
     getChangesetWrites(changesetId: string): M<ChangesetWrite[]>;
 
     /**
+     * Local only. Hard-delete every version row (and buffered changeset write) of purged nodes (`nodeDelete({ purge:true })`).
+     * KNOWN GAP (cloud): `DataplaneVersionStore` does not implement it, so cloud purge leaves `lore_version` rows. The SDK's
+     * `deleteByQuery` could remove them by `node_id`, but that path is untested against a real Dataplane, so it is left out.
+     */
+    purgeNodes?(nodeIds: readonly string[], workspace: string, upTo?: string): unknown;
+
+    /**
      * Cloud only. Remove the version rows (ids from `VersionIntent.recorded`) of a node write that was
      * rolled back after its graph write, so rollback/restore cannot resurrect a node that never stood
      * (review C #2). Local records its version AFTER the whole write, so it has nothing to undo.

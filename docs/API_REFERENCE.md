@@ -803,7 +803,7 @@ const out = await lore.nodeDelete({ id: 'decision-001', workspace: 'default' });
 
 - Throws on an empty `id` or `workspace`, and with `workspace_not_found` on a
   workspace this instance does not know.
-- Version history rows of the node are kept (as with `delete_node`).
+- Version history rows of the node are kept (as with `delete_node`). Only `purge: true` erases them (see below).
 - A `nodeUpsert` of the same id after the delete is kept. A save recorded before
   the delete is never replayed over it, including one left unfinished by a crash.
 - If the graph delete itself throws, the call rejects. The delete is already
@@ -823,8 +823,23 @@ outbox row (payload `{ id: 'lore:<id>', ids: [...] }`) so replay converges to
 bring the content back. The outcome carries `purged: true`. Stores that cannot
 purge history (the cloud/Dataplane store removes the exact ids only) leave their
 separate history rows; a store with no delete at all falls back to tombstones and
-reports a `verbatimWarning`. Version history in the graph is unaffected. Purge is
-embedded-only: MCP `delete_node` and REST `DELETE /api/node` still tombstone.
+reports a `verbatimWarning`. Purge also removes the node from the local version
+store (`versions.sqlite`: the node's `node_versions` rows in that workspace, which
+hold its prior and new content, plus buffered changeset writes that carry it);
+this holds for SQLite and Postgres workspaces alike. The erase runs under the
+node lock in the same step as the verbatim purge and only removes history no
+newer than the purge (inclusive, millisecond precision), so a node re-created
+afterwards keeps its new history. The `verbatim.purge` outbox row (payload
+`{ id, ids, nodeIds, purgedAt }`) repeats it on replay, so a crash converges and
+a second purge is a no-op. A failing version erase is reported as `versionWarning`
+and leaves `purged` unclaimed. Purging a node that was already deleted (plain
+delete earlier) still erases its leftover verbatim and version content and
+returns `{ deleted: false, purged: true }`. Known gaps (purge is NOT a full
+forensic erase): the cloud/Dataplane version store has no node-scoped delete
+wired, so its version rows survive; already-replicated `node.upsert` /
+`verbatim.upsert` outbox rows keep their payloads until the 7-day retention
+removes them; SQLite WAL files and the sync WAL (`sync.wal`, until pushed) may
+still hold the bytes (no `secure_delete`). Purge is embedded-only: MCP `delete_node` and REST `DELETE /api/node` still tombstone. Further known limits of the local version erase: (1) buffered `changeset_writes` have no timestamp of their own, so a replayed purge bounds them by the parent changeset's creation time; a changeset opened before the purge that buffers a write for a re-created node after it loses that pending write. (2) Workspace erase is time-bounded by the deletion time and `node_versions` stores only the workspace name, so late writes made under an OLD instance of a same-named workspace after it was deleted cannot be told apart from the new instance's and are removed or kept by timestamp alone. (3) A purge of ids that are already gone still queues one `verbatim.purge` outbox row per id (`nodeDeleteMany` takes at most 10,000 ids per call) and can surface a version-store open error as `versionWarning`. (4) Every MCP/HTTP path that writes a version row (prune, restore, record_outcome, recall outcome, changeset commit) records it inside the same per-node lock the purge takes, so a racing purge cannot be followed by a re-inserted row.
 
 In both modes, alias tombstones are recorded only for aliases that exist in the
 verbatim store or have a queued `verbatim.upsert` (3.27.0). A node without
@@ -859,7 +874,9 @@ const { results } = await lore.nodeDeleteMany({ ids: staleIds, workspace: 'defau
   cannot deadlock with it. Each chunk's outbox rows are inserted in one
   transaction, alias existence is checked with one batched read, and a purge is
   one store call per chunk (LanceDB: one filtered query per 256 ids plus one
-  delete; SQLite: one transaction). A purge still records one `verbatim.purge`
+  delete; SQLite: one transaction). With `purge: true` the purged ids' version
+  history is removed from the local version store too (one local transaction per call; same
+  time bound, `versionWarning` and already-deleted behaviour as `nodeDelete`). A purge still records one `verbatim.purge`
   row per node: supersession is keyed on a row's `payload.id`, so a chunk-wide
   row could be dropped or retried over re-created content.
 - One failing id never aborts the others. A failed graph delete sets `error` on

@@ -43,6 +43,7 @@ import type { WriteAheadLog } from '../../engines/syncEngine.js';
 // shared orchestration (outbox + verbatim + embed), not raw graph writes.
 import { changesetTouchesHiddenNode } from '../changesetScopeGate.js';
 import { applyChangesetUpsert, applyChangesetDelete, type ChangesetWriteDeps } from '../changesetWrite.js';
+import { openPurgeFence } from '../../core/purgeFence.js';
 
 export interface VersioningDeps {
     versionStore: VersionStoreApi;
@@ -313,30 +314,22 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                             }
                             const graph = resolved.graph;
                             const nodeId = String(p.nodeData['id'] ?? '');
-                            const prevNode = await graph.getNode(nodeId);
                             // 1.M7 — route through nodeService (outbox +
                             // verbatim + embed) instead of a raw graph
                             // write, so changeset-created nodes become
-                            // searchable like any direct write.
-                            await applyChangesetUpsert(
+                            // searchable like any direct write. The version
+                            // row is recorded inside nodeUpsert's node lock.
+                            const up = await applyChangesetUpsert(
                                 changesetWriteDeps(deps, 'mcp:commit_changeset'),
                                 graph, p.workspace, p.nodeData,
+                                { versionStore: deps.versionStore, changesetId: changeset_id },
                             );
                             const ad = appliedDelta.get(p.workspace) ?? { nodes: 0, bytes: 0 };
                             ad.nodes += 1;
                             ad.bytes += quotaBytesOf(p.nodeData);
                             appliedDelta.set(p.workspace, ad);
-                            await deps.versionStore.recordVersion({
-                                versionId: randomUUID(),
-                                nodeId,
-                                workspace: p.workspace,
-                                timestamp: new Date().toISOString(),
-                                principal: 'changeset',
-                                operation: 'upsert',
-                                previousState: prevNode ?? null,
-                                newState: p.nodeData,
-                                changesetId: changeset_id,
-                            });
+                            // The node landed (counted above); a failed version row still fails this write, as in 3.38.3.
+                            if (up.versionError !== undefined) throw up.versionError;
                             applied++;
                         } else if (w.operation === 'delete_node') {
                             const p = w.payload as { workspace: string; node_id: string };
@@ -350,7 +343,6 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                                 continue;
                             }
                             const graph = resolved.graph;
-                            const prevNode = await graph.getNode(p.node_id);
                             // 1.M7 — graph delete + verbatim tombstone in
                             // the same workspace (was graph-only, leaving
                             // the deleted text live in the search index).
@@ -358,18 +350,8 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                                 changesetWriteDeps(deps, 'mcp:commit_changeset'),
                                 graph, p.workspace, p.node_id,
                                 'node deleted via commit_changeset',
+                                { versionStore: deps.versionStore, changesetId: changeset_id },
                             );
-                            await deps.versionStore.recordVersion({
-                                versionId: randomUUID(),
-                                nodeId: p.node_id,
-                                workspace: p.workspace,
-                                timestamp: new Date().toISOString(),
-                                principal: 'changeset',
-                                operation: 'delete',
-                                previousState: prevNode ?? null,
-                                newState: null,
-                                changesetId: changeset_id,
-                            });
                             applied++;
                         }
                     } catch (writeErr) {
@@ -434,41 +416,49 @@ export function registerVersioningTools(server: McpServer, deps: VersioningDeps)
                 }
 
                 // status === 'committed' — reverse each versioned write (newest-first).
-                const versions = await deps.versionStore.getVersionsByChangeset(changeset_id);
+                // The restore writes `previousState` read here, outside any node lock: a
+                // purge in between would be undone by that create-if-absent write, so the
+                // fence (opened BEFORE the read) makes nodeUpsert refuse a purged id.
+                const purgeFence = openPurgeFence();
                 let reversed = 0;
                 let failed = 0;
                 const errors: string[] = [];
-
-                for (const v of [...versions].reverse()) {
-                    try {
-                        const resolved = await resolveTargetGraph(
-                            deps.store, deps.graphRegistry,
-                            deps.detectedScope.workspace, v.workspace,
-                        );
-                        if (!resolved.ok) { failed++; continue; }
-                        const graph = resolved.graph;
-                        if (v.previousState != null) {
-                            // Node existed before — restore it. 1.M7: route
-                            // through nodeService so the REVERTED text also
-                            // reaches the verbatim/search index (a raw graph
-                            // restore left the post-commit text searchable).
-                            await applyChangesetUpsert(
-                                changesetWriteDeps(deps, 'mcp:rollback_changeset'),
-                                graph, v.workspace, v.previousState as unknown as Record<string, unknown>,
+                try {
+                    const versions = await deps.versionStore.getVersionsByChangeset(changeset_id);
+                    for (const v of [...versions].reverse()) {
+                        try {
+                            const resolved = await resolveTargetGraph(
+                                deps.store, deps.graphRegistry,
+                                deps.detectedScope.workspace, v.workspace,
                             );
-                        } else if (v.operation === 'upsert') {
-                            // Node was brand-new — delete it to undo the create.
-                            await applyChangesetDelete(
-                                changesetWriteDeps(deps, 'mcp:rollback_changeset'),
-                                graph, v.workspace, v.nodeId,
-                                'node created by rolled-back changeset',
-                            );
+                            if (!resolved.ok) { failed++; continue; }
+                            const graph = resolved.graph;
+                            if (v.previousState != null) {
+                                // Node existed before — restore it. 1.M7: route
+                                // through nodeService so the REVERTED text also
+                                // reaches the verbatim/search index (a raw graph
+                                // restore left the post-commit text searchable).
+                                await applyChangesetUpsert(
+                                    changesetWriteDeps(deps, 'mcp:rollback_changeset'),
+                                    graph, v.workspace, v.previousState as unknown as Record<string, unknown>,
+                                    undefined, purgeFence,
+                                );
+                            } else if (v.operation === 'upsert') {
+                                // Node was brand-new — delete it to undo the create.
+                                await applyChangesetDelete(
+                                    changesetWriteDeps(deps, 'mcp:rollback_changeset'),
+                                    graph, v.workspace, v.nodeId,
+                                    'node created by rolled-back changeset',
+                                );
+                            }
+                            reversed++;
+                        } catch (revErr) {
+                            errors.push(`${v.nodeId}: ${(revErr as Error).message}`);
+                            failed++;
                         }
-                        reversed++;
-                    } catch (revErr) {
-                        errors.push(`${v.nodeId}: ${(revErr as Error).message}`);
-                        failed++;
                     }
+                } finally {
+                    purgeFence.close();
                 }
 
                 await deps.versionStore.updateChangeset(changeset_id, 'rolled_back');

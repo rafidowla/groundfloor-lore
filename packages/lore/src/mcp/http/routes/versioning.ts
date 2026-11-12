@@ -33,6 +33,7 @@ import { redactHiddenSuccessors } from '../../../security/nodePointers.js';
 import { redactError } from '../../../security/logRedact.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import type { OutboxStore } from '../../../outbox/types.js';
+import { openPurgeFence } from '../../../core/purgeFence.js';
 import type { VerbatimStoreApi } from '../../../engines/verbatimStoreApi.js';
 import type { WriteAheadLog } from '../../../engines/syncEngine.js';
 // 1.M7 (2026-08-17 audit) — changeset commit/rollback write through the
@@ -293,39 +294,26 @@ export async function tryVersioningRoutes(
                     if (w.operation === 'upsert_node') {
                         const p = w.payload as { workspace: string; nodeData: Record<string, unknown> };
                         const nodeId = String(p.nodeData['id'] ?? '');
-                        const prevNode = await graph.getNode(nodeId);
                         // 1.M7 — route through nodeService (outbox +
-                        // verbatim + embed) instead of a raw graph write.
-                        await applyChangesetUpsert(
+                        // verbatim + embed) instead of a raw graph write. The
+                        // version row is recorded inside nodeUpsert's node lock.
+                        const up = await applyChangesetUpsert(
                             changesetWriteDeps(deps, cs.workspace, 'http:POST /api/changesets/:id/commit'),
                             graph, p.workspace, p.nodeData,
+                            { versionStore: deps.versionStore, changesetId },
                         );
-                        await deps.versionStore.recordVersion({
-                            versionId: randomUUID(), nodeId, workspace: p.workspace,
-                            timestamp: new Date().toISOString(), principal: 'changeset',
-                            operation: 'upsert',
-                            previousState: prevNode ?? null,
-                            newState: p.nodeData,
-                            changesetId,
-                        });
+                        // The node landed; a failed version row still fails this write, as in 3.38.3.
+                        if (up.versionError !== undefined) throw up.versionError;
                         applied++;
                     } else if (w.operation === 'delete_node') {
                         const p = w.payload as { workspace: string; node_id: string };
-                        const prevNode = await graph.getNode(p.node_id);
                         // 1.M7 — graph delete + verbatim tombstone.
                         await applyChangesetDelete(
                             changesetWriteDeps(deps, cs.workspace, 'http:POST /api/changesets/:id/commit'),
                             graph, p.workspace, p.node_id,
                             'node deleted via changeset commit',
+                            { versionStore: deps.versionStore, changesetId },
                         );
-                        await deps.versionStore.recordVersion({
-                            versionId: randomUUID(), nodeId: p.node_id, workspace: p.workspace,
-                            timestamp: new Date().toISOString(), principal: 'changeset',
-                            operation: 'delete',
-                            previousState: prevNode ?? null,
-                            newState: null,
-                            changesetId,
-                        });
                         applied++;
                     }
                 } catch (writeErr) {
@@ -389,52 +377,61 @@ export async function tryVersioningRoutes(
                 return true;
             }
 
-            // committed — reverse each versioned write (newest-first)
-            const versions = await deps.versionStore.getVersionsByChangeset(changesetId);
-            let reversed = 0;
-            let failed = 0;
-            const errors: string[] = [];
+            // committed — reverse each versioned write (newest-first). The restore writes
+            // `previousState` read here, outside any node lock: a purge in between would be
+            // undone by that create-if-absent write, so the fence (opened BEFORE the read)
+            // makes nodeUpsert refuse a purged id.
+            const purgeFence = openPurgeFence();
+            try {
+                const versions = await deps.versionStore.getVersionsByChangeset(changesetId);
+                let reversed = 0;
+                let failed = 0;
+                const errors: string[] = [];
 
-            // Local-mode routing: reverse writes on the changeset's OWN workspace,
-            // not the boot/active store. Registry absent → boot store (unchanged).
-            const gres = await resolveTargetGraph(deps.store, deps.graphRegistry, cs.workspace, cs.workspace);
-            if (!gres.ok) {
-                if ('missing' in gres) {
-                    writeError(res, 400, 'workspace_required', 'pass workspace=<name> as body field or query param', { changeset_id: changesetId });
+                // Local-mode routing: reverse writes on the changeset's OWN workspace,
+                // not the boot/active store. Registry absent → boot store (unchanged).
+                const gres = await resolveTargetGraph(deps.store, deps.graphRegistry, cs.workspace, cs.workspace);
+                if (!gres.ok) {
+                    if ('missing' in gres) {
+                        writeError(res, 400, 'workspace_required', 'pass workspace=<name> as body field or query param', { changeset_id: changesetId });
+                        return true;
+                    }
+                    writeError(res, 404, 'workspace_not_found', `workspace not found: ${gres.requested}`, { requested: gres.requested, known: gres.known });
                     return true;
                 }
-                writeError(res, 404, 'workspace_not_found', `workspace not found: ${gres.requested}`, { requested: gres.requested, known: gres.known });
-                return true;
-            }
-            const graph = gres.graph as LoreGraph;
-            await graph.initialize();
+                const graph = gres.graph as LoreGraph;
+                await graph.initialize();
 
-            for (const v of [...versions].reverse()) {
-                try {
-                    if (v.previousState != null) {
-                        // 1.M7 — restore through nodeService so the REVERTED
-                        // text also reaches the search index.
-                        await applyChangesetUpsert(
-                            changesetWriteDeps(deps, cs.workspace, 'http:POST /api/changesets/:id/rollback'),
-                            graph, v.workspace, v.previousState as unknown as Record<string, unknown>,
-                        );
-                    } else if (v.operation === 'upsert') {
-                        await applyChangesetDelete(
-                            changesetWriteDeps(deps, cs.workspace, 'http:POST /api/changesets/:id/rollback'),
-                            graph, v.workspace, v.nodeId,
-                            'node created by rolled-back changeset',
-                        );
+                for (const v of [...versions].reverse()) {
+                    try {
+                        if (v.previousState != null) {
+                            // 1.M7 — restore through nodeService so the REVERTED
+                            // text also reaches the search index.
+                            await applyChangesetUpsert(
+                                changesetWriteDeps(deps, cs.workspace, 'http:POST /api/changesets/:id/rollback'),
+                                graph, v.workspace, v.previousState as unknown as Record<string, unknown>,
+                                undefined, purgeFence,
+                            );
+                        } else if (v.operation === 'upsert') {
+                            await applyChangesetDelete(
+                                changesetWriteDeps(deps, cs.workspace, 'http:POST /api/changesets/:id/rollback'),
+                                graph, v.workspace, v.nodeId,
+                                'node created by rolled-back changeset',
+                            );
+                        }
+                        reversed++;
+                    } catch (revErr) {
+                        errors.push(`${v.nodeId}: ${(revErr as Error).message}`);
+                        failed++;
                     }
-                    reversed++;
-                } catch (revErr) {
-                    errors.push(`${v.nodeId}: ${(revErr as Error).message}`);
-                    failed++;
                 }
-            }
 
-            await deps.versionStore.updateChangeset(changesetId, 'rolled_back');
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ changeset_id: changesetId, status: 'rolled_back', reversed, failed, errors }));
+                await deps.versionStore.updateChangeset(changesetId, 'rolled_back');
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ changeset_id: changesetId, status: 'rolled_back', reversed, failed, errors }));
+            } finally {
+                purgeFence.close();
+            }
         } catch (err) {
             writeError(res, 500, 'internal_error', redactError(err));
         }

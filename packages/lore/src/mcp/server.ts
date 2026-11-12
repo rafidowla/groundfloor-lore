@@ -795,7 +795,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
         getEmbedder: outboxGetEmbedder,
         getGraphForWorkspace: outboxGetGraphForWorkspace,
         getVerbatimForWorkspace: outboxGetVerbatimForWorkspace,
-        getRegistryHome: outboxGetRegistryHome,
+        getRegistryHome: outboxGetRegistryHome, getVersionPurger: () => localVersionStore,
     }); workspaceVerbatimResolver?.setGuardrails({ hasPendingEmbeds: (ws) => embedQueue.hasPendingForWorkspace(ws), hasPendingOutbox: async (ws) => !!(await outboxWiring.store.listPendingForWorkspace?.(ws, 1))?.length }); // late-bound eviction guardrail
     // Sprint Z1 — load_jobs SQLite store backs POST /api/load + GET /api/load/jobs.
     const loadJobsStore = new LoadJobsStore(loreDir);
@@ -1265,7 +1265,7 @@ export async function createLore(opts: CreateLoreOptions = {}): Promise<LoreInst
             isActiveWorkspace: (ws) => ws === (graphRegistry?.activeName() ?? detectedScope.workspace),
             resolveGraph: async (ws) => (graphRegistry ? graphRegistry.getGraphHandle(ws) : graph),
             resolveVerbatim: async (ws) => (workspaceVerbatimResolver ? workspaceVerbatimResolver.getOrOpen(ws) : store.loreVerbatim),
-            verbatimDelete: (verbatimId) => store.storageClient.verbatimDelete(verbatimId),
+            verbatimDelete: (verbatimId) => store.storageClient.verbatimDelete(verbatimId), ...(localVersionStore ? { purgeNodeVersions: (ids: string[], ws: string, upTo?: string) => localVersionStore.purgeNodes(ids, ws, upTo) } : {}),
         }),
         async nodeUpsertBatch(nodes) {
             // 4.4 (2026-08-17) — bound the fan-out: an unchunked Promise.all

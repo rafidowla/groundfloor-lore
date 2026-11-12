@@ -44,6 +44,8 @@ export interface EmbeddedNodeDeleteDeps {
     outboxStore?: OutboxStore;
     getWal: () => Pick<WriteAheadLog, 'append'>;
     replayScope: EmbeddedReplayScope;
+    /** Local version store's node purge (`versions.sqlite`); absent in cloud mode. Used only for `purge: true`. */
+    purgeNodeVersions?: (nodeIds: string[], workspace: string, upTo?: string) => unknown;
 }
 
 export async function embeddedNodeDelete(
@@ -75,6 +77,7 @@ export async function embeddedNodeDelete(
             // 3.27.0 — `purge: true` physically removes the verbatim rows
             // (history + aliases included) instead of tombstoning them.
             ...(args.purge === true ? { purge: true } : {}),
+            ...(args.purge === true && deps.purgeNodeVersions ? { purgeVersions: async (nodeIds: string[], upTo: string) => { await deps.purgeNodeVersions!(nodeIds, args.workspace, upTo); } } : {}),
         });
     } catch (err) {
         error = err;

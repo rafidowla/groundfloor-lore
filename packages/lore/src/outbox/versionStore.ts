@@ -21,6 +21,7 @@ import Database from 'better-sqlite3';
 import type { VersionHistoryPolicy } from './versionPolicy.js';
 import { resolveEffectiveVersionHistoryPolicy, type EffectiveVersionHistoryPolicy } from './versionPruningPolicy.js';
 import * as reclaimOps from './reclaimOps.js';
+import { purgeNodeVersions, purgeWorkspaceVersions, type VersionPurgeCounts } from './versionPurgeOps.js';
 
 const SQLITE_FILE = 'versions.sqlite';
 
@@ -644,17 +645,9 @@ export class VersionStore {
      *  the only way an outside caller can drive that transaction. Mechanics
      *  live in `reclaimOps.ts` (shared with `SqliteOutboxStore`, which was
      *  a literal duplicate — extracted to stay under the file-size cap). */
-    beginReclaimTx(): void {
-        reclaimOps.beginReclaimTx(this.db);
-    }
-
-    commitReclaimTx(): void {
-        reclaimOps.commitReclaimTx(this.db);
-    }
-
-    rollbackReclaimTx(): void {
-        reclaimOps.rollbackReclaimTx(this.db);
-    }
+    beginReclaimTx(): void { reclaimOps.beginReclaimTx(this.db); }
+    commitReclaimTx(): void { reclaimOps.commitReclaimTx(this.db); }
+    rollbackReclaimTx(): void { reclaimOps.rollbackReclaimTx(this.db); }
 
     /** Storage-growth fix 3/3, Step 1 — drop `node_versions` rows that are a
      *  true no-op against the very state they themselves recorded writing
@@ -676,6 +669,11 @@ export class VersionStore {
     convertToIncrementalVacuum(): { autoVacuumBefore: number; autoVacuumAfter: number } {
         return reclaimOps.convertToIncrementalVacuumOp(this.db);
     }
+
+    /** Hard-delete all version rows (and buffered changeset writes) of purged nodes. Idempotent; see versionPurgeOps.ts. */
+    purgeNodes(nodeIds: readonly string[], workspace: string, upTo?: string): VersionPurgeCounts { return purgeNodeVersions(this.db, nodeIds, workspace, upTo); }
+    /** Hard-delete every version row and changeset of an erased workspace (exact name). Idempotent. */
+    purgeWorkspace(workspace: string, upTo?: string): VersionPurgeCounts { return purgeWorkspaceVersions(this.db, workspace, upTo); }
 
     /* ─── changesets ─────────────────────────────────────────────── */
 

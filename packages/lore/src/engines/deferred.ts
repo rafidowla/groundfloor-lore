@@ -35,6 +35,7 @@
 import type { GraphProvider, LoreNode } from '../providers/types.js';
 import { tagsToString, tagsToArray } from './normalizeTags.js';
 import { forEachNodePage, type NodePager } from './nodePager.js';
+import { withLockedExistingNode } from '../core/nodeWriteLock.js';
 
 export interface DeferredSignal {
     /** Topic the caller is searching on. Optional — pass '' to skip
@@ -336,9 +337,27 @@ export async function stampResolved(
     graph: GraphProvider,
     nodeId: string,
     resolvedByCommit?: string,
+    /** The daemon's lock workspace for `graph`. When set, the read and the write run under ONE
+     *  `(workspace, id)` node lock (core/nodeWriteLock.ts withLockedExistingNode): upsertNode
+     *  inserts when absent, so writing a node read outside the lock would re-create one purged in
+     *  between. Omitted only by the offline CLI, which shares no process with a purge. */
+    lockWorkspace?: string,
 ): Promise<{ node: LoreNode; metadata: Record<string, unknown> } | null> {
-    const node = await graph.getNode(nodeId);
-    if (!node) return null;
+    if (lockWorkspace === undefined) {
+        const node = await graph.getNode(nodeId);
+        return node ? writeResolved(graph, node, resolvedByCommit) : null;
+    }
+    const r = await withLockedExistingNode(lockWorkspace, nodeId, () => graph.getNode(nodeId),
+        (node) => writeResolved(graph, node, resolvedByCommit));
+    return r.found ? r.value : null;
+}
+
+async function writeResolved(
+    graph: GraphProvider,
+    node: LoreNode,
+    resolvedByCommit?: string,
+): Promise<{ node: LoreNode; metadata: Record<string, unknown> }> {
+    const nodeId = node.id;
     if (!node.id.startsWith('deferred-')) {
         throw new Error(`Node '${nodeId}' is not a deferred-* node (id must start with 'deferred-').`);
     }

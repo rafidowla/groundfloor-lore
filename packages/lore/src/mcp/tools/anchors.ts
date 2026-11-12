@@ -19,6 +19,7 @@ import { filterNodesByActorScope } from '../../security/scopeFilter.js';
 import { resolveTargetGraph, workspaceRequiredEnvelope } from './workspaceResolve.js';
 import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
+import { withLockedExistingNode } from '../../core/nodeWriteLock.js';
 import { withTransactionConflictRetry } from '../../engines/transactionConflictRetry.js';
 
 export interface AnchorDeps {
@@ -78,22 +79,34 @@ export function registerAnchorTools(server: McpServer, deps: AnchorDeps): void {
                 // Row-level security_scopes confinement: a node the bound
                 // actor may not see is reported exactly like a missing id
                 // (and is never mutated by mark_stale). Unbound ⇒ no-op.
-                const node = fetched && filterNodesByActorScope([fetched]).length > 0 ? fetched : null;
-                if (!node) {
-                    return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'node_not_found', id }, null, 2) }], isError: true };
-                }
+                let node = fetched && filterNodesByActorScope([fetched]).length > 0 ? fetched : null;
+                const notFound = () => ({ content: [{ type: 'text' as const, text: JSON.stringify({ error: 'node_not_found', id }, null, 2) }], isError: true });
+                if (!node) return notFound();
 
-                const anchors = parseAnchors(node.anchors);
                 let staleMarked = false;
 
                 if (mark_stale && !node.anchor_stale) {
-                    await withTransactionConflictRetry(() => graph.upsertNode({
-                        ...node,
-                        anchor_stale: true,
-                        anchor_stale_since: new Date().toISOString(),
-                    }));
-                    staleMarked = true;
+                    // Re-read under the node lock and write the IN-LOCK node (core/nodeWriteLock.ts
+                    // withLockedExistingNode): upsertNode inserts when absent, so writing the read
+                    // above would re-create a node purged in between.
+                    const locked = await withLockedExistingNode(resolved.resolvedWorkspace, id, async () => {
+                        const n = await graph.getNode(id);
+                        return n && filterNodesByActorScope([n]).length > 0 ? n : null;
+                    }, async (fresh) => {
+                        if (fresh.anchor_stale) return { fresh, marked: false };
+                        await withTransactionConflictRetry(() => graph.upsertNode({
+                            ...fresh,
+                            anchor_stale: true,
+                            anchor_stale_since: new Date().toISOString(),
+                        }));
+                        return { fresh, marked: true };
+                    });
+                    if (!locked.found) return notFound();
+                    node = locked.value.fresh;
+                    staleMarked = locked.value.marked;
                 }
+
+                const anchors = parseAnchors(node.anchors);
 
                 return {
                     content: [{

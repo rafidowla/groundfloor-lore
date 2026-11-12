@@ -27,6 +27,7 @@ import { log } from '../../logger.js';
 import { mcpToolError } from './mcpToolError.js';
 import { withTransactionConflictRetry } from '../../engines/transactionConflictRetry.js';
 import { upsertKeepingRevision } from '../../engines/graphShared/revision.js';
+import { withLockedExistingNode } from '../../core/nodeWriteLock.js';
 
 export interface OutcomeDeps {
     store: StorageBundle;
@@ -100,46 +101,56 @@ export function registerOutcomeTools(server: McpServer, deps: OutcomeDeps): void
                 const graph = resolved.graph;
                 await graph.initialize();
 
-                const node = await graph.getNode(node_id);
-                // Row-level security_scopes: a node hidden from the bound actor is
-                // answered exactly like a missing one, and nothing is written.
-                if (!node || filterNodesByActorScope([node]).length === 0) {
+                // Read + scope check + outcome row + counters + graph write + version row run under
+                // ONE per-(workspace,id) node lock (core/nodeWriteLock.ts withLockedExistingNode): a
+                // node read outside the lock could be purged before the write, and
+                // upsertKeepingRevision would then RE-CREATE it from the stale read. Raw primitives
+                // only inside: no lock re-entry (nodeWriteLock.ts rule 1).
+                const locked = await withLockedExistingNode(resolved.resolvedWorkspace, node_id, async () => {
+                    const n = await graph.getNode(node_id);
+                    // Row-level security_scopes: a node hidden from the bound actor is
+                    // answered exactly like a missing one, and nothing is written.
+                    return n && filterNodesByActorScope([n]).length > 0 ? n : null;
+                }, async (node) => {
+                    // Insert outcome row.
+                    const outcomeId = randomUUID();
+                    deps.auxStore.recordOutcome({ id: outcomeId, nodeId: node_id, workspace, status, notes, recordedBy: recorded_by });
+
+                    // Recompute counters from SQLite (authoritative source).
+                    const counts = deps.auxStore.getOutcomeCount(node_id, workspace);
+                    const newScore = calcConfirmationScore(counts.success, counts.failure, counts.partial);
+
+                    // Update the graph node with new counters + score.
+                    await withTransactionConflictRetry(() => upsertKeepingRevision(graph, {
+                        ...node,
+                        success_count:      counts.success,
+                        failure_count:      counts.failure,
+                        partial_count:      counts.partial,
+                        confirmation_score: newScore,
+                    }));
+
+                    // Bump corpus counter.
+                    deps.auxStore.incrementCounter(workspace, `outcomes_${status}`);
+
+                    // Feature 8: record version (non-fatal).
+                    if (deps.versionStore) {
+                        try {
+                            await deps.versionStore.recordVersion({
+                                versionId: randomUUID(), nodeId: node_id, workspace,
+                                timestamp: new Date().toISOString(), principal: 'mcp',
+                                operation: 'outcome',
+                                previousState: node,
+                                newState: { ...node, success_count: counts.success, failure_count: counts.failure, partial_count: counts.partial, confirmation_score: newScore },
+                                changesetId: null,
+                            });
+                        } catch { /* non-fatal */ }
+                    }
+                    return { outcomeId, counts, newScore };
+                });
+                if (!locked.found) {
                     return { content: [{ type: 'text' as const, text: JSON.stringify({ error: 'node_not_found', node_id }, null, 2) }], isError: true };
                 }
-
-                // Insert outcome row.
-                const outcomeId = randomUUID();
-                deps.auxStore.recordOutcome({ id: outcomeId, nodeId: node_id, workspace, status, notes, recordedBy: recorded_by });
-
-                // Recompute counters from SQLite (authoritative source).
-                const counts = deps.auxStore.getOutcomeCount(node_id, workspace);
-                const newScore = calcConfirmationScore(counts.success, counts.failure, counts.partial);
-
-                // Update the graph node with new counters + score.
-                await withTransactionConflictRetry(() => upsertKeepingRevision(graph, {
-                    ...node,
-                    success_count:      counts.success,
-                    failure_count:      counts.failure,
-                    partial_count:      counts.partial,
-                    confirmation_score: newScore,
-                }));
-
-                // Bump corpus counter.
-                deps.auxStore.incrementCounter(workspace, `outcomes_${status}`);
-
-                // Feature 8: record version (non-fatal).
-                if (deps.versionStore) {
-                    try {
-                        await deps.versionStore.recordVersion({
-                            versionId: randomUUID(), nodeId: node_id, workspace,
-                            timestamp: new Date().toISOString(), principal: 'mcp',
-                            operation: 'outcome',
-                            previousState: node,
-                            newState: { ...node, success_count: counts.success, failure_count: counts.failure, partial_count: counts.partial, confirmation_score: newScore },
-                            changesetId: null,
-                        });
-                    } catch { /* non-fatal */ }
-                }
+                const { outcomeId, counts, newScore } = locked.value;
 
                 return {
                     content: [{

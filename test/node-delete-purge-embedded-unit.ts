@@ -127,14 +127,16 @@ for (const engine of ['sqlite', 'lance'] as const) {
             assert.ok((await v.getById(aliasId('two', 0)))?.text?.startsWith('[TOMBSTONED'), 'alias q0 tombstoned by replay');
         });
 
-        await test(`[${engine}] purge, no aliases: 2 rows, one verbatim.purge { id, ids:[lore:<id>] }, outcome purged`, async () => {
+        await test(`[${engine}] purge, no aliases: 2 rows, one verbatim.purge { id, ids:[lore:<id>], nodeIds:[<id>] }, outcome purged`, async () => {
             const v = await prep(lore, 'pnone', 0);
             await drain(lore);
             const out = await lore.nodeDelete({ id: 'pnone', workspace: WS, purge: true });
             assert.deepEqual(out, { deleted: true, verbatimWarning: undefined, purged: true });
             const rows = await pendingRows(lore);
             assert.deepEqual(rows.map((e) => e.operationKind), ['node.delete', 'verbatim.purge']);
-            assert.deepEqual(rows[1]!.payload, { id: 'lore:pnone', ids: ['lore:pnone'] });
+            const { purgedAt, ...rest } = rows[1]!.payload as Record<string, unknown>;
+            assert.deepEqual(rest, { id: 'lore:pnone', ids: ['lore:pnone'], nodeIds: ['pnone'] });
+            assert.ok(typeof purgedAt === 'string' && !Number.isNaN(Date.parse(purgedAt)), 'carries the purge moment (ISO)');
             assert.equal(await rowsOf(v, 'lore:pnone'), 0, 'canonical and history gone');
             await drain(lore);
             assert.equal(await rowsOf(v, 'lore:pnone'), 0, 'still gone after replay');
@@ -211,10 +213,11 @@ for (const engine of ['sqlite', 'lance'] as const) {
             assert.equal(await rowsOf(v, aliasId('fail', 0)), 0, 'the failed alias upsert never re-created the alias');
         });
 
-        await test(`[${engine}] purge of an unknown id: deleted:false, nothing recorded`, async () => {
+        await test(`[${engine}] purge of an unknown id: deleted:false, purged:true (idempotent cleanup), one purge row`, async () => {
             await drain(lore);
-            assert.deepEqual(await lore.nodeDelete({ id: 'nope-nope', workspace: WS, purge: true }), { deleted: false });
-            assert.deepEqual((await pendingRows(lore)).filter((e) => e.operationKind === 'verbatim.purge'), []);
+            const out = await lore.nodeDelete({ id: 'nope-nope', workspace: WS, purge: true });
+            assert.equal(out.deleted, false); assert.equal(out.purged, true); assert.equal(out.verbatimWarning, undefined);
+            assert.equal((await pendingRows(lore)).filter((e) => e.operationKind === 'verbatim.purge').length, 1, 'a purge of a node that is already gone still erases leftovers, so it is recorded');
         });
     } finally {
         await lore.dispose('test');

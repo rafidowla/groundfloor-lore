@@ -51,6 +51,8 @@ export interface EmbeddedNodeDeleteManyDeps {
     outboxStore?: OutboxStore;
     getWal: () => Pick<WriteAheadLog, 'append'>;
     replayScope: EmbeddedReplayScope;
+    /** Local version store's node purge (`versions.sqlite`); absent in cloud mode. Used only for `purge: true`. */
+    purgeNodeVersions?: (nodeIds: string[], workspace: string, upTo?: string) => unknown;
 }
 
 export async function embeddedNodeDeleteMany(
@@ -87,6 +89,7 @@ export async function embeddedNodeDeleteMany(
                 if (typeof id === 'string') noteInlineAppliedDelete(deps.replayScope, entry, id);
             },
             ...(args.purge === true ? { purge: true } : {}),
+            ...(args.purge === true && deps.purgeNodeVersions ? { purgeVersions: async (nodeIds: string[], upTo: string) => { await deps.purgeNodeVersions!(nodeIds, workspace, upTo); } } : {}),
         });
     } catch (err) {
         error = err;
@@ -112,6 +115,7 @@ export function attachNodeDeleteMany(lore: LoreInstance): LoreInstance & NodeDel
         getGraph(): { deleteNode(id: string): Promise<boolean> };
         getGraphRegistry(): { activeName(): string; getGraphHandle(ws: string): Promise<{ deleteNode(id: string): Promise<boolean> }> } | undefined;
         getVerbatimResolver(): { getOrOpen(ws: string): Promise<unknown> } | undefined;
+        localVersionStore?: { purgeNodes(nodeIds: readonly string[], workspace: string, upTo?: string): unknown };
         store: { loreVerbatim: unknown; storageClient: { verbatimDelete(id: string): Promise<unknown> } };
     };
     Object.defineProperty(lore, 'nodeDeleteMany', {
@@ -126,6 +130,7 @@ export function attachNodeDeleteMany(lore: LoreInstance): LoreInstance & NodeDel
                 resolveGraph: async (ws) => (registry ? registry.getGraphHandle(ws) : d.getGraph()),
                 resolveVerbatim: async (ws) => (resolver ? resolver.getOrOpen(ws) : d.store.loreVerbatim),
                 verbatimDelete: (verbatimId) => d.store.storageClient.verbatimDelete(verbatimId),
+                ...(d.localVersionStore ? { purgeNodeVersions: (nodeIds: string[], ws: string, upTo?: string) => d.localVersionStore!.purgeNodes(nodeIds, ws, upTo) } : {}),
             });
         },
     });

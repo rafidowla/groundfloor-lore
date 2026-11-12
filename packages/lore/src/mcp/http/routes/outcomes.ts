@@ -27,6 +27,7 @@ import { getCurrentActorScopes } from '../../../security/actorContext.js';
 import type { LoreGraphHandle } from '../../../storage/loreStorageClient.js';
 import { withTransactionConflictRetry } from '../../../engines/transactionConflictRetry.js';
 import { upsertKeepingRevision } from '../../../engines/graphShared/revision.js';
+import { withLockedExistingNode } from '../../../core/nodeWriteLock.js';
 
 export interface OutcomesRouteDeps {
     store: StorageBundle;
@@ -147,49 +148,58 @@ export async function tryOutcomesRoutes(
             }
             await graph.initialize();
 
-            const node = await graph.getNode(nodeId);
-            // Row-level security_scopes: a node hidden from the bound actor is
-            // answered exactly like a missing one, and nothing is written.
-            if (!node || filterNodesByActorScope([node]).length === 0) {
+            // Read + scope check + outcome row + counters + graph write + version row run under ONE
+            // per-(workspace,id) node lock (core/nodeWriteLock.ts withLockedExistingNode): a node read
+            // outside the lock could be purged before the write, and upsertKeepingRevision would then
+            // RE-CREATE it from the stale read. Raw primitives only inside: no lock re-entry.
+            const locked = await withLockedExistingNode(workspace, nodeId, async () => {
+                const n = await graph.getNode(nodeId);
+                // Row-level security_scopes: a node hidden from the bound actor is
+                // answered exactly like a missing one, and nothing is written.
+                return n && filterNodesByActorScope([n]).length > 0 ? n : null;
+            }, async (node) => {
+                const outcomeId = randomUUID();
+                deps.auxStore.recordOutcome({
+                    id: outcomeId,
+                    nodeId,
+                    workspace,
+                    status,
+                    notes: parsed.notes,
+                    recordedBy: parsed.recorded_by,
+                });
+
+                const counts = deps.auxStore.getOutcomeCount(nodeId, workspace);
+                const newScore = calcConfirmationScore(counts.success, counts.failure, counts.partial);
+
+                await withTransactionConflictRetry(() => upsertKeepingRevision(graph, {
+                    ...node,
+                    success_count: counts.success,
+                    failure_count: counts.failure,
+                    partial_count: counts.partial,
+                    confirmation_score: newScore,
+                }));
+
+                deps.auxStore.incrementCounter(workspace, `outcomes_${status}`);
+
+                if (deps.versionStore) {
+                    try {
+                        await deps.versionStore.recordVersion({
+                            versionId: randomUUID(), nodeId, workspace,
+                            timestamp: new Date().toISOString(), principal: 'http',
+                            operation: 'outcome',
+                            previousState: node,
+                            newState: { ...node, success_count: counts.success, failure_count: counts.failure, partial_count: counts.partial, confirmation_score: newScore },
+                            changesetId: null,
+                        });
+                    } catch { /* non-fatal */ }
+                }
+                return { outcomeId, counts, newScore };
+            });
+            if (!locked.found) {
                 writeError(res, 404, 'node_not_found', `node not found: ${nodeId}`, { node_id: nodeId });
                 return true;
             }
-
-            const outcomeId = randomUUID();
-            deps.auxStore.recordOutcome({
-                id: outcomeId,
-                nodeId,
-                workspace,
-                status,
-                notes: parsed.notes,
-                recordedBy: parsed.recorded_by,
-            });
-
-            const counts = deps.auxStore.getOutcomeCount(nodeId, workspace);
-            const newScore = calcConfirmationScore(counts.success, counts.failure, counts.partial);
-
-            await withTransactionConflictRetry(() => upsertKeepingRevision(graph, {
-                ...node,
-                success_count: counts.success,
-                failure_count: counts.failure,
-                partial_count: counts.partial,
-                confirmation_score: newScore,
-            }));
-
-            deps.auxStore.incrementCounter(workspace, `outcomes_${status}`);
-
-            if (deps.versionStore) {
-                try {
-                    await deps.versionStore.recordVersion({
-                        versionId: randomUUID(), nodeId, workspace,
-                        timestamp: new Date().toISOString(), principal: 'http',
-                        operation: 'outcome',
-                        previousState: node,
-                        newState: { ...node, success_count: counts.success, failure_count: counts.failure, partial_count: counts.partial, confirmation_score: newScore },
-                        changesetId: null,
-                    });
-                } catch { /* non-fatal */ }
-            }
+            const { outcomeId, counts, newScore } = locked.value;
 
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
