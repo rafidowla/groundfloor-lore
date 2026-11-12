@@ -6,6 +6,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) loos
 
 ## [Unreleased]
 
+## [3.38.5] — 2026-11-12
+
+Dependency-only security release. No Lore code change, no migration, no new configuration, no API change; upgrading
+over 3.38.x is a drop-in.
+
+### Security
+
+- Raised dependency floors so hosts resolve fixed versions, not just Lore's own lockfile:
+  - `zod` `^4.0.0` → `^4.6.6` (GHSA-mrhx-c7xc-m3w5: memory exhaustion validating oversized constrained collections;
+    reachable on HTTP / MCP input validation).
+  - `mailparser` (optional) `^3.9.26` → `^3.14.3` and the `nodemailer` override `^10.0.9` → `^10.1.4`
+    (GHSA-8c8m-p3m8-cjg8, GHSA-m943-m63m-w62w, GHSA-85x2-q946-cp5h: `addressparser` mis-splits recipients; reachable
+    when ingesting `.eml`, impact limited to wrong To/From labels in extracted text).
+  - `hono` `^4.13.9` → `^4.13.11` (GHSA-5r4p-p66f-jhc7: `serveStatic` double decode; Lore never calls `serveStatic`).
+  - `@modelcontextprotocol/sdk` `^1.31.0` → `^1.32.1`.
+- Lockfile refresh (`npm audit fix`, non-major) of transitive packages under the MCP SDK's Express stack:
+  `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h), `body-parser` 2.4.0 (GHSA-27r3-jxmh-p828), `qs` 6.17.1
+  (GHSA-6pq8-jhm2-2vcw), `ip-address` 10.7.6, `fast-uri` 3.1.9. Lore's HTTP server does not use the SDK's Express
+  helpers, so these were not reachable. A host's own lockfile may keep older copies; `npm update proxy-addr
+  body-parser qs ip-address fast-uri` in the host clears its scan.
+- **Not changed:** `@hono/node-server` 1.x (GHSA-rmxm-3fg6-px4f, `serveStatic` double decode). The fix is 2.x, the
+  MCP SDK pins its own 1.x copy (so a Lore-side major bump would not clear the advisory), and Lore never calls
+  `serveStatic`. `npm audit --omit=dev` now reports this one moderate item only (was 10: 1 critical, 2 high).
+
 ## [3.38.4] — 2026-11-12
 
 Honest-erase release: purge and workspace erase now also remove version history, plus a golden-baseline test
